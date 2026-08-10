@@ -126,12 +126,30 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
     factory. `bedrock` returns `EmbedError::Unavailable` with a clear "use bge_m3/fixture" note
     (T7.1 will implement it). `fixture` requires dim 1024 exactly.
   - `scripts/fetch-bge-m3.sh` — HF GGUF download into `models/` (gitignored). Default repo
-    `gpustack/bge-m3-GGUF` file `bge-m3-f16.gguf`, overridable via `LAMBO_BGE_M3_HF_REPO` /
-    `LAMBO_BGE_M3_GGUF`. Uses huggingface-cli, else `hf`, else curl fallback; `--dry-run` prints plan.
+    `gpustack/bge-m3-GGUF` file `bge-m3-FP16.gguf`, overridable via `LAMBO_BGE_M3_HF_REPO` /
+    `LAMBO_BGE_M3_GGUF`. Uses `hf` (hub CLI) first, then legacy `huggingface-cli`, then curl
+    fallback; `--dry-run` prints plan.
   - `scripts/run-llama-embed.sh` — starts `llama-server -m <model> --embedding -c <ctx>` on the
     parsed port; `--check` health-checks an existing server; refuses if a server is already up.
   - `.env.example` — added `LAMBO_LLAMA_MODEL` (model id sent; empty => server default) and
     `LAMBO_BGE_M3_GGUF`. `LAMBO_LLAMA_MODEL` or `LAMBO_BGE_M3_MODEL` both feed the request model id.
+- **Weights downloaded + live smoke PASSED (2026-08-11):**
+  - Repro: `scripts/fetch-bge-m3.sh` default = repo **`gpustack/bge-m3-GGUF`** @
+    `2d48f1737679ad900d5c26c5aad5410e9c70fdca` (last modified 2024-10-31), file
+    **`bge-m3-FP16.gguf`** (1.08 GB, gitignored). Originally tried `bge-m3-f16.gguf` — **does not
+    exist**; the repo's full-precision file is `bge-m3-FP16.gguf`. Also available: Q8_0 (0.59 GB),
+    Q5_K_M (0.44 GB) if a smaller build is preferred.
+  - `./scripts/run-llama-embed.sh` started `llama-server` (installed at /usr/bin) — `--check` OK,
+    model loaded, listening on http://127.0.0.1:8080.
+  - Gated test `live_smoke_against_llama_server` (in `bge_m3.rs`, `#[ignore]`):
+    run `cargo test --lib embed::bge_m3::tests::live_smoke_against_llama_server -- --ignored`.
+    Result: **1024 dims, L2 unit-norm** ✓; cosine(register user, create account)=**0.78**,
+    cosine(register user, quantum chromo …)=0.28.
+  - **Calibration note for T7.2:** the real BGE-M3 near-pair score is **0.78, below the
+    fixture-derived semantic_match_threshold (0.85)**. The 0.85 fixture contract is about
+    `FixtureEmbedder`; do NOT assume BGE-M3 reaches it on the same text pair. T7.2 should
+    calibrate its merge threshold against the live embedder's distribution, or accept that
+    some paraphrases won't merge — do not edit the fixture contract to match BGE-M3.
 - **Announcement (shared Cargo.toml exception):** added additive deps without a separate claim —
   `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }`
   (rustls to match sqlx) and dev dep `httpmock = "0.7"` for the HTTP client tests.

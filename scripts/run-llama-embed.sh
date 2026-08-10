@@ -33,7 +33,7 @@ if [[ "$URL" == *":"* ]]; then
   fi
 fi
 
-MODEL="${LAMBO_BGE_M3_MODEL:-$ROOT/models/bge-m3/bge-m3-f16.gguf}"
+MODEL="${LAMBO_BGE_M3_MODEL:-$ROOT/models/bge-m3/bge-m3-FP16.gguf}"
 CTX="${LAMBO_LLAMA_EMBED_CTX:-8192}"
 
 check_health() {

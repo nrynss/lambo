@@ -25,7 +25,7 @@ MODEL_DIR="${LAMBO_BGE_M3_DIR:-$ROOT/models/bge-m3}"
 
 # Repo + file on Hugging Face. Override for another build.
 REPO="${LAMBO_BGE_M3_HF_REPO:-gpustack/bge-m3-GGUF}"
-FILE="${LAMBO_BGE_M3_GGUF:-bge-m3-f16.gguf}"
+FILE="${LAMBO_BGE_M3_GGUF:-bge-m3-FP16.gguf}"
 
 TARGET="$MODEL_DIR/$FILE"
 
@@ -47,16 +47,16 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   exit 0
 fi
 
-# Preferred path: huggingface-cli (python huggingface_hub).
-if command -v huggingface-cli >/dev/null 2>&1; then
+# Preferred path: `hf` (new hub CLI). huggingface-cli is deprecated and may be a
+# non-functional stub, so try `hf` first, then legacy huggingface-cli.
+if command -v hf >/dev/null 2>&1; then
+  echo "== using hf (hub CLI) =="
+  hf download "$REPO" "$FILE" --local-dir "$MODEL_DIR"
+elif command -v huggingface-cli >/dev/null 2>&1; then
   echo "== using huggingface-cli =="
   huggingface-cli download "$REPO" \
     --include "*${FILE}*" \
     --local-dir "$MODEL_DIR"
-elif command -v hf >/dev/null 2>&1; then
-  echo "== using hf (new hub CLI) =="
-  mkdir -p "$MODEL_DIR"
-  hf download "$REPO" "$FILE" --local-dir "$MODEL_DIR"
 else
   # Fallback: raw resolve URL (needs `curl`).
   echo "== huggingface-cli not found; falling back to curl =="
