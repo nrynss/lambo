@@ -142,13 +142,13 @@ Keep this current; it is the only global view.
 
 | Phase | Tasks done | Status |
 |---|---|---|
-| P0 | 3 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form |
-| P1 | 3 / 4 | T1.1–T1.3 done; **T1.4 fixtures** remaining to unblock swarm |
-| P2 | 0 / 7 | blocked on P1 |
-| P3 | 0 / 6 | blocked on P1 (T3.1 DDL can start after T0.3) |
-| P4 | 0 / 6 | blocked on P1 |
-| P5 | 0 / 4 | blocked on P1 |
-| P6 | 0 / 4 | blocked on P1 |
-| P7 | 0 / 3 | blocked on P1 (T7.1 can start after T0.4) |
+| P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
+| P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
+| P2 | 0 / 7 | OPEN for claiming |
+| P3 | 0 / 6 | OPEN (T3.1 DDL can start after T0.3) |
+| P4 | 0 / 6 | OPEN for claiming |
+| P5 | 0 / 4 | OPEN for claiming |
+| P6 | 0 / 4 | OPEN for claiming |
+| P7 | 1 / 3 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
 | P8 | 0 / 5 | blocked on P2 P4 P5 |
 | P9 | 0 / 5 | blocked on P8 |

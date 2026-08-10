@@ -1,0 +1,106 @@
+{
+  "mutations": [
+    {
+      "op": "upsert_node",
+      "node": {
+        "kind": "interaction",
+        "id": "f0000000-0000-4000-8000-000000007001",
+        "session_id": "session-mutations",
+        "agent_id": "agent-a",
+        "prompt_text": "mutate me",
+        "previous_id": null,
+        "created_at": "2026-08-10T09:00:00Z"
+      }
+    },
+    {
+      "op": "upsert_node",
+      "node": {
+        "kind": "concept",
+        "id": "f0000000-0000-4000-8000-000000007002",
+        "session_id": "session-mutations",
+        "content": "kept concept",
+        "canonical_key": "concept kept",
+        "concept_type": "Entity",
+        "origin_interaction": "f0000000-0000-4000-8000-000000007001",
+        "origin_agent": "agent-a",
+        "created_at": "2026-08-10T09:00:00Z",
+        "access_count": 0,
+        "last_accessed": null,
+        "gc_survived": 1,
+        "canonization_status": "None",
+        "blast_radius": null,
+        "last_demotion_time": null,
+        "embedding": null
+      }
+    },
+    {
+      "op": "upsert_node",
+      "node": {
+        "kind": "concept",
+        "id": "f0000000-0000-4000-8000-000000007003",
+        "session_id": "session-mutations",
+        "content": "deleted concept",
+        "canonical_key": "concept deleted",
+        "concept_type": "Observation",
+        "origin_interaction": "f0000000-0000-4000-8000-000000007001",
+        "origin_agent": "agent-b",
+        "created_at": "2026-08-10T09:00:00Z",
+        "access_count": 0,
+        "last_accessed": null,
+        "gc_survived": 0,
+        "canonization_status": "None",
+        "blast_radius": null,
+        "last_demotion_time": null,
+        "embedding": null
+      }
+    },
+    {
+      "op": "upsert_edge",
+      "edge": {
+        "id": "f0000000-0000-4000-8000-000000007051",
+        "session_id": "session-mutations",
+        "source": "f0000000-0000-4000-8000-000000007001",
+        "target": "f0000000-0000-4000-8000-000000007002",
+        "edge_type": "Temporal",
+        "weight": 1.0,
+        "reinforcements": 1,
+        "created_at": "2026-08-10T09:00:00Z",
+        "last_reinforced": "2026-08-10T09:00:00Z"
+      }
+    },
+    {
+      "op": "upsert_edge",
+      "edge": {
+        "id": "f0000000-0000-4000-8000-000000007052",
+        "session_id": "session-mutations",
+        "source": "f0000000-0000-4000-8000-000000007002",
+        "target": "f0000000-0000-4000-8000-000000007003",
+        "edge_type": "Dependency",
+        "weight": 0.9,
+        "reinforcements": 1,
+        "created_at": "2026-08-10T09:00:00Z",
+        "last_reinforced": "2026-08-10T09:00:00Z"
+      }
+    },
+    {
+      "op": "delete_node",
+      "id": "f0000000-0000-4000-8000-000000007003"
+    },
+    {
+      "op": "delete_edge",
+      "id": "f0000000-0000-4000-8000-000000007052"
+    },
+    {
+      "op": "canonization_transition",
+      "event": {
+        "id": "f0000000-0000-4000-8000-000000007090",
+        "session_id": "session-mutations",
+        "node_id": "f0000000-0000-4000-8000-000000007002",
+        "from_status": "None",
+        "to_status": "Candidate",
+        "blast_radius": null,
+        "occurred_at": "2026-08-10T09:00:00Z"
+      }
+    }
+  ]
+}

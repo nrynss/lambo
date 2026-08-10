@@ -7,6 +7,8 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod embed;
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
 pub mod graph;
 pub mod mcp;
 pub mod recall;

@@ -46,6 +46,16 @@ impl MemoryStore {
         })
     }
 
+    /// Seed a prebuilt snapshot directly (used by `fixtures` to load committed graphs).
+    #[cfg(feature = "fixtures")]
+    pub fn seed(&self, snapshot: GraphSnapshot) -> Result<(), StoreError> {
+        let sid = snapshot.session_id.clone();
+        self.inner
+            .write()
+            .insert(sid.0.clone(), SessionData { snapshot });
+        Ok(())
+    }
+
     fn resolve_session_for_node(
         map: &HashMap<String, SessionData>,
         id: NodeId,

@@ -100,7 +100,7 @@ near/far pair contract is asserted in a test.
 requires:   T1.1, T1.2
 fixture-ok: n/a
 owns:       fixtures/
-status:     not-started
+status:     done
 ```
 **The task that unblocks the swarm.** Committed, hand-checked JSON, loadable into
 `MemoryStore` by a `fixtures::load(name)` helper (helper lives in `src/store/memory.rs`
@@ -151,3 +151,48 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
 - Layout note: phase doc listed `src/types.rs`; implementation uses `src/types/` directory.
 
 > Name any type or default that differs from the spec and why: none intentional.
+
+---
+
+### T1.4 — Fixture graphs (2026-08-11) — DONE — swarm unblocked
+
+- **What exists now:**
+  - `fixtures/*.json` (5 files), generated deterministically by `scripts/gen-fixtures.py`
+    (commit the generator + output; re-run `python3 scripts/gen-fixtures.py` to regenerate).
+  - `src/fixtures.rs` (feature `fixtures`, default-on): `load_snapshot`, `load_store`
+    (seeds a `MemoryStore` via new `MemoryStore::seed`), `load_mutation_batch`,
+    `load_recall_goldens`, `load_canonicalization_cases`.
+  - P2–P7 can now start with zero network access: `fixtures::load_store("session-rest-api")`.
+- **Fixture semantics (verified by `src/fixtures.rs` tests):**
+  - `session-rest-api`: user schema passes all three canonization stages (gc_survived 4;
+    interaction_span distinct 6, coverage ~0.42; blast_radius 8). `api layer` passes Stage 2
+    (distinct 3, coverage 0.5) but fails Stage 3 (blast_radius 2). Caching layer = recent
+    agent-a write near session end (conflict-window seed; P4 plants the 30s recency against
+    `Utc::now` since fixture timestamps are in the past).
+  - `session-drift`: root goal (Venerable), on-path chain <= 5 hops, `far budget concept`
+    at 6 hops (drift trigger), and an isolated 2-node disconnected component (GC step 3 food).
+  - `mutations-batch`: all five mutation kinds in spec §2.4 order; applies cleanly
+    (delete is session-scoped; canonization transition targets a surviving concept).
+  - `canonicalization-cases`: canonical-key table for T6. **Convention** (must match T6):
+    lowercase -> split `[-_ ]` + camelCase -> drop stopwords -> Porter stem
+    (`rust-stemmers`, verified) -> sort -> join `" "`. Synonym lookup on the RAW normalized
+    key BEFORE stemming: `register_user` -> `create_user` -> key `"creat user"`.
+    Semantic near-pair A/B (`register user`/`create account`) have DISTINCT keys
+    (`regist user` vs `account creat`) — normalization must NOT merge them; hybrid §7.1
+    step 6 does. If T6's canonicalize diverges from this convention, update the fixture +
+    this note in the same change.
+  - `recall-goldens`: for `session-rest-api`; assert membership + structural ordering, not
+    float scores. `pagination` -> {pagination, api layer, api docs, caching layer};
+    `create` -> {create user, user schema, api layer}. P5 refines as needed.
+- **Surprises / gotchas:**
+  - Canonical keys depend on exact Porter output (e.g. `registering`->`regist`, `creating`->
+    `creat`, `limiter`->`limit`). Computed with `rust-stemmers` — do NOT hand-guess; re-probe
+    if adding cases.
+  - `MemoryStore::seed` is `#[cfg(feature="fixtures")]`; `src/fixtures.rs` module is gated
+    too, so `--no-default-features` builds stay lean.
+  - Fixture UUIDs are stable placeholders (`f0000000-...-00000000<i>ddd`); recall goldens and
+    tests reference them by full string, not by low-u64 arithmetic (that arithmetic does not
+    equal the decimal suffix).
+- **Live gap:** recall phase-1/phase-2 golden membership is authored from the graph by hand;
+  the strongest assertions (ordering, exact expansion) land when P4/P5 implement the query
+  against these fixtures — that is intended, not a defect.

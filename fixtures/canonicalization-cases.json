@@ -1,0 +1,68 @@
+[
+  {
+    "category": "case",
+    "input": "User Schema",
+    "expected_key": "schema user",
+    "note": "lowercase + sort"
+  },
+  {
+    "category": "hyphen",
+    "input": "user-schema",
+    "expected_key": "schema user",
+    "note": "split hyphens"
+  },
+  {
+    "category": "underscore",
+    "input": "user_schema",
+    "expected_key": "schema user",
+    "note": "split underscores"
+  },
+  {
+    "category": "camelcase",
+    "input": "UserSchema",
+    "expected_key": "schema user",
+    "note": "split camelCase"
+  },
+  {
+    "category": "stopword",
+    "input": "the user schema api",
+    "expected_key": "api schema user",
+    "note": "strip 'the'"
+  },
+  {
+    "category": "stem",
+    "input": "registering users",
+    "expected_key": "regist user",
+    "note": "Porter stem"
+  },
+  {
+    "category": "stem",
+    "input": "creating cached systems",
+    "expected_key": "cach creat system",
+    "note": "multi-token stems"
+  },
+  {
+    "category": "tokensort",
+    "input": "schema the user",
+    "expected_key": "schema user",
+    "note": "sort + stopword"
+  },
+  {
+    "category": "synonym",
+    "input": "register_user",
+    "expected_key": "creat user",
+    "note": "register_user->create_user then canonical key"
+  },
+  {
+    "category": "semantic-near-pair-A",
+    "input": "register user",
+    "expected_key": "regist user",
+    "note": "distinct from B; hybrid step 6 merges"
+  },
+  {
+    "category": "semantic-near-pair-B",
+    "input": "create account",
+    "expected_key": "account creat",
+    "note": "distinct from A; hybrid step 6 merges"
+  }
+]
