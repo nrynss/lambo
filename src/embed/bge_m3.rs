@@ -1,7 +1,7 @@
 //! BGE-M3 embeddings served by a local llama.cpp server (default production path).
 //!
 //! Speaks llama.cpp's OpenAI-compatible `POST /v1/embeddings` endpoint, which is the
-//! most version-stable surface across llama.cpp releases. Returns 1024-d dense vectors,
+//! most version-stable surface across llama.cpp releases. Returns dense vectors that are
 //! L2-normalized before returning so Cockroach `<->` (L2) rankings stay coherent with
 //! cosine similarity (see `notes/embeddings-portable.md`).
 //!
@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use super::{EmbedError, Embedder};
 
@@ -31,6 +32,10 @@ struct EmbedData {
     embedding: Vec<f32>,
 }
 
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// BGE-M3 embeddings via a local llama.cpp server over HTTP.
 #[derive(Debug, Clone)]
 pub struct BgeM3LlamaCppEmbedder {
@@ -43,6 +48,14 @@ pub struct BgeM3LlamaCppEmbedder {
     model: String,
     /// Expected embedding dimensionality (must equal the store's `VECTOR(1024)`).
     dim: usize,
+}
+
+fn build_client(connect: Duration, request: Duration) -> Result<reqwest::Client, EmbedError> {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .timeout(request)
+        .build()
+        .map_err(|e| EmbedError::Unavailable(format!("failed to build HTTP client: {e}")))
 }
 
 impl BgeM3LlamaCppEmbedder {
@@ -70,7 +83,7 @@ impl BgeM3LlamaCppEmbedder {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: build_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
             url: format!("{base_url}/v1/embeddings"),
             base_url,
             model: model.into(),
@@ -78,14 +91,25 @@ impl BgeM3LlamaCppEmbedder {
         })
     }
 
+    /// Override connect/request timeouts (most users can rely on the defaults).
+    pub fn with_timeouts(
+        mut self,
+        connect: Duration,
+        request: Duration,
+    ) -> Result<Self, EmbedError> {
+        self.client = build_client(connect, request)?;
+        Ok(self)
+    }
+
     /// Report the server health without embedding anything.
     pub async fn check_health(&self) -> Result<(), EmbedError> {
         let resp = self
             .client
             .get(format!("{}/health", self.base_url))
+            .timeout(HEALTH_TIMEOUT)
             .send()
             .await
-            .map_err(|e| EmbedError::Backend(format!("llama.cpp health check failed: {e}")))?;
+            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp health check failed: {e}")))?;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(EmbedError::Backend(format!(
@@ -93,6 +117,52 @@ impl BgeM3LlamaCppEmbedder {
             )));
         }
         Ok(())
+    }
+
+    /// POST an embed request and parse the response.
+    ///
+    /// Error classification (consumed by the degradation contract in T7.2):
+    /// * connect-level failures (server down/unreachable) -> `Unavailable`, so the caller
+    ///   can fall back to canonical matching permanently and log once instead of hammering;
+    /// * server-side rejections / malformed / dimension-mismatched output -> `Backend`
+    ///   (server is up; the config or version is wrong, and the fix is permanent too).
+    async fn request_embedding(
+        &self,
+        model: &str,
+        text: &str,
+    ) -> Result<EmbedResponse, EmbedError> {
+        let mut model = model.to_string();
+        let mut retried = false;
+        loop {
+            let body = EmbedRequest {
+                model: model.clone(),
+                input: text.to_string(),
+            };
+            let resp = self
+                .client
+                .post(&self.url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
+            let status = resp.status();
+            if status.is_success() {
+                return resp.json().await.map_err(|e| {
+                    EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
+                });
+            }
+            let text_body = resp.text().await.unwrap_or_default();
+            // A 400 on /v1/embeddings usually means the requested model id isn't loaded.
+            // Retry once against the server's default model to be robust to a mismatch.
+            if !model.is_empty() && status == reqwest::StatusCode::BAD_REQUEST && !retried {
+                retried = true;
+                model.clear();
+                continue;
+            }
+            return Err(EmbedError::Backend(format!(
+                "llama.cpp returned {status}: {text_body}"
+            )));
+        }
     }
 }
 
@@ -132,27 +202,7 @@ impl Embedder for BgeM3LlamaCppEmbedder {
                 "cannot embed empty/whitespace text".into(),
             ));
         }
-        let body = EmbedRequest {
-            model: self.model.clone(),
-            input: text.to_string(),
-        };
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| EmbedError::Backend(format!("llama.cpp request failed: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(EmbedError::Backend(format!(
-                "llama.cpp returned {status}: {body}"
-            )));
-        }
-        let parsed: EmbedResponse = resp.json().await.map_err(|e| {
-            EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
-        })?;
+        let parsed = self.request_embedding(&self.model, text).await?;
         let mut vec = parsed
             .data
             .into_iter()
@@ -187,19 +237,21 @@ mod tests {
         v.iter().map(|x| x * x).sum::<f32>().sqrt()
     }
 
+    fn ok_response() -> serde_json::Value {
+        serde_json::json!({
+            "object": "list",
+            "data": [{ "object": "embedding", "index": 0, "embedding": sample_embedding() }],
+            "model": "bge-m3",
+            "usage": { "prompt_tokens": 2, "total_tokens": 2 }
+        })
+    }
+
     #[tokio::test]
     async fn embeds_and_normalizes() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/v1/embeddings")
-                .json_body_partial(r#"{ "input": "user schema" }"#);
-            then.status(200).json_body(serde_json::json!({
-                "object": "list",
-                "data": [{ "object": "embedding", "index": 0, "embedding": sample_embedding() }],
-                "model": "bge-m3",
-                "usage": { "prompt_tokens": 2, "total_tokens": 2 }
-            }));
+            when.method(POST).path("/v1/embeddings");
+            then.status(200).json_body(ok_response());
         });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
         let v = e.embed("user schema").await.unwrap();
@@ -217,9 +269,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings");
-            then.status(200).json_body(serde_json::json!({
-                "data": [{ "embedding": vec![1.0; 512] }]
-            }));
+            then.status(200)
+                .json_body(serde_json::json!({ "data": [{ "embedding": vec![1.0; 512] }] }));
         });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
         let err = e.embed("anything").await.unwrap_err();
@@ -270,9 +321,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings");
-            then.status(200).json_body(serde_json::json!({
-                "data": [{ "embedding": vec![f32::NAN; 1024] }]
-            }));
+            then.status(200)
+                .json_body(serde_json::json!({ "data": [{ "embedding": vec![f32::NAN; 1024] }] }));
         });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
         assert!(e.embed("anything").await.is_err());
@@ -289,6 +339,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_without_model_on_400_model_not_loaded() {
+        let server = MockServer::start();
+        // First request carries a model id and 400s (model not loaded).
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings").matches(|r| {
+                let body = r.body.as_deref().unwrap_or(&[]);
+                String::from_utf8_lossy(body).contains("\"model\":\"my-model\"")
+            });
+            then.status(400).body("model 'my-model' not loaded");
+        });
+        // Retried request omits model -> 200.
+        let ok = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings").matches(|r| {
+                let body = r.body.as_deref().unwrap_or(&[]);
+                !String::from_utf8_lossy(body).contains("\"model\"")
+            });
+            then.status(200).json_body(ok_response());
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "my-model", 1024).unwrap();
+        let v = e.embed("anything").await.unwrap();
+        assert_eq!(v.len(), 1024);
+        ok.assert();
+    }
+
+    #[tokio::test]
+    async fn no_retry_loop_when_model_empty() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(400).body("bad request");
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)));
+        assert!(err.to_string().contains("400"));
+    }
+
+    #[tokio::test]
     async fn health_check_ok() {
         let server = MockServer::start();
         server.mock(|when, then| {
@@ -300,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn constructor_validates_inputs() {
+    async fn constructor_validates_inputs_and_timeouts() {
         assert!(matches!(
             BgeM3LlamaCppEmbedder::new("", "", 1024),
             Err(EmbedError::Unavailable(_))
@@ -309,5 +397,10 @@ mod tests {
             BgeM3LlamaCppEmbedder::new("http://127.0.0.1:8080", "", 0),
             Err(EmbedError::Unavailable(_))
         ));
+        let e = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:8080", "", 1024)
+            .unwrap()
+            .with_timeouts(Duration::from_secs(1), Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(e.dimensions(), 1024);
     }
 }
