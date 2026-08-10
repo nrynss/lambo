@@ -1,7 +1,16 @@
 # Adversarial review — **T7.0 Embeddings** (main)
 
+```text
+╔══════════════════════════════════════════════════════════╗
+║  STATUS: CLOSED                                          ║
+║  Disposition: ACCEPT (residual ops only)                 ║
+║  Closed: 2026-08-11                                      ║
+╚══════════════════════════════════════════════════════════╝
+```
+
 **Task:** T7.0 — Embedder factory + BGE-M3 / llama.cpp (default production path)  
-**Not this review:** full P7 exit (T7.1 / T7.2 / T7.3) — tracked separately as follow-on work.
+**Not this review:** full P7 exit (T7.1 / T7.2 / T7.3) — tracked separately as follow-on work.  
+**Do not reopen T7.0** for residual ops items or for T7.1–T7.3 work.
 
 **Scope:**
 
@@ -14,16 +23,18 @@
 | `.env.example`, `notes/embeddings-portable.md` | Documented |
 | Related contract | Cockroach `VECTOR(1024)`, T0.3 spike |
 
-**Date:** 2026-08-11  
+**Date opened:** 2026-08-11  
 **Disposition check:** 2026-08-11 (findings re-verified against tree)  
+**Closed:** 2026-08-11  
+
 **Related self-reviews:**
 
 - [`adve-review-p7-t7-0-embedder-self.md`](adve-review-p7-t7-0-embedder-self.md) — first T7.0 pass + remediations  
 - [`adve-review-p0-p1-foundation-self.md`](adve-review-p0-p1-foundation-self.md) — foundation (non-embed)  
 
-**Verdict:** **ACCEPT T7.0** with residual ops notes.  
+**Verdict:** **ACCEPT T7.0 — CLOSED** with residual ops notes.  
 Unit/mocked tests green; live server smoke remains ops-dependent (weights + `llama-server`).  
-T7.1–T7.3 are **out of scope for closing this review**.
+T7.1–T7.3 are **out of scope** for this review and **do not reopen** it.
 
 ---
 
@@ -195,16 +206,25 @@ T7.1–T7.3 are **out of scope for closing this review**.
 | Residual ops | HF revision pin, curl checksum, live smoke evidence, pre-warm demo |
 | Deferred to later tasks | Model-mix guard (T7.2/T8), health at Memory build (T8), hybrid (T7.2), Cockroach vectors (T7.3), Bedrock (T7.1) |
 
-**Close-out decision for T7.0:**  
-**ACCEPT — residual ops only.** No further code blockers identified for this task.
-
 ---
 
-## Priority residuals (do not reopen T7.0)
+## Close-out (2026-08-11) — **CLOSED**
+
+| Field | Value |
+|-------|--------|
+| Decision | **ACCEPT** |
+| Code blockers remaining for T7.0 | **None** |
+| Residual | Ops only (pin GGUF revision; optional live evidence; demo pre-warm) |
+| Reopen criteria | Only if T7.0 code regresses (client, factory, scripts, dim contract) — **not** for T7.1–T7.3 feature work |
+| Follow-on work | Tracked in PHASE-7 tasks T7.1 / T7.2 / T7.3 — **new reviews**, not reopening this one |
+
+**Sign-off:** T7.0 adversarial review closed. Downstream agents treat T7.0 as done for dependency purposes (`embedder_from_env` / `BgeM3LlamaCppEmbedder` / scripts).
+
+### Residual backlog (non-blocking; do not reopen)
 
 1. Pin HF GGUF repo + revision (+ optional SHA) in Handoff when demo freezes.  
 2. One live smoke evidence file under `dev-diary/evidence/` when convenient.  
-3. Downstream: T7.2 hybrid, T7.3 vector store, T7.1 Bedrock, session embedder id.
+3. Downstream (separate tasks): T7.2 hybrid, T7.3 vector store, T7.1 Bedrock, session embedder id.
 
 ---
 
@@ -218,13 +238,13 @@ T7.1–T7.3 are **out of scope for closing this review**.
 
 ---
 
-## Gate commands
+## Gate commands (at close)
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test embed
-# optional live:
+# optional live (not required to keep this review closed):
 # ./scripts/fetch-bge-m3.sh && ./scripts/run-llama-embed.sh --check
 ```
 
@@ -234,8 +254,8 @@ cargo test embed
 
 | Deliverable | Verdict |
 |-------------|---------|
-| **T7.0 code + scripts** | **ACCEPT** (residual ops) |
-| T7.1 / T7.2 / T7.3 | Not covered by this close-out |
+| **T7.0 code + scripts** | **ACCEPT — CLOSED** (residual ops) |
+| T7.1 / T7.2 / T7.3 | Not covered; do not reopen this review |
 
 ---
 
@@ -243,6 +263,6 @@ cargo test embed
 
 | File | Role |
 |------|------|
-| **`adve-review-t70-embeddings.md`** | **Main T7.0 adversarial review (this file)** |
+| **`adve-review-t70-embeddings.md`** | **Main T7.0 adversarial review — CLOSED** |
 | `adve-review-p7-t7-0-embedder-self.md` | Earlier T7.0-only review + remediations |
 | `adve-review-p0-p1-foundation-self.md` | Foundation review (non-T7.0) |
