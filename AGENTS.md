@@ -31,3 +31,8 @@
 - Spec of record: `lambo-hackathon-spec-v0.1.md` (frozen). Phase handoffs in `dev-diary/`.
 - Never commit `.env`. Cockroach DSN uses `sslmode=verify-full&sslrootcert=system`.
 - Single-writer deployment model for `lambo serve` (see spec §2.2).
+- **Embeddings are portable** (see `dev-diary/notes/embeddings-portable.md`):
+  - Default: **BGE-M3** (1024-d) from **Hugging Face**, run with **llama.cpp**.
+  - Swap-in: **Bedrock Titan V2** when `authorizationStatus` is AUTHORIZED.
+  - Tests: `FixtureEmbedder` only. Never mix model vectors in one session without re-embed.
+  - Never commit `models/` weights.

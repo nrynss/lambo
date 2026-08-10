@@ -8,32 +8,53 @@ parallel: high   # T7.1 ‖ T7.2 ‖ T7.3
 runs-parallel-with: P2, P3, P4, P5, P6
 ```
 
-**Goal:** Bedrock Titan v2 behind the `Embedder` trait, hybrid concept matching (spec §7.1
-step 6), and live `vector_candidates` — the hackathon's **Distributed Vector Indexing**
-requirement (spec §12.1) doing real work: merging concepts normalization can't
-("register user" / "create account"), keeping the graph from fragmenting into islands.
+**Goal:** Portable `Embedder` trait (1024-d dense) + hybrid concept matching (spec §7.1
+step 6) + live `vector_candidates` — Cockroach **Distributed Vector Indexing** (spec §12.1)
+doing real work: merging concepts normalization can't ("register user" / "create account").
 
-**Degradation contract:** if this whole phase slips, `MatchStrategy::Hybrid` falls back to
-`Canonical` and logs once. But §12.1 lists the vector index as one of the two required
-CockroachDB tools — so P7 can land *last*, it cannot land *never*. T7.3 + one hybrid merge
-in the demo is the minimum.
+**Default embedder:** **BGE-M3** weights from **Hugging Face**, runtime **llama.cpp**
+(see [`notes/embeddings-portable.md`](notes/embeddings-portable.md)).  
+**Swap-in:** Bedrock Titan V2 when account is authorized.  
+**Tests:** `FixtureEmbedder` only.
+
+**Degradation contract:** if hybrid cannot embed, fall back to `MatchStrategy::Canonical`
+and log once — not "keyword as product." §12.1 still requires the vector index in use for
+the demo (T7.3 + one hybrid merge minimum).
 
 ---
 
-### T7.1 — `BedrockEmbedder`
+### T7.0 — Embedder factory + BGE-M3 / llama.cpp ★ (default path)
+```yaml
+requires:   T1.3
+fixture-ok: yes
+owns:       src/embed/mod.rs, src/embed/llama_cpp.rs (or bge_m3.rs), scripts/fetch-bge-m3.sh, scripts/run-llama-embed.sh
+status:     not-started
+```
+- `LAMBO_EMBEDDER=bge_m3|bedrock|fixture`, `LAMBO_EMBED_DIM=1024`, `LAMBO_LLAMA_EMBED_URL`.
+- Download GGUF (or convert) from HF into `models/` (gitignored); serve with llama.cpp
+  `--embedding`.
+- HTTP client returns L2-normalized 1024-d vectors.
+- **Never mix** BGE-M3 and Titan vectors in one session without re-embed.
+
+**Done when:** smoke against local llama.cpp returns 1024 dims; fixture path still green in CI
+without models.
+
+---
+
+### T7.1 — `BedrockEmbedder` (optional swap-in)
 ```yaml
 requires:   T1.3, T0.4
 fixture-ok: yes   # written from the T0.4 handoff; live call behind an integration gate
 owns:       src/embed/bedrock.rs
 status:     not-started
 ```
-Titan Text Embeddings V2, 1024-dim, via `aws-sdk-bedrockruntime`, using T0.4's recorded
-request/response shapes. Timeout + typed error mapping; **an embed failure fails the
-match step, never the write** — `derive()` completes keyword-only (circuit breaker was cut;
-per-call fallback is the v0.1 shape).
+Titan Text Embeddings V2, 1024-dim, via `aws-sdk-bedrockruntime` or Bearer API key, using
+T0.4 shapes. Selected when `LAMBO_EMBEDDER=bedrock` and account is AUTHORIZED. Timeout +
+typed errors; **embed failure fails the hybrid match step, never the write** — fall back to
+canonical match (per-call fallback is the v0.1 shape).
 
 **Done when:** unit tests with a mocked client pass; feature-gated live smoke returns 1024
-dims.
+dims when AWS allows.
 
 ---
 
@@ -74,9 +95,16 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
 
 ## Exit criteria
 
+- [ ] BGE-M3 + llama.cpp path documented and smokeable (default)
+- [ ] Bedrock path optional swap-in (same 1024-d contract)
 - [ ] Hybrid merge demonstrated offline (fixtures) and live (Cockroach)
 - [ ] Degraded mode proven equivalent to Canonical strategy
 - [ ] `EXPLAIN` evidence of index use committed
+
+## Handoff Log
+
+- **2026-08-10:** Portable embeddings decision — default BGE-M3 (HF + llama.cpp), Bedrock
+  Titan when authorized. Dim 1024. Details: `notes/embeddings-portable.md`.
 
 ---
 

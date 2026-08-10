@@ -23,6 +23,29 @@ cargo run -- --help
 cargo test
 ```
 
+## Embeddings (portable)
+
+Embeddings sit behind an **`Embedder` trait** (1024-dim dense, L2-normalized). Backends:
+
+| Backend | Role |
+|---------|------|
+| **BGE-M3** via **Hugging Face** download + **llama.cpp** | **Default** while Bedrock is unavailable |
+| **Amazon Titan Text Embeddings V2** (Bedrock) | Swap-in when account is authorized |
+| **FixtureEmbedder** | Unit tests / CI only |
+
+Same dimension as Cockroach `VECTOR(1024)` — do **not** mix vectors from different models
+in one session without re-embedding.
+
+Setup notes: [`dev-diary/notes/embeddings-portable.md`](dev-diary/notes/embeddings-portable.md).  
+Bedrock account gate: [`dev-diary/notes/bedrock-authorization-blocker.md`](dev-diary/notes/bedrock-authorization-blocker.md).
+
+```bash
+# high level
+# 1) huggingface-cli download … → models/bge-m3/*.gguf  (gitignored)
+# 2) llama-server -m … --embedding --port 8080
+# 3) LAMBO_EMBEDDER=bge_m3 LAMBO_LLAMA_EMBED_URL=http://127.0.0.1:8080
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

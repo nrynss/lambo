@@ -13,3 +13,8 @@ spikes/*/Cargo.lock
 # local EC2 / tooling scratch
 /tmp/
 *.tgz
+# Hugging Face / llama.cpp model weights (BGE-M3 etc.)
+/models/
+*.gguf
+*.bin
+*.safetensors
