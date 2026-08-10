@@ -147,9 +147,27 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
     cosine(register user, quantum chromo …)=0.28.
   - **Calibration note for T7.2:** the real BGE-M3 near-pair score is **0.78, below the
     fixture-derived semantic_match_threshold (0.85)**. The 0.85 fixture contract is about
-    `FixtureEmbedder`; do NOT assume BGE-M3 reaches it on the same text pair. T7.2 should
+    `FixtureEmbedder`; do NOT assume BGE-M3 reaches it on the the same text pair. T7.2 should
     calibrate its merge threshold against the live embedder's distribution, or accept that
     some paraphrases won't merge — do not edit the fixture contract to match BGE-M3.
+    **UPDATED (2026-08-11): this note is superseded — see the live-calibration result below.**
+- **Live BGE-M3 calibration probe (2026-08-11) — IMPORTANT design evidence for T7.2:**
+  `tests/live_calibration.rs` (gated `#[ignore]`; run `cargo test --test live_calibration --
+  --ignored --nocapture` against a running server). Findings:
+  1. **Bare concept-name embedding does NOT separate the classes.** On 8 curated should-merge
+     vs 8 must-not-merge 2-3 word labels: near range [0.567, 0.868], far range [0.429, 0.855].
+     **They overlap** (far-max 0.855 > near-min 0.567) so NO single threshold works on bare
+     labels. Dense vectors of short noun-phrases are noisy; antonym/domain-twin pairs
+     (reset/forgot 0.86, delete/create user 0.76) embed nearer than true paraphrases
+     (deploy/ship 0.57, charge/process 0.62).
+  2. **Embedding WITH sentence context fixes it.** Same concepts inside short sentences:
+     near = [0.867, 0.931], far = [0.750, 0.825] — a clean gap (0.825, 0.867). **The
+     existing 0.85 threshold sits inside that gap.**
+  **=> Rule for T7.2:** hybrid matching must embed the concept WITH context (name + origin
+  interaction text), never the bare label. Keep 0.85 as default; make it configurable and
+  re-calibrate per embedder on a larger labeled set (precision/recall) before shipping.
+  Bias toward precision (under-merge = separate concepts, safe for canonization) over
+  over-merge. The demo's 'one hybrid merge' is achievable via context embedding.
 - **Announcement (shared Cargo.toml exception):** added additive deps without a separate claim —
   `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }`
   (rustls to match sqlx) and dev dep `httpmock = "0.7"` for the HTTP client tests.
