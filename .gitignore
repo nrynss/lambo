@@ -10,3 +10,6 @@
 *.pdb
 .cargo-cache/
 spikes/*/Cargo.lock
+# local EC2 / tooling scratch
+/tmp/
+*.tgz

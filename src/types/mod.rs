@@ -20,11 +20,20 @@ impl NodeId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Nil UUID — safe `Default` (unlike random, which would be a footgun).
+    pub const fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
+    pub fn is_nil(self) -> bool {
+        self.0.is_nil()
+    }
 }
 
 impl Default for NodeId {
     fn default() -> Self {
-        Self::new()
+        Self::nil()
     }
 }
 
@@ -502,5 +511,28 @@ mod tests {
         let s = serde_json::to_string(&batch).unwrap();
         let back: MutationBatch = serde_json::from_str(&s).unwrap();
         assert_eq!(batch, back);
+    }
+
+    #[test]
+    fn node_id_default_is_nil_not_random() {
+        assert!(NodeId::default().is_nil());
+        assert_ne!(NodeId::new(), NodeId::new());
+    }
+
+    #[test]
+    fn all_edge_types_serde() {
+        for et in [
+            EdgeType::Temporal,
+            EdgeType::Derives,
+            EdgeType::CoOccurrence,
+            EdgeType::Causal,
+            EdgeType::Dependency,
+            EdgeType::Hierarchical,
+            EdgeType::Semantic,
+        ] {
+            let s = serde_json::to_string(&et).unwrap();
+            let back: EdgeType = serde_json::from_str(&s).unwrap();
+            assert_eq!(et, back);
+        }
     }
 }

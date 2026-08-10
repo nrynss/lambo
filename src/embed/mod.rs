@@ -2,9 +2,7 @@
 
 mod fixture;
 
-pub use fixture::{
-    cosine, near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR,
-};
+pub use fixture::{cosine, near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
 
 use async_trait::async_trait;
 use thiserror::Error;

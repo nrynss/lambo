@@ -33,6 +33,11 @@ pub fn near_far_contract() -> (f32, f32) {
 const DIM: usize = 1024;
 
 /// Hash-seeded unit vectors. Related phrases share a base seed so they land near each other.
+///
+/// **Stability:** uses [`std::collections::hash_map::DefaultHasher`], which is **not**
+/// guaranteed stable across Rust releases. Fixture golden vectors must be regenerated if
+/// the toolchain major hash algorithm changes; prefer asserting relative geometry
+/// (near/far) over absolute component equality across rustc versions.
 #[derive(Debug, Clone, Default)]
 pub struct FixtureEmbedder;
 
@@ -100,16 +105,31 @@ impl Embedder for FixtureEmbedder {
     }
 }
 
+/// Cosine similarity. Returns 0.0 if either vector is empty or lengths differ
+/// (callers must not silently zip-truncate mismatched dims).
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0;
-    let mut na = 0.0;
-    let mut nb = 0.0;
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
     for (x, y) in a.iter().zip(b.iter()) {
+        // Guard NaN/Inf pollution from bad backends.
+        if !x.is_finite() || !y.is_finite() {
+            return 0.0;
+        }
         dot += x * y;
         na += x * x;
         nb += y * y;
     }
-    dot / (na.sqrt() * nb.sqrt()).max(1e-12)
+    let denom = (na.sqrt() * nb.sqrt()).max(1e-12);
+    let c = dot / denom;
+    if c.is_finite() {
+        c.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -145,5 +165,25 @@ mod tests {
             sim < 0.85,
             "far pair cosine {sim} should be < 0.85 (NEAR_A vs FAR)"
         );
+    }
+
+    #[test]
+    fn cosine_rejects_length_mismatch() {
+        assert_eq!(cosine(&[1.0, 0.0], &[1.0]), 0.0);
+        assert_eq!(cosine(&[], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn unit_norm() {
+        let v = FixtureEmbedder::embed_sync("anything");
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((n - 1.0).abs() < 1e-5, "norm={n}");
+    }
+
+    #[test]
+    fn near_far_contract_helper() {
+        let (near, far) = near_far_contract();
+        assert!(near >= 0.85);
+        assert!(far < 0.85);
     }
 }

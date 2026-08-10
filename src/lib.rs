@@ -13,6 +13,13 @@ pub mod recall;
 pub mod store;
 pub mod types;
 
-pub use config::Config;
+pub use config::{Config, RecallWeights, ScoringWeights};
+pub use embed::{EmbedError, Embedder, FixtureEmbedder};
 pub use store::{Capabilities, GraphStore, MemoryStore};
-pub use types::*;
+// Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
+pub use types::{
+    AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,
+    EdgeType, GraphSnapshot, Interaction, InteractionSpan, LamboError, MatchStrategy, Mutation,
+    MutationBatch, Node, NodeId, RecallHit, RecallQuery, RecallResult, Reservation, Scored,
+    SessionId, StoreError, Synonym,
+};
