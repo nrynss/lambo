@@ -85,10 +85,7 @@ impl EmbedderConfig {
         let llama_url = env::var("LAMBO_LLAMA_EMBED_URL")
             .ok()
             .filter(|s| !s.is_empty());
-        let llama_model = env::var("LAMBO_LLAMA_MODEL")
-            .or_else(|_| env::var("LAMBO_BGE_M3_MODEL"))
-            .ok()
-            .filter(|s| !s.is_empty());
+        let llama_model = env::var("LAMBO_LLAMA_MODEL").ok().filter(|s| !s.is_empty());
 
         Ok(Self {
             kind,
@@ -111,10 +108,13 @@ pub fn embedder_from_env() -> Result<Box<dyn Embedder>, EmbedError> {
 
 /// Build an embedder from an explicit config (injectable for tests).
 pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
-    if cfg.dim == 0 {
-        return Err(EmbedError::Unavailable(
-            "embedding dimension must be > 0".into(),
-        ));
+    // v0.1: the only supported dimension is 1024 (Cockroach `VECTOR(1024)`). Fail fast
+    // rather than let an embedder diverge from the schema (adve-review-p7-embeddings R2).
+    if cfg.dim != 1024 {
+        return Err(EmbedError::Unavailable(format!(
+            "v0.1 supports only 1024-dim embeddings (Cockroach VECTOR(1024)); got {}",
+            cfg.dim
+        )));
     }
     match cfg.kind {
         EmbedderKind::BgeM3 => {
@@ -125,15 +125,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             let model = cfg.llama_model.unwrap_or_default();
             Ok(Box::new(BgeM3LlamaCppEmbedder::new(url, model, cfg.dim)?))
         }
-        EmbedderKind::Fixture => {
-            if cfg.dim != 1024 {
-                return Err(EmbedError::Unavailable(format!(
-                    "FixtureEmbedder is fixed at 1024 dims, got {}",
-                    cfg.dim
-                )));
-            }
-            Ok(Box::new(FixtureEmbedder::new()))
-        }
+        EmbedderKind::Fixture => Ok(Box::new(FixtureEmbedder::new())),
         EmbedderKind::Bedrock => Err(EmbedError::Unavailable(
             "bedrock embedder is a swap-in not yet implemented (T7.1); it also requires \
              the account authorizationStatus=AUTHORIZED. Use LAMBO_EMBEDDER=bge_m3 (default) \

@@ -107,12 +107,6 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
 
 ---
 
-## Handoff Log
-
-> _Fill on completion._
-
----
-
 ### T7.0 — BGE-M3 / llama.cpp embedder + factory (2026-08-11) — DONE
 
 - **What exists now:**
@@ -168,6 +162,19 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
   re-calibrate per embedder on a larger labeled set (precision/recall) before shipping.
   Bias toward precision (under-merge = separate concepts, safe for canonization) over
   over-merge. The demo's 'one hybrid merge' is achievable via context embedding.
+- **P7 review remediation (2026-08-11, per `dev-diary/adversarial-review/adve-review-p7-embeddings.md`):**
+  - **R2 dim:** v0.1 now fails fast unless dim == 1024 (Cockroach `VECTOR(1024)`): single guard in
+    `build_embedder` for all kinds + defense-in-depth in `BgeM3LlamaCppEmbedder::new`. Fixture
+    branch no longer needs its own check.
+  - **R5 env split:** `LAMBO_LLAMA_MODEL` is the only env feeding the HTTP `/v1/embeddings` model
+    id. `LAMBO_BGE_M3_MODEL` is now documented as the GGUF *filesystem path* only (scripts); the
+    old dual-feed fallback (`or_else(LAMBO_BGE_M3_MODEL)`) was removed so a path is never sent
+    as a model id. `.env.example` updated.
+  - **R6 repro:** `scripts/fetch-bge-m3.sh` now pins `LAMBO_BGE_M3_REVISION`
+    (default `2d48f173...`) and passes `--revision` to hf/huggingface-cli; curl fallback uses the
+    revision in the URL instead of `main`.
+  - **R14/R15:** live `#[ignore]` smoke (bge_m3.rs) + live calibration probe (tests/) committed;
+    duplicate `## Handoff Log` headers merged.
 - **Announcement (shared Cargo.toml exception):** added additive deps without a separate claim —
   `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }`
   (rustls to match sqlx) and dev dep `httpmock = "0.7"` for the HTTP client tests.

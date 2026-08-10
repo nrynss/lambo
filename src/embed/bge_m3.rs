@@ -77,10 +77,10 @@ impl BgeM3LlamaCppEmbedder {
                 "llama.cpp base URL is empty".into(),
             ));
         }
-        if dim == 0 {
-            return Err(EmbedError::Unavailable(
-                "embedding dimension must be > 0".into(),
-            ));
+        if dim != 1024 {
+            return Err(EmbedError::Unavailable(format!(
+                "v0.1 supports only 1024-dim embeddings (Cockroach VECTOR(1024)); got {dim}"
+            )));
         }
         Ok(Self {
             client: build_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,

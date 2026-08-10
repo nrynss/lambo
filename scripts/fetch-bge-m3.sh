@@ -26,12 +26,14 @@ MODEL_DIR="${LAMBO_BGE_M3_DIR:-$ROOT/models/bge-m3}"
 # Repo + file on Hugging Face. Override for another build.
 REPO="${LAMBO_BGE_M3_HF_REPO:-gpustack/bge-m3-GGUF}"
 FILE="${LAMBO_BGE_M3_GGUF:-bge-m3-FP16.gguf}"
+# Pinned revision (sha) for reproducibility - see dev-diary notes. Override to track another.
+REVISION="${LAMBO_BGE_M3_REVISION:-2d48f1737679ad900d5c26c5aad5410e9c70fdca}"
 
 TARGET="$MODEL_DIR/$FILE"
 
 echo "== BGE-M3 GGUF download =="
 echo "  repo : $REPO"
-echo "  file : $FILE"
+echo "  file : $FILE @ $REVISION"
 echo "  dest : $TARGET"
 
 if [[ -f "$TARGET" ]]; then
@@ -51,17 +53,18 @@ fi
 # non-functional stub, so try `hf` first, then legacy huggingface-cli.
 if command -v hf >/dev/null 2>&1; then
   echo "== using hf (hub CLI) =="
-  hf download "$REPO" "$FILE" --local-dir "$MODEL_DIR"
+  hf download "$REPO" "$FILE" --revision "$REVISION" --local-dir "$MODEL_DIR"
 elif command -v huggingface-cli >/dev/null 2>&1; then
   echo "== using huggingface-cli =="
   huggingface-cli download "$REPO" \
+    --revision "$REVISION" \
     --include "*${FILE}*" \
     --local-dir "$MODEL_DIR"
 else
-  # Fallback: raw resolve URL (needs `curl`).
+  # Fallback: raw resolve URL pinned to the revision (needs `curl`).
   echo "== huggingface-cli not found; falling back to curl =="
   command -v curl >/dev/null 2>&1 || { echo "error: need huggingface-cli or curl" >&2; exit 1; }
-  URL="https://huggingface.co/${REPO}/resolve/main/${FILE}"
+  URL="https://huggingface.co/${REPO}/resolve/${REVISION}/${FILE}"
   curl -L --fail --proto '=https' -o "$TARGET.part" "$URL"
   mv "$TARGET.part" "$TARGET"
 fi
