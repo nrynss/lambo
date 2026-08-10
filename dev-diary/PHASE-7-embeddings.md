@@ -2,10 +2,9 @@
 
 ```yaml
 id:       P7
-requires: [P1, T0.3, T0.4]
-blocks:   nothing hard — capability-gated; keyword-only is a lawful degraded mode (spec §3.2)
-parallel: high   # T7.1 ‖ T7.2 ‖ T7.3
-runs-parallel-with: P2, P3, P4, P5, P6
+requires: [P1, T0.3]   # T0.4 only for T7.1 Bedrock; default path is BGE-M3 (T7.0)
+blocks:   nothing hard — capability-gated; hybrid falls back to Canonical (not keyword-as-product)
+parallel: high   # T7.0 done; T7.1 ‖ T7.2 ‖ T7.3runs-parallel-with: P2, P3, P4, P5, P6
 ```
 
 **Goal:** Portable `Embedder` trait (1024-d dense) + hybrid concept matching (spec §7.1
