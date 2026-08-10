@@ -1,0 +1,57 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/vector-spike`
+=== T0.3 sqlx × VECTOR spike (Attempt A: text cast) ===
+[1] connected in 290.67399ms
+[2] INSERT 1024-dim VECTOR via $n::VECTOR text bind — ok
+[3] round-trip ok (max abs diff 0.000e0, eps=0.0001)
+[4a] EXPLAIN pure (no session filter):
+distribution: local
+
+• top-k
+│ estimated row count: 1
+│ order: +column20
+│ k: 5
+│
+└── • render
+    │
+    └── • lookup join
+        │ table: concepts@concepts_pkey
+        │ equality: (id) = (id)
+        │ equality cols are key
+        │
+        └── • vector search
+              table: concepts@concepts_embedding_idx
+              target count: 5
+
+[4a] EXPLAIN filtered (session_id predicate):
+distribution: local
+
+• top-k
+│ estimated row count: 1
+│ order: +column20
+│ k: 5
+│
+└── • render
+    │
+    └── • index join
+        │ estimated row count: 1
+        │ table: concepts@concepts_pkey
+        │
+        └── • scan
+              estimated row count: 1 (100% of the table; stats collected 3 minutes ago)
+              table: concepts@concepts_session_id_canonical_key_key
+              spans: [/'spike-vector-35eb4ec5-7da4-40f6-a80d-67f2dbaf26b4' - /'spike-vector-35eb4ec5-7da4-40f6-a80d-67f2dbaf26b4']
+
+index recommendations: 1
+1. type: index creation
+   SQL command: CREATE INDEX ON lambo.public.concepts (session_id) STORING (embedding);
+
+[4a] index concepts_embedding_idx: pure=true filtered=false
+[4b] top hit id=4bae334d-68cc-4fb7-b857-6a9ccc791aa9 (expected 4bae334d-68cc-4fb7-b857-6a9ccc791aa9)
+
+=== VERDICT: GO (Rust) ===
+attempt: A (text bind + $n::VECTOR cast)
+distance operator: <-> (L2)
+index used (heuristic): true
+round-trip eps: 0.0001
+total elapsed: 1.529670789s

@@ -1,0 +1,12 @@
+/target
+**/target
+.env
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+*.pdb
+.cargo-cache/
+spikes/*/Cargo.lock

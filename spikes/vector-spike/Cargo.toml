@@ -1,0 +1,19 @@
+[package]
+name = "vector-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "T0.3 decision gate: sqlx × CockroachDB VECTOR"
+
+[dependencies]
+anyhow = "1"
+dotenvy = "0.15"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }

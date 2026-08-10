@@ -1,0 +1,9 @@
+T0.4 Bedrock Titan V2 — blocked on account model-access form
+date: 2026-08-10T11:11:14Z
+identity: arn:aws:iam::542468167736:root
+regions tried: ap-south-2, us-east-1
+model: amazon.titan-embed-text-v2:0
+CLI error: ValidationException: Operation not allowed
+get-use-case-for-model-access: You have not filled out the request form.
+spike crate builds; needs console Bedrock model access / use-case form.
+SDK fix applied: aws-config feature credentials-login for aws login sessions.
