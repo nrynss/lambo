@@ -27,8 +27,8 @@ the demo (T7.3 + one hybrid merge minimum).
 ```yaml
 requires:   T1.3
 fixture-ok: yes
-owns:       src/embed/mod.rs, src/embed/llama_cpp.rs (or bge_m3.rs), scripts/fetch-bge-m3.sh, scripts/run-llama-embed.sh
-status:     not-started
+owns:       src/embed/mod.rs, src/embed/bge_m3.rs, scripts/fetch-bge-m3.sh, scripts/run-llama-embed.sh
+status:     done
 ```
 - `LAMBO_EMBEDDER=bge_m3|bedrock|fixture`, `LAMBO_EMBED_DIM=1024`, `LAMBO_LLAMA_EMBED_URL`.
 - Download GGUF (or convert) from HF into `models/` (gitignored); serve with llama.cpp
@@ -111,3 +111,41 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
 ## Handoff Log
 
 > _Fill on completion._
+
+---
+
+### T7.0 — BGE-M3 / llama.cpp embedder + factory (2026-08-11) — DONE
+
+- **What exists now:**
+  - `src/embed/bge_m3.rs` — `BgeM3LlamaCppEmbedder`, talks to llama.cpp's OpenAI-compatible
+    `POST /v1/embeddings` (chosen as the most version-stable surface), parses `data[0].embedding`,
+    enforces exact dim (default 1024), **L2-normalizes in place**, and rejects empty text,
+    non-finite (NaN/Inf) vectors, zero-norm, dim mismatch, empty data, non-2xx, and bad JSON.
+    Includes `.check_health()` against `{base}/health`.
+  - `src/embed/mod.rs` — `EmbedderKind` (bge_m3 | bedrock | fixture, parse from `LAMBO_EMBEDDER`
+    default bge_m3) + `EmbedderConfig::from_env()` + `build_embedder()` / `embedder_from_env()`
+    factory. `bedrock` returns `EmbedError::Unavailable` with a clear "use bge_m3/fixture" note
+    (T7.1 will implement it). `fixture` requires dim 1024 exactly.
+  - `scripts/fetch-bge-m3.sh` — HF GGUF download into `models/` (gitignored). Default repo
+    `gpustack/bge-m3-GGUF` file `bge-m3-f16.gguf`, overridable via `LAMBO_BGE_M3_HF_REPO` /
+    `LAMBO_BGE_M3_GGUF`. Uses huggingface-cli, else `hf`, else curl fallback; `--dry-run` prints plan.
+  - `scripts/run-llama-embed.sh` — starts `llama-server -m <model> --embedding -c <ctx>` on the
+    parsed port; `--check` health-checks an existing server; refuses if a server is already up.
+  - `.env.example` — added `LAMBO_LLAMA_MODEL` (model id sent; empty => server default) and
+    `LAMBO_BGE_M3_GGUF`. `LAMBO_LLAMA_MODEL` or `LAMBO_BGE_M3_MODEL` both feed the request model id.
+- **Announcement (shared Cargo.toml exception):** added additive deps without a separate claim —
+  `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }`
+  (rustls to match sqlx) and dev dep `httpmock = "0.7"` for the HTTP client tests.
+- **Surprises / gotchas:**
+  - httpmock `json_body_partial` takes a JSON *string* (not `serde_json::Value`) — write the body
+    as a `r#"..."#` literal.
+  - llama.cpp `/v1/embeddings` model field: some servers 400 on a model id that isn't loaded, so
+    the request omits `model` when `LAMBO_LLAMA_MODEL` is empty (server default). Documented for the
+    demo machine: set `LAMBO_LLAMA_MODEL` to the served model name if the default check fails.
+- **Next agent should not re-derive:** the exact request/response shape and the normalization step
+  are already implemented and mocked-tested. T7.2/T7.3 only need a working `Embedder`; call
+  `embedder_from_env()` or `build_embedder(cfg)`.
+- **To reproduce offline:** `cargo test embed::bge_m3` (httpmock, no model/server needed).
+- **Live smoke pending (ops checklist):** model weights not downloaded here (several GB, gitignored).
+  Follow `notes/embeddings-portable.md` ops checklist: `./scripts/fetch-bge-m3.sh` then
+  `./scripts/run-llama-embed.sh`.

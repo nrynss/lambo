@@ -14,7 +14,10 @@ pub mod store;
 pub mod types;
 
 pub use config::{Config, RecallWeights, ScoringWeights};
-pub use embed::{EmbedError, Embedder, FixtureEmbedder};
+pub use embed::{
+    build_embedder, embedder_from_env, BgeM3LlamaCppEmbedder, EmbedError, Embedder, EmbedderConfig,
+    EmbedderKind, FixtureEmbedder,
+};
 pub use store::{Capabilities, GraphStore, MemoryStore};
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{

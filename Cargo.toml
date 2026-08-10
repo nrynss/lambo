@@ -17,6 +17,7 @@ aws-sdk-bedrockruntime = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = "0.1"
 rust-stemmers = "1"
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +41,7 @@ bitflags = "2.13.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+httpmock = "0.7"
 
 [[bin]]
 name = "lambo"
