@@ -7,9 +7,10 @@ description = "T0.4 Bedrock Titan Text Embeddings V2 smoke"
 
 [dependencies]
 anyhow = "1"
-# credentials-login enables `aws login` browser sessions (not long-lived keys).
+# credentials-login for `aws login`; bearer path uses reqwest when API key is set.
 aws-config = { version = "1", features = ["credentials-login"] }
 aws-sdk-bedrockruntime = { version = "1", features = ["behavior-version-latest"] }
 dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

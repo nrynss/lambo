@@ -175,27 +175,30 @@ index storing embedding). T3.2 should either:
 
 Evidence: `dev-diary/evidence/t0.4-bedrock-blocked.txt`
 
-- Spike crate: `spikes/bedrock-spike/` builds.
-- Required SDK feature: `aws-config` **`credentials-login`** (without it: "ProfileFile
-  provider could not be built... credentials-login").
+- Spike crate: `spikes/bedrock-spike/` — dual auth:
+  1. **Bearer** via `AWS_BEARER_TOKEN_BEDROCK` / `LAMBO_BEDROCK_API_KEY` (HTTP `reqwest`)
+  2. AWS default chain (`aws login`) via SDK + `credentials-login`
 - Request shape (T7.1):
   ```json
   {"inputText":"user schema","dimensions":1024,"normalize":true}
   ```
-  model id: `amazon.titan-embed-text-v2:0`
-- **Invoke fails** on both `ap-south-2` and `us-east-1`:
-  `ValidationException: Operation not allowed`
-- Root cause: `aws bedrock get-use-case-for-model-access` →
-  **"You have not filled out the request form."**
-- **Human action:** AWS Console → Bedrock → Model access / enable foundation models
-  (complete use-case form), then re-run:
+  model id: `amazon.titan-embed-text-v2:0`  
+  URL: `POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke`
+- Short-term Bedrock API key stored in **`.env` only** (not committed). Token minted for
+  **ap-south-2**, `X-Amz-Expires=43200` (~12h from mint).
+- With valid Bearer key on **ap-south-2**: auth succeeds, still  
+  `HTTP 400 {"message":"Operation not allowed"}` — **account restriction**, not bad key.
+- On **us-east-1** with same key: `403 Authentication failed` (key is region-scoped).
+- `put-use-case-for-model-access` also denied: account not authorized → open support case.
+- **Human action:** unlock Bedrock for account (console model access / support / limited-mode
+  activation). Then re-run from repo root:
   ```bash
-  cd spikes/bedrock-spike && AWS_REGION=ap-south-2 cargo run
-  # or us-east-1 if Titan is only enabled there
+  cd spikes/bedrock-spike && cargo run   # loads ../../.env automatically
   ```
 - Until then: keyword-only path remains lawful degraded mode (spec §3.2 / P7 degradable).
 
 ### Open for human
 
-1. Enable Bedrock model access (use-case form) → re-run T0.4 → mark done.
+1. Unlock Bedrock InvokeModel on the account → re-run T0.4 → mark done.
 2. Optional: `git remote` + push so GitHub About shows MIT.
+3. **Rotate the Bedrock API key** if this chat/log is shared (secret was pasted in-session).
