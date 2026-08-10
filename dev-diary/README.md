@@ -143,7 +143,7 @@ Keep this current; it is the only global view.
 | Phase | Tasks done | Status |
 |---|---|---|
 | P0 | 3 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form |
-| P1 | 0 / 4 | unblocked (needs only T0.1 — done) |
+| P1 | 3 / 4 | T1.1–T1.3 done; **T1.4 fixtures** remaining to unblock swarm |
 | P2 | 0 / 7 | blocked on P1 |
 | P3 | 0 / 6 | blocked on P1 (T3.1 DDL can start after T0.3) |
 | P4 | 0 / 6 | blocked on P1 |

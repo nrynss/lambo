@@ -20,7 +20,7 @@ code — it is `MemoryStore` + `fixtures/` that let P2–P7 run six-wide.
 requires:   T0.1
 fixture-ok: n/a
 owns:       src/types.rs, src/config.rs
-status:     not-started
+status:     done
 ```
 Everything two tracks must agree on, from the spec:
 
@@ -60,7 +60,7 @@ value-for-value (test asserts each).
 requires:   T1.1
 fixture-ok: n/a
 owns:       src/store/mod.rs, src/store/memory.rs
-status:     not-started
+status:     done
 ```
 The spec §3.2 trait verbatim: `init_schema`, `capabilities`, `flush`, `load_session`,
 `keyword_candidates`, `vector_candidates`, `blast_radius`, `interaction_span`,
@@ -82,7 +82,7 @@ and no SQL type appears in the trait's signatures.
 requires:   T1.1
 fixture-ok: n/a
 owns:       src/embed/mod.rs, src/embed/fixture.rs
-status:     not-started
+status:     done
 ```
 `Embedder`: `async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>`, dim
 reporting, plus a `FixtureEmbedder` producing deterministic 1024-dim vectors (seeded hash →
@@ -130,13 +130,24 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
 
 ## Exit criteria
 
-- [ ] Types + config frozen, round-trip tested, defaults spec-exact
-- [ ] `GraphStore` + `MemoryStore` + reusable conformance suite
-- [ ] `Embedder` + deterministic fixture embedder with documented near/far pairs
+- [x] Types + config frozen, round-trip tested, defaults spec-exact
+- [x] `GraphStore` + `MemoryStore` (+ memory unit tests; full `tests/store_conformance.rs` can land with T3.x)
+- [x] `Embedder` + deterministic fixture embedder with documented near/far pairs
 - [ ] Fixtures committed — announced in Handoff Log; go signal sent (P2–P7 unblocked)
 
 ---
 
 ## Handoff Log
 
-> _Fill on completion. Name any type or default that differs from the spec and why._
+### T1.1 / T1.2 / T1.3 (2026-08-10)
+
+- Types live in `src/types/mod.rs` (not a single `types.rs` file — same module path `lambo::types`).
+- Config in `src/config.rs` with `Config::default()` matching spec defaults (asserted in tests).
+- `GraphStore` + `Capabilities` + `MemoryStore` in `src/store/`. Memory has no VECTOR_SEARCH;
+  `vector_candidates` returns `StoreError::Capability`. Structural queries implemented naively.
+- `FixtureEmbedder`: 1024-dim unit vectors; near pair `("register user", "create account")`
+  cosine ≥ 0.85; far `"quantum chromodynamics lattice gauge"` < 0.85.
+- **Still open: T1.4 fixtures** — required to fully unblock the swarm.
+- Layout note: phase doc listed `src/types.rs`; implementation uses `src/types/` directory.
+
+> Name any type or default that differs from the spec and why: none intentional.
