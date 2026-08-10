@@ -166,9 +166,10 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
 - **Fixture semantics (verified by `src/fixtures.rs` tests):**
   - `session-rest-api`: user schema passes all three canonization stages (gc_survived 4;
     interaction_span distinct 6, coverage ~0.42; blast_radius 8). `api layer` passes Stage 2
-    (distinct 3, coverage 0.5) but fails Stage 3 (blast_radius 2). Caching layer = recent
-    agent-a write near session end (conflict-window seed; P4 plants the 30s recency against
-    `Utc::now` since fixture timestamps are in the past).
+    (distinct 3, coverage 0.5) but fails Stage 3 (computed blast_radius 1 <= 5; its exclusive
+    dependent is only `api docs` because `caching layer` also receives from `load testing`).
+    Caching layer = recent agent-a write near session end (conflict-window seed; P4 plants the
+    30s recency against `Utc::now` since fixture timestamps are in the past).
   - `session-drift`: root goal (Venerable), on-path chain <= 5 hops, `far budget concept`
     at 6 hops (drift trigger), and an isolated 2-node disconnected component (GC step 3 food).
   - `mutations-batch`: all five mutation kinds in spec §2.4 order; applies cleanly
@@ -181,9 +182,12 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
     (`regist user` vs `account creat`) — normalization must NOT merge them; hybrid §7.1
     step 6 does. If T6's canonicalize diverges from this convention, update the fixture +
     this note in the same change.
-  - `recall-goldens`: for `session-rest-api`; assert membership + structural ordering, not
-    float scores. `pagination` -> {pagination, api layer, api docs, caching layer};
-    `create` -> {create user, user schema, api layer}. P5 refines as needed.
+  - `recall-goldens`: for `session-rest-api`; `phase1_candidates` are EXACT;
+    `phase2_expanded` lists REQUIRED members (candidate + direct neighbors) — the full
+    depth-2 expanded set is P5's to compute and may be larger. `pagination` -> candidate
+    {pagination}, required {pagination, api layer}; `create` -> candidate {create user},
+    required {create user, user schema, api layer}. Assert membership + structural ordering,
+    not float scores.
 - **Surprises / gotchas:**
   - Canonical keys depend on exact Porter output (e.g. `registering`->`regist`, `creating`->
     `creat`, `limiter`->`limit`). Computed with `rust-stemmers` — do NOT hand-guess; re-probe

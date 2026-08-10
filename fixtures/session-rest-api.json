@@ -302,7 +302,7 @@
       "last_accessed": null,
       "gc_survived": 3,
       "canonization_status": "Venerable",
-      "blast_radius": 2,
+      "blast_radius": 1,
       "last_demotion_time": null,
       "embedding": null
     },

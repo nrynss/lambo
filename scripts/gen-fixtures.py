@@ -82,7 +82,7 @@ concepts = [
     concept(CACHE, "caching layer", "cach layer", "Resource", 11, A, 55, 0, "None"),
     concept(LOAD, "load testing", "load test", "Observation", 12, B, 55, 0, "None"),
     # Stage 2 but not Stage 3
-    concept(API, "api layer", "api layer", "Entity", 12, B, 55, 3, "Venerable", 2),
+    concept(API, "api layer", "api layer", "Entity", 12, B, 55, 3, "Venerable", 1),
     # blast-radius orphans (exclusive dependents of user schema)
     concept(D1, "user id", "id user", "Entity", 1, A, 0, 0, "None"),
     concept(D2, "user email", "email user", "Entity", 2, B, 5, 0, "None"),
@@ -223,11 +223,14 @@ mutations_batch = {"mutations": mutations}
 # ---------------------------------------------------------------------------
 recall_goldens = {
     "session": SID,
-    "note": "phase1/phase2 assert membership + structural ordering, not floats.",
+    "note": ("phase1_candidates are EXACT. phase2_expanded lists REQUIRED members "
+             "(candidate + direct neighbors); the full depth-2 expanded set is P5's to "
+             "compute and may be larger. Assert membership + structural ordering, not "
+             "float scores. IDs use the f0000000 placeholder family."),
     "cases": [
         {"query": "pagination", "top_k": 5, "depth": 2,
          "phase1_candidates": [nid(PAG)],
-         "phase2_expanded": [nid(PAG), nid(API), nid(DOCS), nid(CACHE)]},
+         "phase2_expanded": [nid(PAG), nid(API)]},
         {"query": "create", "top_k": 5, "depth": 2,
          "phase1_candidates": [nid(CREATE)],
          "phase2_expanded": [nid(CREATE), nid(US), nid(API)]},

@@ -162,6 +162,33 @@ mod tests {
         assert_eq!(cache.content, "caching layer");
     }
 
+    /// All edges must reference nodes that actually exist (spec §5.7 invariant).
+    #[test]
+    fn edges_reference_existing_nodes() {
+        for name in ["session-rest-api", "session-drift"] {
+            let snap = load_snapshot(name).unwrap();
+            let mut ids = std::collections::HashSet::new();
+            for i in &snap.interactions {
+                ids.insert(i.id);
+            }
+            for c in &snap.concepts {
+                ids.insert(c.id);
+            }
+            for e in &snap.edges {
+                assert!(
+                    ids.contains(&e.source),
+                    "{name}: edge {} source missing",
+                    e.id
+                );
+                assert!(
+                    ids.contains(&e.target),
+                    "{name}: edge {} target missing",
+                    e.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn drift_has_goal_onenpath_far_and_disconnected() {
         let snap = load_snapshot("session-drift").unwrap();
