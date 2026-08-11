@@ -17,7 +17,7 @@
       "session_id": "session-drift",
       "agent_id": "agent-a",
       "prompt_text": "isolate widget work",
-      "previous_id": null,
+      "previous_id": "f0000000-0000-4000-8000-000000005001",
       "created_at": "2026-08-11T08:30:00Z"
     }
   ],
@@ -26,7 +26,7 @@
       "id": "f0000000-0000-4000-8000-000000005010",
       "session_id": "session-drift",
       "content": "launch the product",
-      "canonical_key": "launch the product",
+      "canonical_key": "launch product",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -43,7 +43,7 @@
       "id": "f0000000-0000-4000-8000-000000005011",
       "session_id": "session-drift",
       "content": "on path step one",
-      "canonical_key": "on path step one",
+      "canonical_key": "one path step",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -60,7 +60,7 @@
       "id": "f0000000-0000-4000-8000-000000005012",
       "session_id": "session-drift",
       "content": "on path step two",
-      "canonical_key": "on path step two",
+      "canonical_key": "path step two",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -77,7 +77,7 @@
       "id": "f0000000-0000-4000-8000-000000005013",
       "session_id": "session-drift",
       "content": "on path step three",
-      "canonical_key": "on path step three",
+      "canonical_key": "path step three",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -94,7 +94,7 @@
       "id": "f0000000-0000-4000-8000-000000005014",
       "session_id": "session-drift",
       "content": "on path step four",
-      "canonical_key": "on path step four",
+      "canonical_key": "four path step",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -111,7 +111,7 @@
       "id": "f0000000-0000-4000-8000-000000005015",
       "session_id": "session-drift",
       "content": "on path step five",
-      "canonical_key": "on path step five",
+      "canonical_key": "five path step",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -128,7 +128,7 @@
       "id": "f0000000-0000-4000-8000-000000005016",
       "session_id": "session-drift",
       "content": "far budget concept",
-      "canonical_key": "far budget concept",
+      "canonical_key": "budget concept far",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005001",
       "origin_agent": "agent-a",
@@ -145,7 +145,7 @@
       "id": "f0000000-0000-4000-8000-000000005020",
       "session_id": "session-drift",
       "content": "isolated widget",
-      "canonical_key": "isolated widget",
+      "canonical_key": "isol widget",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005002",
       "origin_agent": "agent-a",
@@ -162,7 +162,7 @@
       "id": "f0000000-0000-4000-8000-000000005021",
       "session_id": "session-drift",
       "content": "isolated sibling",
-      "canonical_key": "isolated sibling",
+      "canonical_key": "isol sibl",
       "concept_type": "Entity",
       "origin_interaction": "f0000000-0000-4000-8000-000000005002",
       "origin_agent": "agent-a",
@@ -180,6 +180,116 @@
     {
       "id": "f0000000-0000-4000-8000-000000014001",
       "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005002",
+      "target": "f0000000-0000-4000-8000-000000005001",
+      "edge_type": "Temporal",
+      "weight": 1.0,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014002",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005010",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014003",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005011",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014004",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005012",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014005",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005013",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014006",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005014",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014007",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005015",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014008",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005001",
+      "target": "f0000000-0000-4000-8000-000000005016",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014009",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005002",
+      "target": "f0000000-0000-4000-8000-000000005020",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014010",
+      "session_id": "session-drift",
+      "source": "f0000000-0000-4000-8000-000000005002",
+      "target": "f0000000-0000-4000-8000-000000005021",
+      "edge_type": "Derives",
+      "weight": 0.9,
+      "reinforcements": 1,
+      "created_at": "2026-08-11T08:05:00Z",
+      "last_reinforced": "2026-08-11T08:05:00Z"
+    },
+    {
+      "id": "f0000000-0000-4000-8000-000000014011",
+      "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005010",
       "target": "f0000000-0000-4000-8000-000000005011",
       "edge_type": "Dependency",
@@ -189,7 +299,7 @@
       "last_reinforced": "2026-08-11T08:05:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014002",
+      "id": "f0000000-0000-4000-8000-000000014012",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005011",
       "target": "f0000000-0000-4000-8000-000000005012",
@@ -200,7 +310,7 @@
       "last_reinforced": "2026-08-11T08:10:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014003",
+      "id": "f0000000-0000-4000-8000-000000014013",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005012",
       "target": "f0000000-0000-4000-8000-000000005013",
@@ -211,7 +321,7 @@
       "last_reinforced": "2026-08-11T08:15:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014004",
+      "id": "f0000000-0000-4000-8000-000000014014",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005013",
       "target": "f0000000-0000-4000-8000-000000005014",
@@ -222,7 +332,7 @@
       "last_reinforced": "2026-08-11T08:20:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014005",
+      "id": "f0000000-0000-4000-8000-000000014015",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005014",
       "target": "f0000000-0000-4000-8000-000000005015",
@@ -233,7 +343,7 @@
       "last_reinforced": "2026-08-11T08:25:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014006",
+      "id": "f0000000-0000-4000-8000-000000014016",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005015",
       "target": "f0000000-0000-4000-8000-000000005016",
@@ -244,7 +354,7 @@
       "last_reinforced": "2026-08-11T08:30:00Z"
     },
     {
-      "id": "f0000000-0000-4000-8000-000000014007",
+      "id": "f0000000-0000-4000-8000-000000014017",
       "session_id": "session-drift",
       "source": "f0000000-0000-4000-8000-000000005020",
       "target": "f0000000-0000-4000-8000-000000005021",

@@ -1,6 +1,6 @@
 {
   "session": "session-rest-api",
-  "note": "phase1_candidates are EXACT. phase2_expanded lists REQUIRED members (candidate + direct neighbors); the full depth-2 expanded set is P5's to compute and may be larger. Assert membership + structural ordering, not float scores. IDs use the f0000000 placeholder family.",
+  "note": "phase1_candidates are EXACT under MemoryStore keyword_candidates (substring on content/canonical_key). phase2_expanded lists REQUIRED members (candidate + direct neighbors); the full depth-2 set is P5's to compute. Assert membership + structural ordering, not floats.",
   "cases": [
     {
       "query": "pagination",

@@ -291,6 +291,19 @@ impl GraphStore for MemoryStore {
             .get(&session.0)
             .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
 
+        // Blast radius is about concept-to-concept dependency orphans. We count ONLY
+        // aged inbound {Dependency, Causal, Hierarchical} edges from a concept source.
+        // This excludes provenance Derives (interaction -> concept) and Temporal edges,
+        // which §5.7 mandates on every concept but which the literal §4.1 SQL would
+        // otherwise treat as "dependent on another source" - a spec-internal
+        // inconsistency (see Handoff Log T1.4).
+        let structural = [
+            EdgeType::Dependency,
+            EdgeType::Causal,
+            EdgeType::Hierarchical,
+        ];
+        let concept_ids: HashSet<NodeId> = data.snapshot.concepts.iter().map(|c| c.id).collect();
+
         let mut count = 0u64;
         for c in &data.snapshot.concepts {
             if c.id == node {
@@ -300,6 +313,9 @@ impl GraphStore for MemoryStore {
             let mut from_other = false;
             for e in &data.snapshot.edges {
                 if e.target != c.id || e.created_at > min_created {
+                    continue;
+                }
+                if !structural.contains(&e.edge_type) || !concept_ids.contains(&e.source) {
                     continue;
                 }
                 if e.source == node {
@@ -678,6 +694,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r, 1, "only orphan is exclusively dependent on pillar");
+    }
+
+    #[tokio::test]
+    async fn blast_radius_ignores_provenance_derives_edges() {
+        // §5.7 requires every concept to have a Derives edge (interaction -> concept).
+        // If blast_radius counted that inbound edge as "another source", every concept
+        // would look non-orphaned and blast radius would be ~0. It must ignore
+        // provenance (Derives/Temporal) edges (see Handoff Log T1.4).
+        let store = MemoryStore::new();
+        let sid = SessionId::from("br-provenance");
+        let ts = Utc::now() - chrono::Duration::hours(1);
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let orphan = NodeId::new();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: i1,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("a"),
+                prompt_text: None,
+                previous_id: None,
+                created_at: ts,
+            }),
+        });
+        batch.push(plant_concept(&sid, pillar, i1, "pillar", ts));
+        batch.push(plant_concept(&sid, orphan, i1, "orphan", ts));
+        // pillar -> orphan (Dependency): the real dependency relationship.
+        batch.push(Mutation::UpsertEdge {
+            edge: Edge {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: pillar,
+                target: orphan,
+                edge_type: EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts,
+                last_reinforced: ts,
+            },
+        });
+        // orphan also has a Derives from its origin interaction (mandatory §5.7).
+        batch.push(Mutation::UpsertEdge {
+            edge: Edge {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: i1,
+                target: orphan,
+                edge_type: EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts,
+                last_reinforced: ts,
+            },
+        });
+        store.flush(&batch).await.unwrap();
+        let r = store
+            .blast_radius(&sid, pillar, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(r, 1, "Derives provenance must not un-orphan the dependent");
     }
 
     #[tokio::test]

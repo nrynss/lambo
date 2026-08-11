@@ -19,6 +19,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+
 use crate::store::MemoryStore;
 use crate::types::{GraphSnapshot, MutationBatch, StoreError};
 
@@ -50,6 +52,63 @@ pub fn load_store(name: &str) -> Result<MemoryStore, StoreError> {
     Ok(store)
 }
 
+/// Shift every timestamp in a snapshot by a uniform delta.
+fn shift_snapshot(snap: &mut GraphSnapshot, delta: ChronoDuration) {
+    for i in snap.interactions.iter_mut() {
+        i.created_at += delta;
+    }
+    for c in snap.concepts.iter_mut() {
+        c.created_at += delta;
+        if let Some(t) = &mut c.last_accessed {
+            *t += delta;
+        }
+        if let Some(t) = &mut c.last_demotion_time {
+            *t += delta;
+        }
+    }
+    for e in snap.edges.iter_mut() {
+        e.created_at += delta;
+        e.last_reinforced += delta;
+    }
+    for r in snap.reservations.iter_mut() {
+        r.expires_at += delta;
+    }
+    for ev in snap.canonization_events.iter_mut() {
+        ev.occurred_at += delta;
+    }
+    if let Some(t) = &mut snap.created_at {
+        *t += delta;
+    }
+    if let Some(t) = &mut snap.closed_at {
+        *t += delta;
+    }
+}
+
+/// Load a session graph rebased onto wall-clock time so the most recent concept write
+/// lands `last_write_age` before `anchor`. Makes the P4 conflict / recency window
+/// runnable against `Utc::now` (fixture timestamps are in the past by default).
+pub fn load_store_relative(
+    name: &str,
+    anchor: DateTime<Utc>,
+    last_write_age: std::time::Duration,
+) -> Result<MemoryStore, StoreError> {
+    let mut snap = load_snapshot(name)?;
+    let max_write = snap
+        .concepts
+        .iter()
+        .map(|c| c.created_at)
+        .max()
+        .ok_or_else(|| StoreError::Backend("fixture has no concepts".into()))?;
+    let age = ChronoDuration::from_std(last_write_age)
+        .map_err(|e| StoreError::Backend(format!("last_write_age out of range: {e}")))?;
+    let target = anchor - age;
+    let delta = target - max_write;
+    shift_snapshot(&mut snap, delta);
+    let store = MemoryStore::new();
+    store.seed(snap)?;
+    Ok(store)
+}
+
 /// Load the ordered write-behind `MutationBatch` exercising every mutation kind.
 pub fn load_mutation_batch(name: &str) -> Result<MutationBatch, StoreError> {
     read_json(name)
@@ -69,7 +128,8 @@ pub fn load_canonicalization_cases() -> Result<serde_json::Value, StoreError> {
 mod tests {
     use super::*;
     use crate::store::GraphStore;
-    use crate::types::{CanonizationStatus, NodeId, SessionId};
+    use crate::types::{CanonizationStatus, EdgeType, NodeId, SessionId};
+    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
     fn node_id(s: &str) -> NodeId {
@@ -81,7 +141,7 @@ mod tests {
         let snap = load_snapshot("session-rest-api").unwrap();
         assert_eq!(snap.session_id, SessionId::from("session-rest-api"));
         assert_eq!(snap.interactions.len(), 12);
-        assert_eq!(snap.concepts.len(), 20);
+        assert_eq!(snap.concepts.len(), 22);
         assert!(!snap.edges.is_empty());
     }
 
@@ -92,7 +152,7 @@ mod tests {
             .load_session(&SessionId::from("session-rest-api"))
             .await
             .unwrap();
-        assert_eq!(snap.concepts.len(), 20);
+        assert_eq!(snap.concepts.len(), 22);
         // User schema present and already Canonical with a blast radius.
         let us = snap
             .concepts
@@ -204,15 +264,15 @@ mod tests {
             .find(|c| c.content == "launch the product")
             .unwrap();
         assert_eq!(goal.canonization_status, CanonizationStatus::Venerable);
-        // 9 concepts, 7 edges, 2 interactions.
+        // 9 concepts, 17 edges, 2 interactions.
         assert_eq!(snap.concepts.len(), 9);
-        assert_eq!(snap.edges.len(), 7);
+        assert_eq!(snap.edges.len(), 17);
     }
 
     #[test]
     fn mutations_batch_loads_and_applies() {
         let batch = load_mutation_batch("mutations-batch").unwrap();
-        assert_eq!(batch.mutations.len(), 8); // all five kinds exercised
+        assert_eq!(batch.mutations.len(), 10); // all five kinds exercised
         let mut kinds = std::collections::HashSet::new();
         use crate::types::Mutation;
         for m in &batch.mutations {
@@ -254,6 +314,147 @@ mod tests {
             assert!(!c["phase1_candidates"].as_array().unwrap().is_empty());
             assert!(!c["phase2_expanded"].as_array().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn satisfies_spec_57_invariants() {
+        for name in ["session-rest-api", "session-drift"] {
+            let snap = load_snapshot(name).unwrap();
+            let mut concept_ids = HashSet::new();
+            let mut interaction_ids = Vec::new();
+            for c in &snap.concepts {
+                concept_ids.insert(c.id);
+            }
+            for i in &snap.interactions {
+                interaction_ids.push(i.id);
+            }
+            // Every non-first interaction has exactly one Temporal predecessor edge
+            // (encoded as non-first -> predecessor, so an OUTGOING Temporal edge).
+            for (idx, i) in interaction_ids.iter().enumerate() {
+                let t = snap
+                    .edges
+                    .iter()
+                    .filter(|e| e.source == *i && e.edge_type == EdgeType::Temporal)
+                    .count();
+                if idx == 0 {
+                    assert_eq!(t, 0, "{name}: first interaction has no Temporal out");
+                } else {
+                    assert_eq!(
+                        t, 1,
+                        "{name}: non-first interaction {i} Temporal predecessors"
+                    );
+                }
+            }
+            // Every concept has at least one Derives edge.
+            for c in &snap.concepts {
+                let derives = snap
+                    .edges
+                    .iter()
+                    .filter(|e| e.target == c.id && e.edge_type == EdgeType::Derives)
+                    .count();
+                assert!(derives >= 1, "{name}: concept {} lacks Derives", c.id);
+            }
+            // No duplicate (source, target, edge_type).
+            let mut seen = HashSet::new();
+            for e in &snap.edges {
+                let key = (e.source, e.target, e.edge_type);
+                assert!(
+                    seen.insert(key),
+                    "{name}: duplicate edge {}->{} {:?}",
+                    e.source,
+                    e.target,
+                    e.edge_type
+                );
+            }
+            // No cycles in Causal/Dependency (BFS from every node).
+            let dep_edges: Vec<_> = snap
+                .edges
+                .iter()
+                .filter(|e| matches!(e.edge_type, EdgeType::Causal | EdgeType::Dependency))
+                .collect();
+            let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+            for e in &dep_edges {
+                adj.entry(e.source).or_default().push(e.target);
+            }
+            for s in concept_ids
+                .iter()
+                .copied()
+                .chain(interaction_ids.iter().copied())
+            {
+                let mut stack = vec![(s, 0u32)];
+                let mut vis = HashSet::new();
+                while let Some((n, d)) = stack.pop() {
+                    if vis.contains(&n) {
+                        continue;
+                    }
+                    vis.insert(n);
+                    if d > 0 && n == s {
+                        panic!("{name}: Causal/Dependency cycle at {s}");
+                    }
+                    if let Some(next) = adj.get(&n) {
+                        for &m in next {
+                            stack.push((m, d + 1));
+                        }
+                    }
+                }
+            }
+            // Weights are finite and >= 0.
+            for e in &snap.edges {
+                assert!(
+                    e.weight.is_finite() && e.weight >= 0.0,
+                    "{name}: bad weight"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_goldens_phase1_exact_under_keyword() {
+        let store = load_store("session-rest-api").unwrap();
+        let sid = SessionId::from("session-rest-api");
+        let goldens = load_recall_goldens().unwrap();
+        for c in goldens["cases"].as_array().unwrap() {
+            let query = c["query"].as_str().unwrap();
+            let tokens: Vec<String> = query.split_whitespace().map(String::from).collect();
+            let got: HashSet<NodeId> = store
+                .keyword_candidates(&sid, &tokens, 50)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| s.item)
+                .collect();
+            let want: HashSet<NodeId> = c["phase1_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| node_id(id.as_str().unwrap()))
+                .collect();
+            assert_eq!(
+                got, want,
+                "phase1 mismatch for query {query:?}: got {got:?} want {want:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conflict_window_recent_write_via_relative_load() {
+        // Rebase so the latest concept write is 5s before anchor; the caching layer
+        // (recent agent-a write) must then fall inside a 30s conflict window.
+        let anchor = Utc::now();
+        let store =
+            load_store_relative("session-rest-api", anchor, Duration::from_secs(5)).unwrap();
+        let sid = SessionId::from("session-rest-api");
+        let snap = store.load_session(&sid).await.unwrap();
+        let latest = snap.concepts.iter().map(|c| c.created_at).max().unwrap();
+        let age = anchor - latest;
+        assert!(
+            age <= ChronoDuration::seconds(10),
+            "latest concept should be near anchor, age={age:?}"
+        );
+        // The canonical StructureEdge-dependent caching layer is agent-a authored.
+        let cache_id = node_id("f0000000-0000-4000-8000-000000001010");
+        let cache = snap.concepts.iter().find(|c| c.id == cache_id).unwrap();
+        assert_eq!(cache.origin_agent.as_str(), "agent-a");
     }
 
     #[test]
