@@ -39,8 +39,11 @@
 //! runtime drops it or the returned [`tokio::task::JoinHandle`] is aborted.
 
 use parking_lot::{Mutex, RwLock};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::graph::Graph;
@@ -79,9 +82,12 @@ pub struct FlushStats {
 
 /// Lock-light state shared between the running task and the caller's stats
 /// handle. `last_success` is a `Mutex<Instant>` (held for nanoseconds inside
-/// `stats`); `depth`/`degraded` are atomics.
+/// `stats`); `started`/`depth`/`degraded` are atomics.
 #[derive(Debug)]
 struct Shared {
+    /// Set by `spawn` (check-and-set): exactly one flush loop may run per task.
+    /// Visible to `stats`/`degraded` without races.
+    started: AtomicBool,
     last_success: Mutex<tokio::time::Instant>,
     depth: AtomicUsize,
     degraded: AtomicBool,
@@ -90,6 +96,9 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
+            // `last_success` is a placeholder until `spawn` initializes it (the
+            // lag contract starts at spawn, not construction — see `spawn`).
+            started: AtomicBool::new(false),
             last_success: Mutex::new(tokio::time::Instant::now()),
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
@@ -134,12 +143,29 @@ impl FlushTask {
 
     /// Spawn the interval loop and return its handle.
     ///
+    /// Call `spawn` **exactly once** per `FlushTask` — a second call panics.
+    /// Exactly one loop may run: two concurrent loops would each carry an
+    /// independent `pending` buffer and could persist batches out of order
+    /// (drain serialization alone does not order flushes).
+    ///
     /// Takes `&self` rather than the pinned `self`: the task clones the
     /// graph/store/shared arcs, so the caller keeps this `FlushTask` as its
     /// stats handle — `spawn(self)` would consume the only path to
-    /// [`FlushTask::stats`]. The first flush happens one `interval` after
-    /// spawn.
+    /// [`FlushTask::stats`]. `last_success` is initialized here (not at
+    /// construction), so `stats().lag` is 0 until the first successful flush
+    /// after spawn even if the task was built long before it was spawned. The
+    /// first flush happens one `interval` after spawn.
     pub fn spawn(&self) -> tokio::task::JoinHandle<()> {
+        // Single-loop enforcement: check-and-set the shared `started` flag so a
+        // second `spawn` panics before it can start another loop. The flag
+        // lives in `Shared` (not task-local) so `stats`/`degraded` observe it
+        // race-free.
+        self.shared
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .expect("FlushTask::spawn called twice — exactly one loop may run");
+        *self.shared.last_success.lock() = tokio::time::Instant::now();
+
         let graph = self.graph.clone();
         let store = self.store.clone();
         let shared = self.shared.clone();
@@ -167,6 +193,47 @@ impl FlushTask {
     /// (`durability="none"`). Terminal for the task's lifetime.
     pub fn degraded(&self) -> bool {
         self.shared.degraded.load(Ordering::Acquire)
+    }
+}
+
+/// Polls `F` inside [`std::panic::catch_unwind`], turning a panic during any
+/// poll into `Err(payload)`. std-only: used to keep a panicking store backend
+/// from aborting the flush task (which would stop flushing permanently with
+/// `degraded()==false` — silent durability loss). Dropping the future after a
+/// caught panic is safe: the backend only ever holds a `&MutationBatch`, so the
+/// loop's `pending` buffer cannot have been corrupted.
+struct CatchUnwindPoll<F>(F);
+
+impl<F: Future> Future for CatchUnwindPoll<F> {
+    type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `self` is a pinned `CatchUnwindPoll` and `F` is its only
+        // field, so `F` stays in place for as long as the outer pin does. The
+        // closure only borrows the field for the poll — it never moves or
+        // replaces it — so re-projecting the pin onto `F` is sound.
+        let fut = unsafe { self.map_unchecked_mut(|s| &mut s.0) };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
+
+/// Best-effort human-readable message for a panic payload (for logging).
+///
+/// Takes `&Box<dyn Any + Send>` rather than `&(dyn Any + Send)`: a plain
+/// `&boxed` coerces via the reflexive `Unsize` rule and would present the Box
+/// itself (not its payload) as the trait object, breaking every downcast.
+/// `Box::as_ref` is the explicit deref that reaches the payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    let payload: &(dyn std::any::Any + Send) = payload.as_ref();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("non-string panic payload ({})", std::any::type_name_of_val(payload))
     }
 }
 
@@ -267,7 +334,31 @@ impl FlushLoop {
         let mut retries_used: u32 = 0;
         let mut backoff = BACKOFF_BASE;
         loop {
-            match self.store.flush(&self.pending).await {
+            // A panicking backend must not abort the spawned loop: the task
+            // would die silently, stopping all flush bookkeeping with
+            // `degraded()==false` and no events — durability loss worse than
+            // the designed failure path. Poll the flush inside `catch_unwind`
+            // and route a panic into the typed-error path below (same backoff
+            // → retain/degrade handling), logging the payload.
+            let result = match CatchUnwindPoll(async {
+                self.store.flush(&self.pending).await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = panic_message(&payload);
+                    tracing::warn!(
+                        panic = %message,
+                        attempt = retries_used + 1,
+                        max_retries = self.params.retries,
+                        "BackendFlushPanic: store.flush panicked; treating as a failed flush \
+                         attempt (backoff, then retain/degrade as usual)"
+                    );
+                    Err(StoreError::Backend(format!("store flush panicked: {message}")))
+                }
+            };
+            match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     if retries_used >= self.params.retries {
@@ -418,6 +509,27 @@ mod tests {
             retries,
             log_max,
         }
+    }
+
+    /// Install a thread-local default that registers tracing callsites as
+    /// `always`-interested while dropping every event.
+    ///
+    /// `tracing` caches each callsite's `Interest` process-wide at first
+    /// registration; with no default subscriber that interest is `never` and
+    /// the shared `BackendFlushFailed` warn callsite (in `cycle`) becomes
+    /// permanently disabled for *every* test — including
+    /// [`degrades_past_log_max_and_stops_flushing`], which asserts that event
+    /// through a capturing subscriber. Any flush test that can reach that warn
+    /// without its own subscriber must install this guard so the callsite can
+    /// never be poisoned. `TRACE` keeps the filter from returning `never`; the
+    /// sink writer keeps the events silent.
+    fn keep_callsites_enabled() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(|| std::io::sink())
+                .finish(),
+        )
     }
 
     /// `GraphStore` mock: fails the first `fail_next(n)` flush calls (or
@@ -659,7 +771,7 @@ mod tests {
         assert!(store.load_session(&sid()).await.is_err(), "nothing landed yet");
 
         // Session uninterrupted: the graph accepts writes while the store is down.
-        let iid2 = add_interaction(&graph, 2, Some(iid));
+        let _iid2 = add_interaction(&graph, 2, Some(iid));
         assert_eq!(graph.read().log_len(), 2);
         assert!(!task.degraded());
 
@@ -756,6 +868,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stats_depth_and_lag_across_success_and_failure() {
+        // This test reaches the shared BackendFlushFailed warn; keep its
+        // callsite from registering `never` (see `keep_callsites_enabled`).
+        let _callsites = keep_callsites_enabled();
+
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
         let graph = new_graph();
@@ -817,6 +933,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn retained_batch_and_new_drains_flush_together_in_order() {
+        // This test reaches the shared BackendFlushFailed warn; keep its
+        // callsite from registering `never` (see `keep_callsites_enabled`).
+        let _callsites = keep_callsites_enabled();
+
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
         let graph = new_graph();

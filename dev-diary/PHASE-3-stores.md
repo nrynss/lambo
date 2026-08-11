@@ -244,3 +244,23 @@ records call count + batch sizes). Adapters slot in with zero changes.
 **Not wired yet (by design):** nothing consumes `FlushTask` — the daemon/session
 owner (T4.x / P3 Memory) will spawn it. Reservations never enter the log
 (S5 contract) — nothing to do here. `cargo test --lib` green (202 tests).
+
+**Round-1 review remediation (2026-08-11):**
+- **Spawn-once contract (F1).** `spawn(&self)` is kept (reviewer-accepted
+  deviation), but `Shared` now carries a `started: AtomicBool`; `spawn`
+  check-and-sets it and a second call panics ("FlushTask::spawn called twice —
+  exactly one loop may run") — two concurrent loops with independent `pending`
+  buffers could persist out of order. Callers must `spawn` exactly once.
+- **Panic containment (F3).** `store.flush` is polled inside
+  `catch_unwind` (std-only `CatchUnwindPoll` combinator); a panicking backend
+  is treated as a failed attempt (`warn!("BackendFlushPanic")` → backoff →
+  retain/degrade), so the loop can never die silently with `degraded()==false`.
+- **Lag init at spawn (F4).** `last_success` is initialized in `spawn`, not
+  `new` — `stats().lag` is 0 until the first successful flush after spawn even
+  for a task held before spawning (matches the `FlushStats::lag` docstring).
+- **Test-only flake fix.** The shared `BackendFlushFailed` warn callsite could
+  register `Interest::never` (process-wide, first registration wins) in the two
+  subscriber-less flush tests, silently disabling that event for the capturing
+  assertions in `degrades_past_log_max_and_stops_flushing` under parallel
+  execution. Those tests now install a silent TRACE-level default
+  (`keep_callsites_enabled`) that registers callsites as `always`.
