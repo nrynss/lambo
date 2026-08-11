@@ -172,6 +172,16 @@ module delete.
 
 ## Handoff Log
 
+### P2 → main (2026-08-11, by main)
+
+P2 merged to `main` at `9f9d2cb` (task → phase/p2 → main, star model). All
+`phase/p3..p7` branches fast-forwarded onto main so the next task cycles branch
+from current code. P2 is 7/7 with all four exit criteria marked and every
+adversarial review closed (per-task ACCEPT x2; muse-spark M1–M4; grok G1–G7).
+Cross-phase contracts from those closes are in the P3/P4/P5 phase docs'
+"Integration contracts from P2 review closes" sections.
+
+
 ### P2 exit-criteria integration test — rebuild session-rest-api (2026-08-11, by main)
 
 `tests/rebuild_session.rs` (`rebuilds_session_rest_api_via_public_write_apis`)

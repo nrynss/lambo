@@ -148,7 +148,7 @@ Keep this current; it is the only global view.
 |---|---|---|
 | P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
 | P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
-| P2 | 7 / 7 | **ALL DONE** — T2.1–T2.7 on phase/p2 (graph core, canonicalization, derive, record_action, demote, BM25 index, reservations); all reviews CLOSED. Remaining: P2 exit-criteria integration test (rebuild session-rest-api via public write APIs) + phase/p2→main merge (awaiting go-ahead) |
+| P2 | 7 / 7 | **DONE + MERGED TO MAIN (2026-08-11, commit 9f9d2cb)** — graph core, canonicalization, derive, record_action, demote, BM25 index, reservations; exit criteria [x] (rebuild test); reviews CLOSED (per-task ACCEPT x2, muse-spark M1-M4, grok G1-G7); cross-phase contracts written into P3/P4/P5 docs |
 | P3 | 0 / 6 | OPEN (T3.1 DDL can start after T0.3) |
 | P4 | 0 / 6 | OPEN for claiming |
 | P5 | 0 / 4 | OPEN for claiming |
@@ -213,7 +213,7 @@ Example: T2.3 conflict detection → `task/p2-t2.3-conflict-detection`,
 |-------|--------|
 | P0 | `phase/p0-ground` (historical, merged) |
 | P1 | `phase/p1-contracts` (historical, merged) |
-| P2 | `phase/p2-graph-core` |
+| P2 | `phase/p2-graph-core` (merged to main 2026-08-11) |
 | P3 | `phase/p3-stores` |
 | P4 | `phase/p4-daemon` |
 | P5 | `phase/p5-recall` |
