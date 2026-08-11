@@ -10,6 +10,9 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
+// T3.5 — `load_session()` / startup materialization (see `load.rs`).
+pub mod load;
+
 use async_trait::async_trait;
 use bitflags::bitflags;
 use serde::{Deserialize, Deserializer, Serialize};
