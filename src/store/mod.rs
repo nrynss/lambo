@@ -87,6 +87,12 @@ pub trait GraphStore: Send + Sync {
     /// error on re-insertion. All Lambo mutation kinds are naturally
     /// idempotent this way (node/edge upserts by natural key, canonization
     /// transitions by event id); adapters must preserve that property.
+    ///
+    /// **`created_at` parity (STORE-5, accepted divergence):** after an identical
+    /// flush history, `load_session` returns `created_at: Some(now)` on Cockroach
+    /// (schema `TIMESTAMPTZ NOT NULL DEFAULT now()`) but `None` on SQLite/Memory
+    /// (no session-metadata `Mutation` kind exists to bind it — S5 snapshot-only).
+    /// Adapters may differ here; do NOT rely on `created_at` presence.
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 

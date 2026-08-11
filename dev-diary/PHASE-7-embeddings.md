@@ -88,6 +88,14 @@ Sits behind T2.2's `Unmatched` seam — do not modify `canonical.rs`.
 later hybrid writes, `ensure_compatible` with the live contract — refuse kind/model/dim
 swaps (BGE vs Titan is the common trap; same dim is not enough).
 
+**Owner (STORE-1, 2026-08-12):** the contract **write path** already exists — Wave 5
+shipped it: `GraphStore::seed` (cockroach + sqlite) persists
+`embedding_kind/model/dim` from `GraphSnapshot.embedding`, and `load_session`
+materializes it back (regression-locked in the live conformance suite + sqlite parity
+tests). T7.2 owns only the **stamp + refusal**: stamping `GraphSnapshot.embedding` on
+first embed and refusing mid-session kind/model/dim swaps via `ensure_compatible` —
+do not re-derive the persistence layer.
+
 **Done when:** with `FixtureEmbedder`, the near pair merges with a `Semantic` edge and the
 far text creates a fresh concept; with a no-capability store, behavior is byte-identical to
 `MatchStrategy::Canonical`; swapping embedder kind mid-session errors without re-embed.
@@ -103,12 +111,33 @@ status:     not-started
 feature:    store-cockroach
 ```
 The T0.3 spike productionized: embedding column write in `flush()`, index-backed
-similarity query, `Capabilities::VECTOR_SEARCH` advertised. Verify with `EXPLAIN` that the
-vector index is actually used — "we used the vector index" must be true on camera.
-Integration tests under `--features store-cockroach`.
+similarity query, `Capabilities::VECTOR_SEARCH` advertised. Integration tests under
+`--features store-cockroach`.
+
+**DECISION D1 (recorded 2026-08-12, adversarial review COH-1) — the query is GLOBAL
+vector search + a Rust-side session filter.** T0.3's own spike evidence
+(`dev-diary/evidence/t0.3-vector-spike.txt`) shows the session-filtered shape bypasses
+the index: with `WHERE session_id = $1` the planner scans
+`concepts_session_id_canonical_key_key` (`vector search` absent; recommends
+`CREATE INDEX ON concepts (session_id) STORING (embedding)`), while the pure
+`ORDER BY embedding <-> $1::VECTOR LIMIT k` hits `vector search` on
+`concepts@concepts_embedding_idx` (`pure=true filtered=false`). The T3.2-shipped
+`vector_candidates` SQL used the session-filtered shape — the demo's "vector index in
+use" claim (spec §12.1) was false on EXPLAIN day. T7.3 therefore:
+
+1. **Drops `session_id` from the WHERE clause** — query globally
+   (`WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT $k`).
+2. **Filters by session in Rust** — fetch `k` generous (the index-backed top-k is
+   cheap; size it to cover the session's concept population), then drop candidates
+   whose `session_id` does not match the caller's session before returning.
+3. **Done-when requires EXPLAIN-verified index usage** — `EXPLAIN` must show
+   `vector search` on `concepts@concepts_embedding_idx`; "we used the vector index"
+   must be true on camera.
 
 **Done when:** integration test: two paraphrase concepts derived through the full live
-stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evidence/`.
+stack merge via the index, and `EXPLAIN` output — captured into
+`dev-diary/evidence/` — proves `vector search` on `concepts@concepts_embedding_idx`
+(index used, per DECISION D1 item 3).
 
 ---
 
@@ -185,7 +214,7 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
   re-calibrate per embedder on a larger labeled set (precision/recall) before shipping.
   Bias toward precision (under-merge = separate concepts, safe for canonization) over
   over-merge. The demo's 'one hybrid merge' is achievable via context embedding.
-- **P7 review remediation (2026-08-11, per `dev-diary/adversarial-review/adve-review-p7-embeddings.md`):**
+- **P7 review remediation (2026-08-11, per `dev-diary/adversarial-review/adve-review-t70-embeddings.md`):**
   - **R2 dim:** v0.1 now fails fast unless dim == 1024 (Cockroach `VECTOR(1024)`): single guard in
     `build_embedder` for all kinds + defense-in-depth in `BgeM3LlamaCppEmbedder::new`. Fixture
     branch no longer needs its own check.
@@ -211,6 +240,9 @@ stack merge via the index, and `EXPLAIN` output is captured into `dev-diary/evid
   are already implemented and mocked-tested. T7.2/T7.3 only need a working `Embedder`; call
   `embedder_from_env()` or `build_embedder(cfg)`.
 - **To reproduce offline:** `cargo test embed::bge_m3` (httpmock, no model/server needed).
-- **Live smoke pending (ops checklist):** model weights not downloaded here (several GB, gitignored).
-  Follow `notes/embeddings-portable.md` ops checklist: `./scripts/fetch-bge-m3.sh` then
-  `./scripts/run-llama-embed.sh`.
+- **Live smoke status (COH-10, 2026-08-12 — corrected):** the live smoke **PASSED on
+  2026-08-11** (see "Weights downloaded + live smoke PASSED" above; weights are
+  downloaded in `models/`, gitignored). The checklist below is for **reproducing on a
+  fresh machine**, not a pending step here: `notes/embeddings-portable.md` ops checklist:
+  `./scripts/fetch-bge-m3.sh` then `./scripts/run-llama-embed.sh`, then re-run the
+  `#[ignore]` smoke test.

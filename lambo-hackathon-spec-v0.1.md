@@ -546,7 +546,7 @@ Core crates always available. **Adapter crates are optional** and enabled by Car
 |---------|-------|--------------|
 | Async runtime | `tokio` | always |
 | Process config | `toml`, `serde` | always |
-| MCP | `rmcp` (fall back to hand-rolled stdio JSON-RPC if it fights) | always |
+| MCP | `rmcp` — **erratum 2026-08-12 (COH-2): not a v0.1 dependency.** Removed from Cargo.toml by 8f9e527 (no MCP server ships yet); re-added by the P8 implementer at T8.2 with a deliberate 0.1.x-vs-v3 choice. Fallback stands: hand-rolled stdio JSON-RPC if it fights | always (once re-added at T8.2) |
 | HTTP (demo app, http transport) | `axum` | always |
 | Stemming | `rust-stemmers` (Porter) | always |
 | Segmentation | `unicode-segmentation` (UAX #29) | always |

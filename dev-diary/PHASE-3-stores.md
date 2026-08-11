@@ -183,7 +183,16 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
 
 ## Exit criteria
 
-- [x] Conformance suite green ×3 (memory default; sqlite/cockroach under their features)
+- [x] Adapter conformance suites green, named per adapter (TEST-4, 2026-08-12 — there
+  is NO generic `tests/store_conformance.rs`; the "×3" is three in-module oracles of
+  different strictness):
+  - **memory** (default features): `store::memory::tests` in `src/store/memory.rs`
+  - **sqlite** (`--features store-sqlite`): the offline parity suite in
+    `src/store/sqlite.rs::tests` on `sqlite::memory:` (flush→load deep-equals the
+    `MemoryStore` oracle; 24 conformance tests (incl. feature-gated))
+  - **cockroach** (`--features store-cockroach` + `LAMBO_COCKROACH_DSN`): the live
+    `conformance_suite` in `src/store/cockroach.rs::conformance` (skips loudly when
+    the DSN is unset — never counts as green)
 - [x] `build_store` registers both SQL adapters; uncompiled kinds still fail closed
 - [x] Flush semantics: ordering, retry, degradation, observability all tested
 - [x] Round-trip load fidelity

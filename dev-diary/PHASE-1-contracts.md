@@ -77,8 +77,10 @@ it must be *correct*, not fast; the SQL adapters are checked against it in T3.6.
 **Level B:** gated on Cargo feature `store-memory` (default-on). Registered in
 `build_store` for `StoreKind::Memory`.
 
-**Done when:** trait compiles under `async_trait`, `MemoryStore` passes a conformance test
-module (`tests/store_conformance.rs`, written generically so T3.2/T3.3 reuse it verbatim),
+**Done when:** trait compiles under `async_trait`, `MemoryStore`'s in-module tests
+(`src/store/memory.rs::tests`) cover the trait surface as the reference oracle — there
+is NO shared `tests/store_conformance.rs` harness (TEST-4, 2026-08-12); the SQL
+adapters are checked against `MemoryStore` by T3.6's three-way agreement gate instead —
 and no SQL type appears in the trait's signatures.
 
 ---
@@ -166,7 +168,9 @@ uncompiled kind errors with a feature rebuild hint; `lambo.example.toml` parses 
 ## Exit criteria
 
 - [x] Types + config frozen, round-trip tested, defaults spec-exact
-- [x] `GraphStore` + `MemoryStore` (+ memory unit tests; full `tests/store_conformance.rs` can land with T3.x)
+- [x] `GraphStore` + `MemoryStore` (+ memory unit tests in `src/store/memory.rs::tests`;
+  no generic `tests/store_conformance.rs` exists or is planned — TEST-4, 2026-08-12 —
+  adapters are checked against MemoryStore by T3.6's three-way agreement gate)
 - [x] `Embedder` + deterministic fixture embedder with documented near/far pairs
 - [x] Fixtures committed — announced in Handoff Log; go signal sent (**P2–P7 unblocked**)
 - [x] Level B packaging landed (T1.5): features, registries, `lambo.toml`
@@ -251,7 +255,10 @@ uncompiled kind errors with a feature rebuild hint; `lambo.example.toml` parses 
 ### T1.5 — Level B pluggability (2026-08-11) — DONE
 
 - Design of record: `dev-diary/notes/level-b-pluggability.md` (kept current).
-- Spec errata: §3.3 tables, §3.4 packaging + dim/contract rules, §6.1–§6.3.
+- Spec errata: §3.3 tables, §3.4 packaging + dim/contract rules, §6.1–§6.3, **§12.2
+  (Bedrock row — feature `embed-bedrock`, default BGE-M3 until account authorized) and
+  §14 (cut order — `store-sqlite` optional note + "Never cut: … Level B packaging"
+  entry)** (COH-11, 2026-08-12 — the original record omitted these two sections).
 - Cargo features + registries + `LamboFile` / `lambo.example.toml`.
 - **`src/resolve.rs`:** `resolve_backends`, store×embedder dim check (store-authoritative
   `vector_dimensions`), `EmbeddingContract` on `GraphSnapshot`.

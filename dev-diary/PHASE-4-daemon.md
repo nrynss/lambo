@@ -46,9 +46,12 @@ status:     not-started
 Spec §9 verbatim:
 `score = recency·0.25 + frequency·0.20 + session_activity·0.20 + density·0.35 + edge_type_bonus + concept_type_modifier`
 — every dimension clamped to [0,1] **before** weighting; NaN/Inf → 0.0. No centrality (cut).
-Weights come from `Config`, never inlined. Also the daemon task skeleton (`src/daemon/mod.rs`
-shared claim with T4.6 — coordinate): wake on mutation notify from T2.3, warm-up rescore on
-load (T3.5's signal).
+Also the daemon task skeleton (`src/daemon/mod.rs`
+shared claim with T4.6 — coordinate): poll `Graph::epoch()` on a tick interval for
+rescoring, with explicit wake in tests. **There is no mutation-notify channel and no
+T3.5 rescore signal — both were explicitly deferred** (derive.rs: "do NOT build the
+channel here … no stubs, no channel types"; T3.5's handoff ships no transport). The
+notify seam lands with T8.1 (COH-5, 2026-08-12).
 
 **Done when:** property tests hold (bounded inputs ⇒ bounded finite score; monotonic in
 each dimension) and rescoring `session-rest-api` produces a stable ordering with

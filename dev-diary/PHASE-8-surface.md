@@ -33,11 +33,58 @@ flush task + startup load. Methods: `set_root_goal`, `declare_synonym`, `recall`
 mutation), `reserve`, `canonical_memories`, `stats` (must expose flush lag + log depth),
 `events`, `close` (final flush, clean shutdown of both tasks). Cut list stays cut: no
 `correct`, `merge_concepts`, `resume`, `restart_daemon`, `checkpoint`.
+**`close()` final-flush drain (COH-6, 2026-08-12) — P8-owned, hand-rolled:** spec §6.1
+`close()` requires a final flush in v0.1, but `FlushTask` exposes only
+`new/spawn/stats/degraded` (no drain API; COH-6 adds only a stop signal, below); the
+opus46-S1 "shutdown drain = v0.7.0" deferral was closed as unsound and lands here.
+Implement the drain inside `Memory::close` — do NOT add a drain API to `FlushTask`:
+`FlushLoop.pending` (`src/store/flush.rs` ~285) is task-owned, so a hard
+`JoinHandle::abort()` would drop not-yet-durable mutations — most importantly a batch
+RETAINED after a failed flush (retained batches sit at the front, flush.rs ~283).
+**Stop mechanism: a `tokio::sync::Notify` stop channel.** One `Arc<Notify>` on
+`FlushTask` (in `Shared`, cloned into the loop); `FlushTask::stop()` = `notify_one()`.
+The loop's `select!` (flush.rs ~301-304) gains a third branch, FIRST and
+`biased;`: `tokio::select! { biased; _ = stop.notified() => { self.requeue_pending();
+break; }, _ = interval.tick() => ..., _ = sleep(POLL_QUANTUM) => ... }`. Chosen over an
+`AtomicBool` poll because the `select!` already awaits futures — `notified()` is a
+native branch (no `POLL_QUANTUM` coupling, no extra sleep) — and `Notify` latches: a
+`notify_one()` during an in-flight `cycle()` stores a permit, so the current flush
+and its retry/backoff awaits run to completion and the loop breaks on the next
+`select!` poll. **The `biased;` + stop-first ordering is REQUIRED:** an unbiased
+`select!` polls all branches in random-start order, so a concurrently-ready
+`interval.tick()` can be polled first, consume-and-drop the stored permit, and the
+stop is lost forever — `close()`'s `join_handle.await` would hang (the tick is
+concurrently ready whenever an in-flight flush outlasts `backend_flush_interval`,
+which is the normal slow-flush shutdown case). With `biased;`, polling is in
+written order and a ready stop is selected before the tick is polled.
+1. `stop.notify_one()` — the loop finishes its current `cycle()` (any in-flight flush
+   and retry/backoff completes; a post-retry `RETAINED_BACKOFF` hold is NOT waited
+   out), then re-appends whatever is still in `self.pending` to the FRONT of the
+   graph log (a small push-front helper on the log — chronological order preserved;
+   NOT a FlushTask drain API), and the task exits.
+2. `join_handle.await` — the task is gone; it can no longer re-take the graph lock.
+3. Take the graph lock, `drain_log()` the remaining mutations, release the lock.
+4. Call `store.flush(&batch)` directly on the drained batch (`.await` — no lock held),
+   and surface the result as `close()`'s error.
+A **retained post-retry batch is flushed or surfaced by this path**: it is still in
+`self.pending` (already drained from the log, invisible to `close()`'s later
+`drain_log()`), and the step-1 re-append is what puts it back where that drain can see
+it — a hard abort would drop it with the task. The final attempt either flushes it or
+surfaces the failure as `close()`'s error; it is never silently lost. `close()` then
+satisfies "final flush + clean shutdown of both tasks"; the doc-test must assert the
+tail is durable after `close()` (it holds whenever the store accepts the final flush —
+including the retained-batch case). This is P8-owned scope, not T3.4's.
 
 **Level B:** builder accepts `ResolvedBackends` (or `Box<dyn GraphStore>` +
 `Box<dyn Embedder>` + `EmbeddingContract` from that resolve). Prefer
 `resolve_backends(LamboFile)` over raw `build_*`. On `load_session`, if
 `snap.embedding` is set, call `assert_session_embedding_compatible`.
+
+**Owner (STORE-1, 2026-08-12):** contract enforcement on attach is **T8.1-owned** — the
+`assert_session_embedding_compatible` check above (kind/model/dim vs the live
+`EmbeddingContract`) is the second half of the model-mixing refusal; the persistence
+half (seed write path + `load_session` materialization) shipped in Wave 5. If the check
+is missing at P8 time, T8.1 must build it — it is not optional.
 
 **Done when:** a doc-test mirroring the spec §6.1 snippet compiles and runs against
 `MemoryStore` (default features), `close()` flushes the tail, and session attach rejects
@@ -58,6 +105,12 @@ fight to half a day.** Tools: `lambo_recall`, `lambo_derive`, `lambo_record_acti
 `lambo_reserve`, `lambo_inspect`, `lambo_saints`, `lambo_stats`. One process owns the
 session (spec §2.2); tool calls from multiple MCP clients are tasks inside it, each
 carrying `agent_id`.
+
+**rmcp re-add (COH-2, 2026-08-12):** `rmcp` is **not** in Cargo.toml today — removed by
+8f9e527 (no MCP server ships yet; `src/mcp/` is an empty stub). T8.2 **owns re-adding it
+with a deliberate 0.1.x-vs-v3 choice** (the P8 implementer decides at that point; both
+0.1.x and v3 are viable — the hand-rolled JSON-RPC fallback in §6.3 covers either). Do
+not assume the crate is already present.
 
 **Level B:** on start, `resolve_from_config_path` → **`ResolvedBackends`** → inject into
 `Memory` (single construction). Fail closed if kinds are uncompiled, TOML has unknown keys,

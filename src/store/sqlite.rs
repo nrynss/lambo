@@ -570,9 +570,11 @@ impl GraphStore for SqliteStore {
             Some(row) => row,
             None => return Err(StoreError::SessionNotFound(session.0.clone())),
         };
-        let embedding_kind: Option<String> = row.get(0);
-        let embedding_model: Option<String> = row.get(1);
-        let embedding_dim: Option<i64> = row.get(2);
+        let embedding_kind: Option<String> =
+            row.try_get(0).map_err(|e| db_err("lookup session", e))?;
+        let embedding_model: Option<String> =
+            row.try_get(1).map_err(|e| db_err("lookup session", e))?;
+        let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
         let embedding = match (embedding_kind, embedding_dim) {
             (Some(kind), Some(dim)) => Some(EmbeddingContract {
                 kind,
@@ -680,8 +682,12 @@ impl GraphStore for SqliteStore {
             .map_err(|e| db_err("keyword_candidates", e))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: String = row.get(0);
-            let score: i64 = row.get(1);
+            let id: String = row
+                .try_get(0)
+                .map_err(|e| db_err("keyword_candidates", e))?;
+            let score: i64 = row
+                .try_get(1)
+                .map_err(|e| db_err("keyword_candidates", e))?;
             out.push(Scored::new(node_id(&id, "concept id")?, score as f64));
         }
         Ok(out)
@@ -741,7 +747,7 @@ impl GraphStore for SqliteStore {
         .fetch_one(self.pool())
         .await
         .map_err(|e| db_err("blast_radius", e))?;
-        let n: i64 = row.get(0);
+        let n: i64 = row.try_get(0).map_err(|e| db_err("blast_radius", e))?;
         Ok(n as u64)
     }
 
@@ -772,11 +778,11 @@ impl GraphStore for SqliteStore {
                 .await
                 .map_err(|e| db_err("interaction_span", e))?;
 
-        let distinct: i64 = row.get(0);
-        let span_lo: Option<String> = row.get(1);
-        let span_hi: Option<String> = row.get(2);
-        let sess_lo: Option<String> = row.get(3);
-        let sess_hi: Option<String> = row.get(4);
+        let distinct: i64 = row.try_get(0).map_err(|e| db_err("interaction_span", e))?;
+        let span_lo: Option<String> = row.try_get(1).map_err(|e| db_err("interaction_span", e))?;
+        let span_hi: Option<String> = row.try_get(2).map_err(|e| db_err("interaction_span", e))?;
+        let sess_lo: Option<String> = row.try_get(3).map_err(|e| db_err("interaction_span", e))?;
+        let sess_hi: Option<String> = row.try_get(4).map_err(|e| db_err("interaction_span", e))?;
 
         let coverage = match (span_lo, span_hi) {
             (Some(lo_s), Some(hi_s)) => {
@@ -1117,12 +1123,12 @@ async fn load_interactions(
     .map_err(|e| db_err("load interactions", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: String = row.get(0);
-        let sid: String = row.get(1);
-        let agent: String = row.get(2);
-        let prompt: Option<String> = row.get(3);
-        let prev: Option<String> = row.get(4);
-        let created: String = row.get(5);
+        let id: String = row.try_get(0).map_err(|e| db_err("load interactions", e))?;
+        let sid: String = row.try_get(1).map_err(|e| db_err("load interactions", e))?;
+        let agent: String = row.try_get(2).map_err(|e| db_err("load interactions", e))?;
+        let prompt: Option<String> = row.try_get(3).map_err(|e| db_err("load interactions", e))?;
+        let prev: Option<String> = row.try_get(4).map_err(|e| db_err("load interactions", e))?;
+        let created: String = row.try_get(5).map_err(|e| db_err("load interactions", e))?;
         out.push(Interaction {
             id: node_id(&id, "interaction id")?,
             session_id: SessionId::from(sid),
@@ -1156,23 +1162,25 @@ async fn load_concepts(
     .map_err(|e| db_err("load concepts", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: String = row.get(0);
-        let sid: String = row.get(1);
-        let content: String = row.get(2);
-        let key: String = row.get(3);
-        let ctype: String = row.get(4);
-        let origin: String = row.get(5);
-        let agent: String = row.get(6);
-        let created: String = row.get(7);
-        let access_count: i32 = row.get(8);
-        let last_accessed: Option<String> = row.get(9);
-        let gc_survived: i32 = row.get(10);
-        let status: String = row.get(11);
-        let blast_radius: Option<i32> = row.get(12);
-        let last_demotion: Option<String> = row.get(13);
+        let id: String = row.try_get(0).map_err(|e| db_err("load concepts", e))?;
+        let sid: String = row.try_get(1).map_err(|e| db_err("load concepts", e))?;
+        let content: String = row.try_get(2).map_err(|e| db_err("load concepts", e))?;
+        let key: String = row.try_get(3).map_err(|e| db_err("load concepts", e))?;
+        let ctype: String = row.try_get(4).map_err(|e| db_err("load concepts", e))?;
+        let origin: String = row.try_get(5).map_err(|e| db_err("load concepts", e))?;
+        let agent: String = row.try_get(6).map_err(|e| db_err("load concepts", e))?;
+        let created: String = row.try_get(7).map_err(|e| db_err("load concepts", e))?;
+        let access_count: i32 = row.try_get(8).map_err(|e| db_err("load concepts", e))?;
+        let last_accessed: Option<String> =
+            row.try_get(9).map_err(|e| db_err("load concepts", e))?;
+        let gc_survived: i32 = row.try_get(10).map_err(|e| db_err("load concepts", e))?;
+        let status: String = row.try_get(11).map_err(|e| db_err("load concepts", e))?;
+        let blast_radius: Option<i32> = row.try_get(12).map_err(|e| db_err("load concepts", e))?;
+        let last_demotion: Option<String> =
+            row.try_get(13).map_err(|e| db_err("load concepts", e))?;
         // CON-8: decode the BLOB back to the shared text form. A corrupt blob
         // (invalid UTF-8 / unparseable elements) is a backend error, not a panic.
-        let embedding: Option<Vec<u8>> = row.get(14);
+        let embedding: Option<Vec<u8>> = row.try_get(14).map_err(|e| db_err("load concepts", e))?;
         let embedding = match embedding {
             Some(bytes) => {
                 let text = std::str::from_utf8(&bytes).map_err(|e| {
@@ -1185,7 +1193,8 @@ async fn load_concepts(
             }
             None => None,
         };
-        let chunk_group_id: Option<String> = row.get(15);
+        let chunk_group_id: Option<String> =
+            row.try_get(15).map_err(|e| db_err("load concepts", e))?;
         out.push(Concept {
             id: node_id(&id, "concept id")?,
             session_id: SessionId::from(sid),
@@ -1223,15 +1232,15 @@ async fn load_edges(
     .map_err(|e| db_err("load edges", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: String = row.get(0);
-        let sid: String = row.get(1);
-        let source: String = row.get(2);
-        let target: String = row.get(3);
-        let etype: String = row.get(4);
-        let weight: f64 = row.get(5);
-        let reinforcements: i32 = row.get(6);
-        let created: String = row.get(7);
-        let last_reinforced: String = row.get(8);
+        let id: String = row.try_get(0).map_err(|e| db_err("load edges", e))?;
+        let sid: String = row.try_get(1).map_err(|e| db_err("load edges", e))?;
+        let source: String = row.try_get(2).map_err(|e| db_err("load edges", e))?;
+        let target: String = row.try_get(3).map_err(|e| db_err("load edges", e))?;
+        let etype: String = row.try_get(4).map_err(|e| db_err("load edges", e))?;
+        let weight: f64 = row.try_get(5).map_err(|e| db_err("load edges", e))?;
+        let reinforcements: i32 = row.try_get(6).map_err(|e| db_err("load edges", e))?;
+        let created: String = row.try_get(7).map_err(|e| db_err("load edges", e))?;
+        let last_reinforced: String = row.try_get(8).map_err(|e| db_err("load edges", e))?;
         out.push(Edge {
             id: node_id(&id, "edge id")?,
             session_id: SessionId::from(sid),
@@ -1261,9 +1270,9 @@ async fn load_synonyms(
     .map_err(|e| db_err("load synonyms", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let sid: String = row.get(0);
-        let src: String = row.get(1);
-        let canon: String = row.get(2);
+        let sid: String = row.try_get(0).map_err(|e| db_err("load synonyms", e))?;
+        let src: String = row.try_get(1).map_err(|e| db_err("load synonyms", e))?;
+        let canon: String = row.try_get(2).map_err(|e| db_err("load synonyms", e))?;
         out.push(crate::types::Synonym {
             session_id: SessionId::from(sid),
             source_key: src,
@@ -1287,10 +1296,10 @@ async fn load_reservations(
     .map_err(|e| db_err("load reservations", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let sid: String = row.get(0);
-        let node: String = row.get(1);
-        let agent: String = row.get(2);
-        let expires: String = row.get(3);
+        let sid: String = row.try_get(0).map_err(|e| db_err("load reservations", e))?;
+        let node: String = row.try_get(1).map_err(|e| db_err("load reservations", e))?;
+        let agent: String = row.try_get(2).map_err(|e| db_err("load reservations", e))?;
+        let expires: String = row.try_get(3).map_err(|e| db_err("load reservations", e))?;
         out.push(crate::types::Reservation {
             session_id: SessionId::from(sid),
             node_id: node_id(&node, "reservation node")?,
@@ -1316,14 +1325,30 @@ async fn load_canonization_events(
     .map_err(|e| db_err("load canonization events", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let id: String = row.get(0);
-        let sid: String = row.get(1);
-        let node: String = row.get(2);
-        let from: String = row.get(3);
-        let to: String = row.get(4);
-        let blast_radius: Option<i32> = row.get(5);
-        let last_demotion: Option<String> = row.get(6);
-        let occurred: String = row.get(7);
+        let id: String = row
+            .try_get(0)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let sid: String = row
+            .try_get(1)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let node: String = row
+            .try_get(2)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let from: String = row
+            .try_get(3)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let to: String = row
+            .try_get(4)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let blast_radius: Option<i32> = row
+            .try_get(5)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let last_demotion: Option<String> = row
+            .try_get(6)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let occurred: String = row
+            .try_get(7)
+            .map_err(|e| db_err("load canonization events", e))?;
         out.push(CanonizationEvent {
             id: node_id(&id, "canonization event id")?,
             session_id: SessionId::from(sid),

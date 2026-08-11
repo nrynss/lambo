@@ -36,11 +36,15 @@ and `Cargo.toml`/`lib.rs` churn is front-loaded here, not fought over mid-swarm.
 
 Dependencies (spec §6.3, **Level B** — see `notes/level-b-pluggability.md`):
 
-- **Always:** `tokio`, `rmcp`, `axum`, `rust-stemmers`, `unicode-segmentation`,
+- **Always:** `tokio`, `axum`, `rust-stemmers`, `unicode-segmentation`,
   `parking_lot`, `clap`, `tracing`, `tracing-subscriber`, `serde`, `serde_json`, `toml`,
   `uuid`, `chrono`, `async-trait`, `bitflags`, `thiserror`, `anyhow`.
 - **Feature-gated:** `sqlx` (`store-cockroach` / `store-sqlite`), `reqwest` (`embed-bge`),
   `aws-sdk-bedrockruntime` + `aws-config` (`embed-bedrock`).
+- **`rmcp` is NOT on this list — it was removed from Cargo.toml by 8f9e527** (Level B
+  pluggability) because no MCP server code ships yet (`src/mcp/` is an empty stub until
+  T8.2). It is re-added at T8.2 with a deliberate 0.1.x-vs-v3 choice; the owner is the
+  P8 implementer (COH-2, 2026-08-12).
 
 Default features: `store-memory`, `embed-bge`, `embed-fixture`, `fixtures`. Do **not** put
 `sqlx` or AWS SDK in the default feature set.
@@ -125,7 +129,9 @@ Capture cost/latency of a single call in the Handoff Log.
 - `aws-config` with `credentials-login` feature (required for `aws login` sessions).
 - `cargo fmt` / `clippy -D warnings` / `cargo test` clean; `cargo run -- --help` works.
 - CI: `.github/workflows/ci.yml` (fmt, clippy, test).
-- Note: `rmcp` pinned at 0.1.x in Cargo.toml (latest is v3 — upgrade carefully in P8).
+- Note (COH-2, 2026-08-12): `rmcp` is **not** a Cargo dependency — removed by 8f9e527
+  (no MCP server ships yet; `src/mcp/` is an empty stub). Re-add at T8.2 with a deliberate
+  0.1.x-vs-v3 choice; owner: the P8 implementer.
 
 ### T0.2 — Schema (2026-08-10)
 

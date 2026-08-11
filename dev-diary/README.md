@@ -146,14 +146,14 @@ Keep this current; it is the only global view.
 
 | Phase | Tasks done | Status |
 |---|---|---|
-| P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
-| P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
+| P0 | 3 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready, not counted done) |
+| P1 | 5 / 5 | **COMPLETE** — T1.1–T1.5 (incl. T1.4 fixtures + T1.5 Level B packaging): P2–P7 unblocked |
 | P2 | 7 / 7 | **DONE + MERGED TO MAIN (2026-08-11, commit 9f9d2cb)** — graph core, canonicalization, derive, record_action, demote, BM25 index, reservations; exit criteria [x] (rebuild test); reviews CLOSED (per-task ACCEPT x2, muse-spark M1-M4, grok G1-G7); cross-phase contracts written into P3/P4/P5 docs |
 | P3 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-11, commit 4c816a2)** — DDL, CockroachStore + live conformance, SqliteStore, flush, load_session, structural-query three-way gate; exit criteria [x]; all reviews CLOSED (per-task ×2, gemini36flash + opus46 partials) |
 | P4 | 0 / 6 | OPEN for claiming |
 | P5 | 0 / 4 | OPEN for claiming |
 | P6 | 0 / 4 | OPEN for claiming |
-| P7 | 1 / 3 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
+| P7 | 1 / 4 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
 | P8 | 0 / 5 | blocked on P2 P4 P5 |
 | P9 | 0 / 5 | blocked on P8 |
 

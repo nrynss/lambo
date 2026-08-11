@@ -75,7 +75,10 @@
 //!   CREATE + ALTER `ADD COLUMN IF NOT EXISTS` idempotency pattern as
 //!   `chunk_group_id`), `seed` upserts all three from the snapshot's contract,
 //!   and `load_session` materializes `GraphSnapshot.embedding` when
-//!   `embedding_kind` is present (STORE-1 remediation). `flush` still does NOT
+//!   `embedding_kind` is present (STORE-1 remediation). **Corruption parity
+//!   (STORE-7):** a row with exactly one of `embedding_kind` / `embedding_dim`
+//!   set (kind XOR dim) is a `Backend` corruption error from `load_session` —
+//!   mirroring sqlite — never a silent `None`. `flush` still does NOT
 //!   write them — there is no session-metadata `Mutation` kind (S5-class;
 //!   documented in the T3.2 handoff), so a flush after a seed leaves the
 //!   stamped contract untouched (regression-locked by the live conformance
@@ -394,6 +397,37 @@ FROM extent
 
 fn backend<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Backend(e.to_string())
+}
+
+/// STORE-7 — session-row embedding-contract parsing, mirroring sqlite's XOR
+/// corruption handling. A row with exactly one of `embedding_kind` /
+/// `embedding_dim` set (as direct SQL can manufacture) is a corruption error,
+/// never a silent `None`; `embedding_model` alone is inert (model without a
+/// kind has nothing to label).
+fn session_embedding_from_parts(
+    kind: Option<String>,
+    model: Option<String>,
+    dim: Option<i64>,
+    session_id: &str,
+) -> Result<Option<EmbeddingContract>, StoreError> {
+    match (kind, dim) {
+        (Some(kind), Some(dim)) => Ok(Some(EmbeddingContract {
+            kind,
+            model,
+            dim: usize::try_from(dim).map_err(|_| {
+                StoreError::Backend(format!(
+                    "sessions row for {session_id} has negative embedding_dim"
+                ))
+            })?,
+        })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(StoreError::Backend(format!(
+            "sessions row for {session_id} has embedding_kind without embedding_dim"
+        ))),
+        (None, Some(_)) => Err(StoreError::Backend(format!(
+            "sessions row for {session_id} has embedding_dim without embedding_kind"
+        ))),
+    }
 }
 
 /// CockroachDB serializable transactions abort with SQLSTATE 40001
@@ -1153,25 +1187,22 @@ impl GraphStore for CockroachStore {
             // Snapshot-only embedding contract (S5-class, see module doc): read the
             // nullable kind/model/dim columns into GraphSnapshot.embedding when a
             // contract is stamped. `flush` never writes these — there is no
-            // session-metadata Mutation kind.
+            // session-metadata Mutation kind. STORE-7: a row with exactly one of
+            // embedding_kind / embedding_dim set (kind XOR dim) is a corruption
+            // error — mirroring sqlite — never a silent `None` (see
+            // `session_embedding_from_parts`).
             let embedding_kind: Option<String> =
                 session_row.try_get("embedding_kind").map_err(backend)?;
             let embedding_model: Option<String> =
                 session_row.try_get("embedding_model").map_err(backend)?;
             let embedding_dim: Option<i64> =
                 session_row.try_get("embedding_dim").map_err(backend)?;
-            let embedding = match embedding_kind {
-                Some(kind) => Some(EmbeddingContract {
-                    kind,
-                    model: embedding_model,
-                    dim: embedding_dim.ok_or_else(|| {
-                        StoreError::Backend(
-                            "embedding_kind present but embedding_dim NULL in sessions row".into(),
-                        )
-                    })? as usize,
-                }),
-                None => None,
-            };
+            let embedding = session_embedding_from_parts(
+                embedding_kind,
+                embedding_model,
+                embedding_dim,
+                sid.0.as_str(),
+            )?;
 
             let interactions = sqlx::query(SELECT_INTERACTIONS_SQL)
                 .bind(sid.0.as_str())
@@ -1700,6 +1731,53 @@ mod tests {
             vec!["schema".to_string()]
         );
         assert!(CockroachStore::normalize_tokens(&[]).is_empty());
+    }
+
+    #[test]
+    fn session_embedding_xor_corruption_errors_not_silent_none() {
+        // STORE-7: a sessions row with embedding_dim set but embedding_kind NULL
+        // (what direct SQL on a corrupt/migrated row would produce) must error like
+        // sqlite, not silently return `embedding: None`.
+        let sid = "session-store7";
+        // The old silent-None shape (kind absent, dim present) — the STORE-7 bug.
+        let err = session_embedding_from_parts(None, None, Some(1024), sid).unwrap_err();
+        assert!(matches!(err, StoreError::Backend(_)), "{err:?}");
+        assert!(
+            err.to_string()
+                .contains("embedding_dim without embedding_kind"),
+            "corruption error must name the shape: {err}"
+        );
+        // Mirror image: kind present, dim absent — sqlite errors here too.
+        let err = session_embedding_from_parts(Some("bge_m3".into()), None, None, sid).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("embedding_kind without embedding_dim"),
+            "{err}"
+        );
+        // Negative dim is an error, not an `as usize` wrap (sqlite parity).
+        let err =
+            session_embedding_from_parts(Some("bge_m3".into()), None, Some(-1), sid).unwrap_err();
+        assert!(err.to_string().contains("negative embedding_dim"), "{err}");
+        // Well-formed rows still parse.
+        let got = session_embedding_from_parts(
+            Some("bge_m3".into()),
+            Some("BAAI/bge-m3".into()),
+            Some(1024),
+            sid,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            Some(EmbeddingContract {
+                kind: "bge_m3".into(),
+                model: Some("BAAI/bge-m3".into()),
+                dim: 1024,
+            })
+        );
+        assert_eq!(
+            session_embedding_from_parts(None, None, None, sid).unwrap(),
+            None
+        );
     }
 }
 
@@ -2748,6 +2826,42 @@ mod conformance {
         assert!(matches!(err, StoreError::NotFound(_)));
     }
 
+    async fn check_corrupt_contract_row_load_errors(store: &CockroachStore) {
+        // STORE-7: a sessions row with embedding_dim set but embedding_kind NULL
+        // (manufactured here via DIRECT SQL — the store's write path can never
+        // produce it) must make load_session error like sqlite, never return a
+        // silent `embedding: None`. The offline unit test
+        // `session_embedding_xor_corruption_errors_not_silent_none` covers the
+        // same arms without a cluster; this check proves the end-to-end read path.
+        let sid = SessionId::from(format!("conformance-store7-a-{}", Uuid::new_v4()));
+        let pool = store.pool().await.unwrap();
+        sqlx::query("INSERT INTO sessions (session_id, embedding_dim) VALUES ($1, 1024)")
+            .bind(sid.0.as_str())
+            .execute(pool)
+            .await
+            .unwrap();
+        let err = store.load_session(&sid).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("embedding_dim without embedding_kind"),
+            "dim-without-kind row must error, not silently load: {err}"
+        );
+
+        // Mirror image: kind set, dim NULL.
+        let sid2 = SessionId::from(format!("conformance-store7-b-{}", Uuid::new_v4()));
+        sqlx::query("INSERT INTO sessions (session_id, embedding_kind) VALUES ($1, 'bge_m3')")
+            .bind(sid2.0.as_str())
+            .execute(pool)
+            .await
+            .unwrap();
+        let err = store.load_session(&sid2).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("embedding_kind without embedding_dim"),
+            "{err}"
+        );
+    }
+
     /// All live checks run inside ONE test/runtime — see [`new_store`] for why (pool
     /// and connections must never cross Tokio runtimes). `#[ignore]`d: without
     /// `LAMBO_COCKROACH_DSN` this must report as ignored, not skip-as-green. Each
@@ -2775,5 +2889,6 @@ mod conformance {
         check_structural_queries_errata_derives_probe(&store).await;
         check_interaction_span_single_point_session_coverage(&store).await;
         check_record_canonization_appends_and_is_idempotent(&store).await;
+        check_corrupt_contract_row_load_errors(&store).await;
     }
 }
