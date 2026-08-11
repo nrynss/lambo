@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'phase-*']
   pull_request:
 
 env:
@@ -31,3 +31,43 @@ jobs:
 
       - name: test
         run: cargo test --all
+
+  # Feature-gated adapter tier (TEST-2): the default-features `check` job above
+  # never compiles sqlite/cockroach. Every non-default combo that must stay
+  # green gets a row here; all inherit RUSTFLAGS="-D warnings".
+  feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # sqlite behavior tests (T3.6 matrix) on default features + sqlite.
+          - name: sqlite
+            command: cargo test --features store-sqlite
+          # sqlite WITHOUT store-memory: the ungated MemoryStore import in the
+          # test module (CON-4) must never regress.
+          - name: sqlite-minimal
+            command: cargo test --no-default-features --features store-sqlite
+          # No adapters at all.
+          - name: minimal
+            command: cargo check --no-default-features
+          # cockroach without fixtures: compiles AND runs the test module
+          # (dead-code-clean under -D warnings); live tests are #[ignore]d.
+          - name: cockroach
+            command: cargo test --no-default-features --features store-cockroach
+          # Ship profile (cockroach + memory + embedders + fixtures).
+          - name: demo
+            command: cargo check --features demo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.command }}

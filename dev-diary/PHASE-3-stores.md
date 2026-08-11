@@ -438,8 +438,10 @@ id-sort). Wired as `#[cfg(all(test, feature = "store-cockroach", feature = "fixt
 sqlx connections are registered with the Tokio runtime that first acquires them: per-test
 runtimes die at test end, poisoning the pool ("A Tokio 1.x context was found, but it is
 being shutdown"), and per-test pools multiplied connections past the cluster's cap
-("pool timed out while waiting for an open connection"). Skips cleanly (never fails)
-without `LAMBO_COCKROACH_DSN`. `build_store_returns_working_adapter` is a plain sync
+("pool timed out while waiting for an open connection"). Live tests are
+`#[ignore]`d by default and only run explicitly; when they are run (live run via
+`-- --ignored` under `LAMBO_REQUIRE_LIVE=1`), a missing `LAMBO_COCKROACH_DSN` is a
+hard failure (`dsn_or_skip` panics) rather than a skip. `build_store_returns_working_adapter` is a plain sync
 test (lazy pool ⇒ no runtime needed).
 
 **Verification:** `cargo build --features store-cockroach` clean (0 warnings);

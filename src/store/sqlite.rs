@@ -1141,6 +1141,7 @@ mod tests {
     use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
     use crate::store::load::load_session;
+    #[cfg(feature = "store-memory")]
     use crate::store::memory::MemoryStore;
     use crate::types::{AgentId, CanonizationStatus, ConceptType, EdgeType, Node as NodeKind};
     use chrono::TimeZone;
@@ -1197,6 +1198,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn plant_edge(
         sid: &SessionId,
         source: NodeId,
@@ -1539,6 +1541,7 @@ mod tests {
         assert_eq!(obs.chunk_group_id.as_deref(), Some("legacy-chunk"));
     }
 
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn keyword_candidates_match_memory_and_guard_inputs() {
         let sqlite = test_store();
@@ -1618,6 +1621,7 @@ mod tests {
     /// Snapshot -> mutation batch (nodes then edges; §2.4 order). The
     /// fixtures carry no canonization events; synonyms and reservations are
     /// RAM-local (S5) and never part of the structural queries.
+    #[cfg(feature = "fixtures")]
     fn snapshot_to_batch(snap: &GraphSnapshot) -> MutationBatch {
         let mut batch = MutationBatch::new();
         for i in &snap.interactions {
@@ -1640,6 +1644,7 @@ mod tests {
     /// × min-age {0, 3600s} × both queries, each answer asserted EXACTLY
     /// equal to MemoryStore's naive computation on the same snapshot.
     /// Returns the number of equality assertions performed.
+    #[cfg(feature = "fixtures")]
     async fn assert_structural_agreement_matrix(
         store: &SqliteStore,
         memory: &MemoryStore,
@@ -1734,6 +1739,7 @@ mod tests {
     /// blast radius would collapse to ~0. The adapter must ignore provenance
     /// (`Derives`/`Temporal`) edges exactly like MemoryStore — never
     /// un-orphaning a concept through them.
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn blast_radius_errata_derives_must_not_un_orphan() {
         let store = test_store();
@@ -1797,6 +1803,7 @@ mod tests {
     /// `blast_radius` is origin-agnostic by contrast: the aged probe edge counts
     /// at both ages even though its origin is fresh (the i-gate is span-only,
     /// matching MemoryStore).
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
         let store = test_store();
@@ -1954,6 +1961,7 @@ mod tests {
     /// supported inbound dependency reports coverage 1.0, not 0.0 — parity
     /// with MemoryStore and Cockroach (canonization Stage 2 in short
     /// sessions), and agreement with MemoryStore's naive answer.
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn interaction_span_single_point_session_coverage_is_one() {
         let store = test_store();

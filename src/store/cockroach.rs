@@ -130,6 +130,7 @@ ON CONFLICT (session_id) DO NOTHING
 
 /// Full-snapshot sessions upsert (fixtures `seed` path): root_goal JSONB, created_at,
 /// closed_at. `COALESCE($3, now())` keeps the NOT NULL default when a snapshot omits it.
+#[cfg(any(test, feature = "fixtures"))]
 const UPSERT_SESSION_SQL: &str = r#"
 INSERT INTO sessions (session_id, root_goal, created_at, closed_at)
 VALUES ($1, $2::JSONB, COALESCE($3, now()), $4)
@@ -231,6 +232,7 @@ INSERT INTO canonization_events (
 ON CONFLICT (id) DO NOTHING
 "#;
 
+#[cfg(any(test, feature = "fixtures"))]
 const UPSERT_SYNONYM_SQL: &str = r#"
 INSERT INTO synonyms (session_id, source_key, canonical_key)
 VALUES ($1, $2, $3)
@@ -238,6 +240,7 @@ ON CONFLICT (session_id, source_key) DO UPDATE SET
     canonical_key = EXCLUDED.canonical_key
 "#;
 
+#[cfg(any(test, feature = "fixtures"))]
 const UPSERT_RESERVATION_SQL: &str = r#"
 INSERT INTO reservations (session_id, node_id, agent_id, expires_at)
 VALUES ($1, $2, $3, $4)
@@ -1677,13 +1680,17 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Live conformance (feature-gated; skips cleanly without LAMBO_COCKROACH_DSN)
+// Live conformance (feature-gated; honest skips without LAMBO_COCKROACH_DSN)
 // ---------------------------------------------------------------------------
 
 /// Runs under `cargo test --features store-cockroach` (with `fixtures`, which is in the
-/// default set). Every test SKIPS (prints a notice, returns Ok) when
-/// `LAMBO_COCKROACH_DSN` is unset — never fails. The DSN is read from the environment
-/// only and never printed.
+/// default set). The two live tests are `#[ignore]`d, so a run without
+/// `LAMBO_COCKROACH_DSN` reports them as **ignored** — never a silent, skip-as-green
+/// `ok`. To actually run them: `cargo test --features store-cockroach -- --ignored`.
+/// With `LAMBO_REQUIRE_LIVE=1` (evidence capture) a missing DSN is a hard failure:
+/// [`dsn_or_skip`] panics and [`live_dsn_gate_fails_loudly_when_required`] fails even
+/// when the ignored tests did not run. The DSN is read from the environment only and
+/// never printed.
 #[cfg(all(test, feature = "store-cockroach", feature = "fixtures"))]
 mod conformance {
     use super::*;
@@ -1702,15 +1709,40 @@ mod conformance {
             .filter(|s| !s.is_empty())
     }
 
-    /// Skip-not-fail helper; returns the DSN when present.
+    /// Returns the DSN when present. Without one: under `LAMBO_REQUIRE_LIVE=1` this
+    /// PANICS (an evidence-captured live run must never silently skip); otherwise it
+    /// prints a skip notice and returns None. Callers are `#[ignore]`d, so a missing
+    /// DSN surfaces as an ignored test in the default run, not a false `ok`.
     fn dsn_or_skip(test: &str) -> Option<String> {
         match dsn() {
             Some(d) => Some(d),
             None => {
+                if env::var_os("LAMBO_REQUIRE_LIVE").is_some() {
+                    panic!(
+                        "{test}: LAMBO_COCKROACH_DSN is unset but LAMBO_REQUIRE_LIVE=1 \
+                         is set — refusing to skip a live cockroach test"
+                    );
+                }
                 eprintln!("SKIP {test}: LAMBO_COCKROACH_DSN not set");
                 None
             }
         }
+    }
+
+    /// Non-ignored honesty gate: the two live tests above are `#[ignore]`d, so the
+    /// default run reports them as ignored instead of passing while skipping. With
+    /// `LAMBO_REQUIRE_LIVE=1` a missing DSN must fail loudly — this gate fails even
+    /// though the ignored tests themselves did not run.
+    #[test]
+    fn live_dsn_gate_fails_loudly_when_required() {
+        if env::var_os("LAMBO_REQUIRE_LIVE").is_none() {
+            return;
+        }
+        assert!(
+            dsn().is_some(),
+            "LAMBO_REQUIRE_LIVE=1 requires LAMBO_COCKROACH_DSN: live cockroach tests \
+             must not be silently skipped (run with -- --ignored and a real DSN)"
+        );
     }
 
     fn cfg(dsn: String) -> StoreConfig {
@@ -1854,8 +1886,10 @@ mod conformance {
 
     /// No Tokio needed: `build_store` constructs the adapter without creating the pool
     /// (lazy OnceCell), so this runs as a plain sync test. The real DSN also exercises
-    /// the rustls rewrite + parse validation at construction.
+    /// the rustls rewrite + parse validation at construction. `#[ignore]`d: without
+    /// `LAMBO_COCKROACH_DSN` this must report as ignored, not skip-as-green.
     #[test]
+    #[ignore = "requires LAMBO_COCKROACH_DSN (run live via -- --ignored)"]
     fn build_store_returns_working_adapter() {
         let Some(dsn) = dsn_or_skip("build_store_returns_working_adapter") else {
             return;
@@ -2697,10 +2731,12 @@ mod conformance {
     }
 
     /// All live checks run inside ONE test/runtime — see [`new_store`] for why (pool
-    /// and connections must never cross Tokio runtimes). Skips cleanly, never fails,
-    /// when `LAMBO_COCKROACH_DSN` is unset. Each check has a distinct session namespace
-    /// so re-runs against a persistent cluster are idempotent.
+    /// and connections must never cross Tokio runtimes). `#[ignore]`d: without
+    /// `LAMBO_COCKROACH_DSN` this must report as ignored, not skip-as-green. Each
+    /// check has a distinct session namespace so re-runs against a persistent cluster
+    /// are idempotent.
     #[tokio::test]
+    #[ignore = "requires LAMBO_COCKROACH_DSN (run live via -- --ignored)"]
     async fn conformance_suite() {
         let Some(dsn) = dsn_or_skip("conformance_suite") else {
             return;
