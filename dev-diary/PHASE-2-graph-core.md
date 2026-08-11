@@ -149,15 +149,53 @@ module delete.
 
 ## Exit criteria
 
-- [ ] All fixture graphs constructible via public write APIs alone (a test rebuilds
-      `session-rest-api` from scratch)
-- [ ] Invariants hold after every test
-- [ ] Mutation log ordering verified (nodes before edges referencing them)
-- [ ] No `.await` inside any lock scope (grep + review)
+- [x] All fixture graphs constructible via public write APIs alone (a test rebuilds
+      `session-rest-api` from scratch) — `tests/rebuild_session.rs`
+      (`rebuilds_session_rest_api_via_public_write_apis`): interactions +
+      temporal chain via `insert_interaction`, concepts + canonical keys + Derives
+      via `derive()` (T2.3/T2.2), Dependency edges via `upsert_edge`, synonym via
+      `declare_synonym`; edge structure compared to the fixture as a labeled
+      multiset (content/prompt + type + weight-bits) — EXACT match (53/53 edges).
+      Daemon-earned state (gc_survived/status/blast_radius) intentionally not
+      written — asserted unearned (P4/P6 produce it).
+- [x] Invariants hold after every test — every graph-module test ends with
+      `assert_invariants()` (T2.1–T2.7), incl. the rebuild test.
+- [x] Mutation log ordering verified (nodes before edges referencing them) —
+      `graph::tests::drain_log_clears_and_orders_writes`,
+      `mutation_log_is_chronological_across_interleaved_writes` (T2.1), and
+      `derive`/`record_action`/`demote` batch-ordering tests (T2.3–T2.5).
+- [x] No `.await` inside any lock scope (grep + review) — the graph module owns
+      no locks and no async at all (all write paths synchronous); `Graph` is
+      `Send + Sync` (compile-time assertion, T2.1).
 
 ---
 
 ## Handoff Log
+
+### P2 exit-criteria integration test — rebuild session-rest-api (2026-08-11, by main)
+
+`tests/rebuild_session.rs` (`rebuilds_session_rest_api_via_public_write_apis`)
+rebuilds the demo fixture from scratch via public write APIs and compares
+structurally against the committed snapshot — EXACT edge multiset match
+(53/53, labeled by content/prompt + edge type + weight-bits), all canonical
+keys reproduced by the T2.2 pipeline, invariants hold.
+
+**What the test teaches downstream agents:**
+- One concept per `derive()` call reproduces the fixture exactly; multiple
+  concepts per call add `CoOccurrence` edges the fixture doesn't have (the
+  fixture predates derive's pairwise behavior — that's fine, derive is the
+  richer path).
+- `derive()` stamps concept/edge timestamps from `interaction.created_at`; the
+  fixture's Derives edges all carry T(5) (synthetic) — timestamps are not part
+  of the structural contract (weight-bits comparison only).
+- Daemon-earned state (`gc_survived`, `CanonizationStatus`, `blast_radius`) is
+  asserted UNEARNED by the write path (fresh concepts: 0 / None). P4/P6 earn
+  it. Do not add write-API paths that stamp these — that's the daemon's job.
+- Rebuilt concepts get fresh ids; the test remaps fixture edges by content.
+  Interaction ids are reused (insert_interaction takes caller-chosen ids).
+
+**Exit criteria: all four marked [x]** — see the phase doc; evidence mapping
+for each criterion is written inline.
 
 ### Contract change (2026-08-11, by main) — `Concept.chunk_group_id` added
 
