@@ -148,7 +148,7 @@ Keep this current; it is the only global view.
 |---|---|---|
 | P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
 | P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
-| P2 | 1 / 7 | T2.1 done (graph core on main, review CLOSED); T2.2–T2.7 OPEN for claiming |
+| P2 | 4 / 7 | T2.1, T2.2, T2.6, T2.7 done (graph core, canonicalization, BM25 index, reservations on phase/p2, all reviews CLOSED); T2.3–T2.5 OPEN (require T2.2, now on phase/p2) |
 | P3 | 0 / 6 | OPEN (T3.1 DDL can start after T0.3) |
 | P4 | 0 / 6 | OPEN for claiming |
 | P5 | 0 / 4 | OPEN for claiming |

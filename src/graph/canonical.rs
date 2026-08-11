@@ -75,7 +75,7 @@ pub fn normalize_tokens(content: &str) -> Vec<String> {
 }
 
 /// Step 3 — sort stems and join with single spaces.
-fn tokens_to_key(stems: &mut Vec<String>) -> String {
+fn tokens_to_key(stems: &mut [String]) -> String {
     stems.sort();
     stems.join(" ")
 }
@@ -113,7 +113,11 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
         Some(mapped) => tokens_to_key(&mut normalize_tokens(mapped)),
         None => tokens_to_key(&mut normalize_tokens(raw)),
     };
-    match graph.concepts().find(|c| c.canonical_key == key).map(|c| c.id) {
+    match graph
+        .concepts()
+        .find(|c| c.canonical_key == key)
+        .map(|c| c.id)
+    {
         Some(node) => Ok(CanonicalizeResult::Matched { key, node }),
         None => Ok(CanonicalizeResult::Unmatched { key }),
     }
@@ -127,35 +131,86 @@ mod tests {
     /// Fixture STEM table (`scripts/gen-fixtures.py`, probe-verified against this
     /// module's stemmer — Porter English). `(word, expected stem)`.
     const STEM: &[(&str, &str)] = &[
-        ("registering", "regist"), ("register", "regist"), ("registered", "regist"),
-        ("users", "user"), ("user", "user"), ("systems", "system"), ("system", "system"),
-        ("connecting", "connect"), ("connect", "connect"),
-        ("schema", "schema"), ("schemas", "schema"),
-        ("authentication", "authent"), ("authorization", "author"),
-        ("validating", "valid"), ("validated", "valid"), ("validation", "valid"),
+        ("registering", "regist"),
+        ("register", "regist"),
+        ("registered", "regist"),
+        ("users", "user"),
+        ("user", "user"),
+        ("systems", "system"),
+        ("system", "system"),
+        ("connecting", "connect"),
+        ("connect", "connect"),
+        ("schema", "schema"),
+        ("schemas", "schema"),
+        ("authentication", "authent"),
+        ("authorization", "author"),
+        ("validating", "valid"),
+        ("validated", "valid"),
+        ("validation", "valid"),
         ("rules", "rule"),
-        ("creating", "creat"), ("created", "creat"), ("creat", "creat"), ("create", "creat"),
-        ("pagination", "pagin"), ("paginate", "pagin"),
-        ("rate", "rate"), ("limits", "limit"), ("limiter", "limit"), ("limit", "limit"),
-        ("caching", "cach"), ("cache", "cach"),
-        ("documentation", "document"), ("docs", "doc"), ("doc", "doc"),
-        ("password", "password"), ("passwords", "password"),
-        ("reset", "reset"), ("resetting", "reset"),
-        ("logging", "log"), ("loadtesting", "loadtest"), ("testing", "test"), ("load", "load"),
-        ("id", "id"), ("ratelimit", "ratelimit"), ("registration", "registr"),
-        ("time", "time"), ("birth", "birth"), ("join", "join"),
-        ("updated", "updat"), ("update", "updat"),
-        ("profile", "profil"), ("middleware", "middlewar"),
-        ("response", "respons"), ("responses", "respons"),
-        ("launch", "launch"), ("product", "product"), ("path", "path"), ("step", "step"),
-        ("far", "far"), ("budget", "budget"), ("concept", "concept"),
-        ("isolated", "isol"), ("widget", "widget"), ("sibling", "sibl"),
-        ("web", "web"), ("framework", "framework"), ("database", "databas"),
-        ("layer", "layer"), ("authenticate", "authent"), ("auth", "auth"),
-        ("role", "role"), ("email", "email"), ("hash", "hash"),
-        ("status", "status"), ("error", "error"), ("api", "api"), ("account", "account"),
-        ("one", "one"), ("two", "two"), ("three", "three"),
-        ("four", "four"), ("five", "five"),
+        ("creating", "creat"),
+        ("created", "creat"),
+        ("creat", "creat"),
+        ("create", "creat"),
+        ("pagination", "pagin"),
+        ("paginate", "pagin"),
+        ("rate", "rate"),
+        ("limits", "limit"),
+        ("limiter", "limit"),
+        ("limit", "limit"),
+        ("caching", "cach"),
+        ("cache", "cach"),
+        ("documentation", "document"),
+        ("docs", "doc"),
+        ("doc", "doc"),
+        ("password", "password"),
+        ("passwords", "password"),
+        ("reset", "reset"),
+        ("resetting", "reset"),
+        ("logging", "log"),
+        ("loadtesting", "loadtest"),
+        ("testing", "test"),
+        ("load", "load"),
+        ("id", "id"),
+        ("ratelimit", "ratelimit"),
+        ("registration", "registr"),
+        ("time", "time"),
+        ("birth", "birth"),
+        ("join", "join"),
+        ("updated", "updat"),
+        ("update", "updat"),
+        ("profile", "profil"),
+        ("middleware", "middlewar"),
+        ("response", "respons"),
+        ("responses", "respons"),
+        ("launch", "launch"),
+        ("product", "product"),
+        ("path", "path"),
+        ("step", "step"),
+        ("far", "far"),
+        ("budget", "budget"),
+        ("concept", "concept"),
+        ("isolated", "isol"),
+        ("widget", "widget"),
+        ("sibling", "sibl"),
+        ("web", "web"),
+        ("framework", "framework"),
+        ("database", "databas"),
+        ("layer", "layer"),
+        ("authenticate", "authent"),
+        ("auth", "auth"),
+        ("role", "role"),
+        ("email", "email"),
+        ("hash", "hash"),
+        ("status", "status"),
+        ("error", "error"),
+        ("api", "api"),
+        ("account", "account"),
+        ("one", "one"),
+        ("two", "two"),
+        ("three", "three"),
+        ("four", "four"),
+        ("five", "five"),
     ];
 
     /// No-op synonym table. A fn item (not a closure): the pinned
@@ -281,8 +336,14 @@ mod tests {
         assert_eq!(canonical_key("user-schema", no_synonym), "schema user");
         assert_eq!(canonical_key("user_schema", no_synonym), "schema user");
         assert_eq!(canonical_key("UserSchema", no_synonym), "schema user");
-        assert_eq!(canonical_key("the user schema api", no_synonym), "api schema user");
-        assert_eq!(canonical_key("registering users", no_synonym), "regist user");
+        assert_eq!(
+            canonical_key("the user schema api", no_synonym),
+            "api schema user"
+        );
+        assert_eq!(
+            canonical_key("registering users", no_synonym),
+            "regist user"
+        );
         assert_eq!(
             canonical_key("creating cached systems", no_synonym),
             "cach creat system"
@@ -297,10 +358,19 @@ mod tests {
     fn canonical_key_raw_synonym_lookup_before_normalization() {
         // RAW "register_user" maps to "create_user" BEFORE normalization; the
         // normalized "register user" must NOT map (direct lookup, no chain).
-        assert_eq!(canonical_key("register_user", fixture_synonyms), "creat user");
-        assert_eq!(canonical_key("register user", fixture_synonyms), "regist user");
+        assert_eq!(
+            canonical_key("register_user", fixture_synonyms),
+            "creat user"
+        );
+        assert_eq!(
+            canonical_key("register user", fixture_synonyms),
+            "regist user"
+        );
         // Trimmed raw lookup: surrounding whitespace does not defeat the synonym.
-        assert_eq!(canonical_key("  register_user  ", fixture_synonyms), "creat user");
+        assert_eq!(
+            canonical_key("  register_user  ", fixture_synonyms),
+            "creat user"
+        );
     }
 
     #[test]

@@ -81,11 +81,13 @@ pub fn reserve(
     // reservation policy must never panic on a caller-supplied TTL.
     let expires_at = now
         .checked_add_signed(ttl)
-        .ok_or_else(|| ReserveError { ttl: ttl_std })?;
+        .ok_or(ReserveError { ttl: ttl_std })?;
 
     // Snapshot the holder before mutating: the decision below must not hold a
     // borrow of `graph` across `set_reservation`.
-    let held = graph.reservation(node).map(|r| (r.agent_id.clone(), r.expires_at));
+    let held = graph
+        .reservation(node)
+        .map(|r| (r.agent_id.clone(), r.expires_at));
 
     let reservation = match held {
         // No lock yet — create.
@@ -144,11 +146,7 @@ pub fn release(graph: &mut Graph, node: NodeId, agent: &AgentId) -> Result<(), L
 
 /// The live reservation on `node`, if any — `None` once it has expired.
 /// Active iff `now < expires_at`.
-pub fn active_reservation<'a>(
-    graph: &'a Graph,
-    node: NodeId,
-    now: DateTime<Utc>,
-) -> Option<&'a Reservation> {
+pub fn active_reservation(graph: &Graph, node: NodeId, now: DateTime<Utc>) -> Option<&Reservation> {
     graph.reservation(node).filter(|r| now < r.expires_at)
 }
 
@@ -213,8 +211,7 @@ mod tests {
 
         // Re-reserve 10 min later with a longer ttl: expiry advances, agent and
         // node unchanged, still exactly one reservation.
-        let second =
-            reserve(&mut g, n, &agent("alice"), Duration::from_secs(60), ts(10)).unwrap();
+        let second = reserve(&mut g, n, &agent("alice"), Duration::from_secs(60), ts(10)).unwrap();
         assert_eq!(second.expires_at, ts(10) + chrono::Duration::seconds(60));
         assert_eq!(second.agent_id, agent("alice"));
         assert_eq!(second.node_id, n);
@@ -239,8 +236,14 @@ mod tests {
         match err {
             LamboError::Conflict(msg) => {
                 assert!(msg.contains("alice"), "message should name holder: {msg}");
-                assert!(msg.contains(&original.expires_at.to_string()), "message should name expiry: {msg}");
-                assert!(msg.contains("bob") || msg.contains("reserved"), "message should be about the node: {msg}");
+                assert!(
+                    msg.contains(&original.expires_at.to_string()),
+                    "message should name expiry: {msg}"
+                );
+                assert!(
+                    msg.contains("bob") || msg.contains("reserved"),
+                    "message should be about the node: {msg}"
+                );
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
@@ -280,7 +283,10 @@ mod tests {
 
         let err = release(&mut g, n, &agent("bob")).unwrap_err();
         match err {
-            LamboError::Conflict(msg) => assert!(msg.contains("alice") && msg.contains("bob"), "message should name both agents: {msg}"),
+            LamboError::Conflict(msg) => assert!(
+                msg.contains("alice") && msg.contains("bob"),
+                "message should name both agents: {msg}"
+            ),
             other => panic!("expected Conflict, got {other:?}"),
         }
 
@@ -293,7 +299,10 @@ mod tests {
         let (mut g, n) = graph_with_node();
         let err = release(&mut g, n, &agent("alice")).unwrap_err();
         match err {
-            LamboError::Store(StoreError::NotFound(msg)) => assert!(msg.contains("reservation"), "message should mention reservation: {msg}"),
+            LamboError::Store(StoreError::NotFound(msg)) => assert!(
+                msg.contains("reservation"),
+                "message should mention reservation: {msg}"
+            ),
             other => panic!("expected NotFound, got {other:?}"),
         }
     }
@@ -315,10 +324,20 @@ mod tests {
     fn reserve_on_missing_node_errors() {
         let (mut g, _) = graph_with_node();
         let missing = uid(999);
-        let err = reserve(&mut g, missing, &agent("alice"), Duration::from_secs(30), ts(0)).unwrap_err();
+        let err = reserve(
+            &mut g,
+            missing,
+            &agent("alice"),
+            Duration::from_secs(30),
+            ts(0),
+        )
+        .unwrap_err();
         match err {
             LamboError::Store(StoreError::NotFound(msg)) => {
-                assert!(msg.contains(&missing.to_string()), "message should name the node: {msg}")
+                assert!(
+                    msg.contains(&missing.to_string()),
+                    "message should name the node: {msg}"
+                )
             }
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -328,7 +347,14 @@ mod tests {
     #[test]
     fn out_of_range_ttl_is_typed_error() {
         let (mut g, n) = graph_with_node();
-        let err = reserve(&mut g, n, &agent("alice"), Duration::from_secs(u64::MAX), ts(0)).unwrap_err();
+        let err = reserve(
+            &mut g,
+            n,
+            &agent("alice"),
+            Duration::from_secs(u64::MAX),
+            ts(0),
+        )
+        .unwrap_err();
         match err {
             LamboError::Other(e) => assert!(
                 e.downcast_ref::<ReserveError>().is_some(),
@@ -407,11 +433,17 @@ mod tests {
         let err = release(&mut g, n, &agent("bob")).unwrap_err();
         match err {
             LamboError::Conflict(msg) => {
-                assert!(msg.contains("alice") && msg.contains("bob"), "message should name both agents: {msg}")
+                assert!(
+                    msg.contains("alice") && msg.contains("bob"),
+                    "message should name both agents: {msg}"
+                )
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
-        assert!(g.reservation(n).is_some(), "denied release must not clear the lock");
+        assert!(
+            g.reservation(n).is_some(),
+            "denied release must not clear the lock"
+        );
 
         // ...and the original owner can still clean up the expired lock.
         release(&mut g, n, &agent("alice")).unwrap();

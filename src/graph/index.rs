@@ -15,8 +15,7 @@
 
 use std::collections::HashMap;
 
-use rust_stemmers::{Algorithm, Stemmer};
-
+use crate::graph::canonical::normalize_tokens;
 use crate::types::{Concept, GraphSnapshot, NodeId, Scored};
 
 /// BM25 term-frequency saturation (spec-pinned constant).
@@ -24,15 +23,9 @@ const BM25_K1: f64 = 1.2;
 /// BM25 document-length normalization (spec-pinned constant).
 const BM25_B: f64 = 0.75;
 
-/// Stopwords dropped before stemming — the shared canonical-normalizer set
-/// (contract with T2.2, see dev-diary/fixtures convention).
-const STOPWORDS: [&str; 13] = [
-    "the", "a", "an", "for", "of", "at", "in", "to", "on", "and", "or", "is", "are",
-];
-
 /// Inverted index over concept content.
 ///
-/// Terms are produced by [`tokenize`] (the T2.2 canonical-normalizer contract);
+/// Terms are produced by [`normalize_tokens`] (the T2.2 canonical-normalizer contract);
 /// each term maps to a posting list of `(concept id -> in-document frequency)`.
 /// Document lengths (token counts) are kept per concept for BM25's length
 /// normalization; totals are maintained for `avgdl`.
@@ -62,7 +55,7 @@ impl InvertedIndex {
         if self.doc_tokens.contains_key(&c.id) {
             self.remove(c.id);
         }
-        let tokens = tokenize(&c.content);
+        let tokens = normalize_tokens(&c.content);
         for t in &tokens {
             self.postings
                 .entry(t.clone())
@@ -118,7 +111,7 @@ impl InvertedIndex {
         if self.total_docs == 0 {
             return Vec::new();
         }
-        let terms = tokenize(query);
+        let terms = normalize_tokens(query);
         if terms.is_empty() {
             return Vec::new();
         }
@@ -155,51 +148,12 @@ impl InvertedIndex {
     }
 }
 
-/// Tokenize content for indexing and querying: lowercase -> split on `[-_ ]` and
-/// camelCase boundaries -> drop stopwords -> Porter-stem (rust-stemmers English).
-///
-/// Duplicate tokens are retained (in-document term frequency counts occurrences).
-/// The order matches the canonical-normalizer convention documented in
-/// `scripts/gen-fixtures.py` / `src/fixtures.rs`.
-// T2.6 seam: replace with crate::graph::canonical::normalize_tokens at integration
-fn tokenize(content: &str) -> Vec<String> {
-    let stemmer = Stemmer::create(Algorithm::English);
-    let chars: Vec<char> = content.chars().collect();
-    let mut tokens = Vec::new();
-    let mut word = String::new();
-    let flush = |word: &mut String, out: &mut Vec<String>| {
-        if word.is_empty() {
-            return;
-        }
-        let lowered = word.to_lowercase();
-        word.clear();
-        if !STOPWORDS.contains(&lowered.as_str()) {
-            out.push(stemmer.stem(&lowered).into_owned());
-        }
-    };
-    for (i, &ch) in chars.iter().enumerate() {
-        // camelCase boundary: lower/digit -> Upper, or end of an acronym run
-        // (Upper -> Upper -> lower splits before the last Upper: "APIKey" -> "API","Key").
-        let camel_boundary = ch.is_uppercase()
-            && i > 0
-            && (chars[i - 1].is_lowercase()
-                || chars[i - 1].is_ascii_digit()
-                || (chars[i - 1].is_uppercase()
-                    && chars.get(i + 1).is_some_and(|n| n.is_lowercase())));
-        if ch.is_whitespace() || ch == '-' || ch == '_' || camel_boundary {
-            flush(&mut word, &mut tokens);
-            if !ch.is_whitespace() && ch != '-' && ch != '_' {
-                // keep the uppercase char that started the new word
-                word.push(ch);
-            }
-        } else {
-            word.push(ch);
-        }
-    }
-    flush(&mut word, &mut tokens);
-    tokens
-}
-
+/// Tokenizer for indexing and querying: the shared canonical normalizer
+/// (T2.2, `src/graph/canonical.rs::normalize_tokens`) — lowercase, split on
+/// `[-_ ]` + camelCase boundaries, drop stopwords, Porter-stem. Duplicate
+/// tokens are retained so in-document term frequency counts occurrences.
+/// Imported, never forked (T2.6 phase-doc contract; the local seam copy was
+/// removed at integration).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,18 +194,26 @@ mod tests {
 
     #[test]
     fn tokenize_matches_canonical_contract() {
-        assert_eq!(tokenize("Create User"), vec!["creat", "user"]);
-        assert_eq!(tokenize("create"), vec!["creat"]);
-        assert_eq!(tokenize("pagination"), vec!["pagin"]);
-        assert_eq!(tokenize("rate-limiter"), vec!["rate", "limit"]);
-        assert_eq!(tokenize("rate_limiter"), vec!["rate", "limit"]);
-        assert_eq!(tokenize("RateLimiter"), vec!["rate", "limit"]);
-        assert_eq!(tokenize("APIKey"), vec!["api", "key"]);
-        assert_eq!(tokenize(""), Vec::<String>::new());
+        assert_eq!(normalize_tokens("Create User"), vec!["creat", "user"]);
+        assert_eq!(normalize_tokens("create"), vec!["creat"]);
+        assert_eq!(normalize_tokens("pagination"), vec!["pagin"]);
+        assert_eq!(normalize_tokens("rate-limiter"), vec!["rate", "limit"]);
+        assert_eq!(normalize_tokens("rate_limiter"), vec!["rate", "limit"]);
+        assert_eq!(normalize_tokens("RateLimiter"), vec!["rate", "limit"]);
+        // Acronym runs are NOT split: the canonical tokenizer follows the fixture
+        // convention (lower->Upper camelCase boundaries only, matching
+        // gen-fixtures.py's regex), so "APIKey" indexes as one term "apikey".
+        // The integration seam copy split acronym runs ("api","key"); reconciled
+        // in favor of the canonical tokenizer (import, don't fork).
+        assert_eq!(normalize_tokens("APIKey"), vec!["apikey"]);
+        assert_eq!(normalize_tokens(""), Vec::<String>::new());
         // Stopwords are dropped, not stemmed.
-        assert_eq!(tokenize("the of and to"), Vec::<String>::new());
+        assert_eq!(normalize_tokens("the of and to"), Vec::<String>::new());
         // Duplicates retained: term frequency counts occurrences.
-        assert_eq!(tokenize("user user schema"), vec!["user", "user", "schema"]);
+        assert_eq!(
+            normalize_tokens("user user schema"),
+            vec!["user", "user", "schema"]
+        );
     }
 
     #[test]

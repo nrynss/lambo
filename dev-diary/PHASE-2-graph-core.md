@@ -48,7 +48,7 @@ fixture and after every mutation in tests.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/graph/canonical.rs
-status:     claimed:main-swarm (worktree worktrees/p2-t2.2-canonicalization)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p2)
 ```
 Spec §7.1 steps 1–5 (step 6, hybrid/vector, is T7.2's — leave a seam: the pipeline returns
 `Unmatched(canonical_key)` and the caller decides):
@@ -120,7 +120,7 @@ it). No custom split fn (cut).
 requires:   T1.1
 fixture-ok: yes
 owns:       src/graph/index.rs
-status:     claimed:main-swarm (worktree worktrees/p2-t2.6-inverted-index)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p2)
 ```
 In-memory inverted index over concept content, per-session `df`, BM25 scoring — recall
 phase 1's keyword source (spec §8). Incremental: updated on node create/update/remove, not
@@ -136,7 +136,7 @@ against fixture graphs.
 requires:   T2.1
 fixture-ok: yes
 owns:       src/graph/reserve.rs
-status:     claimed:main-swarm (worktree worktrees/p2-t2.7-reservations)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p2)
 ```
 Spec §11 soft locks: advisory, expiring, same-agent re-reservation extends, cross-agent
 returns `AlreadyReserved`. Surfaced in recall output (T5.3 reads active reservations).
@@ -293,16 +293,18 @@ separate rebuild path), `search(query, limit) -> Vec<Scored<NodeId>>`. BM25
 lock, synchronous, pure; no error paths (API returns `()`/`Vec`, so no
 `LamboError`/`StoreError` needed).
 
-**Tokenization — SEAM USED (T2.2's `canonical.rs` absent in this worktree at build
-time).** Private `fn tokenize` implements the pinned T2.2 contract locally:
-lowercase -> split `[-_ ]` + camelCase (incl. acronym-run split: `APIKey` ->
-`api`,`key`) -> drop stopwords `{the,a,an,for,of,at,in,to,on,and,or,is,are}` ->
-Porter stem (rust-stemmers `Algorithm::English`). Duplicate tokens retained (tf
-counts occurrences). Marked with the exact seam comment
-`// T2.6 seam: replace with crate::graph::canonical::normalize_tokens at
-integration`; Main swaps at integration and the tokenizer contract test
-(`tokenize_matches_canonical_contract`) double-checks the swap is behavior-neutral.
-Did NOT touch `canonical.rs` (it doesn't exist here) or `graph.rs`.
+**Tokenization — SEAM USED and RESOLVED AT INTEGRATION (2026-08-11).** The local
+private `fn tokenize` built against the pinned T2.2 contract (lowercase -> split
+`[-_ ]` + camelCase incl. acronym-run split -> drop stopwords -> Porter stem,
+duplicates retained for tf) has been **removed**: `src/graph/index.rs` now
+imports `crate::graph::canonical::normalize_tokens` (T2.2), the one tokenizer —
+import, don't fork. **One reconciliation:** the canonical tokenizer does NOT
+split acronym runs (`APIKey` -> `["apikey"]`), following the fixture convention
+(lower->Upper camelCase boundaries only, matching `gen-fixtures.py`'s regex);
+the seam copy split them (`api`,`key`). Canonical behavior wins; the contract
+test `tokenize_matches_canonical_contract` now pins `APIKey` -> `["apikey"]`
+with a comment explaining why. Goldens unaffected (no acronyms in fixtures).
+Did NOT touch `canonical.rs` or `graph.rs`.
 
 **Decisions the next agent must not re-derive:**
 - **Search semantics:** OR over query terms (a concept matching any term is a
