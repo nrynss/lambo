@@ -6,10 +6,16 @@ Default production path while Bedrock is blocked: **BAAI/bge-m3** downloaded fro
 Bedrock when `authorizationStatus` is `AUTHORIZED`.
 
 **Packaging (2026-08-11):** Level B — Cargo features (`embed-bge` / `embed-fixture` /
-`embed-bedrock`) + TOML/env selection. See [level-b-pluggability.md](level-b-pluggability.md).
+`embed-bedrock`) + TOML/env selection + `resolve_backends`. See
+[level-b-pluggability.md](level-b-pluggability.md).
 
 **Do not** mix vectors from different models in one session/index without re-embedding.
-Same dimension (1024) does **not** mean the same embedding space.
+Same dimension does **not** mean the same embedding space. Enforce with
+`EmbeddingContract { kind, model, dim }` on `GraphSnapshot` (helpers in `src/resolve.rs`).
+
+**Dim:** config default 1024 suits BGE + Cockroach demo DDL. It is **not** hardwired in
+`build_embedder`. Stores that persist vectors declare width via
+`GraphStore::vector_dimensions()`.
 
 ---
 

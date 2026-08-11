@@ -37,6 +37,17 @@ pub trait GraphStore: Send + Sync {
     async fn init_schema(&self) -> Result<(), StoreError>;
     fn capabilities(&self) -> Capabilities;
 
+    /// Fixed dense-vector column width when this store persists embeddings.
+    ///
+    /// * `Some(n)` — e.g. Cockroach `VECTOR(n)`; embedder output must be exactly `n`.
+    /// * `None` — no vector column / no constraint (MemoryStore, SQLite without vectors).
+    ///
+    /// Dim is **not** a global product constant: the store schema is the authority.
+    /// Checked at process resolution (`crate::resolve::check_vector_compatibility`).
+    fn vector_dimensions(&self) -> Option<usize> {
+        None
+    }
+
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 
@@ -126,6 +137,13 @@ impl StoreKind {
         }
     }
 }
+
+// Registry design note (do not "simplify" away):
+// * `is_compiled()` is a *message* pre-check so we can say "rebuild with --features X"
+//   without naming uncompiled types.
+// * The real gate is the `#[cfg(feature = "...")]` arm that constructs the adapter.
+// * Both are required: pre-check alone cannot reference uncompiled types; cfg alone
+//   yields a poorer error when the arm is missing.
 
 impl FromStr for StoreKind {
     type Err = StoreError;
@@ -252,12 +270,17 @@ fn missing_feature(kind: StoreKind) -> StoreError {
 
 /// Level B store registry. Fail-closed when the kind's feature is off or the adapter
 /// is not implemented yet.
+///
+/// Prefer [`crate::resolve::resolve_backends`] at process start so store×embedder
+/// compatibility is checked once and the same instances are handed to the command.
 pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> {
+    // Pre-check for a clear rebuild hint (see module comment above is_compiled).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
     }
     match cfg.kind {
         StoreKind::Memory => {
+            // Real gate: type only exists under this feature.
             #[cfg(feature = "store-memory")]
             {
                 Ok(Box::new(MemoryStore::new()))
@@ -268,7 +291,8 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             }
         }
         StoreKind::Cockroach => {
-            // T3.2 will construct CockroachStore from cfg.dsn here.
+            // T3.2: construct CockroachStore; implement `vector_dimensions() -> Some(n)`
+            // from schema / StoreConfig (not a global constant).
             Err(StoreError::Backend(
                 "store-cockroach is enabled (or selected) but CockroachStore is not implemented \
                  yet (T3.2); use kind=memory until P3 lands"
@@ -276,7 +300,7 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             ))
         }
         StoreKind::Sqlite => {
-            // T3.3 will construct SqliteStore from cfg.path here.
+            // T3.3: typically `vector_dimensions() -> None` unless a BLOB path is added.
             Err(StoreError::Backend(
                 "store-sqlite is enabled (or selected) but SqliteStore is not implemented yet \
                  (T3.3); use kind=memory until P3 lands"
@@ -294,15 +318,7 @@ pub fn store_from_env() -> Result<Box<dyn GraphStore>, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    /// Serialize env mutation across store tests (and keep bin tests isolated via their own lock).
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::test_util::env_lock;
 
     #[test]
     fn parses_store_kind() {

@@ -1,0 +1,179 @@
+//! Level B process resolution: one place to build store + embedder and check compatibility.
+//!
+//! Callers (CLI, future `Memory::builder` / `serve`) must use [`resolve_backends`] rather
+//! than calling `build_store` + `build_embedder` separately and re-checking.
+
+use crate::embed::{build_embedder, Embedder, EmbedderConfig, EmbedderKind};
+use crate::store::{build_store, GraphStore, StoreConfig};
+use crate::types::{EmbeddingContract, LamboError};
+use crate::LamboFile;
+
+/// Fully resolved Level B backends ready for `Memory` / CLI.
+pub struct ResolvedBackends {
+    pub store: Box<dyn GraphStore>,
+    pub embedder: Box<dyn Embedder>,
+    pub store_cfg: StoreConfig,
+    pub embedder_cfg: EmbedderConfig,
+    /// Contract to stamp on the session / refuse mid-session model swaps.
+    pub embedding: EmbeddingContract,
+}
+
+/// Store vector width vs embedder output dim (store is the authority when it persists vectors).
+///
+/// * `None` store width (MemoryStore, SQLite without vectors) → any positive embedder dim OK.
+/// * `Some(n)` (e.g. Cockroach `VECTOR(n)`) → embedder must emit exactly `n`.
+pub fn check_vector_compatibility(
+    store_vector_dim: Option<usize>,
+    embedder_dim: usize,
+) -> Result<(), LamboError> {
+    if embedder_dim == 0 {
+        return Err(LamboError::Config("embedder dimension must be > 0".into()));
+    }
+    if let Some(store_dim) = store_vector_dim {
+        if store_dim != embedder_dim {
+            return Err(LamboError::Config(format!(
+                "embedder dim {embedder_dim} is incompatible with store vector width {store_dim} \
+                 (store schema is the authority; change the embedder or the store, not a global constant)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build store + embedder from a resolved process file and enforce store×embedder dim match.
+pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError> {
+    let store_cfg = file.store;
+    let embedder_cfg = file.embedder;
+    let store = build_store(store_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+    let embedder =
+        build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+
+    let embed_dim = embedder.dimensions();
+    if embed_dim != embedder_cfg.dim {
+        return Err(LamboError::Config(format!(
+            "embedder reported dim {embed_dim} but config requested {}",
+            embedder_cfg.dim
+        )));
+    }
+    check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
+
+    let embedding = EmbeddingContract {
+        kind: embedder_cfg.kind.to_string(),
+        model: embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
+        dim: embed_dim,
+    };
+
+    Ok(ResolvedBackends {
+        store,
+        embedder,
+        store_cfg,
+        embedder_cfg,
+        embedding,
+    })
+}
+
+/// Convenience: load file/env then resolve (same as CLI).
+pub fn resolve_from_config_path(
+    explicit: Option<&std::path::Path>,
+) -> Result<ResolvedBackends, LamboError> {
+    let file = LamboFile::load_resolved(explicit)?;
+    resolve_backends(file)
+}
+
+/// Store-only resolution (provision / reader tools that do not embed).
+pub fn resolve_store_only(
+    explicit: Option<&std::path::Path>,
+) -> Result<Box<dyn GraphStore>, LamboError> {
+    let file = LamboFile::load_resolved(explicit)?;
+    build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))
+}
+
+/// Refuse to use an embedder that disagrees with the session's stamped contract.
+///
+/// Call on `load_session` / serve attach when `GraphSnapshot.embedding` is `Some`.
+pub fn assert_session_embedding_compatible(
+    session: Option<&EmbeddingContract>,
+    live: &EmbeddingContract,
+) -> Result<(), LamboError> {
+    match session {
+        None => Ok(()),
+        Some(existing) => existing.ensure_compatible(live),
+    }
+}
+
+/// Human-readable label for logs (never include secrets).
+pub fn describe_embedder(kind: EmbedderKind, dim: usize, model: Option<&str>) -> String {
+    match model {
+        Some(m) if !m.is_empty() => format!("{kind} dim={dim} model={m}"),
+        _ => format!("{kind} dim={dim}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::EmbedderKind;
+    use crate::store::StoreKind;
+
+    #[test]
+    fn vector_compat_none_store_accepts_any_positive_dim() {
+        check_vector_compatibility(None, 512).unwrap();
+        check_vector_compatibility(None, 1024).unwrap();
+        check_vector_compatibility(None, 0).unwrap_err();
+    }
+
+    #[test]
+    fn vector_compat_store_requires_exact_match() {
+        check_vector_compatibility(Some(1024), 1024).unwrap();
+        let err = check_vector_compatibility(Some(1024), 512).unwrap_err();
+        assert!(err.to_string().contains("incompatible"), "{err}");
+    }
+
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn resolve_memory_plus_fixture_any_configured_dim() {
+        // MemoryStore has no vector column → 768 is allowed if the embedder emits 768.
+        // FixtureEmbedder is currently fixed at 1024; use matching config.
+        let file = LamboFile {
+            store: StoreConfig {
+                kind: StoreKind::Memory,
+                dsn: None,
+                path: None,
+            },
+            embedder: EmbedderConfig {
+                kind: EmbedderKind::Fixture,
+                dim: 1024,
+                llama_url: None,
+                llama_model: None,
+            },
+        };
+        let r = resolve_backends(file).unwrap();
+        assert_eq!(r.embedder.dimensions(), 1024);
+        assert_eq!(r.store.vector_dimensions(), None);
+        assert_eq!(r.embedding.dim, 1024);
+        assert_eq!(r.embedding.kind, "fixture");
+    }
+
+    #[test]
+    fn session_contract_rejects_model_space_mix() {
+        let a = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("bge-m3-FP16".into()),
+            dim: 1024,
+        };
+        let b = EmbeddingContract {
+            kind: "bedrock".into(),
+            model: Some("titan-v2".into()),
+            dim: 1024,
+        };
+        assert!(a.ensure_compatible(&b).is_err());
+        assert!(a.ensure_compatible(&a).is_ok());
+        // Same kind+dim, model change still a mix (different embedding space risk).
+        let c = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("other-gguf".into()),
+            dim: 1024,
+        };
+        assert!(a.ensure_compatible(&c).is_err());
+    }
+}

@@ -35,7 +35,7 @@ pub enum EmbedError {
 /// Pluggable embedding backend (default: BGE-M3 via llama.cpp; Bedrock Titan V2 swap-in).
 #[async_trait]
 pub trait Embedder: Send + Sync {
-    /// Embedding dimensionality (Titan V2 / BGE-M3 default: 1024).
+    /// Embedding dimensionality this backend emits.
     fn dimensions(&self) -> usize;
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
@@ -212,17 +212,23 @@ fn missing_feature(kind: EmbedderKind) -> EmbedError {
     ))
 }
 
+// Registry design note (do not "simplify" away):
+// * `is_compiled()` is a *message* pre-check ("rebuild with --features X").
+// * The real gate is each `#[cfg(feature = "...")]` arm that constructs the type.
+// * Both are required: pre-check cannot name uncompiled types; cfg alone is a worse error.
+
 /// Build an embedder from an explicit config (Level B registry).
 ///
 /// Fail-closed when the kind's Cargo feature is off or the adapter is not implemented.
+///
+/// **Dim is not validated against Cockroach here.** Call
+/// [`crate::resolve::resolve_backends`] (or `check_vector_compatibility`) so the
+/// *store's* `vector_dimensions()` is the authority.
 pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
-    // v0.1: the only supported dimension is 1024 (Cockroach `VECTOR(1024)`).
-    if cfg.dim != 1024 {
-        return Err(EmbedError::Unavailable(format!(
-            "v0.1 supports only 1024-dim embeddings (Cockroach VECTOR(1024)); got {}",
-            cfg.dim
-        )));
+    if cfg.dim == 0 {
+        return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
     }
+    // Pre-check for a clear rebuild hint (see comment above).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
     }
@@ -245,7 +251,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         EmbedderKind::Fixture => {
             #[cfg(feature = "embed-fixture")]
             {
-                Ok(Box::new(FixtureEmbedder::new()))
+                Ok(Box::new(FixtureEmbedder::with_dimensions(cfg.dim)?))
             }
             #[cfg(not(feature = "embed-fixture"))]
             {
@@ -308,12 +314,7 @@ mod tests {
 
     #[test]
     fn empty_embedder_env_defaults_kind() {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _g = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_util::env_lock();
 
         env::remove_var("LAMBO_EMBEDDER");
         env::remove_var("LAMBO_EMBED_DIM");
@@ -380,17 +381,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_1024_dim() {
+    fn rejects_zero_dim() {
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Fixture,
-            dim: 512,
+            dim: 0,
             llama_url: None,
             llama_model: None,
         });
         let Err(err) = r else {
             panic!("expected err");
         };
-        assert!(err.to_string().contains("1024"), "{err}");
+        assert!(err.to_string().contains("dim"), "{err}");
+    }
+
+    #[test]
+    #[cfg(feature = "embed-fixture")]
+    fn accepts_non_default_dim_on_fixture() {
+        // Dim is not globally hardwired; MemoryStore has no vector width constraint.
+        let e = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Fixture,
+            dim: 64,
+            llama_url: None,
+            llama_model: None,
+        })
+        .unwrap();
+        assert_eq!(e.dimensions(), 64);
     }
 
     #[test]

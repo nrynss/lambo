@@ -33,12 +33,18 @@
 - Single-writer deployment model for `lambo serve` (see spec §2.2).
 - **Level B pluggability** (design of record: `dev-diary/notes/level-b-pluggability.md`):
   - Cargo **features** compile adapters in (`store-*`, `embed-*`).
-  - **`lambo.toml` / env** select among compiled kinds (`build_store`, `build_embedder`).
-  - Selecting an uncompiled kind is a **hard error** (rebuild with `--features …`).
-  - New backend = adapter module + feature + registry arm — not a core fork.
+  - **`lambo.toml` / env** select among compiled kinds; process start uses
+    `resolve_backends` / `resolve_from_config_path` (**single construction site** →
+    `ResolvedBackends`). Do not rebuild store/embedder inside each command.
+  - Selecting an uncompiled kind or unknown TOML key is a **hard error**.
+  - New backend = adapter module + feature + registry arm + docs — not a core fork.
   - Example config: `lambo.example.toml`.
+- **Vector dim is store-authoritative** (`GraphStore::vector_dimensions()`), not hardwired
+  in the embedder factory. Config `embedder.dim` is expected embedder width (default 1024
+  for BGE demos). Compatibility is checked at resolve time.
 - **Embeddings are portable** (see `dev-diary/notes/embeddings-portable.md`):
-  - Default: **BGE-M3** (1024-d) from **Hugging Face**, run with **llama.cpp** (`embed-bge`).
+  - Default: **BGE-M3** from **Hugging Face**, run with **llama.cpp** (`embed-bge`).
   - Swap-in: **Bedrock Titan V2** when authorized (`embed-bedrock`, T7.1).
-  - Tests: `FixtureEmbedder` only (`embed-fixture`). Never mix model vectors in one session without re-embed.
+  - Tests: `FixtureEmbedder` (`embed-fixture`). Never mix model vectors in one session
+    without re-embed — use `EmbeddingContract` on `GraphSnapshot`.
   - Never commit `models/` weights.

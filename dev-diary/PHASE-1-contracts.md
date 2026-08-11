@@ -249,12 +249,11 @@ uncompiled kind errors with a feature rebuild hint; `lambo.example.toml` parses 
 
 ### T1.5 — Level B pluggability (2026-08-11) — DONE
 
-- Design of record: `dev-diary/notes/level-b-pluggability.md`.
-- Spec errata: §3.3 tables (feature + kind), §3.4 packaging, §6.1 registry construction,
-  §6.2 `--config`, §6.3 optional crates.
-- Cargo features: `store-memory`, `store-cockroach`, `store-sqlite`, `embed-bge`,
-  `embed-fixture`, `embed-bedrock`, `fixtures`, convenience `demo`.
-- Registries: `store::build_store` / `embed::build_embedder` fail closed if kind not compiled.
-- Process file: `lambo.toml` (`LamboFile`) + `lambo.example.toml`; env overlays file.
-- Downstream: P3/P7 implement adapters under features; P8 wires load on `serve`/CLI; P9
-  documents ship profile.
+- Design of record: `dev-diary/notes/level-b-pluggability.md` (kept current).
+- Spec errata: §3.3 tables, §3.4 packaging + dim/contract rules, §6.1–§6.3.
+- Cargo features + registries + `LamboFile` / `lambo.example.toml`.
+- **`src/resolve.rs`:** `resolve_backends`, store×embedder dim check (store-authoritative
+  `vector_dimensions`), `EmbeddingContract` on `GraphSnapshot`.
+- CLI: single construction site (`ResolvedBackends`); no hardwired 1024 in embedder factory.
+- Downstream: T3.2 implements `vector_dimensions() -> Some(n)`; T7.2/T8.1 stamp/check
+  contract on session attach + hybrid write.

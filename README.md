@@ -32,6 +32,10 @@ Adapters are **feature-gated** and **config-selected** (not dynlib plugins):
 | Store | `store-memory` (default), `store-cockroach`, `store-sqlite` | `[store]` in `lambo.toml` / `LAMBO_STORE` |
 | Embedder | `embed-bge` (default), `embed-fixture`, `embed-bedrock` | `[embedder]` / `LAMBO_EMBEDDER` |
 
+Process start uses **`resolve_from_config_path` / `resolve_backends`** once
+(`ResolvedBackends`) — store + embedder + dim compatibility + `EmbeddingContract`. Commands
+must consume that result, not rebuild backends.
+
 Design of record: [`dev-diary/notes/level-b-pluggability.md`](dev-diary/notes/level-b-pluggability.md).  
 Example file: [`lambo.example.toml`](lambo.example.toml).
 
@@ -43,9 +47,16 @@ cargo test
 cargo build --release --features demo
 ```
 
+### Vector width (not hardwired)
+
+- Config `embedder.dim` is the embedder’s expected output width (default **1024** for BGE demos).
+- Stores that **persist** vectors expose `GraphStore::vector_dimensions() -> Some(n)`
+  (Cockroach `VECTOR(n)` when T3.2 lands). MemoryStore returns `None` (no column constraint).
+- Resolution fails if a store width and embedder width disagree.
+
 ## Embeddings (portable)
 
-Embeddings sit behind an **`Embedder` trait** (1024-dim dense, L2-normalized). Backends:
+Embeddings sit behind an **`Embedder` trait** (dense, L2-normalized). Backends:
 
 | Backend | Feature | Role |
 |---------|---------|------|
@@ -53,8 +64,8 @@ Embeddings sit behind an **`Embedder` trait** (1024-dim dense, L2-normalized). B
 | **Amazon Titan Text Embeddings V2** (Bedrock) | `embed-bedrock` | Swap-in when account is authorized (T7.1) |
 | **FixtureEmbedder** | `embed-fixture` | Unit tests / CI only |
 
-Same dimension as Cockroach `VECTOR(1024)` — do **not** mix vectors from different models
-in one session without re-embedding.
+**Do not mix models** in one session without re-embedding (same dim ≠ same space). Session
+identity is `EmbeddingContract { kind, model, dim }` on the graph snapshot.
 
 Setup notes: [`dev-diary/notes/embeddings-portable.md`](dev-diary/notes/embeddings-portable.md).  
 Bedrock account gate: [`dev-diary/notes/bedrock-authorization-blocker.md`](dev-diary/notes/bedrock-authorization-blocker.md).

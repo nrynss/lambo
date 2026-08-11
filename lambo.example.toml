@@ -17,9 +17,12 @@ kind = "memory"
 [embedder]
 # bge_m3 | bedrock | fixture
 kind = "bge_m3"
-# v0.1 requires 1024 (Cockroach VECTOR(1024)); other dims are rejected.
+# Expected embedder output width (default for BGE demos). Not a global product law:
+# stores that persist vectors expose GraphStore::vector_dimensions(); process resolve
+# requires a match. MemoryStore has no vector column → any positive dim is allowed.
 dim = 1024
 # llama.cpp OpenAI-compatible embeddings base URL (kind = bge_m3):
 url = "http://127.0.0.1:8080"
-# Optional model id sent to llama.cpp (empty => server default):
+# Optional model id sent to llama.cpp (empty => server default). Part of EmbeddingContract
+# (kind+model+dim) — do not change mid-session without re-embedding.
 # model = "bge-m3-FP16"

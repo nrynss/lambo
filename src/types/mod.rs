@@ -216,7 +216,7 @@ pub struct Concept {
     pub canonization_status: CanonizationStatus,
     pub blast_radius: Option<i32>,
     pub last_demotion_time: Option<DateTime<Utc>>,
-    /// 1024-dim Titan V2 embedding when present (optional offline).
+    /// Dense embedding when present (width = session [`EmbeddingContract::dim`]).
     pub embedding: Option<Vec<f32>>,
 }
 
@@ -307,6 +307,53 @@ pub struct GraphSnapshot {
     pub synonyms: Vec<Synonym>,
     pub reservations: Vec<Reservation>,
     pub canonization_events: Vec<CanonizationEvent>,
+    /// Active dense-embedding space for this session (kind/model/dim).
+    /// Set on first embed; refuse swaps without re-embed (see `EmbeddingContract`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingContract>,
+}
+
+/// Identity of the dense embedding space used in a session.
+///
+/// Same dim does **not** mean interchangeable models. Stamp this on
+/// [`GraphSnapshot::embedding`] and call [`EmbeddingContract::ensure_compatible`]
+/// before any hybrid/vector write when a contract already exists.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingContract {
+    /// Embedder kind string (`bge_m3`, `bedrock`, `fixture`, …).
+    pub kind: String,
+    /// Optional model id / GGUF name (empty = server default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Dense vector width this session's stored embeddings use.
+    pub dim: usize,
+}
+
+impl EmbeddingContract {
+    /// Error if `other` would mix embedding spaces (kind, model, or dim differ).
+    pub fn ensure_compatible(&self, other: &Self) -> Result<(), LamboError> {
+        if self.dim != other.dim {
+            return Err(LamboError::Config(format!(
+                "session embedding dim {} != live embedder dim {} (re-embed or new session)",
+                self.dim, other.dim
+            )));
+        }
+        if self.kind != other.kind {
+            return Err(LamboError::Config(format!(
+                "session embedder kind {:?} != live {:?} — vectors are not interchangeable \
+                 (re-embed or new session)",
+                self.kind, other.kind
+            )));
+        }
+        let a = self.model.as_deref().unwrap_or("");
+        let b = other.model.as_deref().unwrap_or("");
+        if a != b {
+            return Err(LamboError::Config(format!(
+                "session embedder model {a:?} != live {b:?} — re-embed or new session"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

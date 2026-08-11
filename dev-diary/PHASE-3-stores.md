@@ -58,13 +58,16 @@ in `build_store` for `StoreKind::Cockroach`. `flush()` applies a `MutationBatch`
 transaction in spec §2.4 order: node upserts → edge upserts → deletions → canonization
 transitions. `keyword_candidates` via SQL `LIKE`/full-scan is acceptable (RAM index is the
 real path; this exists for reader processes). `vector_candidates` using the T0.3 spike's
-encode/decode. Capabilities: `VECTOR_SEARCH`. `record_canonization` appends to
+encode/decode. Capabilities: `VECTOR_SEARCH`. **`vector_dimensions() -> Some(n)`** where
+`n` is the schema column width (Cockroach `VECTOR(n)` — typically 1024 for the demo DDL;
+**not** a global constant in the embedder factory). `record_canonization` appends to
 `canonization_events` — **this table is the demo's on-screen artifact; get it right.**
 
 **Done when:** the T1.2 conformance suite passes against a live cluster (feature-gated
 integration test: `cargo test --features store-cockroach` + `LAMBO_COCKROACH_DSN`),
 including `fixtures/mutations-batch.json` round-trip; `build_store(kind=cockroach)` returns
-a working adapter (not a stub error).
+a working adapter; `vector_dimensions()` matches the DDL so `resolve_backends` can reject
+mismatched embedders.
 
 ---
 

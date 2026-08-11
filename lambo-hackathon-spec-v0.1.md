@@ -191,9 +191,19 @@ real, keeps the test suite fast, and restores the embedded tier v0.6.0 was writt
 Dolt's divergence is mostly mechanical (placeholders, upsert syntax) with one genuine gap
 (`VEC_DISTANCE()` vs Cockroach's vector index) — real work, but not hackathon work.
 
-**Construction:** call `build_store(StoreConfig)` / `build_embedder(EmbedderConfig)` (or the
-env helpers). Do not construct adapter types in application code outside those registries
-except in adapter unit tests.
+**Construction:** process start calls `resolve_backends` / `resolve_from_config_path`
+(returns `ResolvedBackends`). Low-level `build_store` / `build_embedder` are for registries
+and unit tests. Application code must not construct concrete adapter types outside those
+paths.
+
+**Vector width:** not a global constant. `GraphStore::vector_dimensions()` returns
+`Some(n)` when the adapter persists dense vectors (Cockroach `VECTOR(n)`), else `None`.
+`resolve::check_vector_compatibility` requires the embedder’s `dimensions()` to match when
+the store declares a width. Config `embedder.dim` is the embedder’s expected output
+(default 1024 for BGE demos).
+
+**Embedding space:** `GraphSnapshot.embedding: Option<EmbeddingContract { kind, model, dim }>`
+stamps the active model space; refuse mid-session kind/model/dim changes without re-embed.
 
 ### 3.4 Packaging — Level B pluggability (errata 2026-08-11)
 
@@ -204,16 +214,19 @@ Adapters are **not** always linked into every binary. v0.1 uses **Level B** pack
 2. **`lambo.toml` and/or env** select among compiled kinds at process start.
    - File: `[store]` / `[embedder]` sections (example: `lambo.example.toml`).
    - Env: `LAMBO_STORE`, `LAMBO_EMBEDDER`, `LAMBO_COCKROACH_DSN`, `LAMBO_LLAMA_EMBED_URL`,
-     `LAMBO_CONFIG`, … — env **overrides** file when set.
+     `LAMBO_CONFIG`, … — **non-empty** env **overrides** file when set.
+   - Unknown TOML keys are rejected (`deny_unknown_fields`).
 3. Selecting a kind that is not compiled in is a **hard error** with a rebuild hint
    (`--features store-cockroach`), never a silent fallback to memory/keyword.
 4. **Default feature set** for everyday `cargo test`: `store-memory`, `embed-bge`,
    `embed-fixture`, `fixtures`. **Demo/ship profile:** enable `store-cockroach` (and
    `embed-bedrock` when authorized), or use the convenience feature `demo`.
+5. **Single construction site:** CLI/`serve` resolve once into `ResolvedBackends` and pass
+   that into the command body (no double `build_*`).
 
 This keeps CI and offline tracks free of Cockroach/AWS weight while the demo binary enables
 the durable path. Design of record: `dev-diary/notes/level-b-pluggability.md`. Runtime
-plugins (dynlib / sidecar, Level C) are **out of scope for v0.1**.
+plugins (dynlib / sidecar, Level C) are **out of v0.1 scope**.
 
 ---
 
@@ -423,16 +436,15 @@ Arena and generational indexing (§5.9) are gone — the store issues UUIDs.
 ### 6.1 Library
 
 ```rust
-// Level B: build adapters from config (feature-gated kinds), not ad-hoc constructors.
-let file = LamboFile::load_resolved(None)?;          // lambo.toml + env overlay
-let store = build_store(file.store)?;                // e.g. cockroach when feature on
-let embedder = build_embedder(file.embedder)?;       // e.g. bge_m3 default
+// Level B: resolve once (store + embedder + dim/contract), then hand into Memory.
+let backends = resolve_from_config_path(None)?;   // lambo.toml + env; fail-closed
 
 let mem = Memory::builder()
     .session("project-doom")
     .agent("agent-A")
-    .store(store)
-    .embedder(embedder)
+    .store(backends.store)
+    .embedder(backends.embedder)
+    .embedding_contract(backends.embedding)       // stamp / refuse model-space mix
     .match_strategy(MatchStrategy::Hybrid)
     .flush_interval(Duration::from_secs(1))
     .scoring_weights(ScoringWeights::default())   // 0.25 / 0.20 / 0.20 / 0.35

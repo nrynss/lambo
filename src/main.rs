@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lambo::{build_embedder, build_store, LamboFile};
+use lambo::{resolve_from_config_path, resolve_store_only, ResolvedBackends};
 
 /// Lambo — agentic graph memory (MCP server + CLI).
 #[derive(Debug, Parser)]
@@ -84,32 +84,27 @@ impl Commands {
         }
     }
 
-    /// Whether this command needs store + embedder (vs store-only ops).
     fn needs_embedder(&self) -> bool {
         !matches!(self, Self::Provision)
     }
 }
 
-/// Load Level B config and construct store + embedder (fail closed).
-fn resolve_backends(config: Option<&std::path::Path>) -> Result<(), String> {
-    let file = LamboFile::load_resolved(config).map_err(|e| e.to_string())?;
-    let _store = build_store(file.store).map_err(|e| e.to_string())?;
-    let _embed = build_embedder(file.embedder).map_err(|e| e.to_string())?;
-    Ok(())
+/// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
+enum Resolved {
+    Full(Box<ResolvedBackends>),
+    StoreOnly,
 }
 
-/// Validate store selection only (provision / schema tooling does not need an embedder).
-fn resolve_store_only(config: Option<&std::path::Path>) -> Result<(), String> {
-    let file = LamboFile::load_resolved(config).map_err(|e| e.to_string())?;
-    let _store = build_store(file.store).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn resolve_for_command(cmd: &Commands, config: Option<&std::path::Path>) -> Result<(), String> {
+fn resolve_for_command(
+    cmd: &Commands,
+    config: Option<&std::path::Path>,
+) -> Result<Resolved, String> {
     if cmd.needs_embedder() {
-        resolve_backends(config)
+        let r = resolve_from_config_path(config).map_err(|e| e.to_string())?;
+        Ok(Resolved::Full(Box::new(r)))
     } else {
-        resolve_store_only(config)
+        let _store = resolve_store_only(config).map_err(|e| e.to_string())?;
+        Ok(Resolved::StoreOnly)
     }
 }
 
@@ -122,60 +117,85 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // Single Level B guard — fail closed before any stub work.
-    if let Err(e) = resolve_for_command(&cmd, config) {
-        let what = if cmd.needs_embedder() {
-            "failed to build backends"
-        } else {
-            "failed to resolve store"
-        };
-        eprintln!("lambo {}: {what}: {e}", cmd.name());
-        return ExitCode::FAILURE;
-    }
+    // Construct once; when Memory/serve land, pass `Resolved` into the command body.
+    let resolved = match resolve_for_command(&cmd, config) {
+        Ok(r) => r,
+        Err(e) => {
+            let what = if cmd.needs_embedder() {
+                "failed to build backends"
+            } else {
+                "failed to resolve store"
+            };
+            eprintln!("lambo {}: {what}: {e}", cmd.name());
+            return ExitCode::FAILURE;
+        }
+    };
 
-    match cmd {
-        Commands::Serve {
-            session,
-            transport,
-            port,
-        } => {
+    match (cmd, resolved) {
+        (
+            Commands::Serve {
+                session,
+                transport,
+                port,
+            },
+            Resolved::Full(backends),
+        ) => {
+            // Hold backends so they are not dead-code; T8.2 will own them for the process life.
+            let _ = (&backends.store, &backends.embedder, &backends.embedding);
             println!(
                 "lambo serve (stub): session={session:?} transport={transport} port={port} \
-                 (store+embedder resolved via Level B config)"
+                 (store+embedder resolved once: {} dim={})",
+                backends.embedding.kind, backends.embedding.dim
             );
             ExitCode::SUCCESS
         }
-        Commands::Demo { scenario } => {
+        (Commands::Demo { scenario }, Resolved::Full(backends)) => {
+            let _ = backends;
             println!("lambo demo (stub): scenario={scenario}");
             ExitCode::SUCCESS
         }
-        Commands::Recall {
-            session,
-            query,
-            top_k,
-        } => {
+        (
+            Commands::Recall {
+                session,
+                query,
+                top_k,
+            },
+            Resolved::Full(backends),
+        ) => {
+            let _ = backends;
             println!("lambo recall (stub): session={session} query={query} top_k={top_k}");
             ExitCode::SUCCESS
         }
-        Commands::Saints { session } => {
+        (Commands::Saints { session }, Resolved::Full(backends)) => {
+            let _ = backends;
             println!("lambo saints (stub): session={session}");
             ExitCode::SUCCESS
         }
-        Commands::Inspect {
-            session,
-            focus,
-            depth,
-        } => {
+        (
+            Commands::Inspect {
+                session,
+                focus,
+                depth,
+            },
+            Resolved::Full(backends),
+        ) => {
+            let _ = backends;
             println!("lambo inspect (stub): session={session} focus={focus} depth={depth}");
             ExitCode::SUCCESS
         }
-        Commands::Stats { session } => {
+        (Commands::Stats { session }, Resolved::Full(backends)) => {
+            let _ = backends;
             println!("lambo stats (stub): session={session}");
             ExitCode::SUCCESS
         }
-        Commands::Provision => {
+        (Commands::Provision, Resolved::StoreOnly) => {
             println!("lambo provision (stub): use scripts/provision.sh for now");
             ExitCode::SUCCESS
+        }
+        _ => {
+            // needs_embedder / resolve_for_command pairing is exhaustive in practice.
+            eprintln!("lambo: internal resolve mismatch");
+            ExitCode::FAILURE
         }
     }
 }
@@ -190,20 +210,19 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// Only runs when both default adapters are compiled; uses an explicit temp
-    /// config path so a developer-local `./lambo.toml` cannot poison discovery.
     #[test]
     #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
     fn resolve_backends_default_memory_and_bge() {
         use std::io::Write;
         use std::sync::{Mutex, OnceLock};
 
+        // Bin tests link the lib without cfg(test), so use a local lock (same discipline
+        // as lib `test_util::env_lock` — do not mutate env without holding a mutex).
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _g = LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-
         for k in [
             "LAMBO_STORE",
             "LAMBO_EMBEDDER",
@@ -243,8 +262,10 @@ dim = 1024
             .unwrap();
         }
 
-        resolve_backends(Some(&path)).expect("default Level B backends");
-        resolve_store_only(Some(&path)).expect("default Level B store");
+        let full = resolve_from_config_path(Some(&path)).expect("full resolve");
+        assert_eq!(full.embedding.dim, 1024);
+        assert!(full.store.vector_dimensions().is_none());
+        let _ = resolve_store_only(Some(&path)).expect("store only");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

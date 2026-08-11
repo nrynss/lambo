@@ -18,7 +18,10 @@ doing real work: merging concepts normalization can't ("register user" / "create
 
 **Level B packaging** (see [`notes/level-b-pluggability.md`](notes/level-b-pluggability.md)):
 features `embed-bge` (default), `embed-fixture` (default), `embed-bedrock` (optional);
-registry `embed::build_embedder`; TOML `[embedder]` / env select kind.
+registry `embed::build_embedder`; process start prefers `resolve_backends`. **Dim is not
+hardwired** — embedder factory accepts any `dim > 0`; store×embedder match is
+`GraphStore::vector_dimensions()` at resolve. Session model space is
+`EmbeddingContract { kind, model, dim }` (stamp + check on hybrid write / serve attach).
 
 **Degradation contract:** if hybrid cannot embed, fall back to `MatchStrategy::Canonical`
 and log once — not "keyword as product." §12.1 still requires the vector index in use for
@@ -80,9 +83,13 @@ On canonical-key miss under `MatchStrategy::Hybrid`: embed, query
 capability absent → create new concept, keyword-only, log the fallback once per session.
 Sits behind T2.2's `Unmatched` seam — do not modify `canonical.rs`.
 
+**EmbeddingContract:** on first embed in a session, stamp `GraphSnapshot.embedding`. On
+later hybrid writes, `ensure_compatible` with the live contract — refuse kind/model/dim
+swaps (BGE vs Titan is the common trap; same dim is not enough).
+
 **Done when:** with `FixtureEmbedder`, the near pair merges with a `Semantic` edge and the
 far text creates a fresh concept; with a no-capability store, behavior is byte-identical to
-`MatchStrategy::Canonical`.
+`MatchStrategy::Canonical`; swapping embedder kind mid-session errors without re-embed.
 
 ---
 

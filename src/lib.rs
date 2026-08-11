@@ -13,7 +13,10 @@ pub mod fixtures;
 pub mod graph;
 pub mod mcp;
 pub mod recall;
+pub mod resolve;
 pub mod store;
+#[cfg(test)]
+pub mod test_util;
 pub mod types;
 
 pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
@@ -25,6 +28,11 @@ pub use embed::{
 #[cfg(feature = "embed-fixture")]
 pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
 
+pub use resolve::{
+    assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,
+    resolve_from_config_path, resolve_store_only, ResolvedBackends,
+};
+
 #[cfg(feature = "store-memory")]
 pub use store::MemoryStore;
 pub use store::{build_store, store_from_env, Capabilities, GraphStore, StoreConfig, StoreKind};
@@ -32,7 +40,7 @@ pub use store::{build_store, store_from_env, Capabilities, GraphStore, StoreConf
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,
-    EdgeType, GraphSnapshot, Interaction, InteractionSpan, LamboError, MatchStrategy, Mutation,
-    MutationBatch, Node, NodeId, RecallHit, RecallQuery, RecallResult, Reservation, Scored,
-    SessionId, StoreError, Synonym,
+    EdgeType, EmbeddingContract, GraphSnapshot, Interaction, InteractionSpan, LamboError,
+    MatchStrategy, Mutation, MutationBatch, Node, NodeId, RecallHit, RecallQuery, RecallResult,
+    Reservation, Scored, SessionId, StoreError, Synonym,
 };

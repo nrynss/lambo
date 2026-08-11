@@ -46,7 +46,7 @@ pub struct BgeM3LlamaCppEmbedder {
     base_url: String,
     /// Model id sent in the request (empty => server default).
     model: String,
-    /// Expected embedding dimensionality (must equal the store's `VECTOR(1024)`).
+    /// Expected embedding dimensionality (must match server output and store schema).
     dim: usize,
 }
 
@@ -65,7 +65,9 @@ impl BgeM3LlamaCppEmbedder {
     ///   `health` paths are appended automatically).
     /// * `model` - model id sent in the request; pass `""` to let the server use its
     ///   default model.
-    /// * `dim` - expected dimensionality (must be 1024 for Cockroach `VECTOR(1024)`).
+    /// * `dim` - expected output width from the server (must be > 0).
+    ///   Store schema compatibility is enforced at process resolution
+    ///   (`GraphStore::vector_dimensions`), not here.
     pub fn new(
         llama_url: impl Into<String>,
         model: impl Into<String>,
@@ -77,10 +79,8 @@ impl BgeM3LlamaCppEmbedder {
                 "llama.cpp base URL is empty".into(),
             ));
         }
-        if dim != 1024 {
-            return Err(EmbedError::Unavailable(format!(
-                "v0.1 supports only 1024-dim embeddings (Cockroach VECTOR(1024)); got {dim}"
-            )));
+        if dim == 0 {
+            return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
         Ok(Self {
             client: build_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,

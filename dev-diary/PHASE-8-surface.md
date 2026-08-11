@@ -11,8 +11,10 @@ parallel: partial   # T8.1 first; then T8.2 ‖ T8.3 ‖ T8.5; T8.4 needs T8.2
 two-agent demo scripted and reproducible. This is where the tracks converge; expect
 integration friction here, not in the tracks — budget for it.
 
-**Level B:** process start loads `LamboFile` → `build_store` / `build_embedder` (spec §3.4,
-§6.1–§6.2). Serve and CLI never hard-code `CockroachStore::connect` or a single embedder.
+**Level B:** process start uses **`resolve_from_config_path` / `resolve_backends`** once
+(spec §3.4, `notes/level-b-pluggability.md`) and hands **`ResolvedBackends`** into the
+command. Serve and CLI never hard-code `CockroachStore::connect`, never rebuild store/
+embedder with a second config pass, and stamp/check `EmbeddingContract` on session attach.
 
 ---
 
@@ -31,13 +33,14 @@ mutation), `reserve`, `canonical_memories`, `stats` (must expose flush lag + log
 `events`, `close` (final flush, clean shutdown of both tasks). Cut list stays cut: no
 `correct`, `merge_concepts`, `resume`, `restart_daemon`, `checkpoint`.
 
-**Level B:** builder accepts `Box<dyn GraphStore>` and `Box<dyn Embedder>` produced by the
-registries (not concrete adapter types). Doc-test uses `LamboFile` + `build_store` /
-`build_embedder` as in spec §6.1.
+**Level B:** builder accepts `ResolvedBackends` (or `Box<dyn GraphStore>` +
+`Box<dyn Embedder>` + `EmbeddingContract` from that resolve). Prefer
+`resolve_backends(LamboFile)` over raw `build_*`. On `load_session`, if
+`snap.embedding` is set, call `assert_session_embedding_compatible`.
 
 **Done when:** a doc-test mirroring the spec §6.1 snippet compiles and runs against
-`MemoryStore` (default features), and `close()` provably flushes the tail (store contains
-everything).
+`MemoryStore` (default features), `close()` flushes the tail, and session attach rejects
+embedder kind/model/dim mismatches.
 
 ---
 
@@ -55,14 +58,12 @@ fight to half a day.** Tools: `lambo_recall`, `lambo_derive`, `lambo_record_acti
 session (spec §2.2); tool calls from multiple MCP clients are tasks inside it, each
 carrying `agent_id`.
 
-**Level B:** on start, `LamboFile::load_resolved(config_path)` → `build_store` +
-`build_embedder` → inject into `Memory`. Fail closed if selected kinds are not compiled.
-Document required features for the live demo binary (`--features demo` or
-`store-cockroach,embed-bge`).
+**Level B:** on start, `resolve_from_config_path` → **`ResolvedBackends`** → inject into
+`Memory` (single construction). Fail closed if kinds are uncompiled, TOML has unknown keys,
+or store×embedder dims disagree. Document demo features (`--features demo`).
 
 **Done when:** `lambo serve` pasted into a Claude Code MCP config works — recall through a
-real client returns the T5.3 context block. That paste-a-path flow is the adoption story;
-test it for real, in `dev-diary/evidence/`. Config file + env selection proven in evidence.
+real client returns the T5.3 context block. Config + resolve proven in `dev-diary/evidence/`.
 
 ---
 
@@ -134,8 +135,8 @@ event feed updating during the demo scenario.
 
 ## Exit criteria
 
-- [ ] Spec §6.1 doc-test green (Level B registry construction); §6.2 commands all exist
-- [ ] `serve` / CLI load `LamboFile` + `build_store` / `build_embedder` (fail closed)
+- [ ] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist
+- [ ] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed
 - [ ] MCP flow proven from a real Claude Code config
 - [ ] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured
 - [ ] Demo app reachable and honest (renders real recall output, not canned text)
