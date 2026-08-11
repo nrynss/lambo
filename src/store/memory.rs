@@ -293,10 +293,9 @@ impl GraphStore for MemoryStore {
 
         // Blast radius is about concept-to-concept dependency orphans. We count ONLY
         // aged inbound {Dependency, Causal, Hierarchical} edges from a concept source.
-        // This excludes provenance Derives (interaction -> concept) and Temporal edges,
-        // which §5.7 mandates on every concept but which the literal §4.1 SQL would
-        // otherwise treat as "dependent on another source" - a spec-internal
-        // inconsistency (see Handoff Log T1.4).
+        // Excludes provenance Derives (interaction -> concept) and Temporal edges.
+        // Spec §4.1 errata (2026-08-11 / T1.4): mandatory §5.7 Derives must not un-orphan
+        // concepts under Stage 3 (see Handoff Log T1.4).
         let structural = [
             EdgeType::Dependency,
             EdgeType::Causal,

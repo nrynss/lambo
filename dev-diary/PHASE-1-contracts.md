@@ -204,8 +204,10 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
   spec-internal inconsistency. Interaction-sourced `Derives`/`Temporal` edges no longer un-orphan
   a concept. Locked by `store::memory::tests::blast_radius_ignores_provenance_derives_edges`.
   P6 readers that recompute blast radius should use the same semantics.
-- **Review disposition (2026-08-11):** `adve-review-t14-fixtures.md` REJECT -> now RESOLVED.
+- **Review disposition (2026-08-11):** `adve-review-t14-fixtures.md` **CLOSED — ACCEPT**.
   All must-fix items closed: (§5.7) Temporal + Derives emitted + invariant test; (Stage 1)
   21 non-Canonical peers; (recall) orphan renamed + phase1-exact tested; (canon keys)
   generated in-script via stem table; (mutations) spec-legal edge endpoint types; (conflict)
   `load_store_relative` rebases onto wall-clock so the recency window is runnable.
+  Spec §4.1 blast SQL errata applied so adapters match MemoryStore (structural concept edges
+  only; provenance Derives/Temporal excluded).

@@ -285,7 +285,13 @@ this scale. The writer enforces it.
 ### 4.1 Structural queries
 
 **Blast radius** (v0.6.0 §7.9 Stage 3: nodes with zero inbound edges after hypothetical
-removal — no recursion needed, the definition is 1-hop):
+removal — no recursion needed, the definition is 1-hop).
+
+**Errata (2026-08-11, T1.4 / MemoryStore):** count only concept-to-concept structural edges
+(`Dependency` / `Causal` / `Hierarchical`). Spec §5.7 requires a `Derives` edge
+(interaction → concept) on every concept; treating that provenance edge as "another inbound
+source" would zero Stage-3 blast radius for every legal graph. `Temporal` edges are likewise
+excluded. Source must be a concept id (not an interaction).
 
 ```sql
 SELECT count(*)
@@ -293,12 +299,17 @@ FROM concepts c
 WHERE c.session_id = $1
   AND EXISTS (
       SELECT 1 FROM edges e
+      JOIN concepts src ON src.id = e.source
       WHERE e.target = c.id AND e.source = $2
+        AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
         AND e.created_at <= now() - ($3 || ' seconds')::INTERVAL
   )
   AND NOT EXISTS (
       SELECT 1 FROM edges e2
+      JOIN concepts src2 ON src2.id = e2.source
       WHERE e2.target = c.id AND e2.source <> $2
+        AND e2.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
+        AND e2.created_at <= now() - ($3 || ' seconds')::INTERVAL
   );
 ```
 
