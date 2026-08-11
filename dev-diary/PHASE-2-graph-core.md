@@ -23,7 +23,7 @@ touches the network.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/graph/mod.rs, src/graph/graph.rs
-status:     not-started
+status:     done (main, 2026-08-11)
 ```
 Node/edge storage (`HashMap<NodeId, Node>`, adjacency in/out by edge type), the temporal
 chain, mutation log emission (every mutation appends to the ordered log the flush task
@@ -159,4 +159,50 @@ module delete.
 
 ## Handoff Log
 
-> _Fill on completion._
+### T2.1 — Graph structure & invariants (done 2026-08-11, by main)
+
+**What exists now:** `src/graph/mod.rs` + `src/graph/graph.rs` (`Graph`, ~1.5k LOC
+with tests), re-exported as `lambo::Graph`. In-RAM bipartite graph with:
+
+- `HashMap<NodeId, Node>` nodes; `HashMap<NodeId, Edge>` edges (id PK) + natural-key
+  index `(source, target, edge_type) -> id` (schema UNIQUE); per-node out/in
+  adjacency grouped by `EdgeType` for recall BFS / structural queries.
+- Temporal chain (`Vec<NodeId>`) built by construction in `insert_interaction`;
+  `MutationEpoch` (bumps per appended mutation); ordered write-behind
+  `mutation_log` drained by `drain_log()` (T3.4's input).
+- Write APIs: `insert_interaction` (auto `Temporal` edge), `insert_concept` (auto
+  `Derives` edge from origin interaction — §5.7 enforced at write time),
+  `upsert_edge` (natural-key dedup + reinforcement), `remove_node` (emits incident
+  `DeleteEdge`s before `DeleteNode`), `remove_edge`,
+  `apply_canonization_transition`, `declare_synonym`, reservations, root_goal,
+  embedding contract.
+- `from_snapshot` (validates every invariant, seeds without log entries) +
+  `snapshot()` (deterministic order: interactions in chain order, concepts/edges by
+  id, synonyms by source_key — **round-trip exact for both fixtures**).
+- `assert_invariants()` collects ALL §5.7 violations into one error (session
+  consistency, endpoints, natural-key uniqueness, finite weights, chain,
+  Derives coverage, Causal/Dependency acyclicity).
+
+**Decisions the next agent must not re-derive:**
+- **Reinforcement constants are ours** (v0.6.0 §5.4 constants not in-repo):
+  `REINFORCE_BUMP = 1.0`, `MAX_EDGE_WEIGHT = 10.0`. Duplicate natural-key write:
+  weight bumps (capped), `reinforcements += 1`, `last_reinforced` = write time, id +
+  `created_at` preserved. Recall never reinforces (read path never calls edge
+  writes).
+- **Temporal edge direction: source = newer, target = previous** (points back in
+  time, matching `scripts/gen-fixtures.py`). The predecessor invariant is therefore
+  an **out**-edge check, not an in-edge check.
+- Structural edge defaults mirror fixtures: `Temporal` w=1.0, `Derives` w=0.9.
+- NaN/±Inf edge weights clamp to 0.0; negatives rejected (`Invariant`).
+- `Causal`/`Dependency` cycle **rejection** is T2.4's BFS; `upsert_edge` stores what
+  it's given and `assert_invariants` detects cycles.
+- Synonyms + reservations are RAM-local (no `Mutation` kind exists); they round-trip
+  through `GraphSnapshot` only. Reservations storage is a `Vec` preserving order.
+- `Graph` owns no lock — `Arc<RwLock<Graph>>` + "never hold across `.await`" is the
+  T2.3+ `Memory` owner's job (spec §6.4).
+- Chain construction rejects forks/cycles/missing covers; re-upserting an
+  interaction must keep its chain position.
+
+**Verification:** 22 new tests, all green; full suite 113 passed / 1 ignored
+(live-calibration needs llama-server). Both fixture snapshots load with
+`assert_invariants` passing and `snapshot()` round-tripping exactly.
