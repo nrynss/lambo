@@ -70,7 +70,7 @@ Spec §7.1 steps 1–5 (step 6, hybrid/vector, is T7.2's — leave a seam: the p
 requires:   T2.1, T2.2
 fixture-ok: yes
 owns:       src/graph/derive.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.3-derive)
 ```
 Spec §7 exactly: per concept — canonicalize → within-call dedup → match-or-create →
 `Derives` edge from current interaction → pairwise `CoOccurrence` capped at
@@ -87,7 +87,7 @@ daemon notify (a channel send; daemon side is T4.x).
 requires:   T2.1, T2.2
 fixture-ok: yes
 owns:       src/graph/action.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.4-record-action)
 ```
 `Resource` concept for the action; `Causal` edges to `produces`/`modifies`, `Dependency` to
 `depends_on`; implicit node creation through the full canonicalization pipeline; **BFS cycle
@@ -104,7 +104,7 @@ unchanged after rejection.
 requires:   T2.1
 fixture-ok: yes
 owns:       src/graph/demote.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.5-demote)
 ```
 Context-overflow chunks → `Observation` nodes; UAX #29 sentence segmentation
 (`unicode-segmentation`); `chunk_group_id` recorded for sibling co-retrieval (T5.2 reads
