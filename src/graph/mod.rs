@@ -43,4 +43,7 @@
 #[allow(clippy::module_inception)]
 pub mod graph;
 
+// Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
+pub mod canonical;
+
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
