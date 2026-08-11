@@ -47,5 +47,8 @@ pub mod graph;
 pub mod canonical;
 // Inverted index + BM25 (T2.6) — spec §8 phase-1 keyword source.
 pub mod index;
+// T2.7 — spec §11 soft-lock reservation policy (see `reserve.rs`). Kept a single
+// additive module: cutting the feature is deleting this line + `reserve.rs`.
+pub mod reserve;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
