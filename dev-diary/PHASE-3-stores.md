@@ -615,3 +615,81 @@ remediation note above).
 `src/store/sqlite.rs`, `migrations/cockroach/001_init.sql` +
 `migrations/sqlite/001_init.sql` (comments only), this file. No Cargo.toml, no
 frozen-file changes.
+
+### T3.6 — Structural queries, both dialects (done, task/p3-t3.6-structural-queries @ base add3e17)
+
+**What T3.6 delivered (the three-way agreement gate — the fns themselves already existed
+from T3.2/T3.3, unchanged):**
+
+**Consolidated + extended agreement matrix in BOTH adapter files** (per-adapter suites,
+twin-shaped):
+- **Both fixtures × every node × min-age {0, 3600s}.** `session-rest-api` (34 nodes:
+  22 concepts incl. Canonical hub 1001, Venerable 1012, D1–D8 orphans C1013–C1020,
+  P1/P2 peers, + 12 interactions) and `session-drift` (11 nodes: 9 concepts + 2
+  interactions), flushed/seeded into the store AND a fresh MemoryStore; every
+  `blast_radius` and `interaction_span` (distinct AND coverage) asserted EXACTLY equal
+  to MemoryStore's naive answer on the same snapshot. **Matrix dimensions: 45 nodes ×
+  2 ages × 2 queries = 180 equality assertions per adapter.**
+- **§4.1 errata probes (un-orphaning).** Mirror of MemoryStore's
+  `blast_radius_ignores_provenance_derives_edges`: a concept whose only structural
+  inbound is a Dependency from the probe node PLUS the mandatory §5.7 `Derives`
+  provenance edge (interaction → concept) must still count as an orphan
+  (`blast_radius == 1` at both ages) — if `Derives` were counted as "another source"
+  every legal graph would show blast radius ~0. A negative probe adds a concept whose
+  ONLY inbound is `Derives` (never an orphan of anyone). Added to BOTH adapters
+  (sqlite test + cockroach live check).
+- **Aged-vs-fresh edge interaction.** An aged `pillar → orphan` Dependency plus a
+  freshly-created `other → orphan` Dependency: at min-age 0 the fresh edge un-orphans
+  (radius 0), at 3600s it is filtered (radius 1); BOTH cutoffs asserted equal to
+  MemoryStore on EVERY node of the synthetic session (sqlite test + extended cockroach
+  live check — the latter previously probed only the pillar node).
+- **F1 single-point coverage case retained** in both suites (coverage 1.0 when the
+  session extent is a single point and distinct >= 1; 0.0 iff distinct == 0).
+
+**Divergences found: NONE.** Both SQL dialects matched MemoryStore exactly on every
+matrix cell on first run (the queries were already MemoryStore-exact from T3.2/T3.3 +
+F1; the matrix is the proof, extended now to drift + age-3600 + errata + aged-edge).
+
+**Documentation:** each adapter's module doc now carries a "Structural queries"
+section spelling the semantics: errata exclusions (`Dependency`/`Causal`/`Hierarchical`
+only; provenance `Derives`/`Temporal` never un-orphan), session-scoped source-concept
+join (an interaction id can never be a structural source), `c.id <> $node`
+self-exclusion, aged-edge gating (`e.created_at <= cutoff` in BOTH queries — spec §4.1
+second errata; span also gates `i.created_at <= cutoff`), the F1 single-point rule, and
+the twin-shaped Rust-computed cutoff (no `INTERVAL`).
+
+**Round-1 review remediation (ReviewT36Structural, 2026-08-11):** two findings
+fixed on `task/p3-t3.6-structural-queries`:
+- **F1 [P2] — the span's both-timestamp gates are now discriminated
+  behaviorally.** Previously every span test collapsed to an all-old origin
+  set, so dropping either `e.created_at`/`i.created_at` gate passed the whole
+  suite. The aged-vs-fresh test (both adapters) now gives the fresh edge's
+  source a **DISTINCT origin interaction** (`i2`), so `span(orphan).distinct`
+  is 2 at min-age 0 and 1 at 1h (fresh edge's origin drops out of the span
+  when the edge is filtered), and adds an **i-gate probe** — an AGED edge
+  (`probe_src → probe_victim`) whose origin interaction `i3` is FRESH:
+  `span(probe_victim).distinct` is 1 at min-age 0 and 0 at 1h. Divergent
+  values are asserted equal to MemoryStore on the same scenario (the matrix
+  loop now covers 8 nodes × 2 ages × 2 queries), plus oracle-independent
+  anchors; a `blast_radius` anchor proves the i-gate is span-only (origin age
+  never affects radius). SQLite also gained a text-level lock mirroring
+  Cockroach's `structural_query_placeholder_order_and_counts`
+  (`structural_span_sql_gates_both_timestamps`: the span SQL contains BOTH
+  `e.created_at <= ?` and `i.created_at <= ?`). Demonstrated: dropping the
+  e-gate alone makes `span(orphan)` at 1h return distinct 2 vs MemoryStore's
+  1; dropping the i-gate alone makes `span(probe_victim)` at 1h return
+  distinct 1 vs 0 — both fail the matrix agreement. (`INTERACTION_SPAN_SQL`
+  was extracted to a module const in sqlite.rs; behavior unchanged.)
+- **F2 [P3] — the cockroach matrix count is now locked.** The twin
+  `check_fixture_structural_agreement` returned its assertion count and
+  `check_structural_queries_agree_with_memory_store` asserts the total == 180
+  (45 nodes × 2 ages × 2 queries), matching the sqlite matrix lock — a future
+  narrowing can no longer silently shrink coverage.
+
+**Verification:** `cargo test --features store-sqlite` → 232 lib tests green (incl. the
+extended matrix + the F1/F2 remediation probes; acceptance was 229+).
+`cargo test --features store-cockroach` with the live `.env` DSN (never printed) → 232
+lib tests green, `conformance_suite` RAN live (zero SKIP), incl. both-fixture matrix
+(with the 180-assertion lock) + errata probe + aged-edge (F1-remediated, both-gate
+discrimination) + single-point checks. Zero new warnings in both feature builds. No
+changes outside `src/store/cockroach.rs` + `src/store/sqlite.rs` + this file.
