@@ -49,6 +49,18 @@
 //!   interaction_span query additionally filters `edges.created_at` (not just
 //!   `i.created_at` as the spec's literal SQL shows) to match `MemoryStore`'s naive
 //!   answer — T3.6's three-way agreement test defines agreement against MemoryStore.
+//!   Full semantics (locked by the T3.6 matrix on BOTH fixtures × every node ×
+//!   min-age {0, 3600s} × MemoryStore equality, plus the errata/aged-edge probes):
+//!   (1) **errata exclusions (2026-08-11 / T1.4)** — only concept-sourced
+//!   `Dependency`/`Causal`/`Hierarchical` count; provenance `Derives`
+//!   (interaction → concept, mandatory §5.7) and `Temporal` must never un-orphan a
+//!   concept, or Stage-3 blast radius would collapse to ~0 on every legal graph;
+//!   (2) `c.id <> $node` self-exclusion, matching MemoryStore's skip;
+//!   (3) **aged edges only** — `e.created_at <= cutoff` in BOTH queries, and span
+//!   also gates `i.created_at <= cutoff` (spec §4.1 second errata); (4) **F1
+//!   single-point rule** — `coverage` is `0.0` only when `distinct == 0`; a non-empty
+//!   span over a single-point session extent reports `1.0` (canonization Stage 2
+//!   parity in short sessions).
 //! - **`chunk_group_id` (T2.5) is a first-class column** (P3 review round 1
 //!   remediation). `concepts.chunk_group_id STRING` (nullable) is declared in the
 //!   `CREATE TABLE` for fresh installs AND added via `ALTER TABLE concepts ADD COLUMN
@@ -2300,8 +2312,13 @@ mod conformance {
         assert_eq!(ae, be);
     }
 
-    async fn check_structural_queries_agree_with_memory_store(store: &CockroachStore) {
-        let snap = load_snapshot("session-rest-api").unwrap();
+    /// T3.6 matrix for ONE fixture: seed it into the live Cockroach store AND a
+    /// fresh MemoryStore, then assert EVERY node (concepts + interactions) ×
+    /// min-age {0, 3600s} × both queries answers EXACTLY like MemoryStore's
+    /// naive scan on the same snapshot. Seeding is an idempotent upsert, so
+    /// re-runs against a persistent cluster converge.
+    async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &str) {
+        let snap = load_snapshot(fixture).unwrap();
         let sid = snap.session_id.clone();
         store.seed(&snap).await.unwrap();
 
@@ -2311,28 +2328,68 @@ mod conformance {
             Arc::new(m)
         };
 
-        // Three-way agreement probe (T3.6 will formalize): every concept, both queries,
-        // min-age 0 (fixture timestamps are in the past, so both cutoffs admit all).
-        for c in &snap.concepts {
-            let mem_br = mem.blast_radius(&sid, c.id, Duration::ZERO).await.unwrap();
-            let crdb_br = store
-                .blast_radius(&sid, c.id, Duration::ZERO)
-                .await
-                .unwrap();
-            assert_eq!(mem_br, crdb_br, "blast_radius({})", c.id);
-            let mem_span = mem
-                .interaction_span(&sid, c.id, Duration::ZERO)
-                .await
-                .unwrap();
-            let crdb_span = store
-                .interaction_span(&sid, c.id, Duration::ZERO)
-                .await
-                .unwrap();
+        let node_ids: Vec<NodeId> = snap
+            .concepts
+            .iter()
+            .map(|c| c.id)
+            .chain(snap.interactions.iter().map(|i| i.id))
+            .collect();
+        let ages = [Duration::ZERO, Duration::from_secs(3600)];
+        for node in &node_ids {
+            for age in ages {
+                let mem_br = mem.blast_radius(&sid, *node, age).await.unwrap();
+                let crdb_br = store.blast_radius(&sid, *node, age).await.unwrap();
+                assert_eq!(mem_br, crdb_br, "blast_radius({fixture}, {node}, {age:?})");
+                let mem_span = mem
+                    .interaction_span(&sid, *node, age)
+                    .await
+                    .unwrap();
+                let crdb_span = store
+                    .interaction_span(&sid, *node, age)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    mem_span, crdb_span,
+                    "interaction_span({fixture}, {node}, {age:?}): mem={mem_span:?} crdb={crdb_span:?}"
+                );
+            }
+        }
+
+        // Deterministic anchors on rest-api (independent of the oracle): eight
+        // concepts depend on the Canonical hub 1001 exclusively; span = 6
+        // distinct interactions over 25 of 55 minutes.
+        if fixture == "session-rest-api" {
+            let hub: NodeId = snap
+                .concepts
+                .iter()
+                .find(|c| c.id.0.to_string().ends_with("001001"))
+                .unwrap()
+                .id;
             assert_eq!(
-                mem_span, crdb_span,
-                "interaction_span({}): mem={mem_span:?} crdb={crdb_span:?}",
-                c.id
+                store.blast_radius(&sid, hub, Duration::ZERO).await.unwrap(),
+                8,
+                "hub 1001 blast radius anchor"
             );
+            let span = store
+                .interaction_span(&sid, hub, Duration::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(span.distinct, 6);
+            assert!(
+                (span.coverage - 25.0 / 55.0).abs() < 1e-9,
+                "hub 1001 span anchor: {span:?}"
+            );
+        }
+    }
+
+    /// T3.6 acceptance: the three-way agreement matrix on BOTH fixture graphs —
+    /// `session-rest-api` (22 concepts incl. Canonical hub 1001, Venerable
+    /// 1012, D1–D8 orphans, P1/P2 peers) and `session-drift` (9 concepts) —
+    /// every node × min-age {0, 3600s}, blast_radius + interaction_span
+    /// (distinct AND coverage) exactly equal to MemoryStore.
+    async fn check_structural_queries_agree_with_memory_store(store: &CockroachStore) {
+        for fixture in ["session-rest-api", "session-drift"] {
+            check_fixture_structural_agreement(store, fixture).await;
         }
     }
 
@@ -2371,13 +2428,21 @@ mod conformance {
         mem.flush(&fresh).await.unwrap();
 
         let one_hour = Duration::from_secs(3600);
-        for min_age in [Duration::ZERO, one_hour] {
-            let mem_br = mem.blast_radius(&sid, pillar, min_age).await.unwrap();
-            let crdb_br = store.blast_radius(&sid, pillar, min_age).await.unwrap();
-            assert_eq!(mem_br, crdb_br, "blast_radius(min_age={min_age:?})");
-            let mem_span = mem.interaction_span(&sid, pillar, min_age).await.unwrap();
-            let crdb_span = store.interaction_span(&sid, pillar, min_age).await.unwrap();
-            assert_eq!(mem_span, crdb_span, "interaction_span(min_age={min_age:?})");
+        // Aged-vs-fresh edge interaction: EVERY node × both cutoffs must agree
+        // with MemoryStore exactly (the aged pillar -> orphan edge vs the
+        // freshly created other -> orphan edge).
+        for node in [pillar, orphan, other, i1] {
+            for min_age in [Duration::ZERO, one_hour] {
+                let mem_br = mem.blast_radius(&sid, node, min_age).await.unwrap();
+                let crdb_br = store.blast_radius(&sid, node, min_age).await.unwrap();
+                assert_eq!(mem_br, crdb_br, "blast_radius({node}, {min_age:?})");
+                let mem_span = mem.interaction_span(&sid, node, min_age).await.unwrap();
+                let crdb_span = store.interaction_span(&sid, node, min_age).await.unwrap();
+                assert_eq!(
+                    mem_span, crdb_span,
+                    "interaction_span({node}, {min_age:?}): mem={mem_span:?} crdb={crdb_span:?}"
+                );
+            }
         }
         // The age filter is doing real work: with min_age=0 the fresh edge un-orphans;
         // with min_age=1h it is filtered and the orphan still counts.
@@ -2394,6 +2459,52 @@ mod conformance {
             1,
             "fresh edge filtered at min_age=1h"
         );
+    }
+
+    /// §4.1 errata probe (T3.6): mirror of MemoryStore's
+    /// `blast_radius_ignores_provenance_derives_edges` against the live SQL
+    /// adapter. §5.7 requires every concept to carry a `Derives` edge
+    /// (interaction → concept); if blast_radius counted that inbound edge as
+    /// "another source", every concept would look non-orphaned and Stage-3
+    /// blast radius would collapse to ~0. Cockroach must ignore provenance
+    /// (`Derives`/`Temporal`) edges exactly like MemoryStore — never
+    /// un-orphaning a concept through them.
+    async fn check_structural_queries_errata_derives_probe(store: &CockroachStore) {
+        let sid = SessionId::from(format!("conformance-errata-{}", Uuid::new_v4()));
+        let old_ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let orphan = NodeId::new();
+        let alone = NodeId::new();
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, old_ts),
+                plant_concept(&sid, pillar, i1, "pillar", old_ts, None),
+                plant_concept(&sid, orphan, i1, "orphan", old_ts, None),
+                plant_concept(&sid, alone, i1, "alone", old_ts, None),
+                // pillar -> orphan (Dependency): the only structural inbound.
+                plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
+                // orphan ALSO has the mandatory §5.7 Derives from its origin
+                // interaction — counting it would un-orphan orphan.
+                plant_edge(&sid, i1, orphan, EdgeType::Derives, old_ts),
+                // alone has ONLY the Derives provenance: never an orphan of
+                // anyone (no structural inbound edge exists at all).
+                plant_edge(&sid, i1, alone, EdgeType::Derives, old_ts),
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let mem = MemoryStore::new();
+        mem.flush(&batch).await.unwrap();
+
+        for min_age in [Duration::ZERO, Duration::from_secs(3600)] {
+            let want = mem.blast_radius(&sid, pillar, min_age).await.unwrap();
+            assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
+            let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
+            assert_eq!(
+                got, want,
+                "Cockroach must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
+            );
+        }
     }
 
     /// F1: a single-interaction session (temporal extent is one point) with a
@@ -2534,6 +2645,7 @@ mod conformance {
         check_seed_load_full_snapshot_roundtrip(&store).await;
         check_structural_queries_agree_with_memory_store(&store).await;
         check_structural_queries_age_filter_agrees(&store).await;
+        check_structural_queries_errata_derives_probe(&store).await;
         check_interaction_span_single_point_session_coverage(&store).await;
         check_record_canonization_appends_and_is_idempotent(&store).await;
     }
