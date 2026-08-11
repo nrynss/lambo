@@ -173,17 +173,47 @@ trouble than it's worth at this scale. Each adapter owns its SQL.
 
 ### 3.3 Adapters
 
-| Adapter | Purpose | Status in v0.1 |
-|---------|---------|----------------|
-| `CockroachStore` | Hackathon primary, distributed vector index | ships |
-| `SQLiteStore` | Test suite, local-first embedded tier | ships |
-| `DoltStore` | Versioned memory, branch-based blast radius | v0.7.0 |
-| `MemoryStore` | Unit tests, no I/O | ships |
+| Adapter | Cargo feature | Config `kind` | Purpose | v0.1 |
+|---------|---------------|---------------|---------|------|
+| `MemoryStore` | `store-memory` (default) | `memory` | Unit tests, fixture-ok tracks, no I/O | ships |
+| `CockroachStore` | `store-cockroach` | `cockroach` | Hackathon primary, distributed vector index | ships |
+| `SqliteStore` | `store-sqlite` | `sqlite` | Fast tests, local-first embedded tier | ships |
+| `DoltStore` | *(v0.7)* | `dolt` | Versioned memory, branch-based blast radius | deferred |
 
-SQLite is the second adapter rather than Dolt because it proves the abstraction is real,
-keeps the test suite fast, and restores the embedded tier v0.6.0 was written for. Dolt's
-divergence is mostly mechanical (placeholders, upsert syntax) with one genuine gap
+| Embedder | Cargo feature | Config `kind` | Purpose | v0.1 |
+|----------|---------------|---------------|---------|------|
+| `BgeM3LlamaCppEmbedder` | `embed-bge` (default) | `bge_m3` | Default dense path (HF + llama.cpp) | ships |
+| `FixtureEmbedder` | `embed-fixture` (default) | `fixture` | Deterministic tests / CI | ships |
+| `BedrockEmbedder` | `embed-bedrock` | `bedrock` | Titan V2 when account authorized | ships when unlocked |
+
+SQLite is the second store adapter rather than Dolt because it proves the abstraction is
+real, keeps the test suite fast, and restores the embedded tier v0.6.0 was written for.
+Dolt's divergence is mostly mechanical (placeholders, upsert syntax) with one genuine gap
 (`VEC_DISTANCE()` vs Cockroach's vector index) — real work, but not hackathon work.
+
+**Construction:** call `build_store(StoreConfig)` / `build_embedder(EmbedderConfig)` (or the
+env helpers). Do not construct adapter types in application code outside those registries
+except in adapter unit tests.
+
+### 3.4 Packaging — Level B pluggability (errata 2026-08-11)
+
+Adapters are **not** always linked into every binary. v0.1 uses **Level B** packaging:
+
+1. **Cargo features** compile adapters in (tables in §3.3). Optional crates (`sqlx`, AWS
+   SDK, `reqwest` for BGE) are pulled only by the matching feature.
+2. **`lambo.toml` and/or env** select among compiled kinds at process start.
+   - File: `[store]` / `[embedder]` sections (example: `lambo.example.toml`).
+   - Env: `LAMBO_STORE`, `LAMBO_EMBEDDER`, `LAMBO_COCKROACH_DSN`, `LAMBO_LLAMA_EMBED_URL`,
+     `LAMBO_CONFIG`, … — env **overrides** file when set.
+3. Selecting a kind that is not compiled in is a **hard error** with a rebuild hint
+   (`--features store-cockroach`), never a silent fallback to memory/keyword.
+4. **Default feature set** for everyday `cargo test`: `store-memory`, `embed-bge`,
+   `embed-fixture`, `fixtures`. **Demo/ship profile:** enable `store-cockroach` (and
+   `embed-bedrock` when authorized), or use the convenience feature `demo`.
+
+This keeps CI and offline tracks free of Cockroach/AWS weight while the demo binary enables
+the durable path. Design of record: `dev-diary/notes/level-b-pluggability.md`. Runtime
+plugins (dynlib / sidecar, Level C) are **out of scope for v0.1**.
 
 ---
 
@@ -224,7 +254,7 @@ CREATE TABLE concepts (
     canonization_status STRING NOT NULL DEFAULT 'None',
     blast_radius        INT,
     last_demotion_time  TIMESTAMPTZ,
-    embedding           VECTOR(1024),        -- Bedrock Titan v2
+    embedding           VECTOR(1024),        -- dense 1024-d (BGE-M3 default / Titan V2 swap-in)
     UNIQUE (session_id, canonical_key),
     INDEX (session_id, canonization_status)
 );
@@ -393,11 +423,16 @@ Arena and generational indexing (§5.9) are gone — the store issues UUIDs.
 ### 6.1 Library
 
 ```rust
+// Level B: build adapters from config (feature-gated kinds), not ad-hoc constructors.
+let file = LamboFile::load_resolved(None)?;          // lambo.toml + env overlay
+let store = build_store(file.store)?;                // e.g. cockroach when feature on
+let embedder = build_embedder(file.embedder)?;       // e.g. bge_m3 default
+
 let mem = Memory::builder()
     .session("project-doom")
     .agent("agent-A")
-    .store(CockroachStore::connect(&dsn).await?)
-    .embedder(BedrockEmbedder::titan_v2(&aws_config))
+    .store(store)
+    .embedder(embedder)
     .match_strategy(MatchStrategy::Hybrid)
     .flush_interval(Duration::from_secs(1))
     .scoring_weights(ScoringWeights::default())   // 0.25 / 0.20 / 0.20 / 0.35
@@ -447,6 +482,7 @@ error.
 ```bash
 lambo serve --session S --transport stdio       # MCP server (primary artifact)
 lambo serve --session S --transport http --port 7700
+lambo serve --config ./lambo.toml --session S   # Level B process file (optional)
 lambo demo --scenario rest-api                  # scripted two-agent demo
 lambo recall --session S --query Q --top-k 5
 lambo saints --session S                        # canonical memories
@@ -462,20 +498,29 @@ Note the distinction from §12.1 — this is *Lambo's* MCP server, which agents 
 memory. CockroachDB's managed MCP server is separate, read-only, and used to inspect the
 store underneath.
 
+Process config (Level B, §3.4): `--config PATH`, else `LAMBO_CONFIG`, else `./lambo.toml`
+if present, else defaults. Env vars override file keys. Secrets (DSN passwords) stay in the
+environment, not committed TOML.
+
 ### 6.3 Crates
 
-| Concern | Crate |
-|---------|-------|
-| Async runtime | `tokio` |
-| SQL | `sqlx` (features: `postgres`, `sqlite`, `uuid`, `chrono`) |
-| MCP | `rmcp` (fall back to hand-rolled stdio JSON-RPC if it fights) |
-| HTTP (demo app, http transport) | `axum` |
-| Embeddings | `aws-sdk-bedrockruntime` |
-| Stemming | `rust-stemmers` (Porter) |
-| Segmentation | `unicode-segmentation` (UAX #29) |
-| Locking | `parking_lot` |
-| CLI | `clap` |
-| Logging | `tracing`, `tracing-subscriber` |
+Core crates always available. **Adapter crates are optional** and enabled by Cargo features
+(§3.4).
+
+| Concern | Crate | Feature gate |
+|---------|-------|--------------|
+| Async runtime | `tokio` | always |
+| Process config | `toml`, `serde` | always |
+| MCP | `rmcp` (fall back to hand-rolled stdio JSON-RPC if it fights) | always |
+| HTTP (demo app, http transport) | `axum` | always |
+| Stemming | `rust-stemmers` (Porter) | always |
+| Segmentation | `unicode-segmentation` (UAX #29) | always |
+| Locking | `parking_lot` | always |
+| CLI | `clap` | always |
+| Logging | `tracing`, `tracing-subscriber` | always |
+| SQL (Cockroach / SQLite adapters) | `sqlx` (`postgres` and/or `sqlite`, `uuid`, `chrono`) | `store-cockroach` / `store-sqlite` |
+| BGE-M3 HTTP client | `reqwest` (rustls) | `embed-bge` |
+| Bedrock Titan | `aws-sdk-bedrockruntime`, `aws-config` | `embed-bedrock` |
 
 ### 6.4 Concurrency rule
 
@@ -663,7 +708,7 @@ v0.6.0 §10.3, reduced but functional — this carries the demo.
 
 | Service | How it is used |
 |---------|----------------|
-| **Amazon Bedrock** | Titan Text Embeddings V2 behind the `Embedder` trait (1024-dim), via `aws-sdk-bedrockruntime`. Claude on Bedrock drives the two demo agents. |
+| **Amazon Bedrock** | Titan Text Embeddings V2 behind the `Embedder` trait (1024-dim), via `aws-sdk-bedrockruntime`, feature `embed-bedrock`. Default dense path is BGE-M3 (`embed-bge`) until the account is authorized. Claude on Bedrock may still drive the two demo agents. |
 | **AWS Lambda** *(optional)* | Scheduled canonization sweep against the store for sessions with no active writer. |
 
 ### 12.3 Judging criteria alignment
@@ -724,10 +769,10 @@ one screen.
 | Sun Aug 9 | **Spike: `sqlx` against CockroachDB's `VECTOR` type.** Provision cluster via ccloud CLI, schema DDL, write and read back a 1024-dim embedding, run a vector-index query. Then repo, license, CI, `GraphStore` trait, `MemoryStore`. |
 | Mon–Tue | *(Native Builder / DataHub submissions — Lambo paused)* |
 | Wed Aug 12 | Graph core: nodes, edges, canonicalization pipeline, `derive()`, `record_action()`, cycle checks. |
-| Thu Aug 13 | `CockroachStore` + `SqliteStore`. Write-behind flush task. `load_session()`. Both structural queries. |
+| Thu Aug 13 | `CockroachStore` (`store-cockroach`) + `SqliteStore` (`store-sqlite`). Write-behind flush. `load_session()`. Structural queries. |
 | Fri Aug 14 | Daemon: scoring, hot list, conflict detection, drift, GC. `recall()` all three phases. |
-| Sat Aug 15 | Canonization, all three stages. Bedrock embedder. Multi-agent + reservations. |
-| Sun Aug 16 | `lambo serve` MCP tools. Demo app. Two-agent scenario scripted and reproducible. |
+| Sat Aug 15 | Canonization, all three stages. Bedrock embedder behind `embed-bedrock` if authorized (else BGE). Multi-agent + reservations. |
+| Sun Aug 16 | `lambo serve` loads Level B config, MCP tools. Demo app. Two-agent scenario scripted and reproducible (`--features demo`). |
 | Mon Aug 17 | Video, README, architecture diagram. Buffer. |
 | Tue Aug 18 | Submit before 5:00 pm ET (2:30 am IST Aug 19). |
 
@@ -739,8 +784,10 @@ Python** — the graph logic is identical either way and the schedule cannot abs
 fight in the middle of the week.
 
 **If the schedule slips, cut in this order:** Lambda sweep → ccloud scripting → SQLite
-adapter → reservations → drift detection. **Never cut:** canonization, blast radius, the
-recall context format.
+adapter (`store-sqlite` feature stays optional) → reservations → drift detection.
+**Never cut:** canonization, blast radius, the recall context format, Level B packaging
+(feature gates + fail-closed selection — do not re-link every adapter into the default
+binary).
 
 ---
 

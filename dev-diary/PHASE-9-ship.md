@@ -26,8 +26,16 @@ credit to the v0.6.0 design doc for honesty (spec §12.4 note); MIT license visi
 GitHub About sidebar (add the license file mapping if GitHub doesn't auto-detect). Repo
 public.
 
-**Done when:** a cold reader reproduces the demo from README alone, and the About section
-shows "MIT license".
+**Level B (required in README):**
+
+- Default features vs demo/ship: `cargo build --release --features demo` (or list
+  `store-cockroach,embed-bge,…`).
+- `lambo.example.toml` / `lambo.toml` + env override rules.
+- Link to `dev-diary/notes/level-b-pluggability.md`.
+- Never instruct users to mix embedder models mid-session without re-embed.
+
+**Done when:** a cold reader reproduces the demo from README alone (including features +
+config), and the About section shows "MIT license".
 
 ---
 
@@ -39,11 +47,12 @@ owns:       docs/architecture.*
 status:     not-started
 ```
 Spec §12.4: "optional, cheap, do it." One diagram: RAM tier (graph, daemon, recall) over
-the write-behind boundary, `GraphStore` adapters fanning out, MCP writer path vs read-only
-reader path (CockroachDB MCP server), Bedrock at the edge. Embed in README.
+the write-behind boundary, `GraphStore` / `Embedder` adapters fanning out (Level B:
+features → registry → `dyn Trait`), MCP writer path vs read-only reader path (CockroachDB
+MCP server), BGE/Bedrock at the edge. Embed in README.
 
 **Done when:** it renders in the README and matches what was actually built (not the spec's
-aspirations).
+aspirations), including feature-gated adapters.
 
 ---
 

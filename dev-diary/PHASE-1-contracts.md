@@ -4,11 +4,13 @@
 id:       P1
 requires: [T0.1]
 blocks:   P2, P3, P4, P5, P6, P7
-parallel: partial   # T1.1 first, then T1.2 ‖ T1.3, then T1.4
+parallel: partial   # T1.1 first, then T1.2 ‖ T1.3, then T1.4; T1.5 with T1.2/T1.3
 ```
 
 **Goal:** freeze the shapes, then hand every downstream track a complete in-RAM store and
-fixture graphs so nobody waits for anybody — least of all for CockroachDB.
+fixture graphs so nobody waits for anybody — least of all for CockroachDB. Also land
+**Level B** packaging (feature gates + registries + `lambo.toml`) so P3/P7 adapters plug
+in without bloating the default binary.
 
 **This phase is small on purpose and load-bearing on purpose.** Its real output is not
 code — it is `MemoryStore` + `fixtures/` that let P2–P7 run six-wide.
@@ -19,7 +21,7 @@ code — it is `MemoryStore` + `fixtures/` that let P2–P7 run six-wide.
 ```yaml
 requires:   T0.1
 fixture-ok: n/a
-owns:       src/types.rs, src/config.rs
+owns:       src/types/, src/config.rs
 status:     done
 ```
 Everything two tracks must agree on, from the spec:
@@ -71,6 +73,9 @@ computed naively** (blast radius by 1-hop scan, interaction span by walking
 `origin_interaction`). Capabilities: neither flag. This is what makes P4/P5/P6 fixture-ok —
 it must be *correct*, not fast; the SQL adapters are checked against it in T3.6.
 
+**Level B:** gated on Cargo feature `store-memory` (default-on). Registered in
+`build_store` for `StoreKind::Memory`.
+
 **Done when:** trait compiles under `async_trait`, `MemoryStore` passes a conformance test
 module (`tests/store_conformance.rs`, written generically so T3.2/T3.3 reuse it verbatim),
 and no SQL type appears in the trait's signatures.
@@ -83,12 +88,16 @@ requires:   T1.1
 fixture-ok: n/a
 owns:       src/embed/mod.rs, src/embed/fixture.rs
 status:     done
+feature:    embed-fixture
 ```
 `Embedder`: `async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>`, dim
 reporting, plus a `FixtureEmbedder` producing deterministic 1024-dim vectors (seeded hash →
 unit vector) so hybrid matching (T7.2) and recall are testable offline and reproducibly.
 Two fixture texts must land within `semantic_match_threshold` of each other and a third
 outside it — document which, T1.4 and T7.2 depend on those pairs.
+
+**Level B:** gated on `embed-fixture` (default-on). Registered in `build_embedder` for
+`EmbedderKind::Fixture`.
 
 **Done when:** determinism test passes (same text ⇒ same vector) and the
 near/far pair contract is asserted in a test.
@@ -128,12 +137,38 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
 
 ---
 
+### T1.5 — Level B packaging (features + registries + `lambo.toml`) ★
+```yaml
+requires:   T1.2, T1.3
+fixture-ok: n/a
+owns:       Cargo.toml [features], src/store/mod.rs (build_store), src/embed/mod.rs
+            (build_embedder), src/config.rs (LamboFile), lambo.example.toml,
+            dev-diary/notes/level-b-pluggability.md
+status:     done
+```
+Sustainability model (spec §3.4):
+
+1. Cargo features: `store-memory`, `store-cockroach`, `store-sqlite`, `embed-bge`,
+   `embed-fixture`, `embed-bedrock`, `fixtures`, convenience `demo`.
+2. Optional deps only behind features (`sqlx`, AWS SDK, `reqwest`).
+3. Registries `build_store` / `build_embedder` — **fail closed** if kind not compiled or
+   adapter not implemented.
+4. `LamboFile` parses `lambo.toml`; env overlays file; discover path via `--config` /
+   `LAMBO_CONFIG` / `./lambo.toml`.
+5. Design note is the packaging contract for P3/P7/P8/P9.
+
+**Done when:** default `cargo test` stays lean (no sqlx/AWS required); selecting an
+uncompiled kind errors with a feature rebuild hint; `lambo.example.toml` parses in tests.
+
+---
+
 ## Exit criteria
 
 - [x] Types + config frozen, round-trip tested, defaults spec-exact
 - [x] `GraphStore` + `MemoryStore` (+ memory unit tests; full `tests/store_conformance.rs` can land with T3.x)
 - [x] `Embedder` + deterministic fixture embedder with documented near/far pairs
 - [x] Fixtures committed — announced in Handoff Log; go signal sent (**P2–P7 unblocked**)
+- [x] Level B packaging landed (T1.5): features, registries, `lambo.toml`
 
 ---
 
@@ -211,3 +246,15 @@ behind `#[cfg(any(test, feature = "fixtures"))]`):
   `load_store_relative` rebases onto wall-clock so the recency window is runnable.
   Spec §4.1 blast SQL errata applied so adapters match MemoryStore (structural concept edges
   only; provenance Derives/Temporal excluded).
+
+### T1.5 — Level B pluggability (2026-08-11) — DONE
+
+- Design of record: `dev-diary/notes/level-b-pluggability.md`.
+- Spec errata: §3.3 tables (feature + kind), §3.4 packaging, §6.1 registry construction,
+  §6.2 `--config`, §6.3 optional crates.
+- Cargo features: `store-memory`, `store-cockroach`, `store-sqlite`, `embed-bge`,
+  `embed-fixture`, `embed-bedrock`, `fixtures`, convenience `demo`.
+- Registries: `store::build_store` / `embed::build_embedder` fail closed if kind not compiled.
+- Process file: `lambo.toml` (`LamboFile`) + `lambo.example.toml`; env overlays file.
+- Downstream: P3/P7 implement adapters under features; P8 wires load on `serve`/CLI; P9
+  documents ship profile.

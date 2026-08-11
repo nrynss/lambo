@@ -5,6 +5,9 @@ Default production path while Bedrock is blocked: **BAAI/bge-m3** downloaded fro
 **Hugging Face**, served with **llama.cpp**. Swap to **Amazon Titan Text Embeddings V2** on
 Bedrock when `authorizationStatus` is `AUTHORIZED`.
 
+**Packaging (2026-08-11):** Level B — Cargo features (`embed-bge` / `embed-fixture` /
+`embed-bedrock`) + TOML/env selection. See [level-b-pluggability.md](level-b-pluggability.md).
+
 **Do not** mix vectors from different models in one session/index without re-embedding.
 Same dimension (1024) does **not** mean the same embedding space.
 

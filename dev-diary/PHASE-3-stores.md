@@ -15,6 +15,17 @@ SQL.
 **Design rule (spec §3.1):** the interface speaks Lambo's vocabulary, never the database's.
 Each adapter owns its SQL; runtime `sqlx::query`, no macros.
 
+**Level B packaging** (see [`notes/level-b-pluggability.md`](notes/level-b-pluggability.md)):
+
+| Adapter | Cargo feature | `store.kind` | Status |
+|---------|---------------|--------------|--------|
+| `MemoryStore` | `store-memory` (default) | `memory` | done (T1.2) |
+| `CockroachStore` | `store-cockroach` | `cockroach` | T3.2 |
+| `SqliteStore` | `store-sqlite` | `sqlite` | T3.3 |
+
+Registry: `store::build_store(StoreConfig)`. Selecting an uncompiled kind fails closed.
+`sqlx` is optional and pulled only by the SQL store features.
+
 ---
 
 ### T3.1 — Schema DDL, both dialects
@@ -40,8 +51,10 @@ requires:   T1.2, T3.1
 fixture-ok: no   # needs the T0.2 cluster; unit-level SQL shape tests only
 owns:       src/store/cockroach.rs
 status:     not-started
+feature:    store-cockroach
 ```
-Full `GraphStore` impl over `sqlx::PgPool`. `flush()` applies a `MutationBatch` in one
+Full `GraphStore` impl over `sqlx::PgPool`, gated on feature `store-cockroach`, registered
+in `build_store` for `StoreKind::Cockroach`. `flush()` applies a `MutationBatch` in one
 transaction in spec §2.4 order: node upserts → edge upserts → deletions → canonization
 transitions. `keyword_candidates` via SQL `LIKE`/full-scan is acceptable (RAM index is the
 real path; this exists for reader processes). `vector_candidates` using the T0.3 spike's
@@ -49,8 +62,9 @@ encode/decode. Capabilities: `VECTOR_SEARCH`. `record_canonization` appends to
 `canonization_events` — **this table is the demo's on-screen artifact; get it right.**
 
 **Done when:** the T1.2 conformance suite passes against a live cluster (feature-gated
-integration test, `LAMBO_COCKROACH_DSN` env), including `fixtures/mutations-batch.json`
-round-trip.
+integration test: `cargo test --features store-cockroach` + `LAMBO_COCKROACH_DSN`),
+including `fixtures/mutations-batch.json` round-trip; `build_store(kind=cockroach)` returns
+a working adapter (not a stub error).
 
 ---
 
@@ -60,15 +74,19 @@ requires:   T1.2, T3.1
 fixture-ok: yes  # sqlite::memory: — no external dependency at all
 owns:       src/store/sqlite.rs
 status:     not-started
+feature:    store-sqlite
 ```
-Same shape over `sqlx::SqlitePool`. No `VECTOR_SEARCH` capability — `vector_candidates`
-returns `StoreError::Unsupported`. Placeholder syntax (`?` vs `$1`) and interval arithmetic
+Same shape over `sqlx::SqlitePool`, gated on feature `store-sqlite`, registered in
+`build_store` for `StoreKind::Sqlite`. No `VECTOR_SEARCH` capability — `vector_candidates`
+returns `StoreError::Capability`. Placeholder syntax (`?` vs `$1`) and interval arithmetic
 (SQLite has no `INTERVAL`; compute cutoff timestamps in Rust and bind them — do the same in
 T3.6 for both dialects to keep the queries twin-shaped). **Cut-order note:** 3rd in the cut
 order, but it is also the test suite's fast path — cutting it late is expensive; finish it
 early instead.
 
-**Done when:** the conformance suite passes on `sqlite::memory:` in plain `cargo test`.
+**Done when:** the conformance suite passes on `sqlite::memory:` under
+`cargo test --features store-sqlite` (not required in default features);
+`build_store(kind=sqlite)` returns a working adapter.
 
 ---
 
@@ -115,25 +133,30 @@ fixture-ok: no
 owns:       (blast_radius + interaction_span fns inside cockroach.rs / sqlite.rs — same owner as T3.2/T3.3, claim jointly or sequence)
 status:     not-started
 ```
-The spec §4.1 SQL verbatim for Cockroach; ported placeholders/intervals for SQLite. These
+The spec §4.1 SQL for Cockroach (**errata:** only concept-sourced
+`Dependency`/`Causal`/`Hierarchical` edges — same as `MemoryStore`; provenance
+`Derives`/`Temporal` must not un-orphan); ported placeholders/intervals for SQLite. These
 back canonization Stages 2–3 (spec §10) and the `⚑ Load-bearing pillar` warning — **on the
 never-cut list.**
 
 **Done when:** on `fixtures/session-rest-api.json` flushed into each store, both queries
 return values equal to `MemoryStore`'s naive answers (three-way agreement test). That test
-is the abstraction's proof.
+is the abstraction's proof — and proves Level B adapters honor the same trait contract.
 
 ---
 
 ## Exit criteria
 
-- [ ] Conformance suite green ×3 (memory, sqlite, cockroach)
+- [ ] Conformance suite green ×3 (memory default; sqlite/cockroach under their features)
+- [ ] `build_store` registers both SQL adapters; uncompiled kinds still fail closed
 - [ ] Flush semantics: ordering, retry, degradation, observability all tested
 - [ ] Round-trip load fidelity
-- [ ] Three-way structural-query agreement
+- [ ] Three-way structural-query agreement (incl. §4.1 blast errata)
+- [ ] `sqlx` remains optional (not in default features)
 
 ---
 
 ## Handoff Log
 
-> _Fill on completion. Record the VECTOR encode/decode choice and every dialect divergence._
+> _Fill on completion. Record the VECTOR encode/decode choice and every dialect divergence.
+> Confirm feature flags and `build_store` arms for cockroach/sqlite._

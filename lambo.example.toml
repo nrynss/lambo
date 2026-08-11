@@ -1,0 +1,25 @@
+# Example Lambo process config (Level B pluggability).
+# Copy to lambo.toml and adjust. Secrets stay in .env / the environment — not here.
+#
+# Selection rules: see dev-diary/notes/level-b-pluggability.md
+# - Cargo features decide what is compiled in.
+# - This file (or env) selects among compiled backends.
+# - Unknown or uncompiled `kind` => hard startup error.
+
+[store]
+# memory | cockroach | sqlite
+kind = "memory"
+# Cockroach / Postgres-compatible DSN (prefer env LAMBO_COCKROACH_DSN for secrets):
+# dsn = "postgresql://USER:PASSWORD@HOST:26257/lambo?sslmode=verify-full&sslrootcert=system"
+# SQLite path when kind = "sqlite":
+# path = "./lambo.db"
+
+[embedder]
+# bge_m3 | bedrock | fixture
+kind = "bge_m3"
+# v0.1 requires 1024 (Cockroach VECTOR(1024)); other dims are rejected.
+dim = 1024
+# llama.cpp OpenAI-compatible embeddings base URL (kind = bge_m3):
+url = "http://127.0.0.1:8080"
+# Optional model id sent to llama.cpp (empty => server default):
+# model = "bge-m3-FP16"

@@ -7,7 +7,10 @@
 //!
 //! Run:
 //!   ./scripts/run-llama-embed.sh            # start server if not up
-//!   cargo test --test live_calibration -- --ignored --nocapture
+//!   cargo test --features embed-bge --test live_calibration -- --ignored --nocapture
+
+// Compiles only with embed-bge (BgeM3LlamaCppEmbedder is feature-gated).
+#![cfg(feature = "embed-bge")]
 
 use lambo::embed::{cosine, BgeM3LlamaCppEmbedder};
 use lambo::Embedder;

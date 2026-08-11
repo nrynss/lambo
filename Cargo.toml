@@ -12,25 +12,14 @@ categories = ["asynchronous"]
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
-aws-config = { version = "1", features = ["credentials-login"] }
-aws-sdk-bedrockruntime = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rmcp = "0.1"
 rust-stemmers = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "sqlite",
-    "uuid",
-    "chrono",
-] }
 tokio = { version = "1", features = ["full"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-segmentation = "1"
@@ -39,10 +28,38 @@ thiserror = "2.0.20"
 anyhow = "1.0.104"
 bitflags = "2.13.1"
 
+# --- optional: Level B adapters (see dev-diary/notes/level-b-pluggability.md) ---
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", optional = true, default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+aws-config = { version = "1", optional = true, features = ["credentials-login"] }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+
 [features]
-default = ["fixtures"]
+default = ["store-memory", "embed-bge", "embed-fixture", "fixtures"]
+
+# Stores (GraphStore adapters)
+store-memory = []
+# P3: enable when CockroachStore lands (pulls sqlx + postgres).
+store-cockroach = ["dep:sqlx", "sqlx/postgres"]
+# P3: enable when SqliteStore lands (pulls sqlx + sqlite).
+store-sqlite = ["dep:sqlx", "sqlx/sqlite"]
+
+# Embedders
+embed-fixture = []
+embed-bge = ["dep:reqwest"]
+# T7.1: Bedrock Titan when account is AUTHORIZED.
+embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
-fixtures = []
+fixtures = ["store-memory"]
+
+# Convenience: hackathon / ship profile (store adapters as they land).
+demo = ["store-memory", "store-cockroach", "embed-bge", "embed-fixture", "fixtures"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

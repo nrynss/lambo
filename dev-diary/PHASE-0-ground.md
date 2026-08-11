@@ -25,17 +25,24 @@ Single crate `lambo`, binary + lib. MIT `LICENSE` (spec §12.4 — must be detec
 GitHub About section, so use the stock MIT text verbatim). `.gitignore` covers `target/`,
 `.env`. CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`. Stub README
 stating the single-writer deployment model in one paragraph (spec §2.2) — expanded in T9.1.
-Commit `.env.example` with `LAMBO_COCKROACH_DSN`, `AWS_REGION`, AWS credential names;
-never `.env`.
+Commit `.env.example` with `LAMBO_COCKROACH_DSN`, `LAMBO_STORE`, `LAMBO_EMBEDDER`,
+`AWS_REGION`, AWS credential names; never `.env`. Also `lambo.example.toml` for process
+config (Level B).
 
 Module skeleton in `src/lib.rs`: `types`, `graph`, `store`, `daemon`, `recall`, `canon`,
 `embed`, `mcp`, `cli` — empty `mod.rs` files so every later task's `owns` directory exists
 and `Cargo.toml`/`lib.rs` churn is front-loaded here, not fought over mid-swarm.
 
-Dependencies (spec §6.3): `tokio`, `sqlx` (postgres, sqlite, uuid, chrono, runtime-tokio),
-`rmcp`, `axum`, `aws-sdk-bedrockruntime`, `rust-stemmers`, `unicode-segmentation`,
-`parking_lot`, `clap`, `tracing`, `tracing-subscriber`, `serde`, `serde_json`, `uuid`,
-`chrono`, `async-trait`.
+Dependencies (spec §6.3, **Level B** — see `notes/level-b-pluggability.md`):
+
+- **Always:** `tokio`, `rmcp`, `axum`, `rust-stemmers`, `unicode-segmentation`,
+  `parking_lot`, `clap`, `tracing`, `tracing-subscriber`, `serde`, `serde_json`, `toml`,
+  `uuid`, `chrono`, `async-trait`, `bitflags`, `thiserror`, `anyhow`.
+- **Feature-gated:** `sqlx` (`store-cockroach` / `store-sqlite`), `reqwest` (`embed-bge`),
+  `aws-sdk-bedrockruntime` + `aws-config` (`embed-bedrock`).
+
+Default features: `store-memory`, `embed-bge`, `embed-fixture`, `fixtures`. Do **not** put
+`sqlx` or AWS SDK in the default feature set.
 
 **Done when:** CI is green on the initial commit and `cargo run -- --help` prints a clap
 stub.

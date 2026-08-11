@@ -11,11 +11,14 @@ parallel: partial   # T8.1 first; then T8.2 ‖ T8.3 ‖ T8.5; T8.4 needs T8.2
 two-agent demo scripted and reproducible. This is where the tracks converge; expect
 integration friction here, not in the tracks — budget for it.
 
+**Level B:** process start loads `LamboFile` → `build_store` / `build_embedder` (spec §3.4,
+§6.1–§6.2). Serve and CLI never hard-code `CockroachStore::connect` or a single embedder.
+
 ---
 
 ### T8.1 — `Memory` builder & assembly ★
 ```yaml
-requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3
+requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3, T1.5
 fixture-ok: yes   # assembles against MemoryStore first
 owns:       src/memory.rs
 status:     not-started
@@ -28,8 +31,13 @@ mutation), `reserve`, `canonical_memories`, `stats` (must expose flush lag + log
 `events`, `close` (final flush, clean shutdown of both tasks). Cut list stays cut: no
 `correct`, `merge_concepts`, `resume`, `restart_daemon`, `checkpoint`.
 
+**Level B:** builder accepts `Box<dyn GraphStore>` and `Box<dyn Embedder>` produced by the
+registries (not concrete adapter types). Doc-test uses `LamboFile` + `build_store` /
+`build_embedder` as in spec §6.1.
+
 **Done when:** a doc-test mirroring the spec §6.1 snippet compiles and runs against
-`MemoryStore`, and `close()` provably flushes the tail (store contains everything).
+`MemoryStore` (default features), and `close()` provably flushes the tail (store contains
+everything).
 
 ---
 
@@ -37,19 +45,24 @@ mutation), `reserve`, `canonical_memories`, `stats` (must expose flush lag + log
 ```yaml
 requires:   T8.1
 fixture-ok: yes
-owns:       src/mcp/
+owns:       src/mcp/, src/main.rs (serve flags)
 status:     not-started
 ```
-`lambo serve --session S --transport stdio|http [--port 7700]` via `rmcp`; **fallback
-authorized by spec §6.3: hand-rolled stdio JSON-RPC if rmcp fights — timebox the fight to
-half a day.** Tools: `lambo_recall`, `lambo_derive`, `lambo_record_action`,
+`lambo serve --session S --transport stdio|http [--port 7700] [--config PATH]` via `rmcp`;
+**fallback authorized by spec §6.3: hand-rolled stdio JSON-RPC if rmcp fights — timebox the
+fight to half a day.** Tools: `lambo_recall`, `lambo_derive`, `lambo_record_action`,
 `lambo_reserve`, `lambo_inspect`, `lambo_saints`, `lambo_stats`. One process owns the
 session (spec §2.2); tool calls from multiple MCP clients are tasks inside it, each
 carrying `agent_id`.
 
+**Level B:** on start, `LamboFile::load_resolved(config_path)` → `build_store` +
+`build_embedder` → inject into `Memory`. Fail closed if selected kinds are not compiled.
+Document required features for the live demo binary (`--features demo` or
+`store-cockroach,embed-bge`).
+
 **Done when:** `lambo serve` pasted into a Claude Code MCP config works — recall through a
 real client returns the T5.3 context block. That paste-a-path flow is the adoption story;
-test it for real, in `dev-diary/evidence/`.
+test it for real, in `dev-diary/evidence/`. Config file + env selection proven in evidence.
 
 ---
 
@@ -62,12 +75,15 @@ status:     not-started
 ```
 Spec §6.2: `demo --scenario rest-api`, `recall --session --query --top-k`,
 `saints --session`, `inspect --session --focus --depth`, `stats --session`, `provision`
-(wraps `scripts/provision.sh`). Read-only commands go straight to the store as reader
-processes (spec §2.2) — they must not spin up a writer against a session another process
-owns.
+(wraps `scripts/provision.sh`). Global/shared `--config` where a store is needed. Read-only
+commands go straight to the store as reader processes (spec §2.2) — they must not spin up a
+writer against a session another process owns.
 
-**Done when:** each subcommand runs against a SQLite session file; `saints` and `stats`
-also verified against the live cluster.
+**Level B:** reader CLIs use `build_store` from resolved config (sqlite or cockroach under
+the matching feature). Do not open a second writer.
+
+**Done when:** each subcommand runs against a SQLite session (`--features store-sqlite`);
+`saints` and `stats` also verified against the live cluster (`store-cockroach`).
 
 ---
 
@@ -92,9 +108,9 @@ Spec §13, scripted and **deterministic** — a demo that works 3 times in 5 is 
    server** (read-only — the spec §2.2 reader story made concrete; needs console-side
    setup, do it early, it's an external dependency).
 
-**Done when:** `lambo demo --scenario rest-api` runs end-to-end against the live cluster
-twice consecutively with identical outcomes, and the MCP-server split-screen query is
-rehearsed and screenshotted into `dev-diary/evidence/`.
+**Done when:** `cargo run --features demo -- demo --scenario rest-api` (or equivalent)
+runs end-to-end against the live cluster twice consecutively with identical outcomes, and
+the MCP-server split-screen query is rehearsed and screenshotted into `dev-diary/evidence/`.
 
 ---
 
@@ -118,9 +134,10 @@ event feed updating during the demo scenario.
 
 ## Exit criteria
 
-- [ ] Spec §6.1 doc-test green; §6.2 commands all exist
+- [ ] Spec §6.1 doc-test green (Level B registry construction); §6.2 commands all exist
+- [ ] `serve` / CLI load `LamboFile` + `build_store` / `build_embedder` (fail closed)
 - [ ] MCP flow proven from a real Claude Code config
-- [ ] Demo scenario deterministic ×2 on live infra, evidence captured
+- [ ] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured
 - [ ] Demo app reachable and honest (renders real recall output, not canned text)
 
 ---

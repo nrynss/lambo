@@ -31,8 +31,14 @@
 - Spec of record: `lambo-hackathon-spec-v0.1.md` (frozen). Phase handoffs in `dev-diary/`.
 - Never commit `.env`. Cockroach DSN uses `sslmode=verify-full&sslrootcert=system`.
 - Single-writer deployment model for `lambo serve` (see spec §2.2).
+- **Level B pluggability** (design of record: `dev-diary/notes/level-b-pluggability.md`):
+  - Cargo **features** compile adapters in (`store-*`, `embed-*`).
+  - **`lambo.toml` / env** select among compiled kinds (`build_store`, `build_embedder`).
+  - Selecting an uncompiled kind is a **hard error** (rebuild with `--features …`).
+  - New backend = adapter module + feature + registry arm — not a core fork.
+  - Example config: `lambo.example.toml`.
 - **Embeddings are portable** (see `dev-diary/notes/embeddings-portable.md`):
-  - Default: **BGE-M3** (1024-d) from **Hugging Face**, run with **llama.cpp**.
-  - Swap-in: **Bedrock Titan V2** when `authorizationStatus` is AUTHORIZED.
-  - Tests: `FixtureEmbedder` only. Never mix model vectors in one session without re-embed.
+  - Default: **BGE-M3** (1024-d) from **Hugging Face**, run with **llama.cpp** (`embed-bge`).
+  - Swap-in: **Bedrock Titan V2** when authorized (`embed-bedrock`, T7.1).
+  - Tests: `FixtureEmbedder` only (`embed-fixture`). Never mix model vectors in one session without re-embed.
   - Never commit `models/` weights.

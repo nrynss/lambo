@@ -1,6 +1,7 @@
 //! Lambo — agentic graph memory library.
 //!
-//! Module skeleton for the hackathon build. Contracts land in P1; behavior in later phases.
+//! Backends are **Level B** pluggable: Cargo features compile adapters in;
+//! `lambo.toml` / env select among them. See `dev-diary/notes/level-b-pluggability.md`.
 
 pub mod canon;
 pub mod cli;
@@ -15,12 +16,19 @@ pub mod recall;
 pub mod store;
 pub mod types;
 
-pub use config::{Config, RecallWeights, ScoringWeights};
+pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
+#[cfg(feature = "embed-bge")]
+pub use embed::BgeM3LlamaCppEmbedder;
 pub use embed::{
-    build_embedder, embedder_from_env, BgeM3LlamaCppEmbedder, EmbedError, Embedder, EmbedderConfig,
-    EmbedderKind, FixtureEmbedder,
+    build_embedder, cosine, embedder_from_env, EmbedError, Embedder, EmbedderConfig, EmbedderKind,
 };
-pub use store::{Capabilities, GraphStore, MemoryStore};
+#[cfg(feature = "embed-fixture")]
+pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
+
+#[cfg(feature = "store-memory")]
+pub use store::MemoryStore;
+pub use store::{build_store, store_from_env, Capabilities, GraphStore, StoreConfig, StoreKind};
+
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,

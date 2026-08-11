@@ -22,6 +22,10 @@ fixture graphs as JSON. Any task marked `fixture-ok` starts against those immedi
 swaps to live adapters later. The daemon, recall, and canonization tracks never wait for
 CockroachDB.
 
+**Packaging (Level B):** adapters are feature-gated and config-selected
+([`notes/level-b-pluggability.md`](notes/level-b-pluggability.md)). Default features keep
+memory + BGE + fixtures; Cockroach/Bedrock compile only when their features are enabled.
+
 ---
 
 ## Phase graph
@@ -29,7 +33,7 @@ CockroachDB.
 | Phase | Doc | Requires | Runs parallel with | Blocks |
 |---|---|---|---|---|
 | **P0** Ground & spike | [PHASE-0-ground.md](PHASE-0-ground.md) | — | (T0.1‖T0.2‖T0.4 internally) | everything |
-| **P1** Contracts & fixtures | [PHASE-1-contracts.md](PHASE-1-contracts.md) | T0.1 | — | everything after |
+| **P1** Contracts & fixtures (+ Level B packaging) | [PHASE-1-contracts.md](PHASE-1-contracts.md) | T0.1 | — | everything after |
 | **P2** Graph core | [PHASE-2-graph-core.md](PHASE-2-graph-core.md) | P1 | P3 P4 P5 P6 P7 | P8 |
 | **P3** Stores | [PHASE-3-stores.md](PHASE-3-stores.md) | P1 · T0.3 | P2 P4 P5 P6 P7 | P6 (live queries) P8 |
 | **P4** Daemon | [PHASE-4-daemon.md](PHASE-4-daemon.md) | P1 | P2 P3 P5 P6 P7 | P6 (gc_survived) P8 |

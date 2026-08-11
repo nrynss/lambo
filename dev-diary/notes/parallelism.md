@@ -9,19 +9,20 @@ single-developer serialization of this graph; with agents, the graph is the sche
    language choice. Run first, alone if necessary. Everything downstream is hostage to its
    go/no-go.
 2. **P1 — contracts.** T1.1 (types) → T1.2 (trait + MemoryStore) → T1.4 (fixtures), with
-   T1.3 alongside. Roughly one focused session. Rushing it is false economy: every hour
-   saved here is repaid as cross-track rework.
+   T1.3 alongside and **T1.5 Level B packaging** (features + registries + `lambo.toml`) on
+   the store/embedder traits. Roughly one focused session. Rushing it is false economy:
+   every hour saved here is repaid as cross-track rework.
 
 ## After P1: six independent tracks
 
 | Track | Phase | True upstream | Why it's independent |
 |---|---|---|---|
 | Graph core | P2 | types only | pure in-RAM data structure work |
-| Stores | P3 | trait + DDL + spike | consumes `MutationBatch`, produces `GraphSnapshot` — both frozen in P1 |
+| Stores | P3 | trait + DDL + spike + Level B features | consumes `MutationBatch`, produces `GraphSnapshot`; adapters under `store-cockroach` / `store-sqlite` |
 | Daemon | P4 | types + fixture graphs | reads graph state; fixtures plant every trigger |
 | Recall | P5 | index (T2.6) + fixture graphs | goldens defined against fixtures, not live code |
 | Canonization | P6 | MemoryStore's structural queries | predicates are pure functions; live SQL swaps in later |
-| Embeddings | P7 | Embedder trait + spikes | capability-gated; nothing blocks on it |
+| Embeddings | P7 | Embedder trait + spikes + Level B features | capability-gated; adapters under `embed-bge` / `embed-bedrock` |
 
 **Maximum useful width: ~6 agents** during Aug 12–13. Beyond that, agents start queueing on
 `owns` collisions and cross-track review load.
