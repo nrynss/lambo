@@ -327,3 +327,80 @@ owner (T4.x / P3 Memory) will spawn it. Reservations never enter the log
   assertions in `degrades_past_log_max_and_stops_flushing` under parallel
   execution. Those tests now install a silent TRACE-level default
   (`keep_callsites_enabled`) that registers callsites as `always`.
+
+### T3.3 — SqliteStore (handoff, 2026-08-11, task/p3-t3.3-sqlite-store @ 9d95230)
+
+**What exists:** `src/store/sqlite.rs` — full `GraphStore` over `sqlx::SqlitePool`
+(one connection, `sqlite::memory:` for tests), registered in `build_store` for
+`StoreKind::Sqlite` under feature `store-sqlite`. **mod.rs touches (shared-file
+convention):** (a) `#[cfg(feature = "store-sqlite")] mod sqlite;` +
+`pub use sqlite::SqliteStore;`, (b) the `StoreKind::Sqlite` `build_store` arm
+replaces the "not implemented" Err, (c) `is_ready(Sqlite)` now returns
+`cfg!(feature = "store-sqlite")`, (d) the obsolete `sqlite_fail_closed_message`
+test rewritten as `sqlite_builds_or_fails_closed_by_feature` (it asserted
+`!is_ready()`, which (c) invalidates). No other mod.rs changes; Cockroach arm
+untouched.
+
+**Conformance (12 tests in sqlite.rs, all feature-gated; 2 fixture-gated; suite
+222 lib tests green ×6 runs, zero warnings):** init_schema ×2 idempotent;
+mutations-batch.json flush+load deep-equals the MemoryStore oracle; T3.5
+round-trip shape reused (graph ops → drain_log → flush → `load_session` →
+deep-equal, chain order + index agreement); keyword_candidates (empty-token /
+limit-0 / missing-session guards, oracle-equal); blast_radius + interaction_span
+three-way agreement with MemoryStore on session-rest-api (all 34 nodes × 2 ages;
+hard anchors: hub 1001 → 8, span distinct 6, coverage 25/55); canonization_events
+append via mutation and record_canonization (NotFound on missing concept);
+ISO-8601 fixed-format + lex-ordering + parse-back; demote duplicate Observation
+keys pass while duplicate Entity key fails (partial-UNIQUE, transaction rolled
+back); concurrent flushes across sessions; build_store(kind=sqlite) working
+adapter + is_ready.
+
+**Divergences from the Cockroach shape (twin notes for T3.2 / T3.6):**
+1. **Lazy pool is REQUIRED, not cosmetic.** `build_store` runs in a **sync**
+   startup context (`main.rs` → `resolve_backends`), and
+   `SqlitePoolOptions::connect_lazy_with` spawns a maintenance task via
+   `tokio::spawn`, which **panics outside a Tokio context**. SqliteStore holds
+   `OnceLock<SqlitePool>` and creates the pool on first async use. T3.2's
+   PgPool will hit the identical wall — plan for it.
+2. **Cross-runtime connection-return quirk.** sqlx returns a pool connection via
+   a spawned task; a blocked current-thread runtime never runs it, so
+   `load_session`'s worker thread (load.rs) can time out acquiring against an
+   in-flight return. The T3.5-shape test uses
+   `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` for this
+   reason; multi-thread runtimes (production) are unaffected.
+3. **Fixed ms format truncates sub-ms instants** (by contract). `Utc::now()`
+   does NOT round-trip exactly; ms-aligned timestamps do. Tests use whole-second
+   clocks.
+4. **Structural queries are MemoryStore-exact, not spec-text-exact:** blast
+   radius adds `c.id <> $node` (spec text would count the node against itself);
+   interaction span gates the **edge** age too (`e.created_at <= cutoff AND
+   i.created_at <= cutoff`) because MemoryStore checks both. Both divergences
+   are required for the T3.6 three-way gate; keep them in T3.2.
+5. **keyword_candidates uses `instr(lower(...), ?) > 0`** (exact substring,
+   LIKE-free) rather than `LIKE '%tok%'` — MemoryStore's `contains` has no
+   wildcard semantics. T3.2 may use LIKE; only wildcard-bearing tokens would
+   differ.
+6. **canonization_events load order:** `ORDER BY occurred_at, id` — memory
+   preserves insertion order; random-id ordering broke the append test.
+
+**Schema gap (flagged — affects T3.2 equally):** the T3.1 DDL (both dialects)
+has **no `chunk_group_id` column** on `concepts`, but `Graph::demote` sets it on
+Observations (spec §8 sibling co-retrieval, T5.2). Flush/load drops it; the
+T3.5 round-trip deep-equality test normalizes `chunk_group_id` to None on both
+sides and asserts the loss explicitly. Needs a schema errata (add
+`chunk_group_id TEXT` to both dialects) — Main's call; do not land silently.
+
+**ON CONFLICT + timestamp choices:** concepts target the `id` PK; the partial
+index `(session_id, canonical_key) WHERE concept_type <> 'Observation'` is a
+separate constraint — bare `ON CONFLICT (session_id, canonical_key)` errors at
+runtime (T3.1, verified). Edges target `(source, target, edge_type)` (memory's
+natural-key preference; graph core preserves id/created_at on reinforcement so
+the DO UPDATE SET id = excluded.id is safe). Timestamps:
+`to_rfc3339_opts(SecondsFormat::Millis, true)` everywhere; age cutoffs computed
+in Rust and bound as TEXT so `<=` is lex-valid.
+
+**Not persisted (by design, matches MemoryStore):** session-level
+root_goal/created_at/closed_at (no Mutation kind — None on load), synonyms and
+reservations (S5 — full-snapshot path only, which has no SQLite impl yet),
+concept `embedding` (BLOB unused — never read/written), chunk_group_id (gap
+above).
