@@ -84,6 +84,10 @@ fn tokens_to_key(stems: &mut [String]) -> String {
 ///
 /// RAW-input synonym lookup FIRST (trimmed, as-is, per the pinned fixture
 /// convention), then [`normalize_tokens`], token-sort, join with single spaces.
+///
+/// Synonym keys are matched EXACTLY on the trimmed input: case-sensitive, no
+/// case folding, no whitespace collapsing beyond the leading/trailing trim.
+/// `declare_synonym` keys must match the raw call-site spelling (muse-spark S2).
 pub fn canonical_key(content: &str, synonyms: impl Fn(&str) -> Option<&str>) -> String {
     let raw = content.trim();
     let effective = synonyms(raw).unwrap_or(raw);

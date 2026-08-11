@@ -69,12 +69,13 @@
 //! resolve to the same node is rejected up front — a `Hierarchical` self-loop
 //! is a cycle (§5.7 / adve-review T2.1 M1) and must never be written.
 //!
-//! ## Non-transactionality
+//! ## Validate-then-mutate (no partial writes)
 //!
-//! [`derive`] is not transactional: an error mid-call (practically impossible —
-//! `canonicalize` cannot fail and the interaction was validated first) leaves
-//! earlier writes of that call in place. The graph is never left
-//! invariant-violating, though.
+//! [`derive`] validates every fallible input up front in a read-only pre-pass
+//! (interaction exists; raw- and resolved-reflexive `parent_of` pairs), so the
+//! write loop that follows cannot fail mid-call — an error never leaves a
+//! partial batch in the graph or the mutation log (muse-spark M4). The loop's
+//! reflexive checks remain as unreachable defense-in-depth.
 //!
 //! ## Daemon notify seam (T4.x — do NOT build the channel here)
 //!
@@ -194,6 +195,33 @@ pub fn derive(
     };
     let session_id = graph.session_id().clone();
 
+    // Pre-pass (read-only): hoist every fallible input check here so the write
+    // loop below cannot fail mid-call — derive is validate-then-mutate, never
+    // partially applied (muse-spark M4). canonicalize is read-only, so nothing
+    // is written by this pass. Raw-reflexive AND resolved-reflexive parent_of
+    // pairs (both ends canonicalize to the same key -> same node) are rejected
+    // before any concept or edge exists.
+    for &(parent, child) in parent_of.pairs {
+        if parent == child {
+            return Err(LamboError::Store(StoreError::Invariant(format!(
+                "derive: parent_of pair ({parent}, {child}) is reflexive — a Hierarchical \
+                 self-loop is a cycle (spec §5.7)"
+            ))));
+        }
+        let parent_key = match canonicalize(parent, graph)? {
+            CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
+        };
+        let child_key = match canonicalize(child, graph)? {
+            CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
+        };
+        if parent_key == child_key {
+            return Err(LamboError::Store(StoreError::Invariant(format!(
+                "derive: parent_of pair ({parent}, {child}) resolves to the same canonical \
+                 key ({parent_key:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
+            ))));
+        }
+    }
+
     let mut outcome = DeriveOutcome::default();
     // Nodes written earlier in THIS call (created, or matched and re-upserted).
     // Their node and Derives edge are already written; a later content that
@@ -232,7 +260,10 @@ pub fn derive(
     // Step 5 — pairwise CoOccurrence among the call's concepts (created +
     // matched, deduped), in call order, capped at max_cooccurrence_per_derive
     // edges per call. Direction: earlier-in-call -> later-in-call (CoOccurrence
-    // is symmetric; this convention keeps writes deterministic).
+    // is symmetric; this convention keeps writes deterministic). Policy note
+    // (muse-spark S4): the cap biases connectivity toward early concepts in a
+    // large call (first 10 pairs = pairs among roughly the first 5 concepts of
+    // 8) — spec-§7-allowed, flag for P5 if recall balancing ever cares.
     let mut written = 0usize;
     'pairs: for i in 0..call_nodes.len() {
         for j in (i + 1)..call_nodes.len() {
@@ -272,6 +303,9 @@ pub fn derive(
     // nodes (only recording them in outcome.matched).
     let mut seen_pairs: HashSet<(NodeId, NodeId)> = HashSet::with_capacity(parent_of.pairs.len());
     for &(parent, child) in parent_of.pairs {
+        // Defense-in-depth: both reflexive checks were hoisted to the pre-pass
+        // (validate-then-mutate, muse-spark M4) and are unreachable here — kept
+        // so a future edit cannot silently reintroduce a reflexive write.
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
                 "derive: parent_of pair ({parent}, {child}) is reflexive — a Hierarchical \

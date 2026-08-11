@@ -35,6 +35,17 @@
 //! path does not call edge writes. Decay of `CoOccurrence`/`Semantic` edges is the
 //! daemon GC's job (T4.x), not this module's.
 //!
+//! ## InvertedIndex ownership (P3 contract — muse-spark M3)
+//!
+//! [`InvertedIndex`] (T2.6) is a **separate structure owned by the session owner**
+//! (P3's `Memory`, the `Arc<RwLock<Graph>>` holder) — the graph module itself is
+//! index-free and no write API touches it. The owner MUST mirror every concept
+//! write into the index: `index.add` on every concept create/update (including
+//! `derive`, `record_action`, `demote` creations) and `index.remove` on
+//! `remove_node`. A forgotten mirror is silent staleness (recall returns stale
+//! keyword candidates), so P3 must not rely on memory — the sync contract is
+//! tested in `tests/p2_integration.rs::inverted_index_manual_sync_contract`.
+//!
 //! The exact v0.6.0 constants are not in-repo; the bump/cap below are the v0.1
 //! decision (see Handoff Log T2.1).
 

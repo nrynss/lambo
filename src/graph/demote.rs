@@ -35,7 +35,6 @@
 //! Synchronous and pure like every P2 module: the graph owns no lock and nothing
 //! here holds one across an await (spec §6.4).
 
-use chrono::Utc;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::graph::{canonical, Graph};
@@ -82,9 +81,12 @@ pub fn demote(
     chunk_group_id: &str,
 ) -> Result<Vec<NodeId>, LamboError> {
     // Step 1 — validate the interaction up front. A missing node and a node that
-    // exists but is not an interaction are both `NotFound`.
-    match graph.node(interaction) {
-        Some(Node::Interaction(_)) => {}
+    // exists but is not an interaction are both `NotFound`. The interaction's
+    // `created_at` becomes the logical timestamp for every Observation below —
+    // deterministic, matching `derive`/`record_action` (muse-spark S1; the
+    // pinned signature has no clock param by design).
+    let interaction_created_at = match graph.node(interaction) {
+        Some(Node::Interaction(i)) => i.created_at,
         Some(_) => {
             return Err(LamboError::Store(StoreError::NotFound(format!(
                 "interaction {interaction} not found (node exists but is not an interaction)"
@@ -95,7 +97,7 @@ pub fn demote(
                 "interaction {interaction} not found"
             ))));
         }
-    }
+    };
 
     // Steps 2–4 — one Observation per non-empty sentence, in order.
     let mut created: Vec<NodeId> = Vec::new();
@@ -112,7 +114,7 @@ pub fn demote(
             concept_type: ConceptType::Observation,
             origin_interaction: interaction,
             origin_agent: agent.clone(),
-            created_at: Utc::now(),
+            created_at: interaction_created_at,
             access_count: 0,
             last_accessed: None,
             gc_survived: 0,

@@ -25,8 +25,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::types::{
-    CanonizationEvent, Concept, Edge, EdgeType, GraphSnapshot, Interaction, LamboError, Mutation,
-    MutationBatch, Node, NodeId, Reservation, SessionId, StoreError, Synonym,
+    CanonizationEvent, Concept, ConceptType, Edge, EdgeType, GraphSnapshot, Interaction,
+    LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId, StoreError, Synonym,
 };
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
@@ -393,6 +393,31 @@ impl Graph {
                 "concept {} derives from {derives_from}, which is not an interaction in this graph",
                 c.id
             )));
+        }
+        // Schema §4 `UNIQUE (session_id, canonical_key)`, partial for
+        // Observations (spec errata 2026-08-11 / muse-spark M1-M2): two
+        // non-Observation concepts must never share a canonical key — a
+        // collision fragments the graph and would fail the store's upsert at
+        // flush time (P3). Demoted Observations skip the match step by design
+        // (spec §7) and may legitimately share keys, so they are exempt.
+        if c.concept_type != ConceptType::Observation {
+            let collision = self.nodes.iter().find_map(|(id, n)| match n {
+                Node::Concept(x)
+                    if *id != c.id
+                        && x.canonical_key == c.canonical_key
+                        && x.concept_type != ConceptType::Observation =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            });
+            if let Some(other) = collision {
+                return Err(invariant(format!(
+                    "concept {} canonical_key {:?} collides with concept {other} \
+                     (UNIQUE (session_id, canonical_key), spec §4; Observations exempt)",
+                    c.id, c.canonical_key
+                )));
+            }
         }
         let node = Node::Concept(c.clone());
         self.nodes.insert(c.id, node.clone());
@@ -879,6 +904,22 @@ impl Graph {
             }
         }
 
+        // Canonical-key uniqueness (schema §4 UNIQUE, partial: Observations
+        // exempt — demote creates context-overflow duplicates by design,
+        // spec errata 2026-08-11 / muse-spark M1-M2).
+        let mut keys: HashMap<&str, NodeId> = HashMap::new();
+        for c in self
+            .concepts()
+            .filter(|c| c.concept_type != ConceptType::Observation)
+        {
+            if let Some(prev) = keys.insert(c.canonical_key.as_str(), c.id) {
+                v.push(format!(
+                    "concepts {prev} and {} share canonical_key {:?} (UNIQUE; Observations exempt)",
+                    c.id, c.canonical_key
+                ));
+            }
+        }
+
         // Causal/Dependency/Hierarchical acyclicity (safety net; write-time
         // rejection of Causal/Dependency cycles is T2.4's BFS; Hierarchical is a
         // DAG constraint by definition).
@@ -1211,6 +1252,62 @@ mod tests {
         assert_eq!(d.weight, 0.9);
         assert_eq!(g.edge_count(), 1);
         g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn insert_concept_enforces_partial_canonical_key_uniqueness() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+
+        // Two non-Observation concepts with the same canonical key -> rejected
+        // (schema §4 UNIQUE, spec errata 2026-08-11 / muse-spark M1).
+        let mut c1 = concept(1, iid, "user schema");
+        c1.canonical_key = "schema user".into();
+        g.insert_concept(c1, iid).unwrap();
+        let mut c2 = concept(2, iid, "schema user");
+        c2.canonical_key = "schema user".into();
+        let err = g.insert_concept(c2, iid).unwrap_err().to_string();
+        assert!(err.contains("collides"), "{err}");
+        // Rejection leaves the graph unchanged.
+        assert_eq!(g.node_count(), 2);
+        // Same-id re-upsert is idempotent and allowed (not a collision).
+        let mut c1b = concept(1, iid, "user schema");
+        c1b.canonical_key = "schema user".into();
+        g.insert_concept(c1b, iid).unwrap();
+        assert_eq!(g.node_count(), 2);
+
+        // Observations are exempt (demote creates context-overflow duplicates
+        // by design — muse-spark M2): two Observations sharing a key are fine.
+        let mut o1 = concept(3, iid, "drift note");
+        o1.concept_type = ConceptType::Observation;
+        o1.canonical_key = "note".into();
+        g.insert_concept(o1, iid).unwrap();
+        let mut o2 = concept(4, iid, "drift note");
+        o2.concept_type = ConceptType::Observation;
+        o2.canonical_key = "note".into();
+        g.insert_concept(o2, iid).unwrap();
+        // Observation + Entity sharing a key: only one non-Observation row.
+        let mut o3 = concept(5, iid, "schema user");
+        o3.concept_type = ConceptType::Observation;
+        o3.canonical_key = "schema user".into();
+        g.insert_concept(o3, iid).unwrap();
+        g.assert_invariants().unwrap();
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[test]
+    fn assert_invariants_rejects_duplicate_canonical_keys_on_load() {
+        // A loaded snapshot with two non-Observation concepts sharing a key
+        // must fail assert_invariants (from_snapshot -> invariant check).
+        let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
+        let mut clone = snap.concepts[0].clone();
+        clone.id = NodeId::new();
+        clone.content = "colliding clone".into();
+        snap.concepts.push(clone);
+        let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+        assert!(err.contains("canonical_key"), "{err}");
     }
 
     #[test]

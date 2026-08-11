@@ -6,6 +6,12 @@
 //! [`GraphSnapshot`] only). This module owns the *rules* — expiry, same-agent
 //! extend, cross-agent deny/takeover — and deliberately adds nothing to `Graph`.
 //!
+//! Durability contract (P3 note, muse-spark S5): reservations persist ONLY via
+//! a full [`GraphSnapshot`] save/load (e.g. `store.load_session` /
+//! `MemoryStore::seed`). The write-behind mutation log never carries them — a
+//! writer crash between two snapshot saves loses reservations, which is
+//! tolerable for advisory locks (spec §11) but must be stated, not assumed.
+//!
 //! ## Policy (spec §11, v0.6.0 §10.3.3)
 //!
 //! * Advisory: reservations never block writes; they are visible in other agents'
