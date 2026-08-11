@@ -122,7 +122,7 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{GraphSnapshot, SessionId};
+    use crate::types::GraphSnapshot;
 
     /// Fixture STEM table (`scripts/gen-fixtures.py`, probe-verified against this
     /// module's stemmer — Porter English). `(word, expected stem)`.
@@ -157,10 +157,6 @@ mod tests {
         ("one", "one"), ("two", "two"), ("three", "three"),
         ("four", "four"), ("five", "five"),
     ];
-
-    fn sid() -> SessionId {
-        SessionId::new("test-session")
-    }
 
     /// No-op synonym table. A fn item (not a closure): the pinned
     /// `impl Fn(&str) -> Option<&str>` callback is higher-ranked, and fn items —

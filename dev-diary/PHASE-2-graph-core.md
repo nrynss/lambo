@@ -277,7 +277,7 @@ line in `src/graph/mod.rs`). Spec §7.1 steps 1–5, exactly the pinned exports:
 features): 11 tokenizer/key unit tests + the fixture acceptance test iterating all
 11 rows of `fixtures/canonicalization-cases.json` (gated
 `#[cfg(feature = "fixtures")]`, synonym table mirroring the snapshot:
-`register_user` → `create_user`). STEM-table unit test (82 words from
+`register_user` → `create_user`). STEM-table unit test (80 words from
 `gen-fixtures.py`) confirms rust-stemmers matches the probe-verified fixture
 table verbatim. `graph::` scope: 40 passed / 0 failed. Only touched
 `src/graph/canonical.rs` + `src/graph/mod.rs`; `src/graph/graph.rs` untouched.
