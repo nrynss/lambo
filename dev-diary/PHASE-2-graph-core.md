@@ -232,3 +232,57 @@ Additional decisions downstream agents must know:
 
 Gate at close: `cargo fmt --check`; clippy `-D warnings` (default + no-default);
 119 lib tests × 3 consecutive runs.
+
+### T2.7 — Reservations policy (done 2026-08-11, by worker)
+
+**What exists now:** `src/graph/reserve.rs` (new, ~360 LOC incl. tests) +
+one additive `pub mod reserve;` in `src/graph/mod.rs`. No other files touched —
+in particular **`src/graph/graph.rs` is untouched** (T2.1's RAM-local
+`set_reservation`/`clear_reservation`/`reservation`/`reservations` storage is
+reused as-is; no new storage, no `Mutation` kind).
+
+Policy functions (all take `now: DateTime<Utc>` explicitly — never `Utc::now()`,
+time is mocked in tests):
+
+- `reserve(graph, node, agent, ttl, now) -> Result<Reservation, LamboError>`:
+  missing node -> `StoreError::NotFound`; no lock -> create
+  (`expires_at = now + ttl`); same agent -> extend (expiry replaced, node +
+  agent unchanged); cross-agent live -> `LamboError::Conflict` naming holder +
+  expiry (`"node {n} already reserved by {holder} until {expiry}"`); cross-agent
+  expired (`now >= expires_at`) -> takeover.
+- `release(graph, node, agent) -> Result<(), LamboError>`: owner clears;
+  non-owner -> `Conflict` (lock untouched); no reservation -> `NotFound`.
+- `active_reservation(graph, node, now) -> Option<&Reservation>`: `None` when
+  expired. **Expiry is half-open: active iff `now < expires_at`** (at
+  `now == expires_at` the lock is dead).
+
+**Decisions the next agent must not re-derive:**
+
+- **Expiry boundary is half-open** — `now < expires_at` is live, `now >=
+  expires_at` is expired (chosen so a `ttl` fully elapsed at the instant of
+  expiry; matches `active_reservation` and the takeover trigger).
+- **`release` ignores expiry** — owner/non-owner/no-lock are decided on agent
+  identity alone, per the pinned contract; an expired lock is still
+  owner-releasable (harmless cleanup) and non-owner-release still conflicts.
+- **TTL conversion is a typed error**: `std::time::Duration` ->
+  `chrono::Duration` via `chrono::Duration::from_std`; out-of-range (e.g.
+  `u64::MAX` seconds) yields `pub struct ReserveError` (thiserror), surfaced as
+  `LamboError::Other` and downcastable via `anyhow::Error::downcast_ref`.
+  Not silently clamped, not a bare string.
+- **Borrow discipline**: the policy decision snapshots `(agent_id, expires_at)`
+  by value before calling `set_reservation`, so no `&Graph` borrow is live
+  across the mutation.
+- **`set_reservation` replaces by `node_id`** — create/extend/takeover all
+  funnel through it; the deny path never mutates, so the existing lock is
+  untouched by construction.
+
+**Verification:** 10 new unit tests (mocked time via
+`Utc.timestamp_opt(1_752_000_000, 0)` + minute offsets): fresh reserve expiry,
+same-agent extend (single reservation, agent unchanged, expiry advances),
+cross-agent deny while live (typed `Conflict`, message names holder + expiry,
+lock untouched), cross-agent takeover after expiry, owner release clears,
+non-owner release errors, absent-reservation release errors, expired invisible
+to `active_reservation` (incl. the `now == expires_at` boundary), missing-node
+error, out-of-range TTL typed error. `cargo test graph::` (default features):
+38 passed / 0 failed (28 pre-existing + 10 new). No fixtures read, so no
+`#[cfg(feature = "fixtures")]` gating needed.

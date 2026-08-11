@@ -43,4 +43,8 @@
 #[allow(clippy::module_inception)]
 pub mod graph;
 
+// T2.7 — spec §11 soft-lock reservation policy (see `reserve.rs`). Kept a single
+// additive module: cutting the feature is deleting this line + `reserve.rs`.
+pub mod reserve;
+
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
