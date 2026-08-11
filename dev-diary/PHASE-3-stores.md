@@ -214,8 +214,12 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
   1. Cockroach `STRING`/`UUID`/`JSONB`/`TIMESTAMPTZ`/`INT`/`FLOAT` → SQLite
      `TEXT`/`TEXT`/`TEXT`/`TEXT`/`INTEGER`/`REAL`.
   2. `TIMESTAMPTZ` → TEXT ISO-8601 UTC (`2026-08-11T12:41:19.186Z`), chosen so RFC 3339
-     lexicographic order = time order → adapters can compare in SQL. Adapters write/read
-     with chrono RFC 3339.
+     lexicographic order = time order → adapters can compare in SQL. Adapters MUST write/read
+     a FIXED serialization: chrono `to_rfc3339_opts(SecondsFormat::Millis, true)` →
+     `YYYY-MM-DDTHH:MM:SS.SSSZ` (24 chars, ms always present, `Z` not `+00:00`), keeping SQL
+     lex comparisons valid. chrono's default `to_rfc3339()` is NOT acceptable — it emits
+     `+00:00` and variable-width fractional seconds, breaking lex comparisons against this
+     format.
   3. `now()` default → `strftime('%Y-%m-%dT%H:%M:%fZ','now')` (documented equivalent of
      CURRENT_TIMESTAMP; keeps the ISO-8601 format uniform, adds ms precision).
   4. `embedding VECTOR(1024)` → `BLOB`, **unused** (no VECTOR_SEARCH in SQLite; adapters
@@ -231,5 +235,10 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
   (partial) + 5 regular indexes present. Cockroach DDL not runnable offline (no cluster);
   T3.2 conformance verifies it.
 - **T3.3 notes:** FK enforcement + `ON CONFLICT` targets as above; `interactions.created_at`
-  has NO default (matches spec — adapter must bind it).
+  has NO default (matches spec — adapter must bind it). Upserts against the partial index
+  MUST spell the conflict target with the exact WHERE clause:
+  `ON CONFLICT (session_id, canonical_key) WHERE concept_type <> 'Observation'
+  DO NOTHING` (or `DO UPDATE`). A bare `ON CONFLICT (session_id, canonical_key)` errors at
+  runtime — "does not match any PRIMARY KEY or UNIQUE constraint" — because the table-level
+  UNIQUE was removed (verified on SQLite 3.53.4).
 - Status: lines not edited per task constraints (Main claims centrally).
