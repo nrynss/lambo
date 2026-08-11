@@ -206,3 +206,29 @@ with tests), re-exported as `lambo::Graph`. In-RAM bipartite graph with:
 **Verification:** 22 new tests, all green; full suite 113 passed / 1 ignored
 (live-calibration needs llama-server). Both fixture snapshots load with
 `assert_invariants` passing and `snapshot()` round-tripping exactly.
+
+### T2.1 adve-review remediation (2026-08-11, by main — commit 7f3b6a3)
+
+Adversarial review (`dev-diary/adversarial-review/adve-review-t2.1-graph-structure.md`)
+CLOSED as ACCEPT. All 11 findings remediated; full dispositions in the review file.
+Additional decisions downstream agents must know:
+
+- **`assert_invariants` treats `Hierarchical` as a DAG constraint** (M1) — the
+  safety net is broader than spec §5.7's write-time contract (Causal/Dependency,
+  enforced by T2.4's BFS). A Hierarchical cycle is now a reported violation.
+- **`drain_log` batches are chronological, never re-sorted** (M2) — §2.4's phase
+  grouping holds within a single logical write only. A node upsert may legally
+  follow a `DeleteNode` in one batch (create→delete→create). T3.4 must replay
+  in order.
+- **`remove_node` rejects interactions** (S2) — interactions are append-only in
+  v0.1 (spec §9 compaction is cut). GC (T4.5) may only remove concepts.
+- **Neighbor accessors are deterministic** (S5 fallout): `out_neighbors`,
+  `in_neighbors`, `*_typed`, `incident_edges` return id-ascending order. The S5
+  round-trip test caught a real HashSet-iteration-order flake.
+- **`reinforcements` starts at 1** (I2): creation counts as the first write.
+  Store adapters (T3.2) must match this convention.
+- **CanonizationStatus naming** (I1): spec §9 stage numbers map to
+  None→Candidate→Venerable→Canonical (frozen by T1.1). P6 must map, not rename.
+
+Gate at close: `cargo fmt --check`; clippy `-D warnings` (default + no-default);
+119 lib tests × 3 consecutive runs.
