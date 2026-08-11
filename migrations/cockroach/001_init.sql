@@ -34,9 +34,19 @@ CREATE TABLE IF NOT EXISTS concepts (
     blast_radius        INT,
     last_demotion_time  TIMESTAMPTZ,
     embedding           VECTOR(1024),
-    UNIQUE (session_id, canonical_key),
     INDEX (session_id, canonization_status)
 );
+
+-- Errata (2026-08-11, P2 integration / muse-spark M1-M2): the schema's
+-- table-level UNIQUE (session_id, canonical_key) is **partial** — it
+-- constrains non-Observation concepts only (spec §4 errata):
+CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_non_obs_idx
+    ON concepts (session_id, canonical_key)
+    WHERE concept_type <> 'Observation';
+-- Demoted Observations (spec §7) skip the match step and may legitimately
+-- share a canonical key (identical sentences from different chunks are distinct
+-- context-overflow records). `Graph::insert_concept` and
+-- `Graph::assert_invariants` enforce the same rule in RAM.
 
 -- Vector index: may require feature.vector_index.enabled on some plans.
 -- IF NOT EXISTS is supported on CockroachDB vector indexes in recent versions;
