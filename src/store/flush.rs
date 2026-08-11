@@ -15,7 +15,10 @@
 //!   next cycle (drained mutations are appended *after* whatever is already
 //!   pending, preserving chronological order — the mod.rs contract). The
 //!   in-memory graph is the primary tier (spec §2.1), so the session keeps
-//!   accepting writes throughout an outage.
+//!   accepting writes throughout an outage. A retained batch that exhausted
+//!   its retries waits out [`RETAINED_BACKOFF`] before the next attempt (F3):
+//!   a permanently failing store re-enters the retry sequence at most once
+//!   per hold, not once per interval tick.
 //! * **Degradation.** If the pending depth exceeds `log_max` the session
 //!   degrades to `durability="none"`: the task logs at ERROR, sets
 //!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal for
@@ -58,6 +61,14 @@ const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Cap on a single backoff sleep (retries are bounded by `FlushParams::retries`
 /// anyway; the cap keeps a large `retries` config from sleeping for minutes).
 const BACKOFF_CAP: Duration = Duration::from_secs(10);
+/// Post-retry hold on a retained batch (F3): once `retries` are exhausted the
+/// batch waits out this long before the **next** attempt re-enters the retry
+/// sequence. Without it a permanently failing store would re-run the whole
+/// retry sequence (attempts + warn) on every interval tick. Equal to the
+/// per-attempt backoff cap; a documented multiple of the interval would work
+/// too — the contract is "at least this long between exhausted-retry
+/// sequences", not the exact value.
+const RETAINED_BACKOFF: Duration = BACKOFF_CAP;
 
 /// Flush tuning. Callers pass `Config::backend_flush_*` values; this task has
 /// no `Config` dependency.
@@ -173,6 +184,7 @@ impl FlushTask {
                 params,
                 shared,
                 pending: MutationBatch::default(),
+                retry_after: None,
             }
             .run()
             .await
@@ -246,6 +258,10 @@ struct FlushLoop {
     /// drained mutations are appended in chronological order — never re-sorted
     /// (mod.rs contract).
     pending: MutationBatch,
+    /// Earliest time (tokio clock) the next flush attempt may run after a
+    /// retained batch exhausted its retries (F3, `RETAINED_BACKOFF`). `None`
+    /// when no batch is in the post-retry hold.
+    retry_after: Option<tokio::time::Instant>,
 }
 
 impl FlushLoop {
@@ -299,6 +315,18 @@ impl FlushLoop {
             return;
         }
 
+        // Post-retry hold (F3): a batch that exhausted its retries waits out
+        // RETAINED_BACKOFF before the next attempt, so a permanently failing
+        // store does not re-run the whole retry sequence on every interval
+        // tick. New drains keep appending while we wait; the batch flushes
+        // whole (order preserved) once the hold elapses.
+        if let Some(deadline) = self.retry_after {
+            if tokio::time::Instant::now() < deadline {
+                return;
+            }
+            self.retry_after = None;
+        }
+
         if !tick && self.pending.len() < self.params.max_batch {
             return; // early-flush poll: batch not full yet, wait for the tick
         }
@@ -306,6 +334,7 @@ impl FlushLoop {
         match self.flush_with_retry().await {
             Ok(()) => {
                 self.pending.mutations.clear();
+                self.retry_after = None;
                 *self.shared.last_success.lock() = tokio::time::Instant::now();
                 // Writes may have landed while we flushed; depth is the log only now.
                 self.refresh_depth();
@@ -314,14 +343,19 @@ impl FlushLoop {
                 // Retries exhausted: RETAIN the batch — it is still in
                 // `self.pending`, never dropped, and flushes before new drains
                 // on the next cycle. The session keeps working (spec §2.4).
+                // F3: hold the next attempt until the post-retry backoff
+                // elapses (see `cycle`'s gate above).
+                self.retry_after = Some(tokio::time::Instant::now() + RETAINED_BACKOFF);
                 self.refresh_depth();
                 tracing::warn!(
                     error = %err,
                     depth = self.shared.depth.load(Ordering::Acquire),
                     session = %session,
                     "BackendFlushFailed: store flush failed after {} retries; batch retained \
-                     (never dropped), session keeps working, durability is best-effort",
+                     (never dropped), next attempt in {:?}, session keeps working, \
+                     durability is best-effort",
                     self.params.retries,
+                    RETAINED_BACKOFF,
                 );
             }
         }
@@ -1052,8 +1086,10 @@ mod tests {
         assert_eq!(task.stats().depth, 5);
         assert_eq!(task.stats().lag, Duration::from_millis(1_200));
 
-        // Store recovers: next tick lands the whole pending batch; lag resets.
-        tokio::time::advance(Duration::from_secs(1)).await;
+        // Store recovers: the retained batch held for RETAINED_BACKOFF (F3 —
+        // the next tick after retry_after elapses re-enters the sequence and
+        // lands the whole pending batch); lag resets.
+        tokio::time::advance(Duration::from_secs(10)).await;
         wait_until(|| store.flush_calls() >= 3).await;
         wait_until(|| task.stats().depth == 0).await;
         assert_eq!(task.stats().depth, 0);
@@ -1104,8 +1140,10 @@ mod tests {
         let _iid2 = add_interaction(&graph, 2, Some(iid)); // 2 mutations
         assert_eq!(graph.read().log_len(), 2);
 
-        // Next tick: drained(2) appended AFTER retained(3) -> one ordered batch of 5.
-        tokio::time::advance(Duration::from_secs(1)).await;
+        // After the post-retry hold elapses (F3), the next tick re-enters the
+        // sequence: drained(2) appended AFTER retained(3) -> one ordered batch
+        // of 5. (11s from the retain point: 10s hold + 1s to the next tick.)
+        tokio::time::advance(Duration::from_secs(11)).await;
         wait_until(|| task.stats().depth == 0).await;
         assert_eq!(store.batch_sizes(), vec![3, 3, 5]);
 
@@ -1114,6 +1152,64 @@ mod tests {
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.edges.len(), 2); // Derives + Temporal
         assert_eq!(task.stats().depth, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_batch_does_not_retry_every_tick() {
+        // F3: after retries are exhausted the retained batch holds for
+        // RETAINED_BACKOFF (10s) before the next attempt — a permanently
+        // failing store must not re-run the whole retry sequence (attempts +
+        // warn) on every interval tick. Attempts stay flat while the hold is
+        // active; exactly one new attempt happens once it elapses.
+        // This test reaches the shared BackendFlushFailed warn; keep its
+        // callsite from registering `never` (see `keep_callsites_enabled`).
+        let _callsites = keep_callsites_enabled();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        // Tick: attempt 1 fails; the retry at +100ms fails too -> retries
+        // exhausted, batch retained, hold armed (retry_after = 1.1s + 10s).
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        assert_eq!(store.flush_calls(), 2);
+        assert_eq!(task.stats().depth, 3, "retained batch still pending");
+
+        // Interval ticks keep firing, but attempts stay flat while the hold
+        // is active (ticks at 2.0 .. 11.0 are all before retry_after 11.1).
+        tokio::time::advance(Duration::from_secs(3)).await; // -> 4.1
+        assert_eq!(store.flush_calls(), 2, "no attempt while in the hold");
+        assert_eq!(task.stats().depth, 3, "batch retained through the hold");
+
+        tokio::time::advance(Duration::from_secs(6)).await; // -> 10.1
+        assert_eq!(store.flush_calls(), 2, "still flat just before the hold elapses");
+
+        // The hold elapses at 11.1; the tick at 12.1 re-enters the retry
+        // sequence with exactly one new attempt, then arms a fresh hold.
+        tokio::time::advance(Duration::from_secs(2)).await; // -> 12.1
+        wait_until(|| store.flush_calls() >= 3).await;
+        assert_eq!(store.flush_calls(), 3, "exactly one new attempt after the hold");
+        assert_eq!(task.stats().depth, 3, "still retained (store still failing)");
+
+        // The new hold keeps attempts flat again.
+        tokio::time::advance(Duration::from_secs(1)).await; // -> 13.1
+        assert_eq!(store.flush_calls(), 3, "flat again during the second hold");
+        assert_eq!(task.stats().depth, 3);
+        assert!(!task.degraded(), "below log_max: degrade must not trigger");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1162,8 +1258,9 @@ mod tests {
         assert!(!task.degraded());
         assert_eq!(task.stats().depth, 3, "retained batch still pending");
 
-        // Store stops panicking: the next tick lands the retained batch whole.
-        tokio::time::advance(Duration::from_secs(1)).await;
+        // Store stops panicking: once the post-retry hold elapses (F3), the
+        // next tick lands the retained batch whole.
+        tokio::time::advance(Duration::from_secs(11)).await;
         wait_until(|| task.stats().depth == 0).await;
         assert!(!handle.is_finished());
         assert_eq!(store.batch_sizes(), vec![3, 3, 3]);

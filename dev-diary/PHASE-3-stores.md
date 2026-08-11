@@ -542,3 +542,76 @@ kind — None/absent on load, S5 read-only), synonyms and reservations (S5 —
 full-snapshot path only, which has no SQLite impl yet), concept `embedding`
 (BLOB unused — never read/written). chunk_group_id IS persisted now (see the
 remediation note above).
+
+### P3 partial-review fixes (2026-08-11, task/p3-partial-review-fixes @ base 8629879)
+
+**What landed (F1–F6):**
+- **F1 — single-interaction coverage = 1.0, all three stores (orig S2).**
+  `interaction_span` returned coverage 0.0 when the session temporal extent is
+  a single point (`sess_span <= 0`) even with `distinct >= 1`, which blocked
+  canonization Stage 2 in short sessions. Now `distinct == 0` is the only 0.0
+  case: memory.rs, the Cockroach `INTERACTION_SPAN_SQL` `CASE` `ELSE` arm, and
+  the SQLite Rust-side coverage all return 1.0 for a non-empty span over a
+  single-point extent (the Cockroach extent is never NULL while the span is
+  non-empty — same session — so the `ELSE` arm is exactly that case). Each
+  store gained a single-interaction coverage test (sqlite/cockroach also
+  assert MemoryStore parity); the existing three-way agreement tests still
+  pass unchanged.
+- **F2 — sync load_session bridge timeout (orig S3).** The worker-thread
+  bridge can block forever on a hung store. The store call now runs under
+  `tokio::time::timeout` inside the private runtime, defaulting to
+  `LOAD_SESSION_TIMEOUT` (30s) → `StoreError::Backend("load_session timed out
+  after 30s")` on elapsed. Parameterized as the internal
+  `load_session_with_timeout(store, session, timeout)`; the public sync fn
+  calls it with 30s. Tested with a hanging-store mock (whose `load_session`
+  never resolves) and a 50ms timeout.
+- **F3 — retained batch backs off instead of retrying every tick (rev S1).**
+  After exhausting `retries`, a retained batch waits `RETAINED_BACKOFF`
+  (= the per-attempt backoff cap, 10s) before the next attempt re-enters the
+  retry sequence — a permanently failing store no longer re-runs attempts +
+  warn on every interval tick. Implemented as `FlushLoop::retry_after`
+  (tokio-clock deadline) gating `cycle` before the flush; degrade (`log_max`)
+  and the depth accounting are unchanged. Paused-time test: attempts stay flat
+  across ticks until the hold elapses, then exactly one new attempt, then flat
+  again; the three retained-batch tests now advance past the hold to observe
+  recovery.
+- **F4 — async load_session_async entry (rev M1).**
+  `load_session_async(store, session)` is now the async CORE (store load →
+  `Graph::from_snapshot` → `InvertedIndex::from_snapshot`; `SessionNotFound` →
+  fresh empty session; corrupted snapshot → typed `StoreError::Invariant`);
+  sync `load_session` is a thin wrapper running the core on the worker thread
+  via the existing bridge (with F2's timeout). Sync semantics unchanged —
+  existing load tests untouched and green; new async-context tests cover
+  round-trip parity with the sync path and the missing-session contract.
+- **F5 — flush idempotency contract on the trait (orig M1).** The
+  `GraphStore::flush` docstring now requires upsert / `ON CONFLICT` semantics
+  for every mutation kind: the flush task may replay a partially succeeded
+  batch, so plain INSERTs are not acceptable (replay must converge, never
+  duplicate or error). Both adapters already comply — comment-only change.
+- **F6 — reservations reader filter doc (rev S2).** Both migrations'
+  `reservations` table now carry a comment telling external SQL readers to
+  filter `WHERE expires_at > now()` (Cockroach) /
+  `WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')` (SQLite) — expired
+  soft locks persist until overwritten. Comment-only change.
+
+**Deferred / noted (no code):**
+- **Graceful-shutdown final drain deferred to v0.7.0 (orig S1).** The flush
+  task has no shutdown signal in v0.1 (task runs until the runtime drops it or
+  the handle is aborted); a final drain on shutdown is a v0.7.0 item, not a
+  P3 gap.
+- **MemoryStore delete-scan (orig I1):** MemoryStore resolves deletes by
+  scanning for the node id (no per-node session index) — O(N) per delete,
+  fine at hackathon scale; a session→id map is the future fix.
+- **Utc-now-in-queries (orig I2):** MemoryStore structural queries use the
+  caller's clock (`Utc::now`) for age filters; tests needing determinism use
+  `min_age` of zero or planted timestamps.
+- **Timestamp precision (rev I1):** already satisfied — both adapters persist
+  ms-precision RFC 3339 (`to_rfc3339_opts(SecondsFormat::Millis, true)` /
+  Cockroach `TIMESTAMPTZ`), and SQLite's documented `now()` default is the
+  ms-precision `strftime('%Y-%m-%dT%H:%M:%fZ','now')` equivalent.
+
+**Files:** `src/store/memory.rs`, `src/store/load.rs`, `src/store/flush.rs`,
+`src/store/mod.rs` (trait docstring only), `src/store/cockroach.rs`,
+`src/store/sqlite.rs`, `migrations/cockroach/001_init.sql` +
+`migrations/sqlite/001_init.sql` (comments only), this file. No Cargo.toml, no
+frozen-file changes.

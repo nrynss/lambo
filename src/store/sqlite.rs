@@ -574,7 +574,12 @@ impl GraphStore for SqliteStore {
                 };
                 let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0) as f64;
                 if sess_span <= 0.0 {
-                    0.0
+                    // F1: single-point session extent (one interaction, or all
+                    // interactions sharing a timestamp) with at least one
+                    // supported interaction (span_lo/hi are Some here, so
+                    // distinct >= 1) -> coverage 1.0, mirroring MemoryStore
+                    // and the Cockroach SQL (canonization Stage 2 parity).
+                    1.0
                 } else {
                     let span = (hi - lo).num_milliseconds().max(0) as f64;
                     (span / sess_span).clamp(0.0, 1.0)
@@ -1616,6 +1621,69 @@ mod tests {
             .unwrap();
         assert_eq!(span.distinct, 6);
         assert!((span.coverage - 25.0 / 55.0).abs() < 1e-9, "{span:?}");
+    }
+
+    /// F1: a single-interaction session (temporal extent is one point) with a
+    /// supported inbound dependency reports coverage 1.0, not 0.0 — parity
+    /// with MemoryStore and Cockroach (canonization Stage 2 in short
+    /// sessions), and agreement with MemoryStore's naive answer.
+    #[tokio::test]
+    async fn interaction_span_single_point_session_coverage_is_one() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("single-span");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let orphan = NodeId::new();
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
+                plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, ts),
+                Mutation::UpsertEdge {
+                    edge: Edge {
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        source: pillar,
+                        target: orphan,
+                        edge_type: EdgeType::Dependency,
+                        weight: 1.0,
+                        reinforcements: 1,
+                        created_at: ts,
+                        last_reinforced: ts,
+                    },
+                },
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&batch).await.unwrap();
+
+        let span = store
+            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .await
+            .unwrap();
+        let span_want = memory
+            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(span, span_want, "MemoryStore parity");
+        assert_eq!(span.distinct, 1);
+        assert_eq!(span.coverage, 1.0);
+
+        // Unsupported target: no inbound structural edges -> 0.0 on both.
+        let empty = store
+            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .await
+            .unwrap();
+        let empty_want = memory
+            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(empty, empty_want);
+        assert_eq!(empty.distinct, 0);
+        assert_eq!(empty.coverage, 0.0);
     }
 
     /// Acceptance: canonization_events append + concept status update, via

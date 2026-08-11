@@ -320,8 +320,12 @@ WHERE c.session_id = $1
 /// origin interactions of concepts reachable via aged structural inbound edges, and the
 /// share of the session's temporal extent those interactions cover. Filters BOTH the
 /// edge and the interaction age (MemoryStore parity — see module doc). The `CASE` keeps
-/// the coverage `0.0` when no spans match or the session extent is empty (a `NULL`
-/// epoch-arithmetic result would otherwise surface as a decode error).
+/// the coverage `0.0` when no spans match (a `NULL` epoch-arithmetic result would
+/// otherwise surface as a decode error). The extent is never `NULL` while the span is
+/// non-empty (the span's interactions belong to the same session), so the `ELSE` arm
+/// covers exactly one case: a non-empty span over a **single-point session extent**
+/// (extent <= 0) — that interaction spans the whole session, so coverage is `1.0`
+/// (F1: canonization Stage 2 parity with MemoryStore in short sessions).
 /// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
 const INTERACTION_SPAN_SQL: &str = r#"
 WITH span AS (
@@ -346,7 +350,9 @@ SELECT
         WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
             THEN extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
                  / extract(epoch FROM (extent.hi - extent.lo))
-        ELSE 0.0
+        -- F1: non-empty span over a single-point session extent covers the
+        -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
+        ELSE 1.0
     END AS coverage
 FROM extent
 "#;
@@ -2390,6 +2396,65 @@ mod conformance {
         );
     }
 
+    /// F1: a single-interaction session (temporal extent is one point) with a
+    /// supported inbound dependency reports coverage 1.0, not 0.0 — parity
+    /// with the MemoryStore fix (canonization Stage 2 in short sessions).
+    async fn check_interaction_span_single_point_session_coverage(store: &CockroachStore) {
+        let sid = SessionId::from(format!("conformance-span-single-{}", Uuid::new_v4()));
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let orphan = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, ts),
+                    plant_concept(&sid, pillar, i1, "pillar", ts, None),
+                    plant_concept(&sid, orphan, i1, "orphan", ts, None),
+                    plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let mem = MemoryStore::new();
+        mem.flush(&MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, ts),
+                plant_concept(&sid, pillar, i1, "pillar", ts, None),
+                plant_concept(&sid, orphan, i1, "orphan", ts, None),
+                plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
+            ],
+        })
+        .await
+        .unwrap();
+
+        let crdb_span = store
+            .interaction_span(&sid, orphan, Duration::ZERO)
+            .await
+            .unwrap();
+        let mem_span = mem
+            .interaction_span(&sid, orphan, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(crdb_span, mem_span, "three-way parity on the single-point session");
+        assert_eq!(crdb_span.distinct, 1);
+        assert_eq!(crdb_span.coverage, 1.0, "F1: {crdb_span:?}");
+
+        // Unsupported target: no inbound structural edges -> 0.0 on both.
+        let empty_crdb = store
+            .interaction_span(&sid, pillar, Duration::ZERO)
+            .await
+            .unwrap();
+        let empty_mem = mem
+            .interaction_span(&sid, pillar, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(empty_crdb, empty_mem);
+        assert_eq!(empty_crdb.distinct, 0);
+        assert_eq!(empty_crdb.coverage, 0.0);
+    }
+
     async fn check_record_canonization_appends_and_is_idempotent(store: &CockroachStore) {
         let sid = SessionId::from(format!("conformance-canon-{}", Uuid::new_v4()));
         let i1 = NodeId::new();
@@ -2466,6 +2531,7 @@ mod conformance {
         check_seed_load_full_snapshot_roundtrip(&store).await;
         check_structural_queries_agree_with_memory_store(&store).await;
         check_structural_queries_age_filter_agrees(&store).await;
+        check_interaction_span_single_point_session_coverage(&store).await;
         check_record_canonization_appends_and_is_idempotent(&store).await;
     }
 }

@@ -393,7 +393,12 @@ impl GraphStore for MemoryStore {
             let sess_hi = all.iter().max().copied().unwrap_or(hi);
             let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0) as f64;
             if sess_span <= 0.0 {
-                0.0
+                // Single-point session extent (one interaction, or all
+                // interactions sharing a timestamp): every supported
+                // interaction spans the whole session, so coverage is 1.0
+                // (F1 — canonization Stage 2 must not be blocked in short
+                // sessions). `times` is non-empty here, so distinct >= 1.
+                1.0
             } else {
                 let span = (hi - lo).num_milliseconds().max(0) as f64;
                 (span / sess_span).clamp(0.0, 1.0)
@@ -694,6 +699,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r, 1, "only orphan is exclusively dependent on pillar");
+    }
+
+    #[tokio::test]
+    async fn interaction_span_single_interaction_coverage_is_one() {
+        // F1: a single-interaction session (temporal extent is one point)
+        // with a supported inbound dependency must report coverage 1.0, not
+        // 0.0 — canonization Stage 2 relies on it in short sessions.
+        let store = MemoryStore::new();
+        let sid = SessionId::from("single-span");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let orphan = NodeId::new();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: i1,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("a"),
+                prompt_text: None,
+                previous_id: None,
+                created_at: ts,
+            }),
+        });
+        batch.push(plant_concept(&sid, pillar, i1, "pillar", ts));
+        batch.push(plant_concept(&sid, orphan, i1, "orphan", ts));
+        batch.push(Mutation::UpsertEdge {
+            edge: Edge {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source: pillar,
+                target: orphan,
+                edge_type: EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: ts,
+                last_reinforced: ts,
+            },
+        });
+        store.flush(&batch).await.unwrap();
+        let span = store
+            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(span.distinct, 1);
+        assert_eq!(span.coverage, 1.0);
+
+        // The unsupported case still reports 0.0: no interaction matches.
+        let empty_span = store
+            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(empty_span.distinct, 0);
+        assert_eq!(empty_span.coverage, 0.0);
     }
 
     #[tokio::test]

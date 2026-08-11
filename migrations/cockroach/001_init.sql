@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     INDEX (session_id, occurred_at)
 );
 
+-- Soft locks (S5): an expired row persists until a later write overwrites it,
+-- so external SQL readers MUST filter `WHERE expires_at > now()` — never read
+-- the table without the expiry predicate.
 CREATE TABLE IF NOT EXISTS reservations (
     session_id      STRING NOT NULL,
     node_id         UUID NOT NULL,

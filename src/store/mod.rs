@@ -63,6 +63,17 @@ pub trait GraphStore: Send + Sync {
         None
     }
 
+    /// Persist a mutation batch durably (spec §2.4–§2.5).
+    ///
+    /// **Idempotency contract (flush replay, F5):** adapters MUST implement
+    /// every mutation kind with upsert / `ON CONFLICT` semantics. The flush
+    /// task may replay a batch that partially succeeded (a mid-batch backend
+    /// failure, a retried flush, or a retained batch re-attempted after a
+    /// store outage), so plain INSERTs are not acceptable: a replayed batch
+    /// must converge to the same final state — never duplicate rows, never
+    /// error on re-insertion. All Lambo mutation kinds are naturally
+    /// idempotent this way (node/edge upserts by natural key, canonization
+    /// transitions by event id); adapters must preserve that property.
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 
