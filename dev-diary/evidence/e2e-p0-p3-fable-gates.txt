@@ -1,0 +1,41 @@
+E2E P0-P3 adversarial review (fable) — gate runs on main @ 61e37d9, 2026-08-11
+Machine: darwin/aarch64, rustc stable. Runner: fable orchestrator (claude-fable-5).
+
+=== cargo fmt --check ===
+clean (exit 0)
+
+=== cargo clippy --all-targets -- -D warnings (default features) ===
+clean (exit 0)
+
+=== cargo clippy --all-targets --features store-sqlite,store-cockroach -- -D warnings ===
+clean (exit 0)
+
+=== cargo test (default features) ===
+lib: 215 passed; 0 failed; 1 ignored (bge_m3 live smoke)
+main bin: 2 passed
+live_calibration: 0 passed; 2 ignored (visible as ignored, not silently green)
+p2_integration: 2 passed
+rebuild_session: 1 passed
+exit 0
+
+=== cargo test --features store-sqlite ===
+lib: 232 passed; 0 failed; 1 ignored
+(all 17 sqlite tests incl. the T3.6 180-assertion agreement matrix run offline
+on sqlite::memory:)
+exit 0
+
+Additional runs by the tests/CI reviewer (same head, same day):
+  cargo test --features store-cockroach (no DSN): 237 passed, 0 failed, 3 ignored
+    — NOTE: conformance_suite and build_store_returns_working_adapter report
+    "ok" while skipping (skip-as-green; see finding TEST-1)
+  cargo test --no-default-features: 144 passed (lib 143 + bin 1)
+  cargo test --no-default-features --features store-sqlite: BUILD ERROR
+    (E0432 unresolved import crate::store::memory — see finding CON-4/TEST-2)
+  cargo check --no-default-features --features store-cockroach: dead-code
+    warnings (UPSERT_SESSION_SQL, UPSERT_SYNONYM_SQL, UPSERT_RESERVATION_SQL)
+    — would fail under CI's RUSTFLAGS="-D warnings" if CI built that combo
+  scripts/gen-fixtures.py re-run to scratchpad: all 5 fixtures/*.json
+    byte-identical to committed
+  gh run list: exactly 3 CI runs ever, all push-to-main, all success; latest
+    31510286505 (2026-08-11T16:02Z) covers current main HEAD
+  gh api repos/nrynss/lambo: license MIT detected; repo private
