@@ -196,3 +196,40 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
 
 > _Fill on completion. Record the VECTOR encode/decode choice and every dialect divergence.
 > Confirm feature flags and `build_store` arms for cockroach/sqlite._
+
+### T3.1 — Schema DDL, both dialects (2026-08-11)
+
+**Committed:** `task/p3-t3.1-schema-ddl` — see commit for `migrations/cockroach/001_init.sql` +
+`migrations/sqlite/001_init.sql`.
+
+- **Partial-UNIQUE errata in BOTH dialects.** Table-level
+  `UNIQUE (session_id, canonical_key)` removed from `concepts` (Cockroach and SQLite);
+  both files carry the spec §4 errata comment + a separate idempotent statement:
+  `CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_non_obs_idx ON concepts (session_id, canonical_key) WHERE concept_type <> 'Observation';`
+  Smoke-verified on SQLite: duplicate non-Observation key rejected, duplicate Observation
+  key accepted.
+- **No T0.2 peer exists** (file is T0.2's copy checked in at base 9f9d2cb); updated it
+  in place — only the errata change, everything else as-is.
+- **Dialect divergences (recorded for T3.2/T3.3):**
+  1. Cockroach `STRING`/`UUID`/`JSONB`/`TIMESTAMPTZ`/`INT`/`FLOAT` → SQLite
+     `TEXT`/`TEXT`/`TEXT`/`TEXT`/`INTEGER`/`REAL`.
+  2. `TIMESTAMPTZ` → TEXT ISO-8601 UTC (`2026-08-11T12:41:19.186Z`), chosen so RFC 3339
+     lexicographic order = time order → adapters can compare in SQL. Adapters write/read
+     with chrono RFC 3339.
+  3. `now()` default → `strftime('%Y-%m-%dT%H:%M:%fZ','now')` (documented equivalent of
+     CURRENT_TIMESTAMP; keeps the ISO-8601 format uniform, adds ms precision).
+  4. `embedding VECTOR(1024)` → `BLOB`, **unused** (no VECTOR_SEARCH in SQLite; adapters
+     never read/write it). No vector index in SQLite; Cockroach keeps
+     `CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx`.
+  5. Spec `INDEX (...)` clauses → separate `CREATE INDEX IF NOT EXISTS` statements in
+     SQLite. Table-level `UNIQUE`/`PRIMARY KEY` constraints stay inline (SQLite autoindexes
+     them — required for `ON CONFLICT` targeting).
+  6. `REFERENCES` clauses kept in SQLite for fidelity; enforcement needs
+     `PRAGMA foreign_keys = ON` at runtime — the adapter's job.
+- **SQLite idempotency smoke:** `sqlite3 /tmp/lambo-t31.db < migrations/sqlite/001_init.sql`
+  run twice → exit 0 both runs (3.53.4 CLI). All 7 tables + `concepts_key_non_obs_idx`
+  (partial) + 5 regular indexes present. Cockroach DDL not runnable offline (no cluster);
+  T3.2 conformance verifies it.
+- **T3.3 notes:** FK enforcement + `ON CONFLICT` targets as above; `interactions.created_at`
+  has NO default (matches spec — adapter must bind it).
+- Status: lines not edited per task constraints (Main claims centrally).
