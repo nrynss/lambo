@@ -350,19 +350,39 @@ mod tests {
         assert_eq!(contents(&g, &ids), ["Pi is 3.14.", "Next."]);
         // SB7 keeps "U.S.A." whole (UpperLower ATerm × Upper), and SB8 places no
         // boundary before a Lowercase start — the chunk is one sentence.
-        // (unicode-segmentation implements the default UAX #29 rules without the
-        // locale abbreviation lists of SB6, so "Dr." would terminate; the rules
-        // above are the ones that fire on these inputs.)
         let ids = demote(&mut g, iid, &agent(), "U.S.A. is big.", "g").unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(contents(&g, &ids), ["U.S.A. is big."]);
+        // No locale abbreviation lists (SB6 in this crate is the numeric rule,
+        // SB7 needs the ATerm immediately followed by Upper): "Dr." terminates,
+        // so the abbreviation case splits into two sentences.
+        let ids = demote(&mut g, iid, &agent(), "Dr. Smith left.", "g").unwrap();
+        assert_eq!(contents(&g, &ids), ["Dr.", "Smith left."]);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn canonical_key_resolves_synonym_before_normalization() {
+        let (mut g, iid) = fresh_graph();
+        g.declare_synonym("register_user", "create_user");
+        // Raw-trimmed lookup BEFORE normalization (canonical_key_for): the raw
+        // sentence "register_user" maps to "create_user", whose key is
+        // "creat user" — NOT "regist user", the key of the raw text itself.
+        let ids = demote(&mut g, iid, &agent(), "register_user", "g").unwrap();
+        assert_eq!(contents(&g, &ids), ["register_user"]);
+        assert_eq!(concept_of(&g, ids[0]).canonical_key, "creat user");
+        // Direct lookup only, no chain: the normalized "register user" does NOT
+        // match the raw synonym key, so its key is the raw text's "regist user".
+        let ids = demote(&mut g, iid, &agent(), "register user", "g").unwrap();
+        assert_eq!(contents(&g, &ids), ["register user"]);
+        assert_eq!(concept_of(&g, ids[0]).canonical_key, "regist user");
         g.assert_invariants().unwrap();
     }
 
     #[test]
     fn mutation_log_is_ordered_node_then_edge_per_sentence() {
         let (mut g, iid) = fresh_graph();
-        let _initial = g.drain_log(); // interaction node + Temporal edge
+        let _initial = g.drain_log(); // interaction node only — first interaction has no Temporal predecessor
         let ids = demote(&mut g, iid, &agent(), "One. Two.", "g").unwrap();
         assert_eq!(ids.len(), 2);
 

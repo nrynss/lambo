@@ -453,11 +453,12 @@ sentences (observations are new by construction; identical sentences both land).
   with NO locale abbreviation lists — SB6 in this crate is the *numeric* rule
   (no boundary between a terminator and a following digit: `"Pi is 3.14. Next."`
   splits after `"3.14."`, not inside it), SB7 is the acronym rule
-  (`UpperLower ATerm × Upper`: `"U.S.A. is big."` keeps `U.S.A.` whole), and SB8
+  (`UpperLower ATerm × Upper`: `"U.S.A. is big."` keeps `U.S.A.` whole), SB8
   places no boundary before a Lowercase start (`"U.S.A. is big."` is therefore
-  ONE sentence). `"Dr. Smith left."` DOES split after `Dr.` — no abbreviation
-  data, and `Upper` after the space fails SB7. This is the crate's (and thus
-  UAX #29 default's) contract; tests pin the actual behavior with comments.
+  ONE sentence), and `"Dr. Smith left."` splits after `Dr.` into two sentences —
+  no abbreviation data, and `Upper` after the space fails SB7. This is the
+  crate's (and thus UAX #29 default's) contract;
+  `uax29_numeric_acronym_and_abbreviation_rules` asserts all four cases.
 - **`split_sentence_bounds` folds the SB1 leading break into the first segment**
   (the iterator consumes break 0 as the segment start), so a chunk is never
   split on a leading empty segment; segments DO include trailing whitespace
@@ -471,14 +472,15 @@ sentences (observations are new by construction; identical sentences both land).
   directly). `chunk_group_id` is stored verbatim (no empty-string validation —
   pinned API takes `&str` as-is).
 
-**Verification:** 9 new unit tests under `graph::demote::tests`
+**Verification:** 10 new unit tests under `graph::demote::tests`
 (multi-sentence split + shared group id + Derives edges + contents/types/keys,
 single sentence + contraction + no-terminator chunk, empty chunk noop,
 whitespace-only chunk noop, missing interaction -> `NotFound`, non-interaction
 node -> `NotFound`, duplicate sentences not deduped, trailing punctuation +
-newline, UAX #29 numeric/acronym rules, mutation-log ordering node-before-edge
-per sentence with returned ids == upsert order). Every test ends with
-`assert_invariants()`. `cargo test graph::` (default features): 74 passed / 0
-failed (65 pre-existing + 9 new), 0 warnings; full `cargo test --lib`: 165
-passed / 1 ignored (live-calibration). No fmt/clippy/project-wide suites run
-(per constraints).
+newline, UAX #29 numeric/acronym/abbreviation rules, synonym-before-
+normalization canonical key (`register_user` -> `create_user`), mutation-log
+ordering node-before-edge per sentence with returned ids == upsert order). Every
+test ends with `assert_invariants()`. `cargo test graph::` (default features):
+75 passed / 0 failed (65 pre-existing + 10 new), 0 warnings; full
+`cargo test --lib`: 166 passed / 1 ignored (live-calibration). No
+fmt/clippy/project-wide suites run (per constraints).
