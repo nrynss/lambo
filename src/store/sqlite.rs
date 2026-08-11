@@ -145,7 +145,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::{Capabilities, GraphStore};
+use super::{map_write_err, Capabilities, GraphStore};
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
     InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
@@ -295,7 +295,7 @@ impl SqliteStore {
             .bind(sid)
             .execute(&mut *tx)
             .await
-            .map_err(|e| db_err("ensure session row", e))?;
+            .map_err(|e| map_write_err(e, |m| format!("ensure session row: {m}")))?;
         }
         Ok(())
     }
@@ -377,7 +377,7 @@ impl GraphStore for SqliteStore {
             .pool()
             .begin()
             .await
-            .map_err(|e| db_err("begin flush transaction", e))?;
+            .map_err(|e| map_write_err(e, |m| format!("begin flush transaction: {m}")))?;
 
         let mut sessions: HashSet<String> = HashSet::new();
         for m in &batch.mutations {
@@ -411,7 +411,7 @@ impl GraphStore for SqliteStore {
                         .bind(id.0.to_string())
                         .execute(&mut *tx)
                         .await
-                        .map_err(|e| db_err("delete edge", e))?;
+                        .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
                 }
                 Mutation::CanonizationTransition { event } => {
                     apply_canonization_transition(&mut *tx, event).await?;
@@ -421,7 +421,7 @@ impl GraphStore for SqliteStore {
 
         tx.commit()
             .await
-            .map_err(|e| db_err("commit flush transaction", e))?;
+            .map_err(|e| map_write_err(e, |m| format!("commit flush transaction: {m}")))?;
         Ok(())
     }
 
@@ -691,15 +691,15 @@ impl GraphStore for SqliteStore {
     }
 
     async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-        let mut tx = self
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| db_err("begin record_canonization transaction", e))?;
+        let mut tx = self.pool().begin().await.map_err(|e| {
+            map_write_err(e, |m| format!("begin record_canonization transaction: {m}"))
+        })?;
         apply_canonization_transition(&mut *tx, event).await?;
-        tx.commit()
-            .await
-            .map_err(|e| db_err("commit record_canonization transaction", e))?;
+        tx.commit().await.map_err(|e| {
+            map_write_err(e, |m| {
+                format!("commit record_canonization transaction: {m}")
+            })
+        })?;
         Ok(())
     }
 }
@@ -802,7 +802,7 @@ async fn upsert_interaction(
     .bind(ts_to_text(i.created_at))
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_err("upsert interaction", e))?;
+    .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
     Ok(())
 }
 
@@ -853,7 +853,7 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     .bind(&c.chunk_group_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_err("upsert concept", e))?;
+    .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
     Ok(())
 }
 
@@ -885,7 +885,7 @@ async fn upsert_edge(tx: &mut sqlx::SqliteConnection, e: &Edge) -> Result<(), St
     .bind(ts_to_text(e.last_reinforced))
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_err("upsert edge", e))?;
+    .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
     Ok(())
 }
 
@@ -897,19 +897,19 @@ async fn delete_node(tx: &mut sqlx::SqliteConnection, id: NodeId) -> Result<(), 
         .bind(&id_text)
         .execute(&mut *tx)
         .await
-        .map_err(|e| db_err("delete interaction", e))?;
+        .map_err(|e| map_write_err(e, |m| format!("delete interaction: {m}")))?;
     sqlx::query("DELETE FROM concepts WHERE id = ?")
         .bind(&id_text)
         .execute(&mut *tx)
         .await
-        .map_err(|e| db_err("delete concept", e))?;
+        .map_err(|e| map_write_err(e, |m| format!("delete concept: {m}")))?;
     sqlx::query("DELETE FROM edges WHERE source = ? OR target = ? OR id = ?")
         .bind(&id_text)
         .bind(&id_text)
         .bind(&id_text)
         .execute(&mut *tx)
         .await
-        .map_err(|e| db_err("delete incident edges", e))?;
+        .map_err(|e| map_write_err(e, |m| format!("delete incident edges: {m}")))?;
     Ok(())
 }
 
@@ -936,7 +936,7 @@ async fn apply_canonization_transition(
     .bind(&event.session_id.0)
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_err("apply canonization transition", e))?;
+    .map_err(|e| map_write_err(e, |m| format!("apply canonization transition: {m}")))?;
     if res.rows_affected() == 0 {
         return Err(StoreError::NotFound(format!(
             "concept {} for canonization",
@@ -962,7 +962,7 @@ async fn apply_canonization_transition(
     .bind(ts_to_text(event.occurred_at))
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_err("append canonization event", e))?;
+    .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
     Ok(())
 }
 
@@ -2352,7 +2352,12 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Backend(_)), "{err:?}");
+        // STORE-4: constraint violations are classified (never flattened
+        // into Backend) so the flush loop can dead-letter them.
+        assert!(
+            matches!(err, StoreError::Constraint(_)),
+            "expected Constraint, got {err:?}"
+        );
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(snap.concepts.len(), 3, "failed flush must not persist rows");
     }

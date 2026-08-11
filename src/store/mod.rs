@@ -20,6 +20,14 @@ mod sqlite;
 #[cfg(feature = "store-sqlite")]
 pub use sqlite::SqliteStore;
 
+// STORE-4 — shared backend-error classification (sqlx-backed adapters only;
+// both `store-cockroach` and `store-sqlite` pull `sqlx`).
+#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+mod error;
+
+#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+pub(crate) use error::map_write_err;
+
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.

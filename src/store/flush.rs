@@ -6,23 +6,32 @@
 //! store outage never drops mutations:
 //!
 //! * **Loss bound is observable.** [`FlushTask::stats`] reports `lag` (time
-//!   since the last successful flush) and `depth` (mutations not yet durable:
+//!   since the last successful flush), `depth` (mutations not yet durable:
 //!   the in-graph log plus the pending batch — in flight, backed off, or
-//!   retained after exhausted retries). `lag` uses the tokio clock so it tracks
-//!   paused time deterministically in tests.
-//! * **Never dropped.** After `retries` retries the batch is retained in the
-//!   task's pending buffer and flushes before newly drained mutations on the
-//!   next cycle (drained mutations are appended *after* whatever is already
-//!   pending, preserving chronological order — the mod.rs contract). The
-//!   in-memory graph is the primary tier (spec §2.1), so the session keeps
-//!   accepting writes throughout an outage. A retained batch that exhausted
-//!   its retries waits out [`RETAINED_BACKOFF`] before the next attempt (F3):
-//!   a permanently failing store re-enters the retry sequence at most once
-//!   per hold, not once per interval tick.
+//!   retained after exhausted retries) and `dead_lettered` (batches dropped
+//!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
+//!   tokio clock so it tracks paused time deterministically in tests.
+//! * **Bounded attempts.** Every `store.flush` attempt is bounded by
+//!   [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung store must not wedge the
+//!   loop forever — the timeout maps into the retry path like any `Err`.
+//! * **Never dropped (except dead letters).** After `retries` retries the
+//!   batch is retained in the task's pending buffer and flushes before newly
+//!   drained mutations on the next cycle (drained mutations are appended
+//!   *after* whatever is already pending, preserving chronological order —
+//!   the mod.rs contract). The in-memory graph is the primary tier (spec
+//!   §2.1), so the session keeps accepting writes throughout an outage. A
+//!   retained batch that exhausted its retries waits out
+//!   [`RETAINED_BACKOFF`] before the next attempt (F3): a permanently failing
+//!   store re-enters the retry sequence at most once per hold, not once per
+//!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
+//!   deterministic constraint violation is logged and dropped — never
+//!   retried, never retained — so it cannot poison the queue head.
 //! * **Degradation.** If the pending depth exceeds `log_max` the session
 //!   degrades to `durability="none"`: the task logs at ERROR, sets
-//!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal for
-//!   the task's lifetime.
+//!   [`FlushTask::degraded`], and stops all store I/O. The mode is terminal
+//!   for the task's lifetime. While degraded the task keeps draining the log
+//!   but DROPS each drained batch (STORE-3, spec §2.3 "none = pure RAM") —
+//!   post-degrade retention must not grow without bound.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -44,7 +53,7 @@
 use parking_lot::{Mutex, RwLock};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -56,6 +65,12 @@ use crate::types::{MutationBatch, StoreError};
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
 /// `depth` fresh between interval ticks (see module docs).
 const POLL_QUANTUM: Duration = Duration::from_millis(100);
+/// Per-attempt bound on a single `store.flush` call (STORE-2): a hung store
+/// must not wedge the flush loop forever. The timeout maps into the existing
+/// retry path (same as any `Err`), so the loop still retries → retains →
+/// degrades as designed. Mirrors the F2 `LOAD_SESSION_TIMEOUT` (load.rs) —
+/// same 30s value, same naming convention.
+const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff base for flush retries; doubles per retry.
 const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Cap on a single backoff sleep (retries are bounded by `FlushParams::retries`
@@ -89,11 +104,16 @@ pub struct FlushStats {
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
     pub depth: usize,
+    /// Batches dropped as dead letters (STORE-4 / D5): a deterministic
+    /// constraint violation is logged and dropped — never retried, never
+    /// retained — so it cannot poison the queue head. Visible in stats by
+    /// design ("drop-after-log, visible in stats").
+    pub dead_lettered: u64,
 }
 
 /// Lock-light state shared between the running task and the caller's stats
 /// handle. `last_success` is a `Mutex<Instant>` (held for nanoseconds inside
-/// `stats`); `started`/`depth`/`degraded` are atomics.
+/// `stats`); `started`/`depth`/`degraded`/`dead_lettered` are atomics.
 #[derive(Debug)]
 struct Shared {
     /// Set by `spawn` (check-and-set): exactly one flush loop may run per task.
@@ -102,6 +122,9 @@ struct Shared {
     last_success: Mutex<tokio::time::Instant>,
     depth: AtomicUsize,
     degraded: AtomicBool,
+    /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
+    /// violations dropped after logging). Monotonic for the task's lifetime.
+    dead_lettered: AtomicU64,
 }
 
 impl Shared {
@@ -113,6 +136,7 @@ impl Shared {
             last_success: Mutex::new(tokio::time::Instant::now()),
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
+            dead_lettered: AtomicU64::new(0),
         }
     }
 
@@ -121,6 +145,7 @@ impl Shared {
         FlushStats {
             lag: now.saturating_duration_since(*self.last_success.lock()),
             depth: self.depth.load(Ordering::Acquire),
+            dead_lettered: self.dead_lettered.load(Ordering::Acquire),
         }
     }
 }
@@ -298,7 +323,13 @@ impl FlushLoop {
             return;
         }
         if self.shared.degraded.load(Ordering::Acquire) {
-            // durability="none": no further store I/O.
+            // durability="none" (spec §2.3 — "none = pure RAM"): the graph is
+            // the only tier, so no further store I/O. STORE-3: DROP the
+            // drained batch instead of retaining it — post-degrade retention
+            // used to grow without bound for the session's remaining life.
+            // Depth is the in-graph log only.
+            self.pending.mutations.clear();
+            self.refresh_depth();
             return;
         }
         let depth = self.shared.depth.load(Ordering::Acquire);
@@ -339,6 +370,27 @@ impl FlushLoop {
                 // Writes may have landed while we flushed; depth is the log only now.
                 self.refresh_depth();
             }
+            Err(StoreError::Constraint(code)) => {
+                // STORE-4 / D5: a deterministic constraint violation can
+                // never succeed on replay — retrying it would only poison the
+                // queue head (head-of-line blocking). Dead-letter the WHOLE
+                // batch: warn (constraint + batch summary), drop, count in
+                // stats, session continues, never degrade for a dead-lettered
+                // batch.
+                let batch_len = self.pending.len();
+                self.pending.mutations.clear();
+                self.retry_after = None;
+                self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
+                self.refresh_depth();
+                tracing::warn!(
+                    constraint = %code,
+                    batch_len,
+                    depth = self.shared.depth.load(Ordering::Acquire),
+                    session = %session,
+                    "FlushDeadLettered: deterministic constraint violation; batch of {batch_len} \
+                     mutations dropped (dead-letter D5, drop-after-log), session continues",
+                );
+            }
             Err(err) => {
                 // Retries exhausted: RETAIN the batch — it is still in
                 // `self.pending`, never dropped, and flushes before new drains
@@ -362,7 +414,12 @@ impl FlushLoop {
     }
 
     /// Attempt `store.flush` with exponential backoff, up to `retries` retries
-    /// after the initial attempt (total attempts = `retries` + 1).
+    /// after the initial attempt (total attempts = `retries` + 1). Every
+    /// attempt is bounded by [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung
+    /// store must not wedge the loop forever — the timeout maps into this
+    /// retry path exactly like any other `Err` (retry → retain → degrade).
+    /// A [`StoreError::Constraint`] (STORE-4) is deterministic and surfaces
+    /// immediately with NO backoff: the caller dead-letters the batch.
     async fn flush_with_retry(&mut self) -> Result<(), StoreError> {
         let mut retries_used: u32 = 0;
         let mut backoff = BACKOFF_BASE;
@@ -373,7 +430,7 @@ impl FlushLoop {
             // the designed failure path. Poll the flush inside `catch_unwind`
             // and route a panic into the typed-error path below (same backoff
             // → retain/degrade handling), logging the payload.
-            let result =
+            let attempt = async {
                 match CatchUnwindPoll(async { self.store.flush(&self.pending).await }).await {
                     Ok(result) => result,
                     Err(payload) => {
@@ -389,10 +446,25 @@ impl FlushLoop {
                             "store flush panicked: {message}"
                         )))
                     }
-                };
+                }
+            };
+            // STORE-2: bound the whole attempt (panic containment included).
+            // On timeout the in-flight future is dropped; the backend only
+            // borrows `&self.pending`, so the pending buffer is intact.
+            let result = match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, attempt).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(StoreError::Backend(format!(
+                    "store flush timed out after {FLUSH_ATTEMPT_TIMEOUT:?}"
+                ))),
+            };
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
+                    if !err.is_retryable() {
+                        // STORE-4: deterministic constraint violation — no
+                        // backoff, no retry; the caller dead-letters it.
+                        return Err(err);
+                    }
                     if retries_used >= self.params.retries {
                         return Err(err);
                     }
@@ -802,6 +874,208 @@ mod tests {
         }
     }
 
+    /// `GraphStore` mock: its flush HANGS (never resolves) for the first
+    /// `hang_next(n)` calls, then delegates to an inner store. STORE-2
+    /// harness — mirrors the F2 `HangingStore` (load.rs) for the flush path:
+    /// a hung flush must be bounded by [`FLUSH_ATTEMPT_TIMEOUT`], never wedge
+    /// the loop.
+    struct HungStore {
+        inner: Arc<dyn GraphStore>,
+        flush_calls: AtomicUsize,
+        hang_remaining: AtomicUsize,
+        hang_always: AtomicBool,
+        batch_sizes: Mutex<Vec<usize>>,
+    }
+
+    impl HungStore {
+        fn new(inner: Arc<dyn GraphStore>) -> Self {
+            Self {
+                inner,
+                flush_calls: AtomicUsize::new(0),
+                hang_remaining: AtomicUsize::new(0),
+                hang_always: AtomicBool::new(false),
+                batch_sizes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn hang_next(&self, n: usize) {
+            self.hang_remaining.store(n, Ordering::SeqCst);
+        }
+
+        fn flush_calls(&self) -> usize {
+            self.flush_calls.load(Ordering::SeqCst)
+        }
+
+        fn batch_sizes(&self) -> Vec<usize> {
+            self.batch_sizes.lock().clone()
+        }
+
+        fn should_hang(&self) -> bool {
+            if self.hang_always.load(Ordering::SeqCst) {
+                return true;
+            }
+            self.hang_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n > 0).then(|| n - 1)
+                })
+                .is_ok()
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for HungStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            self.batch_sizes.lock().push(batch.len());
+            if self.should_hang() {
+                // Never resolve — the flush-loop attempt timeout must bound
+                // this (STORE-2); the pending future is dropped on timeout.
+                std::future::pending().await
+            } else {
+                self.inner.flush(batch).await
+            }
+        }
+
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+        ) -> Result<u64, StoreError> {
+            self.inner.blast_radius(session, node, min_edge_age).await
+        }
+
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner.interaction_span(session, node, min_age).await
+        }
+
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// `GraphStore` mock: flush ALWAYS fails with a deterministic constraint
+    /// violation (STORE-4). Records call/batch bookkeeping like
+    /// [`FlakyStore`].
+    struct ConstraintStore {
+        inner: Arc<dyn GraphStore>,
+        flush_calls: AtomicUsize,
+        batch_sizes: Mutex<Vec<usize>>,
+    }
+
+    impl ConstraintStore {
+        fn new(inner: Arc<dyn GraphStore>) -> Self {
+            Self {
+                inner,
+                flush_calls: AtomicUsize::new(0),
+                batch_sizes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn flush_calls(&self) -> usize {
+            self.flush_calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl GraphStore for ConstraintStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            self.batch_sizes.lock().push(batch.len());
+            Err(StoreError::Constraint("23505".into()))
+        }
+
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+        ) -> Result<u64, StoreError> {
+            self.inner.blast_radius(session, node, min_edge_age).await
+        }
+
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner.interaction_span(session, node, min_age).await
+        }
+
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
     /// Capturing writer for asserting on emitted tracing events.
     #[derive(Clone)]
     struct BufWriter(Arc<Mutex<Vec<u8>>>);
@@ -1016,15 +1290,25 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         wait_until(|| task.degraded()).await;
         assert!(task.degraded());
-        assert_eq!(task.stats().depth, 5);
         assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
 
-        // Still degrading, still no I/O, depth keeps tracking new writes.
+        // STORE-3: post-degrade the drained batch is DROPPED (spec §2.3
+        // "none = pure RAM") — pending is cleared every cycle, so depth
+        // tracks the in-graph log only (which drains to zero). The old
+        // contract retained every mutation for the session's remaining life
+        // (unbounded RAM growth).
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(task.stats().depth, 0, "pending cleared post-degrade");
+        assert_eq!(graph.read().log_len(), 0, "log drained post-degrade");
+
+        // Still degrading, still no I/O; new writes drain and drop every
+        // cycle — depth never accumulates the backlog.
         add_concept(&graph, 3, iid);
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(store.flush_calls(), 2);
-        wait_until(|| task.stats().depth == 7).await;
-        assert_eq!(task.stats().depth, 7);
+        wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(task.stats().depth, 0);
         assert!(task.degraded());
 
         let out = String::from_utf8(buf.lock().clone()).unwrap();
@@ -1054,7 +1338,8 @@ mod tests {
             task.stats(),
             FlushStats {
                 lag: Duration::ZERO,
-                depth: 0
+                depth: 0,
+                dead_lettered: 0,
             }
         );
 
@@ -1337,7 +1622,11 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         wait_until(|| task.degraded()).await;
         assert!(task.degraded());
-        assert_eq!(task.stats().depth, 5);
+        // STORE-3: post-degrade the drained batch is dropped — depth tracks
+        // the in-graph log only (drains to zero), never the retained backlog.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(task.stats().depth, 0, "pending cleared post-degrade");
         assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
         assert!(!handle.is_finished(), "degrade must not abort the loop");
 
@@ -1353,5 +1642,174 @@ mod tests {
             "panic payload missing: {out}"
         );
         assert!(out.contains("FlushDegraded"), "error missing: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_store_flush_times_out_never_wedges_the_loop() {
+        // STORE-2: a store whose flush NEVER resolves must not wedge the
+        // flush loop. The per-attempt FLUSH_ATTEMPT_TIMEOUT ends the attempt;
+        // the timeout maps into the existing retry path (backoff → retry →
+        // retain), the session keeps working, and the loop never dies, never
+        // degrades. Reaches the shared BackendFlushFailed warn; keep its
+        // callsite from registering `never`.
+        let _callsites = keep_callsites_enabled();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(HungStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        store.hang_next(2); // attempts 1 and 2 hang; attempt 3 delegates
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        // Tick at 1.0: attempt 1 hangs. The timeout (not the store) ends the
+        // attempt; the loop stays alive and un-degraded.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        assert_eq!(store.flush_calls(), 1);
+        assert!(!handle.is_finished(), "flush loop wedged on a hung store");
+        assert!(!task.degraded());
+        assert_eq!(task.stats().depth, 3);
+
+        // Attempt 1 times out at 1s + FLUSH_ATTEMPT_TIMEOUT; backoff
+        // (BACKOFF_BASE) then attempt 2 hangs the same way. Advance past the
+        // deadline in small steps: the paused-clock harness has a small,
+        // deterministic scheduling lag between a timer's deadline and the
+        // flush task observing it, so a single exact advance is not enough.
+        tokio::time::advance(FLUSH_ATTEMPT_TIMEOUT).await;
+        for _ in 0..30 {
+            if store.flush_calls() >= 2 {
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        assert_eq!(store.flush_calls(), 2);
+        assert!(!handle.is_finished(), "flush loop wedged on a hung store");
+        assert!(!task.degraded());
+
+        // Attempt 2 times out; retries exhausted -> batch RETAINED (never
+        // dropped), post-retry hold armed (F3). Still no degrade, loop alive.
+        tokio::time::advance(FLUSH_ATTEMPT_TIMEOUT).await;
+        tokio::time::advance(Duration::from_secs(1)).await; // absorb lag; retain settles
+        assert_eq!(
+            store.flush_calls(),
+            2,
+            "hold armed: no attempt during the hold"
+        );
+        assert_eq!(task.stats().depth, 3, "retained batch still pending");
+        assert!(!handle.is_finished());
+        assert!(!task.degraded());
+
+        // The session keeps accepting writes while the store is hung.
+        let _iid2 = add_interaction(&graph, 2, Some(iid)); // 2 more mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().depth == 5).await;
+        assert_eq!(task.stats().depth, 5);
+        assert!(!task.degraded());
+
+        // Hold elapses; the next tick re-enters the sequence and the
+        // recovered store lands the whole pending batch in order.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(store.batch_sizes(), vec![3, 3, 5]);
+        let snap = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snap.interactions.len(), 2);
+        assert_eq!(snap.concepts.len(), 1);
+        assert_eq!(snap.edges.len(), 2); // Derives + Temporal
+        assert!(!handle.is_finished());
+        assert!(!task.degraded());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn constraint_violation_dead_letters_the_batch() {
+        // STORE-4 / D5: a deterministic constraint violation is dead-lettered
+        // — logged and dropped (visible in stats), NOT retried, NOT retained,
+        // NOT degraded. The session continues and the next batch flushes
+        // fresh (no head-of-line poisoning).
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(ConstraintStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        // Tick: the constraint surfaces with NO backoff (retries=3 are
+        // configured but must not be consumed) and the batch is dropped.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().dead_lettered == 1).await;
+        assert_eq!(store.flush_calls(), 1, "constraint must not be retried");
+        assert_eq!(task.stats().dead_lettered, 1);
+        assert_eq!(task.stats().depth, 0, "dead-lettered batch cleared");
+        assert!(!task.degraded(), "dead-letter must not degrade the session");
+        assert!(!handle.is_finished());
+
+        // Session continues: the next write flushes (and fails) fresh — the
+        // dead letter did not poison the queue.
+        add_interaction(&graph, 2, Some(iid)); // 2 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().dead_lettered == 2).await;
+        assert_eq!(store.flush_calls(), 2);
+        assert_eq!(task.stats().depth, 0);
+        assert!(!task.degraded());
+
+        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
+        assert!(out.contains("23505"), "constraint code missing: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failures_keep_the_retain_path_untouched() {
+        // STORE-4 contrast: transient (Backend) failures keep the EXISTING
+        // retain path — retried, then retained — and never touch
+        // `dead_lettered`. Only constraint violations dead-letter.
+        let _callsites = keep_callsites_enabled();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        assert_eq!(task.stats().depth, 3, "transient failure retains the batch");
+        assert_eq!(
+            task.stats().dead_lettered,
+            0,
+            "transient failure is not a dead letter"
+        );
+        assert!(!task.degraded());
     }
 }

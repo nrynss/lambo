@@ -100,7 +100,7 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
-use super::{Capabilities, GraphStore, StoreConfig};
+use super::{map_write_err, Capabilities, GraphStore, StoreConfig};
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
     GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId,
@@ -389,19 +389,31 @@ fn backend<E: std::fmt::Display>(e: E) -> StoreError {
 /// CockroachDB serializable transactions abort with SQLSTATE 40001
 /// (`restart transaction: ... RETRY_SERIALIZABLE ...`) when they conflict with a
 /// concurrent commit; sqlx does not auto-retry, so the client must replay the whole
-/// transaction. Detection is on Cockroach's stable message markers — the sqlx error is
-/// already flattened into [`StoreError::Backend`] by the statement helpers. Bounded
-/// backoff; a genuine (non-conflict) error is returned immediately.
+/// transaction. Bounded backoff; a genuine (non-conflict) error is returned
+/// immediately.
 const TX_RETRY_ATTEMPTS: usize = 5;
 
-fn is_retryable(e: &StoreError) -> bool {
+/// STORE-2: server-side per-statement bound (`statement_timeout`), applied to
+/// every connection in the pool. `statement_timeout` applies per statement,
+/// not per transaction — a multi-statement flush batch can run N x 20s. The
+/// whole-batch bound is the client-side flush attempt timeout
+/// (`flush.rs` `FLUSH_ATTEMPT_TIMEOUT`); the per-statement bound stays below
+/// it so the database aborts a hung statement before the client gives up on
+/// the attempt. It also bounds every other statement on the pool — well
+/// under the 30s `LOAD_SESSION_TIMEOUT`.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// STORE-4: structured retry decision for `tx_retry` — no message-text
+/// matching. Constraint violations (SQLSTATE 23xxx) are deterministic and are
+/// mapped to [`StoreError::Constraint`] by the write path: never replay them.
+/// Typed variants are permanent. A [`StoreError::Backend`] may be a transient
+/// (serialization conflict, connection exception, server shutdown) that
+/// replaying the transaction can fix; the replay is bounded by
+/// [`TX_RETRY_ATTEMPTS`] with backoff.
+fn tx_retryable(e: &StoreError) -> bool {
     match e {
-        StoreError::Backend(msg) => {
-            msg.contains("restart transaction")
-                || msg.contains("RETRY_SERIALIZABLE")
-                || msg.contains("TransactionRetry")
-                || msg.contains("40001")
-        }
+        StoreError::Constraint(_) => false,
+        StoreError::Backend(_) => true,
         _ => false,
     }
 }
@@ -422,7 +434,7 @@ where
         match body().await {
             Ok(value) => return Ok(value),
             Err(err) => {
-                if is_retryable(&err) && attempt + 1 < TX_RETRY_ATTEMPTS {
+                if tx_retryable(&err) && attempt + 1 < TX_RETRY_ATTEMPTS {
                     last_err = Some(err);
                     tokio::time::sleep(Duration::from_millis(50 * (attempt as u64 + 1))).await;
                     continue;
@@ -809,14 +821,29 @@ impl CockroachStore {
     async fn pool(&self) -> Result<&PgPool, StoreError> {
         self.pool
             .get_or_try_init(|| async {
-                PgPoolOptions::new()
+                let options = self
+                    .dsn
+                    .parse::<sqlx::postgres::PgConnectOptions>()
+                    .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
+                    // STORE-2: bound every statement server-side.
+                    // statement_timeout applies per statement, not per
+                    // transaction — a multi-statement flush batch can take
+                    // N x 20s. The whole-batch bound is the client-side
+                    // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
+                    // per-statement bound stays below it so the DB aborts a
+                    // hung statement before the client gives up on the
+                    // attempt (a hung statement must never wedge the flush
+                    // loop).
+                    .options([(
+                        "statement_timeout",
+                        format!("{}s", STATEMENT_TIMEOUT.as_secs()),
+                    )]);
+                Ok(PgPoolOptions::new()
                     .max_connections(MAX_POOL_CONNECTIONS)
-                    .connect_lazy(&self.dsn)
-                    .map_err(|e| backend(format!("connect Cockroach pool: {e}")))
+                    .connect_lazy_with(options))
             })
             .await
     }
-
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
     /// seven tables in one transaction — the full-snapshot path that carries synonyms and
     /// reservations (they have no `Mutation` kind, S5 contract).
@@ -834,7 +861,10 @@ impl CockroachStore {
         // must not move the owned String into the first attempt's future.
         let root_goal = root_goal.as_deref();
         tx_retry(|| async move {
-            let mut tx = pool.begin().await.map_err(backend)?;
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("begin seed transaction: {m}")))?;
             sqlx::query(UPSERT_SESSION_SQL)
                 .bind(sid)
                 .bind(root_goal)
@@ -842,7 +872,7 @@ impl CockroachStore {
                 .bind(snapshot.closed_at)
                 .execute(&mut *tx)
                 .await
-                .map_err(backend)?;
+                .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             for i in &snapshot.interactions {
                 upsert_interaction(&mut *tx, i).await?;
             }
@@ -859,7 +889,7 @@ impl CockroachStore {
                     .bind(&s.canonical_key)
                     .execute(&mut *tx)
                     .await
-                    .map_err(backend)?;
+                    .map_err(|e| map_write_err(e, |m| format!("upsert synonym: {m}")))?;
             }
             for r in &snapshot.reservations {
                 sqlx::query(UPSERT_RESERVATION_SQL)
@@ -869,12 +899,14 @@ impl CockroachStore {
                     .bind(r.expires_at)
                     .execute(&mut *tx)
                     .await
-                    .map_err(backend)?;
+                    .map_err(|e| map_write_err(e, |m| format!("upsert reservation: {m}")))?;
             }
             for ev in &snapshot.canonization_events {
                 insert_canonization_event(&mut *tx, ev).await?;
             }
-            tx.commit().await.map_err(backend)?;
+            tx.commit()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("commit seed transaction: {m}")))?;
             Ok(())
         })
         .await
@@ -915,7 +947,7 @@ async fn upsert_interaction(
         .bind(i.created_at)
         .execute(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
     Ok(())
 }
 
@@ -943,7 +975,7 @@ async fn upsert_concept(tx: &mut sqlx::PgConnection, c: &Concept) -> Result<(), 
         .bind(c.chunk_group_id.clone())
         .execute(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
     Ok(())
 }
 
@@ -960,7 +992,7 @@ async fn upsert_edge(tx: &mut sqlx::PgConnection, e: &Edge) -> Result<(), StoreE
         .bind(e.last_reinforced)
         .execute(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
     Ok(())
 }
 
@@ -979,7 +1011,7 @@ async fn insert_canonization_event(
         .bind(ev.occurred_at)
         .execute(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(|e| map_write_err(e, |m| format!("insert canonization event: {m}")))?;
     Ok(())
 }
 
@@ -997,7 +1029,7 @@ async fn apply_canonization(
         .bind(ev.last_demotion_time)
         .execute(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(|e| map_write_err(e, |m| format!("apply canonization transition: {m}")))?;
     if res.rows_affected() == 0 {
         return Err(StoreError::NotFound(format!(
             "concept {} for canonization",
@@ -1031,7 +1063,10 @@ impl GraphStore for CockroachStore {
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         tx_retry(|| async move {
-            let mut tx = pool.begin().await.map_err(backend)?;
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("begin flush transaction: {m}")))?;
             // Ensure a sessions row for every session the batch writes into — the DDL
             // enforces `REFERENCES sessions(session_id)` on interactions/concepts, and the
             // graph tier creates sessions implicitly (MemoryStore::ensure_session parity).
@@ -1052,7 +1087,7 @@ impl GraphStore for CockroachStore {
                     .bind(sid)
                     .execute(&mut *tx)
                     .await
-                    .map_err(backend)?;
+                    .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             }
 
             // Replay in submission order — see module doc (T2.1 M2: MUST NOT re-sort).
@@ -1071,31 +1106,37 @@ impl GraphStore for CockroachStore {
                             .bind(id.0)
                             .execute(&mut *tx)
                             .await
-                            .map_err(backend)?;
+                            .map_err(|e| map_write_err(e, |m| format!("delete node edges: {m}")))?;
                         sqlx::query(DELETE_NODE_CONCEPTS_SQL)
                             .bind(id.0)
                             .execute(&mut *tx)
                             .await
-                            .map_err(backend)?;
+                            .map_err(|e| {
+                                map_write_err(e, |m| format!("delete node concepts: {m}"))
+                            })?;
                         sqlx::query(DELETE_NODE_INTERACTIONS_SQL)
                             .bind(id.0)
                             .execute(&mut *tx)
                             .await
-                            .map_err(backend)?;
+                            .map_err(|e| {
+                                map_write_err(e, |m| format!("delete node interactions: {m}"))
+                            })?;
                     }
                     Mutation::DeleteEdge { id } => {
                         sqlx::query(DELETE_EDGE_SQL)
                             .bind(id.0)
                             .execute(&mut *tx)
                             .await
-                            .map_err(backend)?;
+                            .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
                     }
                     Mutation::CanonizationTransition { event } => {
                         apply_canonization(&mut *tx, event).await?;
                     }
                 }
             }
-            tx.commit().await.map_err(backend)?;
+            tx.commit()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("commit flush transaction: {m}")))?;
             Ok(())
         })
         .await
@@ -1352,9 +1393,15 @@ impl GraphStore for CockroachStore {
     async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         tx_retry(|| async move {
-            let mut tx = pool.begin().await.map_err(backend)?;
+            let mut tx = pool.begin().await.map_err(|e| {
+                map_write_err(e, |m| format!("begin record_canonization transaction: {m}"))
+            })?;
             apply_canonization(&mut *tx, event).await?;
-            tx.commit().await.map_err(backend)?;
+            tx.commit().await.map_err(|e| {
+                map_write_err(e, |m| {
+                    format!("commit record_canonization transaction: {m}")
+                })
+            })?;
             Ok(())
         })
         .await
@@ -1625,20 +1672,31 @@ mod tests {
     }
 
     #[test]
-    fn serializable_retry_detection() {
-        // Cockroach prefixes every retriable serialization abort with this marker.
-        let retry = StoreError::Backend(
+    fn tx_retryable_is_structured_not_substring() {
+        // STORE-4: the tx-replay decision matches the TYPED error — never
+        // message text. Constraint violations (SQLSTATE 23xxx) are
+        // deterministic: never replayed, dead-lettered upstream. Typed
+        // variants are permanent. A Backend error may be a transient
+        // (serialization conflict, connection exception, server shutdown);
+        // the replay is bounded by TX_RETRY_ATTEMPTS + backoff, so a
+        // non-constraint Backend (e.g. a schema bug) at worst re-runs the tx
+        // body a bounded number of times before surfacing.
+        assert!(!tx_retryable(&StoreError::Constraint("23505".into())));
+        assert!(!tx_retryable(&StoreError::SessionNotFound("x".into())));
+        assert!(!tx_retryable(&StoreError::Capability("nope".into())));
+        assert!(!tx_retryable(&StoreError::NotFound("nope".into())));
+        assert!(!tx_retryable(&StoreError::Invariant("nope".into())));
+        assert!(tx_retryable(&StoreError::Backend(
             "restart transaction: TransactionRetryWithProtoRefreshError: TransactionRetryError: \
              retry txn (RETRY_SERIALIZABLE - failed preemptive refresh...)"
                 .into(),
-        );
-        assert!(is_retryable(&retry));
-        let code = StoreError::Backend("db error: SQLSTATE 40001".into());
-        assert!(is_retryable(&code));
-        let real = StoreError::Backend("relation \"concepts\" does not exist".into());
-        assert!(!is_retryable(&real));
-        assert!(!is_retryable(&StoreError::SessionNotFound("x".into())));
-        assert!(!is_retryable(&StoreError::Capability("nope".into())));
+        )));
+        assert!(tx_retryable(&StoreError::Backend(
+            "db error: SQLSTATE 40001".into()
+        )));
+        assert!(tx_retryable(&StoreError::Backend(
+            "relation \"concepts\" does not exist".into()
+        )));
     }
 
     #[test]

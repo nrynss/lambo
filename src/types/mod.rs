@@ -488,8 +488,25 @@ pub enum StoreError {
     Invariant(String),
     #[error("backend: {0}")]
     Backend(String),
+    /// Deterministic constraint violation (Postgres SQLSTATE 23xxx /
+    /// SQLite `SQLITE_CONSTRAINT`), carrying the SQLSTATE / extended code.
+    /// Terminal: replaying the batch can never succeed (STORE-4 / D5), so the
+    /// flush loop dead-letters it instead of retrying.
+    #[error("constraint violated ({0})")]
+    Constraint(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl StoreError {
+    /// STORE-4: retryability for the flush loop. A constraint violation is
+    /// deterministic — retrying it can never succeed and only blocks the
+    /// queue (head-of-line) — so it is non-retryable and dead-lettered
+    /// (D5: drop-after-log, visible in `FlushStats::dead_lettered`). Every
+    /// other error keeps the existing retry / retain semantics.
+    pub fn is_retryable(&self) -> bool {
+        !matches!(self, StoreError::Constraint(_))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

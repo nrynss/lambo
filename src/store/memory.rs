@@ -191,27 +191,76 @@ impl GraphStore for MemoryStore {
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-        // Single write lock; apply mutations in submission order (spec §2.4).
+        if batch.mutations.is_empty() {
+            return Ok(());
+        }
         let mut map = self.inner.write();
+        // STORE-6: apply the batch to a WORKING COPY of the affected sessions
+        // and commit by swapping on FULL success — a mid-batch error must
+        // leave every session exactly as it was, matching the SQL adapters
+        // (which roll back the whole transaction). Only the sessions the
+        // batch touches are copied, not the whole store.
+        let resolve_committed = |m: &Mutation| -> Option<SessionId> {
+            match m {
+                Mutation::UpsertNode { node } => Some(node.session_id().clone()),
+                Mutation::UpsertEdge { edge } => Some(edge.session_id.clone()),
+                Mutation::CanonizationTransition { event } => Some(event.session_id.clone()),
+                Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
+                Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
+            }
+        };
+
+        let mut affected: Vec<SessionId> = Vec::new();
+        for m in &batch.mutations {
+            let Some(sid) = resolve_committed(m) else {
+                continue; // idempotent no-op if the deleted node/edge is already gone
+            };
+            if !affected.iter().any(|s| s == &sid) {
+                affected.push(sid);
+            }
+        }
+
+        let mut work: HashMap<String, SessionData> = HashMap::new();
+        for sid in &affected {
+            let data = match map.get(&sid.0) {
+                Some(d) => SessionData {
+                    snapshot: d.snapshot.clone(),
+                },
+                None => SessionData {
+                    snapshot: GraphSnapshot {
+                        session_id: sid.clone(),
+                        ..Default::default()
+                    },
+                },
+            };
+            work.insert(sid.0.clone(), data);
+        }
+
+        // Apply in submission order (spec §2.4) on the working copies. Any
+        // error drops `work` — the committed map is untouched. Deletes
+        // resolve against the WORKING state so a node upserted earlier in
+        // this same batch is visible (pre-atomicity semantics preserved).
         for m in &batch.mutations {
             let sid = match m {
                 Mutation::UpsertNode { node } => node.session_id().clone(),
                 Mutation::UpsertEdge { edge } => edge.session_id.clone(),
                 Mutation::CanonizationTransition { event } => event.session_id.clone(),
-                Mutation::DeleteNode { id } => {
-                    match Self::resolve_session_for_node(&map, *id) {
-                        Some(s) => s,
-                        // Idempotent no-op if already gone.
-                        None => continue,
-                    }
-                }
-                Mutation::DeleteEdge { id } => match Self::resolve_session_for_edge(&map, *id) {
+                Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
+                    Some(s) => s,
+                    None => continue,
+                },
+                Mutation::DeleteEdge { id } => match Self::resolve_session_for_edge(&work, *id) {
                     Some(s) => s,
                     None => continue,
                 },
             };
-            let data = Self::ensure_session(&mut map, &sid);
+            let data = work.get_mut(&sid.0).expect("affected session present");
             Self::apply_mutation(&mut data.snapshot, m)?;
+        }
+
+        // Commit: swap the working copies in on full success.
+        for (sid, data) in work {
+            map.insert(sid, data);
         }
         Ok(())
     }
@@ -944,5 +993,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_session(&s1).await.unwrap().interactions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_flush_leaves_session_state_unchanged() {
+        // STORE-6: a mid-batch error must leave the session exactly as it
+        // was — the memory oracle is atomic like the SQL adapters (which roll
+        // back the whole transaction). The prefix of a failing batch must not
+        // leak through.
+        let store = MemoryStore::new();
+        let (sid, i1, c1, _) = sample_session();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+        // Seed a session with one interaction.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::UpsertNode {
+                    node: Node::Interaction(Interaction {
+                        id: i1,
+                        session_id: sid.clone(),
+                        agent_id: AgentId::from("a"),
+                        prompt_text: Some("hi".into()),
+                        previous_id: None,
+                        created_at: ts,
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        let before = store.load_session(&sid).await.unwrap();
+
+        // Batch: a valid concept upsert (prefix) FOLLOWED by a canonization
+        // transition on a missing concept — the mid-batch failure.
+        let bad = MutationBatch {
+            mutations: vec![
+                plant_concept(&sid, c1, i1, "ghost", ts),
+                Mutation::CanonizationTransition {
+                    event: CanonizationEvent {
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        node_id: NodeId::new(), // missing concept
+                        from_status: CanonizationStatus::Candidate,
+                        to_status: CanonizationStatus::Canonical,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        occurred_at: ts,
+                    },
+                },
+            ],
+        };
+        assert!(
+            store.flush(&bad).await.is_err(),
+            "canonization of a missing concept must error"
+        );
+
+        let after = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            before, after,
+            "failed flush must not apply any prefix of the batch"
+        );
     }
 }
