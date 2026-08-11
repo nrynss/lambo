@@ -10,6 +10,21 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
+// T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4). Feature: store-cockroach.
+#[cfg(feature = "store-cockroach")]
+pub mod cockroach;
+// T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). No VECTOR_SEARCH.
+#[cfg(feature = "store-sqlite")]
+mod sqlite;
+
+#[cfg(feature = "store-sqlite")]
+pub use sqlite::SqliteStore;
+
+// T3.5 — `load_session()` / startup materialization (see `load.rs`).
+pub mod load;
+// T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
+pub mod flush;
+
 use async_trait::async_trait;
 use bitflags::bitflags;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -48,6 +63,17 @@ pub trait GraphStore: Send + Sync {
         None
     }
 
+    /// Persist a mutation batch durably (spec §2.4–§2.5).
+    ///
+    /// **Idempotency contract (flush replay, F5):** adapters MUST implement
+    /// every mutation kind with upsert / `ON CONFLICT` semantics. The flush
+    /// task may replay a batch that partially succeeded (a mid-batch backend
+    /// failure, a retried flush, or a retained batch re-attempted after a
+    /// store outage), so plain INSERTs are not acceptable: a replayed batch
+    /// must converge to the same final state — never duplicate rows, never
+    /// error on re-insertion. All Lambo mutation kinds are naturally
+    /// idempotent this way (node/edge upserts by natural key, canonization
+    /// transitions by event id); adapters must preserve that property.
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 
@@ -132,8 +158,10 @@ impl StoreKind {
     pub const fn is_ready(self) -> bool {
         match self {
             Self::Memory => cfg!(feature = "store-memory"),
-            // T3.2 / T3.3 not implemented yet.
-            Self::Cockroach | Self::Sqlite => false,
+            // T3.2: CockroachStore landed.
+            Self::Cockroach => cfg!(feature = "store-cockroach"),
+            // T3.3: SqliteStore lands with feature store-sqlite.
+            Self::Sqlite => cfg!(feature = "store-sqlite"),
         }
     }
 }
@@ -291,21 +319,30 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             }
         }
         StoreKind::Cockroach => {
-            // T3.2: construct CockroachStore; implement `vector_dimensions() -> Some(n)`
-            // from schema / StoreConfig (not a global constant).
-            Err(StoreError::Backend(
-                "store-cockroach is enabled (or selected) but CockroachStore is not implemented \
-                 yet (T3.2); use kind=memory until P3 lands"
-                    .into(),
-            ))
+            // Real gate: type only exists under this feature. The pool is created lazily
+            // (connect_lazy) so constructing the adapter never touches the network.
+            #[cfg(feature = "store-cockroach")]
+            {
+                Ok(Box::new(cockroach::CockroachStore::new(cfg)?))
+            }
+            #[cfg(not(feature = "store-cockroach"))]
+            {
+                Err(missing_feature(StoreKind::Cockroach))
+            }
         }
         StoreKind::Sqlite => {
-            // T3.3: typically `vector_dimensions() -> None` unless a BLOB path is added.
-            Err(StoreError::Backend(
-                "store-sqlite is enabled (or selected) but SqliteStore is not implemented yet \
-                 (T3.3); use kind=memory until P3 lands"
-                    .into(),
-            ))
+            // Real gate: type only exists under this feature. The pool is
+            // created lazily on first async use (build_store runs in a sync
+            // startup context; see sqlite.rs).
+            #[cfg(feature = "store-sqlite")]
+            {
+                let path = cfg.path.clone().unwrap_or_else(|| "sqlite::memory:".into());
+                Ok(Box::new(SqliteStore::connect(&path)?))
+            }
+            #[cfg(not(feature = "store-sqlite"))]
+            {
+                Err(missing_feature(StoreKind::Sqlite))
+            }
         }
     }
 }
@@ -379,54 +416,58 @@ mod tests {
     }
 
     #[test]
-    fn cockroach_fail_closed_message() {
-        let r = build_store(StoreConfig {
+    fn cockroach_build_behavior() {
+        // T3.2: with the feature compiled, build_store returns a working adapter
+        // (constructed lazily — no connection at build time); without it, fail closed
+        // with a rebuild hint and never fall back to memory.
+        let cfg = StoreConfig {
             kind: StoreKind::Cockroach,
             dsn: Some("postgresql://localhost/lambo".into()),
             path: None,
-        });
-        let Err(err) = r else {
-            panic!("expected err — silent fallback forbidden");
         };
-        let msg = err.to_string();
         if StoreKind::Cockroach.is_compiled() {
-            assert!(
-                msg.contains("T3.2") || msg.contains("not implemented"),
-                "{msg}"
-            );
+            let s = build_store(cfg).unwrap();
+            assert!(s.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(s.vector_dimensions(), Some(1024));
+            assert!(StoreKind::Cockroach.is_ready());
         } else {
+            let Err(err) = build_store(cfg) else {
+                panic!("expected err — silent fallback forbidden");
+            };
+            let msg = err.to_string();
             assert!(
                 msg.contains("not compiled") && msg.contains("store-cockroach"),
                 "{msg}"
             );
+            assert!(!msg.to_ascii_lowercase().contains("memory store"));
+            assert!(!StoreKind::Cockroach.is_ready());
         }
-        assert!(!msg.to_ascii_lowercase().contains("memory store"));
-        assert!(!StoreKind::Cockroach.is_ready());
     }
 
     #[test]
-    fn sqlite_fail_closed_message() {
+    fn sqlite_builds_or_fails_closed_by_feature() {
         let r = build_store(StoreConfig {
             kind: StoreKind::Sqlite,
             dsn: None,
             path: Some("sqlite::memory:".into()),
         });
-        let Err(err) = r else {
-            panic!("expected err — silent fallback forbidden");
-        };
-        let msg = err.to_string();
-        if StoreKind::Sqlite.is_compiled() {
-            assert!(
-                msg.contains("T3.3") || msg.contains("not implemented"),
-                "{msg}"
-            );
+        if cfg!(feature = "store-sqlite") {
+            // T3.3: with the feature on, build_store returns a working adapter.
+            let s = r.expect("sqlite store must build under store-sqlite");
+            assert_eq!(s.capabilities(), Capabilities::empty());
+            assert!(StoreKind::Sqlite.is_ready());
         } else {
+            let Err(err) = r else {
+                panic!("expected err — silent fallback forbidden");
+            };
+            let msg = err.to_string();
             assert!(
                 msg.contains("not compiled") && msg.contains("store-sqlite"),
                 "{msg}"
             );
+            assert!(!msg.to_ascii_lowercase().contains("memory store"));
+            assert!(!StoreKind::Sqlite.is_ready());
         }
-        assert!(!StoreKind::Sqlite.is_ready());
     }
 
     #[test]

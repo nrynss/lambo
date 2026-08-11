@@ -239,7 +239,10 @@ CREATE TABLE sessions (
     session_id      STRING PRIMARY KEY,
     root_goal       JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    closed_at       TIMESTAMPTZ
+    closed_at       TIMESTAMPTZ,
+    embedding_kind  STRING,    -- errata 2026-08-11: session embedding space (S5-class,
+    embedding_model STRING,    -- snapshot-only; load_session restores GraphSnapshot.embedding;
+    embedding_dim   INT        -- no Mutation kind writes these — see PHASE-3 handoffs)
 );
 
 CREATE TABLE interactions (
@@ -268,7 +271,8 @@ CREATE TABLE concepts (
     blast_radius        INT,
     last_demotion_time  TIMESTAMPTZ,
     embedding           VECTOR(1024),        -- dense 1024-d (BGE-M3 default / Titan V2 swap-in)
-    UNIQUE (session_id, canonical_key),
+    chunk_group_id      STRING,              -- errata 2026-08-11: demoted-chunk group id (T2.5);
+    UNIQUE (session_id, canonical_key),      -- sibling co-retrieval (spec §8, T5.2 reads it)
     INDEX (session_id, canonization_status)
 );
 
@@ -397,6 +401,15 @@ FROM extent;
 
 Both are pure SQL, both port to SQLite with placeholder and interval-syntax substitution,
 and both are exactly the kind of query the judging criteria mean by "more than toy queries."
+
+**Errata (2026-08-11, P3 / review of T3.3):** the `interaction_span` query above gates
+`i.created_at` only; the shipped adapters gate **both** `e.created_at` and `i.created_at`
+(the span is built from edges, so an edge younger than the cutoff is excluded even when its
+origin interaction is older). This matches `MemoryStore` and is required for the T3.6
+three-way agreement gate — do not "simplify" it back to the literal text above without
+re-running that gate. `blast_radius`'s added `c.id <> $node` guard is semantically
+equivalent to the spec text (structural self-loops are rejected by the graph tier's cycle
+invariants).
 
 ---
 
