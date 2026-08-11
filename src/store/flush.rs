@@ -128,11 +128,7 @@ pub struct FlushTask {
 
 impl FlushTask {
     /// `params` typically come from `Config::backend_flush_*`.
-    pub fn new(
-        graph: Arc<RwLock<Graph>>,
-        store: Arc<dyn GraphStore>,
-        params: FlushParams,
-    ) -> Self {
+    pub fn new(graph: Arc<RwLock<Graph>>, store: Arc<dyn GraphStore>, params: FlushParams) -> Self {
         Self {
             graph,
             store,
@@ -233,7 +229,10 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     } else if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else {
-        format!("non-string panic payload ({})", std::any::type_name_of_val(payload))
+        format!(
+            "non-string panic payload ({})",
+            std::any::type_name_of_val(payload)
+        )
     }
 }
 
@@ -340,24 +339,23 @@ impl FlushLoop {
             // the designed failure path. Poll the flush inside `catch_unwind`
             // and route a panic into the typed-error path below (same backoff
             // → retain/degrade handling), logging the payload.
-            let result = match CatchUnwindPoll(async {
-                self.store.flush(&self.pending).await
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(payload) => {
-                    let message = panic_message(&payload);
-                    tracing::warn!(
-                        panic = %message,
-                        attempt = retries_used + 1,
-                        max_retries = self.params.retries,
-                        "BackendFlushPanic: store.flush panicked; treating as a failed flush \
-                         attempt (backoff, then retain/degrade as usual)"
-                    );
-                    Err(StoreError::Backend(format!("store flush panicked: {message}")))
-                }
-            };
+            let result =
+                match CatchUnwindPoll(async { self.store.flush(&self.pending).await }).await {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let message = panic_message(&payload);
+                        tracing::warn!(
+                            panic = %message,
+                            attempt = retries_used + 1,
+                            max_retries = self.params.retries,
+                            "BackendFlushPanic: store.flush panicked; treating as a failed flush \
+                             attempt (backoff, then retain/degrade as usual)"
+                        );
+                        Err(StoreError::Backend(format!(
+                            "store flush panicked: {message}"
+                        )))
+                    }
+                };
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -527,7 +525,7 @@ mod tests {
         tracing::subscriber::set_default(
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::TRACE)
-                .with_writer(|| std::io::sink())
+                .with_writer(std::io::sink)
                 .finish(),
         )
     }
@@ -575,7 +573,9 @@ mod tests {
                 return true;
             }
             self.fail_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then(|| n - 1))
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n > 0).then(|| n - 1)
+                })
                 .is_ok()
         }
     }
@@ -621,7 +621,9 @@ mod tests {
             embedding: &[f32],
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            self.inner.vector_candidates(session, embedding, limit).await
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
         }
 
         async fn blast_radius(
@@ -692,7 +694,9 @@ mod tests {
                 return true;
             }
             self.panic_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then(|| n - 1))
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n > 0).then(|| n - 1)
+                })
                 .is_ok()
         }
     }
@@ -736,7 +740,9 @@ mod tests {
             embedding: &[f32],
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            self.inner.vector_candidates(session, embedding, limit).await
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
         }
 
         async fn blast_radius(
@@ -805,7 +811,10 @@ mod tests {
         tokio::time::advance(Duration::from_millis(100)).await;
         wait_until(|| graph.read().log_len() == 0).await;
         assert_eq!(task.stats().depth, 3);
-        assert!(store.load_session(&sid()).await.is_err(), "nothing flushed yet");
+        assert!(
+            store.load_session(&sid()).await.is_err(),
+            "nothing flushed yet"
+        );
 
         // Interval tick delivers the batch.
         tokio::time::advance(Duration::from_millis(900)).await;
@@ -816,7 +825,10 @@ mod tests {
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.edges.len(), 1); // Derives edge
         assert_eq!(task.stats().depth, 0);
-        assert!(task.stats().lag < Duration::from_millis(50), "lag reset after success");
+        assert!(
+            task.stats().lag < Duration::from_millis(50),
+            "lag reset after success"
+        );
         assert!(!task.degraded());
     }
 
@@ -883,7 +895,10 @@ mod tests {
         wait_until(|| store.flush_calls() >= 1).await;
         assert_eq!(store.flush_calls(), 1);
         assert_eq!(task.stats().depth, 3);
-        assert!(store.load_session(&sid()).await.is_err(), "nothing landed yet");
+        assert!(
+            store.load_session(&sid()).await.is_err(),
+            "nothing landed yet"
+        );
 
         // Session uninterrupted: the graph accepts writes while the store is down.
         let _iid2 = add_interaction(&graph, 2, Some(iid));
@@ -910,7 +925,10 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(task.stats().depth, 2);
-        assert!(task.stats().lag < Duration::from_millis(50), "lag reset on success");
+        assert!(
+            task.stats().lag < Duration::from_millis(50),
+            "lag reset on success"
+        );
 
         // Next tick catches the session up completely.
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -998,7 +1016,13 @@ mod tests {
         let _handle = task.spawn();
         let_task_arm().await;
 
-        assert_eq!(task.stats(), FlushStats { lag: Duration::ZERO, depth: 0 });
+        assert_eq!(
+            task.stats(),
+            FlushStats {
+                lag: Duration::ZERO,
+                depth: 0
+            }
+        );
 
         store.fail_next(2);
         let iid = add_interaction(&graph, 1, None);
@@ -1033,7 +1057,10 @@ mod tests {
         wait_until(|| store.flush_calls() >= 3).await;
         wait_until(|| task.stats().depth == 0).await;
         assert_eq!(task.stats().depth, 0);
-        assert!(task.stats().lag < Duration::from_millis(50), "lag reset after success");
+        assert!(
+            task.stats().lag < Duration::from_millis(50),
+            "lag reset after success"
+        );
 
         let snap = store.load_session(&sid()).await.unwrap();
         assert_eq!(snap.interactions.len(), 1);
@@ -1122,7 +1149,10 @@ mod tests {
         assert!(!handle.is_finished(), "flush loop aborted on backend panic");
         assert!(!task.degraded());
         assert_eq!(task.stats().depth, 3);
-        assert!(store.load_session(&sid()).await.is_err(), "nothing landed yet");
+        assert!(
+            store.load_session(&sid()).await.is_err(),
+            "nothing landed yet"
+        );
 
         // Retry panics too; retries exhausted -> batch RETAINED (never dropped).
         tokio::time::advance(Duration::from_millis(100)).await;
@@ -1141,11 +1171,18 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.edges.len(), 1); // Derives edge
-        assert!(task.stats().lag < Duration::from_millis(50), "lag reset after success");
+        assert!(
+            task.stats().lag < Duration::from_millis(50),
+            "lag reset after success"
+        );
 
         // Each caught panic logged its payload via the BackendFlushPanic warn.
         let out = String::from_utf8(buf.lock().clone()).unwrap();
-        assert_eq!(out.matches("BackendFlushPanic").count(), 2, "warn missing: {out}");
+        assert_eq!(
+            out.matches("BackendFlushPanic").count(),
+            2,
+            "warn missing: {out}"
+        );
         assert!(
             out.contains("simulated flush panic (PanicStore)"),
             "panic payload missing: {out}"
@@ -1197,7 +1234,11 @@ mod tests {
 
         // Every caught panic logged BackendFlushPanic; degrade logged too.
         let out = String::from_utf8(buf.lock().clone()).unwrap();
-        assert_eq!(out.matches("BackendFlushPanic").count(), 2, "warn missing: {out}");
+        assert_eq!(
+            out.matches("BackendFlushPanic").count(),
+            2,
+            "warn missing: {out}"
+        );
         assert!(
             out.contains("simulated flush panic (PanicStore)"),
             "panic payload missing: {out}"
