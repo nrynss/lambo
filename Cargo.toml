@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "Agentic graph memory — bipartite graph, canonization, MCP serve"
 readme = "README.md"
-repository = "https://github.com/nryn/lambo"
+repository = "https://github.com/nrynss/lambo"
 keywords = ["memory", "agents", "mcp", "graph"]
 categories = ["asynchronous"]
 

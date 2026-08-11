@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P3
+branch:   phase/p3-stores
 requires: [P1, T0.3]
 blocks:   P8; P6 swaps to live queries when T3.6 lands
 parallel: high   # T3.1 first; then T3.2 ‖ T3.3; T3.4 ‖ T3.5 against MemoryStore meanwhile

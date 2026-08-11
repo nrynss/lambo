@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P5
+branch:   phase/p5-recall
 requires: [P1]           # soft: T2.1, T2.6 (works against fixture graphs from day one)
 blocks:   P8
 parallel: medium   # T5.1 ‖ (T5.2 after T5.1 stubs) ; T5.3 after T5.2 ; T5.4 anytime

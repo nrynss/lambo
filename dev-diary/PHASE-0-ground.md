@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P0
+branch:   phase/p0-ground   # historical - foundation merged to main
 requires: []
 blocks:   everything
 parallel: partial   # T0.1 ‖ T0.2 ‖ T0.4; T0.3 needs T0.2

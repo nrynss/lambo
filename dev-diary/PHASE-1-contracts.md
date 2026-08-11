@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P1
+branch:   phase/p1-contracts   # historical - fixtures merged to main
 requires: [T0.1]
 blocks:   P2, P3, P4, P5, P6, P7
 parallel: partial   # T1.1 first, then T1.2 ‖ T1.3, then T1.4; T1.5 with T1.2/T1.3

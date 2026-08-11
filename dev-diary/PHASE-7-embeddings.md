@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P7
+branch:   phase/p7-embeddings
 requires: [P1, T0.3]   # T0.4 only for T7.1 Bedrock; default path is BGE-M3 (T7.0)
 blocks:   nothing hard — capability-gated; hybrid falls back to Canonical (not keyword-as-product)
 parallel: high   # T7.0 done; T7.1 ‖ T7.2 ‖ T7.3runs-parallel-with: P2, P3, P4, P5, P6

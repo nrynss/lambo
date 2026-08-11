@@ -156,3 +156,68 @@ Keep this current; it is the only global view.
 | P7 | 1 / 3 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
 | P8 | 0 / 5 | blocked on P2 P4 P5 |
 | P9 | 0 / 5 | blocked on P8 |
+
+---
+
+## Git workflow (parallel build) — star model
+
+Each **phase** is a `phase/<slug>` branch; each **task** is a worktree on a
+`task/<…>` branch. `main` is the single integrator.
+
+**Topology (star):** merge only `worker → phase → main`. **Never** merge one
+phase branch into another — cross-phase dependencies are resolved through `main`.
+
+**Dependency rule (task-level `requires` is binding):**
+- A task starts only when its `requires` are **on `main`**.
+- Any completed task lands on `main` the moment it merges (`task → phase → main`),
+  regardless of which phase it is in — so a cross-phase dep (T5.3 needs T2.6) is
+  satisfied when T2.6 reaches `main`.
+- Before branching **and** before merging back, **rebase the phase branch onto
+  `main`** to pull in prerequisites from any phase. Example:
+  ```
+  T2.6 done → task/p2-t2.6 → phase/p2 → main            # T2.6 on main
+  T5.3 needs T2.6: rebase phase/p5 onto main → branch task/p5-t5.3 …
+  ```
+- Merge order therefore *is* the parallelism: `worker → phase` is internal to the
+  phase's parallel tasks; `phase → main` respects the phase graph (P2‖P3‖…‖P7 wide,
+  P8 after P2/P4/P5, P9 after P8).
+
+**Claim → worktree flow:**
+1. Set `status: claimed:<id>` and the worktree/branch names in the phase doc.
+2. Rebase the phase branch onto `main`: `git rebase main phase/<slug>`.
+3. Add the worktree: `git worktree add worktrees/<wt-name> -b <branch> phase/<slug>`.
+4. Work inside `owns`, commit to `<branch>`, then merge `worker → phase → main`.
+
+**Naming (pre-assigned, deterministic):**
+| Kind | Name |
+|------|------|
+| Phase branch | `phase/<slug>` (see table below) |
+| Task branch | `task/<phase>-t<task>-<short-slug>` |
+| Worktree | `worktrees/<phase>-t<task>-<short-slug>` |
+
+Example: T2.3 conflict detection → `task/p2-t2.3-conflict-detection`,
+`worktrees/p2-t2.3-conflict-detection` on `phase/p2-graph-core`.
+
+**Shared-file policy (single writer = the integrate/chassis step):**
+- Only `Cargo.toml`, `Cargo.lock`, and `src/lib.rs` module declarations are exempt
+  from `owns`; announce them in the Handoff Log (unchanged rule).
+- At `phase → main` merge, resolve `Cargo.lock` with `-X theirs` (divergent lockfile
+  noise); run `cargo build` once after to re-generate.
+- The dev-diary **status board** and phase-doc `status:` lines are updated at
+  **phase-merge time**, not per-task, so docs don't become a merge battlefield.
+
+**Phase branch map** (all branch from `main` when the phase's prerequisites are on
+`main`):
+
+| Phase | Branch |
+|-------|--------|
+| P0 | `phase/p0-ground` (historical, merged) |
+| P1 | `phase/p1-contracts` (historical, merged) |
+| P2 | `phase/p2-graph-core` |
+| P3 | `phase/p3-stores` |
+| P4 | `phase/p4-daemon` |
+| P5 | `phase/p5-recall` |
+| P6 | `phase/p6-canonization` |
+| P7 | `phase/p7-embeddings` |
+| P8 | `phase/p8-surface` |
+| P9 | `phase/p9-ship` |

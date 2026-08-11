@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P6
+branch:   phase/p6-canonization
 requires: [P1, T4.5]     # Stage 1 consumes gc_survived; stages test fixture-first via MemoryStore
 blocks:   P8 demo story
 parallel: medium   # T6.1 ‖ T6.2 ‖ T6.3 (independent predicates); T6.4 integrates

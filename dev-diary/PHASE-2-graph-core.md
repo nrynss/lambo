@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P2
+branch:   phase/p2-graph-core
 requires: [P1]
 blocks:   P8
 parallel: high   # T2.1 first; then T2.2 ‖ T2.6 ‖ T2.7; T2.3/T2.4/T2.5 after T2.2

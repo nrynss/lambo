@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P8
+branch:   phase/p8-surface
 requires: [T2.3, T2.4, T4.3, T5.3, T6.4]   # soft: T3.2 (live store), T7.x (hybrid)
 blocks:   P9
 parallel: partial   # T8.1 first; then T8.2 ‖ T8.3 ‖ T8.5; T8.4 needs T8.2

@@ -2,6 +2,7 @@
 
 ```yaml
 id:       P4
+branch:   phase/p4-daemon
 requires: [P1]
 blocks:   P8; T4.5 blocks P6 (gc_survived is canonization Stage 1's input)
 parallel: high   # T4.1 first; then T4.2 ‖ T4.3 ‖ T4.4 ‖ T4.5; T4.6 threads through all
