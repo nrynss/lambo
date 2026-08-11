@@ -14,11 +14,12 @@
 //! the session owner (P3's `Memory` type, which owns `Arc<RwLock<Graph>>` plus
 //! the [`InvertedIndex`]) calls [`load_session`] at startup and, when the store
 //! returned an **existing** session (never for a fresh empty one), emits the
-//! rescore signal. That signal is P4's event channel (T4.6,
-//! `src/daemon/events.rs`, a `tokio::sync::broadcast` of `DaemonEvent`); the
-//! daemon task skeleton (T4.1, `src/daemon/mod.rs`) already lists "warm-up
-//! rescore on load (T3.5's signal)" as its wake source. Once the channel
-//! exists, T4.1/T4.6 wires it — this module only provides the materialization.
+//! rescore signal. That signal is the warm-up rescore the T4.1 daemon task
+//! skeleton is *intended* to wake on (planned, not yet present), transported
+//! via the T4.6 event channel — today the channel exists only as
+//! [`crate::types::DaemonEvent`]; neither the transport nor the skeleton is in
+//! the tree yet. Once T4.1/T4.6 land, they wire it up — this module only
+//! provides the materialization.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -115,7 +116,14 @@ where
             Ok(rt.block_on(fut))
         })
         .join()
-        .map_err(|_| StoreError::Backend("load_session: worker thread panicked".to_string()))?
+        .map_err(|payload| {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            StoreError::Backend(format!("load_session: worker thread panicked: {detail}"))
+        })?
     })
 }
 
