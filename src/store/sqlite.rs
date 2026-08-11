@@ -47,13 +47,33 @@
 //!   return. Multi-thread runtimes (production) are unaffected; the T3.5
 //!   round-trip test uses the multi-thread flavor for this reason.
 //!
-//! ## Known schema gap (flagged for phase review, affects T3.2 equally)
+//! ## Case folding (keyword_candidates — ASCII-only)
 //!
-//! The T3.1 DDL (both dialects) has **no `chunk_group_id` column** on
-//! `concepts`, but `GraphSnapshot::Concept` carries it (T2.5 demote sets it on
-//! Observations, spec §8 sibling co-retrieval). Flush/load therefore drops it:
-//! loaded concepts have `chunk_group_id: None`. A schema errata is required;
-//! until then the store cannot persist it. Tests normalize the field.
+//! Matching lowercases the **column** with SQLite's `lower()`, which is
+//! **ASCII-only**, while MemoryStore lowercases with Rust's Unicode
+//! `to_lowercase()`. ASCII text agrees exactly (regression-locked by a
+//! mixed-case concept in the keyword test); non-ASCII case pairs
+//! (`Ä`/`ä`, `İ`/`i`) may diverge. The SQL predicate also lowercases the
+//! column itself, so mixed-case rows score like MemoryStore — there is no
+//! raw-row `contains` path like Cockroach's pre-remediation loop.
+//!
+//! ## Load ordering (same-instant tie-breaks)
+//!
+//! Load queries impose deterministic SQL order: interactions by
+//! `(created_at, id)`, concepts/edges by `id`, canonization events by
+//! `(occurred_at, id)`, synonyms by `source_key`. MemoryStore preserves
+//! insertion order, so rows sharing an instant may reorder relative to it —
+//! equality is by value, not by position.
+//!
+//! ## chunk_group_id (persisted — P3 wave 2 remediation)
+//!
+//! `concepts.chunk_group_id` (T2.5 demote sets it on Observations, spec §8
+//! sibling co-retrieval) is now part of the DDL: the migration carries it
+//! inline in the CREATE TABLE and `init_schema` converges pre-existing
+//! databases with a `PRAGMA table_info`-guarded `ALTER TABLE` (SQLite has no
+//! `ADD COLUMN IF NOT EXISTS` — see the migration header). `flush` upserts it
+//! and `load_session` reads it back; the flush→load round-trip test asserts
+//! it SURVIVES.
 //!
 //! ## Session-level metadata
 //!
@@ -62,6 +82,17 @@
 //! returns `None` for all three. The `sessions` row is created (FK anchor,
 //! `created_at` DB-default) but its metadata columns are inert until a
 //! full-snapshot save path exists.
+//!
+//! ## Embedding contract (schema completeness — S5-class, read-only)
+//!
+//! The `sessions` row carries `embedding_kind` / `embedding_model` /
+//! `embedding_dim` (nullable, converged the same guarded way as
+//! `chunk_group_id`). `load_session` reads them into
+//! `GraphSnapshot.embedding` when present; a row with `embedding_kind` XOR
+//! `embedding_dim` is treated as a corruption error. `flush` does NOT write
+//! them — no `Mutation` kind carries session metadata (S5: snapshot-only; the
+//! write path awaits a future session-metadata mutation, so today the columns
+//! are always NULL after a flush).
 
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -74,8 +105,8 @@ use std::time::Duration;
 
 use super::{Capabilities, GraphStore};
 use crate::types::{
-    CanonizationEvent, Concept, Edge, GraphSnapshot, Interaction, InteractionSpan, Mutation,
-    MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
+    CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
+    InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
 };
 
 /// Structural edge types counted by both structural queries (spec §4.1 errata:
@@ -175,6 +206,41 @@ impl GraphStore for SqliteStore {
             .execute(self.pool())
             .await
             .map_err(|e| db_err("init_schema (migrations/sqlite/001_init.sql)", e))?;
+
+        // Post-T3.1 columns (P3 wave 2 remediation): fresh databases carry them
+        // inline from the DDL above; pre-existing databases converge here.
+        // SQLite has no `ADD COLUMN IF NOT EXISTS` (verified: 3.53.4 rejects
+        // the syntax), so each column is inspected via `pragma_table_info` and
+        // a plain ALTER is issued only when it is missing — making the whole
+        // init idempotent on any database state. See the migration header.
+        ensure_column(
+            self.pool(),
+            "concepts",
+            "chunk_group_id",
+            "ALTER TABLE concepts ADD COLUMN chunk_group_id TEXT",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "embedding_kind",
+            "ALTER TABLE sessions ADD COLUMN embedding_kind TEXT",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "embedding_model",
+            "ALTER TABLE sessions ADD COLUMN embedding_model TEXT",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "embedding_dim",
+            "ALTER TABLE sessions ADD COLUMN embedding_dim INTEGER",
+        )
+        .await?;
         Ok(())
     }
 
@@ -250,14 +316,48 @@ impl GraphStore for SqliteStore {
             .await
             .map_err(|e| db_err("begin load transaction", e))?;
 
-        let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE session_id = ?")
-            .bind(&session.0)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| db_err("lookup session", e))?;
-        if found.is_none() {
-            return Err(StoreError::SessionNotFound(session.0.clone()));
-        }
+        // The existence probe doubles as the embedding-contract read (S5-class:
+        // snapshot-only — flush never writes these columns; see module doc).
+        let row = sqlx::query(
+            "SELECT embedding_kind, embedding_model, embedding_dim \
+             FROM sessions WHERE session_id = ?",
+        )
+        .bind(&session.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("lookup session", e))?;
+        let row = match row {
+            Some(row) => row,
+            None => return Err(StoreError::SessionNotFound(session.0.clone())),
+        };
+        let embedding_kind: Option<String> = row.get(0);
+        let embedding_model: Option<String> = row.get(1);
+        let embedding_dim: Option<i64> = row.get(2);
+        let embedding = match (embedding_kind, embedding_dim) {
+            (Some(kind), Some(dim)) => Some(EmbeddingContract {
+                kind,
+                model: embedding_model,
+                dim: usize::try_from(dim).map_err(|_| {
+                    StoreError::Backend(format!(
+                        "sessions row for {} has negative embedding_dim",
+                        session.0
+                    ))
+                })?,
+            }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(StoreError::Backend(format!(
+                    "sessions row for {} has embedding_kind without embedding_dim",
+                    session.0
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(StoreError::Backend(format!(
+                    "sessions row for {} has embedding_dim without embedding_kind",
+                    session.0
+                )));
+            }
+        };
 
         let interactions = load_interactions(&mut *tx, session).await?;
         let concepts = load_concepts(&mut *tx, session).await?;
@@ -283,7 +383,7 @@ impl GraphStore for SqliteStore {
             synonyms,
             reservations,
             canonization_events,
-            embedding: None,
+            embedding,
         })
     }
 
@@ -511,6 +611,32 @@ fn db_err(context: &str, e: sqlx::Error) -> StoreError {
     StoreError::Backend(format!("{context}: {e}"))
 }
 
+/// Idempotent post-T3.1 column convergence: SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`, so check `pragma_table_info` first and ALTER
+/// only when the column is absent. Safe to call on every `init_schema` (fresh
+/// databases already carry the columns from the DDL — no-op).
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    alter_ddl: &str,
+) -> Result<(), StoreError> {
+    let present: Option<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info(?) WHERE name = ?")
+            .bind(table)
+            .bind(column)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| db_err(&format!("init_schema: inspect {table}.{column}"), e))?;
+    if present.is_none() {
+        sqlx::query(alter_ddl)
+            .execute(pool)
+            .await
+            .map_err(|e| db_err(&format!("init_schema: add {table}.{column}"), e))?;
+    }
+    Ok(())
+}
+
 /// Fixed ISO-8601 UTC serialization (T3.1 contract):
 /// `YYYY-MM-DDTHH:MM:SS.SSSZ` — 24 chars, ms always present, `Z` suffix.
 fn ts_to_text(ts: DateTime<Utc>) -> String {
@@ -597,8 +723,8 @@ async fn upsert_concept(
         "INSERT INTO concepts (\
              id, session_id, content, canonical_key, concept_type, origin_interaction, \
              origin_agent, created_at, access_count, last_accessed, gc_survived, \
-             canonization_status, blast_radius, last_demotion_time) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             canonization_status, blast_radius, last_demotion_time, chunk_group_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (id) DO UPDATE SET \
              session_id = excluded.session_id, \
              content = excluded.content, \
@@ -612,7 +738,8 @@ async fn upsert_concept(
              gc_survived = excluded.gc_survived, \
              canonization_status = excluded.canonization_status, \
              blast_radius = excluded.blast_radius, \
-             last_demotion_time = excluded.last_demotion_time",
+             last_demotion_time = excluded.last_demotion_time, \
+             chunk_group_id = excluded.chunk_group_id",
     )
     .bind(c.id.0.to_string())
     .bind(&c.session_id.0)
@@ -628,6 +755,7 @@ async fn upsert_concept(
     .bind(status)
     .bind(c.blast_radius)
     .bind(c.last_demotion_time.map(ts_to_text))
+    .bind(&c.chunk_group_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err("upsert concept", e))?;
@@ -789,7 +917,7 @@ async fn load_concepts(
     let rows = sqlx::query(
         "SELECT id, session_id, content, canonical_key, concept_type, origin_interaction, \
                 origin_agent, created_at, access_count, last_accessed, gc_survived, \
-                canonization_status, blast_radius, last_demotion_time \
+                canonization_status, blast_radius, last_demotion_time, chunk_group_id \
          FROM concepts WHERE session_id = ? ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -812,6 +940,7 @@ async fn load_concepts(
         let status: String = row.get(11);
         let blast_radius: Option<i32> = row.get(12);
         let last_demotion: Option<String> = row.get(13);
+        let chunk_group_id: Option<String> = row.get(14);
         out.push(Concept {
             id: node_id(&id, "concept id")?,
             session_id: SessionId::from(sid),
@@ -827,9 +956,8 @@ async fn load_concepts(
             canonization_status: text_to_enum(&status, "canonization_status")?,
             blast_radius,
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
-            // The T3.1 DDL has no chunk_group_id column — see module doc.
             embedding: None,
-            chunk_group_id: None,
+            chunk_group_id,
         });
     }
     Ok(out)
@@ -1101,8 +1229,8 @@ mod tests {
     /// reused against SqliteStore). The graph is built through the real write
     /// path (derive / demote / transition), drained, flushed, and loaded back
     /// via `load_session`; the loaded session must deep-equal the pre-flush
-    /// snapshot (minus RAM-local synonyms/reservations — S5 — and the
-    /// chunk_group_id column gap, documented in the module doc).
+    /// snapshot (minus RAM-local synonyms/reservations — S5), including the
+    /// demoted observations' `chunk_group_id` (T5.2 contract).
     // Multi-thread flavor: load_session runs the store future on a worker
     // thread with its own current-thread runtime (see load.rs). sqlx returns
     // pool connections via a spawned task; a current-thread runtime that is
@@ -1191,11 +1319,6 @@ mod tests {
         let mut expected = g.snapshot();
         expected.synonyms.clear();
         expected.reservations.clear();
-        // The T3.1 DDL has no chunk_group_id column: the store cannot carry it.
-        // Normalize the oracle and assert the loss explicitly.
-        for c in &mut expected.concepts {
-            c.chunk_group_id = None;
-        }
         let batch = g.drain_log();
         assert!(!batch.is_empty());
 
@@ -1208,9 +1331,17 @@ mod tests {
         loaded.graph.assert_invariants().unwrap();
         assert_eq!(loaded.graph.synonyms().count(), 0);
         assert_eq!(loaded.graph.reservations().len(), 0);
+        // T5.2 contract: the demote chunk id SURVIVES the flush→load round-trip
+        // (the P3 wave 2 schema remediation added concepts.chunk_group_id).
         for c in loaded.graph.concepts() {
             if c.concept_type == ConceptType::Observation {
-                assert_eq!(c.chunk_group_id, None, "chunk_group_id not persisted (schema gap)");
+                assert_eq!(
+                    c.chunk_group_id.as_deref(),
+                    Some("chunk-1"),
+                    "demoted observation must keep its chunk_group_id across flush→load"
+                );
+            } else {
+                assert_eq!(c.chunk_group_id, None, "non-Observation concepts carry no chunk group");
             }
         }
         // Index rebuilt from the snapshot agrees with a reference and finds
@@ -1228,6 +1359,122 @@ mod tests {
         assert_eq!(drift.len(), 2, "both observations indexed");
     }
 
+    /// Migration path for pre-existing databases (P3 wave 2): a database built
+    /// from the T3.1 DDL (no chunk_group_id / embedding columns) converges on
+    /// `init_schema` — the guarded ALTERs add the columns — a second
+    /// `init_schema` is a no-op, and chunk_group_id then round-trips. The
+    /// regular tests always start from a fresh schema, so this is the only
+    /// place the ALTER convergence is exercised. Multi-thread flavor:
+    /// `load_session` runs on a worker thread (see module doc pool quirk).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn init_schema_converges_preexisting_database() {
+        let store = test_store();
+        let old = r#"
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                root_goal TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                closed_at TEXT
+            );
+            CREATE TABLE concepts (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(session_id),
+                content TEXT NOT NULL,
+                canonical_key TEXT NOT NULL,
+                concept_type TEXT NOT NULL,
+                origin_interaction TEXT NOT NULL REFERENCES interactions(id),
+                origin_agent TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed TEXT,
+                gc_survived INTEGER NOT NULL DEFAULT 0,
+                canonization_status TEXT NOT NULL DEFAULT 'None',
+                blast_radius INTEGER,
+                last_demotion_time TEXT,
+                embedding BLOB
+            );
+        "#;
+        sqlx::query(old).execute(store.pool()).await.unwrap();
+
+        // Convergence + idempotency: columns appear, second init is a no-op.
+        store.init_schema().await.unwrap();
+        store.init_schema().await.unwrap();
+        let concept_cols: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('concepts')")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            concept_cols.iter().any(|c| c == "chunk_group_id"),
+            "chunk_group_id must be added to a pre-existing concepts table"
+        );
+        let session_cols: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        for want in ["embedding_kind", "embedding_model", "embedding_dim"] {
+            assert!(
+                session_cols.iter().any(|c| c == want),
+                "{want} must be added to a pre-existing sessions table"
+            );
+        }
+
+        // The converged column actually round-trips a demoted observation.
+        let sid = SessionId::from("legacy-session");
+        let i1 = NodeId::new();
+        let o1 = NodeId::new();
+        let ts = Utc::now();
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                Mutation::UpsertNode {
+                    node: NodeKind::Concept(Concept {
+                        id: o1,
+                        session_id: sid.clone(),
+                        content: "legacy drift note".into(),
+                        canonical_key: "legacy drift note".into(),
+                        concept_type: ConceptType::Observation,
+                        origin_interaction: i1,
+                        origin_agent: AgentId::from("a"),
+                        created_at: ts,
+                        access_count: 0,
+                        last_accessed: None,
+                        gc_survived: 0,
+                        canonization_status: CanonizationStatus::None,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        embedding: None,
+                        chunk_group_id: Some("legacy-chunk".into()),
+                    }),
+                },
+                // The rebuilt graph requires the Derives edge (invariant),
+                // exactly as demote would create it.
+                Mutation::UpsertEdge {
+                    edge: crate::types::Edge {
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        source: i1,
+                        target: o1,
+                        edge_type: EdgeType::Derives,
+                        weight: 1.0,
+                        reinforcements: 1,
+                        created_at: ts,
+                        last_reinforced: ts,
+                    },
+                },
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let loaded = load_session(&store, &sid).unwrap();
+        let obs = loaded
+            .graph
+            .concepts()
+            .find(|c| c.concept_type == ConceptType::Observation)
+            .expect("observation loaded from converged database");
+        assert_eq!(obs.chunk_group_id.as_deref(), Some("legacy-chunk"));
+    }
+
     #[tokio::test]
     async fn keyword_candidates_match_memory_and_guard_inputs() {
         let sqlite = test_store();
@@ -1238,12 +1485,18 @@ mod tests {
         let i1 = NodeId::new();
         let c1 = NodeId::new();
         let c2 = NodeId::new();
+        let c3 = NodeId::new();
         let ts = Utc::now();
         let batch = MutationBatch {
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, c1, i1, "user schema design", ConceptType::Entity, ts),
                 plant_concept(&sid, c2, i1, "API rate limits", ConceptType::Entity, ts),
+                // Mixed-case row (cockroach R1 bug class): a raw `contains`
+                // on row strings would score this 0.0 for "register"; the SQL
+                // predicate lowercases the column, so it must score like
+                // MemoryStore's Rust-side lowercase.
+                plant_concept(&sid, c3, i1, "Register User", ConceptType::Entity, ts),
             ],
         };
         sqlite.flush(&batch).await.unwrap();
@@ -1256,11 +1509,27 @@ mod tests {
             vec!["api".to_string()],
             vec!["nope".to_string()],
             vec!["  USER  ".to_string()],
+            vec!["register".to_string()],
         ] {
             let got = sqlite.keyword_candidates(&sid, &tokens, 10).await.unwrap();
             let want = memory.keyword_candidates(&sid, &tokens, 10).await.unwrap();
             assert_eq!(got, want, "tokens {tokens:?}");
         }
+
+        // Explicit mixed-case lock: "Register User" scores 1.0 for "register"
+        // and ranks exactly like MemoryStore.
+        let got = sqlite
+            .keyword_candidates(&sid, &["register".into()], 10)
+            .await
+            .unwrap();
+        let want = memory
+            .keyword_candidates(&sid, &["register".into()], 10)
+            .await
+            .unwrap();
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 1, "only the mixed-case concept matches");
+        assert_eq!(got[0].item, c3);
+        assert_eq!(got[0].score, 1.0, "mixed-case content must score, not 0.0");
 
         // Empty / whitespace tokens match nothing; limit 0 matches nothing.
         assert!(sqlite

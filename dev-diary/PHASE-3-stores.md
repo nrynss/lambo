@@ -383,12 +383,24 @@ adapter + is_ready.
 6. **canonization_events load order:** `ORDER BY occurred_at, id` — memory
    preserves insertion order; random-id ordering broke the append test.
 
-**Schema gap (flagged — affects T3.2 equally):** the T3.1 DDL (both dialects)
-has **no `chunk_group_id` column** on `concepts`, but `Graph::demote` sets it on
-Observations (spec §8 sibling co-retrieval, T5.2). Flush/load drops it; the
-T3.5 round-trip deep-equality test normalizes `chunk_group_id` to None on both
-sides and asserts the loss explicitly. Needs a schema errata (add
-`chunk_group_id TEXT` to both dialects) — Main's call; do not land silently.
+**Schema gap — RESOLVED for SQLite (P3 wave 2 remediation, RemedT33Sqlite):**
+`concepts.chunk_group_id` is now persisted. `migrations/sqlite/001_init.sql`
+carries `chunk_group_id TEXT` inline in the CREATE TABLE (fresh DBs), and
+`init_schema` converges pre-existing databases via a `PRAGMA table_info`-guarded
+`ALTER TABLE concepts ADD COLUMN chunk_group_id TEXT` — **SQLite has no
+`ADD COLUMN IF NOT EXISTS`** (verified: 3.53.4 rejects the syntax; the bundled
+libsqlite3-sys is 3.46, also no). `flush` upserts it, `load_session` reads it
+back, and the round-trip test now asserts the demote chunk id SURVIVES
+(`Some("chunk-1")`) instead of normalizing it away. The spec errata record for
+both dialects is Main's at integration; Cockroach remediates in its own
+worktree (its dialect DOES support `ADD COLUMN IF NOT EXISTS`).
+
+**Embedding contract columns added (S5-class, read-only):** `sessions` now
+carries `embedding_kind` / `embedding_model` / `embedding_dim` (nullable,
+guarded ALTER convergence like `chunk_group_id`). `load_session` reads them
+into `GraphSnapshot.embedding` when present (partial rows error); `flush` does
+NOT write them — no `Mutation` kind carries session metadata, write path awaits
+a future session-metadata mutation. Today they are always NULL after a flush.
 
 **ON CONFLICT + timestamp choices:** concepts target the `id` PK; the partial
 index `(session_id, canonical_key) WHERE concept_type <> 'Observation'` is a
@@ -400,7 +412,8 @@ the DO UPDATE SET id = excluded.id is safe). Timestamps:
 in Rust and bound as TEXT so `<=` is lex-valid.
 
 **Not persisted (by design, matches MemoryStore):** session-level
-root_goal/created_at/closed_at (no Mutation kind — None on load), synonyms and
-reservations (S5 — full-snapshot path only, which has no SQLite impl yet),
-concept `embedding` (BLOB unused — never read/written), chunk_group_id (gap
-above).
+root_goal/created_at/closed_at AND the embedding contract columns (no Mutation
+kind — None/absent on load, S5 read-only), synonyms and reservations (S5 —
+full-snapshot path only, which has no SQLite impl yet), concept `embedding`
+(BLOB unused — never read/written). chunk_group_id IS persisted now (see the
+remediation note above).
