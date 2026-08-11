@@ -235,7 +235,7 @@ Gate at close: `cargo fmt --check`; clippy `-D warnings` (default + no-default);
 
 ### T2.6 — Inverted index + BM25 (done 2026-08-11, by T26Index)
 
-**What exists now:** `src/graph/index.rs` (`InvertedIndex`, ~490 LOC incl. tests),
+**What exists now:** `src/graph/index.rs` (`InvertedIndex`, 386 LOC incl. tests),
 registered via `pub mod index;` in `src/graph/mod.rs` (only line touched there).
 Pinned API as spec'd: `new`, `add(&Concept)` (idempotent per node id — re-add
 atomically replaces that concept's postings; a concept never appears twice),
