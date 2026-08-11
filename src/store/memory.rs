@@ -453,6 +453,7 @@ mod tests {
                 blast_radius: None,
                 last_demotion_time: None,
                 embedding: None,
+                chunk_group_id: None,
             }),
         }
     }

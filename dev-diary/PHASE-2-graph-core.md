@@ -159,6 +159,18 @@ module delete.
 
 ## Handoff Log
 
+### Contract change (2026-08-11, by main) — `Concept.chunk_group_id` added
+
+Added `pub chunk_group_id: Option<String>` to `Concept` (types/mod.rs),
+`#[serde(default, skip_serializing_if = "Option::is_none")]` so committed fixture
+JSON loads unchanged. Rationale: spec §7/§8 and the P5 doc ("T2.5's field")
+require demoted Observations to share a group id for sibling co-retrieval, but
+T1.1's frozen `Concept` had no slot. Per the freeze rule: fixtures (no change —
+serde default), MemoryStore (no change — wholesale Concept clone), and the four
+Rust `Concept` literals (types/graph/index/memory tests) updated in the same
+commit. **Dependent tasks: T2.5 (writes it), T5.2 (reads it).**
+
+
 ### T2.1 — Graph structure & invariants (done 2026-08-11, by main)
 
 **What exists now:** `src/graph/mod.rs` + `src/graph/graph.rs` (`Graph`, ~1.5k LOC
