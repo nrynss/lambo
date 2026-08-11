@@ -20,7 +20,6 @@ pub mod test_util;
 pub mod types;
 
 pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
-pub use graph::Graph;
 #[cfg(feature = "embed-bge")]
 pub use embed::BgeM3LlamaCppEmbedder;
 pub use embed::{
@@ -28,6 +27,7 @@ pub use embed::{
 };
 #[cfg(feature = "embed-fixture")]
 pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
+pub use graph::Graph;
 
 pub use resolve::{
     assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,
