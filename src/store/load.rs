@@ -112,7 +112,9 @@ where
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| StoreError::Backend(format!("load_session: build tokio runtime: {e}")))?;
+                .map_err(|e| {
+                    StoreError::Backend(format!("load_session: build tokio runtime: {e}"))
+                })?;
             Ok(rt.block_on(fut))
         })
         .join()
@@ -135,14 +137,17 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::graph::derive::{derive, ParentOf};
     use crate::graph::demote::demote;
+    use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
+    #[cfg(feature = "store-memory")]
     use crate::store::memory::MemoryStore;
     use crate::types::{
-        AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, EdgeType,
-        Interaction, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId,
+        AgentId, CanonizationEvent, CanonizationStatus, ConceptType, EdgeType, Interaction,
+        Mutation, NodeId, Reservation, SessionId,
     };
+    #[cfg(feature = "store-memory")]
+    use crate::types::{Concept, MutationBatch, Node};
 
     /// Fixed clock base (mirrors the graph-tier test convention).
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -169,6 +174,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn concept(sid: &SessionId, id: u64, origin: NodeId, content: &str) -> Concept {
         Concept {
             id: NodeId(Uuid::from_u64_pair(2, id)),
@@ -212,14 +218,24 @@ mod tests {
             &mut g,
             i2_id,
             &agent_a(),
-            &[("user schema", ConceptType::Entity), ("api layer", ConceptType::Logic)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("api layer", ConceptType::Logic),
+            ],
             &ParentOf::from_pairs(&[("user schema", "api layer")]),
             10,
         )
         .unwrap();
 
         // Observations via demote (one per sentence, chunk-grouped).
-        let observations = demote(&mut g, i2_id, &agent_a(), "Drift note. Second drift note.", "chunk-1").unwrap();
+        let observations = demote(
+            &mut g,
+            i2_id,
+            &agent_a(),
+            "Drift note. Second drift note.",
+            "chunk-1",
+        )
+        .unwrap();
         assert_eq!(observations.len(), 2);
 
         let user_schema_id = g
@@ -264,6 +280,7 @@ mod tests {
     /// so the write-behind log cannot carry it: flush -> load restores those as
     /// empty (asserted below); their preservation is the full-snapshot path,
     /// covered by `full_snapshot_round_trip_preserves_ram_local_metadata`.
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn round_trip_via_flush_materializes_mutation_carried_state() {
         let (mut g, user_schema_id, _reservation) = build_session();
@@ -353,6 +370,7 @@ mod tests {
 
     /// Missing session -> Ok(LoadedSession) with an empty graph and an empty
     /// index (first use, not an error).
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn missing_session_returns_fresh_empty_session() {
         let store: &dyn GraphStore = &MemoryStore::new();
@@ -371,6 +389,7 @@ mod tests {
     /// Corruptions are injected through the store's own flush path (MemoryStore
     /// does not validate chain shape / Derives edges), so the test needs no
     /// fixtures feature.
+    #[cfg(feature = "store-memory")]
     #[tokio::test]
     async fn corrupted_snapshot_returns_typed_error_not_panic() {
         let store: &dyn GraphStore = &MemoryStore::new();
@@ -406,6 +425,7 @@ mod tests {
     /// load_session is a sync function and must work even when the calling
     /// thread has no tokio runtime (plain `#[test]` thread): it runs the
     /// store's async future on its own worker thread.
+    #[cfg(feature = "store-memory")]
     #[test]
     fn load_session_works_without_a_tokio_runtime() {
         let store = MemoryStore::new();
@@ -447,10 +467,14 @@ mod tests {
             .mutations
             .iter()
             .any(|m| matches!(m, Mutation::CanonizationTransition { .. })));
-        assert_eq!(g.edge_between(
-            g.temporal_chain()[1],
-            g.temporal_chain()[0],
-            EdgeType::Temporal,
-        ).map(|e| e.weight), Some(1.0));
+        assert_eq!(
+            g.edge_between(
+                g.temporal_chain()[1],
+                g.temporal_chain()[0],
+                EdgeType::Temporal,
+            )
+            .map(|e| e.weight),
+            Some(1.0)
+        );
     }
 }

@@ -66,7 +66,7 @@ spec §4 errata. Do not re-derive — the graph tier already enforces all of the
 requires:   T0.3
 fixture-ok: n/a
 owns:       migrations/cockroach/ (shared with T0.2 — coordinate), migrations/sqlite/
-status:     claimed:main-swarm (worktree worktrees/p3-t3.1-schema-ddl)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 ```
 Spec §4 DDL as the Cockroach source of truth (T0.2 applied it; this task makes it the
 checked-in, adapter-consumed copy). SQLite translation: `STRING`→`TEXT`,
@@ -109,7 +109,7 @@ mismatched embedders.
 requires:   T1.2, T3.1
 fixture-ok: yes  # sqlite::memory: — no external dependency at all
 owns:       src/store/sqlite.rs
-status:     claimed:main-swarm (worktree worktrees/p3-t3.4-flush-task)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 feature:    store-sqlite
 ```
 Same shape over `sqlx::SqlitePool`, gated on feature `store-sqlite`, registered in
@@ -131,7 +131,7 @@ early instead.
 requires:   T1.1, T1.2
 fixture-ok: yes  # runs against MemoryStore; adapters slot in later
 owns:       src/store/flush.rs
-status:     claimed:main-swarm (worktree worktrees/p3-t3.5-load-session)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 ```
 Tokio task draining the T2.1 mutation log per spec §2.4–§2.5 semantics: flush on
 `backend_flush_interval` (1s) or `backend_flush_max_batch` (500); on failure exponential
