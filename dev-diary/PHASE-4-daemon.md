@@ -18,6 +18,24 @@ cut order. Sequence accordingly if time compresses.
 
 ---
 
+## Integration contracts from P2 review closes (2026-08-11)
+
+Binding notes for P4 tasks; source: grok branch review (CLOSED). Do not re-derive.
+
+- **No Hierarchical acyclicity guarantee from write-time checks (G6 → T4.5 GC).**
+  `derive`/`record_action` only reject *self-loop* Hierarchical edges; multi-hop
+  Hierarchical cycles ARE writable across calls (`A parent_of B` → `B parent_of C`
+  → `C parent_of A`). The daemon must NOT assume Hierarchical acyclicity: every
+  traversal (GC disconnected-component cleanup via BFS from the temporal chain,
+  drift path finding) needs visited-set cycle detection. `Graph::assert_invariants`
+  remains the safety net (its dfs covers Causal/Dependency/Hierarchical).
+- **Scaling note (G4 → T4.x scoring/GC benchmarks).** `insert_concept`'s
+  canonical-key UNIQUE check is an O(N) RAM scan (no key index — deliberate cut).
+  GC must not benchmark long-session writes against this as a hot path without
+  first adding a key index.
+
+---
+
 ### T4.1 — Scoring
 ```yaml
 requires:   T1.1

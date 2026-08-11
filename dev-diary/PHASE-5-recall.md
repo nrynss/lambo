@@ -18,6 +18,26 @@ Everything is fixture-ok: `fixtures/recall-goldens.json` defines expected behavi
 
 ---
 
+## Integration contracts from P2 review closes (2026-08-11)
+
+Binding notes for P5 tasks; sources: grok branch review (CLOSED), P2 handoffs.
+
+- **Observation keys may shadow Entity keys (G7 → T5.2 expansion / scoring).** The
+  partial-UNIQUE rule allows an Observation and an Entity to share a
+  `canonical_key`. Recall must disambiguate by `concept_type` (spec §5 modifiers),
+  never by key uniqueness alone.
+- **Keyword-source query semantics (G1 → T5.1).** `InvertedIndex::search` counts
+  duplicate query tokens ONCE (`search("user user")` scores identically to
+  `search("user")`); document-side duplicates still count via tf. Phase-1 scores
+  are BM25 OR-sum over unique query terms.
+- **`chunk_group_id` is guaranteed non-empty (G3 → T5.2).** `demote` rejects empty
+  ids up front, so sibling force-inclusion can rely on a meaningful grouping key.
+- **CoOccurrence prefix bias (S4 → T5.3 scoring).** The `max_cooccurrence_per_derive`
+  cap materializes pairs among EARLY concepts of a large derive call; connectivity
+  is denser there. Flag if recall balancing ever matters.
+
+---
+
 ### T5.1 — Phase 1: candidates
 ```yaml
 requires:   T1.1, T2.6

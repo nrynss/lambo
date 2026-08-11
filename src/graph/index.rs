@@ -107,16 +107,30 @@ impl InvertedIndex {
     /// across matching terms); the result is score-descending with ties broken by
     /// concept id ascending, truncated to `limit`. Only concepts with a strictly
     /// positive score are returned — there is no zero-score padding.
+    ///
+    /// Duplicate query tokens count ONCE (query-term frequency is 1 for scoring,
+    /// grok G1) — `search("user user")` scores identically to `search("user")`;
+    /// document-side duplicates still matter via tf.
     pub fn search(&self, query: &str, limit: usize) -> Vec<Scored<NodeId>> {
         if self.total_docs == 0 {
             return Vec::new();
         }
-        let terms = normalize_tokens(query);
+        let mut terms = normalize_tokens(query);
+        terms.sort();
+        terms.dedup();
         if terms.is_empty() {
             return Vec::new();
         }
         let n = self.total_docs as f64;
-        let avg_dl = self.total_tokens as f64 / n;
+        // Guard (grok G2): a corpus of zero-token documents (stopword-only or
+        // empty content) would otherwise make avg_dl = 0 and tf_component NaN.
+        // No postings exist in that case so results stay empty either way, but
+        // keep the math sound for future callers.
+        let avg_dl = if self.total_tokens == 0 {
+            1.0
+        } else {
+            self.total_tokens as f64 / n
+        };
         let mut scores: HashMap<NodeId, f64> = HashMap::new();
         for term in terms {
             let Some(posts) = self.postings.get(&term) else {
@@ -275,6 +289,30 @@ mod tests {
     fn no_concept_returns_empty() {
         let idx = InvertedIndex::new();
         assert!(idx.search("anything", 10).is_empty());
+    }
+
+    #[test]
+    fn duplicate_query_terms_count_once() {
+        // grok G1: query-term frequency is 1 — "user user" must score exactly
+        // like "user" (same scores, not k-times).
+        let mut idx = InvertedIndex::new();
+        idx.add(&concept(1, "user schema"));
+        idx.add(&concept(2, "user role"));
+        assert_eq!(idx.search("user", 10), idx.search("user user", 10));
+        assert_eq!(ids(idx.search("user user", 10)).len(), 2);
+    }
+
+    #[test]
+    fn zero_token_corpus_stays_empty_and_sane() {
+        // grok G2: a corpus of stopword-only documents has no postings; results
+        // must stay empty with no NaN leakage (avg_dl guarded).
+        let mut idx = InvertedIndex::new();
+        idx.add(&concept(1, "the and of is"));
+        assert_eq!(idx.total_docs, 1);
+        assert_eq!(idx.total_tokens, 0);
+        assert!(idx.search("user", 10).is_empty());
+        assert!(idx.search("the", 10).is_empty());
+        assert!(idx.search("", 10).is_empty());
     }
 
     #[test]

@@ -399,7 +399,12 @@ impl Graph {
         // non-Observation concepts must never share a canonical key — a
         // collision fragments the graph and would fail the store's upsert at
         // flush time (P3). Demoted Observations skip the match step by design
-        // (spec §7) and may legitimately share keys, so they are exempt.
+        // (spec §7) and may legitimately share keys, so they are exempt;
+        // Observation keys may shadow entity keys (grok G7 — P5 recall must
+        // disambiguate by concept_type, not key uniqueness).
+        // Scaling note (grok G4): this is an O(N) scan per insert — no
+        // canonical_key index in v0.1 (deliberate cut); P4 GC should not
+        // benchmark a long-session derive against this without an index.
         if c.concept_type != ConceptType::Observation {
             let collision = self.nodes.iter().find_map(|(id, n)| match n {
                 Node::Concept(x)
@@ -928,7 +933,9 @@ impl Graph {
             if color.get(n).copied().unwrap_or(0) == 0 {
                 let mut path = Vec::new();
                 if let Some(back) = self.dfs_cycle(*n, &mut color, &mut path) {
-                    v.push(format!("Causal/Dependency cycle detected through {back}"));
+                    v.push(format!(
+                        "Causal/Dependency/Hierarchical cycle detected through {back}"
+                    ));
                     break;
                 }
             }

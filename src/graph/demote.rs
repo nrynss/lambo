@@ -98,6 +98,16 @@ pub fn demote(
             ))));
         }
     };
+    // `chunk_group_id` is the T5.2 sibling co-retrieval key (spec §8): an empty
+    // id would collapse the grouping boundary and force-include unrelated
+    // Observations in recall phase 2 (grok G3). Reject it like every other
+    // invalid input — up front, before any write.
+    if chunk_group_id.trim().is_empty() {
+        return Err(LamboError::Store(StoreError::Invariant(
+            "demote: chunk_group_id must be non-empty (sibling co-retrieval key, spec §8)"
+                .to_string(),
+        )));
+    }
 
     // Steps 2–4 — one Observation per non-empty sentence, in order.
     let mut created: Vec<NodeId> = Vec::new();
@@ -301,6 +311,26 @@ mod tests {
         // No graph changes, no mutations.
         assert_eq!(g.node_count(), before_nodes);
         assert_eq!(g.log_len(), before_log);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn demote_rejects_empty_chunk_group_id() {
+        // The chunk group id is the T5.2 sibling co-retrieval key (grok G3): an
+        // empty id would collapse the grouping boundary. Rejected up front,
+        // before any write.
+        let (mut g, iid) = fresh_graph();
+        let err = demote(&mut g, iid, &agent(), "A sentence.", "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-empty"), "{err}");
+        let err = demote(&mut g, iid, &agent(), "A sentence.", "   ")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-empty"), "{err}");
+        // Nothing written: only the first interaction's node upsert.
+        assert_eq!(g.log_len(), 1);
+        assert_eq!(g.node_count(), 1);
         g.assert_invariants().unwrap();
     }
 
