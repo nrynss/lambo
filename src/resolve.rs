@@ -112,8 +112,6 @@ pub fn describe_embedder(kind: EmbedderKind, dim: usize, model: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embed::EmbedderKind;
-    use crate::store::StoreKind;
 
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
@@ -132,6 +130,8 @@ mod tests {
     #[test]
     #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     fn resolve_memory_plus_fixture_any_configured_dim() {
+        use crate::embed::EmbedderKind;
+        use crate::store::StoreKind;
         // MemoryStore has no vector column → 768 is allowed if the embedder emits 768.
         // FixtureEmbedder is currently fixed at 1024; use matching config.
         let file = LamboFile {

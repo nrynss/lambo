@@ -13,8 +13,10 @@
 //! * no duplicate `(source, target, edge_type)` — the natural-key index is the
 //!   authority; a duplicate write reinforces instead of inserting;
 //! * weights ≥ 0 and finite — NaN/±Inf clamp to 0.0, negatives are rejected;
-//! * no cycles in `Causal`/`Dependency` — write-time rejection is `record_action`'s
-//!   BFS (T2.4); [`Graph::assert_invariants`] still detects cycles as a safety net.
+//! * no cycles in `Causal`/`Dependency`/`Hierarchical` — write-time rejection of
+//!   `Causal`/`Dependency` cycles is `record_action`'s BFS (T2.4);
+//!   [`Graph::assert_invariants`] detects cycles in all three as a safety net
+//!   (`Hierarchical` is a DAG constraint by definition, see adve-review T2.1 M1);
 //!
 //! Load path: [`Graph::from_snapshot`] seeds state without touching the mutation
 //! log (a loaded session's history is already durable) and runs
@@ -155,16 +157,15 @@ impl Graph {
             )));
         }
         let mut chain = Vec::with_capacity(snap.interactions.len());
+        let mut visited: HashSet<NodeId> = HashSet::with_capacity(snap.interactions.len());
         let mut cur = heads[0];
         loop {
+            if !visited.insert(cur) {
+                return Err(invariant("cycle in temporal chain"));
+            }
             chain.push(cur);
             match next_of.get(&cur) {
-                Some(&next) => {
-                    if chain.contains(&next) {
-                        return Err(invariant("cycle in temporal chain"));
-                    }
-                    cur = next;
-                }
+                Some(&next) => cur = next,
                 None => break,
             }
         }
@@ -190,7 +191,8 @@ impl Graph {
                     s.session_id, sid
                 )));
             }
-            g.synonyms.insert(s.source_key.clone(), s.canonical_key.clone());
+            g.synonyms
+                .insert(s.source_key.clone(), s.canonical_key.clone());
         }
         for r in &snap.reservations {
             if r.session_id != sid {
@@ -220,7 +222,7 @@ impl Graph {
     /// Deterministic ordering: interactions in temporal chain order, concepts and
     /// edges sorted by id, synonyms sorted by `source_key`.
     pub fn snapshot(&self) -> GraphSnapshot {
-        let mut interactions: Vec<Interaction> = self
+        let interactions: Vec<Interaction> = self
             .temporal_chain
             .iter()
             .filter_map(|id| match self.nodes.get(id) {
@@ -246,9 +248,11 @@ impl Graph {
                 canonical_key: canon.clone(),
             })
             .collect();
-        interactions.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-        concepts.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-        edges.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        // Interactions were collected in temporal chain order above — do NOT sort
+        // them by id (adve-review T2.1 S4): the chain order is the documented
+        // contract, and random v4 UUIDs would silently destroy it.
+        concepts.sort_by_key(|c| c.id.0);
+        edges.sort_by_key(|e| e.id.0);
         synonyms.sort_by(|a, b| a.source_key.cmp(&b.source_key));
 
         GraphSnapshot {
@@ -421,27 +425,65 @@ impl Graph {
     /// [`MAX_EDGE_WEIGHT`], `reinforcements += 1`, `last_reinforced` moves to the
     /// write time; the original id and `created_at` are preserved.
     ///
+    /// On reinforcement the incoming edge's `weight` is **intentionally ignored** —
+    /// a duplicate write is a reinforcement (fixed bump, v0.6.0 §5.4), not a
+    /// re-weight. Callers that want a different weight must delete the edge first
+    /// (adve-review T2.1 S1).
+    ///
     /// `Causal`/`Dependency` cycle rejection is `record_action`'s BFS (T2.4) —
-    /// this primitive stores what it is given; `assert_invariants` detects cycles.
+    /// this primitive stores what it is given; `assert_invariants` detects cycles
+    /// in `Causal`/`Dependency`/`Hierarchical` as a safety net.
     pub fn upsert_edge(&mut self, edge: Edge) -> Result<(), LamboError> {
         let final_edge = self.record_edge(edge)?;
         self.append_mutation(Mutation::UpsertEdge { edge: final_edge });
         Ok(())
     }
 
-    /// Remove a node and every incident edge. Emits `DeleteEdge` for each incident
-    /// edge (before the `DeleteNode`, per §2.4 deletion ordering), then the
-    /// `DeleteNode` itself. Missing node -> `NotFound`.
+    /// Remove a concept node and every incident edge. Emits `DeleteEdge` for each
+    /// incident edge (before the `DeleteNode`, per §2.4 deletion ordering), then
+    /// the `DeleteNode` itself. Missing node -> `NotFound`.
+    ///
+    /// Interactions are **append-only** in v0.1 (interaction compaction is cut,
+    /// spec §9) — removing one is rejected as an invariant violation, so the
+    /// temporal chain can never be left with a dangling `previous_id`
+    /// (adve-review T2.1 S2).
     pub fn remove_node(&mut self, id: NodeId) -> Result<(), LamboError> {
         if !self.nodes.contains_key(&id) {
             return Err(not_found(format!("node {id}")));
         }
-        let incident: Vec<NodeId> = self
-            .edges
-            .iter()
-            .filter(|(_, e)| e.source == id || e.target == id)
-            .map(|(eid, _)| *eid)
-            .collect();
+        if matches!(self.nodes.get(&id), Some(Node::Interaction(_))) {
+            return Err(invariant(format!(
+                "interaction {id} is append-only; node removal is not supported for \
+                 interactions in v0.1 (interaction compaction is cut, spec §9)"
+            )));
+        }
+        // Incident edges come from the adjacency index (O(degree)), not a full
+        // edge scan (adve-review T2.1 S3). A self-loop appears in both out and in
+        // maps, so dedup before removing.
+        let mut incident: Vec<NodeId> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        if let Some(by_type) = self.out.get(&id) {
+            for (ty, targets) in by_type {
+                for &tgt in targets {
+                    if let Some(&eid) = self.edge_keys.get(&(id, tgt, *ty)) {
+                        if seen.insert(eid) {
+                            incident.push(eid);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(by_type) = self.incoming.get(&id) {
+            for (ty, sources) in by_type {
+                for &src in sources {
+                    if let Some(&eid) = self.edge_keys.get(&(src, id, *ty)) {
+                        if seen.insert(eid) {
+                            incident.push(eid);
+                        }
+                    }
+                }
+            }
+        }
         for eid in incident {
             self.remove_edge(eid)?;
         }
@@ -518,7 +560,11 @@ impl Graph {
     /// Advisory soft lock (spec §11). Same-agent re-reservation extends; cross-agent
     /// denial is T2.7's policy — this stores what it is given.
     pub fn set_reservation(&mut self, r: Reservation) {
-        if let Some(existing) = self.reservations.iter_mut().find(|x| x.node_id == r.node_id) {
+        if let Some(existing) = self
+            .reservations
+            .iter_mut()
+            .find(|x| x.node_id == r.node_id)
+        {
             *existing = r;
         } else {
             self.reservations.push(r);
@@ -581,9 +627,11 @@ impl Graph {
         &self.temporal_chain
     }
 
-    /// Out-neighbors (all edge types).
+    /// Out-neighbors (all edge types). Deduplicated; returned in deterministic
+    /// (id-ascending) order so callers never see HashMap iteration order.
     pub fn out_neighbors(&self, src: NodeId) -> Vec<NodeId> {
-        self.out
+        let mut v: Vec<NodeId> = self
+            .out
             .get(&src)
             .map(|by_type| {
                 by_type
@@ -594,20 +642,26 @@ impl Graph {
                     .into_iter()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        v.sort_by_key(|id| id.0);
+        v
     }
 
     pub fn out_neighbors_typed(&self, src: NodeId, ty: EdgeType) -> Vec<NodeId> {
-        self.out
+        let mut v: Vec<NodeId> = self
+            .out
             .get(&src)
             .and_then(|by_type| by_type.get(&ty))
             .map(|targets| targets.iter().copied().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        v.sort_by_key(|id| id.0);
+        v
     }
 
-    /// In-neighbors (all edge types).
+    /// In-neighbors (all edge types). Deduplicated; deterministic id-ascending order.
     pub fn in_neighbors(&self, tgt: NodeId) -> Vec<NodeId> {
-        self.incoming
+        let mut v: Vec<NodeId> = self
+            .incoming
             .get(&tgt)
             .map(|by_type| {
                 by_type
@@ -618,29 +672,35 @@ impl Graph {
                     .into_iter()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        v.sort_by_key(|id| id.0);
+        v
     }
 
     pub fn in_neighbors_typed(&self, tgt: NodeId, ty: EdgeType) -> Vec<NodeId> {
-        self.incoming
+        let mut v: Vec<NodeId> = self
+            .incoming
             .get(&tgt)
             .and_then(|by_type| by_type.get(&ty))
             .map(|sources| sources.iter().copied().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        v.sort_by_key(|id| id.0);
+        v
     }
 
-    /// All edges incident to `node` (out or in).
+    /// All edges incident to `node` (out or in), in id-ascending order.
     pub fn incident_edges(&self, node: NodeId) -> Vec<&Edge> {
-        self.edges
+        let mut v: Vec<&Edge> = self
+            .edges
             .values()
             .filter(|e| e.source == node || e.target == node)
-            .collect()
+            .collect();
+        v.sort_by_key(|e| e.id.0);
+        v
     }
 
     pub fn synonyms(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.synonyms
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
+        self.synonyms.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     pub fn synonym(&self, source_key: &str) -> Option<&str> {
@@ -683,6 +743,10 @@ impl Graph {
     }
 
     /// Drain the ordered mutation log into a batch (T3.4's flush input).
+    ///
+    /// The batch is in **chronological** write order. §2.4's phase grouping
+    /// (nodes -> edges -> deletions -> transitions) holds within a single logical
+    /// write, not across the batch. Replay in order — never re-sort.
     pub fn drain_log(&mut self) -> MutationBatch {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
@@ -739,9 +803,10 @@ impl Graph {
         }
         for ((s, t, ty), id) in &self.edge_keys {
             match self.edges.get(id) {
-                Some(e)
-                    if e.source == *s && e.target == *t && e.edge_type == *ty => {}
-                _ => v.push(format!("natural-key index entry {s}->{t} {ty:?} inconsistent")),
+                Some(e) if e.source == *s && e.target == *t && e.edge_type == *ty => {}
+                _ => v.push(format!(
+                    "natural-key index entry {s}->{t} {ty:?} inconsistent"
+                )),
             }
         }
 
@@ -814,7 +879,9 @@ impl Graph {
             }
         }
 
-        // Causal/Dependency acyclicity (safety net; write-time rejection is T2.4).
+        // Causal/Dependency/Hierarchical acyclicity (safety net; write-time
+        // rejection of Causal/Dependency cycles is T2.4's BFS; Hierarchical is a
+        // DAG constraint by definition).
         let mut color: HashMap<NodeId, u8> = HashMap::new();
         for n in self.nodes.keys() {
             if color.get(n).copied().unwrap_or(0) == 0 {
@@ -878,7 +945,10 @@ impl Graph {
         let key = (edge.source, edge.target, edge.edge_type);
         if let Some(existing_id) = self.edge_keys.get(&key).copied() {
             // Reinforcement on duplicate natural key (v0.6.0 §5.4 semantics).
-            let existing = self.edges.get_mut(&existing_id).expect("edge_keys consistent");
+            let existing = self
+                .edges
+                .get_mut(&existing_id)
+                .expect("edge_keys consistent");
             existing.weight = (existing.weight + REINFORCE_BUMP).min(MAX_EDGE_WEIGHT);
             existing.reinforcements += 1;
             existing.last_reinforced = edge.last_reinforced;
@@ -933,7 +1003,11 @@ impl Graph {
         }
     }
 
-    /// DFS over `Causal`/`Dependency` out-edges; returns a node on a back edge.
+    /// DFS over `Causal`/`Dependency`/`Hierarchical` out-edges; returns a node on a
+    /// back edge. `Hierarchical` is included because it is a DAG constraint by
+    /// definition (A parent of B parent of A is nonsense) — spec §5.7 names only
+    /// `Causal`/`Dependency`, so write-time rejection stays per spec (T2.4); the
+    /// safety net here is broader than the write-time contract.
     fn dfs_cycle(
         &self,
         node: NodeId,
@@ -944,7 +1018,8 @@ impl Graph {
         path.push(node);
         let causal = self.out_neighbors_typed(node, EdgeType::Causal);
         let dependency = self.out_neighbors_typed(node, EdgeType::Dependency);
-        for tgt in causal.into_iter().chain(dependency) {
+        let hierarchical = self.out_neighbors_typed(node, EdgeType::Hierarchical);
+        for tgt in causal.into_iter().chain(dependency).chain(hierarchical) {
             match color.get(&tgt).copied().unwrap_or(0) {
                 1 => return Some(tgt), // back edge
                 2 => continue,
@@ -1129,7 +1204,9 @@ mod tests {
     #[test]
     fn insert_concept_creates_derives_edge() {
         let (g, iid, cid) = small_graph();
-        let d = g.edge_between(iid, cid, EdgeType::Derives).expect("derives");
+        let d = g
+            .edge_between(iid, cid, EdgeType::Derives)
+            .expect("derives");
         assert_eq!(d.weight, 0.9);
         assert_eq!(g.edge_count(), 1);
         g.assert_invariants().unwrap();
@@ -1296,6 +1373,20 @@ mod tests {
     }
 
     #[test]
+    fn remove_node_rejects_interactions() {
+        let (mut g, iid, _) = small_graph();
+        // Interactions are append-only in v0.1 (spec §9: compaction is cut).
+        // Removing one would leave a dangling previous_id in the chain — rejected
+        // at write time, not detected lazily (adve-review T2.1 S2).
+        let err = g.remove_node(iid).unwrap_err().to_string();
+        assert!(err.contains("append-only"), "{err}");
+        // Nothing changed.
+        assert_eq!(g.node_count(), 2);
+        assert_eq!(g.edge_count(), 1);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
     fn cycle_is_detected_by_assert_invariants() {
         let (mut g, iid, cid) = small_graph();
         let c2 = concept(2, iid, "auth middleware");
@@ -1310,6 +1401,51 @@ mod tests {
             .unwrap();
         let err = g.assert_invariants().unwrap_err().to_string();
         assert!(err.contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn hierarchical_cycle_is_detected_by_assert_invariants() {
+        let (mut g, iid, cid) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+
+        // A parent-of B parent-of A is semantically nonsensical. upsert_edge stores
+        // it; assert_invariants must flag it (adve-review T2.1 M1).
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::Hierarchical, 0.7))
+            .unwrap();
+        g.upsert_edge(edge(2, c2id, cid, EdgeType::Hierarchical, 0.7))
+            .unwrap();
+        let err = g.assert_invariants().unwrap_err().to_string();
+        assert!(err.contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn self_loop_structural_edge_is_a_cycle() {
+        let (mut g, _, cid) = small_graph();
+        // Non-structural self-loop is legal.
+        g.upsert_edge(edge(1, cid, cid, EdgeType::CoOccurrence, 0.3))
+            .unwrap();
+        g.assert_invariants().unwrap();
+        // Structural self-loop (A -> A) is a cycle by definition.
+        g.upsert_edge(edge(2, cid, cid, EdgeType::Dependency, 0.3))
+            .unwrap();
+        let err = g.assert_invariants().unwrap_err().to_string();
+        assert!(err.contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn out_neighbors_dedup_across_edge_types() {
+        let (mut g, iid, cid) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5))
+            .unwrap();
+        g.upsert_edge(edge(2, cid, c2id, EdgeType::Semantic, 0.5))
+            .unwrap();
+        // Two edge types to the same target -> one neighbor.
+        assert_eq!(g.out_neighbors(cid), vec![c2id]);
     }
 
     #[test]
@@ -1351,7 +1487,11 @@ mod tests {
         assert_eq!(g.synonym("register_user"), Some("signup_user"));
 
         let snap = g.snapshot();
-        let keys: Vec<&str> = snap.synonyms.iter().map(|s| s.source_key.as_str()).collect();
+        let keys: Vec<&str> = snap
+            .synonyms
+            .iter()
+            .map(|s| s.source_key.as_str())
+            .collect();
         assert_eq!(keys, vec!["delete_user", "register_user"]); // sorted
         assert_eq!(snap.synonyms.len(), 2);
         assert!(g.mutation_log.is_empty(), "synonyms are RAM-local");
@@ -1440,6 +1580,64 @@ mod tests {
     }
 
     #[test]
+    fn mutation_log_is_chronological_across_interleaved_writes() {
+        // Adve-review T2.1 M2: §2.4's phase grouping holds *within* a logical
+        // write, not across the batch. A node upsert may legally follow a
+        // DeleteNode in the same drained batch (create -> delete -> create within
+        // one flush interval); adapters replay in order and never re-sort.
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let i1_id = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let c1 = concept(1, i1_id, "first");
+        let c1_id = c1.id;
+        g.insert_concept(c1, i1_id).unwrap(); // UpsertNode(c1), UpsertEdge(derives)
+        g.remove_node(c1_id).unwrap(); // DeleteEdge(derives), DeleteNode(c1)
+        let c2 = concept(2, i1_id, "second");
+        g.insert_concept(c2, i1_id).unwrap(); // UpsertNode(c2), UpsertEdge(derives2)
+
+        let batch = g.drain_log();
+        let kinds: Vec<&str> = batch
+            .mutations
+            .iter()
+            .map(|m| match m {
+                Mutation::UpsertNode { .. } => "upsert_node",
+                Mutation::UpsertEdge { .. } => "upsert_edge",
+                Mutation::DeleteNode { .. } => "delete_node",
+                Mutation::DeleteEdge { .. } => "delete_edge",
+                Mutation::CanonizationTransition { .. } => "transition",
+            })
+            .collect();
+        let expected = [
+            "upsert_node", // i1
+            "upsert_node", // c1
+            "upsert_edge", // derives c1
+            "delete_edge", // derives c1
+            "delete_node", // c1
+            "upsert_node", // c2 — legally AFTER a DeleteNode
+            "upsert_edge", // derives c2
+        ];
+        assert_eq!(kinds, expected);
+
+        // Chronological replay is always safe: every edge references a node
+        // upserted earlier in the same batch.
+        let mut nodes: HashSet<NodeId> = HashSet::new();
+        for m in &batch.mutations {
+            match m {
+                Mutation::UpsertNode { node } => {
+                    nodes.insert(node.id());
+                }
+                Mutation::UpsertEdge { edge } => {
+                    assert!(nodes.contains(&edge.source), "{m:?}");
+                    assert!(nodes.contains(&edge.target), "{m:?}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[test]
     fn fixture_rest_api_loads_and_passes_invariants() {
         let snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
         let g = Graph::from_snapshot(snap).unwrap();
@@ -1456,6 +1654,56 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_roundtrip_preserves_structure() {
+        // Adve-review T2.1 S5: snapshot equality is necessary but not sufficient —
+        // the adjacency index and natural-key map must survive a round-trip too.
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let i1_id = i1.id;
+        let i2 = interaction(2, Some(i1_id), 5);
+        let i2_id = i2.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+        let c = concept(1, i2_id, "user schema");
+        let cid = c.id;
+        g.insert_concept(c, i2_id).unwrap();
+        let c2 = concept(2, i2_id, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, i2_id).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5))
+            .unwrap();
+        g.upsert_edge(edge(2, cid, c2id, EdgeType::Dependency, 0.7))
+            .unwrap();
+
+        let h = Graph::from_snapshot(g.snapshot()).unwrap();
+
+        // Structural queries agree across the round-trip.
+        assert_eq!(
+            h.edge_between(cid, c2id, EdgeType::CoOccurrence),
+            g.edge_between(cid, c2id, EdgeType::CoOccurrence)
+        );
+        assert_eq!(
+            h.edge_between(cid, c2id, EdgeType::Dependency),
+            g.edge_between(cid, c2id, EdgeType::Dependency)
+        );
+        assert_eq!(
+            h.out_neighbors_typed(cid, EdgeType::CoOccurrence),
+            g.out_neighbors_typed(cid, EdgeType::CoOccurrence)
+        );
+        assert_eq!(
+            h.in_neighbors_typed(c2id, EdgeType::Dependency),
+            g.in_neighbors_typed(c2id, EdgeType::Dependency)
+        );
+        assert_eq!(h.out_neighbors(cid), g.out_neighbors(cid));
+        assert_eq!(h.in_neighbors(c2id), g.in_neighbors(c2id));
+        assert_eq!(h.temporal_chain(), g.temporal_chain());
+        assert_eq!(h.node_count(), g.node_count());
+        assert_eq!(h.edge_count(), g.edge_count());
+        h.assert_invariants().unwrap();
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[test]
     fn fixture_drift_loads_and_passes_invariants() {
         let snap = crate::fixtures::load_snapshot("session-drift").unwrap();
         let g = Graph::from_snapshot(snap).unwrap();
@@ -1465,6 +1713,7 @@ mod tests {
         assert_eq!(g.node_count(), 9 + 2);
     }
 
+    #[cfg(feature = "fixtures")]
     #[test]
     fn from_snapshot_rejects_violating_graphs() {
         // Edge referencing a missing node.
@@ -1500,4 +1749,12 @@ mod tests {
         let err = g.insert_concept(c, uid(999)).unwrap_err().to_string();
         assert!(err.contains("not an interaction"), "{err}");
     }
+
+    // Adve-review T2.1 I4: the owner (T2.3+ `Memory`) wraps Graph in
+    // `Arc<RwLock<Graph>>` (spec §6.4). Compile-time proof it can.
+    const _: () = {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        let _ = [assert_send::<Graph>, assert_sync::<Graph>];
+    };
 }

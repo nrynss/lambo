@@ -15,9 +15,17 @@
 //! Every write appends its [`Mutation`]s to an ordered log drained by
 //! [`Graph::drain_log`]. Ordering is guaranteed: within one logical write, node
 //! mutations precede the edge mutations that reference them, and deletions follow
-//! upserts (spec §2.4). Because the log is chronological and an edge can only be
-//! written once its endpoints exist, any edge referencing nodes that appear earlier
-//! in the *same* drain batch is always safe.
+//! upserts (spec §2.4).
+//!
+//! **`drain_log()` returns chronological write order.** Spec §2.4's phase grouping
+//! (node upserts, then edge upserts, then deletions, then canonization transitions)
+//! applies *within* a single logical write, **not** across the batch: a node
+//! upsert may legally follow a `DeleteNode` in the same drained batch (create ->
+//! delete -> create within one flush interval). Store adapters (T3.4+) MUST replay
+//! batches in order and MUST NOT re-sort them. Because the log is chronological and
+//! an edge can only be written once its endpoints exist, every edge in a batch
+//! references nodes upserted earlier in that same batch — in-order replay is always
+//! safe (adve-review T2.1 M2).
 //!
 //! ## Weight dynamics (v0.6.0 §5.4 semantics)
 //!
@@ -30,6 +38,9 @@
 //! The exact v0.6.0 constants are not in-repo; the bump/cap below are the v0.1
 //! decision (see Handoff Log T2.1).
 
+// The inner module shares the parent's name (`graph::graph`) by design — T2.1
+// owns `src/graph/graph.rs` and phase docs reference that path.
+#[allow(clippy::module_inception)]
 pub mod graph;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
