@@ -481,6 +481,13 @@ impl GraphStore for SqliteStore {
             "ALTER TABLE sessions ADD COLUMN embedding_dim INTEGER",
         )
         .await?;
+        ensure_column(
+            self.pool(),
+            "canonization_events",
+            "last_demotion_time",
+            "ALTER TABLE canonization_events ADD COLUMN last_demotion_time TEXT",
+        )
+        .await?;
         Ok(())
     }
 
@@ -1837,6 +1844,15 @@ mod tests {
                 last_demotion_time TEXT,
                 embedding BLOB
             );
+            CREATE TABLE canonization_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                from_status TEXT NOT NULL,
+                to_status TEXT NOT NULL,
+                blast_radius INTEGER,
+                occurred_at TEXT NOT NULL
+            );
         "#;
         sqlx::query(old).execute(store.pool()).await.unwrap();
 
@@ -1863,6 +1879,15 @@ mod tests {
                 "{want} must be added to a pre-existing sessions table"
             );
         }
+        let ce_cols: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('canonization_events')")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            ce_cols.iter().any(|c| c == "last_demotion_time"),
+            "last_demotion_time must be added to a pre-existing canonization_events table"
+        );
 
         // The converged column actually round-trips a demoted observation.
         let sid = SessionId::from("legacy-session");

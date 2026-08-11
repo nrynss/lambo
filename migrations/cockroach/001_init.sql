@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     occurred_at     TIMESTAMPTZ NOT NULL,
     INDEX (session_id, occurred_at)
 );
+-- Wave 3 (COH-3): canonization_events carries the demotion timestamp. Existing
+-- clusters predate the column, so the idempotent ALTER (same pattern as the
+-- sessions embedding-contract columns above) covers them; fresh installs get it
+-- from the CREATE TABLE and the ALTER is a no-op.
+ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS last_demotion_time TIMESTAMPTZ;
 
 -- Soft locks (S5): an expired row persists until a later write overwrites it,
 -- so external SQL readers MUST filter `WHERE expires_at > now()` — never read
