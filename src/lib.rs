@@ -20,6 +20,7 @@ pub mod test_util;
 pub mod types;
 
 pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
+pub use graph::Graph;
 #[cfg(feature = "embed-bge")]
 pub use embed::BgeM3LlamaCppEmbedder;
 pub use embed::{
