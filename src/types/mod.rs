@@ -218,6 +218,12 @@ pub struct Concept {
     pub last_demotion_time: Option<DateTime<Utc>>,
     /// Dense embedding when present (width = session [`EmbeddingContract::dim`]).
     pub embedding: Option<Vec<f32>>,
+    /// Demoted-chunk group id (T2.5): Observations from one context-overflow
+    /// chunk share this id for sibling co-retrieval (spec §7, §8; read by T5.2).
+    /// Added post-T1.1 per the P5 doc ("T2.5's field") — serde-defaulted so
+    /// existing fixture JSON loads unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_group_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -542,6 +548,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            chunk_group_id: None,
         };
         let node = Node::Concept(c.clone());
         let s = serde_json::to_string(&node).unwrap();

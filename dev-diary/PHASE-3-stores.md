@@ -29,6 +29,38 @@ Registry: `store::build_store(StoreConfig)`. Selecting an uncompiled kind fails 
 
 ---
 
+## Integration contracts from P2 review closes (2026-08-11)
+
+Binding notes for P3 tasks; sources: muse-spark / grok branch reviews (CLOSED),
+spec §4 errata. Do not re-derive — the graph tier already enforces all of these in RAM.
+
+- **Partial UNIQUE index (M1/M2 → T3.1 DDL).** The schema's
+  `UNIQUE (session_id, canonical_key)` is **partial**: non-Observation concepts
+  only (`CREATE UNIQUE INDEX ... ON concepts (session_id, canonical_key)
+  WHERE concept_type <> 'Observation'` — spec errata). Observations may share
+  keys (demote's context-overflow duplicates). `Graph::insert_concept` and
+  `assert_invariants` enforce the same rule in RAM; the DDL must mirror it or a
+  legal demote will fail the store's upsert.
+- **Reservations durability (S5 → T3.4/T3.5).** Reservations are RAM-local: no
+  `Mutation` kind exists, the write-behind log never carries them. They persist
+  ONLY via full `GraphSnapshot` save/load. `load_session` restores them from the
+  snapshot; the flush task must not expect reservation mutations.
+- **InvertedIndex owner wiring (M3 → whoever builds `Memory`).** The graph
+  module is index-free by design; the session owner MUST mirror every concept
+  write into `InvertedIndex` (`add` on create/update, `remove` on delete) —
+  contract documented in `src/graph/mod.rs` and proven by
+  `tests/p2_integration.rs::inverted_index_manual_sync_contract`. A forgotten
+  mirror is silent recall staleness.
+- **`reinforcements` convention (I2 → T3.2/T3.3 upserts).** Graph core counts
+  creation as the first write (`reinforcements = 1`); the DDL default is 0.
+  Store upserts must match the graph core's values, not the DDL default.
+- **Scaling note (G4).** The in-RAM UNIQUE check is an O(N) scan per
+  `insert_concept` (no canonical-key index in RAM — deliberate cut); the store
+  side has the partial index. Do not benchmark P2 code against this as a hot
+  path without an index.
+
+---
+
 ### T3.1 — Schema DDL, both dialects
 ```yaml
 requires:   T0.3

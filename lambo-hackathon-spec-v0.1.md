@@ -272,6 +272,16 @@ CREATE TABLE concepts (
     INDEX (session_id, canonization_status)
 );
 
+-- Errata (2026-08-11, P2 integration / muse-spark M1-M2): the UNIQUE above is
+-- **partial** — it constrains non-Observation concepts only:
+--     CREATE UNIQUE INDEX concepts_key_non_obs_idx
+--       ON concepts (session_id, canonical_key)
+--       WHERE concept_type <> 'Observation';
+-- Demoted Observations (spec §7) skip the match step and may legitimately
+-- share a canonical key (identical sentences from different chunks are distinct
+-- context-overflow records). `Graph::insert_concept` and
+-- `Graph::assert_invariants` enforce the same rule in RAM.
+
 -- CockroachDB only
 CREATE VECTOR INDEX concepts_embedding_idx ON concepts (embedding);
 

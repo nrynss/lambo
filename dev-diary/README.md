@@ -148,7 +148,7 @@ Keep this current; it is the only global view.
 |---|---|---|
 | P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
 | P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
-| P2 | 1 / 7 | T2.1 done (graph core on main, review CLOSED); T2.2–T2.7 OPEN for claiming |
+| P2 | 7 / 7 | **ALL DONE** — T2.1–T2.7 on phase/p2 (graph core, canonicalization, derive, record_action, demote, BM25 index, reservations); all reviews CLOSED. Remaining: P2 exit-criteria integration test (rebuild session-rest-api via public write APIs) + phase/p2→main merge (awaiting go-ahead) |
 | P3 | 0 / 6 | OPEN (T3.1 DDL can start after T0.3) |
 | P4 | 0 / 6 | OPEN for claiming |
 | P5 | 0 / 4 | OPEN for claiming |
