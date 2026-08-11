@@ -167,7 +167,7 @@ signal, don't implement it.
 requires:   T3.2, T3.3
 fixture-ok: no
 owns:       (blast_radius + interaction_span fns inside cockroach.rs / sqlite.rs — same owner as T3.2/T3.3, claim jointly or sequence)
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p3-t3.6-structural)
 ```
 The spec §4.1 SQL for Cockroach (**errata:** only concept-sourced
 `Dependency`/`Causal`/`Hierarchical` edges — same as `MemoryStore`; provenance
