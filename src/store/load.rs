@@ -30,11 +30,13 @@
 //! ## Determinism
 //!
 //! No `Utc::now` anywhere in this module: every timestamp in the loaded session
-//! comes from the snapshot. [`load_session`] is synchronous (pinned API) and
-//! bridges to the store's async trait method on a private worker thread with
-//! its own current-thread runtime, so it is callable from sync startup code and
-//! from inside a tokio task alike (a direct `Handle::block_on` would panic in
-//! the latter case).
+//! comes from the snapshot. The async core is [`load_session_async`]; the
+//! synchronous (pinned API) [`load_session`] is a thin wrapper that bridges it
+//! to a private worker thread with its own current-thread runtime, so it is
+//! callable from sync startup code and from inside a tokio task alike (a direct
+//! `Handle::block_on` would panic in the latter case). The bridge bounds the
+//! store call with [`LOAD_SESSION_TIMEOUT`] (F2) so a hung store cannot block
+//! the sync caller forever.
 
 use std::future::Future;
 
@@ -51,7 +53,11 @@ pub struct LoadedSession {
     pub index: InvertedIndex,
 }
 
-/// Load a session from a durable store into RAM (spec §2.5).
+/// Default timeout for the sync bridge's store call (F2): without it the
+/// worker thread would block forever on a hung store.
+const LOAD_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Load a session from a durable store into RAM (spec §2.5) — **async core**.
 ///
 /// * `store.load_session(session)` -> `Ok(snap)`: materialize the graph
 ///   ([`Graph::from_snapshot`], which re-verifies every §5.7 invariant) and
@@ -63,11 +69,15 @@ pub struct LoadedSession {
 /// * Any other store error propagates unchanged. A corrupted snapshot (an
 ///   invariant violation) surfaces from [`Graph::from_snapshot`] as a typed
 ///   [`StoreError::Invariant`] — never a panic.
-pub fn load_session(
+///
+/// This is the async CORE (F4): the sync [`load_session`] is a thin wrapper
+/// running it on a private worker thread via the bridge (with
+/// [`load_session_with_timeout`]'s timeout).
+pub async fn load_session_async(
     store: &dyn GraphStore,
     session: &SessionId,
 ) -> Result<LoadedSession, StoreError> {
-    let snap = match block_on(store.load_session(session))? {
+    let snap = match store.load_session(session).await {
         Ok(snap) => snap,
         Err(StoreError::SessionNotFound(_)) => {
             return Ok(LoadedSession {
@@ -81,6 +91,38 @@ pub fn load_session(
     let index = InvertedIndex::from_snapshot(&snap);
     let graph = Graph::from_snapshot(snap).map_err(lambo_to_store)?;
     Ok(LoadedSession { graph, index })
+}
+
+/// [`load_session_async`] bounded by a store-call timeout (F2): a hung store
+/// must surface as a typed [`StoreError::Backend`] instead of blocking the
+/// sync caller forever. Runs inside the worker-thread runtime (the bridge),
+/// where `tokio::time::timeout` can actually fire.
+async fn load_session_with_timeout(
+    store: &dyn GraphStore,
+    session: &SessionId,
+    timeout: std::time::Duration,
+) -> Result<LoadedSession, StoreError> {
+    match tokio::time::timeout(timeout, load_session_async(store, session)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(StoreError::Backend(format!(
+            "load_session timed out after {timeout:?}"
+        ))),
+    }
+}
+
+/// Load a session from a durable store into RAM (spec §2.5) — **sync
+/// wrapper** over [`load_session_async`] (F4), with the same semantics.
+///
+/// Runs the async core on a private worker thread (see [`block_on`]) so it is
+/// callable from sync startup code and from inside a tokio task alike. The
+/// store call is bounded by [`LOAD_SESSION_TIMEOUT`] (F2): a hung store yields
+/// `StoreError::Backend("load_session timed out after 30s")` instead of a
+/// permanent block.
+pub fn load_session(
+    store: &dyn GraphStore,
+    session: &SessionId,
+) -> Result<LoadedSession, StoreError> {
+    block_on(load_session_with_timeout(store, session, LOAD_SESSION_TIMEOUT))?
 }
 
 /// Flatten a [`LamboError`] from the graph tier into store vocabulary.
@@ -137,14 +179,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use async_trait::async_trait;
     use crate::graph::demote::demote;
     use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
+    use crate::store::Capabilities;
     #[cfg(feature = "store-memory")]
     use crate::store::memory::MemoryStore;
     use crate::types::{
-        AgentId, CanonizationEvent, CanonizationStatus, ConceptType, EdgeType, Interaction,
-        Mutation, NodeId, Reservation, SessionId,
+        AgentId, CanonizationEvent, CanonizationStatus, ConceptType, EdgeType, GraphSnapshot,
+        Interaction, InteractionSpan, Mutation, NodeId, Reservation, Scored, SessionId,
     };
     #[cfg(feature = "store-memory")]
     use crate::types::{Concept, MutationBatch, Node};
@@ -476,5 +520,146 @@ mod tests {
             .map(|e| e.weight),
             Some(1.0)
         );
+    }
+
+    /// `GraphStore` mock whose `load_session` never resolves — exercises the
+    /// sync bridge's store-call timeout (F2). Everything else delegates to an
+    /// inner `MemoryStore` (unused by the timeout test, but the trait requires
+    /// a full impl).
+    #[cfg(feature = "store-memory")]
+    struct HangingStore {
+        inner: MemoryStore,
+    }
+
+    #[cfg(feature = "store-memory")]
+    #[async_trait]
+    impl GraphStore for HangingStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.inner.flush(batch).await
+        }
+
+        async fn load_session(&self, _session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            std::future::pending().await
+        }
+
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.vector_candidates(session, embedding, limit).await
+        }
+
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+        ) -> Result<u64, StoreError> {
+            self.inner.blast_radius(session, node, min_edge_age).await
+        }
+
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner.interaction_span(session, node, min_age).await
+        }
+
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// F2: the worker-thread bridge must not block forever on a store whose
+    /// `load_session` never resolves — the parameterized timeout surfaces a
+    /// typed `Backend` error instead.
+    #[cfg(feature = "store-memory")]
+    #[test]
+    fn sync_bridge_times_out_on_a_hung_store() {
+        let store: &dyn GraphStore = &HangingStore {
+            inner: MemoryStore::new(),
+        };
+        let sid = SessionId::from("hung");
+        let err = block_on(load_session_with_timeout(store, &sid, Duration::from_millis(50)))
+            .expect("load_session timeout test: worker thread")
+            .expect_err("hung store must time out, not return");
+        match err {
+            StoreError::Backend(msg) => assert!(
+                msg.contains("load_session timed out after"),
+                "expected timeout message, got {msg:?}"
+            ),
+            other => panic!("expected Backend timeout error, got {other:?}"),
+        }
+    }
+
+    /// F4: the async core is the same load as the sync wrapper — a flush ->
+    /// `load_session_async` round-trip deep-equals the sync path (which runs
+    /// the same core on the bridge), and both restore the same state.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn load_session_async_matches_sync_round_trip() {
+        let (mut g, _, _) = build_session();
+        g.assert_invariants().unwrap();
+
+        let mut expected = g.snapshot();
+        expected.synonyms.clear();
+        expected.reservations.clear();
+        let batch = g.drain_log();
+        assert!(!batch.is_empty());
+
+        let store: &dyn GraphStore = &MemoryStore::new();
+        store.flush(&batch).await.unwrap();
+
+        let loaded = load_session_async(store, &SessionId::from("roundtrip"))
+            .await
+            .unwrap();
+        assert_eq!(loaded.graph.snapshot(), expected);
+        assert_eq!(loaded.graph.log_len(), 0);
+        loaded.graph.assert_invariants().unwrap();
+
+        // Sync wrapper runs the same core: identical graph + index.
+        let sync_loaded = load_session(store, &SessionId::from("roundtrip")).unwrap();
+        assert_eq!(loaded.graph.snapshot(), sync_loaded.graph.snapshot());
+        for q in ["user schema", "api layer", "drift"] {
+            assert_eq!(loaded.index.search(q, 10), sync_loaded.index.search(q, 10));
+        }
+    }
+
+    /// F4: `load_session_async` keeps the missing-session contract — a
+    /// `SessionNotFound` from the store yields a fresh empty session, not an
+    /// error.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn load_session_async_missing_session_returns_fresh_empty_session() {
+        let store: &dyn GraphStore = &MemoryStore::new();
+        let ghost = SessionId::from("never-written-async");
+        let loaded = load_session_async(store, &ghost).await.unwrap();
+
+        assert_eq!(loaded.graph.session_id(), &ghost);
+        assert_eq!(loaded.graph.node_count(), 0);
+        assert_eq!(loaded.graph.log_len(), 0);
+        loaded.graph.assert_invariants().unwrap();
+        assert!(loaded.index.search("anything", 10).is_empty());
     }
 }
