@@ -93,6 +93,16 @@ pub trait GraphStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError>;
 
+    /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
+    ///
+    /// **Type split (CON-6):** this surface returns `u64`, but the frozen
+    /// [`crate::types::Concept::blast_radius`] /
+    /// [`crate::types::CanonizationEvent::blast_radius`] fields are
+    /// `Option<i32>` by pinned contract. Implementers MUST narrow at the write
+    /// gate with a typed error — `u32::try_from(value).map_err(|_| invariant(
+    /// ...))` — never a silent `as` cast: an out-of-range radius is an invariant
+    /// violation, not a value to truncate. (P6's canonization sweep consumes
+    /// this method and writes the i32 field.)
     async fn blast_radius(
         &self,
         session: &SessionId,

@@ -31,7 +31,7 @@ use std::sync::LazyLock;
 use rust_stemmers::{Algorithm, Stemmer};
 
 use crate::graph::Graph;
-use crate::types::{LamboError, NodeId};
+use crate::types::{ConceptType, LamboError, NodeId};
 
 /// Stopwords stripped during normalization — pinned to the fixture convention
 /// (`scripts/gen-fixtures.py` `STOPWORDS`).
@@ -108,6 +108,15 @@ pub enum CanonicalizeResult {
 /// Step 4 reads `Graph::synonym` (T2.1 storage; `declare_synonym` lives on
 /// `Graph`). `Result` is part of the pinned contract; this step itself cannot
 /// fail — the hybrid step 6 is deliberately left to the caller.
+///
+/// **Observations are never matched** (adve-review GRAPH-1): demoted
+/// context-overflow records skip the match step per spec §7 demote semantics,
+/// so `derive`/`record_action` must not attach agent-declared content to an
+/// Observation — even when one carries the same canonical key (legal for
+/// Observations under the partial-UNIQUE errata). The remaining candidates are
+/// unique by key (schema §4 partial `UNIQUE`), and the lowest-`NodeId`
+/// tie-break makes the match deterministic by construction even if duplicates
+/// ever slip through — never HashMap iteration order.
 pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, LamboError> {
     // Raw-lookup-before-normalization, identical to `canonical_key`'s pinned
     // ordering, but reading T2.1's storage directly (the public synonym callback
@@ -119,14 +128,15 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
     };
     match graph
         .concepts()
-        .find(|c| c.canonical_key == key)
+        .filter(|c| c.concept_type != ConceptType::Observation)
+        .filter(|c| c.canonical_key == key)
+        .min_by_key(|c| c.id.0)
         .map(|c| c.id)
     {
         Some(node) => Ok(CanonicalizeResult::Matched { key, node }),
         None => Ok(CanonicalizeResult::Unmatched { key }),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +246,12 @@ mod tests {
     /// Minimal graph with a single concept carrying `canonical_key` (built via
     /// snapshot round-trip so the test avoids the write-path mutation log).
     fn graph_with_concept(canonical_key: &str) -> Graph {
+        graph_with_concept_typed(canonical_key, "Entity")
+    }
+
+    /// Like [`graph_with_concept`], but with an arbitrary JSON concept type —
+    /// GRAPH-1's regression needs an Observation-carrying graph.
+    fn graph_with_concept_typed(canonical_key: &str, concept_type: &str) -> Graph {
         let snap: GraphSnapshot = serde_json::from_value(serde_json::json!({
             "session_id": "test-session",
             "root_goal": null,
@@ -254,7 +270,7 @@ mod tests {
                 "session_id": "test-session",
                 "content": "user schema",
                 "canonical_key": canonical_key,
-                "concept_type": "Entity",
+                "concept_type": concept_type,
                 "origin_interaction": "f0000000-0000-4000-8000-000000000001",
                 "origin_agent": "agent-a",
                 "created_at": "2026-08-10T09:00:00Z",
@@ -427,6 +443,118 @@ mod tests {
     /// Acceptance contract: every row of `fixtures/canonicalization-cases.json`
     /// passes through [`canonical_key`] with a synonym table mirroring the fixture
     /// snapshot (`register_user` -> `create_user`).
+
+    #[test]
+    fn canonicalize_never_matches_observations() {
+        // GRAPH-1: demote creates Observations that may legally carry the same
+        // canonical key as agent-declared content (partial-UNIQUE errata,
+        // muse-spark M1-M2). The step-5 matcher must skip them — new agent
+        // content must never attach to a context-overflow record (spec §7
+        // demote semantics).
+        let g = graph_with_concept_typed("schema user", "Observation");
+        match canonicalize("UserSchema", &g).unwrap() {
+            CanonicalizeResult::Matched { .. } => panic!("Observation must not match"),
+            CanonicalizeResult::Unmatched { key } => assert_eq!(key, "schema user"),
+        }
+
+        // An Entity carrying the key still matches (the filter is type-based).
+        let g = graph_with_concept("schema user");
+        assert!(matches!(
+            canonicalize("UserSchema", &g).unwrap(),
+            CanonicalizeResult::Matched { .. }
+        ));
+
+        // An Observation that shadows an Entity's key never wins: the Entity is
+        // the only candidate. (Two same-key non-Observation concepts are
+        // impossible — schema UNIQUE + insert_concept's collision check.)
+        let snap: GraphSnapshot = serde_json::from_value(serde_json::json!({
+            "session_id": "test-session",
+            "root_goal": null,
+            "created_at": "2026-08-10T09:00:00Z",
+            "closed_at": null,
+            "interactions": [{
+                "id": "f0000000-0000-4000-8000-000000000001",
+                "session_id": "test-session",
+                "agent_id": "agent-a",
+                "prompt_text": "seed",
+                "previous_id": null,
+                "created_at": "2026-08-10T09:00:00Z"
+            }],
+            "concepts": [
+                {
+                    "id": "f0000000-0000-4000-8000-000000000002",
+                    "session_id": "test-session",
+                    "content": "drift note",
+                    "canonical_key": "schema user",
+                    "concept_type": "Observation",
+                    "origin_interaction": "f0000000-0000-4000-8000-000000000001",
+                    "origin_agent": "agent-a",
+                    "created_at": "2026-08-10T09:00:00Z",
+                    "access_count": 0,
+                    "last_accessed": null,
+                    "gc_survived": 0,
+                    "canonization_status": "None",
+                    "blast_radius": null,
+                    "last_demotion_time": null,
+                    "embedding": null
+                },
+                {
+                    "id": "f0000000-0000-4000-8000-000000000004",
+                    "session_id": "test-session",
+                    "content": "user schema",
+                    "canonical_key": "schema user",
+                    "concept_type": "Entity",
+                    "origin_interaction": "f0000000-0000-4000-8000-000000000001",
+                    "origin_agent": "agent-a",
+                    "created_at": "2026-08-10T09:00:00Z",
+                    "access_count": 0,
+                    "last_accessed": null,
+                    "gc_survived": 0,
+                    "canonization_status": "None",
+                    "blast_radius": null,
+                    "last_demotion_time": null,
+                    "embedding": null
+                }
+            ],
+            "edges": [
+                {
+                    "id": "f0000000-0000-4000-8000-000000000003",
+                    "session_id": "test-session",
+                    "source": "f0000000-0000-4000-8000-000000000001",
+                    "target": "f0000000-0000-4000-8000-000000000002",
+                    "edge_type": "Derives",
+                    "weight": 0.9,
+                    "reinforcements": 1,
+                    "created_at": "2026-08-10T09:00:00Z",
+                    "last_reinforced": "2026-08-10T09:00:00Z"
+                },
+                {
+                    "id": "f0000000-0000-4000-8000-000000000005",
+                    "session_id": "test-session",
+                    "source": "f0000000-0000-4000-8000-000000000001",
+                    "target": "f0000000-0000-4000-8000-000000000004",
+                    "edge_type": "Derives",
+                    "weight": 0.9,
+                    "reinforcements": 1,
+                    "created_at": "2026-08-10T09:00:00Z",
+                    "last_reinforced": "2026-08-10T09:00:00Z"
+                }
+            ],
+            "synonyms": [],
+            "reservations": [],
+            "canonization_events": [],
+            "embedding": null
+        }))
+        .unwrap();
+        let g = Graph::from_snapshot(snap).unwrap();
+        match canonicalize("UserSchema", &g).unwrap() {
+            CanonicalizeResult::Matched { node, .. } => {
+                assert_eq!(node.0.to_string(), "f0000000-0000-4000-8000-000000000004")
+            }
+            CanonicalizeResult::Unmatched { .. } => panic!("Entity must match"),
+        }
+    }
+
     #[cfg(feature = "fixtures")]
     #[test]
     fn fixture_canonicalization_cases_all_pass() {

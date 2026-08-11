@@ -219,16 +219,22 @@ DELETE FROM edges WHERE id = $1
 /// `CanonizationTransition` application) and append the audit row. The event insert is
 /// `ON CONFLICT (id) DO NOTHING` so a retried flush (same batch, already-committed
 /// response lost) cannot duplicate the demo's on-screen artifact.
+///
+/// COH-3: `last_demotion_time = COALESCE($5, last_demotion_time)` — a demotion
+/// event (which always carries `Some`) stamps the concept; non-demotion events
+/// (`None`) leave a previously demoted value untouched (spec §10).
 const UPDATE_CONCEPT_STATUS_SQL: &str = r#"
 UPDATE concepts
-SET canonization_status = $2, blast_radius = $3
+SET canonization_status = $2, blast_radius = $3,
+    last_demotion_time = COALESCE($5, last_demotion_time)
 WHERE id = $1 AND session_id = $4
 "#;
 
 const INSERT_CANONIZATION_EVENT_SQL: &str = r#"
 INSERT INTO canonization_events (
-    id, session_id, node_id, from_status, to_status, blast_radius, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    id, session_id, node_id, from_status, to_status, blast_radius,
+    last_demotion_time, occurred_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (id) DO NOTHING
 "#;
 
@@ -291,7 +297,7 @@ WHERE session_id = $1
 
 const SELECT_CANONIZATION_EVENTS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, node_id::STRING AS node_id,
-       from_status, to_status, blast_radius, occurred_at
+       from_status, to_status, blast_radius, last_demotion_time, occurred_at
 FROM canonization_events
 WHERE session_id = $1
 ORDER BY occurred_at, id
@@ -749,6 +755,7 @@ fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent, StoreErro
             &row.try_get::<String, _>("to_status").map_err(backend)?,
         )?,
         blast_radius: blast_radius.map(|v| v as i32),
+        last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         occurred_at: row.try_get("occurred_at").map_err(backend)?,
     })
 }
@@ -968,6 +975,7 @@ async fn insert_canonization_event(
         .bind(canonization_status_sql(ev.from_status))
         .bind(canonization_status_sql(ev.to_status))
         .bind(ev.blast_radius)
+        .bind(ev.last_demotion_time)
         .bind(ev.occurred_at)
         .execute(&mut *tx)
         .await
@@ -986,6 +994,7 @@ async fn apply_canonization(
         .bind(canonization_status_sql(ev.to_status))
         .bind(ev.blast_radius)
         .bind(&ev.session_id.0)
+        .bind(ev.last_demotion_time)
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
@@ -1505,9 +1514,13 @@ mod tests {
         assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 16);
         assert_eq!(placeholder_max(UPSERT_EDGE_SQL), 9);
         assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 4);
-        assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 7);
+        assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 8);
+        assert_eq!(placeholder_max(UPDATE_CONCEPT_STATUS_SQL), 5);
         assert_eq!(placeholder_max(UPSERT_SYNONYM_SQL), 3);
         assert_eq!(placeholder_max(UPSERT_RESERVATION_SQL), 4);
+        // COH-3: the canonization surface carries last_demotion_time end to end.
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("COALESCE($5, last_demotion_time)"));
+        assert!(INSERT_CANONIZATION_EVENT_SQL.contains("last_demotion_time"));
         // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is the
         // 16th, nullable, and included in the conflict UPDATE.
         assert!(UPSERT_CONCEPT_SQL.contains("$15::VECTOR"));
@@ -2697,6 +2710,7 @@ mod conformance {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Venerable,
             blast_radius: Some(9),
+            last_demotion_time: None,
             occurred_at: Utc::now(),
         };
         store.record_canonization(&event).await.unwrap();
@@ -2724,6 +2738,7 @@ mod conformance {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Canonical,
             blast_radius: None,
+            last_demotion_time: None,
             occurred_at: Utc::now(),
         };
         let err = store.record_canonization(&ghost).await.unwrap_err();

@@ -34,6 +34,16 @@
 //! and the write-behind log stays ordered node-before-its-edge per sentence.
 //! Synchronous and pure like every P2 module: the graph owns no lock and nothing
 //! here holds one across an await (spec §6.4).
+//!
+//! ## `last_demotion_time` (COH-3)
+//!
+//! Every demoted observation is stamped with `last_demotion_time = Some(now)`
+//! (the interaction's `created_at` — deterministic, no clock). This is the only
+//! shipped write path that sets the field (spec §10 "Demotion sets
+//! `last_demotion_time`"; T6.3 cooldown / T6.4 depend on it). The matching
+//! `canonization_events` audit row for the demotion is P6's carry — demote
+//! emits no `CanonizationEvent` (no `Mutation` kind exists for one); see
+//! `dev-diary/notes/adve-wave3-graph-decisions.md`.
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -130,7 +140,15 @@ pub fn demote(
             gc_survived: 0,
             canonization_status: CanonizationStatus::None,
             blast_radius: None,
-            last_demotion_time: None,
+            // COH-3: this write path IS the demotion — the observation is new
+            // information demoted out of the context window, so the concept is
+            // stamped with the demotion time (the interaction's created_at,
+            // deterministic per this module's no-clock convention). T6.3's
+            // repromotion cooldown / T6.4 read this field. The matching
+            // canonization_events audit row for the demotion is P6's carry
+            // (demote emits no CanonizationEvent — no Mutation kind exists for
+            // one; recorded in dev-diary/notes/adve-wave3-graph-decisions.md).
+            last_demotion_time: Some(interaction_created_at),
             embedding: None,
             chunk_group_id: Some(chunk_group_id.to_string()),
         };
@@ -272,6 +290,9 @@ mod tests {
             assert_eq!(c.origin_agent, agent(), "sentence {i}");
             // T5.2 sibling co-retrieval contract: all share the chunk group id.
             assert_eq!(c.chunk_group_id.as_deref(), Some("chunk-1"), "sentence {i}");
+            // COH-3: the demotion write path stamps last_demotion_time (the
+            // interaction's created_at — deterministic, no clock).
+            assert_eq!(c.last_demotion_time, Some(ts(0)), "sentence {i}");
             // §5.7 invariant, by construction via insert_concept.
             assert!(
                 g.edge_between(iid, c.id, EdgeType::Derives).is_some(),

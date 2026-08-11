@@ -256,8 +256,14 @@ fn resolve(
     concept_type: ConceptType,
 ) -> Result<NodeId, LamboError> {
     match canonicalize(content, graph)? {
-        CanonicalizeResult::Matched { node, .. } => Ok(node),
+        CanonicalizeResult::Matched { key, node } => {
+            // GRAPH-8: a concept with an empty canonical key is junk regardless
+            // of how it got in — reject at the entry point.
+            reject_empty_key(content, &key)?;
+            Ok(node)
+        }
         CanonicalizeResult::Unmatched { key } => {
+            reject_empty_key(content, &key)?;
             if let Some(&id) = resolved.get(&key) {
                 return Ok(id);
             }
@@ -331,6 +337,21 @@ fn closing_edge(
         }
     }
     None
+}
+
+/// GRAPH-8 guard: reject content whose canonical key is empty — empty,
+/// whitespace-only, or stopword-only input would all collapse onto one key-""
+/// concept with a frozen arbitrary type. Typed `Invariant` error, raised during
+/// the read-only planning phase (validate-then-mutate: nothing is written).
+fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
+    if key.is_empty() {
+        return Err(LamboError::Store(StoreError::Invariant(format!(
+            "record_action: content {:?} canonicalizes to an empty key (empty, \
+             whitespace-only, or stopword-only content is rejected)",
+            content
+        ))));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -549,8 +570,10 @@ mod tests {
     #[test]
     fn record_action_rejects_dependency_cycle_and_leaves_graph_unchanged() {
         let (mut g, iid) = graph_with_interaction();
-        // A -> B (action "a" depends on "b").
-        let out_a = record_action(&mut g, iid, &agent(), &action("a", &[], &[], &["b"])).unwrap();
+        // X -> Y (action "x" depends on "y").
+        // Labels are single letters but NOT stopwords: "a"/"an" canonicalize
+        // to an empty key and are rejected by the GRAPH-8 content guard.
+        let out_a = record_action(&mut g, iid, &agent(), &action("x", &[], &[], &["y"])).unwrap();
         assert_eq!(out_a.created.len(), 2);
         let a_id = out_a.action_node;
         let b_id = out_a.created[1];
@@ -560,7 +583,7 @@ mod tests {
         let before = g.snapshot();
         let log_before = g.log_len();
         let epoch_before = g.epoch();
-        let err = record_action(&mut g, iid, &agent(), &action("b", &[], &[], &["a"])).unwrap_err();
+        let err = record_action(&mut g, iid, &agent(), &action("y", &[], &[], &["x"])).unwrap_err();
         assert!(matches!(err, LamboError::Store(StoreError::Invariant(_))));
         assert!(err.to_string().contains("would create a cycle"));
 
@@ -574,13 +597,13 @@ mod tests {
     #[test]
     fn record_action_rejects_three_hop_chain_cycle() {
         let (mut g, iid) = graph_with_interaction();
-        record_action(&mut g, iid, &agent(), &action("a", &[], &[], &["b"])).unwrap();
-        record_action(&mut g, iid, &agent(), &action("b", &[], &[], &["c"])).unwrap();
+        record_action(&mut g, iid, &agent(), &action("x", &[], &[], &["y"])).unwrap();
+        record_action(&mut g, iid, &agent(), &action("y", &[], &[], &["z"])).unwrap();
         let before = g.snapshot();
         let log_before = g.log_len();
 
         // c -> a closes a -> b -> c.
-        let err = record_action(&mut g, iid, &agent(), &action("c", &[], &[], &["a"])).unwrap_err();
+        let err = record_action(&mut g, iid, &agent(), &action("z", &[], &[], &["x"])).unwrap_err();
         assert!(matches!(err, LamboError::Store(StoreError::Invariant(_))));
         assert!(err.to_string().contains("would create a cycle"));
         assert_eq!(g.snapshot(), before);
@@ -722,6 +745,42 @@ mod tests {
             .edge_between(first.action_node, first.created[2], EdgeType::Dependency)
             .unwrap();
         assert_eq!(dep.reinforcements, 2);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn record_action_rejects_empty_and_stopword_only_content() {
+        // GRAPH-8: empty/whitespace-only/stopword-only content would collapse
+        // onto one key-"" concept — rejected at the entry point during the
+        // read-only planning phase, before anything is written.
+        let (mut g, iid) = graph_with_interaction();
+        // Blank action string.
+        let err = record_action(&mut g, iid, &agent(), &action("", &[], &[], &[])).unwrap_err();
+        assert!(
+            matches!(&err, LamboError::Store(StoreError::Invariant(_))),
+            "{err}"
+        );
+        assert!(err.to_string().contains("empty key"), "{err}");
+        // Stopword-only action.
+        let err =
+            record_action(&mut g, iid, &agent(), &action("the and of", &[], &[], &[])).unwrap_err();
+        assert!(matches!(&err, LamboError::Store(StoreError::Invariant(_))));
+        // Empty produce.
+        let err = record_action(&mut g, iid, &agent(), &action("deploy", &["   "], &[], &[]))
+            .unwrap_err();
+        assert!(matches!(&err, LamboError::Store(StoreError::Invariant(_))));
+        // Stopword-only dependency.
+        let err = record_action(
+            &mut g,
+            iid,
+            &agent(),
+            &action("deploy", &[], &[], &["the a an"]),
+        )
+        .unwrap_err();
+        assert!(matches!(&err, LamboError::Store(StoreError::Invariant(_))));
+        // Nothing was written by any rejected call.
+        assert_eq!(g.node_count(), 1);
+        assert_eq!(g.log_len(), 1);
         g.assert_invariants().unwrap();
     }
 }

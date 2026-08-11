@@ -25,8 +25,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::types::{
-    CanonizationEvent, Concept, ConceptType, Edge, EdgeType, GraphSnapshot, Interaction,
-    LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId, StoreError, Synonym,
+    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot,
+    Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId,
+    StoreError, Synonym,
 };
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
@@ -100,6 +101,13 @@ impl Graph {
     /// Materialize a session snapshot into RAM. Seeds state without emitting
     /// mutations (the history is already durable) and verifies every §5.7
     /// invariant before returning.
+    ///
+    /// A zero-interaction snapshot is a valid **empty** graph (adve-review
+    /// GRAPH-6 — "expected exactly one chain head, found 0" was rejecting
+    /// fresh sessions), and duplicate natural-key edges are rejected rather than
+    /// silently merged via reinforcement (GRAPH-7 — the loaded graph must equal
+    /// the stored snapshot; reinforcement is a write-path semantic, not a load
+    /// one).
     pub fn from_snapshot(snap: GraphSnapshot) -> Result<Self, LamboError> {
         let sid = snap.session_id.clone();
         let mut g = Self::new(sid.clone());
@@ -150,35 +158,54 @@ impl Graph {
                 }
             }
         }
-        if heads.len() != 1 {
-            return Err(invariant(format!(
-                "expected exactly one chain head, found {}",
-                heads.len()
-            )));
-        }
-        let mut chain = Vec::with_capacity(snap.interactions.len());
-        let mut visited: HashSet<NodeId> = HashSet::with_capacity(snap.interactions.len());
-        let mut cur = heads[0];
-        loop {
-            if !visited.insert(cur) {
-                return Err(invariant("cycle in temporal chain"));
+        if snap.interactions.is_empty() {
+            // GRAPH-6: a zero-interaction snapshot is a valid empty graph, not a
+            // malformed chain. A non-empty snapshot with a forked/absent chain
+            // still fails below; concepts without Derives edges still fail
+            // assert_invariants.
+            g.temporal_chain = Vec::new();
+        } else {
+            if heads.len() != 1 {
+                return Err(invariant(format!(
+                    "expected exactly one chain head, found {}",
+                    heads.len()
+                )));
             }
-            chain.push(cur);
-            match next_of.get(&cur) {
-                Some(&next) => cur = next,
-                None => break,
+            let mut chain = Vec::with_capacity(snap.interactions.len());
+            let mut visited: HashSet<NodeId> = HashSet::with_capacity(snap.interactions.len());
+            let mut cur = heads[0];
+            loop {
+                if !visited.insert(cur) {
+                    return Err(invariant("cycle in temporal chain"));
+                }
+                chain.push(cur);
+                match next_of.get(&cur) {
+                    Some(&next) => cur = next,
+                    None => break,
+                }
             }
+            if chain.len() != snap.interactions.len() {
+                return Err(invariant(format!(
+                    "temporal chain covers {} of {} interactions",
+                    chain.len(),
+                    snap.interactions.len()
+                )));
+            }
+            g.temporal_chain = chain;
         }
-        if chain.len() != snap.interactions.len() {
-            return Err(invariant(format!(
-                "temporal chain covers {} of {} interactions",
-                chain.len(),
-                snap.interactions.len()
-            )));
-        }
-        g.temporal_chain = chain;
 
+        // GRAPH-7: duplicate (source, target, edge_type) in one snapshot must be
+        // rejected up front — record_edge would silently reinforce, leaving a
+        // loaded graph that disagrees with the stored snapshot.
+        let mut seen_edge_keys: HashSet<EdgeKey> = HashSet::with_capacity(snap.edges.len());
         for e in &snap.edges {
+            let key = (e.source, e.target, e.edge_type);
+            if !seen_edge_keys.insert(key) {
+                return Err(invariant(format!(
+                    "duplicate natural-key edge ({}, {}, {:?}) in snapshot",
+                    key.0, key.1, key.2
+                )));
+            }
             let weight = normalize_weight(e.weight)?;
             let mut e = e.clone();
             e.weight = weight;
@@ -542,6 +569,14 @@ impl Graph {
     /// Apply a canonization transition to a concept and record it. Concept must
     /// exist; status and blast radius are set from the event. The event is
     /// appended to the session's audit trail and emitted as a mutation.
+    ///
+    /// Write-gate validation (adve-review GRAPH-4): `from_status` must equal the
+    /// concept's **current** status — a fabricated audit row is rejected with a
+    /// typed invariant error — and the pair must be an edge of the spec §10
+    /// state machine ([`legal_canonization_transition`]; stage skips, downgrades
+    /// and self-loops are rejected). A demotion event additionally carries the
+    /// concept's new `last_demotion_time` (COH-3, spec §10 "Demotion sets
+    /// `last_demotion_time`"); non-demotion events leave that field untouched.
     pub fn apply_canonization_transition(
         &mut self,
         event: CanonizationEvent,
@@ -561,8 +596,28 @@ impl Graph {
                 )))
             }
         };
+        if concept.canonization_status != event.from_status {
+            return Err(invariant(format!(
+                "canonization transition for {} claims {:?} -> {:?} but the concept's \
+                 current status is {:?} (fabricated transition rejected)",
+                event.node_id, event.from_status, event.to_status, concept.canonization_status
+            )));
+        }
+        if !legal_canonization_transition(event.from_status, event.to_status) {
+            return Err(invariant(format!(
+                "illegal canonization transition {:?} -> {:?} for concept {} \
+                 (spec §10 state machine)",
+                event.from_status, event.to_status, event.node_id
+            )));
+        }
         concept.canonization_status = event.to_status;
         concept.blast_radius = event.blast_radius;
+        // COH-3: a demotion event always carries Some (the concept's new
+        // last_demotion_time); a non-demotion event's None must not clobber a
+        // previously demoted concept's value.
+        if let Some(t) = event.last_demotion_time {
+            concept.last_demotion_time = Some(t);
+        }
         self.canonization_events.push(event.clone());
         self.append_mutation(Mutation::CanonizationTransition { event });
         Ok(())
@@ -586,7 +641,6 @@ impl Graph {
     pub fn set_embedding(&mut self, contract: Option<crate::types::EmbeddingContract>) {
         self.embedding = contract;
     }
-
     /// Advisory soft lock (spec §11). Same-agent re-reservation extends; cross-agent
     /// denial is T2.7's policy — this stores what it is given.
     pub fn set_reservation(&mut self, r: Reservation) {
@@ -818,6 +872,14 @@ impl Graph {
             if !self.nodes.contains_key(&e.target) {
                 v.push(format!("edge {} target {} missing", e.id, e.target));
             }
+            // GRAPH-2: endpoint-type matrix (spec §5) — assert_invariants is the
+            // safety net; record_edge rejects the class at the write gate, this
+            // arm catches any graph that got into that state another way.
+            if let (Some(s), Some(t)) = (self.nodes.get(&e.source), self.nodes.get(&e.target)) {
+                if let Some(msg) = edge_endpoint_error(e.edge_type, s, t) {
+                    v.push(format!("edge {} {msg}", e.id));
+                }
+            }
             let w = e.weight;
             if !w.is_finite() || w < 0.0 {
                 v.push(format!("edge {} weight {w} not finite and >= 0", e.id));
@@ -931,8 +993,7 @@ impl Graph {
         let mut color: HashMap<NodeId, u8> = HashMap::new();
         for n in self.nodes.keys() {
             if color.get(n).copied().unwrap_or(0) == 0 {
-                let mut path = Vec::new();
-                if let Some(back) = self.dfs_cycle(*n, &mut color, &mut path) {
+                if let Some(back) = self.dfs_cycle(*n, &mut color) {
                     v.push(format!(
                         "Causal/Dependency/Hierarchical cycle detected through {back}"
                     ));
@@ -978,6 +1039,16 @@ impl Graph {
                 "edge {} target {}",
                 edge.id, edge.target
             )));
+        }
+        // Spec §5 edge-type endpoint matrix (adve-review GRAPH-2): the schema
+        // deliberately carries no FK on edge endpoints (spec §4 "the writer
+        // enforces it") — this is that write gate. A type-invalid edge (e.g.
+        // `Semantic` from an interaction) would pollute recall BFS permanently,
+        // so it is rejected here, not merely flagged by assert_invariants.
+        let src_node = self.nodes.get(&edge.source).expect("source checked above");
+        let tgt_node = self.nodes.get(&edge.target).expect("target checked above");
+        if let Some(msg) = edge_endpoint_error(edge.edge_type, src_node, tgt_node) {
+            return Err(invariant(format!("edge {} {msg}", edge.id)));
         }
         if let Some(other) = self.edges.get(&edge.id) {
             let key = (edge.source, edge.target, edge.edge_type);
@@ -1056,31 +1127,52 @@ impl Graph {
     /// definition (A parent of B parent of A is nonsense) — spec §5.7 names only
     /// `Causal`/`Dependency`, so write-time rejection stays per spec (T2.4); the
     /// safety net here is broader than the write-time contract.
-    fn dfs_cycle(
-        &self,
-        node: NodeId,
-        color: &mut HashMap<NodeId, u8>,
-        path: &mut Vec<NodeId>,
-    ) -> Option<NodeId> {
-        color.insert(node, 1); // gray
-        path.push(node);
-        let causal = self.out_neighbors_typed(node, EdgeType::Causal);
-        let dependency = self.out_neighbors_typed(node, EdgeType::Dependency);
-        let hierarchical = self.out_neighbors_typed(node, EdgeType::Hierarchical);
-        for tgt in causal.into_iter().chain(dependency).chain(hierarchical) {
+    ///
+    /// Iterative (adve-review GRAPH-3): an explicit stack replaces recursion, so
+    /// a deep chain (~10k+ nodes, plausible for a long record_action-heavy
+    /// session) cannot overflow the ~2 MiB worker-thread stack that
+    /// `load_session` materializes on. The recursive version SIGABRT'd on load
+    /// and left the session permanently unloadable. Same three-color semantics
+    /// (1 = on the current DFS path, 2 = fully explored); the dead `path` vec is
+    /// gone with the recursion.
+    fn dfs_cycle(&self, start: NodeId, color: &mut HashMap<NodeId, u8>) -> Option<NodeId> {
+        // Stack frames: (node, unexplored out-neighbors, next index to visit).
+        let mut stack: Vec<(NodeId, Vec<NodeId>, usize)> = Vec::new();
+        color.insert(start, 1); // gray
+        stack.push((start, self.cycle_neighbors(start), 0));
+        while let Some(top) = stack.last() {
+            let node = top.0;
+            let next = top.2;
+            if next >= top.1.len() {
+                color.insert(node, 2); // black
+                stack.pop();
+                continue;
+            }
+            let tgt = top.1[next];
+            stack.last_mut().expect("stack non-empty in loop").2 = next + 1;
             match color.get(&tgt).copied().unwrap_or(0) {
                 1 => return Some(tgt), // back edge
                 2 => continue,
                 _ => {
-                    if let Some(back) = self.dfs_cycle(tgt, color, path) {
-                        return Some(back);
-                    }
+                    color.insert(tgt, 1);
+                    stack.push((tgt, self.cycle_neighbors(tgt), 0));
                 }
             }
         }
-        color.insert(node, 2); // black
-        path.pop();
         None
+    }
+
+    /// `Causal` + `Dependency` + `Hierarchical` out-neighbors of `node`, in that
+    /// type-priority order — the same iteration the recursive DFS used.
+    fn cycle_neighbors(&self, node: NodeId) -> Vec<NodeId> {
+        let causal = self.out_neighbors_typed(node, EdgeType::Causal);
+        let dependency = self.out_neighbors_typed(node, EdgeType::Dependency);
+        let hierarchical = self.out_neighbors_typed(node, EdgeType::Hierarchical);
+        causal
+            .into_iter()
+            .chain(dependency)
+            .chain(hierarchical)
+            .collect()
     }
 }
 
@@ -1091,6 +1183,57 @@ fn normalize_weight(w: f64) -> Result<f64, LamboError> {
         return Err(invariant(format!("negative edge weight {w}")));
     }
     Ok(if w.is_finite() { w } else { 0.0 })
+}
+
+/// Spec §5 edge-type endpoint matrix (adve-review GRAPH-2): `Temporal` connects
+/// interactions, `Derives` connects an interaction to a concept, and the
+/// remaining five types (`CoOccurrence`/`Causal`/`Dependency`/`Hierarchical`/
+/// `Semantic`) connect concepts to concepts. Returns a violation message when
+/// the endpoints violate the matrix, `None` when legal. The schema carries no FK
+/// on endpoints (spec §4: "the writer enforces it") — `record_edge` is that
+/// gate and `assert_invariants` the safety net.
+fn edge_endpoint_error(edge_type: EdgeType, source: &Node, target: &Node) -> Option<String> {
+    let (ok, want) = match edge_type {
+        EdgeType::Temporal => (
+            matches!(source, Node::Interaction(_)) && matches!(target, Node::Interaction(_)),
+            "Interaction -> Interaction",
+        ),
+        EdgeType::Derives => (
+            matches!(source, Node::Interaction(_)) && matches!(target, Node::Concept(_)),
+            "Interaction -> Concept",
+        ),
+        _ => (
+            matches!(source, Node::Concept(_)) && matches!(target, Node::Concept(_)),
+            "Concept -> Concept",
+        ),
+    };
+    if ok {
+        None
+    } else {
+        Some(format!(
+            "{edge_type:?} edge must connect {want} (spec §5) — got source {} / target {}",
+            source.id(),
+            target.id()
+        ))
+    }
+}
+
+/// Legal spec §10 state-machine edges (adve-review GRAPH-4): Stage 1 promotes
+/// `None -> Candidate`, Stage 2 promotes to `Venerable` (from `None` or
+/// `Candidate` — the two stages evaluate independent evidence), Stage 3 promotes
+/// `Venerable -> Canonical`, and demotion returns `Canonical -> None` (spec §10:
+/// demotion nulls `blast_radius` and sets `last_demotion_time`). Everything else
+/// — stage skips, downgrades, and self-loops — is rejected at the
+/// [`Graph::apply_canonization_transition`] write gate.
+fn legal_canonization_transition(from: CanonizationStatus, to: CanonizationStatus) -> bool {
+    matches!(
+        (from, to),
+        (CanonizationStatus::None, CanonizationStatus::Candidate)
+            | (CanonizationStatus::None, CanonizationStatus::Venerable)
+            | (CanonizationStatus::Candidate, CanonizationStatus::Venerable)
+            | (CanonizationStatus::Venerable, CanonizationStatus::Canonical)
+            | (CanonizationStatus::Canonical, CanonizationStatus::None)
+    )
 }
 
 fn invariant(msg: impl Into<String>) -> LamboError {
@@ -1436,6 +1579,65 @@ mod tests {
     }
 
     #[test]
+    fn record_edge_rejects_type_invalid_endpoints() {
+        // GRAPH-2: spec §5 pins what each edge type connects; the write gate
+        // must reject type-invalid endpoint pairs instead of storing them (they
+        // would pollute recall BFS permanently).
+        let (mut g, iid, cid) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+
+        // Concept-only edge types from/to an interaction.
+        let err = g
+            .upsert_edge(edge(1, iid, c2id, EdgeType::Semantic, 0.5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Concept -> Concept"), "{err}");
+        let err = g
+            .upsert_edge(edge(2, c2id, iid, EdgeType::Causal, 0.5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Concept -> Concept"), "{err}");
+        // Temporal must connect interactions.
+        let err = g
+            .upsert_edge(edge(3, iid, cid, EdgeType::Temporal, 0.5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Interaction -> Interaction"), "{err}");
+        // Derives must connect interaction -> concept.
+        let err = g
+            .upsert_edge(edge(4, cid, c2id, EdgeType::Derives, 0.5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Interaction -> Concept"), "{err}");
+        // A legal Concept -> Concept edge still writes.
+        g.upsert_edge(edge(5, cid, c2id, EdgeType::Semantic, 0.5))
+            .unwrap();
+        // Nothing was written by the rejected attempts (derives x2 + semantic).
+        assert_eq!(g.edge_count(), 3);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn assert_invariants_flags_type_invalid_edges() {
+        // GRAPH-2: assert_invariants must catch the class even if an edge got
+        // into the graph another way (record_edge rejects it, so inject into the
+        // private indexes directly — defense for future load-path bugs).
+        let (mut g, iid, _) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        let bad = edge(9, iid, c2id, EdgeType::Semantic, 0.5);
+        g.edges.insert(bad.id, bad.clone());
+        g.edge_keys
+            .insert((bad.source, bad.target, bad.edge_type), bad.id);
+        g.add_adjacency(bad.source, bad.target, bad.edge_type);
+        let err = g.assert_invariants().unwrap_err().to_string();
+        assert!(err.contains("Semantic edge must connect"), "{err}");
+    }
+
+    #[test]
     fn remove_node_cleans_incident_edges() {
         let mut g = Graph::new(sid());
         let i1 = interaction(1, None, 0);
@@ -1563,6 +1765,7 @@ mod tests {
             from_status: crate::types::CanonizationStatus::None,
             to_status: crate::types::CanonizationStatus::Candidate,
             blast_radius: Some(3),
+            last_demotion_time: None,
             occurred_at: ts(10),
         };
         g.apply_canonization_transition(ev.clone()).unwrap();
@@ -1576,6 +1779,197 @@ mod tests {
         );
         assert_eq!(c.blast_radius, Some(3));
         assert_eq!(g.canonization_events(), &[ev]);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn transition_from_status_mismatch_is_rejected() {
+        // GRAPH-4: the audit trail must match reality — an event whose
+        // from_status does not equal the concept's current status is fabricated
+        // and must be rejected before anything is written.
+        let (mut g, _, cid) = small_graph(); // concept status: None
+        let ev = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: crate::types::CanonizationStatus::Venerable,
+            to_status: crate::types::CanonizationStatus::Canonical,
+            blast_radius: Some(5),
+            last_demotion_time: None,
+            occurred_at: ts(10),
+        };
+        let err = g.apply_canonization_transition(ev).unwrap_err().to_string();
+        assert!(err.contains("current status"), "{err}");
+        // Nothing changed: no status, no blast radius, no audit row, no mutation.
+        match g.node(cid).unwrap() {
+            Node::Concept(c) => {
+                assert_eq!(
+                    c.canonization_status,
+                    crate::types::CanonizationStatus::None
+                );
+                assert_eq!(c.blast_radius, None);
+            }
+            _ => panic!("concept"),
+        }
+        assert!(g.canonization_events().is_empty());
+        assert_eq!(g.log_len(), 3, "only the seed writes");
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn illegal_transition_pairs_are_rejected() {
+        // GRAPH-4: spec §10 state machine — stage skips, downgrades and
+        // self-loops are not edges of the machine and must be rejected at the
+        // write gate (the demo's canonization_events table only ever shows
+        // legal transitions).
+        let (mut g, _, cid) = small_graph();
+        // Stage skip: None -> Canonical requires passing through the stages.
+        let skip = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: crate::types::CanonizationStatus::None,
+            to_status: crate::types::CanonizationStatus::Canonical,
+            blast_radius: Some(5),
+            last_demotion_time: None,
+            occurred_at: ts(10),
+        };
+        let err = g
+            .apply_canonization_transition(skip)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("illegal"), "{err}");
+        // Self-loop: a transition must change status.
+        let self_loop = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: crate::types::CanonizationStatus::None,
+            to_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts(11),
+        };
+        assert!(g.apply_canonization_transition(self_loop).is_err());
+        // Downgrade: demotion is only Canonical -> None.
+        let promote = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: crate::types::CanonizationStatus::None,
+            to_status: crate::types::CanonizationStatus::Venerable,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts(12),
+        };
+        g.apply_canonization_transition(promote).unwrap();
+        let downgrade = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: crate::types::CanonizationStatus::Venerable,
+            to_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(ts(13)),
+            occurred_at: ts(13),
+        };
+        let err = g
+            .apply_canonization_transition(downgrade)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("illegal"), "{err}");
+        // Only the single legal promotion was recorded.
+        assert_eq!(g.canonization_events().len(), 1);
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn legal_transitions_apply_and_demotion_carries_last_demotion_time() {
+        // GRAPH-4 + COH-3: walk the full §10 path None -> Candidate ->
+        // Venerable -> Canonical -> None. Demotion nulls blast_radius and
+        // stamps last_demotion_time (spec §10); non-demotion events leave
+        // last_demotion_time untouched; the carry survives a snapshot round-trip.
+        let (mut g, _, cid) = small_graph();
+        let promote = |from, to, blast, last_demotion, at| CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: cid,
+            from_status: from,
+            to_status: to,
+            blast_radius: blast,
+            last_demotion_time: last_demotion,
+            occurred_at: ts(at),
+        };
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::None,
+            crate::types::CanonizationStatus::Candidate,
+            Some(3),
+            None,
+            1,
+        ))
+        .unwrap();
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::Candidate,
+            crate::types::CanonizationStatus::Venerable,
+            Some(3),
+            None,
+            2,
+        ))
+        .unwrap();
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::Venerable,
+            crate::types::CanonizationStatus::Canonical,
+            Some(7),
+            None,
+            3,
+        ))
+        .unwrap();
+        // Demotion: blast_radius nulled, last_demotion_time stamped.
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::Canonical,
+            crate::types::CanonizationStatus::None,
+            None,
+            Some(ts(4)),
+            4,
+        ))
+        .unwrap();
+        match g.node(cid).unwrap() {
+            Node::Concept(c) => {
+                assert_eq!(
+                    c.canonization_status,
+                    crate::types::CanonizationStatus::None
+                );
+                assert_eq!(c.blast_radius, None);
+                assert_eq!(c.last_demotion_time, Some(ts(4)));
+            }
+            _ => panic!("concept"),
+        }
+        // A later non-demotion promotion must NOT clobber the carry.
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::None,
+            crate::types::CanonizationStatus::Candidate,
+            Some(2),
+            None,
+            5,
+        ))
+        .unwrap();
+        match g.node(cid).unwrap() {
+            Node::Concept(c) => assert_eq!(c.last_demotion_time, Some(ts(4))),
+            _ => panic!("concept"),
+        }
+        // The carry survives a snapshot round-trip (from_snapshot -> to_snapshot).
+        let h = Graph::from_snapshot(g.snapshot()).unwrap();
+        match h.node(cid).unwrap() {
+            Node::Concept(c) => assert_eq!(c.last_demotion_time, Some(ts(4))),
+            _ => panic!("concept"),
+        }
+        let demote_ev = h
+            .canonization_events()
+            .iter()
+            .find(|e| e.to_status == crate::types::CanonizationStatus::None)
+            .expect("demotion event recorded");
+        assert_eq!(demote_ev.last_demotion_time, Some(ts(4)));
+        assert_eq!(h.canonization_events().len(), 5);
         g.assert_invariants().unwrap();
     }
 
@@ -1629,13 +2023,22 @@ mod tests {
         let _ = g.node(cid);
         let _ = g.out_neighbors(iid);
         assert_eq!(g.epoch(), e0);
-        // drain does not reset.
+        // Seed the edge's target concept *before* the drain so the post-drain
+        // section contains exactly the one edge write. The edge must be
+        // type-legal (GRAPH-2 rejects type-invalid endpoints at the write gate —
+        // a `Semantic` edge from an interaction was never legal per spec §5).
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        // drain does not reset; anchor on the post-drain epoch so the next
+        // write is isolated from insert_concept's own bumps.
+        let e_before = g.epoch();
         let _ = g.drain_log();
-        assert_eq!(g.epoch(), e0);
+        assert_eq!(g.epoch(), e_before);
         // Next write bumps again.
-        g.upsert_edge(edge(1, iid, cid, EdgeType::Semantic, 0.5))
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::Semantic, 0.5))
             .unwrap();
-        assert!(g.epoch() > e0);
+        assert!(g.epoch() > e_before);
     }
 
     #[test]
@@ -1805,6 +2208,100 @@ mod tests {
         assert_eq!(h.node_count(), g.node_count());
         assert_eq!(h.edge_count(), g.edge_count());
         h.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn empty_snapshot_roundtrips() {
+        // GRAPH-6: a zero-interaction snapshot is a valid empty graph, not a
+        // malformed chain ("expected exactly one chain head, found 0").
+        let g = Graph::new(sid());
+        let snap = g.snapshot();
+        let h = Graph::from_snapshot(snap.clone()).unwrap();
+        assert!(h.is_empty());
+        assert_eq!(h.snapshot(), snap);
+        h.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn from_snapshot_rejects_duplicate_natural_key_edges() {
+        // GRAPH-7: two edges with the same (source, target, edge_type) in one
+        // snapshot must be rejected — record_edge would silently merge them via
+        // reinforcement, leaving a loaded graph that disagrees with the stored
+        // snapshot.
+        let (mut g, iid, cid) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5))
+            .unwrap();
+        let mut snap = g.snapshot();
+        // A second edge with the same natural key (fresh id) — must be rejected.
+        let mut dup = edge(2, cid, c2id, EdgeType::CoOccurrence, 0.5);
+        dup.id = NodeId::new();
+        snap.edges.push(dup);
+        let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+        assert!(err.contains("duplicate natural-key edge"), "{err}");
+    }
+
+    #[test]
+    fn deep_chain_cycle_check_does_not_overflow_stack() {
+        // GRAPH-3 regression: dfs_cycle was recursive — a ~10k-deep
+        // Causal/Dependency chain overflowed the ~2 MiB worker-thread stack that
+        // load_session materializes on (SIGABRT -> session permanently
+        // unloadable). The check must be iterative. Exercise the full load path
+        // (from_snapshot -> assert_invariants) on a small-stack thread, exactly
+        // like load.rs does.
+        const N: usize = 20_000;
+        let i = interaction(1, None, 0);
+        let iid = i.id;
+        let mut snap = GraphSnapshot {
+            session_id: sid(),
+            root_goal: None,
+            created_at: None,
+            closed_at: None,
+            interactions: vec![i],
+            concepts: (0..N)
+                .map(|k| {
+                    let mut c = concept(k as u64 + 1, iid, "chain");
+                    c.content = format!("chain {k}");
+                    c.canonical_key = format!("chain{k}");
+                    c
+                })
+                .collect(),
+            edges: Vec::with_capacity(2 * N),
+            synonyms: vec![],
+            reservations: vec![],
+            canonization_events: vec![],
+            embedding: None,
+        };
+        // Every concept derives from the interaction (assert_invariants
+        // requires it) plus a single Causal chain c0 -> c1 -> ... -> c(N-1).
+        for k in 0..N {
+            snap.edges.push(edge(
+                k as u64 + 1,
+                iid,
+                NodeId(Uuid::from_u64_pair(2, k as u64 + 1)),
+                EdgeType::Derives,
+                0.9,
+            ));
+        }
+        for k in 0..N - 1 {
+            snap.edges.push(edge(
+                N as u64 + k as u64 + 1,
+                NodeId(Uuid::from_u64_pair(2, k as u64 + 1)),
+                NodeId(Uuid::from_u64_pair(2, k as u64 + 2)),
+                EdgeType::Causal,
+                0.5,
+            ));
+        }
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || Graph::from_snapshot(snap))
+            .expect("spawn small-stack thread");
+        let g = handle.join().expect("no panic on the loader thread");
+        g.expect("load + invariants pass")
+            .assert_invariants()
+            .unwrap();
     }
 
     #[cfg(feature = "fixtures")]

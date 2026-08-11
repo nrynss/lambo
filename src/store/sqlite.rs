@@ -921,12 +921,17 @@ async fn apply_canonization_transition(
     event: &CanonizationEvent,
 ) -> Result<(), StoreError> {
     let to_status = enum_to_text(&event.to_status, "to_status")?;
+    // COH-3: last_demotion_time = COALESCE(?, last_demotion_time) — a demotion
+    // event (Some) stamps the concept; non-demotion events (None) leave a
+    // previously demoted value untouched (spec §10).
     let res = sqlx::query(
-        "UPDATE concepts SET canonization_status = ?, blast_radius = ? \
+        "UPDATE concepts SET canonization_status = ?, blast_radius = ?, \
+         last_demotion_time = COALESCE(?, last_demotion_time) \
          WHERE id = ? AND session_id = ?",
     )
     .bind(&to_status)
     .bind(event.blast_radius)
+    .bind(event.last_demotion_time.map(ts_to_text))
     .bind(event.node_id.0.to_string())
     .bind(&event.session_id.0)
     .execute(&mut *tx)
@@ -942,8 +947,9 @@ async fn apply_canonization_transition(
     let from_status = enum_to_text(&event.from_status, "from_status")?;
     sqlx::query(
         "INSERT INTO canonization_events (\
-             id, session_id, node_id, from_status, to_status, blast_radius, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+             id, session_id, node_id, from_status, to_status, blast_radius, \
+             last_demotion_time, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(event.id.0.to_string())
@@ -952,6 +958,7 @@ async fn apply_canonization_transition(
     .bind(from_status)
     .bind(to_status)
     .bind(event.blast_radius)
+    .bind(event.last_demotion_time.map(ts_to_text))
     .bind(ts_to_text(event.occurred_at))
     .execute(&mut *tx)
     .await
@@ -1150,7 +1157,8 @@ async fn load_canonization_events(
     session: &SessionId,
 ) -> Result<Vec<CanonizationEvent>, StoreError> {
     let rows = sqlx::query(
-        "SELECT id, session_id, node_id, from_status, to_status, blast_radius, occurred_at \
+        "SELECT id, session_id, node_id, from_status, to_status, blast_radius, \
+             last_demotion_time, occurred_at \
          FROM canonization_events WHERE session_id = ? ORDER BY occurred_at ASC, id ASC",
     )
     .bind(&session.0)
@@ -1165,7 +1173,8 @@ async fn load_canonization_events(
         let from: String = row.get(3);
         let to: String = row.get(4);
         let blast_radius: Option<i32> = row.get(5);
-        let occurred: String = row.get(6);
+        let last_demotion: Option<String> = row.get(6);
+        let occurred: String = row.get(7);
         out.push(CanonizationEvent {
             id: node_id(&id, "canonization event id")?,
             session_id: SessionId::from(sid),
@@ -1173,6 +1182,7 @@ async fn load_canonization_events(
             from_status: text_to_enum(&from, "from_status")?,
             to_status: text_to_enum(&to, "to_status")?,
             blast_radius,
+            last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             occurred_at: text_to_ts(&occurred)?,
         });
     }
@@ -1414,6 +1424,7 @@ mod tests {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Candidate,
             blast_radius: Some(2),
+            last_demotion_time: None,
             occurred_at: ts(12),
         })
         .unwrap();
@@ -2101,6 +2112,7 @@ mod tests {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Candidate,
             blast_radius: Some(2),
+            last_demotion_time: None,
             occurred_at: ts,
         };
         store
@@ -2127,6 +2139,7 @@ mod tests {
             from_status: CanonizationStatus::Candidate,
             to_status: CanonizationStatus::Venerable,
             blast_radius: Some(4),
+            last_demotion_time: None,
             occurred_at: ts + chrono::Duration::minutes(1),
         };
         store.record_canonization(&ev2).await.unwrap();
@@ -2146,10 +2159,82 @@ mod tests {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Candidate,
             blast_radius: None,
+            last_demotion_time: None,
             occurred_at: ts,
         };
         let err = store.record_canonization(&ghost).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    /// COH-3 acceptance: a demotion event (Canonical -> None) carries
+    /// `last_demotion_time`; it lands on the concept and round-trips through the
+    /// event table; a later non-demotion transition leaves it untouched.
+    #[tokio::test]
+    async fn demotion_event_sets_and_roundtrips_last_demotion_time() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("demote-canon");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let demote_at = ts + chrono::Duration::minutes(5);
+        let ev = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(demote_at),
+            occurred_at: demote_at,
+        };
+        store.record_canonization(&ev).await.unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::None
+        );
+        assert_eq!(snap.concepts[0].blast_radius, None);
+        assert_eq!(snap.concepts[0].last_demotion_time, Some(demote_at));
+        assert_eq!(snap.canonization_events.len(), 1);
+        assert_eq!(snap.canonization_events[0], ev);
+
+        // A promotion after the demotion must NOT clobber the field (COALESCE).
+        let promo = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: Some(2),
+            last_demotion_time: None,
+            occurred_at: demote_at + chrono::Duration::minutes(1),
+        };
+        store.record_canonization(&promo).await.unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].last_demotion_time,
+            Some(demote_at),
+            "non-demotion transitions leave last_demotion_time untouched"
+        );
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Candidate
+        );
+        assert_eq!(snap.canonization_events.len(), 2);
+        assert_eq!(snap.canonization_events[1], promo);
     }
 
     /// Acceptance: ISO-8601 timestamps use the FIXED 24-char ms format and

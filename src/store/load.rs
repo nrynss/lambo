@@ -304,6 +304,7 @@ mod tests {
             from_status: CanonizationStatus::None,
             to_status: CanonizationStatus::Candidate,
             blast_radius: Some(2),
+            last_demotion_time: None,
             occurred_at: ts(12),
         })
         .unwrap();

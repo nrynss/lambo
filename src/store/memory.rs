@@ -155,6 +155,12 @@ impl MemoryStore {
                 if let Some(c) = snap.concepts.iter_mut().find(|c| c.id == event.node_id) {
                     c.canonization_status = event.to_status;
                     c.blast_radius = event.blast_radius;
+                    // COH-3: a demotion event carries the concept's new
+                    // last_demotion_time (spec §10); non-demotion events leave
+                    // the field untouched.
+                    if let Some(t) = event.last_demotion_time {
+                        c.last_demotion_time = Some(t);
+                    }
                 } else {
                     return Err(StoreError::NotFound(format!(
                         "concept {} for canonization",

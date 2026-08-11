@@ -22,10 +22,14 @@
 //! applies *within* a single logical write, **not** across the batch: a node
 //! upsert may legally follow a `DeleteNode` in the same drained batch (create ->
 //! delete -> create within one flush interval). Store adapters (T3.4+) MUST replay
-//! batches in order and MUST NOT re-sort them. Because the log is chronological and
-//! an edge can only be written once its endpoints exist, every edge in a batch
-//! references nodes upserted earlier in that same batch — in-order replay is always
-//! safe (adve-review T2.1 M2).
+//! batches in order and MUST NOT re-sort them. Because the log is chronological
+//! and an edge can only be written once its endpoints exist, **in-order replay
+//! is always safe**: an edge's endpoints were upserted earlier in the same
+//! batch **or in an earlier batch of the same session** — e.g. `record_action`
+//! after a drain produces edge-only batches whose endpoints were committed by
+//! the previous flush (adve-review GRAPH-10). Adapters MUST tolerate edge rows
+//! referencing nodes already present from an earlier flush (the idempotent
+//! upsert contract makes that free).
 //!
 //! ## Weight dynamics (v0.6.0 §5.4 semantics)
 //!

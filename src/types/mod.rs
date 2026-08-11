@@ -443,6 +443,8 @@ pub struct InteractionSpan {
     pub coverage: f64,
 }
 
+/// One audited canonization transition (spec §10 / §13 — the demo queries this
+/// table on camera).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CanonizationEvent {
     pub id: NodeId,
@@ -451,6 +453,14 @@ pub struct CanonizationEvent {
     pub from_status: CanonizationStatus,
     pub to_status: CanonizationStatus,
     pub blast_radius: Option<i32>,
+    /// The concept's new `last_demotion_time` when this event is a demotion
+    /// (`Canonical -> None`); `None` for every non-demotion transition, which
+    /// must leave the concept's value untouched (adve-review COH-3). Spec §10:
+    /// "Demotion sets `last_demotion_time`" — T6.3 cooldown / T6.4 read it.
+    /// Serde-defaulted and skipped when absent so existing fixture JSON loads
+    /// unchanged (verified: no committed fixture carries a demotion event).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_demotion_time: Option<DateTime<Utc>>,
     pub occurred_at: DateTime<Utc>,
 }
 

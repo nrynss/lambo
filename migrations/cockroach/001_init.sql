@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     from_status     STRING NOT NULL,
     to_status       STRING NOT NULL,
     blast_radius    INT,
+    last_demotion_time TIMESTAMPTZ,
     occurred_at     TIMESTAMPTZ NOT NULL,
     INDEX (session_id, occurred_at)
 );

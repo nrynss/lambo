@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     from_status     TEXT NOT NULL,
     to_status       TEXT NOT NULL,
     blast_radius    INTEGER,
+    last_demotion_time TEXT,
     occurred_at     TEXT NOT NULL
 );
 

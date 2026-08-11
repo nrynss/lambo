@@ -201,6 +201,15 @@ pub fn derive(
     // is written by this pass. Raw-reflexive AND resolved-reflexive parent_of
     // pairs (both ends canonicalize to the same key -> same node) are rejected
     // before any concept or edge exists.
+    // GRAPH-8: content that canonicalizes to an empty key (empty, whitespace-
+    // only, or stopword-only input) would collapse onto one key-"" concept with
+    // a frozen arbitrary type — rejected up front, before any write.
+    for &(content, _) in concepts {
+        let key = match canonicalize(content, graph)? {
+            CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
+        };
+        reject_empty_key(content, &key)?;
+    }
     for &(parent, child) in parent_of.pairs {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -214,6 +223,8 @@ pub fn derive(
         let child_key = match canonicalize(child, graph)? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
+        reject_empty_key(parent, &parent_key)?;
+        reject_empty_key(child, &child_key)?;
         if parent_key == child_key {
             return Err(LamboError::Store(StoreError::Invariant(format!(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same canonical \
@@ -270,8 +281,7 @@ pub fn derive(
             if written >= max_cooccurrence_per_derive {
                 break 'pairs;
             }
-            let source = call_nodes[i];
-            let target = call_nodes[j];
+            let (source, target) = pair_direction(graph, call_nodes[i], call_nodes[j]);
             if graph
                 .edge_between(source, target, EdgeType::CoOccurrence)
                 .is_some()
@@ -454,6 +464,39 @@ fn resolve_concept(
     }
 }
 
+/// CoOccurrence is symmetric (module doc), so a pair may already exist in
+/// either direction: a swapped-order re-derive (`derive([x,y])` then
+/// `derive([y,x])`) must reinforce the existing edge, not create a reverse
+/// duplicate (adve-review GRAPH-5 — which would violate the T2.3 exit criterion
+/// and double-count the pair in P4's density dimension). Fresh edges keep the
+/// deterministic earlier-in-call -> later-in-call direction; when only the
+/// reverse edge exists, its direction is adopted so the natural-key dedup
+/// reinforces instead of inserting a second edge.
+fn pair_direction(graph: &Graph, a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    if graph.edge_between(a, b, EdgeType::CoOccurrence).is_some() {
+        (a, b)
+    } else if graph.edge_between(b, a, EdgeType::CoOccurrence).is_some() {
+        (b, a)
+    } else {
+        (a, b)
+    }
+}
+
+/// GRAPH-8 guard: reject content whose canonical key is empty — empty,
+/// whitespace-only, or stopword-only input would all collapse onto one key-""
+/// concept with a frozen arbitrary type. Typed `Invariant` error, raised at the
+/// entry point before anything is written.
+fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
+    if key.is_empty() {
+        return Err(LamboError::Store(StoreError::Invariant(format!(
+            "derive: content {:?} canonicalizes to an empty key (empty, whitespace-only, \
+             or stopword-only content is rejected)",
+            content
+        ))));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +504,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::graph::canonical::canonical_key;
+    use crate::graph::demote::demote;
     use crate::types::{Interaction, Mutation};
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -522,6 +566,13 @@ mod tests {
 
     fn derives_of(g: &Graph, concept: NodeId) -> Vec<NodeId> {
         g.in_neighbors_typed(concept, EdgeType::Derives)
+    }
+
+    fn concept_of(g: &Graph, id: NodeId) -> &Concept {
+        match g.node(id) {
+            Some(Node::Concept(c)) => c,
+            other => panic!("{id} is not a concept node: {other:?}"),
+        }
     }
 
     #[test]
@@ -638,10 +689,13 @@ mod tests {
             iid,
             &agent(),
             &[
-                ("a", ConceptType::Entity),
-                ("b", ConceptType::Entity),
-                ("c", ConceptType::Entity),
-                ("d", ConceptType::Entity),
+                // Single-letter labels, but not stopwords — GRAPH-8 rejects
+                // content that canonicalizes to an empty key ("a"/"an" are
+                // stopwords).
+                ("x", ConceptType::Entity),
+                ("y", ConceptType::Entity),
+                ("z", ConceptType::Entity),
+                ("w", ConceptType::Entity),
             ],
             &ParentOf::none(),
             2, // cap: exactly 2 CoOccurrence edges for 4 concepts
@@ -1006,6 +1060,152 @@ mod tests {
         let out = derive(&mut g, iid, &agent(), &[], &ParentOf::none(), 10).unwrap();
         assert_eq!(out, DeriveOutcome::default());
         assert_eq!(g.log_len(), 1); // the interaction seed only
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn derive_after_demote_creates_new_concept_not_observation_match() {
+        // GRAPH-1 regression: demote creates an Observation keyed "schema user";
+        // a later derive of an Entity with that key must create a NEW concept
+        // (Unmatched) — Observations skip the step-5 matcher per spec §7 and
+        // must never capture agent-declared content.
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        let obs = demote(&mut g, iid, &agent(), "user schema", "chunk-1").unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(
+            concept_of(&g, obs[0]).canonical_key,
+            "schema user",
+            "the Observation carries the same key derive will produce"
+        );
+
+        let out = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("UserSchema", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            out.created.len(),
+            1,
+            "derive must create a NEW concept, not match the Observation"
+        );
+        assert!(out.matched.is_empty());
+        let entity = concept_of(&g, out.created[0]);
+        assert_eq!(entity.concept_type, ConceptType::Entity);
+        assert_ne!(entity.id, obs[0]);
+        // Observation + Entity coexist under one canonical key (partial UNIQUE
+        // errata — non-Observations stay unique).
+        assert_eq!(g.node_count(), 3); // interaction + observation + entity
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn derive_with_duplicate_observation_keys_is_deterministic() {
+        // GRAPH-1: duplicate Observation keys are legal (partial-UNIQUE errata);
+        // the matcher must skip ALL of them deterministically — the outcome
+        // must never depend on HashMap iteration order.
+        for _ in 0..5 {
+            let (mut g, iid) = graph_with_interaction(1, 0);
+            // Two Observations sharing the key "schema user" (different chunks).
+            demote(&mut g, iid, &agent(), "user schema", "chunk-1").unwrap();
+            demote(&mut g, iid, &agent(), "user schema", "chunk-2").unwrap();
+            let out = derive(
+                &mut g,
+                iid,
+                &agent(),
+                &[("UserSchema", ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+            )
+            .unwrap();
+            assert_eq!(out.created.len(), 1, "always creates, never matches");
+            assert!(out.matched.is_empty());
+            assert_eq!(g.node_count(), 4); // interaction + 2 observations + entity
+            g.assert_invariants().unwrap();
+        }
+    }
+
+    #[test]
+    fn derive_swapped_order_reinforces_single_cooccurrence_edge() {
+        // GRAPH-5 regression: derive([x,y]) then derive([y,x]) must reinforce
+        // the existing CoOccurrence edge (one 1.5-weight edge), not create a
+        // reverse duplicate (T2.3 exit criterion; P4 density double-count).
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        let first = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("x", ConceptType::Entity), ("y", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+        let second = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("y", ConceptType::Entity), ("x", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+
+        // Exactly ONE CoOccurrence edge, reinforced to 0.5 + 1.0.
+        assert_eq!(g.edge_count(), 3); // derives x2 + cooccurrence
+        let co = g
+            .edge_between(first.created[0], first.created[1], EdgeType::CoOccurrence)
+            .expect("the original-direction edge");
+        assert_eq!(co.reinforcements, 2);
+        assert_eq!(co.weight, 1.5);
+        assert!(
+            g.edge_between(first.created[1], first.created[0], EdgeType::CoOccurrence)
+                .is_none(),
+            "no reverse duplicate"
+        );
+        // Both calls counted the CoOccurrence duplicate reinforcement.
+        assert_eq!(second.reinforced, 3); // 2 Derives + 1 CoOccurrence
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn derive_rejects_empty_and_stopword_only_content() {
+        // GRAPH-8: empty/whitespace-only/stopword-only content would collapse
+        // onto one key-"" concept — rejected at the entry point, before any
+        // write.
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        for bad in ["", "   ", "the and of", "-_"] {
+            let err = derive(
+                &mut g,
+                iid,
+                &agent(),
+                &[(bad, ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, LamboError::Store(StoreError::Invariant(_))),
+                "{bad:?}: {err}"
+            );
+            assert!(err.to_string().contains("empty key"), "{bad:?}: {err}");
+        }
+        // parent_of ends are guarded too.
+        let err = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[],
+            &ParentOf::from_pairs(&[("user schema", "the and of")]),
+            10,
+        )
+        .unwrap_err();
+        assert!(matches!(&err, LamboError::Store(StoreError::Invariant(_))));
+        // Nothing was written by any rejected call.
+        assert_eq!(g.node_count(), 1);
+        assert_eq!(g.log_len(), 1);
         g.assert_invariants().unwrap();
     }
 
