@@ -68,6 +68,7 @@ use crate::types::{
 ///      observations skip spec §7.1 step 5);
 ///    * `origin_interaction` = `interaction`, `origin_agent` = `agent`;
 ///    * `chunk_group_id` = `Some(chunk_group_id)` (T5.2 co-retrieval contract).
+///
 ///    No dedup across sentences — duplicates are new by construction.
 /// 4. Insert via [`Graph::insert_concept`], which creates the structural
 ///    `Derives` edge from `interaction` by construction.
@@ -219,7 +220,7 @@ mod tests {
         (g, iid)
     }
 
-    fn concept_of<'a>(g: &'a Graph, id: NodeId) -> &'a Concept {
+    fn concept_of(g: &Graph, id: NodeId) -> &Concept {
         match g.node(id) {
             Some(Node::Concept(c)) => c,
             other => panic!("{id} is not a concept node: {other:?}"),
@@ -227,7 +228,9 @@ mod tests {
     }
 
     fn contents(g: &Graph, ids: &[NodeId]) -> Vec<String> {
-        ids.iter().map(|&id| concept_of(g, id).content.clone()).collect()
+        ids.iter()
+            .map(|&id| concept_of(g, id).content.clone())
+            .collect()
     }
 
     #[test]
@@ -243,10 +246,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(ids.len(), 3);
-        assert_eq!(contents(&g, &ids), ["First sentence.", "Second sentence!", "Third?"]);
+        assert_eq!(
+            contents(&g, &ids),
+            ["First sentence.", "Second sentence!", "Third?"]
+        );
         for (i, c) in ids.iter().map(|&id| concept_of(&g, id)).enumerate() {
             assert_eq!(c.concept_type, ConceptType::Observation, "sentence {i}");
-            assert!(!c.canonical_key.is_empty(), "sentence {i}: empty canonical key");
+            assert!(
+                !c.canonical_key.is_empty(),
+                "sentence {i}: empty canonical key"
+            );
             assert_eq!(c.origin_interaction, iid, "sentence {i}");
             assert_eq!(c.origin_agent, agent(), "sentence {i}");
             // T5.2 sibling co-retrieval contract: all share the chunk group id.
@@ -284,7 +293,9 @@ mod tests {
         let before_log = g.log_len();
 
         assert!(demote(&mut g, iid, &agent(), "", "g").unwrap().is_empty());
-        assert!(demote(&mut g, iid, &agent(), "  \n\t  ", "g").unwrap().is_empty());
+        assert!(demote(&mut g, iid, &agent(), "  \n\t  ", "g")
+            .unwrap()
+            .is_empty());
         // No graph changes, no mutations.
         assert_eq!(g.node_count(), before_nodes);
         assert_eq!(g.log_len(), before_log);
@@ -295,7 +306,10 @@ mod tests {
     fn missing_interaction_returns_not_found() {
         let (mut g, _) = fresh_graph();
         let err = demote(&mut g, uid(999), &agent(), "Hello.", "g").unwrap_err();
-        assert!(matches!(err, LamboError::Store(StoreError::NotFound(_))), "{err}");
+        assert!(
+            matches!(err, LamboError::Store(StoreError::NotFound(_))),
+            "{err}"
+        );
         assert!(err.to_string().contains("not found"), "{err}");
         assert_eq!(g.log_len(), 1); // first interaction: node upsert only, unchanged
         g.assert_invariants().unwrap();
@@ -309,7 +323,10 @@ mod tests {
         g.insert_concept(c, iid).unwrap();
 
         let err = demote(&mut g, cid, &agent(), "Hello.", "g").unwrap_err();
-        assert!(matches!(err, LamboError::Store(StoreError::NotFound(_))), "{err}");
+        assert!(
+            matches!(err, LamboError::Store(StoreError::NotFound(_))),
+            "{err}"
+        );
         // Nothing written by the failed demote (interaction + seeded concept).
         assert_eq!(g.node_count(), 2);
         g.assert_invariants().unwrap();

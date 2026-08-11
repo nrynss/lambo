@@ -38,8 +38,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
 use crate::graph::Graph;
 use crate::types::{
-    AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, LamboError, Node,
-    NodeId, StoreError,
+    AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, LamboError, Node, NodeId,
+    StoreError,
 };
 
 /// Initial weight of `Causal` edges created by [`record_action`] — the
@@ -477,7 +477,9 @@ mod tests {
             .edge_between(out.action_node, prod, EdgeType::Causal)
             .expect("causal to produce");
         assert_eq!(causal_prod.weight, CAUSAL_WEIGHT);
-        assert!(g.edge_between(prod, out.action_node, EdgeType::Causal).is_none());
+        assert!(g
+            .edge_between(prod, out.action_node, EdgeType::Causal)
+            .is_none());
         assert!(g
             .edge_between(out.action_node, modi, EdgeType::Causal)
             .is_some());
@@ -485,7 +487,9 @@ mod tests {
             .edge_between(out.action_node, dep, EdgeType::Dependency)
             .expect("dependency to depends_on");
         assert_eq!(dep_edge.weight, DEPENDENCY_WEIGHT);
-        assert!(g.edge_between(dep, out.action_node, EdgeType::Dependency).is_none());
+        assert!(g
+            .edge_between(dep, out.action_node, EdgeType::Dependency)
+            .is_none());
 
         // Outcome counts: 3 planned edges, all new.
         assert_eq!(out.edges, 3);
@@ -501,14 +505,21 @@ mod tests {
         g.insert_concept(us, iid).unwrap();
         let nodes_before = g.node_count();
 
-        let act = action("created migrations/003.sql", &["migrations/003.sql"], &[], &["user schema"]);
+        let act = action(
+            "created migrations/003.sql",
+            &["migrations/003.sql"],
+            &[],
+            &["user schema"],
+        );
         let out = record_action(&mut g, iid, &agent(), &act).unwrap();
 
         // depends_on resolved to the EXISTING concept; only the action + the
         // produce are created.
         assert_eq!(out.created.len(), 2);
         assert!(!out.created.contains(&us_id));
-        assert!(g.edge_between(out.action_node, us_id, EdgeType::Dependency).is_some());
+        assert!(g
+            .edge_between(out.action_node, us_id, EdgeType::Dependency)
+            .is_some());
         assert_eq!(g.node_count(), nodes_before + 2);
         g.assert_invariants().unwrap();
     }
@@ -630,7 +641,13 @@ mod tests {
     #[test]
     fn record_action_orders_nodes_before_edges_in_log() {
         let (mut g, iid) = graph_with_interaction();
-        record_action(&mut g, iid, &agent(), &action("act", &["prod"], &[], &["dep"])).unwrap();
+        record_action(
+            &mut g,
+            iid,
+            &agent(),
+            &action("act", &["prod"], &[], &["dep"]),
+        )
+        .unwrap();
 
         let batch = g.drain_log();
         let mut seen_nodes: HashSet<NodeId> = HashSet::new();
@@ -673,7 +690,10 @@ mod tests {
         assert_eq!(out.created.len(), 2);
         assert_eq!(out.edges, 2);
         let x = out.created[1];
-        assert_eq!(g.out_neighbors_typed(out.action_node, EdgeType::Causal), vec![x]);
+        assert_eq!(
+            g.out_neighbors_typed(out.action_node, EdgeType::Causal),
+            vec![x]
+        );
         assert_eq!(
             g.out_neighbors_typed(out.action_node, EdgeType::Dependency),
             vec![x]

@@ -343,6 +343,9 @@ pub fn derive(
 /// later resolution to the same node (canonical-key collision) skips the write
 /// and the reinforcement entirely — one call never self-reinforces — but still
 /// records the match.
+// Private helper: every parameter is a distinct input with no natural grouping
+// (a params struct would obscure the call sites); kept under review by tests.
+#[allow(clippy::too_many_arguments)]
 fn resolve_concept(
     graph: &mut Graph,
     content: &str,
@@ -494,7 +497,10 @@ mod tests {
             &mut g,
             iid,
             &agent(),
-            &[("user schema", ConceptType::Entity), ("auth middleware", ConceptType::Logic)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("auth middleware", ConceptType::Logic),
+            ],
             &ParentOf::none(),
             10,
         )
@@ -511,7 +517,9 @@ mod tests {
 
         // Two Derives edges, weight 0.9 / reinforcements 1 (fresh, NOT bumped).
         for &cid in &out.created {
-            let d = g.edge_between(iid, cid, EdgeType::Derives).expect("derives");
+            let d = g
+                .edge_between(iid, cid, EdgeType::Derives)
+                .expect("derives");
             assert_eq!(d.weight, 0.9);
             assert_eq!(d.reinforcements, 1);
         }
@@ -560,8 +568,15 @@ mod tests {
         let cid = c.id;
         g.insert_concept(c, i1).unwrap();
 
-        let out = derive(&mut g, i2id, &agent(), &[("user schema", ConceptType::Entity)], &ParentOf::none(), 10)
-            .unwrap();
+        let out = derive(
+            &mut g,
+            i2id,
+            &agent(),
+            &[("user schema", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
 
         assert!(out.created.is_empty(), "matched concepts are NOT recreated");
         assert_eq!(out.matched, vec![cid]);
@@ -600,7 +615,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.created.len(), 4);
-        let [a, b, c, d] = [out.created[0], out.created[1], out.created[2], out.created[3]];
+        let [a, b, c, d] = [
+            out.created[0],
+            out.created[1],
+            out.created[2],
+            out.created[3],
+        ];
         // Deterministic call-order pairs (0,1) and (0,2).
         assert!(g.edge_between(a, b, EdgeType::CoOccurrence).is_some());
         assert!(g.edge_between(a, c, EdgeType::CoOccurrence).is_some());
@@ -663,7 +683,10 @@ mod tests {
             &mut g,
             iid,
             &agent(),
-            &[("user schema", ConceptType::Entity), ("auth middleware", ConceptType::Logic)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("auth middleware", ConceptType::Logic),
+            ],
             &ParentOf::none(),
             10,
         )
@@ -672,7 +695,10 @@ mod tests {
             &mut g,
             iid,
             &agent(),
-            &[("user schema", ConceptType::Entity), ("auth middleware", ConceptType::Logic)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("auth middleware", ConceptType::Logic),
+            ],
             &ParentOf::none(),
             10,
         )
@@ -719,9 +745,19 @@ mod tests {
     fn derive_missing_interaction_returns_not_found() {
         let mut g = Graph::new(sid());
         let missing = NodeId(Uuid::from_u64_pair(9, 9));
-        let err = derive(&mut g, missing, &agent(), &[("x", ConceptType::Entity)], &ParentOf::none(), 10)
-            .unwrap_err();
-        assert!(matches!(&err, LamboError::Store(StoreError::NotFound(_))), "{err}");
+        let err = derive(
+            &mut g,
+            missing,
+            &agent(),
+            &[("x", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, LamboError::Store(StoreError::NotFound(_))),
+            "{err}"
+        );
         // Nothing was written.
         assert_eq!(g.log_len(), 0);
         assert_eq!(g.node_count(), 0);
@@ -734,9 +770,19 @@ mod tests {
         let c = concept(1, iid, "user schema");
         let cid = c.id;
         g.insert_concept(c, iid).unwrap();
-        let err = derive(&mut g, cid, &agent(), &[("x", ConceptType::Entity)], &ParentOf::none(), 10)
-            .unwrap_err();
-        assert!(matches!(&err, LamboError::Store(StoreError::NotFound(_))), "{err}");
+        let err = derive(
+            &mut g,
+            cid,
+            &agent(),
+            &[("x", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, LamboError::Store(StoreError::NotFound(_))),
+            "{err}"
+        );
         // Only the seed writes remain: interaction (1) + concept (2: node + Derives).
         assert_eq!(g.log_len(), 3);
         g.assert_invariants().unwrap();
@@ -754,7 +800,10 @@ mod tests {
             10,
         )
         .unwrap_err();
-        assert!(matches!(&err, LamboError::Store(StoreError::Invariant(_))), "{err}");
+        assert!(
+            matches!(&err, LamboError::Store(StoreError::Invariant(_))),
+            "{err}"
+        );
         // No concepts were created by the rejected call.
         assert_eq!(g.node_count(), 1);
         assert_eq!(g.edge_count(), 0);
@@ -785,9 +834,11 @@ mod tests {
         assert_eq!(out.matched.len(), 1); // "schema user" -> the first node
         assert_eq!(out.matched[0], out.created[0]);
         assert_eq!(g.node_count(), 3); // interaction + 2 concepts
-        assert!(g
-            .edge_between(out.created[0], out.created[0], EdgeType::CoOccurrence)
-            .is_none(), "no self-loop from a key collision");
+        assert!(
+            g.edge_between(out.created[0], out.created[0], EdgeType::CoOccurrence)
+                .is_none(),
+            "no self-loop from a key collision"
+        );
         assert!(g
             .edge_between(out.created[0], out.created[1], EdgeType::CoOccurrence)
             .is_some());
@@ -815,17 +866,26 @@ mod tests {
             &mut g,
             i2id,
             &agent(),
-            &[("user schema", ConceptType::Entity), ("schema user", ConceptType::Entity)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("schema user", ConceptType::Entity),
+            ],
             &ParentOf::none(),
             10,
         )
         .unwrap();
 
-        assert!(out.created.is_empty(), "both contents matched the pre-existing node");
+        assert!(
+            out.created.is_empty(),
+            "both contents matched the pre-existing node"
+        );
         // Every content that resolved Matched is recorded: one entry per
         // colliding content, both resolving to the same node.
         assert_eq!(out.matched, vec![cid, cid]);
-        assert_eq!(out.reinforced, 0, "a collision within one call must not self-reinforce");
+        assert_eq!(
+            out.reinforced, 0,
+            "a collision within one call must not self-reinforce"
+        );
 
         // Exactly ONE Derives edge from the new interaction, written fresh
         // (weight 0.9, reinforcements 1) — not bumped to 1.9 by the collision.
@@ -837,7 +897,10 @@ mod tests {
             v
         });
         let d = g.edge_between(i2id, cid, EdgeType::Derives).unwrap();
-        assert_eq!(d.reinforcements, 1, "single write, never reinforced within the call");
+        assert_eq!(
+            d.reinforcements, 1,
+            "single write, never reinforced within the call"
+        );
         assert_eq!(d.weight, 0.9);
         assert_eq!(g.node_count(), 3); // i1, i2, c — nothing created
         assert_eq!(g.edge_count(), 3); // Temporal (i2->i1) + seed Derives (i1->c) + derive Derives (i2->c)
@@ -881,7 +944,10 @@ mod tests {
         let h = g
             .edge_between(pre_id, api, EdgeType::Hierarchical)
             .expect("hierarchical");
-        assert_eq!(h.reinforcements, 1, "single write, never bumped within the call");
+        assert_eq!(
+            h.reinforcements, 1,
+            "single write, never bumped within the call"
+        );
         assert_eq!(h.weight, 0.5);
         // The shared parent gained exactly one Derives edge — no double write.
         let mut derives = derives_of(&g, pre_id);
@@ -920,7 +986,10 @@ mod tests {
             &mut g,
             iid,
             &agent(),
-            &[("user schema", ConceptType::Entity), ("auth middleware", ConceptType::Logic)],
+            &[
+                ("user schema", ConceptType::Entity),
+                ("auth middleware", ConceptType::Logic),
+            ],
             &ParentOf::from_pairs(&[("user schema", "api layer")]),
             10,
         )
