@@ -196,3 +196,51 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
 
 > _Fill on completion. Record the VECTOR encode/decode choice and every dialect divergence.
 > Confirm feature flags and `build_store` arms for cockroach/sqlite._
+
+### T3.4 — Write-behind flush task (handoff, 2026-08-11)
+
+**What exists:** `src/store/flush.rs` — `FlushParams`, `FlushStats`, `FlushTask`
+(`new` / `spawn` / `stats` / `degraded`) + 6 paused-time tests; one additive
+`pub mod flush;` in `src/store/mod.rs`. Works against any `GraphStore`
+(MemoryStore in tests; Cockroach/SQLite slot in via T3.2/T3.3).
+
+**Semantics implemented (spec §2.4–§2.5):**
+- Interval loop drains `Graph::drain_log` under the WRITE lock only (never
+  across `.await` — spec §6.4) and flushes the pending batch (retained first,
+  then newly drained, chronological — mod.rs contract, never re-sorted).
+- `max_batch` is a REAL early-flush trigger: the loop polls every
+  `POLL_QUANTUM` (100ms) between ticks via `tokio::select!`, so a batch
+  reaching `max_batch` flushes before the interval. The graph has no write
+  channel, so the quantum is the trigger granularity.
+- Failure: exponential backoff 100ms doubling (cap 10s) up to `retries` retries
+  after the initial attempt (total attempts = retries + 1). Exhausted →
+  batch RETAINED in `self.pending` (never dropped), `warn!("BackendFlushFailed")`,
+  session keeps accepting writes (graph is the primary tier).
+- Degradation: depth (pending + in-graph log) > `log_max` → `error!("FlushDegraded")`,
+  `degraded() == true`, flushing stops permanently (durability="none").
+- `stats()`: `lag` = time since last successful flush (tokio clock — virtual
+  under paused time), `depth` = pending batch + in-graph log (the observable
+  loss bound). Both refreshed each cycle (≤100ms staleness).
+
+**API deviation to review:** `spawn(&self)` instead of the pinned `spawn(self)`
+— `spawn(self)` would consume the caller's only path to `stats()`/`degraded()`
+(they read Arc-shared state; the task clones the arcs). Same name, changed
+receiver; `FlushTask` stays the caller's stats handle.
+
+**Time-control gotchas (reported for the phase reviewer):**
+- `tokio::time::advance` fires timers but only runs the woken task once the
+  test yields — every test wait must use an initially-FALSE condition (e.g.
+  `flush_calls >= n`, `log_len == 0`), never one true in the stale state
+  (`depth == 0` right after spawn is stale until the first cycle).
+- `lag` MUST use `tokio::time::Instant` (not `std::time::Instant`) or paused
+  tests see real-time lag. Done.
+- Retry backoff sleeps are `tokio::time::sleep` so the 100/200/400ms schedule
+  is exactly controllable with `advance`.
+
+**Fixture-ok track:** tests use MemoryStore + a `FlakyStore` mock (delegates to
+an inner `Arc<dyn GraphStore>`, fails the first N flush calls / forever,
+records call count + batch sizes). Adapters slot in with zero changes.
+
+**Not wired yet (by design):** nothing consumes `FlushTask` — the daemon/session
+owner (T4.x / P3 Memory) will spawn it. Reservations never enter the log
+(S5 contract) — nothing to do here. `cargo test --lib` green (202 tests).

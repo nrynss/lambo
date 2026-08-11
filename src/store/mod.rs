@@ -10,6 +10,9 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
+// T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
+pub mod flush;
+
 use async_trait::async_trait;
 use bitflags::bitflags;
 use serde::{Deserialize, Deserializer, Serialize};
