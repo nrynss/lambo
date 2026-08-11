@@ -31,11 +31,13 @@ use chrono::{DateTime, Utc};
 use crate::graph::Graph;
 use crate::types::{AgentId, LamboError, NodeId, Reservation, StoreError};
 
-/// Typed failure for the [`Duration`] -> [`chrono::Duration`] conversion.
-///
-/// `chrono`'s duration range is ±~292,000 years in microseconds; a `Duration`
-/// beyond that (e.g. `u64::MAX` seconds) is rejected rather than silently
-/// clamped. Reachable through [`LamboError::Other`]; downcast with
+/// Typed failure for an unusable TTL: either it does not fit
+/// [`chrono::Duration`] (whose range is ±~292,000 years in microseconds; a
+/// [`Duration`] beyond that, e.g. `u64::MAX` seconds, is rejected rather than
+/// silently clamped) or it fits but `now + ttl` would overflow
+/// [`DateTime<Utc>`](chrono::DateTime) (whose span is ±~262,000 years) — the
+/// add is checked, so this error is returned instead of a panic. Reachable
+/// through [`LamboError::Other`]; downcast with
 /// [`anyhow::Error::downcast_ref`](https://docs.rs/anyhow/latest/anyhow/struct.Error.html#method.downcast_ref).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("ttl {ttl:?} is out of chrono's duration range")]
@@ -70,8 +72,16 @@ pub fn reserve(
             "node {node} not found"
         ))));
     }
-    let ttl = chrono::Duration::from_std(ttl).map_err(|_| ReserveError { ttl })?;
-    let expires_at = now + ttl;
+    let ttl_std = ttl;
+    let ttl = chrono::Duration::from_std(ttl_std).map_err(|_| ReserveError { ttl: ttl_std })?;
+    // `now + ttl` would panic on overflow: chrono's `Add<TimeDelta>` for
+    // `DateTime` unwraps `checked_add_signed`, and `from_std` alone admits
+    // TTLs that fit TimeDelta (~±292k years) but overflow `DateTime<Utc>`
+    // (~±262k years). Route that band through the typed error too — a
+    // reservation policy must never panic on a caller-supplied TTL.
+    let expires_at = now
+        .checked_add_signed(ttl)
+        .ok_or_else(|| ReserveError { ttl: ttl_std })?;
 
     // Snapshot the holder before mutating: the decision below must not hold a
     // borrow of `graph` across `set_reservation`.
@@ -319,6 +329,103 @@ mod tests {
     fn out_of_range_ttl_is_typed_error() {
         let (mut g, n) = graph_with_node();
         let err = reserve(&mut g, n, &agent("alice"), Duration::from_secs(u64::MAX), ts(0)).unwrap_err();
+        match err {
+            LamboError::Other(e) => assert!(
+                e.downcast_ref::<ReserveError>().is_some(),
+                "expected typed ReserveError, got {e:?}"
+            ),
+            other => panic!("expected Other(ReserveError), got {other:?}"),
+        }
+        // Nothing was stored.
+        assert_eq!(g.reservation(n), None);
+    }
+
+    #[test]
+    fn takeover_at_exact_expiry_boundary() {
+        let (mut g, n) = graph_with_node();
+        reserve(&mut g, n, &agent("alice"), Duration::from_secs(60), ts(0)).unwrap();
+
+        // At exactly `now == expires_at` the lock is dead (half-open interval):
+        // the cross-agent attempt is a takeover, not a deny.
+        let r = reserve(&mut g, n, &agent("bob"), Duration::from_secs(60), ts(1)).unwrap();
+        assert_eq!(r.agent_id, agent("bob"));
+        assert_eq!(g.reservations().len(), 1);
+        assert_eq!(g.reservation(n), Some(&r));
+    }
+
+    #[test]
+    fn same_agent_extends_still_live_lock() {
+        let (mut g, n) = graph_with_node();
+        reserve(&mut g, n, &agent("alice"), Duration::from_secs(120), ts(0)).unwrap();
+
+        // 30 s into a 120 s lock it is still live: the same agent extends,
+        // expiry advances from the new `now`, still exactly one reservation.
+        let r = reserve(
+            &mut g,
+            n,
+            &agent("alice"),
+            Duration::from_secs(60),
+            ts(0) + chrono::Duration::seconds(30),
+        )
+        .unwrap();
+        assert_eq!(r.agent_id, agent("alice"));
+        assert_eq!(r.node_id, n);
+        assert_eq!(r.expires_at, ts(0) + chrono::Duration::seconds(90));
+        assert_eq!(g.reservations().len(), 1);
+        assert_eq!(g.reservation(n), Some(&r));
+    }
+
+    #[test]
+    fn active_reservation_missing_node_is_none() {
+        let (g, _) = graph_with_node();
+        // No reservation on the node -> None, and no panic.
+        assert_eq!(active_reservation(&g, uid(999), ts(0)), None);
+    }
+
+    #[test]
+    fn release_then_re_reserve_by_other_agent() {
+        let (mut g, n) = graph_with_node();
+        reserve(&mut g, n, &agent("alice"), Duration::from_secs(60), ts(0)).unwrap();
+        release(&mut g, n, &agent("alice")).unwrap();
+        assert_eq!(g.reservation(n), None);
+
+        // The slot is free: another agent can reserve immediately, with no
+        // takeover/expiry dance required.
+        let r = reserve(&mut g, n, &agent("bob"), Duration::from_secs(60), ts(0)).unwrap();
+        assert_eq!(r.agent_id, agent("bob"));
+        assert_eq!(g.reservations().len(), 1);
+        assert_eq!(g.reservation(n), Some(&r));
+    }
+
+    #[test]
+    fn release_of_expired_lock_is_identity_only() {
+        let (mut g, n) = graph_with_node();
+        reserve(&mut g, n, &agent("alice"), Duration::from_secs(30), ts(0)).unwrap();
+
+        // The 30 s lock is long dead at ts(31), but release is decided on
+        // identity alone: a non-owner is still denied...
+        let err = release(&mut g, n, &agent("bob")).unwrap_err();
+        match err {
+            LamboError::Conflict(msg) => {
+                assert!(msg.contains("alice") && msg.contains("bob"), "message should name both agents: {msg}")
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert!(g.reservation(n).is_some(), "denied release must not clear the lock");
+
+        // ...and the original owner can still clean up the expired lock.
+        release(&mut g, n, &agent("alice")).unwrap();
+        assert_eq!(g.reservation(n), None);
+    }
+
+    #[test]
+    fn ttl_overflowing_datetime_is_typed_error_not_panic() {
+        let (mut g, n) = graph_with_node();
+        // ~260k years: inside chrono::Duration's ±~292k-year range (so from_std
+        // accepts it) but beyond DateTime<Utc>'s ±262,143-year span, where the
+        // plain `now + ttl` add would panic. Must come back as the typed error.
+        let ttl = Duration::from_secs(8_210_000_000_000);
+        let err = reserve(&mut g, n, &agent("alice"), ttl, ts(0)).unwrap_err();
         match err {
             LamboError::Other(e) => assert!(
                 e.downcast_ref::<ReserveError>().is_some(),

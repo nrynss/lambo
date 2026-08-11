@@ -268,7 +268,11 @@ time is mocked in tests):
   `chrono::Duration` via `chrono::Duration::from_std`; out-of-range (e.g.
   `u64::MAX` seconds) yields `pub struct ReserveError` (thiserror), surfaced as
   `LamboError::Other` and downcastable via `anyhow::Error::downcast_ref`.
-  Not silently clamped, not a bare string.
+  Not silently clamped, not a bare string. The expiry computation is
+  **checked** (`DateTime::checked_add_signed`), so a TTL that passes
+  `from_std` (fits `TimeDelta`, ±~292k years) but would overflow
+  `DateTime<Utc>` (±~262k years) also returns `ReserveError` — the policy
+  never panics on a caller-supplied TTL (round-1 review finding P2).
 - **Borrow discipline**: the policy decision snapshots `(agent_id, expires_at)`
   by value before calling `set_reservation`, so no `&Graph` borrow is live
   across the mutation.
@@ -276,13 +280,21 @@ time is mocked in tests):
   funnel through it; the deny path never mutates, so the existing lock is
   untouched by construction.
 
-**Verification:** 10 new unit tests (mocked time via
+**Verification:** 16 new unit tests (mocked time via
 `Utc.timestamp_opt(1_752_000_000, 0)` + minute offsets): fresh reserve expiry,
 same-agent extend (single reservation, agent unchanged, expiry advances),
+same-agent extend on a **still-live** lock (expiry advances from new `now`),
 cross-agent deny while live (typed `Conflict`, message names holder + expiry,
-lock untouched), cross-agent takeover after expiry, owner release clears,
-non-owner release errors, absent-reservation release errors, expired invisible
-to `active_reservation` (incl. the `now == expires_at` boundary), missing-node
-error, out-of-range TTL typed error. `cargo test graph::` (default features):
-38 passed / 0 failed (28 pre-existing + 10 new). No fixtures read, so no
+lock untouched), cross-agent takeover after expiry, takeover at exactly
+`now == expires_at` (boundary: half-open, treated as expired), owner release
+clears, non-owner release errors, absent-reservation release errors, release
+of an **expired** lock is identity-only (owner cleans up, non-owner still
+conflicts), release-then-re-reserve lifecycle (freed slot usable by another
+agent immediately), expired invisible to `active_reservation` (incl. the
+`now == expires_at` boundary), `active_reservation` on a missing node is
+`None`, missing-node error, out-of-range TTL typed error, and a TTL that
+passes `from_std` but would overflow `DateTime<Utc>` (`8.21e12` s, ~260k
+years) returns the typed error instead of panicking (round-1 review finding
+P2). `cargo test graph::` (default features): 44 passed / 0 failed (28
+pre-existing + 16 new), 0 warnings. No fixtures read, so no
 `#[cfg(feature = "fixtures")]` gating needed.
