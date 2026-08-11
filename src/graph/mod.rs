@@ -47,6 +47,8 @@ pub mod graph;
 pub mod canonical;
 // T2.3 — `derive()`, the primary write path (spec §7; see `derive.rs`).
 pub mod derive;
+// T2.5 — context-overflow demotion: Observation nodes per sentence (spec §7).
+pub mod demote;
 // Inverted index + BM25 (T2.6) — spec §8 phase-1 keyword source.
 pub mod index;
 // T2.7 — spec §11 soft-lock reservation policy (see `reserve.rs`). Kept a single

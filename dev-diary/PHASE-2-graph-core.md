@@ -557,3 +557,81 @@ re-record = reinforcement (no new nodes/edges, `reinforcements` bumps).
 `cargo test graph::` (default features): 75 passed / 0 failed (65
 pre-existing + 10 new), 0 warnings. No fixtures read, so no
 `#[cfg(feature = "fixtures")]` gating needed.
+
+### T2.5 — `demote()` (done 2026-08-11, by T25Demote)
+
+**What exists now:** `src/graph/demote.rs` (new, ~480 LOC incl. tests) + one
+additive `pub mod demote;` in `src/graph/mod.rs`. No other files touched —
+`graph.rs`, `canonical.rs`, `types`, fixtures, `Cargo.toml` all untouched.
+
+Pinned API exactly: `demote(graph, interaction, agent, chunk, chunk_group_id) ->
+Result<Vec<NodeId>, LamboError>` returning the created Observation ids in
+sentence order. Flow per spec §7: validate `interaction` (missing OR
+non-interaction node -> `StoreError::NotFound`; validated up front so the typed
+error, not `insert_concept`'s `Invariant`, is what callers see) -> UAX #29
+segmentation via `UnicodeSegmentation::split_sentence_bounds`
+(`unicode-segmentation`, spec §6.3 pinned crate; no custom split fn) -> per
+sentence: trim, skip empty/whitespace-only, create one `Observation` concept
+(`content` = trimmed sentence, `canonical_key` from T2.2, `origin_interaction`
+= interaction, `origin_agent` = agent, `chunk_group_id = Some(...)`) ->
+`graph.insert_concept(...)` (auto `Derives` edge from the interaction at the
+Graph-owned 0.9; this module creates no edges itself, so no weight constants).
+Empty/whitespace-only chunk -> `Ok(vec![])`, zero mutations. No dedup across
+sentences (observations are new by construction; identical sentences both land).
+
+**Decisions the next agent must not re-derive:**
+
+- **`canonical::canonical_key(sentence, graph.synonym)` does not compile.**
+  `canonical_key` pins `impl Fn(&str) -> Option<&str>` = `for<'a> Fn(&'a str) ->
+  Option<&'a str>` (HRTB); a closure borrowing the graph returns a borrow of the
+  graph, not of the input, so it cannot satisfy the bound — the same T2.2
+  constraint that forced `canonicalize` to do its own raw lookup. `demote` does
+  the raw synonym lookup itself (`graph.synonym(raw.trim()).unwrap_or(raw)`)
+  and calls `canonical_key(effective, no_synonym)` with a never-matching `fn`
+  item (`fn(&str) -> Option<&str>` coerces to the HRTB fn-pointer bound). Semantics
+  are identical to the pinned call: direct lookup only (no chains), and the
+  extra trim on the mapped value cannot change tokens (`normalize_tokens` splits
+  on all whitespace).
+- **`last_demotion_time` is left `None`.** T2.5 creates brand-new Observations
+  (`canonization_status: None`); the P6 doc's "demotion sets
+  `last_demotion_time`" is the canonization-daemon budget demotion (P6), a
+  different operation on existing canonical nodes. If a reviewer disagrees this
+  is where the field belongs, it's a one-field change.
+- **`created_at` is `Utc::now()`** — the pinned signature has no clock param
+  (unlike T2.7's explicit `now`), so tests never assert timestamps.
+- **UAX #29 surprises (probed against the vendored crate source, all pinned in
+  tests):** `unicode-segmentation` 1.13.3 implements the default UAX #29 rules
+  with NO locale abbreviation lists — SB6 in this crate is the *numeric* rule
+  (no boundary between a terminator and a following digit: `"Pi is 3.14. Next."`
+  splits after `"3.14."`, not inside it), SB7 is the acronym rule
+  (`UpperLower ATerm × Upper`: `"U.S.A. is big."` keeps `U.S.A.` whole), SB8
+  places no boundary before a Lowercase start (`"U.S.A. is big."` is therefore
+  ONE sentence), and `"Dr. Smith left."` splits after `Dr.` into two sentences —
+  no abbreviation data, and `Upper` after the space fails SB7. This is the
+  crate's (and thus UAX #29 default's) contract;
+  `uax29_numeric_acronym_and_abbreviation_rules` asserts all four cases.
+- **`split_sentence_bounds` folds the SB1 leading break into the first segment**
+  (the iterator consumes break 0 as the segment start), so a chunk is never
+  split on a leading empty segment; segments DO include trailing whitespace
+  (SB7's space), which is exactly why trim+skip-empties is the contract. A
+  whitespace-only chunk yields one whitespace segment -> skipped -> `Ok(vec![])`.
+- **First interaction emits no `Temporal` edge** (no predecessor), so after
+  `fresh_graph` the log holds 1 mutation, not 2 — irrelevant to demote but easy
+  to trip on in tests.
+- **No lock, no async** — module is synchronous and pure, like all P2 modules;
+  mutations flow only through `Graph`'s write API (mutation log untouched
+  directly). `chunk_group_id` is stored verbatim (no empty-string validation —
+  pinned API takes `&str` as-is).
+
+**Verification:** 10 new unit tests under `graph::demote::tests`
+(multi-sentence split + shared group id + Derives edges + contents/types/keys,
+single sentence + contraction + no-terminator chunk, empty chunk noop,
+whitespace-only chunk noop, missing interaction -> `NotFound`, non-interaction
+node -> `NotFound`, duplicate sentences not deduped, trailing punctuation +
+newline, UAX #29 numeric/acronym/abbreviation rules, synonym-before-
+normalization canonical key (`register_user` -> `create_user`), mutation-log
+ordering node-before-edge per sentence with returned ids == upsert order). Every
+test ends with `assert_invariants()`. `cargo test graph::` (default features):
+75 passed / 0 failed (65 pre-existing + 10 new), 0 warnings; full
+`cargo test --lib`: 166 passed / 1 ignored (live-calibration). No
+fmt/clippy/project-wide suites run (per constraints).
