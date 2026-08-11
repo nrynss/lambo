@@ -50,5 +50,7 @@ pub mod index;
 // T2.7 — spec §11 soft-lock reservation policy (see `reserve.rs`). Kept a single
 // additive module: cutting the feature is deleting this line + `reserve.rs`.
 pub mod reserve;
+// T2.4 — spec §7 record_action + write-time Causal/Dependency cycle check (see `action.rs`).
+pub mod action;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};

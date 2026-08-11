@@ -406,3 +406,76 @@ years) returns the typed error instead of panicking (round-1 review finding
 P2). `cargo test graph::` (default features): 44 passed / 0 failed (28
 pre-existing + 16 new), 0 warnings. No fixtures read, so no
 `#[cfg(feature = "fixtures")]` gating needed.
+
+### T2.4 — `record_action()` + cycle check (done 2026-08-11, by T24Action)
+
+**What exists now:** `src/graph/action.rs` (new, ~640 LOC incl. tests) + one
+additive `pub mod action;` in `src/graph/mod.rs`. No other files touched — in
+particular `src/graph/graph.rs` is untouched (`upsert_edge` still stores what
+it's given; this module is the spec §5.7 write-time cycle gate).
+
+Pinned API exactly as spec'd: `Action<'a>` (action/produces/modifies/depends_on),
+`ActionOutcome { action_node, created, edges }`,
+`record_action(graph, interaction, agent, &Action) -> Result<ActionOutcome, LamboError>`.
+Flow per spec §7: interaction must be an `Interaction` node (else
+`StoreError::NotFound`) → resolve ALL contents via `canonicalize` read-only
+(action/produces/modifies → `Resource`, depends_on → `Entity`; unmatched become
+planned concepts, `canonical_key` from `Unmatched.key`) → plan edges (source =
+action node; `Causal` to produces/modifies, `Dependency` to depends_on,
+deduped by natural key) → BFS cycle check → validate-then-mutate
+(`insert_concept(origin_interaction = interaction)` then `upsert_edge`).
+
+**Decisions the next agent must not re-derive:**
+- **Cycle check = one BFS per planned edge over `Causal`/`Dependency`
+  out-neighbors of graph ∪ planned edges**: for each planned `a -> b`, if `b`
+  reaches `a`, reject `StoreError::Invariant("{ty:?} edge {a} -> {b} would
+  create a cycle")`. The edge under test is never traversed (it is an incoming
+  edge of `b`; reaching `a` terminates), so including all planned edges in the
+  search is exact. Self-loops (`a == b`) are rejected up front (an action
+  producing/depending on itself). `Hierarchical` is excluded — write-time
+  acyclicity of that type is not in the pinned §5.7 contract.
+- **In a single call all planned edges originate at the action node**, so the
+  only *planned-vs-planned* cycle possible in one call is the self-loop; the
+  "other planned edges" arm of the BFS is still implemented generally (cheap,
+  mandated by the task, and future-proof if the edge set ever widens).
+- **Matched concepts are reused as-is** (no type change, no re-Derives): the
+  schema `UNIQUE (session_id, canonical_key)` makes re-creating a matched
+  action concept illegal, and canonicalization exists precisely so repeated
+  phrases collapse to one node. Re-recording an action therefore yields the
+  same `action_node`, `created = []`, `edges = 0`, and the existing edges
+  reinforce (`reinforcements += 1`).
+- **`created`/`edges` count *new* writes only**: `created` = planned concepts
+  actually inserted (encounter order: action, produces, modifies, depends_on);
+  `edges` = deduped planned edges whose natural key did not pre-exist
+  (re-recorded edges reinforce and are not counted).
+- **Timestamps = the interaction's `created_at`** for both created concepts and
+  edges. The pinned signature has no clock param; `Utc::now()` would break
+  deterministic snapshots. A future `Memory` wrapper may override.
+- **Within-call dedup by canonical key** (first encounter wins, including the
+  type when the same phrase appears as both Resource and Entity — produces
+  before depends_on in encounter order).
+- **Edge weights:** `CAUSAL_WEIGHT` / `DEPENDENCY_WEIGHT` = 0.5, the
+  module-owned structural default (same initial value as the other
+  module-created structural edges; `Derives`/`Temporal` are Graph-owned at
+  0.9/1.0). Fixture `Dependency` weights are story-specific hand-set values in
+  `gen-fixtures.py`, not a convention to mirror.
+- **Watch the stopwords when crafting tests**: `"a"` is in `STOPWORDS`, so
+  `canonicalize("a")` → key `""` — seeded concepts must use non-stopword
+  content ("b", "c", …) or explicit canonical keys.
+
+**Verification:** 10 new unit tests, all green under `cargo test graph::`
+(default features): happy path (Resource action node + Derives from
+interaction + Causal to produces/modifies + Dependency to depends_on, correct
+direction and weights, outcome fields, invariants), implicit creation +
+matched-concept reuse, missing/non-interaction → `NotFound`, A→B→A dependency
+rejection with **snapshot + log_len + epoch equality** (byte-identical),
+3-hop chain (a→b→c→a) rejection, self-referential planned edges (produces
+self / depends_on self) rejection with graph unchanged, cycle closing
+pre-existing graph edges (upsert_edge-seeded) rejection, mutation ordering
+(nodes before edges in `drain_log`; batch = 4 node upserts + 5 edge upserts,
+every edge endpoint upserted earlier in the batch), within-call dedup
+(`produces ["x","x"]` + `depends_on ["x"]` → 2 edges, 1 concept), and
+re-record = reinforcement (no new nodes/edges, `reinforcements` bumps).
+`cargo test graph::` (default features): 75 passed / 0 failed (65
+pre-existing + 10 new), 0 warnings. No fixtures read, so no
+`#[cfg(feature = "fixtures")]` gating needed.
