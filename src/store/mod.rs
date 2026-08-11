@@ -10,6 +10,10 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
+// T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4). Feature: store-cockroach.
+#[cfg(feature = "store-cockroach")]
+pub mod cockroach;
+
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
@@ -137,8 +141,10 @@ impl StoreKind {
     pub const fn is_ready(self) -> bool {
         match self {
             Self::Memory => cfg!(feature = "store-memory"),
-            // T3.2 / T3.3 not implemented yet.
-            Self::Cockroach | Self::Sqlite => false,
+            // T3.2: CockroachStore landed.
+            Self::Cockroach => cfg!(feature = "store-cockroach"),
+            // T3.3 not implemented yet.
+            Self::Sqlite => false,
         }
     }
 }
@@ -296,13 +302,16 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             }
         }
         StoreKind::Cockroach => {
-            // T3.2: construct CockroachStore; implement `vector_dimensions() -> Some(n)`
-            // from schema / StoreConfig (not a global constant).
-            Err(StoreError::Backend(
-                "store-cockroach is enabled (or selected) but CockroachStore is not implemented \
-                 yet (T3.2); use kind=memory until P3 lands"
-                    .into(),
-            ))
+            // Real gate: type only exists under this feature. The pool is created lazily
+            // (connect_lazy) so constructing the adapter never touches the network.
+            #[cfg(feature = "store-cockroach")]
+            {
+                Ok(Box::new(cockroach::CockroachStore::new(cfg)?))
+            }
+            #[cfg(not(feature = "store-cockroach"))]
+            {
+                Err(missing_feature(StoreKind::Cockroach))
+            }
         }
         StoreKind::Sqlite => {
             // T3.3: typically `vector_dimensions() -> None` unless a BLOB path is added.
@@ -384,29 +393,32 @@ mod tests {
     }
 
     #[test]
-    fn cockroach_fail_closed_message() {
-        let r = build_store(StoreConfig {
+    fn cockroach_build_behavior() {
+        // T3.2: with the feature compiled, build_store returns a working adapter
+        // (constructed lazily — no connection at build time); without it, fail closed
+        // with a rebuild hint and never fall back to memory.
+        let cfg = StoreConfig {
             kind: StoreKind::Cockroach,
             dsn: Some("postgresql://localhost/lambo".into()),
             path: None,
-        });
-        let Err(err) = r else {
-            panic!("expected err — silent fallback forbidden");
         };
-        let msg = err.to_string();
         if StoreKind::Cockroach.is_compiled() {
-            assert!(
-                msg.contains("T3.2") || msg.contains("not implemented"),
-                "{msg}"
-            );
+            let s = build_store(cfg).unwrap();
+            assert!(s.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(s.vector_dimensions(), Some(1024));
+            assert!(StoreKind::Cockroach.is_ready());
         } else {
+            let Err(err) = build_store(cfg) else {
+                panic!("expected err — silent fallback forbidden");
+            };
+            let msg = err.to_string();
             assert!(
                 msg.contains("not compiled") && msg.contains("store-cockroach"),
                 "{msg}"
             );
+            assert!(!msg.to_ascii_lowercase().contains("memory store"));
+            assert!(!StoreKind::Cockroach.is_ready());
         }
-        assert!(!msg.to_ascii_lowercase().contains("memory store"));
-        assert!(!StoreKind::Cockroach.is_ready());
     }
 
     #[test]
