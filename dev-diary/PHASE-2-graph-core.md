@@ -282,3 +282,47 @@ features): 11 tokenizer/key unit tests + the fixture acceptance test iterating a
 table verbatim. `graph::` scope: 40 passed / 0 failed. Only touched
 `src/graph/canonical.rs` + `src/graph/mod.rs`; `src/graph/graph.rs` untouched.
 
+### T2.6 — Inverted index + BM25 (done 2026-08-11, by T26Index)
+**What exists now:** `src/graph/index.rs` (`InvertedIndex`, 386 LOC incl. tests),
+registered via `pub mod index;` in `src/graph/mod.rs` (only line touched there).
+Pinned API as spec'd: `new`, `add(&Concept)` (idempotent per node id — re-add
+atomically replaces that concept's postings; a concept never appears twice),
+`remove(NodeId)`, `from_snapshot(&GraphSnapshot)` (bulk = repeated `add`, never a
+separate rebuild path), `search(query, limit) -> Vec<Scored<NodeId>>`. BM25
+`k1 = 1.2`, `b = 0.75` (consts `BM25_K1`/`BM25_B` in-code, spec-pinned). Owns no
+lock, synchronous, pure; no error paths (API returns `()`/`Vec`, so no
+`LamboError`/`StoreError` needed).
+
+**Tokenization — SEAM USED (T2.2's `canonical.rs` absent in this worktree at build
+time).** Private `fn tokenize` implements the pinned T2.2 contract locally:
+lowercase -> split `[-_ ]` + camelCase (incl. acronym-run split: `APIKey` ->
+`api`,`key`) -> drop stopwords `{the,a,an,for,of,at,in,to,on,and,or,is,are}` ->
+Porter stem (rust-stemmers `Algorithm::English`). Duplicate tokens retained (tf
+counts occurrences). Marked with the exact seam comment
+`// T2.6 seam: replace with crate::graph::canonical::normalize_tokens at
+integration`; Main swaps at integration and the tokenizer contract test
+(`tokenize_matches_canonical_contract`) double-checks the swap is behavior-neutral.
+Did NOT touch `canonical.rs` (it doesn't exist here) or `graph.rs`.
+
+**Decisions the next agent must not re-derive:**
+- **Search semantics:** OR over query terms (a concept matching any term is a
+  candidate; per-term BM25 contributions sum). `idf = ln(1 + (N - df + 0.5)/(df +
+  0.5))` (BM25+ smoothing) so every matching term contributes a strictly positive
+  score — no zero-score padding, matching the goldens' "positive score only" note.
+  `df` is per-session by construction: one index per session; `df` = number of
+  indexed concepts containing the term. Tie-break by `NodeId` (inner `Uuid`) —
+  `NodeId` itself derives no `Ord`; sort uses `.0`.
+- **Length bookkeeping:** every `add` increments `total_docs`/`total_tokens`; a
+  zero-token concept (stopword-only/empty content) is a document but can never
+  match (no postings) — avgdl stays well-defined.
+- **Interactions are not indexed** (concepts only, per spec §8 / task contract);
+  `from_snapshot` iterates `snap.concepts` only.
+- `remove` is a no-op for unknown ids (matches `HashMap::remove` semantics).
+
+**Verification:** 9 new unit tests (`cargo test graph::` — 37 passed, 0 failed,
+92 filtered out; default features so `fixtures` gate is active). Both golden cases
+pass with EXACT id sets and order via `from_snapshot(load_snapshot("session-rest-api"))`
++ `search(query, top_k)`: "pagination" -> `[1008]`, "create" -> `[1002]` (asserted
+as id vectors, not floats, per goldens note). Fixture tests gated
+`#[cfg(feature = "fixtures")]`. No fmt/clippy/project-wide suites run (per
+constraints).

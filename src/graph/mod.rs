@@ -45,5 +45,7 @@ pub mod graph;
 
 // Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
 pub mod canonical;
+// Inverted index + BM25 (T2.6) — spec §8 phase-1 keyword source.
+pub mod index;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
