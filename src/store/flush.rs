@@ -1196,14 +1196,26 @@ mod tests {
         assert_eq!(task.stats().depth, 3, "batch retained through the hold");
 
         tokio::time::advance(Duration::from_secs(6)).await; // -> 10.1
-        assert_eq!(store.flush_calls(), 2, "still flat just before the hold elapses");
+        assert_eq!(
+            store.flush_calls(),
+            2,
+            "still flat just before the hold elapses"
+        );
 
         // The hold elapses at 11.1; the tick at 12.1 re-enters the retry
         // sequence with exactly one new attempt, then arms a fresh hold.
         tokio::time::advance(Duration::from_secs(2)).await; // -> 12.1
         wait_until(|| store.flush_calls() >= 3).await;
-        assert_eq!(store.flush_calls(), 3, "exactly one new attempt after the hold");
-        assert_eq!(task.stats().depth, 3, "still retained (store still failing)");
+        assert_eq!(
+            store.flush_calls(),
+            3,
+            "exactly one new attempt after the hold"
+        );
+        assert_eq!(
+            task.stats().depth,
+            3,
+            "still retained (store still failing)"
+        );
 
         // The new hold keeps attempts flat again.
         tokio::time::advance(Duration::from_secs(1)).await; // -> 13.1

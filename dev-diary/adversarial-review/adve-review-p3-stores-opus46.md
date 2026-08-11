@@ -2,17 +2,48 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════╗
-║  STATUS: OPEN — findings require remediation + review    ║
-║  Reviewer: opus46 (partial review)                    ║
-║  Date: 2026-08-11                                       ║
-║  Disposition: PENDING — shared remediation pass         ║
-║               (RemedP3Partial) + reviewer verification  ║
-║               required before this review closes         ║
+║  STATUS: CLOSED                                          ║
+║  Disposition: ACCEPT after shared remediation + review   ║
+║  Reviewer: opus46 (partial review, original draft)        ║
+║  Source: df04aa8 (phase lineage; was adve-review-p3-partial.md) ║
+║  Opened: 2026-08-11 | Closed: 2026-08-11                ║
+║  Remediation: 1e78a92 (RemedP3Partial, F1-F6)           ║
+║  Verification: ReviewP3Partial ACCEPT (zero findings),   ║
+║                live conformance 232 lib / 0 SKIPs        ║
 ╚══════════════════════════════════════════════════════════╝
 ```
 
-Do not close until the shared remediation (RemedP3Partial) lands and a
-reviewer verifies the fixes. Dispositions are recorded on completion.
+This is the **original** opus46 draft (committed as `df04aa8`). The revised
+gemini36flash draft is closed separately in
+`adve-review-p3-stores-gemini36flash.md`. Both shared one remediation pass
+(`RemedP3Partial`, `1e78a92`) and one verification review (`ReviewP3Partial`,
+ACCEPT — zero findings).
+
+## Dispositions
+
+| # | Severity | Finding | Disposition | Evidence |
+|---|----------|---------|-------------|----------|
+| M1 | MUST | Flush retry replays the full batch — SQL adapters with PK constraints will fail on partial-then-retry unless every mutation kind is an idempotent upsert | **FIXED + DOCUMENTED** — both adapters (T3.2/T3.3) already implement every mutation kind with `ON CONFLICT` upsert semantics (verified in their round reviews); the contract is now pinned on the `GraphStore::flush` trait docstring | `1e78a92` F5 (comment-only); reviewer verified sqlite `INSERT ... ON CONFLICT (...) DO UPDATE SET` and cockroach `ON CONFLICT` incl. DO NOTHING by event id |
+| S1 | SHOULD | No graceful shutdown drain — pending mutations silently lost on task abort | **DOCUMENTED** — deferred to v0.7.0 (acceptable for v0.1: sessions short-lived, graph is the primary tier); note in PHASE-3 handoff | `1e78a92` handoff notes |
+| S2 | SHOULD | `interaction_span` returns `coverage: 0.0` for single-interaction sessions — blocks canonization Stage 2 in short sessions | **FIXED** — coverage 1.0 when the session extent is a single point and distinct >= 1, in MemoryStore AND both SQL adapters (three-way parity); distinct == 0 -> 0.0; no NaN (ratio arm only when extent > 0); single-interaction tests added in all three stores (sqlite/cockroach also assert MemoryStore parity) | `1e78a92` F1; existing three-way agreement tests unchanged and green under live conformance |
+| S3 | SHOULD | `load_session` sync bridge has no timeout — a hung store freezes startup | **FIXED** — `tokio::time::timeout` wraps the async core inside the worker runtime (enable_all: time driver present), `LOAD_SESSION_TIMEOUT` = 30s, elapsed -> exactly `StoreError::Backend("load_session timed out after 30s")`; parameterized `load_session_with_timeout`; hanging-store mock (`std::future::pending`) + 50ms-timeout test | `1e78a92` F2; reviewer verified timeout wraps only the store call, not the bridge |
+| I1 | INFO | `Utc::now()` in MemoryStore structural queries makes test timing fragile | **DOCUMENTED** — existing tests pass `Duration::ZERO`; adapters use Rust-computed cutoffs; noted in PHASE-3 handoff | `1e78a92` handoff notes |
+| I2 | INFO | MemoryStore delete resolution scans all sessions (O(sessions × size)) | **DOCUMENTED** — fine for test workloads; SQL adapters use indexed queries; noted in PHASE-3 handoff | `1e78a92` handoff notes |
+| I3 | INFO | Graph lock discipline clean — verified no `.await` under lock | No action (positive verification, matches T3.4 review) | — |
+
+**Downstream guidance table** (idempotent flush, chronological order,
+`reinforcements = 1`, partial UNIQUE `ON CONFLICT WHERE`, timestamp format,
+`vector_dimensions`) — all six were followed by T3.2/T3.3 and verified in their
+round reviews; the flush idempotency contract is now pinned on the trait
+(M1 disposition).
+
+**Notable gap (from the draft):** CI must run `--all-features` (or
+`--features store-memory,fixtures`) since 5 of 6 load.rs tests are
+feature-gated — the P3 close gate runs all feature combos.
+
+## Original findings (opus46 draft)
+
+Preserved below verbatim.
 
 ---
 
@@ -28,8 +59,6 @@ tasks_open:  T3.2 (CockroachStore), T3.3 (SqliteStore), T3.6 (Structural Queries
 verdict:     CONDITIONAL ACCEPT — 1 must-fix, 3 should-fix, 3 informational
 ```
 
----
-
 ## Scope
 
 This partial review covers the three completed P3 tasks against the frozen
@@ -40,8 +69,6 @@ spec and the P2 integration contracts. Code examined:
 [`src/store/load.rs`](file:///home/nryn/work/lambo/src/store/load.rs) (19 KB),
 [`migrations/cockroach/001_init.sql`](file:///home/nryn/work/lambo/migrations/cockroach/001_init.sql),
 [`migrations/sqlite/001_init.sql`](file:///home/nryn/work/lambo/migrations/sqlite/001_init.sql).
-
----
 
 ## Findings
 
@@ -74,8 +101,6 @@ eventual degradation.
 - (b) Track a high-water mark in the batch so retries skip already-applied
   mutations. This is more complex and unnecessary if (a) is followed.
 
----
-
 ### SHOULD-FIX
 
 #### S1-opus46: No graceful shutdown drain — pending mutations silently lost on task abort
@@ -99,8 +124,6 @@ that drains the final batch is expected.
 one final drain+flush before the loop exits. Low priority for v0.1 — note
 for v0.7.0.
 
----
-
 #### S2-opus46: `interaction_span` returns `coverage: 0.0` for single-interaction sessions
 
 **Location:** [`memory.rs` interaction_span](file:///home/nryn/work/lambo/src/store/memory.rs)
@@ -118,8 +141,6 @@ non-zero coverage, potentially blocking canonization in short sessions.
 (the concept covers 100% of the session's temporal extent, which is a single
 point).
 
----
-
 #### S3-opus46: `load_session` sync bridge has no timeout — hangs indefinitely on store deadlock
 
 **Location:** [`load.rs` block_on helper](file:///home/nryn/work/lambo/src/store/load.rs#L98-L130)
@@ -134,8 +155,6 @@ with no error message.
 
 **Fix:** Wrap the store call in `tokio::time::timeout(Duration::from_secs(30), store.load_session(...))` inside the private runtime. Map timeout to
 `StoreError::Backend("load_session timed out after 30s")`.
-
----
 
 ### INFORMATIONAL
 
@@ -153,8 +172,6 @@ microseconds too recently.
 avoids this. T3.2/T3.3 SQL adapters should use the same pattern, or use
 backdated fixture timestamps.
 
----
-
 #### I2-opus46: `MemoryStore` delete resolution scans all sessions — O(sessions × snapshot_size)
 
 **Location:** [`memory.rs` resolve_session_for_node / resolve_session_for_edge](file:///home/nryn/work/lambo/src/store/memory.rs)
@@ -164,8 +181,6 @@ When a `DeleteNode` or `DeleteEdge` mutation lacks an attached session ID,
 
 **Note:** Fine for test workloads (single session). SQL adapters will use
 indexed queries and don't have this issue.
-
----
 
 #### I3-opus46: Graph lock discipline is clean — verified no `.await` under lock
 
@@ -179,8 +194,6 @@ Verified three lock acquisition sites in `FlushTask`:
    no `.await`.
 
 All three comply with spec §6.4. No findings.
-
----
 
 ## Test Coverage Summary
 
@@ -197,8 +210,6 @@ All three comply with spec §6.4. No findings.
   features runs only 1 of the 6 load tests. Acceptable (features are additive),
   but CI must run `--all-features` or `--features store-memory,fixtures`.
 
----
-
 ## Downstream Guidance for T3.2 / T3.3
 
 | Contract | Source | What adapters must do |
@@ -209,8 +220,6 @@ All three comply with spec §6.4. No findings.
 | Partial UNIQUE | T3.1 DDL | `ON CONFLICT` must spell `WHERE concept_type <> 'Observation'` |
 | Timestamp format | T3.1 handoff | `chrono::to_rfc3339_opts(SecondsFormat::Millis, true)` — 24-char `YYYY-MM-DDTHH:MM:SS.SSSZ` |
 | `vector_dimensions()` | Trait default | CockroachStore: `Some(1024)` from schema; SqliteStore: `None` |
-
----
 
 ## Verdict
 

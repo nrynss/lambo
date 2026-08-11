@@ -2437,7 +2437,10 @@ mod conformance {
             .interaction_span(&sid, orphan, Duration::ZERO)
             .await
             .unwrap();
-        assert_eq!(crdb_span, mem_span, "three-way parity on the single-point session");
+        assert_eq!(
+            crdb_span, mem_span,
+            "three-way parity on the single-point session"
+        );
         assert_eq!(crdb_span.distinct, 1);
         assert_eq!(crdb_span.coverage, 1.0, "F1: {crdb_span:?}");
 

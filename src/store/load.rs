@@ -122,7 +122,11 @@ pub fn load_session(
     store: &dyn GraphStore,
     session: &SessionId,
 ) -> Result<LoadedSession, StoreError> {
-    block_on(load_session_with_timeout(store, session, LOAD_SESSION_TIMEOUT))?
+    block_on(load_session_with_timeout(
+        store,
+        session,
+        LOAD_SESSION_TIMEOUT,
+    ))?
 }
 
 /// Flatten a [`LamboError`] from the graph tier into store vocabulary.
@@ -179,19 +183,21 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use async_trait::async_trait;
     use crate::graph::demote::demote;
     use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
-    use crate::store::Capabilities;
     #[cfg(feature = "store-memory")]
     use crate::store::memory::MemoryStore;
+    #[cfg(feature = "store-memory")]
+    use crate::store::Capabilities;
     use crate::types::{
-        AgentId, CanonizationEvent, CanonizationStatus, ConceptType, EdgeType, GraphSnapshot,
-        Interaction, InteractionSpan, Mutation, NodeId, Reservation, Scored, SessionId,
+        AgentId, CanonizationEvent, CanonizationStatus, ConceptType, EdgeType, Interaction,
+        Mutation, NodeId, Reservation, SessionId,
     };
     #[cfg(feature = "store-memory")]
-    use crate::types::{Concept, MutationBatch, Node};
+    use crate::types::{Concept, GraphSnapshot, InteractionSpan, MutationBatch, Node, Scored};
+    #[cfg(feature = "store-memory")]
+    use async_trait::async_trait;
 
     /// Fixed clock base (mirrors the graph-tier test convention).
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -565,7 +571,9 @@ mod tests {
             embedding: &[f32],
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            self.inner.vector_candidates(session, embedding, limit).await
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
         }
 
         async fn blast_radius(
@@ -601,9 +609,13 @@ mod tests {
             inner: MemoryStore::new(),
         };
         let sid = SessionId::from("hung");
-        let err = block_on(load_session_with_timeout(store, &sid, Duration::from_millis(50)))
-            .expect("load_session timeout test: worker thread")
-            .expect_err("hung store must time out, not return");
+        let err = block_on(load_session_with_timeout(
+            store,
+            &sid,
+            Duration::from_millis(50),
+        ))
+        .expect("load_session timeout test: worker thread")
+        .expect_err("hung store must time out, not return");
         match err {
             StoreError::Backend(msg) => assert!(
                 msg.contains("load_session timed out after"),
