@@ -48,7 +48,7 @@ fixture and after every mutation in tests.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/graph/canonical.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.2-canonicalization)
 ```
 Spec §7.1 steps 1–5 (step 6, hybrid/vector, is T7.2's — leave a seam: the pipeline returns
 `Unmatched(canonical_key)` and the caller decides):
@@ -120,7 +120,7 @@ it). No custom split fn (cut).
 requires:   T1.1
 fixture-ok: yes
 owns:       src/graph/index.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.6-inverted-index)
 ```
 In-memory inverted index over concept content, per-session `df`, BM25 scoring — recall
 phase 1's keyword source (spec §8). Incremental: updated on node create/update/remove, not
@@ -136,7 +136,7 @@ against fixture graphs.
 requires:   T2.1
 fixture-ok: yes
 owns:       src/graph/reserve.rs
-status:     not-started
+status:     claimed:main-swarm (worktree worktrees/p2-t2.7-reservations)
 ```
 Spec §11 soft locks: advisory, expiring, same-agent re-reservation extends, cross-agent
 returns `AlreadyReserved`. Surfaced in recall output (T5.3 reads active reservations).
