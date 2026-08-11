@@ -198,7 +198,6 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
 > Confirm feature flags and `build_store` arms for cockroach/sqlite._
 
 ### T3.1 — Schema DDL, both dialects (2026-08-11)
-
 **Committed:** `task/p3-t3.1-schema-ddl` — see commit for `migrations/cockroach/001_init.sql` +
 `migrations/sqlite/001_init.sql`.
 
@@ -242,3 +241,21 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
   runtime — "does not match any PRIMARY KEY or UNIQUE constraint" — because the table-level
   UNIQUE was removed (verified on SQLite 3.53.4).
 - Status: lines not edited per task constraints (Main claims centrally).
+
+### T3.5 — `load_session()` / startup (done, task/p3-t3.5-load-session @ 9f9d2cb+)
+
+**What exists:** `src/store/load.rs` — `LoadedSession { graph, index }` + `load_session(&dyn GraphStore, &SessionId) -> Result<LoadedSession, StoreError>`, wired by one additive `pub mod load;` in `src/store/mod.rs`. Semantics per spec §2.5: existing session → `Graph::from_snapshot` (re-verifies §5.7 invariants; typed `StoreError::Invariant` on corruption, never a panic) + `InvertedIndex::from_snapshot` on the same snapshot; `SessionNotFound` → fresh empty `LoadedSession`; any other store error propagates. No `Utc::now` anywhere; all timestamps come from the snapshot.
+
+**Rescore seam:** documented in the module doc, not implemented: the session owner (`Memory`, T2.3+) emits the signal only when an *existing* session was loaded. The signal is the warm-up rescore the T4.1 daemon task skeleton is *intended* to wake on (planned, not yet present), transported via the T4.6 event channel — today only `DaemonEvent` in `crate::types` exists; neither transport nor skeleton is in the tree.
+
+**Sync-over-async bridge (surprise):** the pinned API is a sync `fn` but `GraphStore::load_session` is async and there is no `futures` dependency. `Handle::block_on`/`Runtime::block_on` panic when called from inside a tokio task (the likely startup context), so `load_session` runs the store future on a private worker thread with a fresh current-thread runtime. Startup-only cost, correct from both sync and async callers (tested both ways). Reviewer should scrutinize `block_on` in `load.rs`.
+
+**Round-trip reality check (S5):** the write-behind log carries no synonym/reservation mutations, so a flush → load round-trip restores synonyms/reservations as **empty** — the S5 contract, asserted explicitly in the flush round-trip test. They survive only the full-`GraphSnapshot` path (`MemoryStore::seed` under `fixtures`), covered by `full_snapshot_round_trip_preserves_ram_local_metadata` (fixtures-gated). The acceptance's "reservation preserved" therefore lives in the full-snapshot test, not the flush test — the parent agent should confirm this split matches intent.
+
+**Graph-tier behaviors noticed (do not re-derive):**
+- `Graph::from_snapshot` requires exactly one temporal-chain head, so a present-but-*empty* snapshot (e.g. a session whose last node was deleted) loads as `StoreError::Invariant("expected exactly one chain head, found 0")`, not as an empty graph. Only `SessionNotFound` yields an empty session.
+- `from_snapshot` replays edges via `record_edge`, so a corrupted snapshot with duplicate natural keys would silently *reinforce* (bump weight/reinforcements) rather than error. Legal snapshots are unique-keyed, so round-trip is exact.
+
+**Tests (6, in `load.rs`, all generic vs `&dyn GraphStore` except the `MemoryStore::seed` one):** flush round-trip (interactions/derive/demote/synonym/reservation/canonization build → drain → flush → load; deep-equality incl. chain order, index agreement on fixture queries, invariants hold), full-snapshot metadata round-trip (fixtures), missing-session → empty, corrupted snapshot ×2 (dangling `previous_id`; concept without `Derives`) → typed error, sync-context (no runtime) load, and a mutation-log shape sanity test. Same round-trip shape should run against `SqliteStore` unchanged once T3.3 lands — only `MemoryStore::new()` needs swapping.
+
+**Files:** `src/store/load.rs` (new), `src/store/mod.rs` (one `pub mod load;` line). No Cargo.toml, no frozen-file changes.
