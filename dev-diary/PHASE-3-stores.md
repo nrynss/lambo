@@ -326,3 +326,128 @@ owner (T4.x / P3 Memory) will spawn it. Reservations never enter the log
   assertions in `degrades_past_log_max_and_stops_flushing` under parallel
   execution. Those tests now install a silent TRACE-level default
   (`keep_callsites_enabled`) that registers callsites as `always`.
+
+
+### T3.2 — `CockroachStore` (done, task/p3-t3.2-cockroach-store)
+
+**What exists:** `src/store/cockroach.rs` — full `GraphStore` over `sqlx::PgPool`
+(feature `store-cockroach`), registered in `build_store`; `vector_dimensions() -> Some(n)`
+parsed from the embedded DDL (`VECTOR(n)`, currently 1024 — **not** a global constant);
+capabilities `VECTOR_SEARCH`. `flush` (one transaction, in-order replay), `load_session`
+(all 7 tables incl. synonyms/reservations/canonization_events), `keyword_candidates`
+(exact-substring `strpos` full scan; RAM index is the real path), `vector_candidates`
+(T0.3 spike shape), `blast_radius` + `interaction_span` (spec §4.1 + errata), and
+`record_canonization` (appends to `canonization_events` + updates the concept row).
+Also a fixtures-gated `seed()` (full-snapshot path carrying synonyms/reservations —
+MemoryStore parity) and an `init_schema()` that executes `migrations/cockroach/001_init.sql`
+verbatim via `include_str!` + `sqlx::raw_sql` (multi-statement simple protocol;
+idempotent — all `IF NOT EXISTS`).
+
+**mod.rs touches (announced, shared file):** one additive `pub mod cockroach;`
+(feature-gated), the cfg-gated `build_store` Cockroach arm (constructs lazily — pool
+creation is deferred, so `build_store` stays sync and I/O-free), `is_ready()` Cockroach
+arm flipped to `cfg!(feature = "store-cockroach")`, and the old
+`cockroach_fail_closed_message` test rewritten as `cockroach_build_behavior` (branches on
+`is_compiled()`: feature on → working adapter with VECTOR_SEARCH + Some(1024); off →
+fail-closed rebuild hint). No other mod.rs lines touched — T3.3's Sqlite arms are
+untouched and don't collide.
+
+**Vector encode/decode decision (T0.3 spike, Attempt A):** bind the embedding as a text
+literal and cast server-side (`$15::VECTOR`); read back via `embedding::STRING` + parse.
+Text form `[x,y,z]` with Rust's shortest-round-trip `f32` Display (exact round-trip;
+spike-verified). Non-finite elements rejected at encode. **Score = cosine similarity from
+L2 distance** (`1 - d²/2`, clamped) so it is comparable to `semantic_match_threshold`
+(spec §7.1 step 6); valid only for unit-normalized embeddings (pipeline normalizes).
+
+**Batch replay decision (reviewer fodder):** `flush` replays mutations **in submission
+order** — NOT re-grouped by spec §2.4 kind order. `src/graph/mod.rs` (T2.1 M2 close)
+mandates "replay in order and MUST NOT re-sort"; §2.4's grouping holds *within* a logical
+write, which the graph tier already guarantees when it emits the log. Re-grouping would
+break create→delete→create within one batch. `MemoryStore` does the same.
+
+**Dialect divergences (recorded):**
+1. **Cockroach `INT` = INT8 on the wire.** All integer reads decode as `i64` then cast to
+   the Lambo `i32` fields (`access_count`, `gc_survived`, `blast_radius`, `reinforcements`);
+   `i32` binds are accepted by Cockroach (coerced). `LIMIT` bound as `i64`.
+2. **Serializable-transaction retry is client-side.** Cockroach aborts conflicting
+   serializable transactions with SQLSTATE 40001 (`restart transaction: ...
+   RETRY_SERIALIZABLE`); sqlx does not auto-retry. `flush`/`seed`/`load_session`/
+   `record_canonization` replay the whole transaction body (fresh BEGIN) up to 5 times
+   with 50–200 ms backoff. Detection is string-marker based on Cockroach's stable
+   "restart transaction"/"RETRY_SERIALIZABLE"/"40001" prefixes (the sqlx error is already
+   flattened into `StoreError::Backend`); a typed error-code path is future work.
+3. **§4.1 age filters bind a Rust-computed cutoff** (`now - min_age`), not an
+   `INTERVAL` literal — T3.3/T3.6 twin-shape contract (SQLite has no `INTERVAL`).
+   `interaction_span` additionally filters `edges.created_at` (spec's literal SQL only
+   filters `i.created_at`) to match `MemoryStore`'s naive answer — the T3.6 three-way
+   agreement baseline. Both queries also pin the source concept to the session
+   (`src.session_id = $1`) and exclude the node itself (`c.id <> $2`), mirroring
+   MemoryStore.
+4. **rustls DSN rewrite** (T0.3 spike, proven): `sslrootcert=system` → real CA bundle or
+   `sslmode=require`; dangling `?&`/trailing `&`/`?` cleaned. Required for the `.env` DSN.
+5. **Sessions rows are ensured on flush** (`INSERT INTO sessions (session_id) ... ON
+   CONFLICT DO NOTHING`) because Cockroach enforces `REFERENCES sessions(session_id)` on
+   interactions/concepts (the graph tier creates sessions implicitly).
+6. **Canonization event insert is `ON CONFLICT (id) DO NOTHING`** so a retried flush
+   (committed but response lost) cannot duplicate the demo's audit row. Concept status
+   update is idempotent by nature; node/edge upserts are `ON CONFLICT` DO UPDATE.
+
+**Schema persistence (P3 review round 1 remediation, 2026-08-11):** (a) **`chunk_group_id`
+(T2.5) is now a first-class `concepts.chunk_group_id STRING` column** — declared in the
+`CREATE TABLE` for fresh installs plus `ALTER TABLE concepts ADD COLUMN IF NOT EXISTS
+chunk_group_id STRING` for existing clusters (Cockroach supports `IF NOT EXISTS` on
+`ADD COLUMN`), so `init_schema` stays idempotent (verified live ×2). The concept upsert
+writes it (`$16`, included in the `ON CONFLICT` update) and `load_session` reads it back —
+flush→load now **preserves** the T5.2 sibling co-retrieval key (round-trip asserts
+survival, not the old normalization-to-None).
+(b) **The `EmbeddingContract` is snapshot-only (S5-class).** `sessions` now carries
+nullable `embedding_kind` / `embedding_model` / `embedding_dim` (same CREATE + ALTER
+`ADD COLUMN IF NOT EXISTS` pattern), and `load_session` materializes
+`GraphSnapshot.embedding` when `embedding_kind` is present. `flush` does **not** write
+them — there is no session-metadata `Mutation` kind; the write path is pending a future
+mutation (live suite stamps them via direct SQL and asserts flush immunity).
+(c) `mutations-batch.json`'s final state is intentionally **not** a legal §5.7 graph (the
+batch deletes the Temporal edge between the two interactions), so the flush round-trip is
+asserted at snapshot level; `Graph::from_snapshot` materialization of legal batches is
+covered by `load.rs` tests. (d) **Keyword scoring folds case** (`score_keyword_hits`
+lowercases content/key before counting — MemoryStore parity); the SQL predicate already
+lowercased, so a mixed-case row previously scored 0.0 despite being selected
+(review R1, regression-locked vs MemoryStore live + pure unit test).
+(e) **Legal-demote flush** (review R2): duplicate-key Observations flush successfully
+against the live store — the partial `concepts_key_non_obs_idx` excludes them; a
+duplicate-key non-Observation still fails loudly (negative lock in the same check).
+
+**Conformance — ALL items RAN live** (cluster reachable via the `.env` DSN; never
+printed): init_schema ×2 idempotent; `mutations-batch.json` flush + load round-trip
+(2 interactions / 1 concept with status Candidate / 1 edge after delete + incident-edge
+cleanup / 1 canonization event); a 1024-dim embedding write + `vector_candidates` top-1
+(identical vector ranks first, score ≈ 1.0, stored vector round-trips exactly);
+`keyword_candidates` on a planted concept (+ SessionNotFound and empty-token parity vs
+MemoryStore); **mixed-case keyword scoring ranks exactly like MemoryStore** (review R1:
+"Register User" + "user schema" vs tokens `[register, user]` — 2.0 then 1.0); **legal
+demote flush** (review R2: duplicate-key Observations flush + survive; duplicate-key
+Entity fails); **chunk_group_id round-trip** (Observation with `chunk-42` survives
+flush→load; NULL stays None); **embedding-contract read** (direct-SQL stamp
+kind/model/dim → `load_session` returns the contract; a later flush does not clobber it;
+unstamped session → None); **`blast_radius` + `interaction_span` agreement vs MemoryStore
+on `session-rest-api`** (all 22 concepts, min-age 0) plus a fresh-vs-aged-edge filter
+agreement (min-age 0 vs 1h); `record_canonization` append + idempotent re-record +
+NotFound; seed full-snapshot round-trip (synonyms, root_goal, deep-equal after
+id-sort). Wired as `#[cfg(all(test, feature = "store-cockroach", feature = "fixtures"))]`
+`conformance_suite` — one `#[tokio::test]` running all checks on ONE runtime, because
+sqlx connections are registered with the Tokio runtime that first acquires them: per-test
+runtimes die at test end, poisoning the pool ("A Tokio 1.x context was found, but it is
+being shutdown"), and per-test pools multiplied connections past the cluster's cap
+("pool timed out while waiting for an open connection"). Skips cleanly (never fails)
+without `LAMBO_COCKROACH_DSN`. `build_store_returns_working_adapter` is a plain sync
+test (lazy pool ⇒ no runtime needed).
+
+**Verification:** `cargo build --features store-cockroach` clean (0 warnings);
+`cargo test --features store-cockroach` green (226 lib + main + integration, incl. live
+suite); default-feature `cargo test --lib` green. 15 pure-logic unit tests (no
+cluster): vector encode/decode round-trip + Cockroach renderings + non-finite
+rejection, DDL width parse, age-cutoff computation, §4.1 placeholder counts/order +
+errata shape, keyword-SQL placeholder arithmetic, keyword score case-folding
+regression (R1), snapshot→row column counts (16-concept / 6-interaction / 9-edge),
+enum↔STRING round-trips, serializable-retry detection, rustls DSN rewrite, dim check,
+token normalization.
