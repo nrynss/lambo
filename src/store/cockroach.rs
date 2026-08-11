@@ -2316,8 +2316,9 @@ mod conformance {
     /// fresh MemoryStore, then assert EVERY node (concepts + interactions) ×
     /// min-age {0, 3600s} × both queries answers EXACTLY like MemoryStore's
     /// naive scan on the same snapshot. Seeding is an idempotent upsert, so
-    /// re-runs against a persistent cluster converge.
-    async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &str) {
+    /// re-runs against a persistent cluster converge. Returns the number of
+    /// equality assertions performed (2 per node × age cell).
+    async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &str) -> usize {
         let snap = load_snapshot(fixture).unwrap();
         let sid = snap.session_id.clone();
         store.seed(&snap).await.unwrap();
@@ -2335,6 +2336,7 @@ mod conformance {
             .chain(snap.interactions.iter().map(|i| i.id))
             .collect();
         let ages = [Duration::ZERO, Duration::from_secs(3600)];
+        let mut assertions = 0usize;
         for node in &node_ids {
             for age in ages {
                 let mem_br = mem.blast_radius(&sid, *node, age).await.unwrap();
@@ -2352,6 +2354,7 @@ mod conformance {
                     mem_span, crdb_span,
                     "interaction_span({fixture}, {node}, {age:?}): mem={mem_span:?} crdb={crdb_span:?}"
                 );
+                assertions += 2;
             }
         }
 
@@ -2380,6 +2383,7 @@ mod conformance {
                 "hub 1001 span anchor: {span:?}"
             );
         }
+        assertions
     }
 
     /// T3.6 acceptance: the three-way agreement matrix on BOTH fixture graphs —
@@ -2388,27 +2392,65 @@ mod conformance {
     /// every node × min-age {0, 3600s}, blast_radius + interaction_span
     /// (distinct AND coverage) exactly equal to MemoryStore.
     async fn check_structural_queries_agree_with_memory_store(store: &CockroachStore) {
+        let mut total_assertions = 0usize;
         for fixture in ["session-rest-api", "session-drift"] {
-            check_fixture_structural_agreement(store, fixture).await;
+            total_assertions += check_fixture_structural_agreement(store, fixture).await;
         }
+        // Lock the matrix dimensions like the sqlite suite (round-1 review F2):
+        // rest-api 34 nodes (22 concepts + 12 interactions) + drift 11 nodes
+        // (9 + 2) = 45 nodes; 2 ages; 2 queries each -> 180 equality assertions.
+        // A future narrowing of either matrix loop silently shrinks coverage,
+        // so the count must be verified, not just implied by the loop shape.
+        assert_eq!(total_assertions, 180, "matrix dimensions drifted");
     }
 
     async fn check_structural_queries_age_filter_agrees(store: &CockroachStore) {
+        // T3.6 matrix + round-1 review F1 remediation: the span's TWO timestamp
+        // gates are discriminated behaviorally, not just textually —
+        // * e-gate: the fresh edge's source carries a DISTINCT origin
+        //   interaction (`i2`), so the span set genuinely shrinks at
+        //   min_age = 3600s: `span(orphan).distinct` is 2 at min-age 0 and 1 at
+        //   1h (before the fix every origin was `i1`, so the span was identical
+        //   with or without either gate);
+        // * i-gate probe: an AGED edge (`probe_src -> probe_victim`) whose
+        //   origin interaction `i3` is FRESH (created after the 1h cutoff) must
+        //   be excluded from the span — `span(probe_victim).distinct` is 1 at
+        //   min-age 0 and 0 at 1h.
+        // blast_radius is origin-agnostic by contrast (the i-gate is span-only,
+        // matching MemoryStore).
         let sid = SessionId::from(format!("conformance-age-{}", Uuid::new_v4()));
         let old_ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let now = Utc::now();
         let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        let i3 = NodeId::new();
         let pillar = NodeId::new();
         let orphan = NodeId::new();
         let other = NodeId::new();
+        let probe_src = NodeId::new();
+        let probe_victim = NodeId::new();
 
-        // Base: only an aged pillar -> orphan dependency.
+        // Base: aged graph — pillar -> orphan (aged edge, aged origin i1) and
+        // probe_src -> probe_victim (aged edge, FRESH origin i3: the i-gate
+        // probe). `other`'s origin is DISTINCT i2 — the fresh edge's source.
         let base = MutationBatch {
             mutations: vec![
                 plant_interaction(&sid, i1, old_ts),
+                plant_interaction(&sid, i2, old_ts),
+                plant_interaction(&sid, i3, now),
                 plant_concept(&sid, pillar, i1, "pillar", old_ts, None),
                 plant_concept(&sid, orphan, i1, "orphan", old_ts, None),
-                plant_concept(&sid, other, i1, "other", old_ts, None),
+                plant_concept(&sid, other, i2, "other", old_ts, None),
+                plant_concept(&sid, probe_src, i3, "probe-src", old_ts, None),
+                plant_concept(&sid, probe_victim, i1, "probe-victim", old_ts, None),
                 plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
+                plant_edge(
+                    &sid,
+                    probe_src,
+                    probe_victim,
+                    EdgeType::Dependency,
+                    old_ts,
+                ),
             ],
         };
         store.flush(&base).await.unwrap();
@@ -2416,13 +2458,7 @@ mod conformance {
         mem.flush(&base).await.unwrap();
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
-            mutations: vec![plant_edge(
-                &sid,
-                other,
-                orphan,
-                EdgeType::Dependency,
-                Utc::now(),
-            )],
+            mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
         store.flush(&fresh).await.unwrap();
         mem.flush(&fresh).await.unwrap();
@@ -2430,8 +2466,8 @@ mod conformance {
         let one_hour = Duration::from_secs(3600);
         // Aged-vs-fresh edge interaction: EVERY node × both cutoffs must agree
         // with MemoryStore exactly (the aged pillar -> orphan edge vs the
-        // freshly created other -> orphan edge).
-        for node in [pillar, orphan, other, i1] {
+        // freshly created other -> orphan edge, plus the i-gate probe).
+        for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::ZERO, one_hour] {
                 let mem_br = mem.blast_radius(&sid, node, min_age).await.unwrap();
                 let crdb_br = store.blast_radius(&sid, node, min_age).await.unwrap();
@@ -2444,8 +2480,57 @@ mod conformance {
                 );
             }
         }
-        // The age filter is doing real work: with min_age=0 the fresh edge un-orphans;
-        // with min_age=1h it is filtered and the orphan still counts.
+        // e-gate discrimination on the SPAN (independent of the oracle):
+        // `other`'s DISTINCT origin i2 counts at min-age 0 and must vanish at
+        // 1h when the fresh edge is filtered.
+        assert_eq!(
+            store
+                .interaction_span(&sid, orphan, Duration::ZERO)
+                .await
+                .unwrap()
+                .distinct,
+            2,
+            "e-gate: fresh edge's distinct origin counts at min_age=0"
+        );
+        assert_eq!(
+            store
+                .interaction_span(&sid, orphan, one_hour)
+                .await
+                .unwrap()
+                .distinct,
+            1,
+            "e-gate: fresh edge's distinct origin filtered at min_age=1h"
+        );
+        // i-gate probe: the AGED probe_src -> probe_victim edge's origin i3 is
+        // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
+        assert_eq!(
+            store
+                .interaction_span(&sid, probe_victim, Duration::ZERO)
+                .await
+                .unwrap()
+                .distinct,
+            1,
+            "i-gate: fresh origin counts at min_age=0"
+        );
+        assert_eq!(
+            store
+                .interaction_span(&sid, probe_victim, one_hour)
+                .await
+                .unwrap()
+                .distinct,
+            0,
+            "i-gate: aged edge with fresh origin excluded at min_age=1h"
+        );
+        // blast_radius is origin-agnostic: the aged probe edge counts at 1h
+        // even though its origin is fresh (span-only i-gate, MemoryStore parity).
+        assert_eq!(
+            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            1,
+            "blast_radius ignores origin age"
+        );
+        // The age filter is doing real work for blast_radius: with min_age=0 the
+        // fresh edge un-orphans; with min_age=1h it is filtered and the orphan
+        // still counts.
         assert_eq!(
             store
                 .blast_radius(&sid, pillar, Duration::ZERO)

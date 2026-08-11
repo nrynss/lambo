@@ -658,9 +658,38 @@ self-exclusion, aged-edge gating (`e.created_at <= cutoff` in BOTH queries — s
 second errata; span also gates `i.created_at <= cutoff`), the F1 single-point rule, and
 the twin-shaped Rust-computed cutoff (no `INTERVAL`).
 
-**Verification:** `cargo test --features store-sqlite` → 231 lib tests green (incl. the
-extended matrix; acceptance was 229+). `cargo test --features store-cockroach` with the
-live `.env` DSN (never printed) → 232 lib tests green, `conformance_suite` RAN live
-(41–43s, zero SKIP), incl. both-fixture matrix + errata probe + aged-edge +
-single-point checks. Zero new warnings in both feature builds. No changes outside
-`src/store/cockroach.rs` + `src/store/sqlite.rs` + this file.
+**Round-1 review remediation (ReviewT36Structural, 2026-08-11):** two findings
+fixed on `task/p3-t3.6-structural-queries`:
+- **F1 [P2] — the span's both-timestamp gates are now discriminated
+  behaviorally.** Previously every span test collapsed to an all-old origin
+  set, so dropping either `e.created_at`/`i.created_at` gate passed the whole
+  suite. The aged-vs-fresh test (both adapters) now gives the fresh edge's
+  source a **DISTINCT origin interaction** (`i2`), so `span(orphan).distinct`
+  is 2 at min-age 0 and 1 at 1h (fresh edge's origin drops out of the span
+  when the edge is filtered), and adds an **i-gate probe** — an AGED edge
+  (`probe_src → probe_victim`) whose origin interaction `i3` is FRESH:
+  `span(probe_victim).distinct` is 1 at min-age 0 and 0 at 1h. Divergent
+  values are asserted equal to MemoryStore on the same scenario (the matrix
+  loop now covers 8 nodes × 2 ages × 2 queries), plus oracle-independent
+  anchors; a `blast_radius` anchor proves the i-gate is span-only (origin age
+  never affects radius). SQLite also gained a text-level lock mirroring
+  Cockroach's `structural_query_placeholder_order_and_counts`
+  (`structural_span_sql_gates_both_timestamps`: the span SQL contains BOTH
+  `e.created_at <= ?` and `i.created_at <= ?`). Demonstrated: dropping the
+  e-gate alone makes `span(orphan)` at 1h return distinct 2 vs MemoryStore's
+  1; dropping the i-gate alone makes `span(probe_victim)` at 1h return
+  distinct 1 vs 0 — both fail the matrix agreement. (`INTERACTION_SPAN_SQL`
+  was extracted to a module const in sqlite.rs; behavior unchanged.)
+- **F2 [P3] — the cockroach matrix count is now locked.** The twin
+  `check_fixture_structural_agreement` returned its assertion count and
+  `check_structural_queries_agree_with_memory_store` asserts the total == 180
+  (45 nodes × 2 ages × 2 queries), matching the sqlite matrix lock — a future
+  narrowing can no longer silently shrink coverage.
+
+**Verification:** `cargo test --features store-sqlite` → 232 lib tests green (incl. the
+extended matrix + the F1/F2 remediation probes; acceptance was 229+).
+`cargo test --features store-cockroach` with the live `.env` DSN (never printed) → 232
+lib tests green, `conformance_suite` RAN live (zero SKIP), incl. both-fixture matrix
+(with the 180-assertion lock) + errata probe + aged-edge (F1-remediated, both-gate
+discrimination) + single-point checks. Zero new warnings in both feature builds. No
+changes outside `src/store/cockroach.rs` + `src/store/sqlite.rs` + this file.

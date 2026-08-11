@@ -156,6 +156,35 @@ use crate::types::{
 /// `Derives`/`Temporal` must not un-orphan concepts).
 const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 
+/// §4.1 interaction-span SQL (twin-shaped with Cockroach's
+/// `INTERACTION_SPAN_SQL`; `?` placeholders). The span gates on BOTH the edge
+/// and the origin-interaction timestamp (`e.created_at <= ? AND
+/// i.created_at <= ?` — spec §4.1 second errata, MemoryStore parity): a
+/// structural inbound edge is invisible to the span when EITHER its own
+/// timestamp or its source concept's origin interaction is younger than the
+/// cutoff. `{STRUCTURAL_EDGE_IN}` is substituted at the call site (the
+/// predicate is shared with blast_radius); the substitution keeps this const
+/// assertable verbatim in tests.
+const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
+     SELECT DISTINCT i.id, i.created_at \
+     FROM edges e \
+     JOIN concepts src ON src.id = e.source \
+     JOIN interactions i ON i.id = src.origin_interaction \
+     WHERE e.target = ? AND e.session_id = ? \
+       AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
+       AND e.created_at <= ? AND i.created_at <= ? \
+ ), \
+ extent AS ( \
+     SELECT min(created_at) AS lo, max(created_at) AS hi \
+     FROM interactions WHERE session_id = ? \
+ ) \
+ SELECT \
+     (SELECT count(*) FROM span), \
+     (SELECT min(created_at) FROM span), \
+     (SELECT max(created_at) FROM span), \
+     extent.lo, extent.hi \
+ FROM extent";
+
 /// SQLite GraphStore. Cheap, correct, single-connection.
 pub struct SqliteStore {
     options: SqliteConnectOptions,
@@ -561,27 +590,9 @@ impl GraphStore for SqliteStore {
         let cutoff = cutoff_text(Utc::now(), min_age)?;
         let node_text = node.0.to_string();
 
-        let row = sqlx::query(&format!(
-            "WITH span AS ( \
-                 SELECT DISTINCT i.id, i.created_at \
-                 FROM edges e \
-                 JOIN concepts src ON src.id = e.source \
-                 JOIN interactions i ON i.id = src.origin_interaction \
-                 WHERE e.target = ? AND e.session_id = ? \
-                   AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-                   AND e.created_at <= ? AND i.created_at <= ? \
-             ), \
-             extent AS ( \
-                 SELECT min(created_at) AS lo, max(created_at) AS hi \
-                 FROM interactions WHERE session_id = ? \
-             ) \
-             SELECT \
-                 (SELECT count(*) FROM span), \
-                 (SELECT min(created_at) FROM span), \
-                 (SELECT max(created_at) FROM span), \
-                 extent.lo, extent.hi \
-             FROM extent"
-        ))
+        let row = sqlx::query(
+            &INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN),
+        )
         .bind(&node_text)
         .bind(&session.0)
         .bind(&cutoff)
@@ -1768,29 +1779,79 @@ mod tests {
         }
     }
 
-    /// Edge-age interaction (T3.6 matrix): an AGED inbound structural edge vs
-    /// a freshly-created one. At min-age 0 the fresh edge counts and
-    /// un-orphans the target; at 3600s it is filtered out and the orphan
-    /// still counts. Both cutoffs must agree with MemoryStore on every node.
+    /// Edge-age interaction (T3.6 matrix; round-1 review F1 remediation): an
+    /// AGED inbound structural edge vs a freshly-created one. At min-age 0 the
+    /// fresh edge counts and un-orphans the target; at 3600s it is filtered
+    /// out and the orphan still counts. Both cutoffs must agree with
+    /// MemoryStore on every node.
+    ///
+    /// Review F1: the span's TWO timestamp gates are discriminated
+    /// behaviorally, not just textually —
+    /// * **e-gate:** the fresh edge's source carries a DISTINCT origin
+    ///   interaction (`i2`), so the span set genuinely shrinks at min_age =
+    ///   3600s (aged edge included, fresh edge excluded): `span(orphan).distinct`
+    ///   is 2 at min-age 0 and 1 at 1h. Dropping `e.created_at <= ?` would keep
+    ///   `i2` in the span and fail the anchor (before the fix every origin was
+    ///   `i1`, so the span was identical with or without either gate);
+    /// * **i-gate probe:** an AGED edge (`probe_src -> probe_victim`) whose
+    ///   origin interaction `i3` is FRESH (created after the 1h cutoff) must be
+    ///   excluded from the span — `span(probe_victim).distinct` is 1 at min-age
+    ///   0 and 0 at 1h. Dropping `i.created_at <= ?` would keep `i3` in the span.
+    ///
+    /// `blast_radius` is origin-agnostic by contrast: the aged probe edge counts
+    /// at both ages even though its origin is fresh (the i-gate is span-only,
+    /// matching MemoryStore).
     #[tokio::test]
     async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
         let store = test_store();
         store.init_schema().await.unwrap();
         let sid = SessionId::from("aged-vs-fresh");
         let old_ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let now = Utc::now();
         let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        let i3 = NodeId::new();
         let pillar = NodeId::new();
         let orphan = NodeId::new();
         let other = NodeId::new();
+        let probe_src = NodeId::new();
+        let probe_victim = NodeId::new();
 
-        // Base: only an aged pillar -> orphan dependency.
+        // Base: aged graph — pillar -> orphan (aged edge, aged origin i1) and
+        // probe_src -> probe_victim (aged edge, FRESH origin i3: the i-gate
+        // probe). `other`'s origin is DISTINCT i2 — the fresh edge's source.
         let base = MutationBatch {
             mutations: vec![
                 plant_interaction(&sid, i1, None, old_ts),
+                plant_interaction(&sid, i2, None, old_ts),
+                plant_interaction(&sid, i3, None, now),
                 plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, old_ts),
                 plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, old_ts),
-                plant_concept(&sid, other, i1, "other", ConceptType::Entity, old_ts),
+                plant_concept(&sid, other, i2, "other", ConceptType::Entity, old_ts),
+                plant_concept(
+                    &sid,
+                    probe_src,
+                    i3,
+                    "probe-src",
+                    ConceptType::Entity,
+                    old_ts,
+                ),
+                plant_concept(
+                    &sid,
+                    probe_victim,
+                    i1,
+                    "probe-victim",
+                    ConceptType::Entity,
+                    old_ts,
+                ),
                 plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
+                plant_edge(
+                    &sid,
+                    probe_src,
+                    probe_victim,
+                    EdgeType::Dependency,
+                    old_ts,
+                ),
             ],
         };
         store.flush(&base).await.unwrap();
@@ -1798,19 +1859,13 @@ mod tests {
         memory.flush(&base).await.unwrap();
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
-            mutations: vec![plant_edge(
-                &sid,
-                other,
-                orphan,
-                EdgeType::Dependency,
-                Utc::now(),
-            )],
+            mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
         store.flush(&fresh).await.unwrap();
         memory.flush(&fresh).await.unwrap();
 
         let one_hour = Duration::from_secs(3600);
-        for node in [pillar, orphan, other, i1] {
+        for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::from_secs(0), one_hour] {
                 let br = store.blast_radius(&sid, node, min_age).await.unwrap();
                 let br_want = memory.blast_radius(&sid, node, min_age).await.unwrap();
@@ -1820,9 +1875,57 @@ mod tests {
                 assert_eq!(span, span_want, "interaction_span {node} age {min_age:?}");
             }
         }
-        // The age filter is doing real work (independent of the oracle): with
-        // min-age 0 the fresh edge un-orphans; with min-age 1h it is filtered
-        // and the orphan still counts.
+        // e-gate discrimination on the SPAN (independent of the oracle):
+        // `other`'s DISTINCT origin i2 counts at min-age 0 and must vanish at
+        // 1h when the fresh edge is filtered.
+        assert_eq!(
+            store
+                .interaction_span(&sid, orphan, Duration::from_secs(0))
+                .await
+                .unwrap()
+                .distinct,
+            2,
+            "e-gate: fresh edge's distinct origin counts at min_age=0"
+        );
+        assert_eq!(
+            store
+                .interaction_span(&sid, orphan, one_hour)
+                .await
+                .unwrap()
+                .distinct,
+            1,
+            "e-gate: fresh edge's distinct origin filtered at min_age=1h"
+        );
+        // i-gate probe: the AGED probe_src -> probe_victim edge's origin i3 is
+        // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
+        assert_eq!(
+            store
+                .interaction_span(&sid, probe_victim, Duration::from_secs(0))
+                .await
+                .unwrap()
+                .distinct,
+            1,
+            "i-gate: fresh origin counts at min_age=0"
+        );
+        assert_eq!(
+            store
+                .interaction_span(&sid, probe_victim, one_hour)
+                .await
+                .unwrap()
+                .distinct,
+            0,
+            "i-gate: aged edge with fresh origin excluded at min_age=1h"
+        );
+        // blast_radius is origin-agnostic: the aged probe edge counts at 1h
+        // even though its origin is fresh (span-only i-gate, MemoryStore parity).
+        assert_eq!(
+            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            1,
+            "blast_radius ignores origin age"
+        );
+        // The age filter is doing real work for blast_radius (independent of
+        // the oracle): with min-age 0 the fresh edge un-orphans; with min-age
+        // 1h it is filtered and the orphan still counts.
         assert_eq!(
             store
                 .blast_radius(&sid, pillar, Duration::from_secs(0))
@@ -1835,6 +1938,25 @@ mod tests {
             store.blast_radius(&sid, pillar, one_hour).await.unwrap(),
             1,
             "fresh edge filtered at min_age=1h"
+        );
+    }
+
+    /// T3.6 round-1 review F1: text-level lock that the span SQL gates on BOTH
+    /// timestamps — the edge's AND the origin interaction's (spec §4.1 second
+    /// errata). Mirror of Cockroach's
+    /// `structural_query_placeholder_order_and_counts`: a future narrowing that
+    /// drops either clause fails here even while the fixtures keep every origin
+    /// older than the cutoff (the behavioral discrimination is covered by
+    /// [`structural_queries_aged_vs_fresh_edge_agree_with_memory`]).
+    #[test]
+    fn structural_span_sql_gates_both_timestamps() {
+        assert!(
+            INTERACTION_SPAN_SQL.contains("e.created_at <= ?"),
+            "span SQL must gate the EDGE timestamp"
+        );
+        assert!(
+            INTERACTION_SPAN_SQL.contains("i.created_at <= ?"),
+            "span SQL must gate the ORIGIN-INTERACTION timestamp"
         );
     }
 
