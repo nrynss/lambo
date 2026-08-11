@@ -2,6 +2,15 @@
 -- is IF NOT EXISTS, so this file runs twice cleanly. Executed by
 -- SqliteStore::init_schema().
 --
+-- Post-T3.1 columns (P3 wave 2 remediation) are part of the CREATE TABLEs
+-- below, so fresh databases carry them inline. SQLite has NO
+-- `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (verified: 3.53.4 rejects the
+-- syntax), so pre-existing databases are converged by SqliteStore::init_schema
+-- instead: after executing this file it inspects `pragma_table_info` per
+-- column and issues a plain `ALTER TABLE ... ADD COLUMN` only when the column
+-- is missing. This file itself therefore stays idempotent (every statement
+-- IF NOT EXISTS) and runs twice cleanly on any database.
+--
 -- Dialect mapping (spec §4 Cockroach types -> SQLite):
 --   STRING        -> TEXT
 --   UUID          -> TEXT (canonical 36-char lowercase form)
@@ -39,7 +48,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id      TEXT PRIMARY KEY,
     root_goal       TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    closed_at       TEXT
+    closed_at       TEXT,
+    embedding_kind  TEXT,   -- session embedding contract (S5 read-only; no write path yet)
+    embedding_model TEXT,
+    embedding_dim   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS interactions (
@@ -66,7 +78,8 @@ CREATE TABLE IF NOT EXISTS concepts (
     canonization_status TEXT NOT NULL DEFAULT 'None',
     blast_radius        INTEGER,
     last_demotion_time  TEXT,
-    embedding           BLOB    -- unused: SQLite has no VECTOR_SEARCH; adapters never read/write it
+    embedding           BLOB,   -- unused: SQLite has no VECTOR_SEARCH; adapters never read/write it
+    chunk_group_id      TEXT    -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
 );
 
 -- Partial unique index on canonical keys (spec §4 errata): non-Observation only.
