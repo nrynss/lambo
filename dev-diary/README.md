@@ -149,7 +149,7 @@ Keep this current; it is the only global view.
 | P0 | 4 / 4 | **GO on Rust** — T0.1–T0.3 done; T0.4 blocked on Bedrock use-case form (crate ready) |
 | P1 | 4 / 4 | **COMPLETE — T1.4 fixtures landed: P2–P7 unblocked** |
 | P2 | 7 / 7 | **DONE + MERGED TO MAIN (2026-08-11, commit 9f9d2cb)** — graph core, canonicalization, derive, record_action, demote, BM25 index, reservations; exit criteria [x] (rebuild test); reviews CLOSED (per-task ACCEPT x2, muse-spark M1-M4, grok G1-G7); cross-phase contracts written into P3/P4/P5 docs |
-| P3 | 3 / 6 | T3.1 (DDL both dialects), T3.4 (flush task), T3.5 (load_session) DONE on phase/p3-stores, reviews CLOSED; T3.2/T3.3 (SQL adapters) + T3.6 (structural queries) OPEN — T3.1's DDL + partial-UNIQUE/ON CONFLICT/timestamp contracts ready for them |
+| P3 | 5 / 6 | T3.1–T3.5 DONE on phase/p3-stores (DDL both dialects, CockroachStore + live conformance, SqliteStore + three-way agreement, flush task, load_session), reviews CLOSED; T3.6 (structural-query three-way gate) OPEN — adapters already implement §4.1 SQL, T3.6 verifies |
 | P4 | 0 / 6 | OPEN for claiming |
 | P5 | 0 / 4 | OPEN for claiming |
 | P6 | 0 / 4 | OPEN for claiming |

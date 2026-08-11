@@ -73,6 +73,12 @@
 //!   to a real CA bundle (or downgrades `verify-full` → `require`) before pooling
 //!   (T0.3 spike, proven against the cloud cluster).
 
+// Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
+// the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
+// produces `&mut &mut Transaction` (which does not). Known sqlx+clippy false-positive;
+// kept explicit on purpose.
+#![allow(clippy::explicit_auto_deref)]
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::future::Future;
@@ -85,8 +91,8 @@ use sqlx::{PgPool, Row};
 use super::{Capabilities, GraphStore, StoreConfig};
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
-    GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId, Reservation,
-    Scored, SessionId, StoreError, Synonym,
+    GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId,
+    Reservation, Scored, SessionId, StoreError, Synonym,
 };
 
 /// T3.1 DDL — embedded and executed verbatim by [`CockroachStore::init_schema`].
@@ -609,7 +615,11 @@ fn parse_canonization_status(s: &str) -> Result<CanonizationStatus, StoreError> 
         "Candidate" => CanonizationStatus::Candidate,
         "Venerable" => CanonizationStatus::Venerable,
         "Canonical" => CanonizationStatus::Canonical,
-        other => return Err(backend(format!("unknown canonization_status {other:?} in store"))),
+        other => {
+            return Err(backend(format!(
+                "unknown canonization_status {other:?} in store"
+            )))
+        }
     })
 }
 
@@ -629,10 +639,7 @@ fn row_to_interaction(row: &PgRow) -> Result<Interaction, StoreError> {
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
         agent_id: crate::types::AgentId(row.try_get("agent_id").map_err(backend)?),
         prompt_text: row.try_get("prompt_text").map_err(backend)?,
-        previous_id: previous
-            .as_deref()
-            .map(parse_node_id)
-            .transpose()?,
+        previous_id: previous.as_deref().map(parse_node_id).transpose()?,
         created_at: row.try_get("created_at").map_err(backend)?,
     })
 }
@@ -650,7 +657,9 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
         content: row.try_get("content").map_err(backend)?,
         canonical_key: row.try_get("canonical_key").map_err(backend)?,
-        concept_type: parse_concept_type(&row.try_get::<String, _>("concept_type").map_err(backend)?)?,
+        concept_type: parse_concept_type(
+            &row.try_get::<String, _>("concept_type").map_err(backend)?,
+        )?,
         origin_interaction: parse_node_id(&origin)?,
         origin_agent: crate::types::AgentId(row.try_get("origin_agent").map_err(backend)?),
         created_at: row.try_get("created_at").map_err(backend)?,
@@ -658,7 +667,8 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         last_accessed: row.try_get("last_accessed").map_err(backend)?,
         gc_survived: gc_survived as i32,
         canonization_status: parse_canonization_status(
-            &row.try_get::<String, _>("canonization_status").map_err(backend)?,
+            &row.try_get::<String, _>("canonization_status")
+                .map_err(backend)?,
         )?,
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
@@ -789,7 +799,7 @@ impl CockroachStore {
         let root_goal = snapshot
             .root_goal
             .as_ref()
-            .map(|g| serde_json::to_string(g))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
         // Copy handle (Option<&str>): the FnMut body runs once per retry attempt and
@@ -973,7 +983,10 @@ impl GraphStore for CockroachStore {
         // Multi-statement DDL via the simple protocol (raw_sql); every statement is
         // `IF NOT EXISTS`, so this is idempotent by construction (T3.1 acceptance).
         let pool = self.pool().await?;
-        sqlx::raw_sql(INIT_SQL).execute(pool).await.map_err(backend)?;
+        sqlx::raw_sql(INIT_SQL)
+            .execute(pool)
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 
@@ -1084,17 +1097,19 @@ impl GraphStore for CockroachStore {
             // nullable kind/model/dim columns into GraphSnapshot.embedding when a
             // contract is stamped. `flush` never writes these — there is no
             // session-metadata Mutation kind.
-            let embedding_kind: Option<String> = session_row.try_get("embedding_kind").map_err(backend)?;
-            let embedding_model: Option<String> = session_row.try_get("embedding_model").map_err(backend)?;
-            let embedding_dim: Option<i64> = session_row.try_get("embedding_dim").map_err(backend)?;
+            let embedding_kind: Option<String> =
+                session_row.try_get("embedding_kind").map_err(backend)?;
+            let embedding_model: Option<String> =
+                session_row.try_get("embedding_model").map_err(backend)?;
+            let embedding_dim: Option<i64> =
+                session_row.try_get("embedding_dim").map_err(backend)?;
             let embedding = match embedding_kind {
                 Some(kind) => Some(EmbeddingContract {
                     kind,
                     model: embedding_model,
                     dim: embedding_dim.ok_or_else(|| {
                         StoreError::Backend(
-                            "embedding_kind present but embedding_dim NULL in sessions row"
-                                .into(),
+                            "embedding_kind present but embedding_dim NULL in sessions row".into(),
                         )
                     })? as usize,
                 }),
@@ -1338,14 +1353,20 @@ mod tests {
             let text = encode_vector(&v).unwrap();
             assert!(text.starts_with('[') && text.ends_with(']'));
             let back = decode_vector(&text).unwrap();
-            assert_eq!(v, back, "dim {dim}: encode -> decode must be exact (shortest f32 repr)");
+            assert_eq!(
+                v, back,
+                "dim {dim}: encode -> decode must be exact (shortest f32 repr)"
+            );
         }
     }
 
     #[test]
     fn vector_decode_accepts_cockroach_renderings() {
         // Cockroach `embedding::STRING` output has no spaces; tolerate any whitespace.
-        assert_eq!(decode_vector("[0.5,-0.25,1e2]").unwrap(), vec![0.5, -0.25, 100.0]);
+        assert_eq!(
+            decode_vector("[0.5,-0.25,1e2]").unwrap(),
+            vec![0.5, -0.25, 100.0]
+        );
         assert_eq!(decode_vector("[]").unwrap(), Vec::<f32>::new());
         assert_eq!(decode_vector(" [ 1 , 2 ] ").unwrap(), vec![1.0, 2.0]);
         assert!(decode_vector("[1,oops]").is_err());
@@ -1372,9 +1393,8 @@ mod tests {
 
     #[test]
     fn dsn_for_rustls_rewrites_sslrootcert_system() {
-        let out = dsn_for_rustls(
-            "postgresql://u:p@h:26257/db?sslmode=verify-full&sslrootcert=system",
-        );
+        let out =
+            dsn_for_rustls("postgresql://u:p@h:26257/db?sslmode=verify-full&sslrootcert=system");
         assert!(!out.contains("sslrootcert=system"), "{out}");
         let has_bundle = [
             "/etc/ssl/certs/ca-certificates.crt",
@@ -1393,7 +1413,10 @@ mod tests {
             assert!(!out.contains("sslmode=verify-full"), "downgraded: {out}");
         }
         // Dangling separators cleaned.
-        assert!(!out.contains("?&") && !out.ends_with('&') && !out.ends_with('?'), "{out}");
+        assert!(
+            !out.contains("?&") && !out.ends_with('&') && !out.ends_with('?'),
+            "{out}"
+        );
         // Untouched DSN passes through unchanged.
         let plain = "postgresql://u:p@h:26257/db?sslmode=require";
         assert_eq!(dsn_for_rustls(plain), plain);
@@ -1486,7 +1509,10 @@ mod tests {
         }
         // Errata: structural edge types only; provenance must not appear.
         for sql in [BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL] {
-            assert!(sql.contains("'Dependency', 'Causal', 'Hierarchical'"), "{sql}");
+            assert!(
+                sql.contains("'Dependency', 'Causal', 'Hierarchical'"),
+                "{sql}"
+            );
             assert!(!sql.contains("Derives"), "{sql}");
             assert!(!sql.contains("Temporal"), "{sql}");
             // Concept-sourced only: source JOIN pins src to a concept row.
@@ -1507,12 +1533,17 @@ mod tests {
             for m in sql.split('$').skip(1) {
                 let digits: String = m.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if !digits.is_empty() {
-                    *counts.entry(digits.parse::<usize>().unwrap()).or_insert(0usize) += 1;
+                    *counts
+                        .entry(digits.parse::<usize>().unwrap())
+                        .or_insert(0usize) += 1;
                 }
             }
             assert_eq!(counts[&1], 1);
             for k in 2..=n + 1 {
-                assert_eq!(counts[&k], 2, "token placeholder ${k} used for content and key");
+                assert_eq!(
+                    counts[&k], 2,
+                    "token placeholder ${k} used for content and key"
+                );
             }
         }
         // No LIKE wildcards: strpos(lower(...)) is exact substring (MemoryStore contains).
@@ -1587,7 +1618,11 @@ mod tests {
             "mixed-case content + key must still count the lowercase token"
         );
         assert_eq!(
-            score_keyword_hits("Register User", "Register User", &["register".into(), "user".into()]),
+            score_keyword_hits(
+                "Register User",
+                "Register User",
+                &["register".into(), "user".into()]
+            ),
             2
         );
         assert_eq!(
@@ -1599,9 +1634,15 @@ mod tests {
             1
         );
         // Key-only hit still counts (SQL predicate is content OR canonical_key).
-        assert_eq!(score_keyword_hits("Foo", "register user", &["register".into()]), 1);
+        assert_eq!(
+            score_keyword_hits("Foo", "register user", &["register".into()]),
+            1
+        );
         // Tokens are pre-normalized lowercase; an uppercase token matches nothing.
-        assert_eq!(score_keyword_hits("register user", "register user", &["Register".into()]), 0);
+        assert_eq!(
+            score_keyword_hits("register user", "register user", &["Register".into()]),
+            0
+        );
         // Empty rows/tokens (post-normalization) contribute nothing.
         assert_eq!(score_keyword_hits("", "", &["a".into()]), 0);
     }
@@ -1609,7 +1650,10 @@ mod tests {
     #[test]
     fn normalize_tokens_matches_memory_store() {
         let tokens = vec!["  Schema ".to_string(), "".to_string(), "  ".to_string()];
-        assert_eq!(CockroachStore::normalize_tokens(&tokens), vec!["schema".to_string()]);
+        assert_eq!(
+            CockroachStore::normalize_tokens(&tokens),
+            vec!["schema".to_string()]
+        );
         assert!(CockroachStore::normalize_tokens(&[]).is_empty());
     }
 }
@@ -1717,6 +1761,9 @@ mod conformance {
     /// Full-shape concept planter: verbatim canonical_key, concept type, and
     /// chunk_group_id — used by the legal-demote (R2), chunk_group_id round-trip,
     /// and mixed-case keyword checks.
+    // Test helper: every parameter is a distinct planter field (same precedent as
+    // derive.rs resolve_concept) — a params struct would obscure the call sites.
+    #[allow(clippy::too_many_arguments)]
     fn plant_concept_full(
         sid: &SessionId,
         id: NodeId,
@@ -1772,9 +1819,7 @@ mod conformance {
         }
     }
 
-    fn sorted_snap_parts(
-        snap: &GraphSnapshot,
-    ) -> (Vec<NodeId>, Vec<NodeId>, Vec<NodeId>) {
+    fn sorted_snap_parts(snap: &GraphSnapshot) -> (Vec<NodeId>, Vec<NodeId>, Vec<NodeId>) {
         let mut ii: Vec<NodeId> = snap.interactions.iter().map(|i| i.id).collect();
         let mut cc: Vec<NodeId> = snap.concepts.iter().map(|c| c.id).collect();
         let mut ee: Vec<NodeId> = snap.edges.iter().map(|e| e.id).collect();
@@ -1861,13 +1906,14 @@ mod conformance {
             .await
             .unwrap();
 
-        let hits = store
-            .vector_candidates(&sid, &probe, 3)
-            .await
-            .unwrap();
+        let hits = store.vector_candidates(&sid, &probe, 3).await.unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].item, a, "identical embedding must rank first");
-        assert!((hits[0].score - 1.0).abs() < 1e-4, "score {}", hits[0].score);
+        assert!(
+            (hits[0].score - 1.0).abs() < 1e-4,
+            "score {}",
+            hits[0].score
+        );
         assert!(hits[0].score > hits[1].score);
 
         // Round-trip the stored vector through load_session.
@@ -1969,9 +2015,15 @@ mod conformance {
         let tokens: Vec<String> = vec!["register".into(), "user".into()];
         let crdb = store.keyword_candidates(&sid, &tokens, 5).await.unwrap();
         let mem_res = mem.keyword_candidates(&sid, &tokens, 5).await.unwrap();
-        assert_eq!(crdb, mem_res, "mixed-case scoring must match MemoryStore exactly");
+        assert_eq!(
+            crdb, mem_res,
+            "mixed-case scoring must match MemoryStore exactly"
+        );
         assert_eq!(crdb.len(), 2);
-        assert_eq!(crdb[0].item, mixed, "Register User (2 hits) must rank above user schema (1 hit)");
+        assert_eq!(
+            crdb[0].item, mixed,
+            "Register User (2 hits) must rank above user schema (1 hit)"
+        );
         assert_eq!(crdb[0].score, 2.0);
         assert_eq!(crdb[1].item, lower);
         assert_eq!(crdb[1].score, 1.0);
@@ -1993,12 +2045,26 @@ mod conformance {
                 mutations: vec![
                     plant_interaction(&sid, i1, ts),
                     plant_concept_full(
-                        &sid, o1, i1, "identical sentence", "identical sentence",
-                        ConceptType::Observation, ts, None, Some("chunk-1".into()),
+                        &sid,
+                        o1,
+                        i1,
+                        "identical sentence",
+                        "identical sentence",
+                        ConceptType::Observation,
+                        ts,
+                        None,
+                        Some("chunk-1".into()),
                     ),
                     plant_concept_full(
-                        &sid, o2, i1, "identical sentence", "identical sentence",
-                        ConceptType::Observation, ts, None, Some("chunk-1".into()),
+                        &sid,
+                        o2,
+                        i1,
+                        "identical sentence",
+                        "identical sentence",
+                        ConceptType::Observation,
+                        ts,
+                        None,
+                        Some("chunk-1".into()),
                     ),
                 ],
             })
@@ -2026,10 +2092,26 @@ mod conformance {
         let bad = MutationBatch {
             mutations: vec![
                 plant_concept_full(
-                    &sid, e1, i1, "dup key", "dup key", ConceptType::Entity, ts, None, None,
+                    &sid,
+                    e1,
+                    i1,
+                    "dup key",
+                    "dup key",
+                    ConceptType::Entity,
+                    ts,
+                    None,
+                    None,
                 ),
                 plant_concept_full(
-                    &sid, e2, i1, "dup key", "dup key", ConceptType::Entity, ts, None, None,
+                    &sid,
+                    e2,
+                    i1,
+                    "dup key",
+                    "dup key",
+                    ConceptType::Entity,
+                    ts,
+                    None,
+                    None,
                 ),
             ],
         };
@@ -2053,12 +2135,26 @@ mod conformance {
                 mutations: vec![
                     plant_interaction(&sid, i1, ts),
                     plant_concept_full(
-                        &sid, obs, i1, "overflow sentence", "overflow sentence",
-                        ConceptType::Observation, ts, None, Some("chunk-42".into()),
+                        &sid,
+                        obs,
+                        i1,
+                        "overflow sentence",
+                        "overflow sentence",
+                        ConceptType::Observation,
+                        ts,
+                        None,
+                        Some("chunk-42".into()),
                     ),
                     plant_concept_full(
-                        &sid, plain, i1, "plain concept", "plain concept",
-                        ConceptType::Entity, ts, None, None,
+                        &sid,
+                        plain,
+                        i1,
+                        "plain concept",
+                        "plain concept",
+                        ConceptType::Entity,
+                        ts,
+                        None,
+                        None,
                     ),
                 ],
             })
@@ -2072,7 +2168,10 @@ mod conformance {
             "chunk_group_id must survive flush→load (T5.2 sibling co-retrieval key)"
         );
         let plain_row = snap.concepts.iter().find(|c| c.id == plain).unwrap();
-        assert_eq!(plain_row.chunk_group_id, None, "NULL chunk_group_id stays None");
+        assert_eq!(
+            plain_row.chunk_group_id, None,
+            "NULL chunk_group_id stays None"
+        );
     }
 
     async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
@@ -2130,7 +2229,9 @@ mod conformance {
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
-        let emb = snap.embedding.expect("embedding contract survives a later flush");
+        let emb = snap
+            .embedding
+            .expect("embedding contract survives a later flush");
         assert_eq!(emb.kind, "bge_m3");
         assert_eq!(emb.model.as_deref(), Some("BAAI/bge-m3"));
         assert_eq!(emb.dim, 1024);
@@ -2162,9 +2263,16 @@ mod conformance {
         assert_eq!(loaded.root_goal, snap.root_goal);
         assert_eq!(loaded.created_at, snap.created_at);
         assert_eq!(loaded.closed_at, snap.closed_at);
-        assert_eq!(loaded.synonyms.len(), snap.synonyms.len(), "synonym persisted via seed");
+        assert_eq!(
+            loaded.synonyms.len(),
+            snap.synonyms.len(),
+            "synonym persisted via seed"
+        );
         assert_eq!(loaded.synonyms[0].source_key, snap.synonyms[0].source_key);
-        assert_eq!(loaded.synonyms[0].canonical_key, snap.synonyms[0].canonical_key);
+        assert_eq!(
+            loaded.synonyms[0].canonical_key,
+            snap.synonyms[0].canonical_key
+        );
         assert!(loaded.reservations.is_empty());
         assert!(loaded.canonization_events.is_empty());
 
@@ -2201,10 +2309,19 @@ mod conformance {
         // min-age 0 (fixture timestamps are in the past, so both cutoffs admit all).
         for c in &snap.concepts {
             let mem_br = mem.blast_radius(&sid, c.id, Duration::ZERO).await.unwrap();
-            let crdb_br = store.blast_radius(&sid, c.id, Duration::ZERO).await.unwrap();
+            let crdb_br = store
+                .blast_radius(&sid, c.id, Duration::ZERO)
+                .await
+                .unwrap();
             assert_eq!(mem_br, crdb_br, "blast_radius({})", c.id);
-            let mem_span = mem.interaction_span(&sid, c.id, Duration::ZERO).await.unwrap();
-            let crdb_span = store.interaction_span(&sid, c.id, Duration::ZERO).await.unwrap();
+            let mem_span = mem
+                .interaction_span(&sid, c.id, Duration::ZERO)
+                .await
+                .unwrap();
+            let crdb_span = store
+                .interaction_span(&sid, c.id, Duration::ZERO)
+                .await
+                .unwrap();
             assert_eq!(
                 mem_span, crdb_span,
                 "interaction_span({}): mem={mem_span:?} crdb={crdb_span:?}",
@@ -2259,7 +2376,10 @@ mod conformance {
         // The age filter is doing real work: with min_age=0 the fresh edge un-orphans;
         // with min_age=1h it is filtered and the orphan still counts.
         assert_eq!(
-            store.blast_radius(&sid, pillar, Duration::ZERO).await.unwrap(),
+            store
+                .blast_radius(&sid, pillar, Duration::ZERO)
+                .await
+                .unwrap(),
             0,
             "fresh edge counts at min_age=0"
         );
@@ -2299,9 +2419,15 @@ mod conformance {
 
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(snap.canonization_events.len(), 1, "idempotent append");
-        assert_eq!(snap.canonization_events[0].to_status, CanonizationStatus::Venerable);
+        assert_eq!(
+            snap.canonization_events[0].to_status,
+            CanonizationStatus::Venerable
+        );
         assert_eq!(snap.canonization_events[0].blast_radius, Some(9));
-        assert_eq!(snap.concepts[0].canonization_status, CanonizationStatus::Venerable);
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable
+        );
         assert_eq!(snap.concepts[0].blast_radius, Some(9));
 
         // Missing concept -> NotFound (MemoryStore parity).

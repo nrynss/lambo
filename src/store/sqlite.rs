@@ -1,7 +1,6 @@
 //! T3.3 — SQLite GraphStore adapter (offline / test tier, spec §3.2–§3.3, §4).
 //!
-//! Same trait surface as [`super::memory::MemoryStore`] over
-//! `sqlx::SqlitePool`. SQLite has **no** `VECTOR_SEARCH` capability, so
+//! Same trait surface as [`super::memory::MemoryStore`] over//! `sqlx::SqlitePool`. SQLite has **no** `VECTOR_SEARCH` capability, so
 //! `capabilities()` is empty, `vector_candidates` returns
 //! [`StoreError::Capability`], and `vector_dimensions()` is `None` (the
 //! `embedding BLOB` column is never read or written — see T3.1 handoff).
@@ -94,10 +93,16 @@
 //! write path awaits a future session-metadata mutation, so today the columns
 //! are always NULL after a flush).
 
+// Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
+// the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
+// produces `&mut &mut Transaction` (which does not). Known sqlx+clippy false-positive;
+// kept explicit on purpose.
+#![allow(clippy::explicit_auto_deref)]
+
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::Row;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -131,9 +136,7 @@ impl SqliteStore {
     /// Open a SQLite database — `sqlite::memory:` or a file path.
     pub fn connect(path: &str) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str(path)
-            .map_err(|e| {
-                StoreError::Backend(format!("sqlite connect options {path:?}: {e}"))
-            })?
+            .map_err(|e| StoreError::Backend(format!("sqlite connect options {path:?}: {e}")))?
             // REFERENCES clauses are kept in the DDL for fidelity; enforcing
             // them is the adapter's job (T3.1 handoff).
             .foreign_keys(true);
@@ -413,18 +416,14 @@ impl GraphStore for SqliteStore {
             if i > 0 {
                 sql.push_str(" + ");
             }
-            sql.push_str(
-                "(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)",
-            );
+            sql.push_str("(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)");
         }
         sql.push_str(" AS score FROM concepts WHERE session_id = ? AND (");
         for (i, _) in tokens_l.iter().enumerate() {
             if i > 0 {
                 sql.push_str(" OR ");
             }
-            sql.push_str(
-                "(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)",
-            );
+            sql.push_str("(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)");
         }
         sql.push_str(") ORDER BY score DESC, id ASC LIMIT ?");
 
@@ -674,10 +673,7 @@ fn enum_to_text<T: serde::Serialize>(v: &T, what: &str) -> Result<String, StoreE
     }
 }
 
-fn text_to_enum<T: serde::de::DeserializeOwned>(
-    s: &str,
-    what: &str,
-) -> Result<T, StoreError> {
+fn text_to_enum<T: serde::de::DeserializeOwned>(s: &str, what: &str) -> Result<T, StoreError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|e| StoreError::Backend(format!("invalid stored {what} {s:?}: {e}")))
 }
@@ -708,10 +704,7 @@ async fn upsert_interaction(
     Ok(())
 }
 
-async fn upsert_concept(
-    tx: &mut sqlx::SqliteConnection,
-    c: &Concept,
-) -> Result<(), StoreError> {
+async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<(), StoreError> {
     // Conflict target is the `id` PRIMARY KEY. The partial unique index
     // (session_id, canonical_key) WHERE concept_type <> 'Observation' is NOT a
     // valid target (bare ON CONFLICT errors); legal duplicate Observation keys
@@ -762,10 +755,7 @@ async fn upsert_concept(
     Ok(())
 }
 
-async fn upsert_edge(
-    tx: &mut sqlx::SqliteConnection,
-    e: &Edge,
-) -> Result<(), StoreError> {
+async fn upsert_edge(tx: &mut sqlx::SqliteConnection, e: &Edge) -> Result<(), StoreError> {
     // Natural-key preference (MemoryStore parity): the table-level
     // UNIQUE (source, target, edge_type) autoindexes and is a legal target.
     let edge_type = enum_to_text(&e.edge_type, "edge_type")?;
@@ -797,10 +787,7 @@ async fn upsert_edge(
     Ok(())
 }
 
-async fn delete_node(
-    tx: &mut sqlx::SqliteConnection,
-    id: NodeId,
-) -> Result<(), StoreError> {
+async fn delete_node(tx: &mut sqlx::SqliteConnection, id: NodeId) -> Result<(), StoreError> {
     // MemoryStore parity: a node delete removes the node plus every incident
     // edge (edges carry no FK, so dangling edges would otherwise survive).
     let id_text = id.0.to_string();
@@ -1101,8 +1088,8 @@ mod tests {
     use crate::graph::demote::demote;
     use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
-    use crate::store::memory::MemoryStore;
     use crate::store::load::load_session;
+    use crate::store::memory::MemoryStore;
     use crate::types::{AgentId, CanonizationStatus, ConceptType, EdgeType, Node as NodeKind};
     use chrono::TimeZone;
 
@@ -1341,7 +1328,10 @@ mod tests {
                     "demoted observation must keep its chunk_group_id across flush→load"
                 );
             } else {
-                assert_eq!(c.chunk_group_id, None, "non-Observation concepts carry no chunk group");
+                assert_eq!(
+                    c.chunk_group_id, None,
+                    "non-Observation concepts carry no chunk group"
+                );
             }
         }
         // Index rebuilt from the snapshot agrees with a reference and finds
@@ -1600,10 +1590,7 @@ mod tests {
 
                 let span = sqlite.interaction_span(&sid, *node, age).await.unwrap();
                 let span_want = memory.interaction_span(&sid, *node, age).await.unwrap();
-                assert_eq!(
-                    span, span_want,
-                    "interaction_span {node} age {age:?}"
-                );
+                assert_eq!(span, span_want, "interaction_span {node} age {age:?}");
             }
         }
 
@@ -1616,7 +1603,13 @@ mod tests {
             .find(|c| c.id.0.to_string().ends_with("001001"))
             .unwrap()
             .id;
-        assert_eq!(sqlite.blast_radius(&sid, hub, Duration::from_secs(0)).await.unwrap(), 8);
+        assert_eq!(
+            sqlite
+                .blast_radius(&sid, hub, Duration::from_secs(0))
+                .await
+                .unwrap(),
+            8
+        );
         let span = sqlite
             .interaction_span(&sid, hub, Duration::from_secs(0))
             .await
@@ -1665,7 +1658,10 @@ mod tests {
             .unwrap();
 
         let snap = store.load_session(&sid).await.unwrap();
-        assert_eq!(snap.concepts[0].canonization_status, CanonizationStatus::Candidate);
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Candidate
+        );
         assert_eq!(snap.concepts[0].blast_radius, Some(2));
         assert_eq!(snap.canonization_events.len(), 1);
         assert_eq!(snap.canonization_events[0], ev1);
@@ -1682,7 +1678,10 @@ mod tests {
         };
         store.record_canonization(&ev2).await.unwrap();
         let snap = store.load_session(&sid).await.unwrap();
-        assert_eq!(snap.concepts[0].canonization_status, CanonizationStatus::Venerable);
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable
+        );
         assert_eq!(snap.canonization_events.len(), 2);
         assert_eq!(snap.canonization_events[1], ev2);
 
@@ -1741,7 +1740,10 @@ mod tests {
         .fetch_all(store.pool())
         .await
         .unwrap();
-        assert_eq!(rows, vec!["2026-01-01T12:00:00.000Z", "2026-01-01T12:00:00.250Z"]);
+        assert_eq!(
+            rows,
+            vec!["2026-01-01T12:00:00.000Z", "2026-01-01T12:00:00.250Z"]
+        );
         assert!(rows[0] < rows[1]);
 
         // Load parses back to the exact instants.
@@ -1772,8 +1774,22 @@ mod tests {
             .flush(&MutationBatch {
                 mutations: vec![
                     plant_interaction(&sid, i1, None, ts),
-                    plant_concept(&sid, o1, i1, "duplicate sentence", ConceptType::Observation, ts),
-                    plant_concept(&sid, o2, i1, "duplicate sentence", ConceptType::Observation, ts),
+                    plant_concept(
+                        &sid,
+                        o1,
+                        i1,
+                        "duplicate sentence",
+                        ConceptType::Observation,
+                        ts,
+                    ),
+                    plant_concept(
+                        &sid,
+                        o2,
+                        i1,
+                        "duplicate sentence",
+                        ConceptType::Observation,
+                        ts,
+                    ),
                     plant_concept(&sid, e1, i1, "duplicate sentence", ConceptType::Entity, ts),
                 ],
             })

@@ -83,7 +83,7 @@ separate `CREATE INDEX`. `init_schema()` executes these idempotently.
 requires:   T1.2, T3.1
 fixture-ok: no   # needs the T0.2 cluster; unit-level SQL shape tests only
 owns:       src/store/cockroach.rs
-status:     claimed:main-swarm (worktree worktrees/p3-t3.2-cockroach)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 feature:    store-cockroach
 ```
 Full `GraphStore` impl over `sqlx::PgPool`, gated on feature `store-cockroach`, registered
@@ -109,7 +109,7 @@ mismatched embedders.
 requires:   T1.2, T3.1
 fixture-ok: yes  # sqlite::memory: — no external dependency at all
 owns:       src/store/sqlite.rs
-status:     claimed:main-swarm (worktree worktrees/p3-t3.3-sqlite)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 feature:    store-sqlite
 ```
 Same shape over `sqlx::SqlitePool`, gated on feature `store-sqlite`, registered in

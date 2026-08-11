@@ -325,10 +325,7 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             // startup context; see sqlite.rs).
             #[cfg(feature = "store-sqlite")]
             {
-                let path = cfg
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| "sqlite::memory:".into());
+                let path = cfg.path.clone().unwrap_or_else(|| "sqlite::memory:".into());
                 Ok(Box::new(SqliteStore::connect(&path)?))
             }
             #[cfg(not(feature = "store-sqlite"))]
