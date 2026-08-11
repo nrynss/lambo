@@ -45,6 +45,8 @@ pub mod graph;
 
 // Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
 pub mod canonical;
+// T2.3 — `derive()`, the primary write path (spec §7; see `derive.rs`).
+pub mod derive;
 // Inverted index + BM25 (T2.6) — spec §8 phase-1 keyword source.
 pub mod index;
 // T2.7 — spec §11 soft-lock reservation policy (see `reserve.rs`). Kept a single

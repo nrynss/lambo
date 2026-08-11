@@ -406,3 +406,80 @@ years) returns the typed error instead of panicking (round-1 review finding
 P2). `cargo test graph::` (default features): 44 passed / 0 failed (28
 pre-existing + 16 new), 0 warnings. No fixtures read, so no
 `#[cfg(feature = "fixtures")]` gating needed.
+### T2.3 — `derive()` (done 2026-08-11, by T23Derive)
+
+**What exists now:** `src/graph/derive.rs` (new, ~750 LOC incl. tests) + one
+additive `pub mod derive;` line in `src/graph/mod.rs`. No other files touched
+(in particular `graph.rs`, `canonical.rs` untouched). Pinned API as spec'd:
+`ParentOf<'a>` (`none()` / `from_pairs(&[(&str, &str)])`), `DeriveOutcome {
+created: Vec<NodeId>, matched: Vec<NodeId>, reinforced: usize }`,
+`derive(graph, interaction, agent, concepts, parent_of, max_cooccurrence_per_derive)
+-> Result<DeriveOutcome, LamboError>`. Module constants `COOCCURRENCE_WEIGHT =
+0.5`, `HIERARCHICAL_WEIGHT = 0.5` (pub, doc-commented); `PARENT_OF_CONCEPT_TYPE
+= Entity`. Daemon notify seam documented in the module doc (deferred to T4 — no
+stubs, no channel types).
+
+**Decisions the next agent must not re-derive (review these):**
+
+- **Derives "ensure" is realized by `insert_concept`, not a separate
+  `upsert_edge`.** Created concepts get node + Derives (w=0.9, re=1) from
+  `insert_concept`; an extra step-4 `upsert_edge` would immediately reinforce a
+  fresh edge (0.9→1.9) and break fixture-compatible weights (the P2 rebuild
+  test compares snapshots). Matched concepts are **re-upserted** via
+  `insert_concept` — the ONLY public write path that emits the required
+  `UpsertNode`, so the §2.4 drained-batch ordering contract ("every UpsertEdge's
+  endpoints were UpsertNode'd earlier in the same batch") holds when derive
+  writes edges to pre-existing concepts. The re-upsert is idempotent (stored
+  `Concept` cloned as-is; status/gc_survived preserved) and its structural
+  Derives write creates (new interaction) or reinforces (same interaction
+  re-derive) the edge — this is the "re-derives reinforce per T2.1 semantics"
+  path. Every node *written earlier in the same call* — created, or matched
+  and re-upserted (canonical-key collision onto a pre-existing concept) — is
+  tracked in `written_this_call` and NOT re-upserted, so one call can never
+  self-reinforce.
+- **`reinforced` counting:** `edge_between` before each write; a hit = the
+  write is a duplicate natural key = +1 (Derives via insert_concept included).
+  Verified: re-derive of 2 concepts from the same interaction ⇒ reinforced == 3
+  (2 Derives + 1 CoOccurrence); parent_of re-derive ⇒ 3 (2 Derives ends + 1
+  Hierarchical).
+- **Within-call dedup:** `concepts` deduped by raw content (first occurrence
+  wins, incl. its ConceptType); `parent_of` pairs deduped by the **resolved**
+  `(parent_node, child_node)` pair (raw-string dedup would let two pairs whose
+  ends canonicalize to the same node pair write a duplicate Hierarchical edge).
+  Different contents collapsing onto one canonical key are handled by the
+  matcher (every colliding content resolves Matched to the same node and is
+  recorded in `outcome.matched`) — a node is never written twice in one call.
+- **CoOccurrence** is pairwise over the `concepts` argument only (created +
+  matched nodes, call order, direction earlier→later), capped at
+  `max_cooccurrence_per_derive` **edges written per call** (create or reinforce
+  both count). `ParentOf` contents do NOT join CoOccurrence.
+- **`ParentOf` contents** resolve through the same canonicalize/create path;
+  a brand-new one is created as a concept with `PARENT_OF_CONCEPT_TYPE` (Entity
+  — derive's caller supplies types only for `concepts`) and its own Derives
+  edge, and appears in `outcome.created`/`matched` alongside `concepts` nodes.
+  **Reflexive pairs are rejected** with `StoreError::Invariant` — a
+  Hierarchical self-loop is a cycle (§5.7 / adve-review T2.1 M1) and would trip
+  `assert_invariants`. Raw-content-equal pairs are rejected before any write;
+  key-collision pairs after resolution (concepts may already exist — derive is
+  not transactional, though it can never leave the graph invariant-violating).
+- **Timestamps:** derive takes no clock; all stamps derive from the
+  interaction's `created_at` (deterministic, rebuild-friendly). Derives edges
+  follow `insert_concept`'s convention (edge stamped with the concept's
+  `created_at`).
+- **Errors:** missing interaction → `NotFound`; interaction id naming a
+  non-Interaction node → `NotFound` (pinned contract says both); reflexive
+  parent_of → `Invariant`. `derive` returns `Ok(empty outcome)` for an empty
+  call (no-op, no mutations).
+
+**Verification:** 15 new unit tests (creation, within-call dedup, match-reuse
+across interactions, CoOccurrence cap 2-of-4, parent_of creation, re-derive
+reinforcement incl. Hierarchical, missing/non-interaction errors, reflexive
+rejection, canonical-key-collision collapse without a CoOccurrence self-loop,
+empty no-op, drained-batch ordering, plus two round-1 review regressions:
+key collision onto a pre-existing concept must not self-reinforce the fresh
+Derives edge, and colliding parent_of pairs must write one Hierarchical edge).
+`cargo test graph::` (default features):
+80 passed / 0 failed (65 pre-existing + 15 new), 0 warnings; clean
+`cargo build`. Every test ends with `assert_invariants()` (Derives/Temporal
+§5.7 coverage included). No fixtures read, so no `#[cfg(feature =
+"fixtures")]` gating needed.
