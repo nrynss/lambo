@@ -28,6 +28,11 @@ mod error;
 #[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
 pub(crate) use error::map_write_err;
 
+// STORE-1/CON-8 — shared vector codec for the sqlx-backed adapters (Cockroach
+// VECTOR text literal; SQLite stores the same text as a BLOB).
+#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+pub(crate) mod vector;
+
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.

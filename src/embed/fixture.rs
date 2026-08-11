@@ -116,6 +116,13 @@ impl Embedder for FixtureEmbedder {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        // CON-7: reject empty/whitespace input exactly like BGE — the trait
+        // contract forbids embedding the empty string (see `embed/mod.rs`).
+        if text.trim().is_empty() {
+            return Err(EmbedError::Unavailable(
+                "cannot embed empty/whitespace text".into(),
+            ));
+        }
         Ok(self.embed_sync(text))
     }
 }
@@ -131,6 +138,18 @@ mod tests {
         let b = e.embed("user schema").await.unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), DEFAULT_FIXTURE_DIM);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_and_whitespace_input() {
+        let e = FixtureEmbedder::new();
+        for text in ["", "   ", "\t\n"] {
+            let err = e.embed(text).await.unwrap_err();
+            assert!(
+                matches!(err, EmbedError::Unavailable(_)),
+                "CON-7: {text:?} must be rejected, got {err:?}"
+            );
+        }
     }
 
     #[test]

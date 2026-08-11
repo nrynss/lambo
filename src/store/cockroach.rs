@@ -69,14 +69,17 @@
 //!   The concept upsert writes it and `load_session` reads it back — a flush→load
 //!   cycle now PRESERVES the T5.2 sibling co-retrieval key (regression-locked in the
 //!   live conformance suite).
-//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) is snapshot-only
-//!   (S5-class).** The sessions table carries `embedding_kind STRING`,
-//!   `embedding_model STRING`, `embedding_dim INT` (nullable; same CREATE + ALTER
-//!   `ADD COLUMN IF NOT EXISTS` idempotency pattern as `chunk_group_id`), and
-//!   `load_session` materializes `GraphSnapshot.embedding` when `embedding_kind` is
-//!   present. `flush` does NOT write them — there is no session-metadata `Mutation`
-//!   kind, so the write path is pending a future mutation (documented in the T3.2
-//!   handoff; the live suite stamps them via direct SQL and asserts flush immunity).
+//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) persists on the
+//!   full-snapshot `seed` path.** The sessions table carries `embedding_kind
+//!   STRING`, `embedding_model STRING`, `embedding_dim INT` (nullable; same
+//!   CREATE + ALTER `ADD COLUMN IF NOT EXISTS` idempotency pattern as
+//!   `chunk_group_id`), `seed` upserts all three from the snapshot's contract,
+//!   and `load_session` materializes `GraphSnapshot.embedding` when
+//!   `embedding_kind` is present (STORE-1 remediation). `flush` still does NOT
+//!   write them — there is no session-metadata `Mutation` kind (S5-class;
+//!   documented in the T3.2 handoff), so a flush after a seed leaves the
+//!   stamped contract untouched (regression-locked by the live conformance
+//!   suite).
 //!   The DDL column width *is* read from the schema: `vector_dimensions()` parses
 //!   `VECTOR(n)` out of the embedded `001_init.sql` (not a global constant), so
 //!   `resolve::check_vector_compatibility` can reject mismatched embedders.
@@ -100,6 +103,7 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
+use super::vector::{decode_vector, encode_vector};
 use super::{map_write_err, Capabilities, GraphStore, StoreConfig};
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
@@ -129,15 +133,21 @@ ON CONFLICT (session_id) DO NOTHING
 "#;
 
 /// Full-snapshot sessions upsert (fixtures `seed` path): root_goal JSONB, created_at,
-/// closed_at. `COALESCE($3, now())` keeps the NOT NULL default when a snapshot omits it.
+/// closed_at, and the `EmbeddingContract` columns (STORE-1). `COALESCE($3, now())`
+/// keeps the NOT NULL default when a snapshot omits it.
 #[cfg(any(test, feature = "fixtures"))]
 const UPSERT_SESSION_SQL: &str = r#"
-INSERT INTO sessions (session_id, root_goal, created_at, closed_at)
-VALUES ($1, $2::JSONB, COALESCE($3, now()), $4)
+INSERT INTO sessions (
+    session_id, root_goal, created_at, closed_at,
+    embedding_kind, embedding_model, embedding_dim
+) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5::STRING, $6::STRING, $7::INT)
 ON CONFLICT (session_id) DO UPDATE SET
     root_goal = EXCLUDED.root_goal,
     created_at = EXCLUDED.created_at,
-    closed_at = EXCLUDED.closed_at
+    closed_at = EXCLUDED.closed_at,
+    embedding_kind = EXCLUDED.embedding_kind,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_dim = EXCLUDED.embedding_dim
 "#;
 
 const UPSERT_INTERACTION_SQL: &str = r#"
@@ -492,43 +502,9 @@ fn schema_vector_dim(ddl: &str) -> Option<usize> {
     rest[..end].trim().parse().ok()
 }
 
-/// Encode an embedding as Cockroach's `VECTOR` text literal `[x,y,z]` (T0.3 Attempt A:
-/// bind text, cast `$n::VECTOR` server-side). Rust `f32` `Display` is shortest-round-trip
-/// so encode→decode is exact. Rejects non-finite elements (a `NaN`/`Inf` vector is not a
-/// legal embedding and Cockroach would reject the literal).
-fn encode_vector(v: &[f32]) -> Result<String, StoreError> {
-    if let Some(bad) = v.iter().find(|x| !x.is_finite()) {
-        return Err(StoreError::Backend(format!(
-            "embedding contains non-finite value {bad} (at index {:?})",
-            v.iter().position(|x| !x.is_finite())
-        )));
-    }
-    let mut s = String::with_capacity(v.len() * 8);
-    s.push('[');
-    for (i, x) in v.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!("{x}"));
-    }
-    s.push(']');
-    Ok(s)
-}
-
-/// Inverse of [`encode_vector`] — parses the `embedding::STRING` read-back form.
-fn decode_vector(s: &str) -> Result<Vec<f32>, StoreError> {
-    let t = s.trim().trim_start_matches('[').trim_end_matches(']');
-    if t.is_empty() {
-        return Ok(Vec::new());
-    }
-    t.split(',')
-        .map(|p| {
-            p.trim().parse::<f32>().map_err(|e| {
-                StoreError::Backend(format!("decode VECTOR element {p:?} from {s:?}: {e}"))
-            })
-        })
-        .collect()
-}
+// `encode_vector` / `decode_vector` live in the shared `super::vector` module
+// (CON-8: SQLite stores the same text form as a BLOB, so both adapters share
+// one codec — see `store/vector.rs`).
 
 /// Embeddings must match the schema column width before they ever reach SQL.
 fn check_embedding_dim(v: &[f32], dim: usize) -> Result<(), StoreError> {
@@ -846,7 +822,9 @@ impl CockroachStore {
     }
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
     /// seven tables in one transaction — the full-snapshot path that carries synonyms and
-    /// reservations (they have no `Mutation` kind, S5 contract).
+    /// reservations (they have no `Mutation` kind, S5 contract). Also persists
+    /// `GraphSnapshot.embedding` into `sessions.embedding_{kind,model,dim}` (STORE-1),
+    /// so a seeded contract survives restarts instead of being dropped.
     #[cfg(feature = "fixtures")]
     pub async fn seed(&self, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
         let sid = &snapshot.session_id.0;
@@ -860,6 +838,11 @@ impl CockroachStore {
         // Copy handle (Option<&str>): the FnMut body runs once per retry attempt and
         // must not move the owned String into the first attempt's future.
         let root_goal = root_goal.as_deref();
+        let embedding = snapshot.embedding.as_ref();
+        // Copy handles for the same FnMut-reborrow reason as root_goal.
+        let embedding_kind = embedding.map(|c| c.kind.as_str());
+        let embedding_model = embedding.and_then(|c| c.model.as_deref());
+        let embedding_dim = embedding.map(|c| c.dim as i64);
         tx_retry(|| async move {
             let mut tx = pool
                 .begin()
@@ -870,6 +853,9 @@ impl CockroachStore {
                 .bind(root_goal)
                 .bind(snapshot.created_at)
                 .bind(snapshot.closed_at)
+                .bind(embedding_kind)
+                .bind(embedding_model)
+                .bind(embedding_dim)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -1417,46 +1403,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn sample_vec(dim: usize, seed: f32) -> Vec<f32> {
-        (0..dim)
-            .map(|i| ((i as f32 + 1.0) * seed).sin() * 0.5)
-            .collect()
-    }
-
-    #[test]
-    fn vector_encode_decode_roundtrip_exact() {
-        for dim in [0usize, 1, 8, 1024] {
-            let v = sample_vec(dim, 0.17);
-            let text = encode_vector(&v).unwrap();
-            assert!(text.starts_with('[') && text.ends_with(']'));
-            let back = decode_vector(&text).unwrap();
-            assert_eq!(
-                v, back,
-                "dim {dim}: encode -> decode must be exact (shortest f32 repr)"
-            );
-        }
-    }
-
-    #[test]
-    fn vector_decode_accepts_cockroach_renderings() {
-        // Cockroach `embedding::STRING` output has no spaces; tolerate any whitespace.
-        assert_eq!(
-            decode_vector("[0.5,-0.25,1e2]").unwrap(),
-            vec![0.5, -0.25, 100.0]
-        );
-        assert_eq!(decode_vector("[]").unwrap(), Vec::<f32>::new());
-        assert_eq!(decode_vector(" [ 1 , 2 ] ").unwrap(), vec![1.0, 2.0]);
-        assert!(decode_vector("[1,oops]").is_err());
-    }
-
-    #[test]
-    fn vector_encode_rejects_non_finite() {
-        let mut v = sample_vec(4, 1.0);
-        v[2] = f32::NAN;
-        assert!(encode_vector(&v).is_err());
-        v[2] = f32::INFINITY;
-        assert!(encode_vector(&v).is_err());
-    }
+    // Vector codec tests (roundtrip / rendering / non-finite) live in the shared
+    // `super::vector` module — SQLite stores the same text form, so the codec's
+    // coverage must run under either store feature (CON-8).
 
     #[test]
     fn schema_vector_dim_reads_ddl_width() {
@@ -1560,7 +1509,11 @@ mod tests {
         assert_eq!(placeholder_max(UPSERT_INTERACTION_SQL), 6);
         assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 16);
         assert_eq!(placeholder_max(UPSERT_EDGE_SQL), 9);
-        assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 4);
+        // STORE-1: the full-snapshot upsert now carries the embedding contract
+        // (kind/model/dim) alongside root_goal/created_at/closed_at.
+        assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 7);
+        assert!(UPSERT_SESSION_SQL.contains("embedding_kind = EXCLUDED.embedding_kind"));
+        assert!(UPSERT_SESSION_SQL.contains("embedding_dim = EXCLUDED.embedding_dim"));
         assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 8);
         assert_eq!(placeholder_max(UPDATE_CONCEPT_STATUS_SQL), 5);
         assert_eq!(placeholder_max(UPSERT_SYNONYM_SQL), 3);
@@ -2298,34 +2251,24 @@ mod conformance {
     }
 
     async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
-        // Embedding contract (S5-class snapshot metadata): load_session reads
-        // embedding_kind/model/dim into GraphSnapshot.embedding when present, and
-        // flush does NOT write or clobber them (no session-metadata Mutation kind).
-        // The live suite stamps them via direct SQL because no flush path exists.
+        // Embedding contract (S5-class snapshot metadata): seed — the PRODUCTION
+        // full-snapshot path (STORE-1 remediation) — persists embedding_kind/model/dim,
+        // and load_session materializes GraphSnapshot.embedding when present. A later
+        // flush (which only ensures the session row; there is no session-metadata
+        // Mutation kind) must NOT clobber the stamped contract.
         let sid = SessionId::from(format!("conformance-embed-{}", Uuid::new_v4()));
-        let i1 = NodeId::new();
-        let c1 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, Utc::now()),
-                    plant_concept(&sid, c1, i1, "seed concept", Utc::now(), None),
-                ],
+            .seed(&GraphSnapshot {
+                session_id: sid.clone(),
+                embedding: Some(EmbeddingContract {
+                    kind: "bge_m3".into(),
+                    model: Some("BAAI/bge-m3".into()),
+                    dim: 1024,
+                }),
+                ..Default::default()
             })
             .await
             .unwrap();
-        let pool = store.pool().await.unwrap();
-        sqlx::query(
-            "UPDATE sessions SET embedding_kind = $2, embedding_model = $3, embedding_dim = $4 \
-             WHERE session_id = $1",
-        )
-        .bind(&sid.0)
-        .bind("bge_m3")
-        .bind("BAAI/bge-m3")
-        .bind(1024_i32)
-        .execute(pool)
-        .await
-        .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(
             snap.embedding,
@@ -2334,20 +2277,17 @@ mod conformance {
                 model: Some("BAAI/bge-m3".into()),
                 dim: 1024,
             }),
-            "load_session must materialize the stamped embedding contract"
+            "load_session must materialize the seeded embedding contract"
         );
         // A subsequent flush (which only ensures the session row) must not clobber the
         // snapshot-only metadata.
+        let i1 = NodeId::new();
         store
             .flush(&MutationBatch {
-                mutations: vec![plant_concept(
-                    &sid,
-                    NodeId::new(),
-                    i1,
-                    "more concepts",
-                    Utc::now(),
-                    None,
-                )],
+                mutations: vec![
+                    plant_interaction(&sid, i1, Utc::now()),
+                    plant_concept(&sid, NodeId::new(), i1, "seed concept", Utc::now(), None),
+                ],
             })
             .await
             .unwrap();
@@ -2358,6 +2298,11 @@ mod conformance {
         assert_eq!(emb.kind, "bge_m3");
         assert_eq!(emb.model.as_deref(), Some("BAAI/bge-m3"));
         assert_eq!(emb.dim, 1024);
+        assert_eq!(
+            snap.concepts.len(),
+            1,
+            "flush content still lands alongside the contract"
+        );
         // Session with no stamp reads back None.
         let plain_sid = SessionId::from(format!("conformance-embed-none-{}", Uuid::new_v4()));
         store

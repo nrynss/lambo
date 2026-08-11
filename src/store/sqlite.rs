@@ -1,9 +1,10 @@
 //! T3.3 — SQLite GraphStore adapter (offline / test tier, spec §3.2–§3.3, §4).
 //!
-//! Same trait surface as [`super::memory::MemoryStore`] over//! `sqlx::SqlitePool`. SQLite has **no** `VECTOR_SEARCH` capability, so
-//! `capabilities()` is empty, `vector_candidates` returns
-//! [`StoreError::Capability`], and `vector_dimensions()` is `None` (the
-//! `embedding BLOB` column is never read or written — see T3.1 handoff).
+//! Same trait surface as [`super::memory::MemoryStore`] over `sqlx::SqlitePool`. SQLite has
+//! **no** `VECTOR_SEARCH` capability, so `capabilities()` is empty and
+//! `vector_candidates` returns [`StoreError::Capability`]; `vector_dimensions()` is `None`.
+//! `Concept.embedding` IS written and read for flush→load round-trip parity (CON-8 — the
+//! shared text form lives in the `embedding BLOB`), but it is never queried.
 //!
 //! ## Dialect notes (T3.1 handoff, binding)
 //!
@@ -119,16 +120,17 @@
 //! `created_at` DB-default) but its metadata columns are inert until a
 //! full-snapshot save path exists.
 //!
-//! ## Embedding contract (schema completeness — S5-class, read-only)
+//! ## Embedding contract (session metadata)
 //!
 //! The `sessions` row carries `embedding_kind` / `embedding_model` /
 //! `embedding_dim` (nullable, converged the same guarded way as
-//! `chunk_group_id`). `load_session` reads them into
-//! `GraphSnapshot.embedding` when present; a row with `embedding_kind` XOR
-//! `embedding_dim` is treated as a corruption error. `flush` does NOT write
-//! them — no `Mutation` kind carries session metadata (S5: snapshot-only; the
-//! write path awaits a future session-metadata mutation, so today the columns
-//! are always NULL after a flush).
+//! `chunk_group_id`). The full-snapshot `seed` path (fixtures track, STORE-1)
+//! persists `GraphSnapshot.embedding` into those columns; `load_session` reads
+//! them back into `GraphSnapshot.embedding` when present, treating a row with
+//! `embedding_kind` XOR `embedding_dim` as a corruption error. `flush` does
+//! NOT write them — no `Mutation` kind carries session metadata (S5:
+//! snapshot-only), so a flush after a seed leaves the stamped contract
+//! untouched (the round-trip test asserts exactly that).
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -145,6 +147,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use super::vector::{decode_vector, encode_vector};
 use super::{map_write_err, Capabilities, GraphStore};
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
@@ -311,6 +314,124 @@ impl SqliteStore {
         if found.is_none() {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
+        Ok(())
+    }
+
+    /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore/Cockroach
+    /// parity). Writes all seven tables in one transaction — the full-snapshot
+    /// path that carries synonyms and reservations (they have no `Mutation` kind,
+    /// S5 contract). Persists `GraphSnapshot.embedding` into
+    /// `sessions.embedding_{kind,model,dim}` (STORE-1), so a seeded contract
+    /// survives `load_session` instead of being dropped.
+    #[cfg(feature = "fixtures")]
+    pub async fn seed(&self, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("begin seed transaction: {m}")))?;
+        let root_goal = snapshot
+            .root_goal
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreError::Backend(format!("serialize root_goal: {e}")))?;
+        let embedding = snapshot.embedding.as_ref();
+        let (embedding_kind, embedding_model, embedding_dim) = match embedding {
+            Some(c) => (
+                Some(c.kind.as_str()),
+                c.model.as_deref(),
+                Some(c.dim as i64),
+            ),
+            None => (None, None, None),
+        };
+        sqlx::query(
+            "INSERT INTO sessions (\
+                 session_id, root_goal, created_at, closed_at, \
+                 embedding_kind, embedding_model, embedding_dim) \
+             VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?, ?, ?, ?) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+                 root_goal = excluded.root_goal, \
+                 created_at = excluded.created_at, \
+                 closed_at = excluded.closed_at, \
+                 embedding_kind = excluded.embedding_kind, \
+                 embedding_model = excluded.embedding_model, \
+                 embedding_dim = excluded.embedding_dim",
+        )
+        .bind(&snapshot.session_id.0)
+        .bind(root_goal.as_deref())
+        .bind(snapshot.created_at.map(ts_to_text))
+        .bind(snapshot.closed_at.map(ts_to_text))
+        .bind(embedding_kind)
+        .bind(embedding_model)
+        .bind(embedding_dim)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
+        for i in &snapshot.interactions {
+            upsert_interaction(&mut *tx, i).await?;
+        }
+        for c in &snapshot.concepts {
+            upsert_concept(&mut *tx, c).await?;
+        }
+        for e in &snapshot.edges {
+            upsert_edge(&mut *tx, e).await?;
+        }
+        for s in &snapshot.synonyms {
+            sqlx::query(
+                "INSERT INTO synonyms (session_id, source_key, canonical_key) \
+                 VALUES (?, ?, ?) \
+                 ON CONFLICT (session_id, source_key) DO UPDATE SET \
+                     canonical_key = excluded.canonical_key",
+            )
+            .bind(&s.session_id.0)
+            .bind(&s.source_key)
+            .bind(&s.canonical_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("upsert synonym: {m}")))?;
+        }
+        for r in &snapshot.reservations {
+            sqlx::query(
+                "INSERT INTO reservations (session_id, node_id, agent_id, expires_at) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (session_id, node_id) DO UPDATE SET \
+                     agent_id = excluded.agent_id, \
+                     expires_at = excluded.expires_at",
+            )
+            .bind(&r.session_id.0)
+            .bind(r.node_id.0.to_string())
+            .bind(&r.agent_id.0)
+            .bind(ts_to_text(r.expires_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("upsert reservation: {m}")))?;
+        }
+        for ev in &snapshot.canonization_events {
+            let from_status = enum_to_text(&ev.from_status, "from_status")?;
+            let to_status = enum_to_text(&ev.to_status, "to_status")?;
+            sqlx::query(
+                "INSERT INTO canonization_events (\
+                     id, session_id, node_id, from_status, to_status, blast_radius, \
+                     last_demotion_time, occurred_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(ev.id.0.to_string())
+            .bind(&ev.session_id.0)
+            .bind(ev.node_id.0.to_string())
+            .bind(from_status)
+            .bind(to_status)
+            .bind(ev.blast_radius)
+            .bind(ev.last_demotion_time.map(ts_to_text))
+            .bind(ts_to_text(ev.occurred_at))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("commit seed transaction: {m}")))?;
         Ok(())
     }
 }
@@ -814,12 +935,22 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     // key surfaces as an error (the graph tier already forbids it in RAM).
     let concept_type = enum_to_text(&c.concept_type, "concept_type")?;
     let status = enum_to_text(&c.canonization_status, "canonization_status")?;
+    // CON-8: the embedding is written for flush→load round-trip parity. Same
+    // wire form as Cockroach's VECTOR text literal (shared store::vector codec),
+    // stored in the BLOB column; never NULL for a present vector, NULL otherwise.
+    let embedding = c
+        .embedding
+        .as_ref()
+        .map(|v| encode_vector(v))
+        .transpose()?
+        .map(|s| s.into_bytes());
     sqlx::query(
         "INSERT INTO concepts (\
              id, session_id, content, canonical_key, concept_type, origin_interaction, \
              origin_agent, created_at, access_count, last_accessed, gc_survived, \
-             canonization_status, blast_radius, last_demotion_time, chunk_group_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             canonization_status, blast_radius, last_demotion_time, embedding, \
+             chunk_group_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (id) DO UPDATE SET \
              session_id = excluded.session_id, \
              content = excluded.content, \
@@ -834,6 +965,7 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
              canonization_status = excluded.canonization_status, \
              blast_radius = excluded.blast_radius, \
              last_demotion_time = excluded.last_demotion_time, \
+             embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id",
     )
     .bind(c.id.0.to_string())
@@ -850,6 +982,7 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     .bind(status)
     .bind(c.blast_radius)
     .bind(c.last_demotion_time.map(ts_to_text))
+    .bind(embedding.as_deref())
     .bind(&c.chunk_group_id)
     .execute(&mut *tx)
     .await
@@ -1013,7 +1146,8 @@ async fn load_concepts(
     let rows = sqlx::query(
         "SELECT id, session_id, content, canonical_key, concept_type, origin_interaction, \
                 origin_agent, created_at, access_count, last_accessed, gc_survived, \
-                canonization_status, blast_radius, last_demotion_time, chunk_group_id \
+                canonization_status, blast_radius, last_demotion_time, embedding, \
+                chunk_group_id \
          FROM concepts WHERE session_id = ? ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -1036,7 +1170,22 @@ async fn load_concepts(
         let status: String = row.get(11);
         let blast_radius: Option<i32> = row.get(12);
         let last_demotion: Option<String> = row.get(13);
-        let chunk_group_id: Option<String> = row.get(14);
+        // CON-8: decode the BLOB back to the shared text form. A corrupt blob
+        // (invalid UTF-8 / unparseable elements) is a backend error, not a panic.
+        let embedding: Option<Vec<u8>> = row.get(14);
+        let embedding = match embedding {
+            Some(bytes) => {
+                let text = std::str::from_utf8(&bytes).map_err(|e| {
+                    StoreError::Backend(format!(
+                        "concepts.embedding for {} is not valid UTF-8: {e}",
+                        id
+                    ))
+                })?;
+                Some(decode_vector(text)?)
+            }
+            None => None,
+        };
+        let chunk_group_id: Option<String> = row.get(15);
         out.push(Concept {
             id: node_id(&id, "concept id")?,
             session_id: SessionId::from(sid),
@@ -1052,7 +1201,7 @@ async fn load_concepts(
             canonization_status: text_to_enum(&status, "canonization_status")?,
             blast_radius,
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
-            embedding: None,
+            embedding,
             chunk_group_id,
         });
     }
@@ -1311,6 +1460,149 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
+    }
+
+    /// Acceptance (CON-8): `Concept.embedding` survives flush → load on SQLite
+    /// (the column is now written and read), and the loaded snapshot deep-equals
+    /// the MemoryStore oracle on the same batch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concept_embedding_roundtrips_flush_and_load() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("embed-roundtrip");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        // Whole-second timestamps: the SQLite round-trip contract truncates to
+        // milliseconds, so a fresh Utc::now() would break snapshot equality.
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let emb = vec![0.25, -0.5, 1.0, 0.0];
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                Mutation::UpsertNode {
+                    node: NodeKind::Concept(Concept {
+                        id: c1,
+                        session_id: sid.clone(),
+                        content: "embedded concept".into(),
+                        canonical_key: "embedded concept".into(),
+                        concept_type: ConceptType::Entity,
+                        origin_interaction: i1,
+                        origin_agent: AgentId::from("a"),
+                        created_at: ts,
+                        access_count: 0,
+                        last_accessed: None,
+                        gc_survived: 0,
+                        canonization_status: CanonizationStatus::None,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        embedding: Some(emb.clone()),
+                        chunk_group_id: None,
+                    }),
+                },
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(loaded.concepts.len(), 1);
+        assert_eq!(
+            loaded.concepts[0].embedding.as_deref(),
+            Some(emb.as_slice()),
+            "Concept.embedding must survive flush→load (CON-8)"
+        );
+        #[cfg(feature = "store-memory")]
+        {
+            let memory = MemoryStore::new();
+            memory.flush(&batch).await.unwrap();
+            let want = memory.load_session(&sid).await.unwrap();
+            assert_eq!(
+                loaded, want,
+                "sqlite snapshot deep-equals the MemoryStore oracle (embedding included)"
+            );
+        }
+    }
+
+    /// Acceptance (STORE-1, offline gate): the full-snapshot `seed` path persists
+    /// `GraphSnapshot.embedding` into `sessions.embedding_{kind,model,dim}`, and a
+    /// later flush (which only ensures the session row) does not clobber it — the
+    /// SQLite twin of the live cockroach conformance check.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seed_load_preserves_embedding_contract() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("seed-embed-contract");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let contract = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("BAAI/bge-m3".into()),
+            dim: 1024,
+        };
+        store
+            .seed(&GraphSnapshot {
+                session_id: sid.clone(),
+                interactions: vec![Interaction {
+                    id: i1,
+                    session_id: sid.clone(),
+                    agent_id: AgentId::from("a"),
+                    prompt_text: Some("seed".into()),
+                    previous_id: None,
+                    created_at: ts,
+                }],
+                concepts: vec![Concept {
+                    id: c1,
+                    session_id: sid.clone(),
+                    content: "seeded".into(),
+                    canonical_key: "seeded".into(),
+                    concept_type: ConceptType::Entity,
+                    origin_interaction: i1,
+                    origin_agent: AgentId::from("a"),
+                    created_at: ts,
+                    access_count: 0,
+                    last_accessed: None,
+                    gc_survived: 0,
+                    canonization_status: CanonizationStatus::None,
+                    blast_radius: None,
+                    last_demotion_time: None,
+                    embedding: Some(vec![0.1, 0.2, 0.3]),
+                    chunk_group_id: None,
+                }],
+                embedding: Some(contract.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            loaded.embedding.as_ref(),
+            Some(&contract),
+            "seed must persist the embedding contract (STORE-1)"
+        );
+        assert_eq!(
+            loaded.concepts[0].embedding.as_deref(),
+            Some([0.1f32, 0.2, 0.3].as_slice()),
+            "seeded concept embedding round-trips through the full-snapshot path"
+        );
+        // A later flush (session-row ensure only) must not clobber the contract.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(
+                    &sid,
+                    NodeId::new(),
+                    None,
+                    Utc.timestamp_opt(1_752_003_600, 0).unwrap(),
+                )],
+            })
+            .await
+            .unwrap();
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            loaded.embedding.as_ref(),
+            Some(&contract),
+            "flush must not clobber a seeded embedding contract"
+        );
+        assert_eq!(loaded.interactions.len(), 2);
     }
 
     /// Acceptance: mutations-batch.json flush + load round-trip — the SQLite

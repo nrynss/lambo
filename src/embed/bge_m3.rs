@@ -126,43 +126,44 @@ impl BgeM3LlamaCppEmbedder {
     ///   can fall back to canonical matching permanently and log once instead of hammering;
     /// * server-side rejections / malformed / dimension-mismatched output -> `Backend`
     ///   (server is up; the config or version is wrong, and the fix is permanent too).
+    ///
+    /// **CON-2 (fail hard):** there is deliberately NO retry that clears the configured
+    /// model on a 400. A rejected request embeds in the server's default space, which
+    /// would silently diverge from the `EmbeddingContract` stamped from config
+    /// (same dim passes the only runtime check, so the mix would be undetectable).
+    /// The operator fixes the server; the caller's degradation contract handles the rest.
     async fn request_embedding(
         &self,
         model: &str,
         text: &str,
     ) -> Result<EmbedResponse, EmbedError> {
-        let mut model = model.to_string();
-        let mut retried = false;
-        loop {
-            let body = EmbedRequest {
-                model: model.clone(),
-                input: text.to_string(),
-            };
-            let resp = self
-                .client
-                .post(&self.url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
-            let status = resp.status();
-            if status.is_success() {
-                return resp.json().await.map_err(|e| {
-                    EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
-                });
-            }
-            let text_body = resp.text().await.unwrap_or_default();
-            // A 400 on /v1/embeddings usually means the requested model id isn't loaded.
-            // Retry once against the server's default model to be robust to a mismatch.
-            if !model.is_empty() && status == reqwest::StatusCode::BAD_REQUEST && !retried {
-                retried = true;
-                model.clear();
-                continue;
-            }
-            return Err(EmbedError::Backend(format!(
-                "llama.cpp returned {status}: {text_body}"
-            )));
+        let body = EmbedRequest {
+            model: model.to_string(),
+            input: text.to_string(),
+        };
+        let resp = self
+            .client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
+        let status = resp.status();
+        if status.is_success() {
+            return resp.json().await.map_err(|e| {
+                EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
+            });
         }
+        let text_body = resp.text().await.unwrap_or_default();
+        tracing::error!(
+            url = %self.url,
+            model = %model,
+            status = %status,
+            "llama.cpp embeddings request rejected; not retrying without the model (CON-2)"
+        );
+        Err(EmbedError::Backend(format!(
+            "llama.cpp returned {status} for model {model:?}: {text_body}"
+        )))
     }
 }
 
@@ -339,32 +340,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_without_model_on_400_model_not_loaded() {
+    async fn rejects_400_with_configured_model_fail_hard() {
         let server = MockServer::start();
-        // First request carries a model id and 400s (model not loaded).
-        server.mock(|when, then| {
-            when.method(POST).path("/v1/embeddings").matches(|r| {
-                let body = r.body.as_deref().unwrap_or(&[]);
-                String::from_utf8_lossy(body).contains("\"model\":\"my-model\"")
-            });
-            then.status(400).body("model 'my-model' not loaded");
-        });
-        // Retried request omits model -> 200.
-        let ok = server.mock(|when, then| {
+        // A request WITHOUT the configured model must NEVER be sent (CON-2: the
+        // old fallback silently embedded in the server-default space).
+        let default_model_mock = server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings").matches(|r| {
                 let body = r.body.as_deref().unwrap_or(&[]);
                 !String::from_utf8_lossy(body).contains("\"model\"")
             });
             then.status(200).json_body(ok_response());
         });
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(400).body("model 'my-model' not loaded");
+        });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "my-model", 1024).unwrap();
-        let v = e.embed("anything").await.unwrap();
-        assert_eq!(v.len(), 1024);
-        ok.assert();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        assert!(err.to_string().contains("400"), "{err}");
+        assert!(
+            err.to_string().contains("my-model"),
+            "the error must name the configured model: {err}"
+        );
+        default_model_mock.assert_hits(0);
     }
 
     #[tokio::test]
-    async fn no_retry_loop_when_model_empty() {
+    async fn rejects_400_when_no_model_configured() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings");

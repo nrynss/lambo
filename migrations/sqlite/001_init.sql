@@ -22,8 +22,9 @@
 --   JSONB         -> TEXT (serialized JSON; adapter marshals/unmarshals)
 --   INT           -> INTEGER
 --   FLOAT         -> REAL
---   VECTOR(1024)  -> BLOB. UNUSED: SQLite has no VECTOR_SEARCH capability;
---                    adapters never read or write this column.
+--   VECTOR(1024)  -> BLOB. Written and read for flush->load round-trip parity
+--                    (CON-8) as the shared '[x,y,z]' text form; SQLite has no
+--                    VECTOR_SEARCH capability, so the column is never queried.
 --   now() default -> strftime('%Y-%m-%dT%H:%M:%fZ','now') as the ISO-8601 UTC
 --                    equivalent of Cockroach's now(). (Plain SQLite
 --                    CURRENT_TIMESTAMP would yield 'YYYY-MM-DD HH:MM:SS' UTC;
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     root_goal       TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     closed_at       TEXT,
-    embedding_kind  TEXT,   -- session embedding contract (S5 read-only; no write path yet)
+    embedding_kind  TEXT,   -- session embedding contract (S5; written by seed, read by load_session)
     embedding_model TEXT,
     embedding_dim   INTEGER
 );
@@ -78,7 +79,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     canonization_status TEXT NOT NULL DEFAULT 'None',
     blast_radius        INTEGER,
     last_demotion_time  TEXT,
-    embedding           BLOB,   -- unused: SQLite has no VECTOR_SEARCH; adapters never read/write it
+    embedding           BLOB,   -- flush->load parity (CON-8): written/read as the shared text form; no VECTOR_SEARCH
     chunk_group_id      TEXT    -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
 );
 

@@ -33,6 +33,13 @@ pub enum EmbedError {
 }
 
 /// Pluggable embedding backend (default: BGE-M3 via llama.cpp; Bedrock Titan V2 swap-in).
+///
+/// **Input contract (CON-7):** `embed` MUST reject empty / whitespace-only text with
+/// [`EmbedError::Unavailable`] — no implementation may embed the empty string. The
+/// production path already gates content at derive/record_action entry (GRAPH-8), so a
+/// blank string reaching an embedder is a caller bug; every backend must fail it the
+/// same way rather than return a vector (an empty-input vector would silently poison
+/// hybrid ranking on a degraded path).
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -338,6 +345,29 @@ mod tests {
     #[test]
     fn unknown_toml_field_rejected() {
         assert!(toml::from_str::<EmbedderConfig>(r#"knd = "bge_m3""#).is_err());
+    }
+
+    /// CON-7 agreement: every compiled embedder rejects empty/whitespace input
+    /// with `EmbedError::Unavailable` BEFORE any backend traffic.
+    #[cfg(all(feature = "embed-bge", feature = "embed-fixture"))]
+    #[tokio::test]
+    async fn all_embedders_reject_empty_input_identically() {
+        let fixture = FixtureEmbedder::new();
+        // BGE pointed at port 9 (discard): even if the guard regressed, the
+        // request would fail fast (connection refused -> Unavailable), so this
+        // leg only checks error SHAPE, not absence of traffic; the guard itself
+        // is locked by bge_m3::tests::rejects_empty_text (mock server, 404 ->
+        // Backend, so only the guard can produce Unavailable).
+        let bge = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024).unwrap();
+        for text in ["", "   ", "\t\n"] {
+            for e in [&fixture as &dyn Embedder, &bge as &dyn Embedder] {
+                let err = e.embed(text).await.unwrap_err();
+                assert!(
+                    matches!(err, EmbedError::Unavailable(_)),
+                    "embedder must reject {text:?} with Unavailable (CON-7): {err:?}"
+                );
+            }
+        }
     }
 
     #[test]
