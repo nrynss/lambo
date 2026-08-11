@@ -167,7 +167,7 @@ signal, don't implement it.
 requires:   T3.2, T3.3
 fixture-ok: no
 owns:       (blast_radius + interaction_span fns inside cockroach.rs / sqlite.rs — same owner as T3.2/T3.3, claim jointly or sequence)
-status:     claimed:main-swarm (worktree worktrees/p3-t3.6-structural)
+status:     done (2026-08-11, reviewed ACCEPT x2, integrated into phase/p3)
 ```
 The spec §4.1 SQL for Cockroach (**errata:** only concept-sourced
 `Dependency`/`Causal`/`Hierarchical` edges — same as `MemoryStore`; provenance
@@ -183,12 +183,12 @@ is the abstraction's proof — and proves Level B adapters honor the same trait 
 
 ## Exit criteria
 
-- [ ] Conformance suite green ×3 (memory default; sqlite/cockroach under their features)
-- [ ] `build_store` registers both SQL adapters; uncompiled kinds still fail closed
-- [ ] Flush semantics: ordering, retry, degradation, observability all tested
-- [ ] Round-trip load fidelity
-- [ ] Three-way structural-query agreement (incl. §4.1 blast errata)
-- [ ] `sqlx` remains optional (not in default features)
+- [x] Conformance suite green ×3 (memory default; sqlite/cockroach under their features)
+- [x] `build_store` registers both SQL adapters; uncompiled kinds still fail closed
+- [x] Flush semantics: ordering, retry, degradation, observability all tested
+- [x] Round-trip load fidelity
+- [x] Three-way structural-query agreement (incl. §4.1 blast errata)
+- [x] `sqlx` remains optional (not in default features)
 
 ---
 

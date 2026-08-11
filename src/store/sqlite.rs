@@ -590,17 +590,16 @@ impl GraphStore for SqliteStore {
         let cutoff = cutoff_text(Utc::now(), min_age)?;
         let node_text = node.0.to_string();
 
-        let row = sqlx::query(
-            &INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN),
-        )
-        .bind(&node_text)
-        .bind(&session.0)
-        .bind(&cutoff)
-        .bind(&cutoff)
-        .bind(&session.0)
-        .fetch_one(self.pool())
-        .await
-        .map_err(|e| db_err("interaction_span", e))?;
+        let row =
+            sqlx::query(&INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN))
+                .bind(&node_text)
+                .bind(&session.0)
+                .bind(&cutoff)
+                .bind(&cutoff)
+                .bind(&session.0)
+                .fetch_one(self.pool())
+                .await
+                .map_err(|e| db_err("interaction_span", e))?;
 
         let distinct: i64 = row.get(0);
         let span_lo: Option<String> = row.get(1);
@@ -1766,10 +1765,7 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
-            let want = memory
-                .blast_radius(&sid, pillar, min_age)
-                .await
-                .unwrap();
+            let want = memory.blast_radius(&sid, pillar, min_age).await.unwrap();
             assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
             let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
             assert_eq!(
@@ -1845,13 +1841,7 @@ mod tests {
                     old_ts,
                 ),
                 plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
-                plant_edge(
-                    &sid,
-                    probe_src,
-                    probe_victim,
-                    EdgeType::Dependency,
-                    old_ts,
-                ),
+                plant_edge(&sid, probe_src, probe_victim, EdgeType::Dependency, old_ts),
             ],
         };
         store.flush(&base).await.unwrap();

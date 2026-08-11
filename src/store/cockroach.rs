@@ -2342,14 +2342,8 @@ mod conformance {
                 let mem_br = mem.blast_radius(&sid, *node, age).await.unwrap();
                 let crdb_br = store.blast_radius(&sid, *node, age).await.unwrap();
                 assert_eq!(mem_br, crdb_br, "blast_radius({fixture}, {node}, {age:?})");
-                let mem_span = mem
-                    .interaction_span(&sid, *node, age)
-                    .await
-                    .unwrap();
-                let crdb_span = store
-                    .interaction_span(&sid, *node, age)
-                    .await
-                    .unwrap();
+                let mem_span = mem.interaction_span(&sid, *node, age).await.unwrap();
+                let crdb_span = store.interaction_span(&sid, *node, age).await.unwrap();
                 assert_eq!(
                     mem_span, crdb_span,
                     "interaction_span({fixture}, {node}, {age:?}): mem={mem_span:?} crdb={crdb_span:?}"
@@ -2444,13 +2438,7 @@ mod conformance {
                 plant_concept(&sid, probe_src, i3, "probe-src", old_ts, None),
                 plant_concept(&sid, probe_victim, i1, "probe-victim", old_ts, None),
                 plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
-                plant_edge(
-                    &sid,
-                    probe_src,
-                    probe_victim,
-                    EdgeType::Dependency,
-                    old_ts,
-                ),
+                plant_edge(&sid, probe_src, probe_victim, EdgeType::Dependency, old_ts),
             ],
         };
         store.flush(&base).await.unwrap();
