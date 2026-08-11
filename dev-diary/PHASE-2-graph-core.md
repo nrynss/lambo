@@ -433,8 +433,9 @@ stubs, no channel types).
   `Concept` cloned as-is; status/gc_survived preserved) and its structural
   Derives write creates (new interaction) or reinforces (same interaction
   re-derive) the edge — this is the "re-derives reinforce per T2.1 semantics"
-  path. A node created *earlier in the same call* (canonical-key collision) is
-  tracked in `created_this_call` and NOT re-upserted, so one call can never
+  path. Every node *written earlier in the same call* — created, or matched
+  and re-upserted (canonical-key collision onto a pre-existing concept) — is
+  tracked in `written_this_call` and NOT re-upserted, so one call can never
   self-reinforce.
 - **`reinforced` counting:** `edge_between` before each write; a hit = the
   write is a duplicate natural key = +1 (Derives via insert_concept included).
@@ -442,10 +443,12 @@ stubs, no channel types).
   (2 Derives + 1 CoOccurrence); parent_of re-derive ⇒ 3 (2 Derives ends + 1
   Hierarchical).
 - **Within-call dedup:** `concepts` deduped by raw content (first occurrence
-  wins, incl. its ConceptType); `parent_of` pairs deduped by (parent, child).
+  wins, incl. its ConceptType); `parent_of` pairs deduped by the **resolved**
+  `(parent_node, child_node)` pair (raw-string dedup would let two pairs whose
+  ends canonicalize to the same node pair write a duplicate Hierarchical edge).
   Different contents collapsing onto one canonical key are handled by the
-  matcher (second resolves Matched to the node the first created) — a node is
-  never written twice in one call.
+  matcher (every colliding content resolves Matched to the same node and is
+  recorded in `outcome.matched`) — a node is never written twice in one call.
 - **CoOccurrence** is pairwise over the `concepts` argument only (created +
   matched nodes, call order, direction earlier→later), capped at
   `max_cooccurrence_per_derive` **edges written per call** (create or reinforce
@@ -468,12 +471,15 @@ stubs, no channel types).
   parent_of → `Invariant`. `derive` returns `Ok(empty outcome)` for an empty
   call (no-op, no mutations).
 
-**Verification:** 13 new unit tests (creation, within-call dedup, match-reuse
+**Verification:** 15 new unit tests (creation, within-call dedup, match-reuse
 across interactions, CoOccurrence cap 2-of-4, parent_of creation, re-derive
 reinforcement incl. Hierarchical, missing/non-interaction errors, reflexive
 rejection, canonical-key-collision collapse without a CoOccurrence self-loop,
-empty no-op, drained-batch ordering). `cargo test graph::` (default features):
-78 passed / 0 failed (65 pre-existing + 13 new), 0 warnings; clean
+empty no-op, drained-batch ordering, plus two round-1 review regressions:
+key collision onto a pre-existing concept must not self-reinforce the fresh
+Derives edge, and colliding parent_of pairs must write one Hierarchical edge).
+`cargo test graph::` (default features):
+80 passed / 0 failed (65 pre-existing + 15 new), 0 warnings; clean
 `cargo build`. Every test ends with `assert_invariants()` (Derives/Temporal
 §5.7 coverage included). No fixtures read, so no `#[cfg(feature =
 "fixtures")]` gating needed.

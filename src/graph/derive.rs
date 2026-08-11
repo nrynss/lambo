@@ -37,11 +37,17 @@
 //! ## Within-call dedup
 //!
 //! Duplicate *contents* in `concepts` are processed once (first occurrence
-//! wins, including its `ConceptType`). Duplicate `(parent, child)` pairs in
-//! `ParentOf` are processed once. Two different contents that canonicalize to
-//! the same key are additionally collapsed by the matcher (the second resolves
-//! `Matched` to the node the first just created) — a node is never written
-//! twice within one call.
+//! wins, including its `ConceptType`). Two different contents that canonicalize
+//! to the same key are collapsed by the matcher: every colliding content
+//! resolves `Matched` to the same node and is recorded in `outcome.matched`.
+//! The within-call guard tracks every node **written** this call — created, or
+//! matched and re-upserted — so a later resolution to a node already written
+//! earlier in the call is skipped entirely (no re-upsert, no reinforcement
+//! bump): a node is never written twice within one call, and one call can never
+//! self-reinforce. `ParentOf` pairs are deduped on the **resolved**
+//! `(parent_node, child_node)` pair, so two pairs whose ends canonicalize to
+//! the same node pair write exactly one `Hierarchical` edge (re-resolving the
+//! duplicate pair's ends is a no-op thanks to the guard).
 //!
 //! ## Timestamps
 //!
@@ -189,10 +195,12 @@ pub fn derive(
     let session_id = graph.session_id().clone();
 
     let mut outcome = DeriveOutcome::default();
-    // Concepts created earlier in THIS call. Their node and Derives edge are
-    // already written; a later match (e.g. a canonical-key collision) must not
-    // re-upsert and accidentally reinforce the edge just created.
-    let mut created_this_call: HashSet<NodeId> = HashSet::new();
+    // Nodes written earlier in THIS call (created, or matched and re-upserted).
+    // Their node and Derives edge are already written; a later content that
+    // canonicalizes to the same node (key collision) must not re-upsert and
+    // accidentally reinforce the edge just written — one call never
+    // self-reinforces.
+    let mut written_this_call: HashSet<NodeId> = HashSet::new();
 
     // Steps 2–4 — dedup by content, canonicalize, match-or-create, and ensure
     // the Derives edge (via insert_concept's structural edge; see module docs).
@@ -210,7 +218,7 @@ pub fn derive(
             agent,
             interaction_created_at,
             &session_id,
-            &mut created_this_call,
+            &mut written_this_call,
             &mut outcome,
         )?;
         // Two different contents can canonicalize to the same node (key
@@ -257,16 +265,18 @@ pub fn derive(
     // Step 6 — Hierarchical edges from parent_of. Reflexive pairs (raw-content
     // equal, or canonicalizing to the same node) are rejected up front: a
     // Hierarchical self-loop is a cycle and would trip assert_invariants.
-    let mut seen_pairs: HashSet<(&str, &str)> = HashSet::with_capacity(parent_of.pairs.len());
+    // Pairs are deduped on the RESOLVED (parent_node, child_node) pair: two
+    // pairs whose ends canonicalize to the same node pair (key collision) must
+    // write exactly one Hierarchical edge. Re-resolving the duplicate pair's
+    // ends is a write no-op — the within-call guard skips already-written
+    // nodes (only recording them in outcome.matched).
+    let mut seen_pairs: HashSet<(NodeId, NodeId)> = HashSet::with_capacity(parent_of.pairs.len());
     for &(parent, child) in parent_of.pairs {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
                 "derive: parent_of pair ({parent}, {child}) is reflexive — a Hierarchical \
                  self-loop is a cycle (spec §5.7)"
             ))));
-        }
-        if !seen_pairs.insert((parent, child)) {
-            continue;
         }
         let parent_node = resolve_concept(
             graph,
@@ -276,7 +286,7 @@ pub fn derive(
             agent,
             interaction_created_at,
             &session_id,
-            &mut created_this_call,
+            &mut written_this_call,
             &mut outcome,
         )?;
         let child_node = resolve_concept(
@@ -287,7 +297,7 @@ pub fn derive(
             agent,
             interaction_created_at,
             &session_id,
-            &mut created_this_call,
+            &mut written_this_call,
             &mut outcome,
         )?;
         if parent_node == child_node {
@@ -295,6 +305,11 @@ pub fn derive(
                 "derive: parent_of pair ({parent}, {child}) resolves to the same concept \
                  {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
+        }
+        if !seen_pairs.insert((parent_node, child_node)) {
+            // Same resolved node pair as an earlier pair in this call — the
+            // Hierarchical edge was already written; skip the duplicate.
+            continue;
         }
         if graph
             .edge_between(parent_node, child_node, EdgeType::Hierarchical)
@@ -323,7 +338,11 @@ pub fn derive(
 /// `interaction` in both cases (created by [`Graph::insert_concept`]'s
 /// structural edge; reinforced when the natural key already exists). Records
 /// the node in `outcome.created` / `outcome.matched` and counts Derives
-/// reinforcements in `outcome.reinforced`.
+/// reinforcements in `outcome.reinforced`. Every node written this call
+/// (created, or matched and re-upserted) is tracked in `written_this_call`; a
+/// later resolution to the same node (canonical-key collision) skips the write
+/// and the reinforcement entirely — one call never self-reinforces — but still
+/// records the match.
 fn resolve_concept(
     graph: &mut Graph,
     content: &str,
@@ -332,7 +351,7 @@ fn resolve_concept(
     agent: &AgentId,
     created_at: DateTime<Utc>,
     session_id: &SessionId,
-    created_this_call: &mut HashSet<NodeId>,
+    written_this_call: &mut HashSet<NodeId>,
     outcome: &mut DeriveOutcome,
 ) -> Result<NodeId, LamboError> {
     match canonicalize(content, graph)? {
@@ -358,13 +377,17 @@ fn resolve_concept(
             let id = concept.id;
             // Writes UpsertNode + the structural Derives edge (weight 0.9).
             graph.insert_concept(concept, interaction)?;
-            created_this_call.insert(id);
+            written_this_call.insert(id);
             outcome.created.push(id);
             Ok(id)
         }
         CanonicalizeResult::Matched { node, .. } => {
-            if created_this_call.contains(&node) {
-                // Node + Derives edge already written earlier in this call.
+            if written_this_call.contains(&node) {
+                // Node + Derives edge already written earlier in this call
+                // (created, or matched and re-upserted). A canonical-key
+                // collision resolving to it again must not re-upsert — that
+                // would self-reinforce the just-written Derives edge. Record
+                // the match and return.
                 outcome.matched.push(node);
                 return Ok(node);
             }
@@ -387,6 +410,7 @@ fn resolve_concept(
                 outcome.reinforced += 1;
             }
             graph.insert_concept(existing, interaction)?;
+            written_this_call.insert(node);
             outcome.matched.push(node);
             Ok(node)
         }
@@ -767,6 +791,112 @@ mod tests {
         assert!(g
             .edge_between(out.created[0], out.created[1], EdgeType::CoOccurrence)
             .is_some());
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn derive_key_collision_on_preexisting_concept_does_not_self_reinforce() {
+        // F1 regression: two distinct contents in ONE call that canonicalize
+        // to the same PRE-EXISTING concept ("user schema" and "schema user"
+        // both canonicalize to "schema user") must both resolve to that node,
+        // but only the first may write. The second must not re-enter the write
+        // path and bump the just-created Derives edge — one call never
+        // self-reinforces.
+        let (mut g, i1) = graph_with_interaction(1, 0);
+        let i2 = interaction(2, Some(i1), 5);
+        let i2id = i2.id;
+        g.insert_interaction(i2).unwrap();
+        // Pre-seed the concept (canonical key "schema user") derived from i1.
+        let c = concept(1, i1, "user schema");
+        let cid = c.id;
+        g.insert_concept(c, i1).unwrap();
+
+        let out = derive(
+            &mut g,
+            i2id,
+            &agent(),
+            &[("user schema", ConceptType::Entity), ("schema user", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+
+        assert!(out.created.is_empty(), "both contents matched the pre-existing node");
+        // Every content that resolved Matched is recorded: one entry per
+        // colliding content, both resolving to the same node.
+        assert_eq!(out.matched, vec![cid, cid]);
+        assert_eq!(out.reinforced, 0, "a collision within one call must not self-reinforce");
+
+        // Exactly ONE Derives edge from the new interaction, written fresh
+        // (weight 0.9, reinforcements 1) — not bumped to 1.9 by the collision.
+        let mut derives = derives_of(&g, cid);
+        derives.sort_by_key(|id| id.0);
+        assert_eq!(derives, {
+            let mut v = vec![i1, i2id];
+            v.sort_by_key(|id| id.0);
+            v
+        });
+        let d = g.edge_between(i2id, cid, EdgeType::Derives).unwrap();
+        assert_eq!(d.reinforcements, 1, "single write, never reinforced within the call");
+        assert_eq!(d.weight, 0.9);
+        assert_eq!(g.node_count(), 3); // i1, i2, c — nothing created
+        assert_eq!(g.edge_count(), 3); // Temporal (i2->i1) + seed Derives (i1->c) + derive Derives (i2->c)
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn derive_parent_of_colliding_pairs_write_one_hierarchical_edge() {
+        // F2 regression: two parent_of pairs whose ends canonicalize to the
+        // SAME resolved node pair ("user schema" and "schema user" both
+        // resolve to the pre-existing concept, child "api layer" is shared)
+        // must write exactly ONE Hierarchical edge — the second pair must not
+        // reinforce the fresh edge (0.5 -> 1.5) — and the shared parent must
+        // not be double-written (the F1 guard covers parent_of resolution too).
+        let (mut g, i1) = graph_with_interaction(1, 0);
+        let i2 = interaction(2, Some(i1), 5);
+        let i2id = i2.id;
+        g.insert_interaction(i2).unwrap();
+        let pre = concept(1, i1, "user schema"); // canonical key "schema user"
+        let pre_id = pre.id;
+        g.insert_concept(pre, i1).unwrap();
+
+        let out = derive(
+            &mut g,
+            i2id,
+            &agent(),
+            &[],
+            &ParentOf::from_pairs(&[("user schema", "api layer"), ("schema user", "api layer")]),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(out.created.len(), 1, "api layer created exactly once");
+        let api = out.created[0];
+        // Parent matched by both pairs; child matched again by the second
+        // pair's re-resolution (a write no-op thanks to the within-call guard).
+        assert_eq!(out.matched, vec![pre_id, pre_id, api]);
+        assert_eq!(out.reinforced, 0, "no within-call reinforcement anywhere");
+
+        // Exactly ONE Hierarchical edge, fresh (weight 0.5, reinforcements 1).
+        let h = g
+            .edge_between(pre_id, api, EdgeType::Hierarchical)
+            .expect("hierarchical");
+        assert_eq!(h.reinforcements, 1, "single write, never bumped within the call");
+        assert_eq!(h.weight, 0.5);
+        // The shared parent gained exactly one Derives edge — no double write.
+        let mut derives = derives_of(&g, pre_id);
+        derives.sort_by_key(|id| id.0);
+        assert_eq!(derives, {
+            let mut v = vec![i1, i2id];
+            v.sort_by_key(|id| id.0);
+            v
+        });
+        let d = g.edge_between(i2id, pre_id, EdgeType::Derives).unwrap();
+        assert_eq!(d.reinforcements, 1);
+        assert_eq!(d.weight, 0.9);
+        assert_eq!(derives_of(&g, api), vec![i2id]);
+        assert_eq!(g.node_count(), 4); // i1, i2, pre, api
+        assert_eq!(g.edge_count(), 5); // Temporal (i2->i1) + seed Derives + derive Derives x2 + Hierarchical
         g.assert_invariants().unwrap();
     }
 
