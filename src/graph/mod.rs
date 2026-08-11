@@ -43,4 +43,6 @@
 #[allow(clippy::module_inception)]
 pub mod graph;
 
+pub mod index;
+
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};
