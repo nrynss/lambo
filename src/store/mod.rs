@@ -336,7 +336,18 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
             // startup context; see sqlite.rs).
             #[cfg(feature = "store-sqlite")]
             {
-                let path = cfg.path.clone().unwrap_or_else(|| "sqlite::memory:".into());
+                // CON-3 (D2): a missing path is a hard error, mirroring
+                // CockroachStore's missing-DSN check above — the durable tier
+                // must never silently fall back to an ephemeral in-memory
+                // database whose data evaporates at exit. Direct
+                // `SqliteStore::connect("sqlite::memory:")` calls (tests)
+                // bypass this: the check lives in config resolution, not in
+                // `connect`.
+                let path = cfg.path.clone().ok_or_else(|| {
+                    StoreError::Backend(
+                        "SqliteStore requires a path (store.path or LAMBO_SQLITE_PATH)".into(),
+                    )
+                })?;
                 Ok(Box::new(SqliteStore::connect(&path)?))
             }
             #[cfg(not(feature = "store-sqlite"))]
@@ -468,6 +479,31 @@ mod tests {
             assert!(!msg.to_ascii_lowercase().contains("memory store"));
             assert!(!StoreKind::Sqlite.is_ready());
         }
+    }
+
+    /// CON-3 (D2): selecting the sqlite tier without a path is a hard error —
+    /// never a silent fallback to an ephemeral `sqlite::memory:` DB whose data
+    /// evaporates at exit.
+    #[test]
+    fn sqlite_without_path_is_hard_error() {
+        if !cfg!(feature = "store-sqlite") {
+            // Without the feature the fail-closed arm reports "not compiled"
+            // (covered by `sqlite_builds_or_fails_closed_by_feature`); the
+            // no-path check only exists under the feature.
+            return;
+        }
+        let err = build_store(StoreConfig {
+            kind: StoreKind::Sqlite,
+            dsn: None,
+            path: None,
+        })
+        .err()
+        .expect("sqlite without a path must hard-error, never fall back to memory");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path") && msg.contains("LAMBO_SQLITE_PATH"),
+            "{msg}"
+        );
     }
 
     #[test]
