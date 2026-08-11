@@ -232,3 +232,53 @@ Additional decisions downstream agents must know:
 
 Gate at close: `cargo fmt --check`; clippy `-D warnings` (default + no-default);
 119 lib tests × 3 consecutive runs.
+
+### T2.2 — Canonicalization pipeline (done 2026-08-11, by T22Canonical)
+
+**What exists now:** `src/graph/canonical.rs` (+ one additive `pub mod canonical;`
+line in `src/graph/mod.rs`). Spec §7.1 steps 1–5, exactly the pinned exports:
+
+- `normalize_tokens(&str) -> Vec<String>` — camelCase-boundary split (on the
+  ORIGINAL case) → lowercase → split `[-_ ]` + whitespace → drop stopwords
+  (13-word set pinned to `gen-fixtures.py` `STOPWORDS`) → Porter stem via
+  `rust-stemmers` (`Algorithm::English`, lazy `LazyLock` static). NO sort/synonym/
+  join. Pure — no `Graph` dep, so T2.6 imports it for the recall index.
+- `canonical_key(&str, impl Fn(&str) -> Option<&str>) -> String` — RAW-input
+  synonym lookup first (trimmed, as-is) → normalize → sort → join `" "`.
+- `canonicalize(&str, &Graph) -> Result<CanonicalizeResult, LamboError>` with
+  `Matched { key, node }` / `Unmatched { key }`. Step 6 (hybrid/vector, `Semantic`
+  edges) deliberately left to the caller (T2.3/T7.2 seam).
+
+**Decisions the next agent must not re-derive:**
+- **camelCase split runs BEFORE lowercasing.** `gen-fixtures.py`'s `split_tokens`
+  lowercases first, which yields `"userschema"` for `UserSchema` and `"cached"`
+  for `cached` — both contradicting the checked-in `canonicalization-cases.json`
+  (frozen truth). The script has a latent ordering bug; do NOT "fix" the fixture
+  to match the script. All 11 fixture rows pass with case-boundary-first splitting
+  + real Porter.
+- **`canonicalize` does its own raw lookup** via `Graph::synonym` instead of
+  calling `canonical_key` with a graph-closure: the pinned `impl Fn(&str) ->
+  Option<&str>` callback is higher-ranked (`for<'a> Fn(&'a str) -> Option<&'a
+  str>`), which a closure borrowing the graph cannot satisfy (return borrows from
+  the graph, not the input). Same trimmed-raw-then-normalize semantics, shared
+  `tokens_to_key` helper. Callers of `canonical_key` with a static table should
+  pass a **fn item**, not a closure returning `Option<&str>` — closures don't
+  generalize to the HRTB bound (compile error otherwise).
+- **No new synonym storage** — T2.1's `Graph::synonym`/`declare_synonym` are
+  consumed as-is; the phase doc's "`declare_synonym()` lives here too" is stale
+  (it already lives on `Graph`).
+- Match step scans `graph.concepts()` for `canonical_key` (Graph has no
+  canonical-key index); schema `UNIQUE (session_id, canonical_key)` makes at most
+  one match in a well-formed graph. `canonicalize`'s `Result` wrapper is part of
+  the pinned contract; the step itself cannot fail.
+- Stopword-only or empty input → empty token vec → key `""`; no special-casing.
+
+**Verification:** 12 new tests, all green under `cargo test graph::` (default
+features): 11 tokenizer/key unit tests + the fixture acceptance test iterating all
+11 rows of `fixtures/canonicalization-cases.json` (gated
+`#[cfg(feature = "fixtures")]`, synonym table mirroring the snapshot:
+`register_user` → `create_user`). STEM-table unit test (82 words from
+`gen-fixtures.py`) confirms rust-stemmers matches the probe-verified fixture
+table verbatim. `graph::` scope: 40 passed / 0 failed. Only touched
+`src/graph/canonical.rs` + `src/graph/mod.rs`; `src/graph/graph.rs` untouched.
+
