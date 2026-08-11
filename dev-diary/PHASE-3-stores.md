@@ -392,16 +392,30 @@ break create→delete→create within one batch. `MemoryStore` does the same.
    (committed but response lost) cannot duplicate the demo's audit row. Concept status
    update is idempotent by nature; node/edge upserts are `ON CONFLICT` DO UPDATE.
 
-**Known schema gaps (flagged for Main / T3.1):** (a) **`chunk_group_id` (T2.5) has no
-DDL column** in either dialect — the adapter neither writes nor reads it, so a flush→load
-cycle silently drops it (verified: `from_snapshot` doesn't validate it; T5.2 sibling
-co-retrieval after reload is degraded until the schema grows the column).
-(b) **`GraphSnapshot::embedding` (EmbeddingContract) has no table** — `load_session`
-returns `embedding: None` (RAM/session metadata with no mutation kind, same status as
-reservations under S5). (c) `mutations-batch.json`'s final state is intentionally **not** a
-legal §5.7 graph (the batch deletes the Temporal edge between the two interactions), so
-the flush round-trip is asserted at snapshot level; `Graph::from_snapshot` materialization
-of legal batches is covered by `load.rs` tests.
+**Schema persistence (P3 review round 1 remediation, 2026-08-11):** (a) **`chunk_group_id`
+(T2.5) is now a first-class `concepts.chunk_group_id STRING` column** — declared in the
+`CREATE TABLE` for fresh installs plus `ALTER TABLE concepts ADD COLUMN IF NOT EXISTS
+chunk_group_id STRING` for existing clusters (Cockroach supports `IF NOT EXISTS` on
+`ADD COLUMN`), so `init_schema` stays idempotent (verified live ×2). The concept upsert
+writes it (`$16`, included in the `ON CONFLICT` update) and `load_session` reads it back —
+flush→load now **preserves** the T5.2 sibling co-retrieval key (round-trip asserts
+survival, not the old normalization-to-None).
+(b) **The `EmbeddingContract` is snapshot-only (S5-class).** `sessions` now carries
+nullable `embedding_kind` / `embedding_model` / `embedding_dim` (same CREATE + ALTER
+`ADD COLUMN IF NOT EXISTS` pattern), and `load_session` materializes
+`GraphSnapshot.embedding` when `embedding_kind` is present. `flush` does **not** write
+them — there is no session-metadata `Mutation` kind; the write path is pending a future
+mutation (live suite stamps them via direct SQL and asserts flush immunity).
+(c) `mutations-batch.json`'s final state is intentionally **not** a legal §5.7 graph (the
+batch deletes the Temporal edge between the two interactions), so the flush round-trip is
+asserted at snapshot level; `Graph::from_snapshot` materialization of legal batches is
+covered by `load.rs` tests. (d) **Keyword scoring folds case** (`score_keyword_hits`
+lowercases content/key before counting — MemoryStore parity); the SQL predicate already
+lowercased, so a mixed-case row previously scored 0.0 despite being selected
+(review R1, regression-locked vs MemoryStore live + pure unit test).
+(e) **Legal-demote flush** (review R2): duplicate-key Observations flush successfully
+against the live store — the partial `concepts_key_non_obs_idx` excludes them; a
+duplicate-key non-Observation still fails loudly (negative lock in the same check).
 
 **Conformance — ALL items RAN live** (cluster reachable via the `.env` DSN; never
 printed): init_schema ×2 idempotent; `mutations-batch.json` flush + load round-trip
@@ -409,8 +423,14 @@ printed): init_schema ×2 idempotent; `mutations-batch.json` flush + load round-
 cleanup / 1 canonization event); a 1024-dim embedding write + `vector_candidates` top-1
 (identical vector ranks first, score ≈ 1.0, stored vector round-trips exactly);
 `keyword_candidates` on a planted concept (+ SessionNotFound and empty-token parity vs
-MemoryStore); **`blast_radius` + `interaction_span` agreement vs MemoryStore on
-`session-rest-api`** (all 22 concepts, min-age 0) plus a fresh-vs-aged-edge filter
+MemoryStore); **mixed-case keyword scoring ranks exactly like MemoryStore** (review R1:
+"Register User" + "user schema" vs tokens `[register, user]` — 2.0 then 1.0); **legal
+demote flush** (review R2: duplicate-key Observations flush + survive; duplicate-key
+Entity fails); **chunk_group_id round-trip** (Observation with `chunk-42` survives
+flush→load; NULL stays None); **embedding-contract read** (direct-SQL stamp
+kind/model/dim → `load_session` returns the contract; a later flush does not clobber it;
+unstamped session → None); **`blast_radius` + `interaction_span` agreement vs MemoryStore
+on `session-rest-api`** (all 22 concepts, min-age 0) plus a fresh-vs-aged-edge filter
 agreement (min-age 0 vs 1h); `record_canonization` append + idempotent re-record +
 NotFound; seed full-snapshot round-trip (synonyms, root_goal, deep-equal after
 id-sort). Wired as `#[cfg(all(test, feature = "store-cockroach", feature = "fixtures"))]`
@@ -424,9 +444,10 @@ test (lazy pool ⇒ no runtime needed).
 
 **Verification:** `cargo build --features store-cockroach` clean (0 warnings);
 `cargo test --features store-cockroach` green (226 lib + main + integration, incl. live
-suite); default-feature `cargo test --lib` green (210). 12 pure-logic unit tests (no
-cluster): vector encode/decode round-trip + non-finite rejection, DDL width parse,
-age-cutoff computation, §4.1 placeholder counts/order + errata shape, keyword-SQL
-placeholder arithmetic, snapshot→row column counts (15-concept / 6-interaction / 9-edge),
-enum↔STRING round-trips, retry-marker detection, rustls DSN rewrite, dim check, token
-normalization.
+suite); default-feature `cargo test --lib` green. 15 pure-logic unit tests (no
+cluster): vector encode/decode round-trip + Cockroach renderings + non-finite
+rejection, DDL width parse, age-cutoff computation, §4.1 placeholder counts/order +
+errata shape, keyword-SQL placeholder arithmetic, keyword score case-folding
+regression (R1), snapshot→row column counts (16-concept / 6-interaction / 9-edge),
+enum↔STRING round-trips, serializable-retry detection, rustls DSN rewrite, dim check,
+token normalization.

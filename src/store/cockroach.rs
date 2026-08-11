@@ -49,17 +49,25 @@
 //!   interaction_span query additionally filters `edges.created_at` (not just
 //!   `i.created_at` as the spec's literal SQL shows) to match `MemoryStore`'s naive
 //!   answer — T3.6's three-way agreement test defines agreement against MemoryStore.
-//! - **`chunk_group_id` (T2.5) has no DDL column** (spec §4 `concepts` table predates
-//!   it). The adapter neither writes nor reads it — a flush→load cycle silently drops
-//!   it. `Graph::from_snapshot` does not validate it, so nothing fails; T5.2 sibling
-//!   co-retrieval after a reload is degraded until the schema grows the column. Flagged
-//!   for T3.1/Main in the Handoff Log.
-//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) has no table either** — it
-//!   is RAM/session metadata with no mutation kind (same status as reservations under
-//!   S5); `load_session` returns `embedding: None`. The DDL column width *is* read from
-//!   the schema: `vector_dimensions()` parses `VECTOR(n)` out of the embedded
-//!   `001_init.sql` (not a global constant), so `resolve::check_vector_compatibility`
-//!   can reject mismatched embedders.
+//! - **`chunk_group_id` (T2.5) is a first-class column** (P3 review round 1
+//!   remediation). `concepts.chunk_group_id STRING` (nullable) is declared in the
+//!   `CREATE TABLE` for fresh installs AND added via `ALTER TABLE concepts ADD COLUMN
+//!   IF NOT EXISTS chunk_group_id STRING` for existing clusters (Cockroach supports
+//!   `IF NOT EXISTS` on `ADD COLUMN`), so `init_schema` stays idempotent either way.
+//!   The concept upsert writes it and `load_session` reads it back — a flush→load
+//!   cycle now PRESERVES the T5.2 sibling co-retrieval key (regression-locked in the
+//!   live conformance suite).
+//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) is snapshot-only
+//!   (S5-class).** The sessions table carries `embedding_kind STRING`,
+//!   `embedding_model STRING`, `embedding_dim INT` (nullable; same CREATE + ALTER
+//!   `ADD COLUMN IF NOT EXISTS` idempotency pattern as `chunk_group_id`), and
+//!   `load_session` materializes `GraphSnapshot.embedding` when `embedding_kind` is
+//!   present. `flush` does NOT write them — there is no session-metadata `Mutation`
+//!   kind, so the write path is pending a future mutation (documented in the T3.2
+//!   handoff; the live suite stamps them via direct SQL and asserts flush immunity).
+//!   The DDL column width *is* read from the schema: `vector_dimensions()` parses
+//!   `VECTOR(n)` out of the embedded `001_init.sql` (not a global constant), so
+//!   `resolve::check_vector_compatibility` can reject mismatched embedders.
 //! - **rustls DSN rewrite.** sqlx's rustls stack cannot open libpq's magic
 //!   `sslrootcert=system` path; the `.env` DSN uses it. [`dsn_for_rustls`] rewrites it
 //!   to a real CA bundle (or downgrades `verify-full` → `require`) before pooling
@@ -76,9 +84,9 @@ use sqlx::{PgPool, Row};
 
 use super::{Capabilities, GraphStore, StoreConfig};
 use crate::types::{
-    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot,
-    Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId, Reservation, Scored,
-    SessionId, StoreError, Synonym,
+    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
+    GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId, Reservation,
+    Scored, SessionId, StoreError, Synonym,
 };
 
 /// T3.1 DDL — embedded and executed verbatim by [`CockroachStore::init_schema`].
@@ -125,14 +133,15 @@ ON CONFLICT (id) DO UPDATE SET
     created_at = EXCLUDED.created_at
 "#;
 
-/// 15 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`).
-/// `chunk_group_id` intentionally absent — no DDL column (see module doc).
+/// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
+/// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable.
 const UPSERT_CONCEPT_SQL: &str = r#"
 INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
-    gc_survived, canonization_status, blast_radius, last_demotion_time, embedding
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::VECTOR)
+    gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
+    chunk_group_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::VECTOR, $16)
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     content = EXCLUDED.content,
@@ -147,7 +156,8 @@ ON CONFLICT (id) DO UPDATE SET
     canonization_status = EXCLUDED.canonization_status,
     blast_radius = EXCLUDED.blast_radius,
     last_demotion_time = EXCLUDED.last_demotion_time,
-    embedding = EXCLUDED.embedding
+    embedding = EXCLUDED.embedding,
+    chunk_group_id = EXCLUDED.chunk_group_id
 "#;
 
 /// Natural-key conflict target `(source, target, edge_type)` matches the graph tier's
@@ -219,7 +229,8 @@ ON CONFLICT (session_id, node_id) DO UPDATE SET
 "#;
 
 const SELECT_SESSION_SQL: &str = r#"
-SELECT root_goal::STRING AS root_goal, created_at, closed_at
+SELECT root_goal::STRING AS root_goal, created_at, closed_at,
+       embedding_kind, embedding_model, embedding_dim
 FROM sessions
 WHERE session_id = $1
 "#;
@@ -236,7 +247,7 @@ const SELECT_CONCEPTS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, content, canonical_key, concept_type,
        origin_interaction::STRING AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding::STRING AS embedding
+       last_demotion_time, embedding::STRING AS embedding, chunk_group_id
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -497,6 +508,21 @@ fn distance_to_score(dist: f64) -> f64 {
     (1.0 - 0.5 * dist * dist).clamp(-1.0, 1.0)
 }
 
+/// Keyword hit count for one candidate row, case-folded on BOTH sides (MemoryStore
+/// parity). The SQL predicate matches `lower(content)`/`lower(canonical_key)`, so the
+/// score must apply the same folding to the raw row text — a mixed-case row ("Register
+/// User") matched by token "register" would otherwise be selected yet score 0.0
+/// (P3 review R1). Tokens arrive pre-normalized (lowercased) from
+/// [`CockroachStore::normalize_tokens`].
+fn score_keyword_hits(content: &str, canonical_key: &str, tokens: &[String]) -> usize {
+    let content = content.to_lowercase();
+    let key = canonical_key.to_lowercase();
+    tokens
+        .iter()
+        .filter(|t| content.contains(t.as_str()) || key.contains(t.as_str()))
+        .count()
+}
+
 /// Build the keyword-candidate SQL for `n` tokens: `$1` = session, `$2..$n+1` = tokens
 /// (each bound once, used twice — content and canonical_key). `strpos(lower(col), $k) > 0`
 /// is exact-substring matching with no `LIKE` wildcard semantics (Rust `contains`
@@ -637,7 +663,7 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         embedding: embedding.as_deref().map(decode_vector).transpose()?,
-        chunk_group_id: None, // no DDL column (see module doc)
+        chunk_group_id: row.try_get("chunk_group_id").map_err(backend)?,
     })
 }
 
@@ -876,6 +902,7 @@ async fn upsert_concept(tx: &mut sqlx::PgConnection, c: &Concept) -> Result<(), 
         .bind(c.blast_radius)
         .bind(c.last_demotion_time)
         .bind(embedding)
+        .bind(c.chunk_group_id.clone())
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
@@ -1053,6 +1080,27 @@ impl GraphStore for CockroachStore {
                 .transpose()
                 .map_err(|e| backend(format!("parse root_goal JSONB: {e}")))?;
 
+            // Snapshot-only embedding contract (S5-class, see module doc): read the
+            // nullable kind/model/dim columns into GraphSnapshot.embedding when a
+            // contract is stamped. `flush` never writes these — there is no
+            // session-metadata Mutation kind.
+            let embedding_kind: Option<String> = session_row.try_get("embedding_kind").map_err(backend)?;
+            let embedding_model: Option<String> = session_row.try_get("embedding_model").map_err(backend)?;
+            let embedding_dim: Option<i64> = session_row.try_get("embedding_dim").map_err(backend)?;
+            let embedding = match embedding_kind {
+                Some(kind) => Some(EmbeddingContract {
+                    kind,
+                    model: embedding_model,
+                    dim: embedding_dim.ok_or_else(|| {
+                        StoreError::Backend(
+                            "embedding_kind present but embedding_dim NULL in sessions row"
+                                .into(),
+                        )
+                    })? as usize,
+                }),
+                None => None,
+            };
+
             let interactions = sqlx::query(SELECT_INTERACTIONS_SQL)
                 .bind(sid.0.as_str())
                 .fetch_all(&mut *tx)
@@ -1119,7 +1167,7 @@ impl GraphStore for CockroachStore {
                 synonyms,
                 reservations,
                 canonization_events,
-                embedding: None, // RAM-local metadata; no DDL column (see module doc)
+                embedding,
             })
         })
         .await
@@ -1152,10 +1200,7 @@ impl GraphStore for CockroachStore {
                 let id: String = r.try_get("id").map_err(backend)?;
                 let content: String = r.try_get("content").map_err(backend)?;
                 let key: String = r.try_get("canonical_key").map_err(backend)?;
-                let hits = tokens
-                    .iter()
-                    .filter(|t| content.contains(t.as_str()) || key.contains(t.as_str()))
-                    .count();
+                let hits = score_keyword_hits(&content, &key, &tokens);
                 Ok(Scored::new(parse_node_id(&id)?, hits as f64))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -1413,15 +1458,17 @@ mod tests {
         // Snapshot->row mapping shapes: every struct column has exactly one placeholder
         // and the column counts match the INSERT column lists.
         assert_eq!(placeholder_max(UPSERT_INTERACTION_SQL), 6);
-        assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 15);
+        assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 16);
         assert_eq!(placeholder_max(UPSERT_EDGE_SQL), 9);
         assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 4);
         assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 7);
         assert_eq!(placeholder_max(UPSERT_SYNONYM_SQL), 3);
         assert_eq!(placeholder_max(UPSERT_RESERVATION_SQL), 4);
-        // The vector column is the LAST placeholder and carries the ::VECTOR cast.
+        // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is the
+        // 16th, nullable, and included in the conflict UPDATE.
         assert!(UPSERT_CONCEPT_SQL.contains("$15::VECTOR"));
         assert!(UPSERT_CONCEPT_SQL.contains("embedding = EXCLUDED.embedding"));
+        assert!(UPSERT_CONCEPT_SQL.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
         // Edge conflict targets the natural key; id is replaceable on conflict.
         assert!(UPSERT_EDGE_SQL.contains("ON CONFLICT (source, target, edge_type)"));
     }
@@ -1530,6 +1577,36 @@ mod tests {
     }
 
     #[test]
+    fn keyword_score_folds_case_like_memory_store() {
+        // Regression (P3 review R1): the SQL predicate lowercases the columns, so the
+        // score must fold the row text the same way — a mixed-case row ("Register
+        // User") selected by token "register" scores its hits, not 0.0.
+        assert_eq!(
+            score_keyword_hits("Register User", "Register User", &["register".into()]),
+            1,
+            "mixed-case content + key must still count the lowercase token"
+        );
+        assert_eq!(
+            score_keyword_hits("Register User", "Register User", &["register".into(), "user".into()]),
+            2
+        );
+        assert_eq!(
+            score_keyword_hits("Register User", "Register User", &["schema".into()]),
+            0
+        );
+        assert_eq!(
+            score_keyword_hits("register user", "register user", &["register".into()]),
+            1
+        );
+        // Key-only hit still counts (SQL predicate is content OR canonical_key).
+        assert_eq!(score_keyword_hits("Foo", "register user", &["register".into()]), 1);
+        // Tokens are pre-normalized lowercase; an uppercase token matches nothing.
+        assert_eq!(score_keyword_hits("register user", "register user", &["Register".into()]), 0);
+        // Empty rows/tokens (post-normalization) contribute nothing.
+        assert_eq!(score_keyword_hits("", "", &["a".into()]), 0);
+    }
+
+    #[test]
     fn normalize_tokens_matches_memory_store() {
         let tokens = vec!["  Schema ".to_string(), "".to_string(), "  ".to_string()];
         assert_eq!(CockroachStore::normalize_tokens(&tokens), vec!["schema".to_string()]);
@@ -1624,13 +1701,40 @@ mod conformance {
         ts: DateTime<Utc>,
         embedding: Option<Vec<f32>>,
     ) -> Mutation {
+        plant_concept_full(
+            sid,
+            id,
+            origin,
+            content,
+            &content.to_lowercase(),
+            ConceptType::Entity,
+            ts,
+            embedding,
+            None,
+        )
+    }
+
+    /// Full-shape concept planter: verbatim canonical_key, concept type, and
+    /// chunk_group_id — used by the legal-demote (R2), chunk_group_id round-trip,
+    /// and mixed-case keyword checks.
+    fn plant_concept_full(
+        sid: &SessionId,
+        id: NodeId,
+        origin: NodeId,
+        content: &str,
+        canonical_key: &str,
+        concept_type: ConceptType,
+        ts: DateTime<Utc>,
+        embedding: Option<Vec<f32>>,
+        chunk_group_id: Option<String>,
+    ) -> Mutation {
         Mutation::UpsertNode {
             node: Node::Concept(Concept {
                 id,
                 session_id: sid.clone(),
                 content: content.into(),
-                canonical_key: content.to_lowercase(),
-                concept_type: ConceptType::Entity,
+                canonical_key: canonical_key.into(),
+                concept_type,
                 origin_interaction: origin,
                 origin_agent: AgentId::from("agent-a"),
                 created_at: ts,
@@ -1641,7 +1745,7 @@ mod conformance {
                 blast_radius: None,
                 last_demotion_time: None,
                 embedding,
-                chunk_group_id: None,
+                chunk_group_id,
             }),
         }
     }
@@ -1817,6 +1921,229 @@ mod conformance {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::SessionNotFound(_)));
+    }
+
+    async fn check_keyword_mixed_case_ranks_like_memory_store(store: &CockroachStore) {
+        // Regression (P3 review R1): the SQL predicate lowercases content/key, so the
+        // score must fold case too. A mixed-case concept ("Register User") matched by
+        // token "register" must score > 0 and rank exactly like MemoryStore — a
+        // raw-`contains` score would give it 0.0 and sink it below "user schema".
+        let sid = SessionId::from(format!("conformance-kwcase-{}", Uuid::new_v4()));
+        let i1 = NodeId::new();
+        let mixed = NodeId::new();
+        let lower = NodeId::new();
+        let ts = Utc::now();
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, i1, ts),
+                // Mixed-case content AND canonical_key — selected by the SQL's lower()
+                // predicate, scored only if the score loop folds case.
+                plant_concept_full(
+                    &sid,
+                    mixed,
+                    i1,
+                    "Register User",
+                    "Register User",
+                    ConceptType::Entity,
+                    ts,
+                    None,
+                    None,
+                ),
+                plant_concept_full(
+                    &sid,
+                    lower,
+                    i1,
+                    "user schema",
+                    "user schema",
+                    ConceptType::Entity,
+                    ts,
+                    None,
+                    None,
+                ),
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let mem = MemoryStore::new();
+        mem.flush(&batch).await.unwrap();
+
+        let tokens: Vec<String> = vec!["register".into(), "user".into()];
+        let crdb = store.keyword_candidates(&sid, &tokens, 5).await.unwrap();
+        let mem_res = mem.keyword_candidates(&sid, &tokens, 5).await.unwrap();
+        assert_eq!(crdb, mem_res, "mixed-case scoring must match MemoryStore exactly");
+        assert_eq!(crdb.len(), 2);
+        assert_eq!(crdb[0].item, mixed, "Register User (2 hits) must rank above user schema (1 hit)");
+        assert_eq!(crdb[0].score, 2.0);
+        assert_eq!(crdb[1].item, lower);
+        assert_eq!(crdb[1].score, 1.0);
+    }
+
+    async fn check_legal_demote_flush_partial_index(store: &CockroachStore) {
+        // R2 (P3 review): the schema's canonical-key unique index is PARTIAL
+        // (`WHERE concept_type <> 'Observation'`, spec §4 errata / muse-spark M1-M2).
+        // A legal demote (T2.5) writes Observations that share a canonical key
+        // (identical sentences from different chunks); those must flush successfully
+        // against the live store instead of colliding on the index.
+        let sid = SessionId::from(format!("conformance-demote-{}", Uuid::new_v4()));
+        let i1 = NodeId::new();
+        let o1 = NodeId::new();
+        let o2 = NodeId::new();
+        let ts = Utc::now();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, ts),
+                    plant_concept_full(
+                        &sid, o1, i1, "identical sentence", "identical sentence",
+                        ConceptType::Observation, ts, None, Some("chunk-1".into()),
+                    ),
+                    plant_concept_full(
+                        &sid, o2, i1, "identical sentence", "identical sentence",
+                        ConceptType::Observation, ts, None, Some("chunk-1".into()),
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.concepts.len(), 2, "both demoted Observations survive");
+        assert!(snap
+            .concepts
+            .iter()
+            .all(|c| c.concept_type == ConceptType::Observation));
+        assert!(snap
+            .concepts
+            .iter()
+            .all(|c| c.canonical_key == "identical sentence"));
+        assert!(snap
+            .concepts
+            .iter()
+            .all(|c| c.chunk_group_id.as_deref() == Some("chunk-1")));
+
+        // Negative lock on the same index: a duplicate-key NON-Observation must be
+        // rejected (the RAM graph rejects it as an invariant; the store fails loudly).
+        let e1 = NodeId::new();
+        let e2 = NodeId::new();
+        let bad = MutationBatch {
+            mutations: vec![
+                plant_concept_full(
+                    &sid, e1, i1, "dup key", "dup key", ConceptType::Entity, ts, None, None,
+                ),
+                plant_concept_full(
+                    &sid, e2, i1, "dup key", "dup key", ConceptType::Entity, ts, None, None,
+                ),
+            ],
+        };
+        assert!(
+            store.flush(&bad).await.is_err(),
+            "duplicate-key non-Observation must violate concepts_key_non_obs_idx"
+        );
+    }
+
+    async fn check_chunk_group_id_survives_flush_load(store: &CockroachStore) {
+        // T5.2 contract (schema persistence): flush→load must PRESERVE
+        // chunk_group_id — the implementer's snapshot normalization to None is gone;
+        // the round-trip now asserts survival.
+        let sid = SessionId::from(format!("conformance-cgid-{}", Uuid::new_v4()));
+        let i1 = NodeId::new();
+        let obs = NodeId::new();
+        let plain = NodeId::new();
+        let ts = Utc::now();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, ts),
+                    plant_concept_full(
+                        &sid, obs, i1, "overflow sentence", "overflow sentence",
+                        ConceptType::Observation, ts, None, Some("chunk-42".into()),
+                    ),
+                    plant_concept_full(
+                        &sid, plain, i1, "plain concept", "plain concept",
+                        ConceptType::Entity, ts, None, None,
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        let obs_row = snap.concepts.iter().find(|c| c.id == obs).unwrap();
+        assert_eq!(
+            obs_row.chunk_group_id.as_deref(),
+            Some("chunk-42"),
+            "chunk_group_id must survive flush→load (T5.2 sibling co-retrieval key)"
+        );
+        let plain_row = snap.concepts.iter().find(|c| c.id == plain).unwrap();
+        assert_eq!(plain_row.chunk_group_id, None, "NULL chunk_group_id stays None");
+    }
+
+    async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
+        // Embedding contract (S5-class snapshot metadata): load_session reads
+        // embedding_kind/model/dim into GraphSnapshot.embedding when present, and
+        // flush does NOT write or clobber them (no session-metadata Mutation kind).
+        // The live suite stamps them via direct SQL because no flush path exists.
+        let sid = SessionId::from(format!("conformance-embed-{}", Uuid::new_v4()));
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, Utc::now()),
+                    plant_concept(&sid, c1, i1, "seed concept", Utc::now(), None),
+                ],
+            })
+            .await
+            .unwrap();
+        let pool = store.pool().await.unwrap();
+        sqlx::query(
+            "UPDATE sessions SET embedding_kind = $2, embedding_model = $3, embedding_dim = $4 \
+             WHERE session_id = $1",
+        )
+        .bind(&sid.0)
+        .bind("bge_m3")
+        .bind("BAAI/bge-m3")
+        .bind(1024_i32)
+        .execute(pool)
+        .await
+        .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.embedding,
+            Some(EmbeddingContract {
+                kind: "bge_m3".into(),
+                model: Some("BAAI/bge-m3".into()),
+                dim: 1024,
+            }),
+            "load_session must materialize the stamped embedding contract"
+        );
+        // A subsequent flush (which only ensures the session row) must not clobber the
+        // snapshot-only metadata.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_concept(
+                    &sid,
+                    NodeId::new(),
+                    i1,
+                    "more concepts",
+                    Utc::now(),
+                    None,
+                )],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        let emb = snap.embedding.expect("embedding contract survives a later flush");
+        assert_eq!(emb.kind, "bge_m3");
+        assert_eq!(emb.model.as_deref(), Some("BAAI/bge-m3"));
+        assert_eq!(emb.dim, 1024);
+        // Session with no stamp reads back None.
+        let plain_sid = SessionId::from(format!("conformance-embed-none-{}", Uuid::new_v4()));
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(&plain_sid, NodeId::new(), Utc::now())],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&plain_sid).await.unwrap();
+        assert_eq!(snap.embedding, None, "unstamped session has no contract");
     }
 
     async fn check_seed_load_full_snapshot_roundtrip(store: &CockroachStore) {
@@ -2006,6 +2333,10 @@ mod conformance {
         check_load_missing_session_is_session_not_found(&store).await;
         check_vector_write_and_candidates_top1(&store).await;
         check_keyword_candidates_on_planted_concept(&store).await;
+        check_keyword_mixed_case_ranks_like_memory_store(&store).await;
+        check_legal_demote_flush_partial_index(&store).await;
+        check_chunk_group_id_survives_flush_load(&store).await;
+        check_embedding_contract_read_and_flush_immunity(&store).await;
         check_seed_load_full_snapshot_roundtrip(&store).await;
         check_structural_queries_agree_with_memory_store(&store).await;
         check_structural_queries_age_filter_agrees(&store).await;
