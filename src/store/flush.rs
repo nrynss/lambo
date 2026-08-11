@@ -647,6 +647,121 @@ mod tests {
         }
     }
 
+    /// `GraphStore` mock: PANICS (does not return `Err`) on the first
+    /// `panic_next(n)` flush calls (or `panic_forever`), then delegates to an
+    /// inner store. Mirrors [`FlakyStore`]'s call/batch bookkeeping but
+    /// exercises the `catch_unwind` containment path: a raw panic must not
+    /// abort the spawned flush loop.
+    struct PanicStore {
+        inner: Arc<dyn GraphStore>,
+        flush_calls: AtomicUsize,
+        panic_remaining: AtomicUsize,
+        panic_always: AtomicBool,
+        batch_sizes: Mutex<Vec<usize>>,
+    }
+
+    impl PanicStore {
+        fn new(inner: Arc<dyn GraphStore>) -> Self {
+            Self {
+                inner,
+                flush_calls: AtomicUsize::new(0),
+                panic_remaining: AtomicUsize::new(0),
+                panic_always: AtomicBool::new(false),
+                batch_sizes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn panic_next(&self, n: usize) {
+            self.panic_remaining.store(n, Ordering::SeqCst);
+        }
+
+        fn panic_forever(&self) {
+            self.panic_always.store(true, Ordering::SeqCst);
+        }
+
+        fn flush_calls(&self) -> usize {
+            self.flush_calls.load(Ordering::SeqCst)
+        }
+
+        fn batch_sizes(&self) -> Vec<usize> {
+            self.batch_sizes.lock().clone()
+        }
+
+        fn should_panic(&self) -> bool {
+            if self.panic_always.load(Ordering::SeqCst) {
+                return true;
+            }
+            self.panic_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then(|| n - 1))
+                .is_ok()
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for PanicStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            self.batch_sizes.lock().push(batch.len());
+            if self.should_panic() {
+                panic!("simulated flush panic (PanicStore)");
+            } else {
+                self.inner.flush(batch).await
+            }
+        }
+
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.vector_candidates(session, embedding, limit).await
+        }
+
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+        ) -> Result<u64, StoreError> {
+            self.inner.blast_radius(session, node, min_edge_age).await
+        }
+
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner.interaction_span(session, node, min_age).await
+        }
+
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
     /// Capturing writer for asserting on emitted tracing events.
     #[derive(Clone)]
     struct BufWriter(Arc<Mutex<Vec<u8>>>);
@@ -972,5 +1087,121 @@ mod tests {
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.edges.len(), 2); // Derives + Temporal
         assert_eq!(task.stats().depth, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn panicking_backend_is_contained_batch_retained_then_lands() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(PanicStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        store.panic_next(2);
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        // Tick: attempt 1 panics (caught) -> backoff 100ms begins. The spawned
+        // loop must survive: an uncontained panic would abort it, finishing
+        // the JoinHandle with `degraded()==false`.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        assert_eq!(store.flush_calls(), 1);
+        assert!(!handle.is_finished(), "flush loop aborted on backend panic");
+        assert!(!task.degraded());
+        assert_eq!(task.stats().depth, 3);
+        assert!(store.load_session(&sid()).await.is_err(), "nothing landed yet");
+
+        // Retry panics too; retries exhausted -> batch RETAINED (never dropped).
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        assert_eq!(store.flush_calls(), 2);
+        assert!(!handle.is_finished(), "flush loop aborted on backend panic");
+        assert!(!task.degraded());
+        assert_eq!(task.stats().depth, 3, "retained batch still pending");
+
+        // Store stops panicking: the next tick lands the retained batch whole.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        assert!(!handle.is_finished());
+        assert_eq!(store.batch_sizes(), vec![3, 3, 3]);
+        let snap = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snap.interactions.len(), 1);
+        assert_eq!(snap.concepts.len(), 1);
+        assert_eq!(snap.edges.len(), 1); // Derives edge
+        assert!(task.stats().lag < Duration::from_millis(50), "lag reset after success");
+
+        // Each caught panic logged its payload via the BackendFlushPanic warn.
+        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        assert_eq!(out.matches("BackendFlushPanic").count(), 2, "warn missing: {out}");
+        assert!(
+            out.contains("simulated flush panic (PanicStore)"),
+            "panic payload missing: {out}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_panics_lead_to_degrade_past_log_max() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(PanicStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 4),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        store.panic_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+
+        // Panicking attempts exhaust retries; batch retained below log_max.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        assert_eq!(task.stats().depth, 3);
+        assert!(!task.degraded());
+        assert!(!handle.is_finished());
+
+        // More writes push pending past log_max=4 -> designed degrade path
+        // (same as a failing backend): durability="none", I/O stops.
+        add_concept(&graph, 2, iid); // 2 more mutations -> pending 5
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.degraded()).await;
+        assert!(task.degraded());
+        assert_eq!(task.stats().depth, 5);
+        assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
+        assert!(!handle.is_finished(), "degrade must not abort the loop");
+
+        // Every caught panic logged BackendFlushPanic; degrade logged too.
+        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        assert_eq!(out.matches("BackendFlushPanic").count(), 2, "warn missing: {out}");
+        assert!(
+            out.contains("simulated flush panic (PanicStore)"),
+            "panic payload missing: {out}"
+        );
+        assert!(out.contains("FlushDegraded"), "error missing: {out}");
     }
 }
