@@ -120,10 +120,13 @@ an agent waiting on T5.1.
 
 ## Exit criteria
 
-- [ ] All recall goldens green against fixture graphs
-- [ ] Context-format golden byte-exact
-- [ ] Hybrid leg proven behind capability gate (fake VECTOR_SEARCH on/off)
-- [ ] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise)
+> Superseded by the closed-out checklist in the Handoff Log (all [x], backed
+> by tests) — phase-close review P5-6.
+
+- [x] All recall goldens green against fixture graphs
+- [x] Context-format golden byte-exact
+- [x] Hybrid leg proven behind capability gate (fake VECTOR_SEARCH on/off)
+- [x] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise)
 
 ---
 
@@ -161,6 +164,10 @@ an agent waiting on T5.1.
 **Wave-barrier gates (integrator, 2026-08-12):** clippy `too_many_arguments` allow on `assemble` (repo precedent) + full no-default TEST matrix caught two T5.1 fixture-dependent tests running un-gated under no-default rows (fixture tests + `load_rest_api_fixture` gated, `629a61c`). Barrier gates: fmt clean; clippy `--all-targets -D warnings` clean; default 412/0; sqlite 444/0; sqlite-minimal 340/0; cockroach 335/0; minimal + demo checks clean.
 
 **Entry point (Wave D, d18a54b):** `Daemon::recall(session, RecallQuery, &dyn GraphStore, embedding: Option<&[f32]>, RecallWeights, &mut RecallCache) -> RecallResult` (src/daemon/mod.rs). Order: cache probe (brief graph read for epoch) -> `gather` (store I/O, BEFORE any lock; store error degrades to empty vector leg with a warning) -> scores snapshot -> graph read -> index read -> hot write (documented lock order) -> candidates/expand/assemble/format -> cache insert under the re-read epoch (a mutation between probe and compute can never be served stale). Index must be installed via `Daemon::with_index` (else keyword leg degrades with a warning); `embedding = None` degrades to keyword + recent legs (spec §3.2). Cache is session-scoped (spec §8 key carries no session id) — caller owns one per session. End-to-end test `recall_entry_reproduces_context_golden` proves the ENTRY reproduces the byte-exact golden block plus cache hit + epoch invalidation.
+
+**Phase-close review (2026-08-12):** three-lens review ACCEPT with 2 P2 + 4 P3; one remediation round (106d057). See `adve-review-p5-recall.md`. Notable cross-phase change: `Graph::set_reservation`/`clear_reservation` now bump the epoch directly (reservations render into recall context; they are RAM-local, no Mutation kind — P2, Lens C). Entry behavior: the cache stores the epoch-stable `RecallPipeline { phase1, expanded }`; assembly + hot re-validation + reservations + rendering run on EVERY call, so warning lines are always fresh (spec §9). Cache inserts are skipped while `scores.epoch != graph.epoch` (rescore lag guard). `run_cycle` now publishes GC index syncs inside the graph-write scope (atomic (graph, index) pair for recall readers).
+
+**Conflict-writer reconciliation (phase-close P5-5):** the golden's "Agent A wrote to it 11 seconds ago" is a PLANTED-PAYLOAD format pin; live detection on the shipped fixture names agent-b (newest qualifying write on 001001 is agent-b's Dependency at 09:35Z). T8.4 must arrange the live demo graph (writer agent-a, write 11s before demo time) just as it plants the 9th dependent for the blast-radius line.
 
 **Exit criteria:**
 - [x] All recall goldens green against fixture graphs (phase-1 exact, phase-2 membership, context byte-exact through the entry)

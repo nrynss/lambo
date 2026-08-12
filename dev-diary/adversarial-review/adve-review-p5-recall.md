@@ -1,0 +1,82 @@
+# Adversarial Review: P5 — Recall (branch `phase/p5-recall`) — phase close
+
+```text
+╔══════════════════════════════════════════════════════════════════╗
+║  STATUS: CLOSED — remediated, verification ACCEPT                ║
+║  Closed: 2026-08-12 — see Close record below                     ║
+║  Scope:  P5 recall tier (T5.1–T5.4 + entry): candidates,         ║
+║          expansion, assembly, context format, cache,             ║
+║          Daemon::recall entry                                     ║
+║  Source: phase/p5-recall @ 204e055 (diff vs main: 14 files,      ║
+║          3,459 insertions)                                        ║
+║  Reviewer: three parallel lenses (spec-§8 conformance /          ║
+║          concurrency+lock discipline / cross-phase contracts +   ║
+║          test honesty); orchestrated by the integrator           ║
+║  Verdict: all three ACCEPT; 2 P2 + 4 P3 findings,                ║
+║          remediated in one round (106d057), re-review ACCEPT      ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+## Reviewers and verdicts
+
+- **Lens A (spec-§8 conformance)** — ACCEPT: phase-1 union (BM25 index, N=3
+  recent by created_at, capability-gated vector), phase-2 BFS priority, phase-3
+  scoring formula + hot re-validation + max_tokens, epoch-keyed cache, context
+  format all conform. §3.2 degradation + RAM-tier promise verified.
+- **Lens B (concurrency + locks + cache)** — ACCEPT: lock order cycle-free
+  (G < I < H), no awaits under locks, cache probe/insert linearization sound,
+  `&mut` cache across await safe, no deadlock for hot-write-under-graph-read.
+- **Lens C (cross-phase contracts + test honesty + docs)** — ACCEPT: T4.2
+  revalidate honored (recall's own now, read-time seconds_ago, ALGO-2 writer),
+  T2.7 reservations rendered, golden byte-exact through the real entry and
+  wall-clock-free, exit criteria [x] all backed by real tests.
+
+## Findings (2 P2, 4 P3) and dispositions
+
+- **P5-1 (P2, Lens A)** — Cache hits froze time-sensitive output: conflict
+  `seconds_ago`, reservation expiry and hot-entry liveness were only
+  re-validated on the compute path; spec §9 requires conditions re-validated on
+  each `recall()`. **Remediated:** the cache now stores the epoch-stable
+  pipeline artifact (`RecallPipeline { phase1, expanded }`); assembly, hot
+  re-validation, reservations and rendering run on EVERY call. Regression
+  tests: `recall_cache_hit_rerenders_fresh_warning_lines` (age refreshes
+  11s -> 16s across a cache hit; lapsed window drops the line), 
+  `recall_reservation_transition_invalidates_cache_and_renders`.
+- **P5-2 (P2, Lens C)** — Reservations never bumped `Graph::epoch`, so a
+  reservation transition was invisible to the epoch-keyed cache (and the
+  cache.rs "any graph mutation bumps epoch" claim overreached). **Remediated:**
+  `set_reservation`/`clear_reservation` bump the epoch directly (reservations
+  are RAM-local, no Mutation kind); cache.rs doc reworded to scope the claim;
+  regression test proves the miss + re-render.
+- **P5-3 (P3, Lens A + Lens B, merged)** — A compute whose daemon scores lag
+  the graph epoch (up to one rescore tick) was cached under the new epoch key,
+  freezing transient lagged scores. **Remediated:** the entry skips the cache
+  insert while `scores.epoch != graph.epoch` (the spec key is preserved; only
+  the lag window misses; the next call after the rescore recomputes).
+- **P5-4 (P3, Lens B)** — `run_cycle` published GC collections into the index
+  non-atomically with the graph (benign: assemble filters graph-missing
+  members). **Remediated:** `gc::sync_index` now runs inside the graph-write
+  scope, keeping recall's (graph, index) read pair atomic; lock order stays
+  graph -> index.
+- **P5-5 (P3, Lens C)** — Handoff Log silent on the conflict-writer planting:
+  the golden's "Agent A wrote to it 11 seconds ago" is a planted-payload format
+  pin; live detection on the fixture names agent-b (09:35Z). **Remediated:**
+  reconciliation line added to the Handoff Log; T8.4 must arrange the live
+  demo graph (writer agent-a, 11s ago) alongside the 9th dependent.
+- **P5-6 (P3, Lens C)** — Stale duplicate "Exit criteria" checklist (unchecked
+  [ ] block left at the phase-opening section). **Remediated:** folded into the
+  closed-out checklist.
+
+## Close record
+
+Remediation round `106d057` (entry restructure + graph.rs reservation epoch +
+cache genericization + run_cycle atomicity) verified by re-review (independent
+pass over the remediation delta): all six dispositions verified against
+source; the entry golden test still byte-exact; new regression tests genuinely
+discriminate; full gates green — fmt, clippy `--all-targets -D warnings`,
+default 415/0, sqlite 447/0, sqlite-minimal 340/0, cockroach 335/0, minimal +
+demo checks clean.
+
+**Disposition: ACCEPT — `phase/p5-recall` is merge-ready.**
+
+— integrator, orchestration + round-2 verification, 2026-08-12
