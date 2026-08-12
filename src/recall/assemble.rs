@@ -233,8 +233,6 @@ where
     }
 }
 
-
-
 /// Finite, non-negative weight, else `0.0` (mirrors ALGO-10 sanitization).
 fn sane_weight(w: f64) -> f64 {
     if w.is_finite() && w >= 0.0 {
@@ -936,17 +934,35 @@ mod tests {
         // fits alone and block1+sep+block2 does not -> only block1 rendered (ranked-prefix:
         // block2, though it might fit alone, must NOT appear after block1).
         let result = assemble(
-            &g, &expanded, &[], &scores, &mut HotList::new(),
-            &query(3, 34), RecallWeights::default(), ts(60), byte_len,
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut HotList::new(),
+            &query(3, 34),
+            RecallWeights::default(),
+            ts(60),
+            byte_len,
         );
         let contexts = result.context.split("\n\n").collect::<Vec<_>>();
-        assert_eq!(contexts.len(), 1, "ranked-prefix: only the first block fits");
+        assert_eq!(
+            contexts.len(),
+            1,
+            "ranked-prefix: only the first block fits"
+        );
         assert!(result.context.starts_with("concept 1"), "first block kept");
 
         // With a large budget everything fits in rank order.
         let all = assemble(
-            &g, &expanded, &[], &scores, &mut HotList::new(),
-            &query(3, 10_000), RecallWeights::default(), ts(60), byte_len,
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut HotList::new(),
+            &query(3, 10_000),
+            RecallWeights::default(),
+            ts(60),
+            byte_len,
         );
         assert_eq!(all.context.split("\n\n").count(), 3);
     }
@@ -958,7 +974,10 @@ mod tests {
         // expanded.required includes uid(9) which is NOT in the graph (stale
         // vector id), ahead of the valid c1. top_k=1 must yield [c1], not [].
         let g = graph_with(3);
-        let scores = ScoreTable { epoch: 0, ranked: vec![] };
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![],
+        };
         let expanded = ExpandedSet {
             required: vec![
                 Scored::new(uid(9), 0.9), // graph-missing / stale
@@ -967,8 +986,15 @@ mod tests {
             siblings: Vec::new(),
         };
         let result = assemble(
-            &g, &expanded, &[], &scores, &mut HotList::new(),
-            &query(1, 10_000), RecallWeights::default(), ts(60), byte_len,
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut HotList::new(),
+            &query(1, 10_000),
+            RecallWeights::default(),
+            ts(60),
+            byte_len,
         );
         assert_eq!(ids_of(&result), vec![uid(1)], "valid member fills the slot");
     }
@@ -976,5 +1002,4 @@ mod tests {
     fn byte_len(s: &str) -> usize {
         s.len()
     }
-
 }

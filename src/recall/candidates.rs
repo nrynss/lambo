@@ -788,5 +788,4 @@ mod tests {
             assert!(ids.contains(&NodeId(Uuid::from_u64_pair(2, 200 + k))));
         }
     }
-
 }

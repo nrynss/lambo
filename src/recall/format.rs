@@ -565,14 +565,20 @@ mod tests {
         g.upsert_edge(dep_edge(90, uid(1), uid(6))).unwrap();
 
         let single = blast_radius(&g, hub);
-        assert_eq!(single, 5, "only the 5 exclusive-structural leaves depend on hub");
+        assert_eq!(
+            single, 5,
+            "only the 5 exclusive-structural leaves depend on hub"
+        );
 
         // Batched must agree per-node.
         let radii = blast_radii(&g);
         assert_eq!(radii.get(&hub).copied().unwrap_or(0), single);
         // Every leaf also reports its own dependent count from the map.
         for id in [1u64, 2, 3, 4, 5] {
-            assert_eq!(blast_radius(&g, uid(id)), radii.get(&uid(id)).copied().unwrap_or(0));
+            assert_eq!(
+                blast_radius(&g, uid(id)),
+                radii.get(&uid(id)).copied().unwrap_or(0)
+            );
         }
     }
 
@@ -586,8 +592,11 @@ mod tests {
         let origin = interaction(98, "a");
         g.insert_interaction(origin.clone()).unwrap();
         for i in 0..=n {
-            g.insert_concept(concept_for_blast(uid(i as u64), origin.id, &format!("n{i}")), origin.id)
-                .unwrap();
+            g.insert_concept(
+                concept_for_blast(uid(i as u64), origin.id, &format!("n{i}")),
+                origin.id,
+            )
+            .unwrap();
         }
         for i in 1..=n {
             g.upsert_edge(dep_edge(i as u64, uid((i - 1) as u64), uid(i as u64)))
@@ -643,5 +652,4 @@ mod tests {
             last_reinforced: now,
         }
     }
-
 }

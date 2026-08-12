@@ -341,8 +341,7 @@ impl Daemon {
 
         // Gather store I/O BEFORE any lock (the vector leg is async). Uses the
         // graph's authoritative session as the vector namespace (P2-8).
-        let input = match candidates::gather(store, &graph_session, embedding, query.top_k).await
-        {
+        let input = match candidates::gather(store, &graph_session, embedding, query.top_k).await {
             Ok(input) => input,
             Err(err) => {
                 tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
@@ -358,12 +357,7 @@ impl Daemon {
         let index = self.index.as_ref().map(|i| i.read());
         let mut hot = self.hot.write();
         let epoch = graph.epoch();
-        let key = CacheKey::new(
-            &query.query,
-            query.top_k,
-            query.traversal_depth,
-            epoch,
-        );
+        let key = CacheKey::new(&query.query, query.top_k, query.traversal_depth, epoch);
 
         // P1-2: the cache key cannot capture vector-source state (embedding
         // presence, transient store success/failure, write-behind progress), so
@@ -388,8 +382,7 @@ impl Daemon {
             match cache.get(&key) {
                 Some(cached) => cached.clone(),
                 None => {
-                    let pipeline =
-                        build_pipeline(&graph, index.as_deref(), input, &query);
+                    let pipeline = build_pipeline(&graph, index.as_deref(), input, &query);
                     // P5-3: never cache a compute whose daemon scores lag the
                     // graph epoch (rescore is epoch-gated).
                     if scores.epoch == epoch {
@@ -2874,16 +2867,29 @@ mod tests {
         // embedding=Some (vector leg participates) -> NEVER cached.
         let emb = vec![0.1f32; 8];
         let _ = daemon
-            .recall(&session, query.clone(), &store, Some(&emb), RecallWeights::default(), &mut cache)
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                Some(&emb),
+                RecallWeights::default(),
+                &mut cache,
+            )
             .await;
         assert_eq!(cache.len(), 0, "vector-dependent result must not be cached");
 
         // embedding=None (pure keyword+recent) -> cached.
         let _ = daemon
-            .recall(&session, query.clone(), &store, None, RecallWeights::default(), &mut cache)
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
             .await;
         assert_eq!(cache.len(), 1, "keyword+recent result cached");
-        assert!(!can_serve_vector(&mut cache, &query));
     }
 
     // P2-6 (GPT5.6sol): without an inverted index, the independently gathered
@@ -2919,7 +2925,14 @@ mod tests {
             traversal_depth: 2,
         };
         let result = daemon
-            .recall(&session, query, &store, None, RecallWeights::default(), &mut cache)
+            .recall(
+                &session,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
             .await;
         assert!(
             !result.hits.is_empty(),
@@ -2965,7 +2978,14 @@ mod tests {
             traversal_depth: 2,
         };
         let result = daemon
-            .recall(&other, query, &store, None, RecallWeights::default(), &mut cache)
+            .recall(
+                &other,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
             .await;
         assert!(
             result.hits.is_empty() && !result.warnings.is_empty(),
@@ -2979,12 +2999,4 @@ mod tests {
             "refusal names the namespace mix"
         );
     }
-
-    /// Cache holds only keyword+recent entries; an embedded (vector) request can
-    /// never be served a stale keyword entry. Placeholder used by the P1-2 test;
-    /// we assert it by re-running the key and confirming no vector entry exists.
-    fn can_serve_vector(_cache: &mut RecallCache<RecallPipeline>, _q: &RecallQuery) -> bool {
-        false // the cache is never populated on the vector path
-    }
-
 }
