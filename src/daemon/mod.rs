@@ -304,23 +304,6 @@ impl Daemon {
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
     /// caller owns one [`RecallCache`] per session and hands it over by
-    /// `&mut` (the cache has no interior synchronization).
-    ///
-    /// `embedding` is the query embedding when an embedder is configured;
-    /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
-    /// A store error during `gather` degrades to an empty vector leg with a
-    /// warning rather than failing the read.
-    /// Three-phase recall (spec §8; P5).
-    ///
-    /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
-    /// lock: the vector leg is async and must not run while the graph lock is
-    /// held. The pipeline then runs under the documented lock order
-    /// (graph read -> hot write). The daemon's inverted index must be
-    /// installed via [`Daemon::with_index`]; without it recall returns an
-    /// empty hit list with a warning (P8 wires the owner's index).
-    ///
-    /// `cache` is session-scoped: spec §8's key carries no session id, so the
-    /// caller owns one [`RecallCache`] per session and hands it over by
     /// `&mut` (the cache has no interior synchronization). The cache stores
     /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
     /// re-validation and context rendering run on EVERY call with the
@@ -2731,5 +2714,112 @@ mod tests {
             "lapsed entry's warning dropped: {}",
             lapsed.context
         );
+    }
+
+    /// The rescore-lag guard (phase-close P5-3): a compute whose daemon scores
+    /// lag the graph epoch is rendered but NOT cached; once the loop's
+    /// rescore catches up, the next call caches the fresh-epoch key (R2-1:
+    /// the skip branch had no direct test).
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn recall_rescore_lag_guard_skips_cache_insert_while_scores_lag() {
+        use crate::config::RecallWeights;
+        use crate::daemon::score::rescore;
+        use crate::fixtures;
+        use crate::recall::cache::RecallCache;
+
+        let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
+        let snap = fixtures::load_snapshot("session-rest-api").unwrap();
+        let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
+        let index = Arc::new(RwLock::new(InvertedIndex::from_snapshot(&snap)));
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(Arc::new(move || now))
+        .with_index(index);
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+
+        let store = fixtures::load_store("session-rest-api").unwrap();
+        let mut cache = RecallCache::new();
+        let session = SessionId::from("session-rest-api");
+        let query = RecallQuery {
+            query: "update user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 2,
+        };
+
+        let first = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert!(!first.context.is_empty());
+        assert_eq!(cache.len(), 1, "initial compute cached");
+
+        // Mutation bumps the epoch; the loop's rescore has NOT caught up
+        // (scores.epoch still the old one). The compute renders against the
+        // lagged table but must NOT be cached under the new epoch key.
+        let tail = graph
+            .read()
+            .interactions()
+            .max_by_key(|i| i.created_at)
+            .expect("fixture has interactions")
+            .id;
+        graph
+            .write()
+            .insert_interaction(Interaction {
+                id: NodeId::new(),
+                session_id: session.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: None,
+                previous_id: Some(tail),
+                created_at: now,
+            })
+            .unwrap();
+        let lagged = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(
+            cache.len(),
+            1,
+            "lagged-scores compute is NOT cached (P5-3 guard)"
+        );
+        assert!(!lagged.context.is_empty(), "output still rendered");
+
+        // Rescore catches up; the next call stores the fresh-epoch key.
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+        let caught_up = daemon
+            .recall(
+                &session,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(
+            cache.len(),
+            2,
+            "after rescore the fresh-epoch key is cached"
+        );
+        assert!(!caught_up.context.is_empty());
     }
 }
