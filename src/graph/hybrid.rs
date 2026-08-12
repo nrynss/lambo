@@ -49,6 +49,14 @@
 //! "merge": recall expansion follows `Semantic` (spec §8) and canonization (P6)
 //! later physically folds them. The new concept carries its computed embedding
 //! so it too becomes a future vector candidate.
+//! The merge target is surfaced in the outcome's [`DeriveOutcome::semantic_merged`]
+//! — kept separate from `matched` because a merge does not re-upsert the target
+//! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
+//! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept degraded to
+//! keyword-only (below-threshold, capability-miss, or embed failure) is written
+//! with `embedding: None` — the precision bias must never persist a vector for a
+//! concept it refused to merge (MAJOR-1); likewise a failed embed never stamps
+//! the session's embedding contract (MINOR-2).
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -317,7 +325,6 @@ pub async fn derive(
                 }
             }
             None => {
-                attempted_embed = true;
                 let context = context_text(content, origin_text.as_deref());
                 match embedder.embed(&context).await {
                     Err(e) => {
@@ -335,48 +342,60 @@ pub async fn derive(
                             embedding: None,
                         }
                     }
-                    Ok(emb) => match store
-                        .vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT)
-                        .await
-                    {
-                        Ok(hits) => {
-                            // Highest-scoring candidate at/above threshold (store
-                            // results are not guaranteed sorted). The candidate is
-                            // validated to be a real distinct concept at commit.
-                            let best = hits
-                                .iter()
-                                .filter(|c| c.score >= semantic_match_threshold)
-                                .max_by(|a, b| a.score.total_cmp(&b.score));
-                            match best {
-                                Some(c) => Resolution::HybridMerge {
+                    Ok(emb) => {
+                        // An embed only counts as "attempted" for the contract
+                        // stamp once it actually returned a vector — a failed
+                        // attempt must not bind the session to an embedding
+                        // space it produced no vector in (MINOR-2).
+                        attempted_embed = true;
+                        match store
+                            .vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT)
+                            .await
+                        {
+                            Ok(hits) => {
+                                // Highest-scoring candidate at/above threshold (store
+                                // results are not guaranteed sorted). The candidate is
+                                // validated to be a real distinct concept at commit.
+                                let best = hits
+                                    .iter()
+                                    .filter(|c| c.score >= semantic_match_threshold)
+                                    .max_by(|a, b| a.score.total_cmp(&b.score));
+                                match best {
+                                    Some(c) => Resolution::HybridMerge {
+                                        key: key.clone(),
+                                        target: c.item,
+                                        score: c.score,
+                                        embedding: emb,
+                                    },
+                                    // Below threshold: fresh concept, keyword-only.
+                                    // Writing the vector here would let a 'far'
+                                    // concept become a future vector candidate —
+                                    // the exact over-merge the precision bias
+                                    // prevents (PHASE-7 T7.2 law, MAJOR-1).
+                                    None => Resolution::Fresh {
+                                        key: key.clone(),
+                                        embedding: None,
+                                    },
+                                }
+                            }
+                            Err(StoreError::Capability(_)) => {
+                                if note_fallback_logged(&session_id) {
+                                    tracing::warn!(
+                                        target: "lambo::hybrid",
+                                        session = %session_id,
+                                        "store refused vector_candidates (capability miss) — \
+                                         degrading to MatchStrategy::Canonical (creating \
+                                         keyword-only concept)"
+                                    );
+                                }
+                                Resolution::Fresh {
                                     key: key.clone(),
-                                    target: c.item,
-                                    score: c.score,
-                                    embedding: emb,
-                                },
-                                None => Resolution::Fresh {
-                                    key: key.clone(),
-                                    embedding: Some(emb),
-                                },
+                                    embedding: None,
+                                }
                             }
+                            Err(e) => return Err(e.into()),
                         }
-                        Err(StoreError::Capability(_)) => {
-                            if note_fallback_logged(&session_id) {
-                                tracing::warn!(
-                                    target: "lambo::hybrid",
-                                    session = %session_id,
-                                    "store refused vector_candidates (capability miss) — \
-                                     degrading to MatchStrategy::Canonical (creating \
-                                     keyword-only concept)"
-                                );
-                            }
-                            Resolution::Fresh {
-                                key: key.clone(),
-                                embedding: Some(emb),
-                            }
-                        }
-                        Err(e) => return Err(e.into()),
-                    },
+                    }
                 }
             }
         };
@@ -490,7 +509,11 @@ pub async fn derive(
                             created_at: interaction_created_at,
                             last_reinforced: interaction_created_at,
                         })?;
-                        outcome.matched.push(*target);
+                        // Recorded separately from `matched`: a merge does not
+                        // re-upsert the target nor Derives-reinforce it, so the
+                        // outcome must not over-count `matched` as "re-derived"
+                        // (DeriveOutcome contract, MINOR-3).
+                        outcome.semantic_merged.push(*target);
                     }
                 }
                 this_node = id;
@@ -959,6 +982,14 @@ mod tests {
         // concepts, and the new content has a distinct canonical key).
         assert_eq!(out2.created.len(), 1, "new concept for the near surface");
         let c2 = out2.created[0];
+        // MINOR-3: the merge target reports in `semantic_merged`, NOT `matched`.
+        // A merge does not re-upsert the target nor Derives-reinforce it, so
+        // `matched` must not over-count it as "re-derived" (derive contract).
+        assert!(
+            out2.matched.is_empty(),
+            "merge target must not pollute matched"
+        );
+        assert_eq!(out2.semantic_merged, vec![c1]);
         let sem = {
             let g = graph.read();
             g.edge_between(c1, c2, EdgeType::Semantic)
@@ -1036,6 +1067,17 @@ mod tests {
         assert!(out2.matched.is_empty());
         let c2 = out2.created[0];
         let g = graph.read();
+        // MAJOR-1: the below-threshold fresh concept must be keyword-only — a
+        // written vector here would let a 'far' concept become a vector
+        // candidate on a later hybrid derive (the exact over-merge the
+        // precision bias prevents).
+        match g.node(c2) {
+            Some(Node::Concept(con)) => assert!(
+                con.embedding.is_none(),
+                "below-threshold fresh concept must not carry a vector"
+            ),
+            _ => unreachable!(),
+        }
         // No Semantic edge: keyword-only fresh concept.
         assert!(g.edge_between(c1, c2, EdgeType::Semantic).is_none());
         assert!(g.edge_between(c2, c1, EdgeType::Semantic).is_none());
@@ -1196,6 +1238,12 @@ mod tests {
             Some(Node::Concept(con)) => assert!(con.embedding.is_none()),
             _ => unreachable!(),
         }
+        // MINOR-2: the session's embedding contract must NOT be stamped — no
+        // embed ever returned a vector, so this is not a "first embed".
+        assert!(
+            g.embedding().is_none(),
+            "a fully-failed embed must not bind the session to an embedding contract"
+        );
         g.assert_invariants().unwrap();
     }
 

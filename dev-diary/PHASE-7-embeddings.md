@@ -136,6 +136,27 @@ far text creates a fresh concept; with a no-capability store, behavior is byte-i
   calibration rule, and `record_action`'s canonical path (SG-T2.4 `action.rs`) all still
   use the sync `derive`; if `record_action` ever needs hybrid matching it should reuse
   `hybrid::derive`'s `Unmatched` decision primitive rather than re-inventing the seam.
+- **Review remediation (2026-08-12, review of the handoff above):** three findings closed.
+  - **MAJOR-1 — keyword-only law held strictly:** the below-threshold `Fresh` branch and the
+    query-time capability-miss `Fresh` branch previously wrote `embedding: Some(..)` — a 'far'
+    concept would have retained a vector and become a future vector candidate, the exact
+    over-merge the precision bias prevents. Both now write `embedding: None` (byte-identical
+    to the embed-failure degrade). The `far_text_creates_fresh_keyword_concept` test now
+    asserts `con.embedding.is_none()`.
+  - **MINOR-2 — a failed embed is not a 'first embed':** `attempted_embed` was set before the
+    `.embed().await`, so a session whose first hybrid write hit a down/misconfigured embedder
+    was bound to the stamp (and a later kind/model correction refused). The flag now flips only
+    when an embed actually returns a vector; `embed_failure_degrades_to_fresh_concept` asserts
+    `graph.read().embedding()` stays `None`.
+  - **MINOR-3 — merge targets decoupled from `matched`:** a semantic merge does not re-upsert
+    the target nor `Derives`-reinforce it, so it no longer pollutes `outcome.matched` (which
+    stays faithful to sync-`derive` = "re-derived / reinforced this call"). Added
+    `DeriveOutcome::semantic_merged` (new field, struct doc updated); `near_pair_merges...`
+    asserts `matched` is empty and `semantic_merged == [c1]`. No `DeriveOutcome` struct-literal
+    constructor exists (Default only), so the field is additive.
+- **Out of scope (documented, left as-is):** the single-writer TOCTOU between hybrid's plan
+  and commit phases (spec §2.2) is an accepted design constraint; `src/graph/canonical.rs` is
+  inalienable and was not touched.
 
 ---
 

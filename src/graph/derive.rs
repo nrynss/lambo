@@ -140,16 +140,28 @@ impl<'a> ParentOf<'a> {
         self.pairs
     }
 }
-
-/// Summary of one [`derive`] call.
+/// Summary of one `derive` call — returned by both the sync
+/// [`derive`] and its async hybrid twin ([`crate::graph::hybrid::derive`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeriveOutcome {
     /// Concepts created by this call (fresh nodes), in resolution order:
     /// `concepts` argument first, then `ParentOf` contents.
     pub created: Vec<NodeId>,
     /// Concepts matched to pre-existing nodes (or to a node created earlier in
-    /// this same call), in the same resolution order.
+    /// this same call), in the same resolution order. `matched` is faithful to
+    /// the `derive` contract: every entry here was re-upserted (or, within the
+    /// same call, written) and carries/reinforces a `Derives` edge from the
+    /// interaction. Hybrid semantic merges are NOT recorded here — see
+    /// [`Self::semantic_merged`].
     pub matched: Vec<NodeId>,
+    /// Targets of hybrid semantic merges (only populated by
+    /// [`crate::graph::hybrid::derive`]): pre-existing concepts a hybrid write
+    /// merged against via a decaying `Semantic` edge. Kept separate from
+    /// [`Self::matched`] because a merge does NOT re-upsert the target nor add
+    /// a `Derives` edge to it — `matched` must retain its "re-derived /
+    /// Derives-reinforced" meaning for sync `derive` consumers (PHASE-7 T7.2
+    /// remediation, MINOR-3).
+    pub semantic_merged: Vec<NodeId>,
     /// Number of duplicate natural-key writes in this call that bumped an
     /// existing edge (`Derives` / `CoOccurrence` / `Hierarchical`).
     pub reinforced: usize,
