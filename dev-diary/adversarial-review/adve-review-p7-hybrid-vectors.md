@@ -198,3 +198,117 @@ defensive-law consistency fix, MINOR-4 is cosmetic. Airlift the non-live gates a
 (clean) and re-run the hybrid suite after the MAJOR-1 fix lands.
 
 — P7AdveReview, 2026-08-13
+
+---
+
+# Round 2 — Re-review after remediation (commit 7cbfe52)
+
+```text
+╔══════════════════════════════════════════════════════════════════╗
+║  STATUS: ACCEPT — MAJOR-1 + refused-merge-keyword-only VERIFIED  ║
+║  CLOSED; no new defects found.                                   ║
+║  Reviewer: P7AdveReview2 (whole-worktree adversarial re-sweep,   ║
+║            GRAPH-1 concept-type collapse trap / cross-branch     ║
+║            bookkeeping / determinism / lock discipline / gates)  ║
+║  Verdict:  ACCEPT.                                               ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+## Findings verified closed
+
+### MAJOR-1 (P1) — commit-time canonical-key collapse — VERIFIED-CLOSED
+
+`src/graph/hybrid.rs` Phase 3 now re-canonicalizes each content under the write
+lock against the graph **as written this call** (lines 427–447): a distinct content
+collapsing onto a same-key node already written this call resolves `Matched`, and
+if that node is in the within-call `written` set it records the match, adds the
+node to `call_nodes` (once), and writes nothing — mirroring sync `derive`'s
+`resolve_concept` (canonicalize → insert → `written_this_call` dedup). No more
+hard error / partial write on a two-contents-same-key call. `insert_concept`'s
+`UNIQUE (session_id, canonical_key)` invariant can no longer trip from a same-key
+collision because the second content never re-inserts.
+
+**GRAPH-1 trap verified:** `canonicalize` (canonical.rs:150–169) filters out
+`ConceptType::Observation` nodes from matching (lines 160–161; pinned by
+`canonicalize_never_matches_observations` and `derive_after_demote_creates_new_
+concept_not_observation_match`). So the collapse **never** unifies an Observation
+as a target. Traced all orderings of an Observation-content + Entity-content pair
+sharing a key in one call: an Entity/content never collapses onto an Observation
+(Unmatched → separate node); an Observation-content collapses onto a non-Observation
+node only when that node was written earlier in the same call — which is exactly
+sync `derive`'s `resolve_concept` behavior (identical asymmetry, not a divergence).
+The collapse target is always non-Observation, so GRAPH-1's invariant (never
+attach agent-declared content to an Observation) is preserved. The collapse skips
+the `Semantic` edge correctly (it records `matched`, writes no edge).
+
+Regression tests `hybrid_collapses_contents_sharing_a_canonical_key` (Fresh path)
+and `hybrid_collapses_shared_key_under_merge` (both colliding contents HybridMerge
+against one target) both assert the exact bookkeeping: `created.len()==1`,
+`matched == [created[0]]`, no CoOccurrence self-loop, one `Semantic` edge, and
+`assert_invariants()` passes.
+
+### Refused-merge keyword-only (round-1 MINOR-1 / task MINOR-2) — VERIFIED-CLOSED
+
+The `HybridMerge` commit arm now validates the target up front
+(`can_merge = matches!(g.node(*target), Some(Node::Concept(_)))`) and attaches the
+embedding **only** when the `Semantic` edge is actually written; the refused-merge
+degrade path writes `embedding: None` (true keyword-only), and emits no `Semantic`
+edge. Test `hybrid_refused_merge_target_is_keyword_only` (store returns the
+interaction node as the hit) asserts `embedding.is_none()`, empty
+`semantic_merged`, and a `Derives` edge. Matches the precision-bias law: a concept
+never persists a vector for a merge it refused.
+
+## Round-2 adversarial probe (new-defect sweep) — no new findings
+
+- **Cross-branch bookkeeping (collapse + HybridMerge interaction):** in
+  `hybrid_collapses_shared_key_under_merge`, content 1 creates its node + one
+  `Semantic` edge to the target, content 2 collapses onto that node. The node is
+  in both `created` and `matched` — this is the intended/reported semantics for a
+  same-key collision (identical to sync `derive`), not a contradiction; the
+  `semantic_merged` correctly holds only the real merge target (not the collapsed
+  node). No node is both a collapse target and then demoted: `Semantic` edges are
+  written only to a pre-existing `target` (single-writer ⇒ stable between gather
+  and commit), and the collapse arm writes no edge. Sound.
+- **Determinism:** the commit loop iterates the Vec-backed `items`/`resolutions`
+  in call order; `written`/`seen`/`call_nodes` are used only for membership
+  (`HashSet::contains`/`insert`, `Vec::contains`/`push`) — no HashMap/Set
+  iteration order anywhere in `derive` (grep confirms). The re-canonicalize
+  collapse is keyed on `canonicalize`'s deterministic `min_by_key(id.0)` match.
+  Deterministic.
+- **Lock discipline in the new code:** the re-canonicalize + collapse run inside
+  `graph.write()` (line 414) and are fully synchronous — the only "await" token in
+  Phase 3 is the comment "sync, no await". No graph lock is held across `.await`.
+  Clean.
+- **New error path / silent drop:** the collapse branch pushes to `matched` and
+  `continue`s; it introduces no new `Err` and drops only a conditional `Semantic`
+  edge that is correctly superseded by the same-key collapse (merge dropped in
+  favor of collapse is the deterministic, intended winner). No silent loss.
+
+## Regression + gates (non-live, run from the worktree, all clean)
+
+- `cargo fmt --all -- --check` — **clean** (exit 0).
+- `cargo check --all-targets` — **clean** (exit 0).
+- `cargo clippy --all-targets -- -D warnings` — **clean** (exit 0).
+- `cargo test --all` — **431 passed; 0 failed; 1 ignored** (up from 428 — the 3 new
+  hybrid regression tests).
+- `cargo test --lib --features embed-fixture hybrid::` — **10 passed; 0 failed**,
+  including the 3 new collapse/keyword-only tests.
+
+Cross-task seam, capability gating, single-writer lock discipline, secret safety,
+and evidence honesty were re-confirmed untouched: the remediation patch touches
+only `src/graph/hybrid.rs` and `dev-diary/PHASE-7-embeddings.md`; `cockroach.rs`
+(`vector_candidates` D1) is unchanged and the round-1 clean reads stand. No secret
+material in the diff or evidence. PHASE-7 doc honestly reports the three actionable
+closures and leaves the two P3 tradeoffs (global-then-filter under-return; §12.1
+camera-proof PENDING) as documented integrator decisions — no fabrication.
+
+## Round-2 verdict
+
+**ACCEPT.** Both actionable findings are genuinely closed with faithful, tested,
+deterministic, lock-clean implementations. The GRAPH-1 concept-type collapse trap is
+correctly handled (no Observation is ever unified as a target; the Observation-content
+collapse mirrors sync `derive` exactly). The only remaining items are the documented
+non-blocking P3 tradeoffs from round 1 (global-then-filter approximation, §12.1
+camera-proof PENDING, cosmetic `note_fallback_logged`), none of which block merge.
+
+— P7AdveReview2, 2026-08-13
