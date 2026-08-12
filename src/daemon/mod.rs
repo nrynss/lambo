@@ -1719,6 +1719,12 @@ mod tests {
 
     /// Parse the seconds out of a `stale_event` detail
     /// ("... untouched for <N>s").
+    ///
+    /// Gated with its only caller (NEW-1): CI's feature matrix runs
+    /// `--no-default-features --features store-sqlite|store-cockroach` under
+    /// `RUSTFLAGS="-D warnings"`, where an ungated helper whose sole use sits
+    /// behind `fixtures` is a hard dead-code error, not a warning.
+    #[cfg(feature = "fixtures")]
     fn stale_seconds(detail: &str) -> u64 {
         detail
             .trim_end_matches('s')
