@@ -48,6 +48,7 @@
 //!   node in BFS order (shortest distance; ties resolved by seed order →
 //!   smallest-id goal in practice).
 
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
@@ -153,6 +154,63 @@ pub fn detect(graph: &Graph, threshold: usize) -> Vec<DriftHit> {
     hits
 }
 
+/// Is this one concept drifted? The per-node primitive (CONC-5): a BFS
+/// **outward from `node`** that stops at the first root goal it reaches, so a
+/// well-anchored node costs only the ball of radius `threshold + 1` around it
+/// instead of a whole-graph multi-source pass.
+///
+/// Distance is symmetric (the traversable edge set is treated as undirected),
+/// so the hop count this finds is the same one [`detect`] finds from the goal
+/// side, and the tie-break matches: among goals at the shortest distance the
+/// smallest id wins.
+pub fn drift_at(graph: &Graph, node: NodeId, threshold: usize) -> Option<DriftHit> {
+    let goals: HashSet<NodeId> = root_goal_nodes(graph).into_iter().collect();
+    if goals.is_empty() {
+        return None;
+    }
+    let mut seen: HashSet<NodeId> = HashSet::from([node]);
+    let mut frontier: Vec<NodeId> = vec![node];
+    let mut hops = 0usize;
+    while !frontier.is_empty() {
+        // Any goal on this level is at the shortest distance; smallest id wins.
+        if let Some(goal) = frontier
+            .iter()
+            .filter(|n| goals.contains(n))
+            .min_by_key(|n| n.0)
+        {
+            return drift_hit(node, *goal, hops, threshold);
+        }
+        let mut next: Vec<NodeId> = Vec::new();
+        for cur in &frontier {
+            for nxt in traversable_neighbors(graph, *cur) {
+                if seen.insert(nxt) {
+                    next.push(nxt);
+                }
+            }
+        }
+        frontier = next;
+        hops += 1;
+    }
+    // No path to any goal: out of scope, matching `detect` (see the module
+    // docs' "… or no path" note).
+    None
+}
+
+/// A hit for a node at a known distance, or `None` when it is within threshold.
+fn drift_hit(node: NodeId, goal: NodeId, hops: usize, threshold: usize) -> Option<DriftHit> {
+    if hops <= threshold {
+        return None;
+    }
+    Some(DriftHit {
+        node,
+        goal,
+        hops,
+        detail: format!(
+            "concept {node} is {hops} hops from root goal {goal} (threshold {threshold})"
+        ),
+    })
+}
+
 /// Run [`detect`] and refresh the daemon hot list (T4.2): one
 /// `Condition::Drift` entry per hit, carrying T4.2's drift payload (hops +
 /// root goal — what T5.3 renders) and a re-validation predicate that
@@ -167,7 +225,16 @@ pub fn record(hotlist: &mut HotList, graph: &Graph, threshold: usize) -> Vec<Dri
     for hit in &hits {
         let node = hit.node;
         let t = threshold;
-        let holds = move |g: &Graph| detect(g, t).iter().any(|h| h.node == node);
+        // Per-node re-check (CONC-5) returning the refreshed payload: a node
+        // re-linked closer to the goal drops out of a recall, and one that
+        // drifted further renders its new hop count. Drift is clock-free, so
+        // `now` is unused — the signature is uniform across conditions.
+        let holds = move |g: &Graph, _at: DateTime<Utc>| {
+            drift_at(g, node, t).map(|h| HotListPayload::Drift {
+                hops: h.hops as u64,
+                root: h.goal,
+            })
+        };
         let entry = HotListEntry::new(
             node,
             Condition::Drift,
@@ -552,7 +619,10 @@ mod tests {
         // stops holding and revalidate evicts it (spec §9: conditions are
         // re-validated on each recall, not on a timer).
         g.set_root_goal(None);
-        assert!(!hot.revalidate(&g, chain[5]), "condition no longer holds");
+        assert!(
+            !hot.revalidate(&g, chain[5], ts(0)),
+            "condition no longer holds"
+        );
         assert!(!hot.contains(chain[5]), "stale entry evicted");
         assert!(hot.is_empty());
     }
@@ -565,10 +635,75 @@ mod tests {
         record(&mut hot, &g, DRIFT_THRESHOLD);
 
         assert!(
-            hot.revalidate(&g, chain[5]),
+            hot.revalidate(&g, chain[5], ts(0)),
             "still drifted -> entry survives"
         );
         assert!(hot.contains(chain[5]));
         assert_eq!(hot.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // CONC-5 — per-node re-validation
+    // ------------------------------------------------------------------
+
+    /// CONC-5/XP-3: a surviving entry's payload is rebuilt from the per-node
+    /// re-check, so a node that drifts *further* renders its new hop count.
+    ///
+    /// Pre-fix the predicate was `detect(g, t).iter().any(|h| h.node == node)`
+    /// — a whole-graph pass returning a bool, which could neither refresh the
+    /// payload nor be afforded on recall's lock-held path.
+    #[test]
+    fn revalidate_refreshes_drift_hops_when_the_distance_changes() {
+        use crate::daemon::hotlist::HotList;
+        let (mut g, goal_id, chain) = chain_graph(7);
+        let mut hot = HotList::new();
+        record(&mut hot, &g, DRIFT_THRESHOLD);
+        let far = chain[6]; // 7 hops
+        match &hot.iter().find(|e| e.node == far).unwrap().payload {
+            HotListPayload::Drift { hops, .. } => assert_eq!(*hops, 7),
+            other => panic!("expected Drift payload, got {other:?}"),
+        }
+
+        // Short-circuit one link of the chain (chain[0] -> chain[2]): every
+        // node past it moves one hop closer, so `far` is now 6 hops out.
+        g.upsert_edge(edge(9000, chain[0], chain[2], EdgeType::Dependency))
+            .unwrap();
+        assert!(hot.revalidate(&g, far, ts(0)), "6 hops still drifted");
+        match &hot.iter().find(|e| e.node == far).unwrap().payload {
+            HotListPayload::Drift { hops, .. } => assert_eq!(
+                *hops, 6,
+                "the payload must be rebuilt from read-time distance, not frozen at 7"
+            ),
+            other => panic!("expected Drift payload, got {other:?}"),
+        }
+
+        // Linking it straight to the goal puts it inside the threshold: evicted.
+        g.upsert_edge(edge(9001, goal_id, far, EdgeType::Dependency))
+            .unwrap();
+        assert!(!hot.revalidate(&g, far, ts(0)), "1 hop is not drifted");
+        assert!(!hot.contains(far), "no ghost Drift entry");
+        // chain[5] was the run's other hit (6 hops); the first short-circuit
+        // pulled it back to 5, so its own re-validation evicts it too.
+        assert!(!hot.revalidate(&g, chain[5], ts(0)));
+        assert!(hot.is_empty());
+    }
+
+    /// CONC-5: the per-node primitive is the single source of truth — it must
+    /// agree with the whole-graph pass on **every** node, so replacing the
+    /// predicates' `detect` call with `drift_at` cannot change what recall sees.
+    #[test]
+    fn drift_at_agrees_with_the_whole_graph_pass_on_every_node() {
+        let (g, goal_id, chain) = chain_graph(8);
+        let whole: HashMap<NodeId, DriftHit> = detect(&g, DRIFT_THRESHOLD)
+            .into_iter()
+            .map(|h| (h.node, h))
+            .collect();
+        for node in std::iter::once(goal_id).chain(chain.iter().copied()) {
+            assert_eq!(
+                drift_at(&g, node, DRIFT_THRESHOLD).as_ref(),
+                whole.get(&node),
+                "per-node and whole-graph drift must agree for {node}"
+            );
+        }
     }
 }

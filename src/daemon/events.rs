@@ -126,13 +126,20 @@ pub(crate) fn emit_canonized(sender: &broadcast::Sender<DaemonEvent>, event: Can
     emit(sender, DaemonEvent::Canonized { event });
 }
 
-/// Map a conflict hit to its broadcast event. T5.3 renders the payload, so
-/// `detail` carries the renderable sentence ("agents [a, b] wrote within 5s").
+/// Map a conflict hit to its broadcast event.
+///
+/// `detail` names the **writer** of the newest qualifying write, which is the
+/// subject of spec §13's sentence, and then the full contesting set (ALGO-2):
+/// the writer cannot be recovered from `agents`, and picking one of them is
+/// wrong on the shipped fixture.
 pub fn conflict_event(hit: &ConflictHit) -> DaemonEvent {
     DaemonEvent::Conflict {
         node_id: hit.node,
         agents: hit.agents.clone(),
-        detail: format!("agents {:?} wrote within {}s", hit.agents, hit.seconds_ago),
+        detail: format!(
+            "{} wrote to it {}s ago; agents {:?} hold edges",
+            hit.writer, hit.seconds_ago, hit.agents
+        ),
     }
 }
 
@@ -174,6 +181,12 @@ pub struct StaleHit {
     pub seconds_inactive: u64,
 }
 
+/// `window` as a `chrono` duration, saturating instead of panicking on a
+/// window outside chrono's range (config-reachable; CONC-4).
+fn chrono_window(window: Duration) -> ChronoDuration {
+    ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
+}
+
 /// Most recent activity of a concept: its own creation/access or any incident
 /// edge write. `None` for a node missing from the graph (defensive).
 fn last_activity(graph: &Graph, node: NodeId) -> Option<DateTime<Utc>> {
@@ -190,25 +203,34 @@ fn last_activity(graph: &Graph, node: NodeId) -> Option<DateTime<Utc>> {
     Some(own.max(incident))
 }
 
+/// Is this one node stale at `now`? The per-node primitive (CONC-5): one
+/// neighborhood walk, so a recall-time re-validation costs O(degree) rather
+/// than a whole-graph pass.
+pub fn stale_at(
+    graph: &Graph,
+    node: NodeId,
+    window: Duration,
+    now: DateTime<Utc>,
+) -> Option<StaleHit> {
+    let window_start = now - chrono_window(window);
+    let last = last_activity(graph, node)?;
+    if last > now || last >= window_start {
+        return None;
+    }
+    Some(StaleHit {
+        node,
+        seconds_inactive: (now - last).num_seconds().max(0) as u64,
+    })
+}
+
 /// Detect every stale concept: activity older than `window` at `now`
 /// (see the module docs for the v0.1 rule). Pure; deterministic
 /// (id-ascending). Edges dated after `now` (mocked clocks) are not activity.
 pub fn detect_stale(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<StaleHit> {
-    let window_start = now
-        - ChronoDuration::from_std(window).expect("stale window fits in chrono's duration range");
-    let mut hits: Vec<StaleHit> = Vec::new();
-    for c in graph.concepts() {
-        let Some(last) = last_activity(graph, c.id) else {
-            continue;
-        };
-        if last > now || last >= window_start {
-            continue;
-        }
-        hits.push(StaleHit {
-            node: c.id,
-            seconds_inactive: (now - last).num_seconds().max(0) as u64,
-        });
-    }
+    let mut hits: Vec<StaleHit> = graph
+        .concepts()
+        .filter_map(|c| stale_at(graph, c.id, window, now))
+        .collect();
     hits.sort_by_key(|h| h.node.0);
     hits
 }
@@ -233,40 +255,53 @@ fn is_high_value(c: &crate::types::Concept) -> bool {
         .is_some_and(|b| b >= HIGH_RISK_BLAST_RADIUS as i32)
 }
 
+/// Is a fresh write to this one high-value node in flight at `now`? The
+/// per-node primitive (CONC-5), O(degree).
+pub fn high_risk_at(
+    graph: &Graph,
+    node: NodeId,
+    window: Duration,
+    now: DateTime<Utc>,
+) -> Option<HighRiskHit> {
+    let window_start = now - chrono_window(window);
+    let c = match graph.node(node) {
+        Some(crate::types::Node::Concept(c)) => c,
+        _ => return None,
+    };
+    if !is_high_value(c) {
+        return None;
+    }
+    let own_write = c.created_at >= window_start && c.created_at <= now;
+    let edge_write = graph.incident_edges(node).iter().any(|e| {
+        let w = e.last_reinforced.max(e.created_at);
+        w >= window_start && w <= now
+    });
+    if !(own_write || edge_write) {
+        return None;
+    }
+    let status = format!("{:?}", c.canonization_status);
+    let radius = c
+        .blast_radius
+        .map(|b| format!(", blast radius {b}"))
+        .unwrap_or_default();
+    Some(HighRiskHit {
+        node,
+        reason: format!(
+            "high-value node {} ({status}{radius}) modified within {}s",
+            c.id,
+            window.as_secs()
+        ),
+    })
+}
+
 /// Detect every high-risk modification: a fresh write to a high-value node
 /// (see the module docs for the v0.1 rule). Pure; deterministic
 /// (id-ascending). Future-dated writes do not count.
 pub fn detect_high_risk(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<HighRiskHit> {
-    let window_start = now
-        - ChronoDuration::from_std(window)
-            .expect("high-risk window fits in chrono's duration range");
-    let mut hits: Vec<HighRiskHit> = Vec::new();
-    for c in graph.concepts() {
-        if !is_high_value(c) {
-            continue;
-        }
-        let own_write = c.created_at >= window_start && c.created_at <= now;
-        let edge_write = graph.incident_edges(c.id).iter().any(|e| {
-            let w = e.last_reinforced.max(e.created_at);
-            w >= window_start && w <= now
-        });
-        if !(own_write || edge_write) {
-            continue;
-        }
-        let status = format!("{:?}", c.canonization_status);
-        let radius = c
-            .blast_radius
-            .map(|b| format!(", blast radius {b}"))
-            .unwrap_or_default();
-        hits.push(HighRiskHit {
-            node: c.id,
-            reason: format!(
-                "high-value node {} ({status}{radius}) modified within {}s",
-                c.id,
-                window.as_secs()
-            ),
-        });
-    }
+    let mut hits: Vec<HighRiskHit> = graph
+        .concepts()
+        .filter_map(|c| high_risk_at(graph, c.id, window, now))
+        .collect();
     hits.sort_by_key(|h| h.node.0);
     hits
 }
@@ -290,14 +325,19 @@ pub fn insert_stale(
     let hits = detect_stale(graph, window, now);
     for hit in &hits {
         let node = hit.node;
-        let payload = HotListPayload::Stale {
-            seconds_inactive: hit.seconds_inactive,
+        // Per-node re-check against the caller's `now`, returning the refreshed
+        // payload (CONC-5 / XP-3).
+        let holds = move |g: &Graph, at: DateTime<Utc>| {
+            stale_at(g, node, window, at).map(|h| HotListPayload::Stale {
+                seconds_inactive: h.seconds_inactive,
+            })
         };
-        let holds = move |g: &Graph| detect_stale(g, window, now).iter().any(|h| h.node == node);
         let _ = hot.insert(HotListEntry::new(
             node,
             Condition::StaleSession,
-            payload,
+            HotListPayload::Stale {
+                seconds_inactive: hit.seconds_inactive,
+            },
             holds,
         ));
     }
@@ -322,18 +362,18 @@ pub fn insert_high_risk(
     let hits = detect_high_risk(graph, window, now);
     for hit in &hits {
         let node = hit.node;
-        let payload = HotListPayload::HighRisk {
-            reason: hit.reason.clone(),
-        };
-        let holds = move |g: &Graph| {
-            detect_high_risk(g, window, now)
-                .iter()
-                .any(|h| h.node == node)
+        // Per-node re-check against the caller's `now` (CONC-5 / XP-3): the 30s
+        // window is evaluated at read time, so an elapsed HighRisk drops out of
+        // a recall instead of re-validating true against a frozen instant.
+        let holds = move |g: &Graph, at: DateTime<Utc>| {
+            high_risk_at(g, node, window, at).map(|h| HotListPayload::HighRisk { reason: h.reason })
         };
         let _ = hot.insert(HotListEntry::new(
             node,
             Condition::HighRiskModification,
-            payload,
+            HotListPayload::HighRisk {
+                reason: hit.reason.clone(),
+            },
             holds,
         ));
     }
@@ -557,6 +597,7 @@ mod tests {
         let c = conflict_event(&ConflictHit {
             node: nid(1, 1),
             agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+            writer: AgentId::from("agent-b"),
             seconds_ago: 5,
         });
         match c {
@@ -814,14 +855,151 @@ mod tests {
         g.upsert_edge(edge(2, cw_id, c1_id, 7200)).unwrap(); // activity = now
         g.remove_edge(edge(1, cw_id, c2_id, 7190).id).unwrap();
         assert!(
-            !hot.revalidate(&g, c1_id),
+            !hot.revalidate(&g, c1_id, now),
             "touched node is no longer stale"
         );
         assert!(
-            !hot.revalidate(&g, c2_id),
+            !hot.revalidate(&g, c2_id, now),
             "write aged out -> no longer high-risk"
         );
         assert!(!hot.contains(c1_id));
         assert!(!hot.contains(c2_id));
+    }
+
+    // ------------------------------------------------------------------
+    // XP-3 / CONC-5 — read-time re-validation of the clock-bound conditions
+    // ------------------------------------------------------------------
+
+    /// XP-3: a `HighRisk` entry must age out on the **clock alone**, and a
+    /// `Stale` entry's `seconds_inactive` must track read time.
+    ///
+    /// Pre-fix both predicates captured the detection `now` by move and re-ran
+    /// `detect_high_risk`/`detect_stale` against it, so the 30s window was
+    /// re-derived from a frozen instant: the entry re-validated `true` forever
+    /// against an unchanged graph and served the detection-time payload.
+    #[test]
+    fn revalidate_ages_clock_bound_conditions_out_without_touching_the_graph() {
+        let detected_at = ts(7200);
+        let (mut g, i1_id, _) = base_graph();
+        let c1 = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "stale",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let c1_id = c1.id;
+        g.insert_concept(c1, i1_id).unwrap();
+        let c2 = concept(
+            2,
+            i1_id,
+            "agent-a",
+            "canonical",
+            0,
+            CanonizationStatus::Canonical,
+            None,
+        );
+        let c2_id = c2.id;
+        g.insert_concept(c2, i1_id).unwrap();
+        let cw = concept(
+            3,
+            i1_id,
+            "agent-a",
+            "writer",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let cw_id = cw.id;
+        g.insert_concept(cw, i1_id).unwrap();
+        // c2's only fresh write: 10s before detection, inside the 30s window.
+        g.upsert_edge(edge(1, cw_id, c2_id, 7190)).unwrap();
+
+        let mut hot = HotList::new();
+        insert_stale(&mut hot, &g, STALE_WINDOW, detected_at);
+        insert_high_risk(&mut hot, &g, HIGH_RISK_WRITE_WINDOW, detected_at);
+        assert_eq!(hot.len(), 2);
+
+        // 100s later, graph untouched: the write left the 30s window.
+        let later = ts(7300);
+        assert!(
+            !hot.revalidate(&g, c2_id, later),
+            "the clock alone must age a high-risk write out"
+        );
+        assert!(!hot.contains(c2_id), "no ghost HighRisk entry");
+
+        // The stale node is still stale, but *more* stale — read time, not
+        // detection time.
+        assert!(hot.revalidate(&g, c1_id, later));
+        let refreshed = hot.iter().find(|e| e.node == c1_id).unwrap();
+        match &refreshed.payload {
+            HotListPayload::Stale { seconds_inactive } => assert_eq!(
+                *seconds_inactive, 7300,
+                "seconds_inactive must be recomputed at read time, not frozen at 7200"
+            ),
+            other => panic!("expected Stale payload, got {other:?}"),
+        }
+    }
+
+    /// CONC-5: the per-node primitives are the single source of truth — they
+    /// must agree with the whole-graph passes on every concept, so swapping the
+    /// predicates' `detect_*` calls for them cannot change what recall sees.
+    #[test]
+    fn per_node_primitives_agree_with_the_whole_graph_passes() {
+        let now = ts(7200);
+        let (mut g, i1_id, i2_id) = base_graph();
+        let mut c1 = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "stale one",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        c1.last_accessed = Some(ts(400));
+        g.insert_concept(c1, i1_id).unwrap();
+        let c2 = concept(
+            2,
+            i2_id,
+            "agent-b",
+            "fresh canonical",
+            7000,
+            CanonizationStatus::Canonical,
+            Some(8),
+        );
+        let c2_id = c2.id;
+        g.insert_concept(c2, i2_id).unwrap();
+        let c3 = concept(
+            3,
+            i1_id,
+            "agent-a",
+            "refreshed one",
+            0,
+            CanonizationStatus::None,
+            None,
+        );
+        let c3_id = c3.id;
+        g.insert_concept(c3, i1_id).unwrap();
+        g.upsert_edge(edge(1, c2_id, c3_id, 7190)).unwrap();
+
+        let stale: Vec<StaleHit> = detect_stale(&g, STALE_WINDOW, now);
+        let high_risk: Vec<HighRiskHit> = detect_high_risk(&g, HIGH_RISK_WRITE_WINDOW, now);
+        for c in g.concepts() {
+            assert_eq!(
+                stale_at(&g, c.id, STALE_WINDOW, now).as_ref(),
+                stale.iter().find(|h| h.node == c.id),
+                "stale_at must agree with detect_stale for {}",
+                c.id
+            );
+            assert_eq!(
+                high_risk_at(&g, c.id, HIGH_RISK_WRITE_WINDOW, now).as_ref(),
+                high_risk.iter().find(|h| h.node == c.id),
+                "high_risk_at must agree with detect_high_risk for {}",
+                c.id
+            );
+        }
     }
 }

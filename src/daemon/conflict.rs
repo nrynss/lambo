@@ -8,13 +8,20 @@
 //!
 //! ## Agent attribution ("who wrote this edge")
 //!
-//! Edges carry no agent id. An edge is attributed to the agent of its **source**
-//! node: an `Interaction`'s `agent_id` (the writer of a `Derives`/`Temporal`
-//! edge, which is always interaction-initiated) or a `Concept`'s `origin_agent`
-//! (the writer of a concept-to-concept edge — spec §7 `record_action` records
-//! dependencies from the concepts the acting agent produced). "Agent X has an
-//! edge to node N" == X is the source-agent of at least one edge incident to N
-//! (N as source or as target).
+//! Edges carry no agent id (the §5 `Edge` shape is frozen), so the writer is
+//! resolved — see [`edge_writer`]: an interaction-sourced edge belongs to that
+//! interaction's agent; a concept→concept edge belongs to the agent **acting at
+//! the edge's write timestamp**, falling back to the source concept's
+//! `origin_agent` when no interaction was written at that instant.
+//!
+//! Resolving by write time rather than by the source concept's origin is
+//! ALGO-3's fix: `record_action` reuses an already-canonical concept as the
+//! source of a new edge, so origin-based attribution credits the concept's
+//! original author instead of the acting agent — collapsing the demo's
+//! two-agent set to one and silently suppressing the conflict.
+//!
+//! "Agent X has an edge to node N" == X is the resolved writer of at least one
+//! edge incident to N (N as source or as target).
 //!
 //! ## "Active agent"
 //!
@@ -44,32 +51,39 @@
 //! `seconds_ago`. They still count for agent attribution (the agent
 //! demonstrably holds an edge to the node).
 //!
-//! ## `seconds_ago`
+//! ## `seconds_ago` and `writer`
 //!
 //! The age, in whole seconds (truncated), of the most recent qualifying write
-//! — the latest `Causal`/`Dependency` write inside the window. T5.3 renders
-//! "Agent A wrote to it eleven seconds ago" from the payload's `agents` +
-//! `seconds_ago`.
+//! — the latest `Causal`/`Dependency` write inside the window — together with
+//! the agent that made *that* write ([`ConflictHit::writer`], ALGO-2). T5.3
+//! renders "Agent A wrote to it eleven seconds ago" from `writer` +
+//! `seconds_ago`; `agents` is the full contesting set. Deriving the subject
+//! from `agents` alone is not possible and guessing is wrong on the shipped
+//! fixture, where the newest write is agent-b's and the naive first-listed
+//! guess names agent-a.
 //!
 //! ## Hot list
 //!
-//! [`insert_conflicts`] refreshes one entry per hit: the payload carries the
-//! agents + `seconds_ago`, and the entry's re-validation predicate is built
-//! from the same [`conflict_at`] logic and the same `now` used to detect
-//! (the recall-time path, T5.3). [`HotList`] dedups by `(node, condition)` —
+//! [`insert_conflicts`] refreshes one entry per hit. The entry's re-validation
+//! predicate re-runs [`conflict_at`] against the **caller's** `now` and returns
+//! the payload it computed, so a recall five minutes later either drops the
+//! entry (the write left the window) or renders the true age — never the frozen
+//! detection-time value (XP-3). [`HotList`] dedups by `(node, condition)`, so
 //! re-running the detector refreshes an existing conflict entry instead of
-//! duplicating it. The hits are returned: the daemon loop (T4.6) publishes
-//! them on transition and syncs the hot list against them with
-//! [`HotList::retain_conditions`], so a conflict that ages out of the
-//! recency window is dropped on the next cycle — no captured-`now` ghost.
+//! duplicating it. The hits are returned: the daemon loop (T4.6) publishes them
+//! on transition and syncs the hot list against them with
+//! [`HotList::retain_conditions`], so a conflict that ages out of the recency
+//! window is dropped on the next cycle too.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
 use crate::graph::Graph;
-use crate::types::{AgentId, EdgeType, Node, NodeId};
+use crate::types::{AgentId, Edge, EdgeType, Node, NodeId};
 
 /// Spec §9 `conflict_recency_window`; mirrors [`crate::config::Config`]'s
 /// default (30s). `Config` drives the daemon's construction; this const is the
@@ -87,46 +101,127 @@ pub struct ConflictHit {
     pub node: NodeId,
     /// Agents with edges to the node, sorted by id (deterministic).
     pub agents: Vec<AgentId>,
-    /// Age of the most recent qualifying `Causal`/`Dependency` write at
-    /// detection, in seconds.
+    /// The agent that made the most recent qualifying write (ALGO-2) — the
+    /// subject of spec §13's "Agent A wrote to it eleven seconds ago".
+    pub writer: AgentId,
+    /// Age of `writer`'s write, in seconds, at the `now` this was computed for.
     pub seconds_ago: u64,
 }
 
-/// The agent that wrote `node` — its source side: an interaction's `agent_id`
-/// or a concept's `origin_agent`. `None` for a node missing from the graph
-/// (defensive; `assert_invariants` guarantees every edge endpoint exists).
-fn writer_of(graph: &Graph, node_id: NodeId) -> Option<AgentId> {
-    match graph.node(node_id) {
-        Some(Node::Interaction(i)) => Some(i.agent_id.clone()),
-        Some(Node::Concept(c)) => Some(c.origin_agent.clone()),
-        None => None,
+/// The session's interactions indexed by write timestamp, for resolving which
+/// **agent was acting** when an edge was written (ALGO-3).
+///
+/// One `O(interactions)` build per pass, `O(1)` per edge: a whole-graph
+/// [`detect`] builds it once and shares it across every node, and a per-node
+/// [`conflict_at`] (recall's path, CONC-5) builds it once for that node.
+struct WriterTimeline {
+    /// `created_at -> (smallest interaction id at that instant, its agent)`.
+    /// The id is carried only as the tie-break key, so two interactions sharing
+    /// an instant resolve deterministically.
+    by_time: HashMap<DateTime<Utc>, (NodeId, AgentId)>,
+}
+
+impl WriterTimeline {
+    fn of(graph: &Graph) -> Self {
+        let mut by_time: HashMap<DateTime<Utc>, (NodeId, AgentId)> = HashMap::new();
+        for i in graph.interactions() {
+            match by_time.entry(i.created_at) {
+                Entry::Vacant(v) => {
+                    v.insert((i.id, i.agent_id.clone()));
+                }
+                Entry::Occupied(mut o) => {
+                    if i.id.0 < o.get().0 .0 {
+                        o.insert((i.id, i.agent_id.clone()));
+                    }
+                }
+            }
+        }
+        Self { by_time }
+    }
+
+    /// The agent acting at exactly `at`, if an interaction was written then.
+    ///
+    /// Exact-match only, deliberately. Every production write path stamps an
+    /// edge with the timestamp of the interaction performing the write:
+    /// `record_action` copies the interaction's `created_at` onto each
+    /// `Causal`/`Dependency` edge verbatim, and `insert_concept` dates its
+    /// `Derives` edge from the concept it is deriving. So an exact hit *is* the
+    /// acting interaction, while a near-miss carries no attribution evidence at
+    /// all — a hand-built or time-rebased edge could sit anywhere between two
+    /// interactions, and guessing "the latest interaction at or before" would
+    /// invent an author. Callers fall back to structural attribution instead.
+    fn acting_agent(&self, at: DateTime<Utc>) -> Option<&AgentId> {
+        self.by_time.get(&at).map(|(_, agent)| agent)
     }
 }
 
-/// Pure conflict check for one node; shared by [`detect`] and the hot-list
-/// re-validation predicates so both use identical logic.
-fn conflict_at(
+/// The agent that wrote `edge`.
+///
+/// Resolution order (ALGO-3):
+///
+/// 1. An edge whose **source is an `Interaction`** (`Derives`/`Temporal`) is
+///    that interaction's — exact by construction, no inference needed.
+/// 2. Otherwise the **acting agent** at the edge's write timestamp
+///    ([`WriterTimeline::acting_agent`]).
+/// 3. Otherwise the source concept's `origin_agent`.
+///
+/// Step 2 is the fix. Attributing a concept→concept edge to its source
+/// concept's `origin_agent` — the old rule — credits whoever *first created
+/// that concept*, not whoever is writing now. `record_action` resolves an
+/// existing canonical concept as the source of a new `Causal`/`Dependency`
+/// edge (spec §7), which is exactly the demo's shape: agent B records an
+/// action against agent A's `user schema`, and the resulting edge was
+/// attributed to agent A. Both edges then read as agent A's, the agent set
+/// collapses to one, and the conflict silently does not fire.
+///
+/// `None` only for a source node missing from the graph (defensive;
+/// `assert_invariants` guarantees every edge endpoint exists).
+fn edge_writer(graph: &Graph, edge: &Edge, timeline: &WriterTimeline) -> Option<AgentId> {
+    match graph.node(edge.source) {
+        Some(Node::Interaction(i)) => Some(i.agent_id.clone()),
+        Some(Node::Concept(c)) => Some(
+            timeline
+                .acting_agent(edge.last_reinforced.max(edge.created_at))
+                .cloned()
+                .unwrap_or_else(|| c.origin_agent.clone()),
+        ),
+        _ => None,
+    }
+}
+
+/// Pure conflict check for one node — the per-node primitive (CONC-5): shared
+/// by [`detect`] and the hot-list re-validation predicates so both use
+/// identical logic, and cheap enough for recall to call under the graph lock
+/// (one neighborhood walk, not a whole-graph pass).
+pub fn conflict_at(
     graph: &Graph,
     node: NodeId,
     window: Duration,
     now: DateTime<Utc>,
 ) -> Option<ConflictHit> {
-    let window_start = now
-        - ChronoDuration::from_std(window)
-            .expect("conflict_recency_window fits in chrono's duration range");
+    conflict_at_with(graph, node, window, now, &WriterTimeline::of(graph))
+}
+
+/// [`conflict_at`] against a pre-built timeline (whole-graph passes build one).
+fn conflict_at_with(
+    graph: &Graph,
+    node: NodeId,
+    window: Duration,
+    now: DateTime<Utc>,
+    timeline: &WriterTimeline,
+) -> Option<ConflictHit> {
+    let window_start = now - chrono_window(window);
 
     let mut agents: Vec<AgentId> = Vec::new();
-    let mut newest_qualifying_write: Option<DateTime<Utc>> = None;
+    // The newest qualifying write and *who made it* travel together (ALGO-2).
+    let mut newest: Option<(DateTime<Utc>, AgentId)> = None;
 
     for edge in graph.incident_edges(node) {
-        // The writer is the source node's agent; edges where `node` is the
-        // target are written by the neighbor, edges where it is the source by
-        // the node's own agent.
-        let Some(writer) = writer_of(graph, edge.source) else {
+        let Some(writer) = edge_writer(graph, edge, timeline) else {
             continue;
         };
         if !agents.contains(&writer) {
-            agents.push(writer);
+            agents.push(writer.clone());
         }
 
         // Write activity inside [now - window, now]; future-dated edges (the
@@ -135,24 +230,31 @@ fn conflict_at(
         let qualifying = matches!(edge.edge_type, EdgeType::Causal | EdgeType::Dependency)
             && last_write <= now
             && last_write >= window_start;
-        if qualifying {
-            newest_qualifying_write =
-                Some(newest_qualifying_write.map_or(last_write, |t| t.max(last_write)));
+        if qualifying && newest.as_ref().is_none_or(|(t, _)| last_write > *t) {
+            newest = Some((last_write, writer));
         }
     }
 
     if agents.len() < 2 {
         return None;
     }
-    let last_write = newest_qualifying_write?;
+    let (last_write, writer) = newest?;
 
     agents.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let seconds_ago = (now - last_write).num_seconds().max(0) as u64;
     Some(ConflictHit {
         node,
         agents,
+        writer,
         seconds_ago,
     })
+}
+
+/// `window` as a `chrono` duration. `Duration::MAX` seconds exceeds chrono's
+/// range, so an unrepresentable window saturates rather than panicking
+/// (config-reachable — see CONC-4's `from_std` sweep).
+fn chrono_window(window: Duration) -> ChronoDuration {
+    ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
 
 /// Detect every conflict in the graph (spec §9).
@@ -161,6 +263,7 @@ fn conflict_at(
 /// (and tests) control the clock. Hits are returned in deterministic
 /// node-id order.
 pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<ConflictHit> {
+    let timeline = WriterTimeline::of(graph);
     let mut hits: Vec<ConflictHit> = Vec::new();
     for node in graph
         .temporal_chain()
@@ -168,7 +271,7 @@ pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<Confli
         .copied()
         .chain(graph.concepts().map(|c| c.id))
     {
-        if let Some(hit) = conflict_at(graph, node, window, now) {
+        if let Some(hit) = conflict_at_with(graph, node, window, now, &timeline) {
             hits.push(hit);
         }
     }
@@ -181,8 +284,8 @@ pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<Confli
 /// [`HotList::insert`] dedups by `(node, condition)`, so re-running this with a
 /// fresh `now` refreshes the payload (`seconds_ago`) and the re-validation
 /// predicate instead of duplicating (T4.2's contract). Each entry's predicate
-/// re-checks the same conflict logic with the same `now` used here (recall's
-/// re-validation path, T5.3).
+/// re-checks the same conflict logic against the `now` **its caller** passes to
+/// [`HotList::revalidate`] — never this cycle's frozen instant (XP-3).
 ///
 /// Returns the hits — the daemon loop emits them on condition transition and
 /// uses them as the fresh set it syncs the hot list against
@@ -196,14 +299,30 @@ pub fn insert_conflicts(
     let hits = detect(graph, window, now);
     for hit in &hits {
         let node = hit.node;
-        let payload = HotListPayload::Conflict {
-            agents: hit.agents.clone(),
-            seconds_ago: hit.seconds_ago,
-        };
-        let holds = move |g: &Graph| conflict_at(g, node, window, now).is_some();
-        let _ = hot.insert(HotListEntry::new(node, Condition::Conflict, payload, holds));
+        // The predicate re-runs the same per-node check against the *caller's*
+        // `now` and hands back the payload it computed, so recall renders a
+        // read-time `seconds_ago` and writer (XP-3 / ALGO-2). Only `node` and
+        // `window` are captured — both `Copy` (spec §6.4: no lock re-entry).
+        let holds =
+            move |g: &Graph, at: DateTime<Utc>| conflict_at(g, node, window, at).map(payload_of);
+        let _ = hot.insert(HotListEntry::new(
+            node,
+            Condition::Conflict,
+            payload_of(hit.clone()),
+            holds,
+        ));
     }
     hits
+}
+
+/// The hot-list payload for a hit (one conversion, used at insert and at every
+/// re-validation).
+fn payload_of(hit: ConflictHit) -> HotListPayload {
+    HotListPayload::Conflict {
+        agents: hit.agents,
+        writer: hit.writer,
+        seconds_ago: hit.seconds_ago,
+    }
 }
 
 #[cfg(test)]
@@ -514,12 +633,14 @@ mod tests {
         match &entry.payload {
             HotListPayload::Conflict {
                 agents,
+                writer,
                 seconds_ago,
             } => {
                 assert_eq!(
                     *agents,
                     vec![AgentId::from("agent-a"), AgentId::from("agent-b")]
                 );
+                assert_eq!(*writer, AgentId::from("agent-b"));
                 assert_eq!(*seconds_ago, 11);
             }
             other => panic!("unexpected payload {other:?}"),
@@ -538,16 +659,149 @@ mod tests {
             other => panic!("unexpected payload {other:?}"),
         }
 
-        // Re-validation: the holds predicate re-checks the same conflict logic
-        // (same window + now). Remove the recent Dependency edges — the
-        // condition stops holding and the node drops off the list.
+        // Re-validation: the holds predicate re-checks the conflict against the
+        // graph at the `now` it is handed. Remove the recent Dependency edges —
+        // the condition stops holding and the node drops off the list.
         for id in dep_ids {
             g.remove_edge(id).unwrap();
         }
         assert!(
-            !hot.revalidate(&g, c1),
+            !hot.revalidate(&g, c1, later),
             "conflict gone → entry evicted on revalidation"
         );
         assert!(hot.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // XP-3 — re-validation consults live time
+    // ------------------------------------------------------------------
+
+    /// XP-3: advancing the clock past the recency window must age the entry
+    /// out, with **no graph mutation at all**.
+    ///
+    /// Pre-fix the predicate captured `now` by move and re-derived its window
+    /// from that frozen instant, so this returned `true` forever — and recall
+    /// (T5.3), the documented consumer, would render the frozen `seconds_ago`:
+    /// "wrote to it eleven seconds ago", five minutes later, on camera.
+    #[test]
+    fn revalidate_ages_a_conflict_out_when_only_the_clock_advances() {
+        let detected_at = t(3600);
+        let (g, c1, _) = two_agent_graph(3600 - 40, 3600 - 11);
+        let mut hot = HotList::new();
+        insert_conflicts(&mut hot, &g, CONFLICT_RECENCY_WINDOW, detected_at);
+        assert!(hot.contains(c1), "detected at t=3600");
+
+        // Still inside the 30s window: holds, and the age has moved on.
+        let inside = t(3600 + 10);
+        assert!(hot.revalidate(&g, c1, inside), "21s ago is still in-window");
+        match &hot.peek().unwrap().payload {
+            HotListPayload::Conflict { seconds_ago, .. } => assert_eq!(
+                *seconds_ago, 21,
+                "seconds_ago must be recomputed at read time, not frozen at 11"
+            ),
+            other => panic!("unexpected payload {other:?}"),
+        }
+
+        // Past the window, graph untouched: the entry must go.
+        let outside = t(3600 + 20);
+        assert!(
+            !hot.revalidate(&g, c1, outside),
+            "31s ago is outside the 30s window — the clock alone must age it out"
+        );
+        assert!(hot.is_empty(), "no ghost entry survives a clock advance");
+    }
+
+    /// ALGO-3: the writer of a concept→concept edge is the **acting** agent,
+    /// not the source concept's original author.
+    ///
+    /// The demo shape: agent-a creates `user schema`; agent-b then records an
+    /// action whose edge *originates* at a concept agent-a created. Pre-fix
+    /// both edges resolved to agent-a, the agent set collapsed to one, and the
+    /// conflict silently did not fire.
+    #[test]
+    fn resolved_concept_write_is_attributed_to_the_acting_agent() {
+        let now = t(3600);
+        let mut g = Graph::new(sid());
+        // agent-a's interaction creates both concepts.
+        let i1 = interaction(1, None, "agent-a", 3600 - 120);
+        g.insert_interaction(i1.clone()).unwrap();
+        // agent-b's interaction: the acting one for the edge below.
+        let i2 = interaction(2, Some(1), "agent-b", 3600 - 11);
+        g.insert_interaction(i2.clone()).unwrap();
+
+        let pillar = concept(1, i1.id, "agent-a", "user schema", 3600 - 120);
+        let pillar_id = pillar.id;
+        g.insert_concept(pillar, i1.id).unwrap();
+        // A concept agent-a authored — the source of agent-b's new edge, which
+        // is exactly what `record_action` produces when it resolves an existing
+        // canonical concept.
+        let source = concept(2, i1.id, "agent-a", "session store", 3600 - 120);
+        let source_id = source.id;
+        g.insert_concept(source, i1.id).unwrap();
+
+        // The edge is stamped with agent-b's interaction timestamp, which is
+        // what `record_action` does (it copies the interaction's created_at).
+        g.upsert_edge(dep_edge(1, source_id, pillar_id, 3600 - 11))
+            .unwrap();
+        assert!(g.assert_invariants().is_ok());
+
+        let hits = detect(&g, CONFLICT_RECENCY_WINDOW, now);
+        let hit = hits
+            .iter()
+            .find(|h| h.node == pillar_id)
+            .expect("cross-agent write to the pillar is a conflict");
+        assert_eq!(
+            hit.agents,
+            vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+            "the acting agent must join the contesting set"
+        );
+        assert_eq!(
+            hit.writer,
+            AgentId::from("agent-b"),
+            "the newest qualifying write is agent-b's"
+        );
+        assert_eq!(hit.seconds_ago, 11);
+    }
+
+    /// ALGO-2: the payload names the writer of the **newest** qualifying write,
+    /// which is not recoverable from the sorted `agents` list — on this graph
+    /// (and on the shipped fixture) the naive first-listed guess is wrong.
+    #[test]
+    fn writer_is_the_newest_qualifying_writer_not_the_first_agent() {
+        let now = t(3600);
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, "agent-a", 3600 - 60);
+        let i2 = interaction(2, Some(1), "agent-b", 3600 - 5);
+        g.insert_interaction(i1.clone()).unwrap();
+        g.insert_interaction(i2.clone()).unwrap();
+        let target = concept(1, i1.id, "agent-a", "shared node", 3600 - 60);
+        let target_id = target.id;
+        g.insert_concept(target, i1.id).unwrap();
+        let from_a = concept(2, i1.id, "agent-a", "writer a", 3600 - 60);
+        let from_a_id = from_a.id;
+        g.insert_concept(from_a, i1.id).unwrap();
+        let from_b = concept(3, i2.id, "agent-b", "writer b", 3600 - 5);
+        let from_b_id = from_b.id;
+        g.insert_concept(from_b, i2.id).unwrap();
+
+        // agent-a wrote 25s ago, agent-b 5s ago — both in the 30s window.
+        g.upsert_edge(dep_edge(1, from_a_id, target_id, 3600 - 25))
+            .unwrap();
+        g.upsert_edge(dep_edge(2, from_b_id, target_id, 3600 - 5))
+            .unwrap();
+
+        let hits = detect(&g, CONFLICT_RECENCY_WINDOW, now);
+        let hit = hits.iter().find(|h| h.node == target_id).unwrap();
+        assert_eq!(
+            hit.agents[0],
+            AgentId::from("agent-a"),
+            "agent-a sorts first — the naive rendering blames it"
+        );
+        assert_eq!(
+            hit.writer,
+            AgentId::from("agent-b"),
+            "but the newest write is agent-b's"
+        );
+        assert_eq!(hit.seconds_ago, 5);
     }
 }

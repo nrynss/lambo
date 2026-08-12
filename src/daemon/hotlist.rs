@@ -36,20 +36,35 @@
 //! ## Re-validation
 //!
 //! Each entry carries the predicate that decides whether its condition still
-//! holds, as a closure over the current graph ([`ConditionCheck`]). The
-//! detector modules (T4.3 conflict, T4.4 drift) build the predicate at insert
-//! time from the same graph logic and `now` they used to detect; the hot list
-//! only evaluates it. Since T4.6 the daemon loop *does not* evaluate these
-//! predicates each cycle — it diffs the list against the fresh detection
-//! pass ([`HotList::retain_conditions`]), which replaces the old
-//! O(hot_len × graph) per-cycle re-validation scan and guarantees no
-//! captured-`now` ghosts linger (T4.6 finding 2). [`HotList::revalidate`]
-//! stays public for recall (T5.3) to re-check an entry at read time.
+//! holds, as a closure over the current graph **and the caller's `now`**
+//! ([`ConditionCheck`]). The detector modules (T4.3 conflict, T4.4 drift,
+//! T4.6 stale/high-risk) build the predicate at insert time from the same
+//! per-node graph logic they used to detect; the hot list only evaluates it.
+//!
+//! The predicate takes `now` as a **parameter** and returns the recomputed
+//! payload (XP-3). A predicate that captured `now` by move re-derived its
+//! recency window from a frozen instant, so a `Conflict`/`HighRisk` entry
+//! re-validated `true` forever against an unchanged graph and served a frozen
+//! `seconds_ago` — the exact API T5.3 is told to call, rendering "wrote to it
+//! eleven seconds ago" five minutes later. Handing `now` in and taking the
+//! payload out makes both halves impossible to get wrong.
+//!
+//! Predicates are **per-node** (CONC-5): each re-check costs one node's
+//! neighborhood, not a whole-graph detection pass. Recall force-including ten
+//! hot nodes therefore costs ten neighborhood walks under the graph lock, not
+//! ten full scans.
+//!
+//! Since T4.6 the daemon loop *does not* evaluate these predicates each cycle —
+//! it diffs the list against the fresh detection pass
+//! ([`HotList::retain_conditions`]), which replaces the old
+//! O(hot_len × graph) per-cycle re-validation scan (T4.6 finding 2).
+//! [`HotList::revalidate`] is recall's (T5.3) read-time path.
 //! It takes `&Graph` explicitly — rather than stashing a graph handle inside
 //! the hot list — so recall never takes a hidden lock on top of the one it
 //! already holds (the daemon's `RwLock<Graph>` is not reentrant; spec §6.4
 //! lock discipline).
 
+use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
@@ -100,7 +115,15 @@ pub enum HotListPayload {
     Conflict {
         /// Agents with edges to the node (≥2), the conflicting writers.
         agents: Vec<AgentId>,
-        /// Age of the most recent qualifying write, in seconds, at detection.
+        /// The agent that made the **most recent qualifying write** — the
+        /// subject of the §13 sentence "Agent A wrote to it eleven seconds
+        /// ago" (ALGO-2). Without it the renderer can only guess from
+        /// `agents`, and on the shipped fixture the naive guess (first
+        /// alphabetically) is wrong: the newest write is agent-b's.
+        writer: AgentId,
+        /// Age of `writer`'s write, in seconds, **as of the last
+        /// re-validation** — refreshed by [`HotList::revalidate`], so a
+        /// rendered value is the age at read time (XP-3).
         seconds_ago: u64,
     },
     /// A high-risk modification touched the node.
@@ -116,9 +139,22 @@ pub enum HotListPayload {
     Stale { seconds_inactive: u64 },
 }
 
-/// Re-validation predicate: `true` while the entry's condition still holds
-/// against the current graph.
-pub type ConditionCheck = Arc<dyn Fn(&Graph) -> bool + Send + Sync>;
+/// Re-validation predicate: recompute the entry's condition against the current
+/// graph **at `now`**.
+///
+/// `Some(payload)` — the condition still holds, and the payload is recomputed
+/// from read-time state; `None` — it has lapsed and the entry is dropped.
+///
+/// Taking `now` as a parameter rather than capturing it at detection is the
+/// whole point (XP-3): a closure that froze `now` re-derived its recency window
+/// from a fixed instant, so a `Conflict` or `HighRisk` entry re-validated `true`
+/// forever against an unchanged graph and rendered a frozen `seconds_ago` — the
+/// demo's "wrote to it eleven seconds ago" would still say eleven seconds five
+/// minutes later. Returning the payload (rather than a bool) is what makes the
+/// refresh unavoidable: there is no way to re-validate an entry without also
+/// updating what it says.
+pub type ConditionCheck =
+    Arc<dyn Fn(&Graph, DateTime<Utc>) -> Option<HotListPayload> + Send + Sync>;
 
 /// One hot-list entry: the node, its condition kind, the payload recall
 /// renders, and the predicate that decides whether the condition still holds.
@@ -138,12 +174,13 @@ pub struct HotListEntry {
 
 impl HotListEntry {
     /// Build an entry. `holds` is evaluated by [`HotList::revalidate`] on
-    /// every recall; it must return `false` once the condition stops holding.
+    /// every recall; it must return `None` once the condition stops holding,
+    /// and otherwise the payload as of the `now` it was handed.
     pub fn new(
         node: NodeId,
         condition: Condition,
         payload: HotListPayload,
-        holds: impl Fn(&Graph) -> bool + Send + Sync + 'static,
+        holds: impl Fn(&Graph, DateTime<Utc>) -> Option<HotListPayload> + Send + Sync + 'static,
     ) -> Self {
         Self {
             node,
@@ -256,24 +293,33 @@ impl HotList {
         evicted
     }
 
-    /// Re-validate every entry for `node` against the current graph, dropping
-    /// those whose condition no longer holds (spec §9: conditions re-validated
-    /// on each `recall()` — stale entries drop out then, not on a timer).
+    /// Re-validate every entry for `node` against the current graph **at
+    /// `now`**, dropping those whose condition no longer holds and refreshing
+    /// the payload of those that do (spec §9: conditions re-validated on each
+    /// `recall()` — stale entries drop out then, not on a timer).
     ///
     /// Returns `true` iff the node is still on the hot list (≥1 entry
-    /// survived). Recall uses this to decide force-inclusion.
-    pub fn revalidate(&mut self, graph: &Graph, node: NodeId) -> bool {
+    /// survived). Recall (T5.3) uses this to decide force-inclusion and then
+    /// renders [`HotListEntry::payload`], which this call has just rebuilt
+    /// against `now` — so a rendered `seconds_ago` is the age at *read* time,
+    /// not at detection time (XP-3).
+    ///
+    /// `now` is the caller's clock: recall passes its own, so an entry whose
+    /// recency window elapsed between detection and this read is dropped here
+    /// rather than surviving forever against a captured instant.
+    pub fn revalidate(&mut self, graph: &Graph, node: NodeId, now: DateTime<Utc>) -> bool {
         let mut any_valid = false;
-        self.entries.retain(|e| {
-            if e.node == node {
-                if (e.holds)(graph) {
+        self.entries.retain_mut(|e| {
+            if e.node != node {
+                return true;
+            }
+            match (e.holds)(graph, now) {
+                Some(payload) => {
+                    e.payload = payload;
                     any_valid = true;
                     true
-                } else {
-                    false
                 }
-            } else {
-                true
+                None => false,
             }
         });
         any_valid
@@ -350,27 +396,56 @@ mod tests {
         crate::types::SessionId::from("t4.2-hotlist")
     }
 
-    /// An entry whose predicate is a plain flag (mocked "condition state").
+    /// Whole-second timestamp helper.
+    fn t(s: i64) -> DateTime<Utc> {
+        chrono::TimeZone::timestamp_opt(&Utc, 1_700_000_000 + s, 0).unwrap()
+    }
+
+    /// An entry whose predicate is a plain flag (mocked "condition state"),
+    /// echoing back the payload it was built with.
     fn flagged_entry(
         node: NodeId,
         condition: Condition,
         payload: HotListPayload,
         flag: Arc<std::sync::atomic::AtomicBool>,
     ) -> HotListEntry {
-        HotListEntry::new(node, condition, payload, move |_| {
+        let echo = payload.clone();
+        HotListEntry::new(node, condition, payload, move |_, _| {
             flag.load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| echo.clone())
         })
     }
 
     fn conflict_payload(seconds_ago: u64) -> HotListPayload {
         HotListPayload::Conflict {
             agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+            writer: AgentId::from("agent-b"),
             seconds_ago,
         }
     }
 
     fn entry(node: NodeId, condition: Condition) -> HotListEntry {
-        HotListEntry::new(node, condition, conflict_payload(5), |_| true)
+        let payload = conflict_payload(5);
+        let echo = payload.clone();
+        HotListEntry::new(node, condition, payload, move |_, _| Some(echo.clone()))
+    }
+
+    /// An entry whose predicate re-derives `seconds_ago` from the `now` it is
+    /// handed — the shape every real detector uses (XP-3).
+    fn clock_reading_entry(node: NodeId, written_at: DateTime<Utc>, window: i64) -> HotListEntry {
+        HotListEntry::new(
+            node,
+            Condition::Conflict,
+            conflict_payload(0),
+            move |_, at: DateTime<Utc>| {
+                let age = (at - written_at).num_seconds();
+                (age >= 0 && age <= window).then(|| HotListPayload::Conflict {
+                    agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+                    writer: AgentId::from("agent-b"),
+                    seconds_ago: age as u64,
+                })
+            },
+        )
     }
 
     // ------------------------------------------------------------------
@@ -474,7 +549,7 @@ mod tests {
             nid(1),
             Condition::Conflict,
             conflict_payload(30),
-            |_| true,
+            |_, _| Some(conflict_payload(30)),
         ));
         // A second conflict node, inserted after n1.
         let _ = list.insert(entry(nid(2), Condition::Conflict));
@@ -483,7 +558,7 @@ mod tests {
             nid(1),
             Condition::Conflict,
             conflict_payload(11),
-            |_| true,
+            |_, _| Some(conflict_payload(11)),
         ));
         assert!(evicted.is_none(), "refresh must not count as overflow");
         assert_eq!(list.len(), 2, "no duplicate for (node, condition)");
@@ -491,6 +566,7 @@ mod tests {
             list.peek().unwrap().payload,
             HotListPayload::Conflict {
                 agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+                writer: AgentId::from("agent-b"),
                 seconds_ago: 11,
             }
         );
@@ -516,11 +592,11 @@ mod tests {
         assert!(list.contains(nid(1)));
 
         let g = Graph::new(sid());
-        assert!(list.revalidate(&g, nid(1)), "condition still holds");
+        assert!(list.revalidate(&g, nid(1), t(0)), "condition still holds");
 
         // The condition stops holding (e.g. the drift was re-linked).
         flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(!list.revalidate(&g, nid(1)), "node no longer hot");
+        assert!(!list.revalidate(&g, nid(1), t(0)), "node no longer hot");
         assert!(list.is_empty(), "stale entry evicted, not on a timer");
     }
 
@@ -551,7 +627,7 @@ mod tests {
         stale.store(false, std::sync::atomic::Ordering::SeqCst);
         let g = Graph::new(sid());
         assert!(
-            list.revalidate(&g, nid(1)),
+            list.revalidate(&g, nid(1), t(0)),
             "one surviving entry keeps node hot"
         );
         assert_eq!(list.len(), 2);
@@ -564,12 +640,47 @@ mod tests {
         assert!(list.contains(nid(2)));
     }
 
+    /// XP-3: `revalidate` consults the `now` it is handed, and the surviving
+    /// entry's payload is rebuilt from it.
+    ///
+    /// Pre-fix the predicate was `Fn(&Graph) -> bool` over a captured `now`, so
+    /// neither half was expressible: the condition could not age out and the
+    /// payload could not be refreshed.
+    #[test]
+    fn revalidate_uses_the_callers_clock_and_refreshes_the_payload() {
+        let mut list = HotList::new();
+        let written_at = t(1000);
+        let _ = list.insert(clock_reading_entry(nid(1), written_at, 30));
+        let g = Graph::new(sid());
+
+        // 11s later: holds, and says eleven.
+        assert!(list.revalidate(&g, nid(1), t(1011)));
+        match &list.peek().unwrap().payload {
+            HotListPayload::Conflict { seconds_ago, .. } => assert_eq!(*seconds_ago, 11),
+            other => panic!("unexpected payload {other:?}"),
+        }
+
+        // 25s later: still holds, and now says twenty-five — not eleven.
+        assert!(list.revalidate(&g, nid(1), t(1025)));
+        match &list.peek().unwrap().payload {
+            HotListPayload::Conflict { seconds_ago, .. } => assert_eq!(
+                *seconds_ago, 25,
+                "the payload must track read time, not detection time"
+            ),
+            other => panic!("unexpected payload {other:?}"),
+        }
+
+        // Past the window, graph never touched: the entry is gone.
+        assert!(!list.revalidate(&g, nid(1), t(1031)));
+        assert!(list.is_empty(), "the clock alone must age an entry out");
+    }
+
     #[test]
     fn revalidate_absent_node_returns_false() {
         let mut list = HotList::new();
         let _ = list.insert(entry(nid(1), Condition::Conflict));
         let g = Graph::new(sid());
-        assert!(!list.revalidate(&g, nid(2)), "no entry → not hot");
+        assert!(!list.revalidate(&g, nid(2), t(0)), "no entry → not hot");
         assert_eq!(list.len(), 1);
     }
     #[test]
@@ -627,43 +738,52 @@ mod tests {
             node,
             Condition::Conflict,
             conflict_payload(11),
-            move |g: &Graph| {
+            move |g: &Graph, _at: DateTime<Utc>| {
                 g.incident_edges(node)
                     .iter()
                     .any(|e| e.edge_type == EdgeType::Derives)
+                    .then(|| conflict_payload(11))
             },
         ));
 
-        assert!(list.revalidate(&g, node), "edge present → condition holds");
+        assert!(
+            list.revalidate(&g, node, t(0)),
+            "edge present → condition holds"
+        );
         // The condition stops holding: the deriving edge is removed.
         g.remove_edge(edge_id).unwrap();
-        assert!(!list.revalidate(&g, node), "edge gone → node evicted");
+        assert!(!list.revalidate(&g, node, t(0)), "edge gone → node evicted");
         assert!(list.is_empty());
     }
 
     #[test]
     fn fixture_conflict_payload_survives_roundtrip_for_rendering() {
         // The demo sentence T5.3 renders — "Agent A wrote to it eleven
-        // seconds ago" — must be derivable from the payload alone.
+        // seconds ago" — must be derivable from the payload alone: the
+        // `writer` names the subject (ALGO-2), `seconds_ago` the age.
         use crate::types::AgentId;
         let payload = HotListPayload::Conflict {
-            agents: vec![AgentId::from("agent-a")],
+            agents: vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+            writer: AgentId::from("agent-a"),
             seconds_ago: 11,
         };
+        let echo = payload.clone();
         let mut list = HotList::new();
         let _ = list.insert(HotListEntry::new(
             nid(9),
             Condition::Conflict,
             payload,
-            |_| true,
+            move |_, _| Some(echo.clone()),
         ));
         let e = list.peek().unwrap();
         match &e.payload {
             HotListPayload::Conflict {
                 agents,
+                writer,
                 seconds_ago,
             } => {
                 assert_eq!(agents[0].as_str(), "agent-a");
+                assert_eq!(writer.as_str(), "agent-a");
                 assert_eq!(*seconds_ago, 11);
             }
             other => panic!("unexpected payload {other:?}"),
