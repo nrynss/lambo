@@ -94,7 +94,7 @@ pub struct Daemon {
     wake: Arc<Notify>,
     scores: Arc<RwLock<ScoreTable>>,
     hot: Arc<RwLock<HotList>>,
-    events: Arc<broadcast::Sender<DaemonEvent>>,
+    events: events::EventSender,
     /// The owner's inverted index, when it gave the daemon one. GC mirrors
     /// collections into it via [`gc::sync_index`] (XP-5); `None` means the
     /// owner is doing that itself.
@@ -185,7 +185,7 @@ impl Daemon {
         );
         // `new`/`with_params` construct the struct literal below; the clock
         // defaults to the wall clock — `with_clock` swaps it (tests).
-        let (sender, _) = broadcast::channel(params.event_capacity);
+        let (sender, _) = events::event_channel_with_capacity(params.event_capacity);
         Self {
             graph,
             weights,
@@ -193,7 +193,7 @@ impl Daemon {
             wake: Arc::new(Notify::new()),
             scores: Arc::new(RwLock::new(ScoreTable::default())),
             hot: Arc::new(RwLock::new(HotList::with_max(params.hot_list_max))),
-            events: Arc::new(sender),
+            events: sender,
             index: None,
             last_gc: Arc::new(RwLock::new(None)),
             cycles: Arc::new(AtomicU64::new(0)),
@@ -331,13 +331,23 @@ impl Daemon {
     /// non-daemon publishers — P6's canonization evaluator calls
     /// [`events::emit_canonized`] with it (XP-4).
     ///
-    /// Cloning a `broadcast::Sender` is the supported multi-producer pattern:
-    /// every clone feeds the same ring, so `Canonized` events reach the same
-    /// [`Daemon::events`] subscribers as the daemon's own detector events. The
-    /// daemon retains its own handle, so a dropped clone never closes the
-    /// channel.
-    pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
-        (*self.events).clone()
+    /// Every clone feeds the same ring, so `Canonized` events reach the same
+    /// [`Daemon::events`] subscribers as the daemon's own detector events, and
+    /// the daemon retains its own handle so a dropped clone never closes the
+    /// channel. Publish with [`events::EventSender::send`] (or
+    /// [`events::emit_canonized`]) and nothing else is required of the caller.
+    ///
+    /// ## Why this is not a `broadcast::Sender` (NEW-3)
+    ///
+    /// It used to be. Every publisher must advance the channel's shared
+    /// publication counter, because that counter is how the loop's re-arm path
+    /// (CONC-2) knows a held condition's event has been pushed out of the ring.
+    /// A raw `Sender` clone advanced the ring without advancing the counter, so
+    /// an external publisher could evict a held `Conflict` **permanently**: 300
+    /// external `Canonized` sends against a continuously-held `Conflict` and 601
+    /// daemon cycles delivered zero `Conflict` events.
+    pub fn event_sender(&self) -> events::EventSender {
+        self.events.clone()
     }
 
     /// Handle to the daemon-owned hot list (recall, T5.3, reads it; tests
@@ -356,7 +366,7 @@ struct LoopState {
     wake: Arc<Notify>,
     scores: Arc<RwLock<ScoreTable>>,
     hot: Arc<RwLock<HotList>>,
-    sender: Arc<broadcast::Sender<DaemonEvent>>,
+    sender: events::EventSender,
     clock: Clock,
     index: Option<Arc<RwLock<InvertedIndex>>>,
     last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
@@ -415,6 +425,12 @@ fn condition_set(
 ///    at its last publish, and once `event_capacity` further events have been
 ///    published that event can no longer be in the retained window.
 ///
+///    That count is the **channel's**, shared by every publisher
+///    ([`events::EventSender`], NEW-3), not a loop-private tally: anyone's send
+///    advances the ring, so a publisher outside the loop — P6's
+///    `emit_canonized` — must advance the same counter or its sends evict a
+///    held condition invisibly.
+///
 ///    The policy is deliberately minimal: **at most one re-arm per cycle**,
 ///    the pair whose last emission is oldest. Re-arming every eligible pair at
 ///    once would rebuild the same burst that evicts events in the first place;
@@ -423,10 +439,13 @@ fn condition_set(
 ///    deliberately *conservative* — it re-arms on possible eviction, not on an
 ///    observed `Lagged`, which `broadcast` gives the sender no way to see.
 ///
-///    The guarantee is **liveness, not exactly-once**: a still-held condition
-///    is eventually re-published, and a duplicate advisory event is harmless
-///    (§6.1 has no resolved variant to reconcile against). What is ruled out
-///    is the permanent loss.
+///    The guarantee is **liveness, not exactly-once** — and it rests on the
+///    counting above: as long as every publisher goes through
+///    [`events::EventSender`], a still-held condition is eventually
+///    re-published, and a duplicate advisory event is harmless (§6.1 has no
+///    resolved variant to reconcile against). What is ruled out is the
+///    permanent loss. An uncounted send would break the guarantee, not merely
+///    delay it, which is why no raw `broadcast::Sender` is handed out (NEW-3).
 ///
 ///    **Order.** Publication is highest-severity-first — Conflict, HighRisk,
 ///    Drift, then the single session Stale ([`Condition::severity`]) — so a
@@ -526,14 +545,16 @@ struct CycleState {
     /// mutations (NEW-2 — see `run_loop`'s step 3).
     last_gc_epoch: u64,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
-    /// `(condition, node)` maps to the value of `emitted_total` at its last
-    /// emission. A pair absent from the map is entering the set and publishes;
-    /// a pair whose stamp is `event_capacity` emissions old has been pushed out
-    /// of the broadcast ring and publishes again.
+    /// `(condition, node)` maps to the channel's publication index at its last
+    /// emission ([`events::EventSender::send`]'s return). A pair absent from the
+    /// map is entering the set and publishes; a pair whose stamp is
+    /// `event_capacity` publications old has been pushed out of the broadcast
+    /// ring and publishes again.
+    ///
+    /// The count lives on the channel, not here (NEW-3): it must include **every**
+    /// publisher's sends, since anyone's send advances the ring. Only ever compared
+    /// as a difference against these stamps, so wrap-around is not a concern (u64).
     armed: HashMap<(Condition, NodeId), u64>,
-    /// Total events this loop has published. Only ever compared as a difference
-    /// against `armed`'s stamps, so wrap-around is not a concern (u64).
-    emitted_total: u64,
     /// Survivor bumps the last GC run deferred (CONC-6/XP-10). Drained a chunk
     /// per cycle; GC does not re-run until it is empty.
     gc_pending: Vec<NodeId>,
@@ -603,33 +624,28 @@ fn run_cycle(
     // session Stale.
     for hit in &conflict_hits {
         if let Entry::Vacant(slot) = cs.armed.entry((Condition::Conflict, hit.node)) {
-            events::emit(sender, events::conflict_event(hit));
-            cs.emitted_total += 1;
-            slot.insert(cs.emitted_total);
+            slot.insert(events::emit(sender, events::conflict_event(hit)));
         }
     }
     for hit in &high_risk_hits {
         if let Entry::Vacant(slot) = cs.armed.entry((Condition::HighRiskModification, hit.node)) {
-            events::emit(
+            slot.insert(events::emit(
                 sender,
                 events::high_risk_event(hit.node, hit.reason.clone()),
-            );
-            cs.emitted_total += 1;
-            slot.insert(cs.emitted_total);
+            ));
         }
     }
     for hit in &drift_hits {
         if let Entry::Vacant(slot) = cs.armed.entry((Condition::Drift, hit.node)) {
-            events::emit(sender, events::drift_event(hit));
-            cs.emitted_total += 1;
-            slot.insert(cs.emitted_total);
+            slot.insert(events::emit(sender, events::drift_event(hit)));
         }
     }
     for hit in &stale_hits {
         if let Entry::Vacant(slot) = cs.armed.entry((Condition::StaleSession, hit.node)) {
-            events::emit(sender, events::stale_event(hit.node, hit.seconds_inactive));
-            cs.emitted_total += 1;
-            slot.insert(cs.emitted_total);
+            slot.insert(events::emit(
+                sender,
+                events::stale_event(hit.node, hit.seconds_inactive),
+            ));
         }
     }
 
@@ -644,7 +660,9 @@ fn run_cycle(
         .min_by_key(|(_, stamp)| **stamp)
         .map(|(pair, stamp)| (*pair, *stamp))
     {
-        if cs.emitted_total - stamp >= params.event_capacity as u64 {
+        // NEW-3: the count is the channel's, so an external publisher's sends
+        // are measured too — they evict from the same ring.
+        if sender.emitted_total() - stamp >= params.event_capacity as u64 {
             let event = match pair.0 {
                 Condition::Conflict => conflict_hits
                     .iter()
@@ -665,9 +683,7 @@ fn run_cycle(
             };
             // `armed` is kept equal to `fresh`, so the hit is always found.
             if let Some(event) = event {
-                events::emit(sender, event);
-                cs.emitted_total += 1;
-                cs.armed.insert(pair, cs.emitted_total);
+                cs.armed.insert(pair, events::emit(sender, event));
             }
         }
     }
@@ -1940,6 +1956,7 @@ mod tests {
             occurred_at: ts(0),
             last_demotion_time: None,
         };
+        assert_eq!(sender.emitted_total(), 0, "nothing published yet");
         events::emit_canonized(&sender, event.clone());
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -1950,9 +1967,96 @@ mod tests {
             DaemonEvent::Canonized { event: e } => assert_eq!(e, event),
             other => panic!("expected Canonized, got {other:?}"),
         }
+        // NEW-3: the seam is an `events::EventSender`, not a raw broadcast
+        // Sender — P6's send advanced the channel's SHARED publication counter,
+        // which is what the loop's re-arm measures ring eviction against. A
+        // clone taken later reads the same count.
+        assert_eq!(sender.emitted_total(), 1);
+        assert_eq!(daemon.event_sender().emitted_total(), 1);
         // The daemon's own handle keeps the channel open after the clone drops.
         drop(sender);
         assert_eq!(daemon.event_sender().receiver_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
+        // NEW-3: `event_sender()` used to hand out a raw `broadcast::Sender`
+        // clone. Its sends advanced the ring but not the loop's emission count,
+        // so re-arm (CONC-2) could not see that the held Conflict's event had
+        // been pushed out — leaving CONC-2 only partially closed. Probe on the
+        // pre-fix code: 300 external `Canonized` sends + a continuously-held
+        // Conflict + 601 daemon cycles delivered **0** Conflict events.
+        //
+        // Capacity 4, flood 10 (> capacity, so the warm-up Conflict is certainly
+        // gone from the retained window), and the subscriber drains LATE — only
+        // after the flood — so the only way it can ever see the Conflict is the
+        // re-arm path counting the external sends.
+        use crate::types::CanonizationEvent;
+
+        let (graph, c1_id, _, _) = conflicted_graph();
+        let params = CycleParams {
+            event_capacity: 4,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        );
+        let mut rx = daemon.events();
+        let handle = daemon.spawn();
+
+        // Warm-up publishes the Conflict (stamp 1). Wait on the hot list, not on
+        // `rx` — draining would defeat the point.
+        wait_until(|| daemon.hot_list().read().contains(c1_id)).await;
+
+        // The "P6 evaluator" floods the channel it shares with the daemon.
+        let sender = daemon.event_sender();
+        for n in 0..10u64 {
+            events::emit_canonized(
+                &sender,
+                CanonizationEvent {
+                    id: NodeId(Uuid::from_u64_pair(9, n)),
+                    session_id: sid(),
+                    node_id: c1_id,
+                    from_status: CanonizationStatus::None,
+                    to_status: CanonizationStatus::Candidate,
+                    blast_radius: Some(3),
+                    occurred_at: ts(0),
+                    last_demotion_time: None,
+                },
+            );
+        }
+        assert!(
+            sender.emitted_total() >= 11,
+            "the warm-up Conflict plus 10 external sends must all be counted, \
+             got {}",
+            sender.emitted_total()
+        );
+
+        // Cycles with no graph change: nothing ENTERS the condition set, so the
+        // only possible publication is the re-arm of the still-held Conflict.
+        let mut saw_conflict = false;
+        for _ in 0..8 {
+            wake_and_settle(&daemon).await;
+            while let Ok(evt) = rx.try_recv() {
+                if let DaemonEvent::Conflict { node_id, .. } = evt {
+                    if node_id == c1_id {
+                        saw_conflict = true;
+                    }
+                }
+            }
+            if saw_conflict {
+                break;
+            }
+        }
+        assert!(
+            saw_conflict,
+            "an external publisher's flood must not permanently evict a held \
+             Conflict — every publisher counts, so re-arm still fires"
+        );
+        handle.abort();
     }
 
     #[tokio::test(start_paused = true)]

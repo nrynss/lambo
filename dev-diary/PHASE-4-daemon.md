@@ -196,13 +196,25 @@ a liveness backstop for ring eviction, not a delivery guarantee for a late subsc
 (Conflict, HighRisk, Drift, then the single session Stale). A held pair whose event has been
 pushed out of the retained ring window is **re-armed** — re-published — at most **once per
 cycle**, oldest-emission-first: re-arming every eligible pair at once would rebuild the burst
-that causes the eviction. The guarantee is liveness, not exactly-once. `Stale` is per
-**session**, not per concept (spec §9's "stale session"), which is what removed the warm-up
-burst that could wrap the demo's `Conflict` out of the ring.
+that causes the eviction. The guarantee is liveness, not exactly-once — **conditional on every
+publisher counting** (NEW-3 below): eviction is inferred by comparing the channel's total
+publication count against the stamp recorded at the event's publish, so a send that advances
+the ring without advancing that count makes a held condition invisible to re-arm and the
+liveness guarantee does not hold for it. `Stale` is per **session**, not per concept (spec
+§9's "stale session"), which is what removed the warm-up burst that could wrap the demo's
+`Conflict` out of the ring.
 
-**P6 seam (XP-4 — 2026-08-12).** `Daemon::event_sender()` hands out the broadcast `Sender`;
-P6's evaluator calls `events::emit_canonized` with it. Before that accessor existed there was
-no public path to the sender anywhere in the crate, so P6's documented seam was unreachable.
+**P6 seam (XP-4 — 2026-08-12; wrapper since NEW-3 — 2026-08-12).**
+`Daemon::event_sender()` hands out an `events::EventSender` — the broadcast `Sender` plus the
+channel's shared publication counter — and P6's evaluator calls `events::emit_canonized` with
+it. Before that accessor existed there was no public path to the sender anywhere in the crate,
+so P6's documented seam was unreachable. It first shipped as a raw `broadcast::Sender` clone,
+which left CONC-2 only partially closed: external sends advanced the ring but not the count,
+so 300 external `Canonized` sends against a continuously-held `Conflict` delivered **0**
+`Conflict` events over 601 cycles. `EventSender::send` increments then sends, so the count can
+run ahead of the ring but never behind it — re-arm may fire one event early (a harmless
+duplicate advisory), never too late. Pinned by
+`daemon::tests::external_publisher_flood_cannot_permanently_evict_a_held_conflict`.
 
 **Done when:** slow-consumer test shows the daemon unblocked and the consumer seeing
 `Lagged`, not a hang; a non-daemon caller's `Canonized` reaches a `Daemon::events()`
@@ -401,9 +413,21 @@ review loop closes it; this entry is the implementation side.
   identical to the unchunked sweep. GC does not re-run while a drain is
   outstanding, so no concept carries two outstanding bumps. Full argument on
   `gc::drain_survivor_bumps`.
+- **A sweep must not fund the next one (NEW-2).** Survivor bumps are mutations,
+  so a deferred drain advances the epoch on a later cycle. Crediting those bumps
+  as *session* mutations made GC self-sustaining whenever
+  `survivors >= gc_interval + chunk`: `gc_survived` climbed on an idle session
+  with zero writes (crossing canonization Stage 1's `>= 3` gate by idling) and
+  the epoch ran away from T5.4's recall cache. Each drain now advances
+  `last_gc_epoch` by exactly what it appended, so an idle session reaches a
+  fixed point. GC can be one cycle late, never early. Pinned by
+  `daemon::tests::idle_session_reaches_a_gc_fixed_point_after_the_bumps_drain`.
 - **Re-arm is one pair per cycle (CONC-2).** Re-arming every eligible pair at
   once rebuilds the burst that causes ring eviction. Oldest-emission-first gives
-  round-robin coverage; the guarantee is liveness, not exactly-once.
+  round-robin coverage; the guarantee is liveness, not exactly-once — and it
+  holds only while **every** publisher counts (NEW-3): the channel handle is
+  `events::EventSender`, never a raw `broadcast::Sender`, because an uncounted
+  send evicts a held condition invisibly.
 - **Stale is per session (CONC-2/ALGO-8).** Spec §9 names the condition "stale
   session". With a 30s high-risk window inside a 1h stale window, Stale and
   HighRisk are mutually exclusive by construction — worth knowing before writing

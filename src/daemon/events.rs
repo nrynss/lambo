@@ -53,11 +53,28 @@
 //!   [`emit_canonized`] is the seam. The daemon loop does **not** fabricate
 //!   canonization events.
 //!
+//! ## Every publisher counts ([`EventSender`], NEW-3)
+//!
+//! The channel handle is [`EventSender`], not a bare `broadcast::Sender`: it
+//! pairs the sender with a **shared publication counter**. The loop's re-arm
+//! detector (CONC-2) decides an event has been evicted from the ring by
+//! comparing that counter against the stamp it recorded at the event's
+//! publication, so a publisher that advanced the ring **without** advancing the
+//! counter would make a held condition invisible to re-arm — permanently, which
+//! is the exact failure CONC-2 exists to rule out. `event_sender()` used to hand
+//! out a raw `Sender` clone, so 300 external `Canonized` sends could evict a
+//! held `Conflict` for good (probe: 601 cycles, 0 `Conflict` deliveries).
+//! [`EventSender::send`] increments then sends, so the counter can only ever run
+//! *ahead* of the ring — re-arm may fire one event early (a harmless duplicate),
+//! never too late.
+//!
 //! ## P8 seam
 //!
 //! Spec §6.1's `mem.events() -> Receiver<DaemonEvent>` delegates to
 //! [`crate::daemon::Daemon::events`] — one channel per daemon, same sender.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -88,45 +105,96 @@ pub const HIGH_RISK_WRITE_WINDOW: Duration = Duration::from_secs(30);
 /// it is high-risk.
 pub const HIGH_RISK_BLAST_RADIUS: u64 = 5;
 
+/// The §6.1 channel's send half: the broadcast sender plus the **publication
+/// counter every publisher shares** (NEW-3 — see the module docs for why a bare
+/// `Sender` clone breaks CONC-2's re-arm).
+///
+/// Cheap to clone (two `Arc`s) and the supported multi-producer pattern: every
+/// clone feeds the same ring *and* the same counter, so `Canonized` events from
+/// P6 reach the same [`crate::daemon::Daemon::events`] subscribers as the
+/// daemon's own detector events and are equally visible to re-arm. The daemon
+/// retains its own handle, so a dropped clone never closes the channel.
+#[derive(Clone, Debug)]
+pub struct EventSender {
+    tx: Arc<broadcast::Sender<DaemonEvent>>,
+    emitted: Arc<AtomicU64>,
+}
+
+impl EventSender {
+    /// Publish one event, fire-and-forget (spec §6.1), and return its **1-based
+    /// publication index** on the channel — CONC-2's re-arm stamp.
+    ///
+    /// Infallible by construction: `broadcast::Sender::send` errors only when
+    /// **zero** receivers exist — the dropped-receiver case, which §6.1 says is
+    /// not an error — and lagged receivers never make it fail (they skip the
+    /// value). So this never blocks, never panics, and never reports failure;
+    /// any caller may publish without coordinating with consumers.
+    ///
+    /// The counter is incremented **before** the send: the count may briefly run
+    /// ahead of the ring, never behind it, so re-arm can only be early.
+    pub fn send(&self, event: DaemonEvent) -> u64 {
+        let stamp = self.emitted.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.tx.send(event);
+        stamp
+    }
+
+    /// Events published on this channel by **every** publisher (NEW-3). The
+    /// loop's re-arm detector measures ring eviction against this.
+    pub fn emitted_total(&self) -> u64 {
+        self.emitted.load(Ordering::Acquire)
+    }
+
+    /// A receiver seeing everything published after this call (spec §6.1).
+    pub fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Live receiver count (tests; P8 diagnostics).
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+}
+
 /// A fresh event channel at [`EVENT_CAPACITY`].
-pub fn event_channel() -> (
-    broadcast::Sender<DaemonEvent>,
-    broadcast::Receiver<DaemonEvent>,
-) {
+pub fn event_channel() -> (EventSender, broadcast::Receiver<DaemonEvent>) {
     event_channel_with_capacity(EVENT_CAPACITY)
 }
 
 /// An event channel with an explicit capacity (tests; the slow-consumer
 /// contract lives at small capacities).
-fn event_channel_with_capacity(
+pub(crate) fn event_channel_with_capacity(
     capacity: usize,
-) -> (
-    broadcast::Sender<DaemonEvent>,
-    broadcast::Receiver<DaemonEvent>,
-) {
+) -> (EventSender, broadcast::Receiver<DaemonEvent>) {
     assert!(capacity > 0, "broadcast capacity must be > 0");
-    broadcast::channel(capacity)
+    let (tx, rx) = broadcast::channel(capacity);
+    (
+        EventSender {
+            tx: Arc::new(tx),
+            emitted: Arc::new(AtomicU64::new(0)),
+        },
+        rx,
+    )
 }
 
-/// Publish one event, fire-and-forget (spec §6.1).
+/// Publish one event, fire-and-forget (spec §6.1); returns the re-arm stamp.
 ///
-/// `Sender::send` returns `Err(SendError)` only when **zero** receivers
-/// exist — the dropped-receiver case, which is not an error. Lagged receivers
-/// never make `send` fail (they just skip the value). This never blocks and
-/// never panics, so any caller may publish without coordinating with
-/// consumers.
-pub fn emit(sender: &broadcast::Sender<DaemonEvent>, event: DaemonEvent) {
-    let _ = sender.send(event);
+/// Free-function form of [`EventSender::send`], kept because the loop and the
+/// mappers below read as `events::emit(sender, events::conflict_event(hit))`.
+pub fn emit(sender: &EventSender, event: DaemonEvent) -> u64 {
+    sender.send(event)
 }
 
 /// The P6 seam: publish a canonization transition. Canonization (P6) calls
 /// this at every transition; the daemon loop does not invent `Canonized`
 /// events.
 ///
-/// P6 gets the sender from [`crate::daemon::Daemon::event_sender`] (XP-4) —
-/// before that accessor existed this helper had no reachable caller, which is
-/// what the `#[allow(dead_code)]` it used to carry was really saying.
-pub fn emit_canonized(sender: &broadcast::Sender<DaemonEvent>, event: CanonizationEvent) {
+/// P6 gets the [`EventSender`] from [`crate::daemon::Daemon::event_sender`]
+/// (XP-4) — before that accessor existed this helper had no reachable caller,
+/// which is what the `#[allow(dead_code)]` it used to carry was really saying.
+/// Taking the wrapper rather than a raw `broadcast::Sender` is NEW-3: P6's sends
+/// advance the same ring the daemon's re-arm reasons about, so they must advance
+/// the same counter.
+pub fn emit_canonized(sender: &EventSender, event: CanonizationEvent) {
     emit(sender, DaemonEvent::Canonized { event });
 }
 
@@ -601,14 +669,20 @@ mod tests {
         // blocks, never errors while a receiver exists); the oldest values
         // are dropped and the receiver eventually observes Lagged — the
         // spec §6.1 contract for a consumer that cannot keep up.
+        //
+        // `EventSender::send` has no failure mode at all (NEW-3 made the §6.1
+        // "a dropped receiver is not an error" contract structural), so what is
+        // asserted here is that each send *happened* and was counted: the
+        // returned stamps are 1..=4 in order.
         let (tx, mut rx) = event_channel_with_capacity(2);
         for i in 0..4 {
-            let sent = tx.send(DaemonEvent::Stale {
+            let stamp = tx.send(DaemonEvent::Stale {
                 node_id: nid(1, i),
                 detail: format!("{i}"),
             });
-            assert!(sent.is_ok(), "send must never fail while a receiver exists");
+            assert_eq!(stamp, i + 1, "every send is counted, in order");
         }
+        assert_eq!(tx.emitted_total(), 4);
 
         match rx.recv().await {
             Err(RecvError::Lagged(skipped)) => {
