@@ -225,7 +225,11 @@ subscriber; and a still-held condition whose event left the retained window is r
 ## Exit criteria
 
 - [x] All five event kinds emitted — per kind, the exact test that proves it
-      (all green in the default suite: 328 passed, 0 failed):
+      (all green in the default `cargo test`: **368 passed, 0 failed, 3 ignored**
+      — 363 lib + 2 bin + 2 `p2_integration` + 1 `rebuild_session`; the 3 ignored
+      are the lib's live-Cockroach test and the two `live_calibration` ones.
+      Measured at the close of review round 2; the figure here was 328, which was
+      the pre-remediation count):
       - **Conflict** — `loop_emits_planted_conflict_from_rest_api_fixture`
         (mod.rs; `session-rest-api` fixture, 5s-rebased)
       - **Drift** — `loop_emits_planted_drift_from_session_drift_fixture`

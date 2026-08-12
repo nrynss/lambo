@@ -1,8 +1,11 @@
 //! Drift detection — spec §9 (§7.7), T4.4.
 //!
-//! Weighted shortest path over `Causal`/`Dependency`/`Hierarchical` edges to any
-//! root goal node; a concept is **drifted** when its distance from the goal
-//! region is beyond `drift_threshold` hops. Pure, deterministic, cycle-safe:
+//! Unweighted shortest path — hop count — over
+//! `Causal`/`Dependency`/`Hierarchical` edges to any root goal node; a concept is
+//! **drifted** when its distance from the goal region is beyond
+//! `drift_threshold` hops. (Spec §9 says "weighted shortest path" but denominates
+//! the threshold in *hops*; see "Distance = hop count" below.) Pure,
+//! deterministic, cycle-safe:
 //! takes `&Graph` + threshold, returns [`Vec<DriftHit>`]. The daemon loop
 //! (T4.6) converts hits into `DaemonEvent::Drift` — this module owns no event
 //! types and no broadcast channel (cross-task contract).
@@ -67,11 +70,28 @@ use crate::types::{EdgeType, NodeId};
 /// Spec §9 `drift_threshold` — warn strictly beyond this many hops.
 pub const DRIFT_THRESHOLD: usize = 5;
 
-/// The `hops` value standing for "no path to any root goal" where the shape
-/// demands a number ([`HotListPayload::Drift`], `DaemonEvent::Drift`) — the
-/// maximally drifted case (ALGO-5). `DriftHit` itself carries `Option`, so this
-/// sentinel only appears at the two frozen boundaries.
-pub const DRIFT_HOPS_NO_PATH: u64 = u64::MAX;
+/// "No path to any root goal" for `DaemonEvent::Drift`, whose §6.1 shape is
+/// frozen at `hops: u32` and has no unreachable encoding — the maximally drifted
+/// case (ALGO-5).
+///
+/// `DaemonEvent` derives `Serialize`, so **a wire consumer sees `4294967295`**
+/// and must treat it as "no path", not as a hop count. `detail` says so in
+/// words; see the note on `DaemonEvent::Drift` itself.
+pub const DRIFT_HOPS_NO_PATH_EVENT: u32 = u32::MAX;
+
+/// The same sentinel where the shape is `u64` ([`HotListPayload::Drift`]).
+///
+/// **One number, two widths (NEW-5):** this is
+/// `DRIFT_HOPS_NO_PATH_EVENT as u64` — `4_294_967_295` — so the event and the
+/// hot-list payload carry the identical value and a consumer comparing against
+/// either is right about both. It was `u64::MAX`, which disagreed with what
+/// `events::drift_event` actually put on the wire while the cross-reference
+/// there claimed the hardcoded `u32::MAX` *was* this documented sentinel.
+///
+/// `DriftHit` itself carries `Option`, so the sentinel only ever appears at
+/// these two frozen boundaries. No real hop count can reach it (hops are bounded
+/// by the session's concept count).
+pub const DRIFT_HOPS_NO_PATH: u64 = DRIFT_HOPS_NO_PATH_EVENT as u64;
 
 /// Edge types participating in drift paths (spec §9).
 pub const DRIFT_EDGE_TYPES: [EdgeType; 3] = [
@@ -754,6 +774,22 @@ mod tests {
                 root: NodeId::default(),
             }
         );
+
+        // NEW-5: the event and the payload carry the SAME no-path number, under
+        // the documented widening. Pre-fix the payload said `u64::MAX` while
+        // `drift_event` hardcoded `u32::MAX` — two sentinels, one of them
+        // claiming to be the other.
+        let event = crate::daemon::events::drift_event(&per_node);
+        match event {
+            crate::types::DaemonEvent::Drift { hops, detail, .. } => {
+                assert_eq!(hops, DRIFT_HOPS_NO_PATH_EVENT);
+                assert_eq!(u64::from(hops), DRIFT_HOPS_NO_PATH);
+                // What a `Serialize`d consumer actually reads.
+                assert_eq!(hops, 4_294_967_295);
+                assert!(detail.contains("no path"), "{detail}");
+            }
+            other => panic!("expected Drift, got {other:?}"),
+        }
 
         // With no root goal at all there is nothing to drift *from* — unchanged.
         g.set_root_goal(None);

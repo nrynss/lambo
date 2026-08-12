@@ -146,10 +146,24 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// constant-zero dimension cannot reorder anything), which is why [`score`]
 /// itself stays spec-verbatim — only a threshold comparison is distorted.
 ///
-/// Renormalizing rather than re-weighting keeps the change reversible: once
-/// `access_count` goes live the caller switches back to [`score`], and because
-/// frequency only ever *adds*, no concept's eviction score falls at the
-/// switch.
+/// ## The switch back to [`score`] LOWERS scores (NEW-6)
+///
+/// Renormalizing rather than re-weighting keeps the change reversible, but not
+/// score-preserving, and the direction is the opposite of what this block used
+/// to claim. Dividing by the live weight total is a *multiplication by
+/// `1/live_total`* — 1.25 at the default weights — so switching back multiplies
+/// the weighted part by `live_total` again: at `frequency == 0` the full
+/// composite is `0.8 ×` the live one on the weighted part (the additive bonus and
+/// type modifier are untouched). Only a concept whose frequency has actually
+/// started earning comes out ahead.
+///
+/// Measured on the shipped `session-rest-api` fixture (all 22 concepts, at the
+/// moment the first access lands and GC's cut flips): **every** concept's
+/// eviction score falls, by a factor of 0.83–0.89, and the smallest margin to its
+/// type's bar goes from **1.49× to 1.33×**. Nothing crosses the bar, so the
+/// switch does not by itself make GC collect anything — but the headroom
+/// [`crate::daemon::gc::MIN_CONCEPT_SCORE`] was calibrated against is ~11%
+/// smaller after it, which is the number to anchor on when tuning the threshold.
 pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
     let w = weights.sanitized();
     let live_total = w.recency + w.session_activity + w.density;
@@ -510,10 +524,21 @@ mod tests {
             + 0.05;
         assert!((live - expected).abs() < 1e-12, "{live} != {expected}");
 
-        // A saturated concept still tops out at the same bound, and a
-        // concept with live frequency is unchanged by the switch direction:
-        // frequency only ever adds, so `score >= score_over_live` is false
-        // only when frequency is genuinely earning.
+        // The renormalization is a multiplication by 1/live_total, so at
+        // frequency 0 the switch back to `score` costs exactly `live_total`
+        // (0.8 by default) on the weighted part — NEW-6: it LOWERS the score,
+        // it does not raise it.
+        let weighted_live = live - 0.07;
+        let weighted_full = full - 0.07;
+        let live_total = w.recency + w.session_activity + w.density;
+        assert!(
+            (weighted_full - weighted_live * live_total).abs() < 1e-12,
+            "full weighted part must be live × {live_total}: {weighted_full} vs \
+             {weighted_live}"
+        );
+
+        // A saturated concept still tops out at the same bound; only a concept
+        // whose frequency is genuinely earning comes out ahead of the live score.
         let maxed = ScoreDims {
             recency: 1.0,
             frequency: 1.0,

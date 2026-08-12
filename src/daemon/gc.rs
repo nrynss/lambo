@@ -392,8 +392,17 @@ fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
 /// dead and is renormalized out of the cut (ALGO-1,
 /// [`crate::daemon::score::score_over_live_dimensions`]). The moment any
 /// access lands the full spec §9 composite is used again — so the session
-/// switches scoring functions exactly once, and only in the direction that
-/// raises scores.
+/// switches scoring functions exactly once.
+///
+/// That switch **lowers** every score whose frequency is still 0 (NEW-6): the
+/// live composite renormalizes over the surviving weights, so going back to the
+/// full one re-applies the live weight total — `0.8 ×` the weighted part at the
+/// default weights. On the shipped `session-rest-api` fixture all 22 concepts
+/// drop (factor 0.83–0.89) and the smallest margin to a type bar falls from
+/// **1.49× to 1.33×**; nothing crosses, so no concept is collected *because of*
+/// the switch. The direction matters for calibration — see
+/// [`crate::daemon::score::score_over_live_dimensions`] for the measurements —
+/// and it is the opposite of what this block claimed before.
 fn eviction_score(
     graph: &Graph,
     c: &Concept,

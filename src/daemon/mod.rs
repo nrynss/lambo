@@ -1179,7 +1179,11 @@ mod tests {
         while let Ok(evt) = rx.try_recv() {
             match evt {
                 DaemonEvent::Drift { hops, detail, .. } => {
-                    assert_eq!(hops, u32::MAX, "unreachable sentinel: {detail}");
+                    assert_eq!(
+                        hops,
+                        drift::DRIFT_HOPS_NO_PATH_EVENT,
+                        "unreachable sentinel: {detail}"
+                    );
                     assert!(detail.contains("no path"), "renderable detail: {detail}");
                     no_path += 1;
                 }

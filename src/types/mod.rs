@@ -406,6 +406,14 @@ pub enum DaemonEvent {
     },
     Drift {
         node_id: NodeId,
+        /// Shortest-path hop count to the nearest root goal — **or the no-path
+        /// sentinel** `4294967295`
+        /// ([`crate::daemon::drift::DRIFT_HOPS_NO_PATH_EVENT`], ALGO-5/NEW-5).
+        /// `u32` is frozen by spec §6.1 and has no unreachable encoding, so a
+        /// concept with no traversable route to any goal — the maximally drifted
+        /// case — reports the sentinel. This enum derives `Serialize`: a JSON
+        /// consumer sees the literal `4294967295` and must read it as "no path",
+        /// never as a distance. `detail` says so in words.
         hops: u32,
         detail: String,
     },

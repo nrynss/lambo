@@ -130,7 +130,8 @@ pub enum HotListPayload {
     HighRisk { reason: String },
     /// The node drifted from any root goal.
     Drift {
-        /// Shortest path length (weighted hops) to the nearest root goal.
+        /// Unweighted shortest-path hop count to the nearest root goal, or
+        /// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`] when there is no path.
         hops: u64,
         /// The root goal node the path terminates at (nil when no path).
         root: NodeId,

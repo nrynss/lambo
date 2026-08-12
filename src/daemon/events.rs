@@ -80,7 +80,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::daemon::conflict::ConflictHit;
-use crate::daemon::drift::DriftHit;
+use crate::daemon::drift::{DriftHit, DRIFT_HOPS_NO_PATH_EVENT};
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
 use crate::graph::Graph;
 use crate::types::{CanonizationEvent, CanonizationStatus, DaemonEvent, NodeId};
@@ -220,13 +220,16 @@ pub fn conflict_event(hit: &ConflictHit) -> DaemonEvent {
 /// sentence.
 ///
 /// §6.1's `hops: u32` is frozen and has no "unreachable" encoding, so a no-path
-/// hit (ALGO-5) reports `u32::MAX` — the sentinel documented at
-/// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`]. Consumers render `detail`,
-/// which says so in words.
+/// hit (ALGO-5) reports [`DRIFT_HOPS_NO_PATH_EVENT`] — `4294967295`, which is
+/// also what a `Serialize`d event puts on the wire. The `u64`-shaped hot-list
+/// payload carries the same number as
+/// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`] (NEW-5: the two used to
+/// disagree — this site hardcoded `u32::MAX` while the constant it pointed at was
+/// `u64::MAX`). Consumers render `detail`, which says so in words.
 pub fn drift_event(hit: &DriftHit) -> DaemonEvent {
     DaemonEvent::Drift {
         node_id: hit.node,
-        hops: hit.hops.map_or(u32::MAX, |h| h as u32),
+        hops: hit.hops.map_or(DRIFT_HOPS_NO_PATH_EVENT, |h| h as u32),
         detail: hit.detail.clone(),
     }
 }
