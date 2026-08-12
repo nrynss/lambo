@@ -1067,4 +1067,190 @@ mod tests {
         }
         handle.abort();
     }
+
+    #[tokio::test]
+    async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
+        // Final-review finding 1a: the entered-gated HighRisk emit path (the
+        // `high_risk_hits` loop in `run_loop`) + `events::high_risk_event`
+        // mapper had no loop-level test. A Canonical node with a fresh
+        // in-window write is a high-risk modification (spec §9 "high-risk
+        // modification" hot-list condition; events.rs v0.1 rule): exactly one
+        // `DaemonEvent::HighRisk` on transition, a HighRiskModification
+        // hot-list entry with a renderable reason, and NO re-emit while the
+        // condition persists (emit-on-transition, finding 3).
+        use crate::daemon::hotlist::{Condition, HotListPayload};
+
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut g = Graph::new(sid());
+        let i1 = interaction_at(1, None, "agent-a", t0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        // The high-value node: Canonical (spec §10 Stage 3), fresh at t0 —
+        // its Derives edge from `i1` is dated t0 too (graph.rs
+        // insert_concept dates the edge at the concept's created_at).
+        let c1 = Concept {
+            canonization_status: CanonizationStatus::Canonical,
+            blast_radius: Some(8),
+            ..concept_at(1, iid, "agent-a", "canonical concept", t0)
+        };
+        let c1_id = c1.id;
+        g.insert_concept(c1, iid).unwrap();
+        // The modifying writer: a fresh in-window Dependency edge onto c1.
+        let c2 = concept_at(2, iid, "agent-a", "modifier", t0);
+        let c2_id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(dep_edge_at(1, c2_id, c1_id, t0)).unwrap();
+
+        let graph = Arc::new(RwLock::new(g));
+        // Clock pinned to t0: the t0 writes stay inside the 30s high-risk
+        // window for the test's whole lifetime — the condition persists.
+        let clock: Clock = Arc::new(move || t0);
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(clock);
+        let mut rx = daemon.events();
+        let handle = daemon.spawn();
+
+        // Warm-up: the only transition is (HighRiskModification, c1) —
+        // single agent (no conflict), no root goal (no drift), all activity
+        // fresh (no stale).
+        let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("high-risk event within 2s")
+            .unwrap();
+        match evt {
+            DaemonEvent::HighRisk { node_id, detail } => {
+                assert_eq!(node_id, c1_id, "the fresh-written canonical node");
+                assert!(
+                    detail.contains("Canonical") && detail.contains("modified within 30s"),
+                    "renderable detail: {detail}"
+                );
+            }
+            other => panic!("first warm-up event must be the HighRisk, got {other:?}"),
+        }
+
+        // The hot list mirrors the fresh hit: a HighRiskModification entry
+        // with the renderable reason.
+        {
+            let h = daemon.hot_list();
+            let guard = h.read();
+            let entry = guard
+                .iter()
+                .find(|e| e.node == c1_id)
+                .expect("warm-up must put the canonical node on the hot list");
+            assert_eq!(entry.condition, Condition::HighRiskModification);
+            match &entry.payload {
+                HotListPayload::HighRisk { reason } => {
+                    assert!(reason.contains("Canonical"), "renderable reason: {reason}")
+                }
+                other => panic!("expected HighRisk payload, got {other:?}"),
+            }
+        }
+
+        // The condition persists (the t0 write never leaves the 30s window):
+        // wakes re-run detection but emit-on-transition publishes nothing —
+        // the event fired once, on entry.
+        for _ in 0..3 {
+            daemon.wake();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        match rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("persisting high-risk must not re-emit, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    /// Parse the seconds out of a `stale_event` detail
+    /// ("node <id> untouched for <N>s").
+    fn stale_seconds(detail: &str) -> u64 {
+        detail
+            .trim_end_matches('s')
+            .rsplit(' ')
+            .next()
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or_else(|_| panic!("detail must render seconds-inactive: {detail:?}"))
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn loop_emits_stale_from_rest_api_fixture_after_writes_age_out() {
+        // Final-review finding 1a: staleness had only a synthetic-clock loop
+        // test. This one is fixture-driven: rebase session-rest-api so its
+        // newest write lands 2h before `anchor` — past the 1h STALE_WINDOW
+        // and far outside the 30s conflict/high-risk windows. Every concept
+        // ages out, so the warm-up cycle must emit exactly the fixture's 22
+        // stale concepts, and nothing else: no Conflict (all writes are 2h
+        // old, outside conflict_recency_window), no Drift (the session has
+        // no root goal — drift.rs: no goal nodes → no hits), no HighRisk (no
+        // fresh in-window writes — user schema is Canonical/blast-radius 8
+        // but its write is 2h old).
+        use crate::fixtures;
+        use crate::store::GraphStore;
+
+        let anchor = Utc::now();
+        let store =
+            fixtures::load_store_relative("session-rest-api", anchor, Duration::from_secs(7200))
+                .unwrap();
+        let snap = store
+            .load_session(&SessionId::from("session-rest-api"))
+            .await
+            .unwrap();
+        let g = Graph::from_snapshot(snap).unwrap();
+        let n_concepts = g.concepts().count();
+        assert_eq!(n_concepts, 22, "fixture must keep its 22 concepts");
+
+        let daemon = Daemon::new(
+            Arc::new(RwLock::new(g)),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        // Pin detection time to `anchor` so the 2h-rebased writes render
+        // stable seconds-inactive (the wall clock would make this flaky).
+        .with_clock(Arc::new(move || anchor));
+        let mut rx = daemon.events();
+        let handle = daemon.spawn();
+
+        // The warm-up cycle emits every stale concept (id-ascending) in one
+        // pass — drain all 22 and demand no other event kind.
+        let mut stales: Vec<NodeId> = Vec::new();
+        for _ in 0..n_concepts {
+            let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("stale event within 2s")
+                .unwrap();
+            match evt {
+                DaemonEvent::Stale { node_id, detail } => {
+                    assert!(
+                        detail.contains("untouched for"),
+                        "renderable detail: {detail}"
+                    );
+                    assert!(
+                        stale_seconds(&detail) >= 7200,
+                        "2h rebase ⇒ every write is ≥ 2h old, got {detail}"
+                    );
+                    stales.push(node_id);
+                }
+                other => {
+                    panic!("aged-out fixture must emit only Stale, got {other:?}")
+                }
+            }
+        }
+        // Exactly the 22 concepts, once each — and nothing after them.
+        assert_eq!(stales.len(), n_concepts);
+        match rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("exactly {n_concepts} stale events, got more: {other:?}"),
+        }
+        // The hot list mirrors the fresh stale set.
+        assert!(
+            daemon.hot_list().read().contains(stales[0]),
+            "stale node must be on the hot list"
+        );
+        handle.abort();
+    }
 }
