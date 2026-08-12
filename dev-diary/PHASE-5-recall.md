@@ -108,7 +108,7 @@ warning.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/recall/cache.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged e5dde1a)
 ```
 LRU keyed `(query_hash, top_k, traversal_depth, mutation_epoch)`. Epoch invalidation only —
 no generation counters (arena is gone). Small, boring, independent: a good first task for
@@ -149,4 +149,15 @@ an agent waiting on T5.1.
 
 **Wave-barrier gates (integrator, 2026-08-12):** rustfmt pass on wave-A files (`cb9c478` — the per-task `cargo check` reviews do not run the fmt/clippy gates; cache.rs/candidates.rs had drifted) and two clippy fixes (`e1414d5` — `len_without_is_empty` on `RecallCache`, `unnecessary_sort_by` in a candidates.rs test). Full default-tier gates green at the barrier: fmt, clippy `--all-targets -D warnings`, `cargo test --all` 395/0, no-default `store-memory`/`store-sqlite` `--all-targets` clean.
 
-**Open:** T5.3 (scoring / assembly / context format).
+**What exists now (wave C, integrated e5dde1a):**
+
+- `src/recall/assemble.rs` (T5.3) — `assemble<F>(graph, expanded, phase1, scores, hot, query, weights, now, token_fn) -> RecallResult`: final = daemon×w_daemon + relevance×w_query for every expanded member (required + siblings, scored independently); relevance = phase-1 score for keyword hits, 0.0 for BFS/sibling members; daemon missing -> 0.0; weights sanitized; score-desc/id-asc sort. Hot members force-included AFTER `HotList::revalidate(graph, node, now)` with recall's own `now`; lapsed dropped; payload rendered at read time. Assembly to `max_tokens` via `default_token_count` (ceil(bytes/3.5)) or caller `token_fn`; whole blocks only, longest score-ordered prefix; truncated blocks keep hits + warnings. `#[allow(clippy::too_many_arguments)]` (Wave-D entry bundles deps).
+- `src/recall/format.rs` (T5.3) — `blast_radius(graph, node) -> u64` (spec §4.1 + errata: inbound structural edges Dependency/Causal/Hierarchical, 1-hop, no recursion, Derives/Temporal excluded); `concept_label` with `[canonical]` marker; `blast_radius_warning`, `conflict_warning` (writer, never agents[0] — ALGO-2), `reservation_warning`; `render_context`.
+- `fixtures/recall-context-golden.txt` (T5.3) — byte-exact golden for the demo query "update user schema" (top_k=5, max_tokens=500, depth=2), wall-clock-free (fixed planted `now`).
+- Module declarations: `pub mod assemble;` + `pub mod format;` (shared-file policy announcement).
+
+**Spec-vs-data reconciliation (blast radius 8 vs 9):** the ⚑ line renders the GRAPH-COMPUTED dependent count, which on `session-rest-api.json` is **8** (pinned by fixtures.rs `Some(8)`, the Cockroach anchor, and gen-fixtures "blast_radius = 8 > 5"), not the 9 in spec §13 / PHASE-8 narration. The "9" belongs to the T8.4 live demo graph, which must plant a 9th dependent (or the fixture gains a 9th orphan plus updated pins — out of P5 scope). Format stays graph-truthful; golden pins 8.
+
+**Wave-barrier gates (integrator, 2026-08-12):** clippy `too_many_arguments` allow on `assemble` (repo precedent) + full no-default TEST matrix caught two T5.1 fixture-dependent tests running un-gated under no-default rows (fixture tests + `load_rest_api_fixture` gated, `629a61c`). Barrier gates: fmt clean; clippy `--all-targets -D warnings` clean; default 412/0; sqlite 444/0; sqlite-minimal 340/0; cockroach 335/0; minimal + demo checks clean.
+
+**Open:** recall() entry-point wiring (Wave D, integrator).
