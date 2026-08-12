@@ -455,6 +455,21 @@ fn condition_set(
 ///    following cycles, so one sweep can no longer enqueue twenty flush batches
 ///    from inside the guard. GC does not re-run while a drain is outstanding.
 ///
+///    **A sweep must not fund the next one (NEW-2).** Survivor bumps are
+///    mutations, so they advance the epoch; crediting them as *session*
+///    mutations made GC self-sustaining on an idle session whenever
+///    `survivors >= gc_interval + chunk` — every drain paid for the next
+///    sweep, `gc_survived` climbed with no writes at all (crossing
+///    canonization Stage 1's `>= 3` gate by idling), and the epoch ran away
+///    from T5.4's recall cache. `epoch_after` covers only the bumps applied
+///    *inside* `gc::run`; the deferred tail lands on later cycles, so each
+///    drain advances `last_gc_epoch` by exactly what it appended. The elapsed
+///    measure then counts session writes only, and an idle session reaches a
+///    fixed point: bumps drain once, no further sweep. The current cycle's
+///    `epoch` snapshot predates its own drain, so a drain cycle understates
+///    elapsed by that chunk and the next cycle measures exactly — GC can be
+///    one cycle late, never early.
+///
 /// ## Panic containment (CONC-4)
 ///
 /// The cycle body is synchronous, so it is run inside `catch_unwind`: a panic
@@ -505,6 +520,10 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 struct CycleState {
     /// `None` → the first cycle always rescores (warm-up), then epoch-gated.
     last_epoch: Option<u64>,
+    /// GC watermark: the epoch the next `gc_interval` is measured from. Set to
+    /// `GcOutcome::epoch_after` when a sweep runs, then advanced by every
+    /// deferred-bump drain so GC's own mutations are never credited as session
+    /// mutations (NEW-2 — see `run_loop`'s step 3).
     last_gc_epoch: u64,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
     /// `(condition, node)` maps to the value of `emitted_total` at its last
@@ -657,8 +676,16 @@ fn run_cycle(
     //     one chunk per cycle, and always to empty before the next run, so
     //     no concept ever carries two outstanding bumps.
     if !cs.gc_pending.is_empty() {
-        let mut g = graph.write();
-        gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk);
+        let applied = {
+            let mut g = graph.write();
+            gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk)
+        };
+        // NEW-2: a drain's own mutations must not be credited as session
+        // mutations toward the next `gc_interval`. `bump_gc_survived` appends
+        // exactly one `UpsertNode` per applied bump and the epoch bumps once
+        // per appended mutation, so advancing the watermark by `applied`
+        // cancels GC's own writes out of 3b's measure exactly.
+        cs.last_gc_epoch = cs.last_gc_epoch.saturating_add(applied as u64);
     }
 
     // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
@@ -1300,22 +1327,7 @@ mod tests {
         // CONC-6/XP-10: GC hands back the survivor bumps it deferred, and the
         // loop drains them a chunk per cycle. Every survivor must still end up
         // with exactly one bump for that run — chunking changes when, not which.
-        let mut g = Graph::new(sid());
-        let i = interaction(1);
-        let iid = i.id;
-        g.insert_interaction(i).unwrap();
-        // Six Canonical concepts: protected, so every GC step spares them and
-        // the survivor set is exactly these six.
-        let mut ids: Vec<NodeId> = Vec::new();
-        for n in 1..=6u64 {
-            let c = Concept {
-                canonization_status: CanonizationStatus::Canonical,
-                ..concept(n, iid, &format!("canonical {n}"))
-            };
-            ids.push(c.id);
-            g.insert_concept(c, iid).unwrap();
-        }
-        let graph = Arc::new(RwLock::new(g));
+        let (graph, ids) = locked_graph_with_canonical_concepts(6);
 
         // gc_interval 3 → the warm-up epoch already crosses it; chunk 2 → the
         // run bumps 2 and defers 4, drained over the next two cycles.
@@ -1341,9 +1353,11 @@ mod tests {
         };
         wait_until(|| all_bumped(1)).await;
         // And no survivor is double-counted: GC does not re-run while a drain
-        // is outstanding, so after convergence every counter is exactly 1 for
-        // the first run. Later runs may add more, so assert the floor held
-        // uniformly — an over-count would show as an inconsistent set.
+        // is outstanding, so every counter is exactly 1 — one run, one bump
+        // each. (This asserted only `max - min <= 1` while GC still funded its
+        // own next sweep off the drains; that is NEW-2's fixed point now, and
+        // `idle_session_reaches_a_gc_fixed_point_after_the_bumps_drain` pins it
+        // directly.)
         {
             let g = graph.read();
             let counts: Vec<i32> = ids
@@ -1353,13 +1367,94 @@ mod tests {
                     _ => unreachable!(),
                 })
                 .collect();
-            let max = *counts.iter().max().unwrap();
-            let min = *counts.iter().min().unwrap();
-            assert!(
-                max - min <= 1,
-                "chunked bumps must stay within one run of each other: {counts:?}"
+            assert_eq!(
+                counts,
+                vec![1; 6],
+                "chunking changes when a bump lands, never how many"
             );
         }
+        handle.abort();
+    }
+
+    /// A locked graph with `n` Canonical concepts off one interaction. Canonical
+    /// is protected, so every GC step spares them and the survivor set is
+    /// exactly these `n` — the shape both survivor-bump tests need.
+    fn locked_graph_with_canonical_concepts(n: u64) -> (Arc<RwLock<Graph>>, Vec<NodeId>) {
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        let mut ids: Vec<NodeId> = Vec::new();
+        for k in 1..=n {
+            let c = Concept {
+                canonization_status: CanonizationStatus::Canonical,
+                ..concept(k, iid, &format!("canonical {k}"))
+            };
+            ids.push(c.id);
+            g.insert_concept(c, iid).unwrap();
+        }
+        (Arc::new(RwLock::new(g)), ids)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_session_reaches_a_gc_fixed_point_after_the_bumps_drain() {
+        // NEW-2: the chunked survivor bumps re-triggered GC. Bumps are
+        // mutations, `epoch_after` covers only the in-`run` chunk, and the
+        // deferred tail drained on later cycles — where each `UpsertNode` was
+        // credited as a *session* mutation toward the next `gc_interval`. With
+        // `survivors >= gc_interval + chunk` GC became fully self-sustaining on
+        // an idle session: `gc_survived` climbed past canonization Stage 1's
+        // `>= 3` gate with zero writes, and the epoch ran away from T5.4's
+        // recall cache.
+        //
+        // Six survivors, interval 3, chunk 2 — pre-fix this loops forever
+        // (sweep, drain, drain, sweep, …). Post-fix the drains cancel out and
+        // an idle session has exactly one sweep.
+        let (graph, ids) = locked_graph_with_canonical_concepts(6);
+        let params = CycleParams {
+            gc_interval: 3,
+            gc_survivor_bump_chunk: 2,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_millis(10),
+            params,
+        );
+        let handle = daemon.spawn();
+
+        let survived = || -> Vec<i32> {
+            let g = graph.read();
+            ids.iter()
+                .map(|id| match g.node(*id) {
+                    Some(crate::types::Node::Concept(c)) => c.gc_survived,
+                    _ => unreachable!("Canonical concepts are protected"),
+                })
+                .collect()
+        };
+
+        // The one sweep's bumps drain over the following cycles.
+        wait_until(|| survived().iter().all(|&n| n == 1)).await;
+        let settled_epoch = graph.read().epoch();
+        let settled_cycles = daemon.cycles();
+
+        // Now idle for many more cycles with ZERO session writes. Nothing may
+        // move: no second sweep (`gc_survived` stays 1), and no mutation at all
+        // (the epoch is the witness — a sweep's bumps would advance it).
+        wait_until(|| daemon.cycles() >= settled_cycles + 40).await;
+        assert_eq!(
+            survived(),
+            vec![1; 6],
+            "an idle session must not sweep again — GC's own bumps must not \
+             fund the next gc_interval"
+        );
+        assert_eq!(
+            graph.read().epoch(),
+            settled_epoch,
+            "epoch must stabilize on an idle session (T5.4's recall cache keys \
+             on it)"
+        );
         handle.abort();
     }
 
