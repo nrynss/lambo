@@ -1,1 +1,2 @@
 //! Candidate retrieval, expansion, context assembly (P5).
+pub mod candidates;
