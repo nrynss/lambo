@@ -209,8 +209,6 @@ pub fn insert_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures;
-    use crate::store::GraphStore;
     use crate::types::{CanonizationStatus, Concept, ConceptType, Edge, Interaction, SessionId};
     use chrono::TimeZone;
     use uuid::Uuid;
@@ -311,8 +309,12 @@ mod tests {
     // Planted conflict in the session-rest-api fixture (mocked now)
     // ------------------------------------------------------------------
 
+    #[cfg(feature = "fixtures")]
     #[tokio::test]
     async fn rest_api_planted_conflict_fires() {
+        use crate::fixtures;
+        use crate::store::GraphStore;
+
         // Rebase the fixture so the most recent concept write (the caching
         // layer, authored by agent-a) lands 5s before the anchor, then detect
         // with `now == anchor` and the spec's 30s window.

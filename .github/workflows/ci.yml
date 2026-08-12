@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main, master, 'phase-*']
+    # `**` is required: GitHub branch globs do not let `*` cross `/`, and real
+    # phase branches are `phase/<slug>` (XP-1 — `'phase-*'` matched nothing).
+    branches: [main, master, 'phase/**']
   pull_request:
 
 env:

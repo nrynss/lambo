@@ -601,6 +601,7 @@ mod tests {
     // Fixture-backed: predicates read real graph state
     // ------------------------------------------------------------------
 
+    #[cfg(feature = "fixtures")]
     #[test]
     fn fixture_graph_predicate_revalidates_against_real_state() {
         use crate::fixtures::load_snapshot;
