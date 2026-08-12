@@ -76,7 +76,7 @@ guard, `chunk_group_id` siblings force-included but scored independently (T2.5's
 requires:   T5.2       # + T4.2 for hot-list; stub behind a trait until it lands
 fixture-ok: yes
 owns:       src/recall/assemble.rs, src/recall/format.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT after 1 remediation round; merged 33fb935)
 ```
 `final_score = daemon_score × w_daemon + query_relevance × w_query`. Hot-listed nodes
 within the expanded set force-included **after condition re-validation** (call T4.2's
@@ -142,4 +142,11 @@ an agent waiting on T5.1.
 
 **Recorded but not remediated (P3 doc-accuracy, verdict ACCEPT):** T54-1 (eviction-cost doc claim; capacity small, harmless), T54-2 ("Not Sync-friendly" phrasing; the struct is auto-Sync, real constraint is the `&mut self` API). See `adve-review-t5.4-cache.md`.
 
-**Open:** T5.2 (expansion), T5.3 (scoring / assembly / context format).
+**What exists now (wave B, integrated 33fb935):**
+
+- `src/recall/expand.rs` (T5.2) — phase-2 expansion: `expand(graph: &Graph, candidates: Vec<Scored<NodeId>>, depth: usize) -> ExpandedSet` (sync, zero I/O, lock-safe). `ExpandedSet { required, siblings }` — required = candidates (level 0, phase-1 scores carried) + BFS-reached concepts in deterministic discovery order (UNSCORED until T5.3); siblings = force-included `chunk_group_id` concepts (transitive closure over the group, id-asc, NOT BFS-expanded — a group tag is not a graph path). BFS follows `TRAVERSAL_ORDER = [Dependency, Causal, Hierarchical, CoOccurrence, Semantic]` (Derives/Temporal excluded, golden-pinned rationale); visited-set, first-discovery-wins, no re-expansion; `DEFAULT_TRAVERSAL_DEPTH = 2`; `UNSCORED = 0.0`.
+- Module declaration: `pub mod expand;` added to `src/recall/mod.rs` (shared-file policy announcement).
+
+**Wave-barrier gates (integrator, 2026-08-12):** rustfmt pass on wave-A files (`cb9c478` — the per-task `cargo check` reviews do not run the fmt/clippy gates; cache.rs/candidates.rs had drifted) and two clippy fixes (`e1414d5` — `len_without_is_empty` on `RecallCache`, `unnecessary_sort_by` in a candidates.rs test). Full default-tier gates green at the barrier: fmt, clippy `--all-targets -D warnings`, `cargo test --all` 395/0, no-default `store-memory`/`store-sqlite` `--all-targets` clean.
+
+**Open:** T5.3 (scoring / assembly / context format).
