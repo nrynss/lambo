@@ -30,7 +30,7 @@ Complete index of the review records in this directory (29 records).
 | [adve-review-p2-graph-core-muse-spark.md](adve-review-p2-graph-core-muse-spark.md) | P2 graph core — muse-spark (adversarial, branch-level) | **CLOSED** (all findings dispositioned) |
 | [adve-review-p3-stores-gemini36flash.md](adve-review-p3-stores-gemini36flash.md) | P3 stores tier — gemini36flash | **CLOSED** (ACCEPT after shared remediation + review) |
 | [adve-review-p3-stores-opus46.md](adve-review-p3-stores-opus46.md) | P3 stores tier — opus46 | **CLOSED** (ACCEPT after shared remediation + review) |
-| **[adve-review-p4-daemon-opus.md](adve-review-p4-daemon-opus.md)** | Main — P4 daemon tier (T4.1–T4.6), opus ×3 | **OPEN** — 25 findings (8 P1 / 11 P2 / 6 P3); remediation on `phase/p4-daemon` (Waves 0–7); the review loop closes it |
+| **[adve-review-p4-daemon-opus.md](adve-review-p4-daemon-opus.md)** | Main — P4 daemon tier (T4.1–T4.6), opus ×3 | **CLOSED** — 25+7 findings remediated (R1 8 waves + R2 7 commits), verification ACCEPT; merge-ready |
 | [adve-review-p7-t7-0-embedder-self.md](adve-review-p7-t7-0-embedder-self.md) | Prior/self T7.0 pass (history) | historical |
 | [adve-review-p0-p1-foundation-self.md](adve-review-p0-p1-foundation-self.md) | Prior/self P0/P1 foundation review | historical |
 

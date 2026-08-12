@@ -2,7 +2,8 @@
 
 ```text
 ╔════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN — merge to main BLOCKED pending P1 remediation   ║
+║  STATUS: CLOSED — remediated (R1+R2), verification ACCEPT      ║
+║  Closed: 2026-08-12 — see Close record below                   ║
 ║  Scope:  P4 daemon tier (T4.1–T4.6): scoring, hot list,        ║
 ║          conflict, drift, GC, event channel                    ║
 ║  Source: phase/p4-daemon @ cd9340e (diff vs main: 11 files,    ║
@@ -22,6 +23,45 @@
 ║          Fix P1s before phase→main.                            ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
+
+## Close record (2026-08-12)
+
+All 25 findings (+ GRAPH-9, carried from the E2E addendum) remediated and
+independently verified. Two-round loop:
+
+- **Round 1 — 8 wave commits** (fda19d2, 34ba3ca, 49f735e, 695938a,
+  c3144f8, aa237ad, 09e331e, 9ec6812): all 26 dispositions implemented.
+  Per-wave detail in the PHASE-4 Handoff Log.
+- **Verification review** (opus, independent, three passes): 20/26
+  VERIFIED clean with discriminating regression tests; 3 PARTIAL (CONC-2
+  re-arm blind to external publishers; ALGO-3 same-instant tie-break;
+  ALGO-5 sentinel split); 1 REGRESSED (CONC-6 — deferred bumps re-triggered
+  GC on idle sessions, proven by live probe); 7 new findings (NEW-1..7,
+  two P1). Verdict at that point: REJECT pending NEW-1/2/3.
+- **Round 2 — 7 commits** (78e13b2..cb26eb4): NEW-1 cfg gate (both
+  no-default CI rows compile under `-D warnings`); NEW-2 drain-watermark
+  advance (idle fixed-point test: 14 spurious sweeps pre-fix → 0, epoch
+  stable); NEW-3 counting `EventSender` wrapper — no raw `Sender` escapes
+  the module, property is structural (flood test: held Conflict re-emitted
+  by cycle 3; pre-fix never); NEW-4 all-candidates-per-instant writer
+  resolution (false negative killed); NEW-5 unified no-path sentinel;
+  NEW-6/7 doc corrections; record-accuracy fixes. These close the
+  PARTIAL/REGRESSED verdicts: CONC-2, ALGO-3, ALGO-5, CONC-6 → VERIFIED.
+- **Final gates** (every one under `RUSTFLAGS="-D warnings"`; orchestrator
+  re-ran the previously-failing row live): fmt + clippy clean (default and
+  sqlite+cockroach); default 368/0; sqlite 400/0; no-default sqlite 302/0;
+  no-default cockroach 297/0; demo + no-default checks clean.
+- **Residuals ticketed** in the PHASE-4 Handoff Log (no merge impact):
+  Cockroach `SET_ROOT_GOAL_SQL` compile-verified only (one live run when a
+  DSN is available); `conflict_at` rebuilds `WriterTimeline` per call
+  (T5.3 perf note); synonym lookup is pre-NFC (documented contract); SQL
+  adapters' keyword tokenizers do not NFC (parity note for P5).
+
+**Disposition: ACCEPT — `phase/p4-daemon` is merge-ready for the
+integrator's gate.**
+
+— fable (claude-fable-5), orchestrator; remediation opus ×2 rounds,
+  verification opus, 2026-08-12
 
 ## Grounding
 
