@@ -240,7 +240,8 @@ mod tests {
             (3, i3.id, "gamma"),
             (4, i4.id, "delta"),
         ] {
-            g.insert_concept(concept(id, origin, content), origin).unwrap();
+            g.insert_concept(concept(id, origin, content), origin)
+                .unwrap();
         }
         let index = InvertedIndex::from_snapshot(&g.snapshot());
         (g, index)
@@ -303,10 +304,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.caps
         }
-        async fn flush(
-            &self,
-            _batch: &crate::types::MutationBatch,
-        ) -> Result<(), StoreError> {
+        async fn flush(&self, _batch: &crate::types::MutationBatch) -> Result<(), StoreError> {
             self.unexpected_call()
         }
         async fn load_session(
@@ -415,7 +413,10 @@ mod tests {
 
         let lines = log_lines(&buf);
         assert_eq!(lines.len(), 1, "exactly one log line, got {lines:?}");
-        assert!(lines[0].contains("VECTOR_SEARCH"), "log names the capability");
+        assert!(
+            lines[0].contains("VECTOR_SEARCH"),
+            "log names the capability"
+        );
     }
 
     #[tokio::test]
@@ -458,7 +459,10 @@ mod tests {
 
         let lines = log_lines(&buf);
         assert_eq!(lines.len(), 1, "exactly one log line, got {lines:?}");
-        assert!(lines[0].contains("no query embedding"), "log explains the skip");
+        assert!(
+            lines[0].contains("no query embedding"),
+            "log explains the skip"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -500,7 +504,8 @@ mod tests {
             (3, i3.id, "gamma"),
             (4, i4.id, "delta"),
         ] {
-            g.insert_concept(concept(id, origin, content), origin).unwrap();
+            g.insert_concept(concept(id, origin, content), origin)
+                .unwrap();
         }
         let index = InvertedIndex::from_snapshot(&g.snapshot());
 
@@ -643,8 +648,11 @@ mod tests {
                 .cmp(&a.created_at)
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
-        let recent_interactions: HashSet<NodeId> =
-            recent.iter().take(RECENT_INTERACTIONS).map(|i| i.id).collect();
+        let recent_interactions: HashSet<NodeId> = recent
+            .iter()
+            .take(RECENT_INTERACTIONS)
+            .map(|i| i.id)
+            .collect();
         let recent_concept_ids: HashSet<NodeId> = snap
             .concepts
             .iter()
@@ -695,8 +703,7 @@ mod tests {
                 .copied()
                 .filter(|id| recent_concept_ids.contains(id))
                 .collect();
-            let mut recent_expected: Vec<NodeId> =
-                recent_concept_ids.iter().copied().collect();
+            let mut recent_expected: Vec<NodeId> = recent_concept_ids.iter().copied().collect();
             recent_expected.sort_by(|a, b| a.0.cmp(&b.0));
             assert_eq!(
                 recent_members, recent_expected,

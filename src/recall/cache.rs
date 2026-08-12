@@ -231,7 +231,11 @@ mod tests {
         // Re-touch a: now b is least-recently-used.
         assert_eq!(cache.get(&a), Some(&result("a")));
         cache.insert(c.clone(), result("c"));
-        assert_eq!(cache.get(&a), Some(&result("a")), "re-touched entry must survive");
+        assert_eq!(
+            cache.get(&a),
+            Some(&result("a")),
+            "re-touched entry must survive"
+        );
         assert_eq!(cache.get(&b), None);
         assert_eq!(cache.get(&c), Some(&result("c")));
     }
