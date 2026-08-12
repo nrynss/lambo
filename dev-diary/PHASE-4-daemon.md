@@ -64,7 +64,7 @@ each dimension) and rescoring `session-rest-api` produces a stable ordering with
 requires:   T4.1
 fixture-ok: yes
 owns:       src/daemon/hotlist.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged c8f64f6)
 ```
 Bounded priority queue, `hot_list_max=1000`. Entry conditions: conflict, high-risk
 modification, drift, stale session. **Conditions re-validated on each `recall()`** — expose
@@ -80,7 +80,7 @@ on revalidation.
 requires:   T4.1
 fixture-ok: yes
 owns:       src/daemon/conflict.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged c8f64f6)
 ```
 Spec §9: ≥2 active agents with edges to the same node, at least one `Causal`/`Dependency`,
 write activity inside `conflict_recency_window=30s`. Emits `DaemonEvent::Conflict` and a
@@ -97,7 +97,7 @@ stale-window cases don't (mocked time).
 requires:   T4.1
 fixture-ok: yes
 owns:       src/daemon/drift.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged c8f64f6)
 ```
 Weighted shortest path over `Causal`/`Dependency`/`Hierarchical` to any root goal node;
 warn beyond `drift_threshold=5` hops or no path. Root goal nodes are auto-`Venerable` at
@@ -114,7 +114,7 @@ planted node.
 requires:   T4.1
 fixture-ok: yes
 owns:       src/daemon/gc.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged c8f64f6)
 ```
 Spec §9, periodic only, every `gc_interval=10_000` mutations:
 1. edge cleanup below `min_edge_weight` past `gc_edge_ttl`
