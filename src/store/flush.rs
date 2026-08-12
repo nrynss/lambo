@@ -259,7 +259,10 @@ impl<F: Future> Future for CatchUnwindPoll<F> {
 /// `&boxed` coerces via the reflexive `Unsize` rule and would present the Box
 /// itself (not its payload) as the trait object, breaking every downcast.
 /// `Box::as_ref` is the explicit deref that reaches the payload.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+///
+/// `pub(crate)`: the daemon loop's panic containment (CONC-4) reports payloads
+/// the same way, and one formatter means one behaviour to reason about.
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     let payload: &(dyn std::any::Any + Send) = payload.as_ref();
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()

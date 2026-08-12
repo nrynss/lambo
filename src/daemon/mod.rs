@@ -46,15 +46,24 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
-use crate::config::ScoringWeights;
+use crate::config::{Config, ScoringWeights};
 use crate::daemon::hotlist::{Condition, HotList};
+use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::types::{DaemonEvent, NodeId, Scored};
+
+/// Default daemon poll interval (XP-7).
+///
+/// The spec fixes no value; 1s matches `backend_flush_interval` so the daemon
+/// and the write-behind loop age state on the same beat, and it bounds the
+/// window in which a hot-list entry can lag the graph to one second. Mirrored
+/// by [`Config::daemon_tick_interval`], which is what P8 threads in.
+pub const DAEMON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The daemon's score table — epoch of the graph state it was computed from,
 /// plus the score-descending ranked list of concept scores.
@@ -86,16 +95,28 @@ pub struct Daemon {
     scores: Arc<RwLock<ScoreTable>>,
     hot: Arc<RwLock<HotList>>,
     events: Arc<broadcast::Sender<DaemonEvent>>,
+    /// The owner's inverted index, when it gave the daemon one. GC mirrors
+    /// collections into it via [`gc::sync_index`] (XP-5); `None` means the
+    /// owner is doing that itself.
+    index: Option<Arc<RwLock<InvertedIndex>>>,
+    /// The most recent [`gc::GcOutcome`], for [`Daemon::last_gc`] (XP-5).
+    last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
+    /// Completed cycles, for [`Daemon::cycles`] (XP-6).
+    cycles: Arc<AtomicU64>,
     params: CycleParams,
     clock: Clock,
     started: AtomicBool,
 }
 
-/// Daemon loop tuning (T4.6). [`Default`] mirrors [`crate::config::Config`]'s
-/// defaults (hot_list_max 1000, conflict_recency_window 30s, drift_threshold
-/// 5, gc_interval 10_000, max_canonical_nodes 1000) plus the T4.6-specific
-/// knobs (staleness / high-risk windows and event capacity) that Config does
-/// not carry; P8 merges the two when it builds the §6.1 `Memory` surface.
+/// Daemon loop tuning (T4.6).
+///
+/// [`CycleParams::default`] is defined as `From<&Config::default()>` — the
+/// shared knobs (hot_list_max, conflict_recency_window, drift_threshold,
+/// gc_interval, max_canonical_nodes) have exactly one source of truth, so a
+/// default can no longer drift between here and `Config` (XP-7; they were
+/// duplicated as literals). The T4.6-specific knobs Config does not carry
+/// (staleness / high-risk windows, event capacity, GC bump chunk) come from
+/// their module consts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CycleParams {
     /// `conflict_recency_window` (spec §9).
@@ -119,19 +140,28 @@ pub struct CycleParams {
     pub gc_survivor_bump_chunk: usize,
 }
 
-impl Default for CycleParams {
-    fn default() -> Self {
+impl From<&Config> for CycleParams {
+    /// Derive the loop's tuning from the session config (XP-7). P8 calls this
+    /// instead of hand-copying fields; the knobs `Config` does not carry keep
+    /// their module defaults.
+    fn from(config: &Config) -> Self {
         Self {
-            conflict_window: conflict::CONFLICT_RECENCY_WINDOW,
-            drift_threshold: drift::DRIFT_THRESHOLD,
+            conflict_window: config.conflict_recency_window,
+            drift_threshold: config.drift_threshold,
             stale_window: events::STALE_WINDOW,
             high_risk_window: events::HIGH_RISK_WRITE_WINDOW,
-            hot_list_max: hotlist::HOT_LIST_MAX,
-            gc_interval: 10_000,
-            max_canonical_nodes: 1000,
+            hot_list_max: config.hot_list_max,
+            gc_interval: config.gc_interval,
+            max_canonical_nodes: config.max_canonical_nodes,
             event_capacity: events::EVENT_CAPACITY,
             gc_survivor_bump_chunk: gc::GC_SURVIVOR_BUMP_CHUNK,
         }
+    }
+}
+
+impl Default for CycleParams {
+    fn default() -> Self {
+        Self::from(&Config::default())
     }
 }
 
@@ -164,16 +194,44 @@ impl Daemon {
             scores: Arc::new(RwLock::new(ScoreTable::default())),
             hot: Arc::new(RwLock::new(HotList::with_max(params.hot_list_max))),
             events: Arc::new(sender),
+            index: None,
+            last_gc: Arc::new(RwLock::new(None)),
+            cycles: Arc::new(AtomicU64::new(0)),
             params,
             clock: Arc::new(Utc::now),
             started: AtomicBool::new(false),
         }
     }
 
+    /// Build the loop's tuning from a [`Config`] (XP-7): `tick` comes from
+    /// `daemon_tick_interval`, the rest from [`CycleParams::from`]. P8's entry
+    /// point — nothing has to re-derive a default.
+    pub fn from_config(graph: Arc<RwLock<Graph>>, config: &Config) -> Self {
+        Self::with_params(
+            graph,
+            config.scoring,
+            config.daemon_tick_interval,
+            CycleParams::from(config),
+        )
+    }
+
     /// Use `clock` as the cycle's `now` source instead of the wall clock
     /// (tests drive a controllable clock; see [`Clock`]).
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Give the daemon the owner's inverted index so GC mirrors its collections
+    /// into it ([`gc::sync_index`], spec §9 step 4 — XP-5).
+    ///
+    /// The index is owner-side by the P3 contract (`src/graph/mod.rs`), so
+    /// `gc::run(&mut Graph, …)` structurally cannot reach it; without this the
+    /// hook had no production caller and a GC'd concept stayed searchable in the
+    /// index until the owner happened to notice. An owner that mirrors GC
+    /// itself — reading [`Daemon::last_gc`] — simply does not call this.
+    pub fn with_index(mut self, index: Arc<RwLock<InvertedIndex>>) -> Self {
+        self.index = Some(index);
         self
     }
 
@@ -203,6 +261,9 @@ impl Daemon {
             hot,
             sender,
             clock,
+            index: self.index.clone(),
+            last_gc: self.last_gc.clone(),
+            cycles: self.cycles.clone(),
         };
         tokio::spawn(async move {
             run_loop(state, weights, tick, params).await;
@@ -217,6 +278,27 @@ impl Daemon {
     /// Snapshot of the daemon-owned score table.
     pub fn scores(&self) -> ScoreTable {
         self.scores.read().clone()
+    }
+
+    /// Cycles completed since [`Daemon::spawn`] (XP-6).
+    ///
+    /// A cycle increments this only after it finishes, so a test can assert
+    /// "a full cycle ran and published nothing" instead of sleeping and hoping.
+    /// A cycle that panicked (CONC-4) does not count.
+    pub fn cycles(&self) -> u64 {
+        self.cycles.load(Ordering::Acquire)
+    }
+
+    /// The most recent GC run's [`gc::GcOutcome`], or `None` before the first
+    /// run (XP-5).
+    ///
+    /// This is T6.4's canonical-budget signal — `canonical_count`,
+    /// `canonical_over_budget` and the ceiling it was checked against — plus
+    /// `concepts_collected` for an owner mirroring the index itself, the
+    /// advisory `warnings`, and `epoch_after` for T5.4's cache. Everything but
+    /// `epoch_after` was previously dropped on the floor inside `run_loop`.
+    pub fn last_gc(&self) -> Option<gc::GcOutcome> {
+        self.last_gc.read().clone()
     }
 
     /// Subscribe to the daemon's event channel (spec §6.1). The receiver
@@ -276,6 +358,9 @@ struct LoopState {
     hot: Arc<RwLock<HotList>>,
     sender: Arc<broadcast::Sender<DaemonEvent>>,
     clock: Clock,
+    index: Option<Arc<RwLock<InvertedIndex>>>,
+    last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
+    cycles: Arc<AtomicU64>,
 }
 
 /// The detected condition set for one cycle — `(condition, node)` pairs.
@@ -369,178 +454,260 @@ fn condition_set(
 ///    `gc_survivor_bump_chunk` per cycle and the loop drains the remainder on
 ///    following cycles, so one sweep can no longer enqueue twenty flush batches
 ///    from inside the guard. GC does not re-run while a drain is outstanding.
+///
+/// ## Panic containment (CONC-4)
+///
+/// The cycle body is synchronous, so it is run inside `catch_unwind`: a panic
+/// anywhere in scoring, detection, publication or GC is logged and the loop
+/// continues to the next tick. Without this a single panic killed the task
+/// silently and the process ran on with no scoring, no events and no GC for its
+/// whole lifetime — flush.rs made the same argument for the write-behind loop
+/// (`CatchUnwindPoll`) and reached the same conclusion.
+///
+/// Why continuing is sound:
+///
+/// * `parking_lot` guards release during unwind and the locks do not poison, so
+///   the graph and hot list stay usable.
+/// * The graph may be left **partially mutated** (a panic mid-GC-sweep). Every
+///   mutation already applied is already in the append-only mutation log, so the
+///   graph and the store stay consistent with each other; the next cycle
+///   re-derives scores, hot list and detector hits from graph state, holding
+///   nothing over.
+/// * [`CycleState`] may be partially updated. The worst case is one duplicate
+///   or one missed condition transition, and the re-arm path re-publishes a
+///   still-held condition anyway.
 async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, params: CycleParams) {
+    let mut interval = tokio::time::interval(tick);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cycle_state = CycleState::default();
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = state.wake.notified() => {}
+        }
+        // CONC-4: contain a panic in the cycle body — log it, keep the loop.
+        let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_cycle(&state, &weights, &params, &mut cycle_state);
+        }));
+        if let Err(payload) = contained {
+            tracing::error!(
+                target: "lambo::daemon",
+                panic = %crate::store::flush::panic_message(&payload),
+                "DaemonCyclePanic: daemon cycle panicked; the loop continues with the \
+                 next tick (see run_loop's panic-containment note)"
+            );
+        }
+    }
+}
+
+/// The loop's carry-over state between cycles.
+#[derive(Default)]
+struct CycleState {
+    /// `None` → the first cycle always rescores (warm-up), then epoch-gated.
+    last_epoch: Option<u64>,
+    last_gc_epoch: u64,
+    /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
+    /// `(condition, node)` maps to the value of `emitted_total` at its last
+    /// emission. A pair absent from the map is entering the set and publishes;
+    /// a pair whose stamp is `event_capacity` emissions old has been pushed out
+    /// of the broadcast ring and publishes again.
+    armed: HashMap<(Condition, NodeId), u64>,
+    /// Total events this loop has published. Only ever compared as a difference
+    /// against `armed`'s stamps, so wrap-around is not a concern (u64).
+    emitted_total: u64,
+    /// Survivor bumps the last GC run deferred (CONC-6/XP-10). Drained a chunk
+    /// per cycle; GC does not re-run until it is empty.
+    gc_pending: Vec<NodeId>,
+}
+
+/// One cycle: rescore, detect, publish, GC. Fully synchronous — no `.await`, so
+/// the graph lock is structurally incapable of spanning a suspension point
+/// (spec §6.4) and the whole body fits inside one `catch_unwind` (CONC-4).
+fn run_cycle(
+    state: &LoopState,
+    weights: &ScoringWeights,
+    params: &CycleParams,
+    cs: &mut CycleState,
+) {
     let LoopState {
         graph,
-        wake,
         scores,
         hot,
         sender,
         clock,
+        index,
+        last_gc,
+        cycles,
+        ..
     } = state;
-    let mut interval = tokio::time::interval(tick);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // None → the first cycle always rescorees (warm-up), then epoch-gated.
-    let mut last_epoch: Option<u64> = None;
-    let mut last_gc_epoch: u64 = 0;
-    // Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
-    // `(condition, node)` maps to the value of `emitted_total` at its last
-    // emission. A pair absent from the map is entering the set and publishes;
-    // a pair whose stamp is `event_capacity` emissions old has been pushed out
-    // of the broadcast ring and publishes again.
-    let mut armed: HashMap<(Condition, NodeId), u64> = HashMap::new();
-    // Total events this loop has published. Only ever compared as a difference
-    // against `armed`'s stamps, so wrap-around is not a concern (u64).
-    let mut emitted_total: u64 = 0;
-    // Survivor bumps the last GC run deferred (CONC-6/XP-10). Drained a chunk
-    // per cycle; GC does not re-run until it is empty.
-    let mut gc_pending: Vec<NodeId> = Vec::new();
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            _ = wake.notified() => {}
-        }
-        // Brief lock: read epoch, release.
-        let epoch = graph.read().epoch();
-        let now = clock();
+    // Brief lock: read epoch, release.
+    let epoch = graph.read().epoch();
+    let now = clock();
 
-        // 1. Rescore — only when the epoch changed (finding 1: detection is
-        //    NOT epoch-gated; an idle session must age into staleness).
-        if last_epoch != Some(epoch) {
-            last_epoch = Some(epoch);
-            let ranked = {
-                let g = graph.read();
-                score::rescore(&g, &weights)
-            };
-            *scores.write() = ScoreTable { epoch, ranked };
-        }
-
-        // 2. Detect + hot-list sync + publish. Lock order: graph read → hot
-        //    write; every call here is synchronous.
-        let (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh) = {
+    // 1. Rescore — only when the epoch changed (finding 1: detection is
+    //    NOT epoch-gated; an idle session must age into staleness).
+    if cs.last_epoch != Some(epoch) {
+        cs.last_epoch = Some(epoch);
+        let ranked = {
             let g = graph.read();
-            let mut h = hot.write();
-            let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
-            let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
-            let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
-            let high_risk_hits = events::insert_high_risk(&mut h, &g, params.high_risk_window, now);
-            // Hot list = this cycle's fresh hits (finding 2): drop entries
-            // whose (condition, node) is no longer detected — a HighRisk
-            // entry whose 30s window elapsed ages out here, not in a frozen
-            // captured-`now` predicate. Also removes the old
-            // O(hot_len × full-graph scan) per-cycle revalidation.
-            let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
-            h.retain_conditions(&fresh);
-            (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
+            score::rescore(&g, weights)
         };
+        *scores.write() = ScoreTable { epoch, ranked };
+    }
 
-        // Publish — fire-and-forget (spec §6.1): zero receivers → the event
-        // is discarded; lagged receivers skip it. The daemon never blocks.
-        // A pair that left the detected set is disarmed (exit = stop emitting).
-        armed.retain(|pair, _| fresh.contains(pair));
+    // 2. Detect + hot-list sync + publish. Lock order: graph read → hot
+    //    write; every call here is synchronous.
+    let (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh) = {
+        let g = graph.read();
+        let mut h = hot.write();
+        let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
+        let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
+        let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
+        let high_risk_hits = events::insert_high_risk(&mut h, &g, params.high_risk_window, now);
+        // Hot list = this cycle's fresh hits (finding 2): drop entries
+        // whose (condition, node) is no longer detected — a HighRisk
+        // entry whose 30s window elapsed ages out here, not in a frozen
+        // captured-`now` predicate. Also removes the old
+        // O(hot_len × full-graph scan) per-cycle revalidation.
+        let fresh = condition_set(&conflict_hits, &drift_hits, &stale_hits, &high_risk_hits);
+        h.retain_conditions(&fresh);
+        (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh)
+    };
 
-        // Pass 1 — pairs that ENTERED the set, highest severity first, so a
-        // consumer draining a burst in order sees the Conflict before the
-        // session Stale.
-        for hit in &conflict_hits {
-            if let Entry::Vacant(slot) = armed.entry((Condition::Conflict, hit.node)) {
-                events::emit(&sender, events::conflict_event(hit));
-                emitted_total += 1;
-                slot.insert(emitted_total);
-            }
-        }
-        for hit in &high_risk_hits {
-            if let Entry::Vacant(slot) = armed.entry((Condition::HighRiskModification, hit.node)) {
-                events::emit(
-                    &sender,
-                    events::high_risk_event(hit.node, hit.reason.clone()),
-                );
-                emitted_total += 1;
-                slot.insert(emitted_total);
-            }
-        }
-        for hit in &drift_hits {
-            if let Entry::Vacant(slot) = armed.entry((Condition::Drift, hit.node)) {
-                events::emit(&sender, events::drift_event(hit));
-                emitted_total += 1;
-                slot.insert(emitted_total);
-            }
-        }
-        for hit in &stale_hits {
-            if let Entry::Vacant(slot) = armed.entry((Condition::StaleSession, hit.node)) {
-                events::emit(&sender, events::stale_event(hit.node, hit.seconds_inactive));
-                emitted_total += 1;
-                slot.insert(emitted_total);
-            }
-        }
+    // Publish — fire-and-forget (spec §6.1): zero receivers → the event
+    // is discarded; lagged receivers skip it. The daemon never blocks.
+    // A pair that left the detected set is disarmed (exit = stop emitting).
+    cs.armed.retain(|pair, _| fresh.contains(pair));
 
-        // Pass 2 — re-arm ONE held pair (CONC-2). Stamps are unique, so
-        // "oldest stamp" is a total order: the pair whose event has been out of
-        // the retained window longest goes first, and re-publishing it moves it
-        // to the back of the queue. One per cycle is what keeps re-arm from
-        // recreating the very burst it exists to repair.
-        if let Some((pair, stamp)) = armed
-            .iter()
-            .min_by_key(|(_, stamp)| **stamp)
-            .map(|(pair, stamp)| (*pair, *stamp))
-        {
-            if emitted_total - stamp >= params.event_capacity as u64 {
-                let event = match pair.0 {
-                    Condition::Conflict => conflict_hits
-                        .iter()
-                        .find(|h| h.node == pair.1)
-                        .map(events::conflict_event),
-                    Condition::HighRiskModification => high_risk_hits
-                        .iter()
-                        .find(|h| h.node == pair.1)
-                        .map(|h| events::high_risk_event(h.node, h.reason.clone())),
-                    Condition::Drift => drift_hits
-                        .iter()
-                        .find(|h| h.node == pair.1)
-                        .map(events::drift_event),
-                    Condition::StaleSession => stale_hits
-                        .iter()
-                        .find(|h| h.node == pair.1)
-                        .map(|h| events::stale_event(h.node, h.seconds_inactive)),
-                };
-                // `armed` is kept equal to `fresh`, so the hit is always found.
-                if let Some(event) = event {
-                    events::emit(&sender, event);
-                    emitted_total += 1;
-                    armed.insert(pair, emitted_total);
-                }
-            }
-        }
-
-        // 3a. Deferred survivor bumps from the last GC run (CONC-6/XP-10) —
-        //     one chunk per cycle, and always to empty before the next run, so
-        //     no concept ever carries two outstanding bumps.
-        if !gc_pending.is_empty() {
-            let mut g = graph.write();
-            gc::drain_survivor_bumps(&mut g, &mut gc_pending, params.gc_survivor_bump_chunk);
-        }
-
-        // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
-        if gc_pending.is_empty() && epoch.saturating_sub(last_gc_epoch) >= params.gc_interval {
-            let outcome = {
-                let mut g = graph.write();
-                gc::run(
-                    &mut g,
-                    gc::GcParams {
-                        now,
-                        // ALGO-4: GC's eviction ranking uses the session's own
-                        // weights, not a second hardcoded default.
-                        weights,
-                        max_canonical_nodes: params.max_canonical_nodes,
-                        max_survivor_bumps: params.gc_survivor_bump_chunk,
-                        ..Default::default()
-                    },
-                )
-            };
-            last_gc_epoch = outcome.epoch_after;
-            gc_pending = outcome.survivors_pending;
+    // Pass 1 — pairs that ENTERED the set, highest severity first, so a
+    // consumer draining a burst in order sees the Conflict before the
+    // session Stale.
+    for hit in &conflict_hits {
+        if let Entry::Vacant(slot) = cs.armed.entry((Condition::Conflict, hit.node)) {
+            events::emit(sender, events::conflict_event(hit));
+            cs.emitted_total += 1;
+            slot.insert(cs.emitted_total);
         }
     }
+    for hit in &high_risk_hits {
+        if let Entry::Vacant(slot) = cs.armed.entry((Condition::HighRiskModification, hit.node)) {
+            events::emit(
+                sender,
+                events::high_risk_event(hit.node, hit.reason.clone()),
+            );
+            cs.emitted_total += 1;
+            slot.insert(cs.emitted_total);
+        }
+    }
+    for hit in &drift_hits {
+        if let Entry::Vacant(slot) = cs.armed.entry((Condition::Drift, hit.node)) {
+            events::emit(sender, events::drift_event(hit));
+            cs.emitted_total += 1;
+            slot.insert(cs.emitted_total);
+        }
+    }
+    for hit in &stale_hits {
+        if let Entry::Vacant(slot) = cs.armed.entry((Condition::StaleSession, hit.node)) {
+            events::emit(sender, events::stale_event(hit.node, hit.seconds_inactive));
+            cs.emitted_total += 1;
+            slot.insert(cs.emitted_total);
+        }
+    }
+
+    // Pass 2 — re-arm ONE held pair (CONC-2). Stamps are unique, so
+    // "oldest stamp" is a total order: the pair whose event has been out of
+    // the retained window longest goes first, and re-publishing it moves it
+    // to the back of the queue. One per cycle is what keeps re-arm from
+    // recreating the very burst it exists to repair.
+    if let Some((pair, stamp)) = cs
+        .armed
+        .iter()
+        .min_by_key(|(_, stamp)| **stamp)
+        .map(|(pair, stamp)| (*pair, *stamp))
+    {
+        if cs.emitted_total - stamp >= params.event_capacity as u64 {
+            let event = match pair.0 {
+                Condition::Conflict => conflict_hits
+                    .iter()
+                    .find(|h| h.node == pair.1)
+                    .map(events::conflict_event),
+                Condition::HighRiskModification => high_risk_hits
+                    .iter()
+                    .find(|h| h.node == pair.1)
+                    .map(|h| events::high_risk_event(h.node, h.reason.clone())),
+                Condition::Drift => drift_hits
+                    .iter()
+                    .find(|h| h.node == pair.1)
+                    .map(events::drift_event),
+                Condition::StaleSession => stale_hits
+                    .iter()
+                    .find(|h| h.node == pair.1)
+                    .map(|h| events::stale_event(h.node, h.seconds_inactive)),
+            };
+            // `armed` is kept equal to `fresh`, so the hit is always found.
+            if let Some(event) = event {
+                events::emit(sender, event);
+                cs.emitted_total += 1;
+                cs.armed.insert(pair, cs.emitted_total);
+            }
+        }
+    }
+
+    // 3a. Deferred survivor bumps from the last GC run (CONC-6/XP-10) —
+    //     one chunk per cycle, and always to empty before the next run, so
+    //     no concept ever carries two outstanding bumps.
+    if !cs.gc_pending.is_empty() {
+        let mut g = graph.write();
+        gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk);
+    }
+
+    // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
+    if cs.gc_pending.is_empty() && epoch.saturating_sub(cs.last_gc_epoch) >= params.gc_interval {
+        let outcome = {
+            let mut g = graph.write();
+            gc::run(
+                &mut g,
+                gc::GcParams {
+                    now,
+                    // ALGO-4: GC's eviction ranking uses the session's own
+                    // weights, not a second hardcoded default.
+                    weights: *weights,
+                    max_canonical_nodes: params.max_canonical_nodes,
+                    max_survivor_bumps: params.gc_survivor_bump_chunk,
+                    ..Default::default()
+                },
+            )
+        };
+        // Spec §9 step 4 (XP-5): mirror collections into the owner's index
+        // when it gave us one. Never held with the graph lock.
+        if let Some(index) = index.as_ref() {
+            gc::sync_index(&outcome, &mut index.write());
+        }
+        // XP-5: the tier had zero logging, so the advisory
+        // `max_concept_nodes` warning and the canonical-budget signal were
+        // unobservable. Both ride `GcOutcome::warnings`.
+        for warning in &outcome.warnings {
+            tracing::warn!(target: "lambo::daemon::gc", "{warning}");
+        }
+        tracing::debug!(
+            target: "lambo::daemon::gc",
+            edges_removed = outcome.edges_removed.len(),
+            concepts_collected = outcome.concepts_collected.len(),
+            survivors = outcome.survivors.len(),
+            survivors_deferred = outcome.survivors_pending.len(),
+            canonical_count = outcome.canonical_count,
+            canonical_over_budget = outcome.canonical_over_budget,
+            epoch_after = outcome.epoch_after,
+            "GC sweep complete"
+        );
+        cs.last_gc_epoch = outcome.epoch_after;
+        cs.gc_pending = outcome.survivors_pending.clone();
+        *last_gc.write() = Some(outcome);
+    }
+
+    // Last statement: a panicking cycle (CONC-4) does not count as completed,
+    // so `Daemon::cycles` is a witness that the whole body ran (XP-6).
+    cycles.fetch_add(1, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -606,6 +773,19 @@ mod tests {
         (Arc::new(RwLock::new(g)), cid)
     }
 
+    /// Wake the daemon and wait for the woken cycle to COMPLETE (XP-6).
+    ///
+    /// Every negative assertion in this suite ("nothing was published") uses
+    /// this instead of sleeping: `Daemon::cycles` only advances after a full
+    /// cycle body ran, so the assertion cannot pass vacuously because the cycle
+    /// had not started yet. Under `start_paused` the wait is virtual-time, so it
+    /// is also free.
+    async fn wake_and_settle(daemon: &Daemon) {
+        let before = daemon.cycles();
+        daemon.wake();
+        wait_until(|| daemon.cycles() > before).await;
+    }
+
     /// Poll `cond` until true or a 2s timeout elapses (test helper).
     async fn wait_until(cond: impl Fn() -> bool) {
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -617,7 +797,7 @@ mod tests {
         .expect("condition not met within 2s");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn epoch_change_triggers_rescore_via_wake() {
         // Tick of 1h so only the explicit wake drives cycles.
         let (graph, cid) = locked_graph_with_one_concept();
@@ -662,7 +842,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn no_epoch_change_does_not_rescore() {
         let (graph, _) = locked_graph_with_one_concept();
         let epoch0 = graph.read().epoch();
@@ -679,15 +859,14 @@ mod tests {
         // Wake with no mutation: only the RESCORE is epoch-gated (finding 1)
         // — detection still runs, but with no condition transitions nothing
         // is published and the score table stays byte-identical.
-        daemon.wake();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wake_and_settle(&daemon).await;
         let after = daemon.scores();
         assert_eq!(before, after, "no epoch change must not rescore");
 
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cycle_completes_without_deadlock() {
         // Lock-discipline smoke: a cycle that takes the read lock, rescorees,
         // releases, then awaits must complete — never hold the lock across
@@ -725,7 +904,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn abort_stops_the_loop() {
         let (graph, _) = locked_graph_with_one_concept();
         let daemon = Daemon::new(
@@ -740,7 +919,7 @@ mod tests {
         assert!(handle.await.is_err(), "aborted task must not complete Ok");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[should_panic(expected = "spawn called twice")]
     async fn spawn_twice_panics() {
         let (graph, _) = locked_graph_with_one_concept();
@@ -842,7 +1021,7 @@ mod tests {
     }
 
     #[cfg(feature = "fixtures")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_emits_planted_conflict_from_rest_api_fixture() {
         use crate::fixtures;
         use crate::store::GraphStore;
@@ -905,7 +1084,7 @@ mod tests {
     }
 
     #[cfg(feature = "fixtures")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_emits_planted_drift_from_session_drift_fixture() {
         use crate::fixtures;
         use crate::store::GraphStore;
@@ -953,7 +1132,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn lagged_receiver_does_not_block_the_loop() {
         let (graph, c1_id, _, i2_id) = conflicted_graph();
         // Capacity 2 with a receiver that never drains: the daemon must stay
@@ -1004,7 +1183,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dropped_receiver_does_not_break_the_loop() {
         let (graph, c1_id, _, i2_id) = conflicted_graph();
         let daemon = Daemon::new(
@@ -1033,7 +1212,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_maintains_hot_list_from_fresh_hits() {
         use crate::daemon::hotlist::{Condition, HotListPayload};
 
@@ -1069,7 +1248,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_runs_gc_every_gc_interval_mutations() {
         let (graph, cid) = locked_graph_with_one_concept();
         // Orphan the concept (drop its only Derives edge) so GC step 2
@@ -1101,7 +1280,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_drains_deferred_survivor_bumps_to_convergence() {
         // CONC-6/XP-10: GC hands back the survivor bumps it deferred, and the
         // loop drains them a chunk per cycle. Every survivor must still end up
@@ -1169,7 +1348,154 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    // ------------------------------------------------------------------
+    // XP-5 / XP-7 / CONC-4 — observability, config plumbing, containment
+    // ------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn last_gc_exposes_the_outcome_and_syncs_the_owners_index() {
+        // XP-5: `GcOutcome` was dropped except `epoch_after`, so T6.4's
+        // canonical-budget signal was unreachable and `sync_index` — spec §9
+        // step 4 — had no production caller at all: a collected concept stayed
+        // searchable in the owner's index indefinitely.
+        let (graph, cid) = locked_graph_with_one_concept();
+        // Orphan the concept so GC step 2 collects it deterministically.
+        let iid = match graph.read().node(cid).unwrap() {
+            crate::types::Node::Concept(c) => c.origin_interaction,
+            _ => unreachable!(),
+        };
+        let derives = {
+            let g = graph.read();
+            g.edge_between(iid, cid, EdgeType::Derives).unwrap().id
+        };
+        graph.write().remove_edge(derives).unwrap();
+
+        // The owner's index, pre-populated the way the P3 contract requires.
+        let index = Arc::new(RwLock::new(InvertedIndex::new()));
+        {
+            let g = graph.read();
+            let mut idx = index.write();
+            for c in g.concepts() {
+                idx.add(c);
+            }
+        }
+        assert!(
+            !index.read().search("user schema", 5).is_empty(),
+            "the concept must start out searchable"
+        );
+
+        let params = CycleParams {
+            gc_interval: 3,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_millis(10),
+            params,
+        )
+        .with_index(index.clone());
+        assert!(
+            daemon.last_gc().is_none(),
+            "no outcome before the first run"
+        );
+        let handle = daemon.spawn();
+
+        wait_until(|| daemon.last_gc().is_some()).await;
+        let outcome = daemon.last_gc().unwrap();
+        assert!(
+            outcome.concepts_collected.contains(&cid),
+            "the orphan was collected: {outcome:?}"
+        );
+        assert_eq!(outcome.max_canonical_nodes, 1000, "the ceiling T6.4 reads");
+        assert!(!outcome.canonical_over_budget);
+        assert_eq!(outcome.epoch_after, graph.read().epoch());
+
+        // Step 4: the index no longer serves the collected concept.
+        wait_until(|| index.read().search("user schema", 5).is_empty()).await;
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_cycle_does_not_kill_the_loop() {
+        // CONC-4: a panic inside the cycle used to kill the task silently —
+        // scoring, events and GC stopped for the whole process lifetime with no
+        // signal. The cycle body is contained, so the loop survives and the next
+        // tick works normally.
+        //
+        // The panic is injected through the one seam the loop calls on every
+        // cycle: the clock.
+        use std::sync::atomic::AtomicUsize;
+
+        let (graph, _) = locked_graph_with_one_concept();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let clock: Clock = {
+            let calls = calls.clone();
+            Arc::new(move || {
+                // Panic on the 1st cycle only; every later cycle is normal.
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("injected daemon cycle panic");
+                }
+                Utc::now()
+            })
+        };
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_millis(10),
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+
+        // The loop must reach a later cycle and publish a score table — proof
+        // it survived the panic rather than dying with the task.
+        wait_until(|| daemon.scores().epoch == graph.read().epoch()).await;
+        assert!(
+            calls.load(Ordering::SeqCst) > 1,
+            "the loop must run cycles after the panicking one"
+        );
+        assert!(!handle.is_finished(), "the task must still be alive");
+        handle.abort();
+    }
+
+    #[test]
+    fn cycle_params_come_from_config_with_no_duplicated_defaults() {
+        // XP-7: `CycleParams::default()` duplicated Config's spec constants as
+        // literals, so the two could drift silently. It is now derived.
+        use crate::config::Config;
+
+        assert_eq!(
+            CycleParams::default(),
+            CycleParams::from(&Config::default())
+        );
+        assert_eq!(Config::default().daemon_tick_interval, DAEMON_TICK_INTERVAL);
+
+        // A non-default Config must reach the loop's params — including
+        // `drift_threshold`, whose u32/usize split forced a cast at every use.
+        let config = Config {
+            hot_list_max: 7,
+            conflict_recency_window: Duration::from_secs(11),
+            drift_threshold: 9,
+            gc_interval: 13,
+            max_canonical_nodes: 17,
+            daemon_tick_interval: Duration::from_millis(250),
+            ..Default::default()
+        };
+        let params = CycleParams::from(&config);
+        assert_eq!(params.hot_list_max, 7);
+        assert_eq!(params.conflict_window, Duration::from_secs(11));
+        assert_eq!(params.drift_threshold, 9);
+        assert_eq!(params.gc_interval, 13);
+        assert_eq!(params.max_canonical_nodes, 17);
+
+        let (graph, _) = locked_graph_with_one_concept();
+        let daemon = Daemon::from_config(graph, &config);
+        assert_eq!(daemon.tick, Duration::from_millis(250));
+        assert_eq!(daemon.params, params);
+        assert_eq!(daemon.hot_list().read().max(), 7);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn wake_without_mutation_publishes_nothing() {
         let (graph, _, _, _) = conflicted_graph();
         let daemon = Daemon::new(
@@ -1189,8 +1515,7 @@ mod tests {
 
         // A wake with no mutation: detection runs but the condition set is
         // unchanged → no transitions → nothing published (emit-on-transition).
-        daemon.wake();
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        wake_and_settle(&daemon).await;
         match rx.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
             other => panic!("wake without a mutation must not publish, got {other:?}"),
@@ -1198,7 +1523,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stale_fires_for_idle_session_after_window_elapses() {
         // T4.6 finding-1 regression: detection must run on EVERY tick, not
         // only on epoch change. A session with NO mutations ages a concept
@@ -1274,7 +1599,7 @@ mod tests {
 
         // Time keeps passing but the condition persists: no re-emission.
         now_secs.fetch_add(3600, AtomicOrdering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wake_and_settle(&daemon).await;
         match rx.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
             other => panic!("persisting stale must not re-emit, got {other:?}"),
@@ -1282,7 +1607,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_emits_high_risk_for_fresh_write_to_canonical_node() {
         // Final-review finding 1a: the entered-gated HighRisk emit path (the
         // `high_risk_hits` loop in `run_loop`) + `events::high_risk_event`
@@ -1368,8 +1693,7 @@ mod tests {
         // wakes re-run detection but emit-on-transition publishes nothing —
         // the event fired once, on entry.
         for _ in 0..3 {
-            daemon.wake();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            wake_and_settle(&daemon).await;
         }
         match rx.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
@@ -1391,7 +1715,7 @@ mod tests {
     }
 
     #[cfg(feature = "fixtures")]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out() {
         // Final-review finding 1a: staleness had only a synthetic-clock loop
         // test. This one is fixture-driven: rebase session-rest-api so its
@@ -1470,7 +1794,7 @@ mod tests {
     // XP-4 / CONC-2 / CONC-3 — the event seam
     // ------------------------------------------------------------------
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
         // XP-4: P6's documented seam (`events::emit_canonized`) needs the
         // broadcast Sender. Before `Daemon::event_sender()` no public path to it
@@ -1515,7 +1839,7 @@ mod tests {
         assert_eq!(daemon.event_sender().receiver_count(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn late_subscriber_misses_the_warm_up_condition_set() {
         // CONC-3: pins the documented P8 ordering obligation. The warm-up cycle
         // publishes the whole restored condition set — including the demo's
@@ -1537,8 +1861,7 @@ mod tests {
         // condition still holds, so no transition fires and nothing arrives.
         let mut late = daemon.events();
         for _ in 0..3 {
-            daemon.wake();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            wake_and_settle(&daemon).await;
         }
         match late.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
@@ -1547,7 +1870,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
         // CONC-2: emit-on-transition alone loses an event permanently — the
         // transition is recorded whether or not any consumer got it, so an
@@ -1606,11 +1929,7 @@ mod tests {
                 .write()
                 .upsert_edge(dep_edge_at(100 + n, c1_id, cid, wall_ts(3)))
                 .unwrap();
-            daemon.wake();
-            wait_until(|| daemon.scores().epoch == graph.read().epoch()).await;
-            // The cycle's publishes land before the score table is updated on
-            // the *next* cycle, so give this one a beat to finish emitting.
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            wake_and_settle(&daemon).await;
             if drain(&mut rx).contains(&c1_id) {
                 seen_c1_again = true;
             }
@@ -1624,7 +1943,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn entering_conditions_publish_highest_severity_first() {
         // CONC-2: a burst must put the most actionable event first for a
         // consumer draining in order — Conflict, HighRisk, Drift, Stale

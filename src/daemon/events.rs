@@ -510,7 +510,7 @@ mod tests {
         (g, i1_id, i2_id)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn all_five_kinds_round_trip_through_emit() {
         let (tx, mut rx) = event_channel_with_capacity(16);
         emit(
@@ -589,7 +589,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn slow_receiver_gets_lagged_not_a_hang() {
         // Capacity 2; the receiver never drains. Every send succeeds (never
         // blocks, never errors while a receiver exists); the oldest values

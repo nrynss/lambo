@@ -98,9 +98,19 @@ pub struct Config {
     pub scoring: ScoringWeights,
     pub recall_weights: RecallWeights,
 
+    /// Daemon poll interval — how often the loop rescores and re-runs the
+    /// detectors (XP-7). This is the one daemon parameter nothing else can
+    /// derive: it governs stale-detection latency, GC latency, and how long a
+    /// hot-list entry can lag the graph. Default
+    /// [`crate::daemon::DAEMON_TICK_INTERVAL`].
+    pub daemon_tick_interval: Duration,
+
     pub hot_list_max: usize,
     pub conflict_recency_window: Duration,
-    pub drift_threshold: u32,
+    /// `drift_threshold` in hops (spec §9). `usize` — the metric is a hop
+    /// count, which every consumer (`drift::detect`, `CycleParams`) indexes
+    /// with; the previous `u32` forced a cast at every use site (XP-7).
+    pub drift_threshold: usize,
 
     pub gc_interval: u64,
     pub max_canonical_nodes: usize,
@@ -132,9 +142,11 @@ impl Default for Config {
             scoring: ScoringWeights::default(),
             recall_weights: RecallWeights::default(),
 
-            hot_list_max: 1000,
-            conflict_recency_window: Duration::from_secs(30),
-            drift_threshold: 5,
+            daemon_tick_interval: crate::daemon::DAEMON_TICK_INTERVAL,
+
+            hot_list_max: crate::daemon::hotlist::HOT_LIST_MAX,
+            conflict_recency_window: crate::daemon::conflict::CONFLICT_RECENCY_WINDOW,
+            drift_threshold: crate::daemon::drift::DRIFT_THRESHOLD,
 
             gc_interval: 10_000,
             max_canonical_nodes: 1000,
@@ -246,6 +258,10 @@ mod tests {
         assert_eq!(c.scoring.session_activity, 0.20);
         assert_eq!(c.scoring.density, 0.35);
 
+        // XP-7: the daemon tick has a named default, and the spec §9 knobs the
+        // daemon also declares as consts must agree with them here — a drift
+        // between the two is exactly what CycleParams' literal duplication hid.
+        assert_eq!(c.daemon_tick_interval, Duration::from_secs(1));
         assert_eq!(c.hot_list_max, 1000);
         assert_eq!(c.conflict_recency_window, Duration::from_secs(30));
         assert_eq!(c.drift_threshold, 5);
