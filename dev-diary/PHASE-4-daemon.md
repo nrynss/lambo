@@ -137,7 +137,7 @@ protected classes survive, survivors' counters increment, epoch bumps.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/daemon/events.rs (+ shared src/daemon/mod.rs with T4.1 — coordinate)
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT after 1 remediation round; merged 8bcb816)
 ```
 `tokio::sync::broadcast` of `DaemonEvent` (spec §6.1): Conflict, Drift, Stale, HighRisk,
 Canonized. `mem.events() -> Receiver<DaemonEvent>`. A dropped/lagging receiver is not an
