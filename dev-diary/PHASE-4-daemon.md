@@ -510,11 +510,17 @@ two `live_calibration` ones; the no-default-features rows do not compile them.
 
 ### Residual notes — not defects, read before the next tier touches these
 
-- **Cockroach `SET_ROOT_GOAL_SQL` is compile-verified only (XP-8).** The
-  `Mutation::SetRootGoal` applier and its statement typecheck and are covered by
-  the `#[ignore]`d live tests, but no run against a real DSN has happened — the
-  live-Cockroach tests stay ignored in CI. Needs **one live run** when a DSN is
-  available; SQLite's applier and load path *are* exercised by the default suite.
+- **Cockroach `SET_ROOT_GOAL_SQL` — VERIFIED LIVE (XP-8, 2026-08-12).** The
+  compile-only residual is closed: the conformance suite gained
+  `check_set_root_goal_mutation_persists` (flush `SetRootGoal` Some(goal) ->
+  load reads back identical -> flush None -> load returns NULL; the flush's
+  session-row upsert covers the bare-write path), and the full ignored live
+  suite ran green against a real single-node CockroachDB
+  (`LAMBO_COCKROACH_DSN` + `LAMBO_REQUIRE_LIVE=1`, `-- --ignored`):
+  `build_store_returns_working_adapter` + `conformance_suite` (all checks,
+  incl. the new one) 2/2. Evidence: DB shows the `live-set-root-goal` session
+  row created with goal NULL after the clear half of the check. Non-live gates
+  unchanged (default 368/0; no-default cockroach 297/0).
 - **`conflict::conflict_at` rebuilds `WriterTimeline` per call (CONC-5, NEW-4).**
   The whole-graph `detect` builds one timeline and shares it across every node,
   but the per-node primitive recall calls builds its own — `O(interactions)` per

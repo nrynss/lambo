@@ -2889,6 +2889,39 @@ mod conformance {
         );
     }
 
+    /// P4 residual closure: `SET_ROOT_GOAL_SQL` (the UPDATE path) was
+    /// compile-verified only until a live DSN was available. A `SetRootGoal`
+    /// mutation through `flush` must persist the JSONB goal and read back
+    /// identical; `None` clears it; the flush's session-row upsert creates the
+    /// row so a bare goal write works without a prior seed.
+    async fn check_set_root_goal_mutation_persists(store: &CockroachStore) {
+        let sid = SessionId::from("live-set-root-goal");
+        let goal = serde_json::json!({"text": "finish the demo", "n": 1});
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetRootGoal {
+                    session_id: sid.clone(),
+                    goal: Some(goal.clone()),
+                }],
+            })
+            .await
+            .expect("flush SetRootGoal");
+        let snap = store.load_session(&sid).await.expect("load after set");
+        assert_eq!(snap.root_goal, Some(goal), "goal read back identical");
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetRootGoal {
+                    session_id: sid.clone(),
+                    goal: None,
+                }],
+            })
+            .await
+            .expect("flush SetRootGoal clear");
+        let snap = store.load_session(&sid).await.expect("load after clear");
+        assert_eq!(snap.root_goal, None, "None clears the goal");
+    }
+
     /// All live checks run inside ONE test/runtime — see [`new_store`] for why (pool
     /// and connections must never cross Tokio runtimes). `#[ignore]`d: without
     /// `LAMBO_COCKROACH_DSN` this must report as ignored, not skip-as-green. Each
@@ -2917,5 +2950,6 @@ mod conformance {
         check_interaction_span_single_point_session_coverage(&store).await;
         check_record_canonization_appends_and_is_idempotent(&store).await;
         check_corrupt_contract_row_load_errors(&store).await;
+        check_set_root_goal_mutation_persists(&store).await;
     }
 }
