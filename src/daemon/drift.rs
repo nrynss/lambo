@@ -156,10 +156,12 @@ pub fn detect(graph: &Graph, threshold: usize) -> Vec<DriftHit> {
 /// Run [`detect`] and refresh the daemon hot list (T4.2): one
 /// `Condition::Drift` entry per hit, carrying T4.2's drift payload (hops +
 /// root goal — what T5.3 renders) and a re-validation predicate that
-/// re-runs [`detect`] so the entry drops out once the node's distance falls
-/// back to the threshold (or the goal is cleared). The hot list is a side
-/// effect; the hits are returned so the daemon loop can also emit
-/// `DaemonEvent::Drift` (T4.6).
+/// re-runs [`detect`] so a recall-time re-validation (T5.3) drops the entry
+/// once the node's distance falls back to the threshold (or the goal is
+/// cleared). The hot list is a side effect; the hits are returned so the
+/// daemon loop (T4.6) can emit `DaemonEvent::Drift` on transition and sync
+/// the hot list against them ([`HotList::retain_conditions`] — entries no
+/// longer detected are dropped each cycle).
 pub fn record(hotlist: &mut HotList, graph: &Graph, threshold: usize) -> Vec<DriftHit> {
     let hits = detect(graph, threshold);
     for hit in &hits {
