@@ -132,6 +132,11 @@ impl RecallCache {
         self.entries.len()
     }
 
+    /// True when no entries are cached.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Maximum number of entries before eviction kicks in.
     pub fn capacity(&self) -> usize {
         self.capacity

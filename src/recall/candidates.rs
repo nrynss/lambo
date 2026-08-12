@@ -704,7 +704,7 @@ mod tests {
                 .filter(|id| recent_concept_ids.contains(id))
                 .collect();
             let mut recent_expected: Vec<NodeId> = recent_concept_ids.iter().copied().collect();
-            recent_expected.sort_by(|a, b| a.0.cmp(&b.0));
+            recent_expected.sort_by_key(|a| a.0);
             assert_eq!(
                 recent_members, recent_expected,
                 "recent-leg members for query {query:?}"
