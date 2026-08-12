@@ -86,6 +86,7 @@ pub use crate::recall::format::default_token_count;
 /// `max_tokens`, and `now` is the caller's clock — pass the same instant used
 /// for every other time-sensitive read in the recall (hot-list re-validation
 /// and reservations).
+#[allow(clippy::too_many_arguments)] // pipeline deps; bundled into the recall entry at Wave D
 pub fn assemble<F>(
     graph: &Graph,
     expanded: &ExpandedSet,

@@ -534,6 +534,7 @@ mod tests {
     // Union: determinism
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "fixtures")]
     #[test]
     fn union_is_deterministic_across_input_orders() {
         let snap = load_rest_api_fixture();
@@ -579,6 +580,7 @@ mod tests {
         assert_eq!(d, e);
     }
 
+    #[cfg(feature = "fixtures")]
     #[test]
     fn vector_leg_merges_below_keyword_above_recent() {
         let snap = load_rest_api_fixture();
@@ -616,16 +618,10 @@ mod tests {
     // Golden keyword-leg reconciliation
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "fixtures")]
     fn load_rest_api_fixture() -> crate::types::GraphSnapshot {
-        #[cfg(feature = "fixtures")]
-        {
-            use crate::fixtures;
-            fixtures::load_snapshot("session-rest-api").expect("fixture loads")
-        }
-        #[cfg(not(feature = "fixtures"))]
-        {
-            panic!("this test requires the fixtures feature");
-        }
+        use crate::fixtures;
+        fixtures::load_snapshot("session-rest-api").expect("fixture loads")
     }
 
     /// The golden `phase1_candidates` list asserts the KEYWORD leg EXACTLY (set
