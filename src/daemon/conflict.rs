@@ -9,7 +9,7 @@
 //! ## Agent attribution ("who wrote this edge")
 //!
 //! Edges carry no agent id (the §5 `Edge` shape is frozen), so the writer is
-//! resolved — see [`edge_writer`]: an interaction-sourced edge belongs to that
+//! resolved — see [`edge_writers`]: an interaction-sourced edge belongs to that
 //! interaction's agent; a concept→concept edge belongs to the agent **acting at
 //! the edge's write timestamp**, falling back to the source concept's
 //! `origin_agent` when no interaction was written at that instant.
@@ -22,6 +22,17 @@
 //!
 //! "Agent X has an edge to node N" == X is the resolved writer of at least one
 //! edge incident to N (N as source or as target).
+//!
+//! ### Same-instant collisions (NEW-4)
+//!
+//! When several interactions share one instant, "the agent acting then" is not a
+//! single answer, so **every** candidate joins the contested node's agent set and
+//! [`ConflictHit::writer`] names one of them deterministically (smallest
+//! interaction id at that instant). Keeping only a tie-break winner — the earlier
+//! rule — reproduced exactly the bug ALGO-3 fixed: the agent set collapsed to one
+//! agent and the conflict silently did not fire, while an unrelated node could
+//! pick up a spurious conflict naming the wrong writer. Erring toward detection
+//! is deliberate; see `ConflictHit::writer` for the residual ambiguity.
 //!
 //! ## "Active agent"
 //!
@@ -75,7 +86,6 @@
 //! [`HotList::retain_conditions`], so a conflict that ages out of the recency
 //! window is dropped on the next cycle too.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -103,6 +113,18 @@ pub struct ConflictHit {
     pub agents: Vec<AgentId>,
     /// The agent that made the most recent qualifying write (ALGO-2) — the
     /// subject of spec §13's "Agent A wrote to it eleven seconds ago".
+    ///
+    /// **Residual ambiguity (NEW-4).** When two or more interactions from
+    /// different agents share the newest qualifying write's instant, the edge
+    /// carries no evidence of which one wrote it (edges have no agent id — the
+    /// §5 shape is frozen). This field is then *one of* the candidates, picked
+    /// deterministically: newest qualifying write, then smallest interaction id
+    /// at that instant. Every candidate is in [`ConflictHit::agents`], so the
+    /// contested set is complete even when the named writer is a coin toss;
+    /// `agents.len()` exceeding the number of agents that truly touched the node
+    /// is the deliberate direction of the error (a spurious advisory warning
+    /// beats a silently missed conflict). Same-instant cross-agent interactions
+    /// do not occur on the shipped fixture (15-minute granularity).
     pub writer: AgentId,
     /// Age of `writer`'s write, in seconds, at the `now` this was computed for.
     pub seconds_ago: u64,
@@ -115,31 +137,36 @@ pub struct ConflictHit {
 /// [`detect`] builds it once and shares it across every node, and a per-node
 /// [`conflict_at`] (recall's path, CONC-5) builds it once for that node.
 struct WriterTimeline {
-    /// `created_at -> (smallest interaction id at that instant, its agent)`.
-    /// The id is carried only as the tie-break key, so two interactions sharing
-    /// an instant resolve deterministically.
-    by_time: HashMap<DateTime<Utc>, (NodeId, AgentId)>,
+    /// `created_at -> every (interaction id, agent) written at that instant`,
+    /// id-ascending.
+    ///
+    /// **All** candidates, not the smallest id (NEW-4). Collapsing an instant to
+    /// one interaction discards the only evidence that the attribution is
+    /// ambiguous, and under same-instant cross-agent interactions that produced
+    /// both failure modes: a false negative on the genuinely contested node (its
+    /// agent set collapsed to one agent, so no conflict fired) and a spurious
+    /// conflict naming the wrong writer.
+    by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>>,
 }
 
 impl WriterTimeline {
     fn of(graph: &Graph) -> Self {
-        let mut by_time: HashMap<DateTime<Utc>, (NodeId, AgentId)> = HashMap::new();
+        let mut by_time: HashMap<DateTime<Utc>, Vec<(NodeId, AgentId)>> = HashMap::new();
         for i in graph.interactions() {
-            match by_time.entry(i.created_at) {
-                Entry::Vacant(v) => {
-                    v.insert((i.id, i.agent_id.clone()));
-                }
-                Entry::Occupied(mut o) => {
-                    if i.id.0 < o.get().0 .0 {
-                        o.insert((i.id, i.agent_id.clone()));
-                    }
-                }
-            }
+            by_time
+                .entry(i.created_at)
+                .or_default()
+                .push((i.id, i.agent_id.clone()));
+        }
+        // Id-ascending, so `EdgeWriters::named` is deterministic.
+        for candidates in by_time.values_mut() {
+            candidates.sort_by_key(|(id, _)| id.0);
         }
         Self { by_time }
     }
 
-    /// The agent acting at exactly `at`, if an interaction was written then.
+    /// Every interaction written at exactly `at`, id-ascending. Empty when none
+    /// was.
     ///
     /// Exact-match only, deliberately. Every production write path stamps an
     /// edge with the timestamp of the interaction performing the write:
@@ -150,19 +177,54 @@ impl WriterTimeline {
     /// all — a hand-built or time-rebased edge could sit anywhere between two
     /// interactions, and guessing "the latest interaction at or before" would
     /// invent an author. Callers fall back to structural attribution instead.
-    fn acting_agent(&self, at: DateTime<Utc>) -> Option<&AgentId> {
-        self.by_time.get(&at).map(|(_, agent)| agent)
+    fn acting(&self, at: DateTime<Utc>) -> &[(NodeId, AgentId)] {
+        self.by_time.get(&at).map_or(&[], Vec::as_slice)
     }
 }
 
-/// The agent that wrote `edge`.
+/// Who wrote an edge — one agent, or every same-instant candidate when the
+/// timeline cannot separate them (NEW-4).
+enum EdgeWriters<'a> {
+    /// Exactly attributed: an interaction-sourced edge, or the structural
+    /// fallback to the source concept's `origin_agent`.
+    Certain(AgentId),
+    /// The interactions acting at the edge's write instant, id-ascending and
+    /// non-empty. One element is the ordinary case; more means two or more
+    /// interactions share the instant and no evidence separates them.
+    Acting(&'a [(NodeId, AgentId)]),
+}
+
+impl EdgeWriters<'_> {
+    /// Every candidate writer. All of them join the contested node's agent set:
+    /// "agent X has an edge to node N" is true of each, and dropping the ones a
+    /// tie-break did not pick is what made a real conflict invisible (NEW-4).
+    fn all(&self) -> impl Iterator<Item = &AgentId> {
+        let (certain, acting): (&[AgentId], &[(NodeId, AgentId)]) = match self {
+            Self::Certain(agent) => (std::slice::from_ref(agent), &[]),
+            Self::Acting(candidates) => (&[], candidates),
+        };
+        certain.iter().chain(acting.iter().map(|(_, agent)| agent))
+    }
+
+    /// The single agent to *name* as the writer: the only candidate, or the
+    /// smallest interaction id at a collided instant (the slice is id-ascending).
+    fn named(&self) -> &AgentId {
+        match self {
+            Self::Certain(agent) => agent,
+            // Non-empty by construction (`Acting` is only built from a hit).
+            Self::Acting(candidates) => &candidates[0].1,
+        }
+    }
+}
+
+/// The agents that may have written `edge`.
 ///
 /// Resolution order (ALGO-3):
 ///
 /// 1. An edge whose **source is an `Interaction`** (`Derives`/`Temporal`) is
 ///    that interaction's — exact by construction, no inference needed.
-/// 2. Otherwise the **acting agent** at the edge's write timestamp
-///    ([`WriterTimeline::acting_agent`]).
+/// 2. Otherwise the interactions **acting** at the edge's write timestamp
+///    ([`WriterTimeline::acting`]) — usually exactly one.
 /// 3. Otherwise the source concept's `origin_agent`.
 ///
 /// Step 2 is the fix. Attributing a concept→concept edge to its source
@@ -176,15 +238,21 @@ impl WriterTimeline {
 ///
 /// `None` only for a source node missing from the graph (defensive;
 /// `assert_invariants` guarantees every edge endpoint exists).
-fn edge_writer(graph: &Graph, edge: &Edge, timeline: &WriterTimeline) -> Option<AgentId> {
+fn edge_writers<'a>(
+    graph: &'a Graph,
+    edge: &Edge,
+    timeline: &'a WriterTimeline,
+) -> Option<EdgeWriters<'a>> {
     match graph.node(edge.source) {
-        Some(Node::Interaction(i)) => Some(i.agent_id.clone()),
-        Some(Node::Concept(c)) => Some(
-            timeline
-                .acting_agent(edge.last_reinforced.max(edge.created_at))
-                .cloned()
-                .unwrap_or_else(|| c.origin_agent.clone()),
-        ),
+        Some(Node::Interaction(i)) => Some(EdgeWriters::Certain(i.agent_id.clone())),
+        Some(Node::Concept(c)) => {
+            let acting = timeline.acting(edge.last_reinforced.max(edge.created_at));
+            Some(if acting.is_empty() {
+                EdgeWriters::Certain(c.origin_agent.clone())
+            } else {
+                EdgeWriters::Acting(acting)
+            })
+        }
         _ => None,
     }
 }
@@ -217,11 +285,14 @@ fn conflict_at_with(
     let mut newest: Option<(DateTime<Utc>, AgentId)> = None;
 
     for edge in graph.incident_edges(node) {
-        let Some(writer) = edge_writer(graph, edge, timeline) else {
+        let Some(writers) = edge_writers(graph, edge, timeline) else {
             continue;
         };
-        if !agents.contains(&writer) {
-            agents.push(writer.clone());
+        // Every candidate joins the set (NEW-4) — see `EdgeWriters::all`.
+        for agent in writers.all() {
+            if !agents.contains(agent) {
+                agents.push(agent.clone());
+            }
         }
 
         // Write activity inside [now - window, now]; future-dated edges (the
@@ -231,7 +302,7 @@ fn conflict_at_with(
             && last_write <= now
             && last_write >= window_start;
         if qualifying && newest.as_ref().is_none_or(|(t, _)| last_write > *t) {
-            newest = Some((last_write, writer));
+            newest = Some((last_write, writers.named().clone()));
         }
     }
 
@@ -803,5 +874,51 @@ mod tests {
             "but the newest write is agent-b's"
         );
         assert_eq!(hit.seconds_ago, 5);
+    }
+
+    /// NEW-4: two agents' interactions at the **same instant**, and a cross-agent
+    /// write stamped with it. The timeline used to keep only the smallest
+    /// interaction id per instant, which re-created the very failure ALGO-3
+    /// fixed — the contested node's agent set collapsed to one agent and the
+    /// conflict silently did not fire.
+    #[test]
+    fn same_instant_cross_agent_write_still_conflicts() {
+        let now = t(3600);
+        let mut g = Graph::new(sid());
+        // Both interactions at 3600-10: the collided instant. i1 (agent-a) has
+        // the smaller id, so the old tie-break resolved every edge written then
+        // to agent-a and agent-b vanished from attribution entirely.
+        let i1 = interaction(1, None, "agent-a", 3600 - 10);
+        let i2 = interaction(2, Some(1), "agent-b", 3600 - 10);
+        g.insert_interaction(i1.clone()).unwrap();
+        g.insert_interaction(i2.clone()).unwrap();
+
+        let contested = concept(1, i1.id, "agent-a", "user schema", 3600 - 10);
+        let contested_id = contested.id;
+        g.insert_concept(contested, i1.id).unwrap();
+        let source = concept(2, i2.id, "agent-b", "cache layer", 3600 - 10);
+        let source_id = source.id;
+        g.insert_concept(source, i2.id).unwrap();
+
+        // The cross-agent write: a concept→concept Dependency stamped with the
+        // collided instant, so attribution has to fall to the timeline.
+        g.upsert_edge(dep_edge(1, source_id, contested_id, 3600 - 10))
+            .unwrap();
+        assert!(g.assert_invariants().is_ok());
+
+        let hits = detect(&g, CONFLICT_RECENCY_WINDOW, now);
+        let hit = hits
+            .iter()
+            .find(|h| h.node == contested_id)
+            .expect("a same-instant cross-agent write is still a conflict");
+        assert_eq!(
+            hit.agents,
+            vec![AgentId::from("agent-a"), AgentId::from("agent-b")],
+            "every same-instant candidate joins the contested set"
+        );
+        // The named writer is one of the candidates, chosen deterministically:
+        // smallest interaction id at the instant (documented ambiguity).
+        assert_eq!(hit.writer, AgentId::from("agent-a"));
+        assert_eq!(hit.seconds_ago, 10);
     }
 }
