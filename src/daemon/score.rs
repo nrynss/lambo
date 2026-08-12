@@ -117,18 +117,71 @@ fn clamp_additive(x: f64, lo: f64, hi: f64) -> f64 {
 /// Each weighted dimension is clamped to `[0,1]` before weighting; the
 /// additive bonus and modifier are clamped to their defined ranges; the
 /// result is clamped to `[0, 1 + MAX_BONUS]` (bounded, always finite).
+///
+/// `weights` are sanitized first ([`ScoringWeights::sanitized`], ALGO-10):
+/// they arrive from TOML/JSON, where `NaN` is admissible, and a `NaN` weight
+/// would otherwise propagate into a `NaN` composite — which ranks as garbage
+/// and silently disables GC's threshold comparison. The final clamp is
+/// non-finite-guarded for the same reason: this function returns a finite
+/// value for every possible input (spec §5.7).
 pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
-    let weighted = clamp_dim(dims.recency) * weights.recency
-        + clamp_dim(dims.frequency) * weights.frequency
-        + clamp_dim(dims.session_activity) * weights.session_activity
-        + clamp_dim(dims.density) * weights.density;
-    let bonus = clamp_additive(dims.edge_type_bonus, 0.0, MAX_EDGE_BONUS);
-    let modifier = clamp_additive(
-        dims.concept_type_modifier,
-        MIN_CONCEPT_MODIFIER,
-        MAX_CONCEPT_MODIFIER,
-    );
-    (weighted + bonus + modifier).clamp(0.0, 1.0 + MAX_BONUS)
+    let w = weights.sanitized();
+    let weighted = clamp_dim(dims.recency) * w.recency
+        + clamp_dim(dims.frequency) * w.frequency
+        + clamp_dim(dims.session_activity) * w.session_activity
+        + clamp_dim(dims.density) * w.density;
+    finite_or_zero(weighted + bonus_and_modifier(dims))
+}
+
+/// Spec §9 composite over the dimensions that are **live** in v0.1: the
+/// `frequency` term is dropped and the weighted sum is renormalized over the
+/// remaining weights, so the result occupies the same `[0,1]`-plus-bonus range
+/// as [`score`].
+///
+/// GC's step-2 cut uses this while `access_count` is dead session-wide
+/// (ALGO-1). The spec formula reserves 20% of the composite for a dimension no
+/// write path feeds until P5 recall lands, so an **absolute** threshold against
+/// the full composite measures every concept against a fifth of a score it
+/// cannot yet earn. Recall *ranking* is unaffected by the dead term (a
+/// constant-zero dimension cannot reorder anything), which is why [`score`]
+/// itself stays spec-verbatim — only a threshold comparison is distorted.
+///
+/// Renormalizing rather than re-weighting keeps the change reversible: once
+/// `access_count` goes live the caller switches back to [`score`], and because
+/// frequency only ever *adds*, no concept's eviction score falls at the
+/// switch.
+pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
+    let w = weights.sanitized();
+    let live_total = w.recency + w.session_activity + w.density;
+    let weighted = if live_total > 0.0 {
+        (clamp_dim(dims.recency) * w.recency
+            + clamp_dim(dims.session_activity) * w.session_activity
+            + clamp_dim(dims.density) * w.density)
+            / live_total
+    } else {
+        0.0
+    };
+    finite_or_zero(weighted + bonus_and_modifier(dims))
+}
+
+/// The two additive terms, each clamped to its defined range.
+fn bonus_and_modifier(dims: ScoreDims) -> f64 {
+    clamp_additive(dims.edge_type_bonus, 0.0, MAX_EDGE_BONUS)
+        + clamp_additive(
+            dims.concept_type_modifier,
+            MIN_CONCEPT_MODIFIER,
+            MAX_CONCEPT_MODIFIER,
+        )
+}
+
+/// Clamp a composite into `[0, 1 + MAX_BONUS]`; a non-finite composite is
+/// `0.0` (ALGO-10 — the composite is finite for every input, spec §5.7).
+fn finite_or_zero(x: f64) -> f64 {
+    if x.is_finite() {
+        x.clamp(0.0, 1.0 + MAX_BONUS)
+    } else {
+        0.0
+    }
 }
 
 /// Session-wide values shared by every concept's dimensions. Compute once per
@@ -382,6 +435,108 @@ mod tests {
                 prev = out;
             }
         }
+    }
+
+    /// ALGO-10: a garbage **weight** (they arrive from TOML, where `NaN` is
+    /// admissible) must degrade its own dimension to zero, never poison the
+    /// composite. Pre-fix the weight multiplied straight into the sum, so the
+    /// composite was `NaN` — which ranks as garbage and makes GC's
+    /// `score < threshold` test silently `false`.
+    #[test]
+    fn non_finite_weights_zero_their_dimension_and_keep_the_composite_finite() {
+        let dims = ScoreDims {
+            recency: 1.0,
+            frequency: 1.0,
+            session_activity: 1.0,
+            density: 1.0,
+            edge_type_bonus: 0.1,
+            concept_type_modifier: 0.05,
+        };
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let poisoned = ScoringWeights {
+                recency: bad,
+                ..ScoringWeights::default()
+            };
+            let out = score(dims, &poisoned);
+            assert!(out.is_finite(), "recency weight {bad} produced {out}");
+            // The surviving dimensions still count: zeroing recency costs
+            // exactly its own contribution, nothing more.
+            assert_eq!(
+                out,
+                score(
+                    dims,
+                    &ScoringWeights {
+                        recency: 0.0,
+                        ..ScoringWeights::default()
+                    }
+                ),
+                "weight {bad} must behave as 0.0"
+            );
+            // The comparison GC makes is a real comparison again.
+            assert!((0.0..1.0 + MAX_BONUS).contains(&out));
+        }
+        assert!(!ScoringWeights {
+            recency: f64::NAN,
+            ..ScoringWeights::default()
+        }
+        .is_valid());
+        assert!(ScoringWeights::default().is_valid());
+    }
+
+    /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes
+    /// over the surviving weights, so it stays on the same `[0,1]`+bonus scale
+    /// and lifts every concept whose only missing dimension is the dead one.
+    #[test]
+    fn live_dimension_score_renormalizes_over_surviving_weights() {
+        let w = ScoringWeights::default();
+        let dims = ScoreDims {
+            recency: 0.0,
+            frequency: 0.0,
+            session_activity: 0.1,
+            density: 0.2,
+            edge_type_bonus: 0.02,
+            concept_type_modifier: 0.05,
+        };
+        let live = score_over_live_dimensions(dims, &w);
+        let full = score(dims, &w);
+        assert!(
+            live > full,
+            "excluding a dead 20% weight must raise the score: {live} vs {full}"
+        );
+        // Exactly the renormalization, not an arbitrary boost.
+        let expected = (0.1 * w.session_activity + 0.2 * w.density)
+            / (w.recency + w.session_activity + w.density)
+            + 0.02
+            + 0.05;
+        assert!((live - expected).abs() < 1e-12, "{live} != {expected}");
+
+        // A saturated concept still tops out at the same bound, and a
+        // concept with live frequency is unchanged by the switch direction:
+        // frequency only ever adds, so `score >= score_over_live` is false
+        // only when frequency is genuinely earning.
+        let maxed = ScoreDims {
+            recency: 1.0,
+            frequency: 1.0,
+            session_activity: 1.0,
+            density: 1.0,
+            edge_type_bonus: MAX_EDGE_BONUS,
+            concept_type_modifier: MAX_CONCEPT_MODIFIER,
+        };
+        assert_eq!(score_over_live_dimensions(maxed, &w), 1.0 + MAX_BONUS);
+
+        // All-zero weights cannot divide by zero.
+        let zeroed = ScoringWeights {
+            recency: 0.0,
+            frequency: 0.0,
+            session_activity: 0.0,
+            density: 0.0,
+        };
+        let out = score_over_live_dimensions(dims, &zeroed);
+        assert!(out.is_finite(), "zero weight total produced {out}");
+        assert!(
+            (out - 0.07).abs() < 1e-12,
+            "bonus + modifier only, got {out}"
+        );
     }
 
     #[test]

@@ -13,6 +13,16 @@ use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.
+///
+/// Every field is a public `f64` and this struct deserializes from `lambo.toml`
+/// / JSON, so `NaN`, `±inf` and negatives are all *admissible inputs*. Spec
+/// §5.7 requires finite composites and GC compares the composite against a
+/// threshold, where a `NaN` weight would silently disable collection
+/// (`NaN < x == false`). Weights are therefore **sanitized at the point of
+/// use** — [`ScoringWeights::sanitized`], applied by
+/// [`crate::daemon::score::score`] — rather than rejected at parse time: a
+/// mis-typed weight degrades that one dimension to zero instead of failing the
+/// session.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScoringWeights {
     pub recency: f64,
@@ -29,6 +39,36 @@ impl Default for ScoringWeights {
             session_activity: 0.20,
             density: 0.35,
         }
+    }
+}
+
+impl ScoringWeights {
+    /// Every non-finite or negative weight replaced by `0.0` (ALGO-10).
+    ///
+    /// A zeroed weight drops its dimension out of the composite; it can never
+    /// poison the whole score. Idempotent, and the identity on any valid set.
+    pub fn sanitized(self) -> Self {
+        Self {
+            recency: sane_weight(self.recency),
+            frequency: sane_weight(self.frequency),
+            session_activity: sane_weight(self.session_activity),
+            density: sane_weight(self.density),
+        }
+    }
+
+    /// True when every weight is finite and non-negative (i.e. `sanitized` is
+    /// the identity). Callers that prefer to fail loudly check this first.
+    pub fn is_valid(self) -> bool {
+        self == self.sanitized()
+    }
+}
+
+/// A weight usable in the composite: finite and non-negative, else `0.0`.
+fn sane_weight(w: f64) -> f64 {
+    if w.is_finite() && w >= 0.0 {
+        w
+    } else {
+        0.0
     }
 }
 

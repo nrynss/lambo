@@ -387,6 +387,9 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
                     &mut g,
                     gc::GcParams {
                         now,
+                        // ALGO-4: GC's eviction ranking uses the session's own
+                        // weights, not a second hardcoded default.
+                        weights,
                         max_canonical_nodes: params.max_canonical_nodes,
                         ..Default::default()
                     },

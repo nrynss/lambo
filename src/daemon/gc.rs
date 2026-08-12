@@ -13,10 +13,13 @@
 //!    `last_reinforced` (the edge's last activity; a never-reinforced edge is
 //!    dead from its write). All edge types qualify — the spec names none.
 //! 2. **Concept cleanup** — orphans (no incident edges after step 1) and
-//!    sub-threshold concepts (daemon composite score below
-//!    [`MIN_CONCEPT_SCORE`], computed with the spec §9 formula via
-//!    `score::rescore`) are collected, **excluding** Venerable, Canonical, and
-//!    root-goal concepts.
+//!    sub-threshold concepts are collected, **excluding** Venerable,
+//!    Canonical, and root-goal concepts. The cut takes the **session's**
+//!    [`ScoringWeights`] (ALGO-4 — GC must not rank eviction with weights
+//!    nothing else uses), scores over the live dimensions while `access_count`
+//!    is dead session-wide (ALGO-1), and compares against a per-type bar
+//!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
+//!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
 //! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
 //!    the G6 binding note — never assume Hierarchical acyclicity) from the
 //!    temporal chain over the full undirected graph; every concept not reached
@@ -63,7 +66,7 @@ use std::collections::HashSet;
 use crate::config::ScoringWeights;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::types::{CanonizationStatus, Concept, EdgeType, NodeId};
+use crate::types::{CanonizationStatus, Concept, ConceptType, EdgeType, NodeId};
 
 /// Below this weight, an edge past its TTL is removed (step 1).
 ///
@@ -74,8 +77,39 @@ pub const MIN_EDGE_WEIGHT: f64 = 0.5;
 /// An edge untouched for this long is "past `gc_edge_ttl`" (step 1).
 pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// Below this daemon composite score, a concept is sub-threshold (step 2).
-/// v0.6.0's value is not in-repo — v0.1 decision.
-pub const MIN_CONCEPT_SCORE: f64 = 0.3;
+/// v0.6.0's value is not in-repo — v0.1 decision, **recalibrated** (ALGO-1).
+///
+/// The threshold is not applied flat: the concept's eviction score is
+/// [`crate::daemon::score::score_over_live_dimensions`] (frequency excluded
+/// while `access_count` is dead session-wide) and the comparison is against
+/// `MIN_CONCEPT_SCORE / ConceptType::eviction_resistance()` — the spec §5
+/// resistances (Constraint 1.5 … Observation 0.7) scale the bar per type
+/// instead of every type facing the identical cut (ALGO-11). Dividing the
+/// threshold by the resistance is algebraically the same as multiplying the
+/// score by it; the threshold form is used so the *bar* is what varies and the
+/// score stays comparable to recall's.
+///
+/// ### Why 0.12
+///
+/// The original 0.3 was calibrated against nothing: with `access_count`
+/// identically 0 (no write path feeds it until P5 recall) and `density`
+/// max-normalized against the session hub, an ordinary well-connected concept
+/// in the shipped `session-rest-api` fixture scores 0.13–0.34 — so 0.3
+/// collected **15 of its 22 concepts on the first sweep**, including `auth
+/// middleware`, which spec §13 step 1 names, and left 6 non-Canonical peers
+/// where canonization Stage 1 requires 20. GC starved the pipeline it exists
+/// to feed.
+///
+/// Against the live-dimension score the same fixture's floor is 0.149
+/// (`user id`: zero recency, one Derives edge, minimum density); the effective
+/// Entity bar is `0.12 / 1.2 = 0.10`, ~50% below that floor, so every healthy
+/// mid-session concept survives with margin while the clause still bites where
+/// it should: a concept whose recency **and** density have both decayed to ~0
+/// scores at most its type modifier (Entity +0.05, Observation −0.10 → 0.0),
+/// which is below every type's bar. Orphans and disconnected components are
+/// collected by their own clauses regardless of score, so the score cut is
+/// deliberately the conservative one while a fifth of the composite is dead.
+pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
 
@@ -89,8 +123,15 @@ pub struct GcParams {
     pub min_edge_weight: f64,
     /// Step 1: age anchor — `now - last_reinforced > gc_edge_ttl`.
     pub gc_edge_ttl: ChronoDuration,
-    /// Step 2: daemon composite score below this is sub-threshold.
+    /// Step 2: daemon composite score below this is sub-threshold. Scaled per
+    /// concept type by [`crate::types::ConceptType::eviction_resistance`] — see
+    /// [`MIN_CONCEPT_SCORE`].
     pub min_concept_score: f64,
+    /// Step 2: the **session's** scoring weights (ALGO-4). GC must rank
+    /// eviction with the same function recall ranks retrieval with, or a
+    /// concept can be evicted for being worthless under weights nothing else
+    /// uses. P8 threads `Config::scoring` here via the daemon.
+    pub weights: ScoringWeights,
     /// Advisory capacity ceiling — warn above, never evict.
     pub max_concept_nodes: usize,
     /// Step 6: Canonical budget ceiling; over it → `canonical_over_budget`.
@@ -104,6 +145,7 @@ impl Default for GcParams {
             min_edge_weight: MIN_EDGE_WEIGHT,
             gc_edge_ttl: GC_EDGE_TTL,
             min_concept_score: MIN_CONCEPT_SCORE,
+            weights: ScoringWeights::default(),
             max_concept_nodes: MAX_CONCEPT_NODES,
             max_canonical_nodes: 1000, // spec §10
         }
@@ -161,18 +203,19 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     }
 
     // Step 2 — concept cleanup: orphans + sub-threshold, excluding protected.
-    let scores: std::collections::HashMap<NodeId, f64> =
-        crate::daemon::score::rescore(graph, &ScoringWeights::default())
-            .into_iter()
-            .map(|s| (s.item, s.score))
-            .collect();
+    // Scored against post-step-1 state with the session's own weights (ALGO-4),
+    // over the live dimensions only while `access_count` is dead session-wide
+    // (ALGO-1), and cut per concept type (ALGO-11).
+    let ctx = crate::daemon::score::SessionContext::compute(graph);
+    let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
     let mut candidates: Vec<NodeId> = Vec::new();
     for c in graph.concepts() {
         if protected.contains(&c.id) {
             continue;
         }
         let orphan = graph.incident_edges(c.id).is_empty();
-        let below = scores.get(&c.id).copied().unwrap_or(0.0) < params.min_concept_score;
+        let below = eviction_score(graph, c, &ctx, params, frequency_is_live)
+            < eviction_threshold(params.min_concept_score, c.concept_type);
         if orphan || below {
             candidates.push(c.id);
         }
@@ -259,6 +302,47 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
 pub fn sync_index(outcome: &GcOutcome, index: &mut InvertedIndex) {
     for id in &outcome.concepts_collected {
         index.remove(*id);
+    }
+}
+
+/// The step-2 bar for one concept type: [`MIN_CONCEPT_SCORE`] divided by the
+/// spec §5 [`ConceptType::eviction_resistance`] (ALGO-11).
+///
+/// A Constraint (1.5) faces a bar a third lower than a Resource (1.0); an
+/// Observation (0.7) faces one ~43% higher. A non-positive or non-finite
+/// resistance would invert or poison the comparison, so it falls back to the
+/// unscaled threshold (the `const fn` cannot produce one today — this is a
+/// guard against a future table edit, not a live branch).
+fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
+    let resistance = ty.eviction_resistance();
+    if resistance.is_finite() && resistance > 0.0 {
+        min_concept_score / resistance
+    } else {
+        min_concept_score
+    }
+}
+
+/// One concept's step-2 eviction score.
+///
+/// `frequency_is_live` is computed once per run over the whole session: while
+/// **no** concept has been accessed, the frequency dimension is structurally
+/// dead and is renormalized out of the cut (ALGO-1,
+/// [`crate::daemon::score::score_over_live_dimensions`]). The moment any
+/// access lands the full spec §9 composite is used again — so the session
+/// switches scoring functions exactly once, and only in the direction that
+/// raises scores.
+fn eviction_score(
+    graph: &Graph,
+    c: &Concept,
+    ctx: &crate::daemon::score::SessionContext,
+    params: GcParams,
+    frequency_is_live: bool,
+) -> f64 {
+    let dims = crate::daemon::score::score_concept(graph, c, ctx);
+    if frequency_is_live {
+        crate::daemon::score::score(dims, &params.weights)
+    } else {
+        crate::daemon::score::score_over_live_dimensions(dims, &params.weights)
     }
 }
 
@@ -491,9 +575,10 @@ mod tests {
 
         // Orphan: no edges at all -> step 2, not protected.
         let orphan = insert_isolated(&mut g, concept(10, 1, "orphan", ConceptType::Entity), 1);
-        // Sub-threshold (and not an orphan): an Observation with only its
-        // Derives edge — zero recency/frequency, half session_activity, 2/3
-        // density, Observation modifier -> composite below 0.3.
+        // Sub-threshold (and not an orphan): an Observation whose only edge is
+        // its Derives provenance — zero recency, minimum density (1 of the
+        // hub's 4), and the Observation modifier (−0.10) against the highest
+        // per-type bar in the table (resistance 0.7 ⇒ 0.12/0.7 = 0.171).
         let low_id = nid(11);
         g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
             .unwrap();
@@ -510,28 +595,43 @@ mod tests {
             CanonizationStatus::Venerable,
         ))
         .unwrap();
-        // Anchors that raise the density baseline (max incident = 3) so the
-        // Observation's density is 2/3, not 1.0. They must survive.
-        g.insert_concept(concept(13, 1, "anchor a", ConceptType::Entity), iid)
+        // A hub (13) plus three spokes: max incident = 4, so the Observation's
+        // density is 1/4. All four must survive.
+        for id in [13u64, 14, 15, 16] {
+            g.insert_concept(
+                concept(id, 1, &format!("anchor {id}"), ConceptType::Entity),
+                iid,
+            )
             .unwrap();
-        g.insert_concept(concept(14, 1, "anchor b", ConceptType::Entity), iid)
-            .unwrap();
-        g.upsert_edge(edge(100, 13, 11, EdgeType::Dependency, 1.0, 0))
-            .unwrap();
-        g.upsert_edge(edge(101, 13, 14, EdgeType::Dependency, 1.0, 0))
-            .unwrap();
+        }
+        for (eid, tgt) in [(101u64, 14u64), (102, 15), (103, 16)] {
+            g.upsert_edge(edge(eid, 13, tgt, EdgeType::Dependency, 1.0, 0))
+                .unwrap();
+        }
 
-        // Sanity: the Observation really is sub-threshold.
-        let scores = crate::daemon::score::rescore(&g, &ScoringWeights::default());
-        let low_score = scores.iter().find(|s| s.item == low_id).unwrap().score;
-        assert!(low_score < 0.3, "test premise: got {low_score}");
+        // Sanity: the Observation really is sub-threshold under the cut GC
+        // applies — live-dimension score vs. its own type's bar (ALGO-1/11).
+        let params = default_params();
+        let ctx = crate::daemon::score::SessionContext::compute(&g);
+        let low = match g.node(low_id).unwrap() {
+            Node::Concept(c) => c,
+            _ => unreachable!(),
+        };
+        let low_score = eviction_score(&g, low, &ctx, params, false);
+        let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Observation);
+        assert!(
+            low_score < low_bar,
+            "test premise: score {low_score} must be under the Observation bar {low_bar}"
+        );
 
-        let outcome = run(&mut g, default_params());
+        let outcome = run(&mut g, params);
         assert_eq!(outcome.concepts_collected, vec![nid(10), nid(11)]);
         assert!(g.node(orphan).is_none());
         assert!(g.node(low_id).is_none());
         assert!(g.node(protected).is_some(), "protected class must survive");
-        assert!(g.node(nid(13)).is_some() && g.node(nid(14)).is_some());
+        for id in [13u64, 14, 15, 16] {
+            assert!(g.node(nid(id)).is_some(), "anchor {id} must survive");
+        }
         // The Venerable island is a survivor and its counter increments.
         assert!(outcome.survivors.contains(&protected));
         let p = match g.node(protected).unwrap() {
@@ -540,6 +640,247 @@ mod tests {
         };
         assert_eq!(p.gc_survived, 1);
         assert_eq!(p.canonization_status, CanonizationStatus::Venerable);
+    }
+
+    // ------------------------------------------------------------------
+    // Step 2 — calibration (ALGO-1 / ALGO-4 / ALGO-11)
+    // ------------------------------------------------------------------
+
+    /// ALGO-1: the shipped demo session must survive a sweep.
+    ///
+    /// Pre-fix (flat `MIN_CONCEPT_SCORE = 0.3` against the full spec §9
+    /// composite) this collected **15 of the 22** concepts on the first run —
+    /// `auth middleware` (spec §13 step 1) among them — leaving 6 non-Canonical
+    /// peers where canonization Stage 1 needs 20, i.e. GC starved the pipeline
+    /// it exists to feed.
+    #[cfg(feature = "fixtures")]
+    #[test]
+    fn rest_api_demo_session_survives_a_gc_sweep() {
+        let snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
+        let mut g = Graph::from_snapshot(snap).unwrap();
+        assert_eq!(g.concepts().count(), 22, "fixture premise");
+
+        // Every fixture edge is >= 0.6 (> MIN_EDGE_WEIGHT), so step 1 cannot
+        // fire and `now` only has to be past the TTL to prove that.
+        let outcome = run(
+            &mut g,
+            GcParams {
+                now: Utc
+                    .with_ymd_and_hms(2026, 8, 12, 0, 0, 0)
+                    .single()
+                    .expect("valid timestamp"),
+                ..Default::default()
+            },
+        );
+        assert!(
+            outcome.edges_removed.is_empty(),
+            "no fixture edge is below min_edge_weight"
+        );
+        assert!(
+            outcome.concepts_collected.is_empty(),
+            "a healthy session must survive a sweep intact, collected: {:?}",
+            outcome
+                .concepts_collected
+                .iter()
+                .map(|id| match g.node(*id) {
+                    Some(Node::Concept(c)) => c.content.clone(),
+                    _ => id.to_string(),
+                })
+                .collect::<Vec<_>>()
+        );
+
+        // The concepts spec §13 names by content (`session store` has no
+        // counterpart in this fixture) plus the planted conflict node.
+        let surviving: Vec<&str> = g.concepts().map(|c| c.content.as_str()).collect();
+        for named in ["user schema", "auth middleware", "caching layer"] {
+            assert!(
+                surviving.contains(&named),
+                "spec §13 names {named}; it must survive GC"
+            );
+        }
+
+        // Canonization Stage 1 needs >= 20 non-Canonical peers in the session.
+        let peers = g
+            .concepts()
+            .filter(|c| c.canonization_status != CanonizationStatus::Canonical)
+            .count();
+        assert!(
+            peers >= 20,
+            "Stage 1 needs >= 20 non-Canonical peers, found {peers}"
+        );
+    }
+
+    /// ALGO-11: the cut consults [`ConceptType::eviction_resistance`].
+    ///
+    /// `Entity` and `Logic` share a `score_multiplier` (1.05), so two
+    /// structurally identical concepts of those types score **identically**;
+    /// their resistances differ (1.2 vs 1.1). Choosing
+    /// `min_concept_score = 1.15 · score` puts the Entity bar (score/1.2·1.15 =
+    /// 0.958·score) below the score and the Logic bar (1.045·score) above it,
+    /// so the resistance factor is the *only* thing deciding their fate. Under
+    /// the pre-fix flat cut both shared one bar and one outcome.
+    #[test]
+    fn eviction_resistance_discriminates_at_the_threshold_boundary() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let i2 = Interaction {
+            created_at: ts(100),
+            ..interaction(2, Some(1))
+        };
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+
+        g.insert_concept(concept(10, 1, "anchor", ConceptType::Entity), iid)
+            .unwrap();
+        g.insert_concept(concept(11, 1, "entity leaf", ConceptType::Entity), iid)
+            .unwrap();
+        g.insert_concept(concept(12, 1, "logic leaf", ConceptType::Logic), iid)
+            .unwrap();
+        g.upsert_edge(edge(100, 11, 10, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        g.upsert_edge(edge(101, 12, 10, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+
+        // The two leaves score identically — same structure, same modifier.
+        let ctx = crate::daemon::score::SessionContext::compute(&g);
+        let base = default_params();
+        let score_of = |g: &Graph, id: NodeId, ctx: &crate::daemon::score::SessionContext| {
+            let c = match g.node(id).unwrap() {
+                Node::Concept(c) => c.clone(),
+                _ => unreachable!(),
+            };
+            eviction_score(g, &c, ctx, base, false)
+        };
+        let entity_score = score_of(&g, nid(11), &ctx);
+        let logic_score = score_of(&g, nid(12), &ctx);
+        assert_eq!(
+            entity_score, logic_score,
+            "test premise: Entity and Logic share score_multiplier"
+        );
+
+        let params = GcParams {
+            min_concept_score: entity_score * 1.15,
+            ..base
+        };
+        assert!(
+            eviction_threshold(params.min_concept_score, ConceptType::Entity) < entity_score,
+            "Entity bar must sit below the shared score"
+        );
+        assert!(
+            eviction_threshold(params.min_concept_score, ConceptType::Logic) > logic_score,
+            "Logic bar must sit above the shared score"
+        );
+
+        let outcome = run(&mut g, params);
+        assert_eq!(
+            outcome.concepts_collected,
+            vec![nid(12)],
+            "only the less resistant type is collected"
+        );
+        assert!(g.node(nid(11)).is_some(), "Entity (1.2) resists the cut");
+        assert!(g.node(nid(12)).is_none(), "Logic (1.1) does not");
+    }
+
+    /// ALGO-4: the cut uses the **session's** weights, not a second default.
+    ///
+    /// The concept's whole value is structural (density); weights that zero
+    /// density and put everything on recency (which is 0 for it) drop it under
+    /// the bar. Pre-fix, `run` hardcoded `ScoringWeights::default()` and the
+    /// session's weights could not reach the cut at all, so it survived.
+    #[test]
+    fn step_two_cut_honors_the_sessions_scoring_weights() {
+        let build = || {
+            let mut g = Graph::new(sid());
+            let i1 = interaction(1, None);
+            let i2 = Interaction {
+                created_at: ts(100),
+                ..interaction(2, Some(1))
+            };
+            let iid = i1.id;
+            g.insert_interaction(i1).unwrap();
+            g.insert_interaction(i2).unwrap();
+            g.insert_concept(concept(10, 1, "dense anchor", ConceptType::Entity), iid)
+                .unwrap();
+            g.insert_concept(concept(11, 1, "dense leaf", ConceptType::Entity), iid)
+                .unwrap();
+            g.upsert_edge(edge(100, 11, 10, EdgeType::Dependency, 1.0, 0))
+                .unwrap();
+            g
+        };
+
+        // Default weights (density 0.35): the leaf's density carries it.
+        let mut g = build();
+        let outcome = run(&mut g, default_params());
+        assert!(
+            outcome.concepts_collected.is_empty(),
+            "under the session's default weights the leaf is worth keeping"
+        );
+
+        // Session weights that value only recency, which the leaf has none of.
+        let mut g = build();
+        let outcome = run(
+            &mut g,
+            GcParams {
+                weights: ScoringWeights {
+                    recency: 1.0,
+                    frequency: 0.0,
+                    session_activity: 0.0,
+                    density: 0.0,
+                },
+                ..default_params()
+            },
+        );
+        assert!(
+            outcome.concepts_collected.contains(&nid(11)),
+            "recency-only weights must reach the cut, collected: {:?}",
+            outcome.concepts_collected
+        );
+    }
+
+    /// ALGO-10: non-finite weights must not disable collection.
+    ///
+    /// Pre-fix a `NaN` weight produced a `NaN` composite, and `NaN < threshold`
+    /// is `false` — GC silently stopped collecting anything at all.
+    #[test]
+    fn non_finite_weights_do_not_disable_the_cut() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        // An Observation with only its Derives edge in a session with a hub —
+        // dead under any sane weighting.
+        g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
+            .unwrap();
+        for id in [13u64, 14, 15, 16] {
+            g.insert_concept(
+                concept(id, 1, &format!("anchor {id}"), ConceptType::Entity),
+                iid,
+            )
+            .unwrap();
+        }
+        for (eid, tgt) in [(101u64, 14u64), (102, 15), (103, 16)] {
+            g.upsert_edge(edge(eid, 13, tgt, EdgeType::Dependency, 1.0, 0))
+                .unwrap();
+        }
+
+        let outcome = run(
+            &mut g,
+            GcParams {
+                weights: ScoringWeights {
+                    recency: f64::NAN,
+                    frequency: f64::INFINITY,
+                    session_activity: -1.0,
+                    density: 0.35,
+                },
+                ..default_params()
+            },
+        );
+        assert!(
+            outcome.concepts_collected.contains(&nid(11)),
+            "garbage weights must degrade to zeroed dimensions, not a NaN score \
+             that silently disables collection"
+        );
     }
 
     // ------------------------------------------------------------------
