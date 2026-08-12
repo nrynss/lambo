@@ -19,6 +19,7 @@
 ║          docs honest. 45 findings: 7 P1, 15 P2, 23 P3. No P0.  ║
 ║          Disposition the P1s before the tracks that consume    ║
 ║          them start (see Recommended disposition order).       ║
+║  Verified: 2026-08-12 — 7/7 P1, 32/38 P2/P3 (see addendum)     ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
@@ -423,3 +424,144 @@ building on these surfaces Wednesday. Disposition the seven P1s first —
 items 1–4 above are an afternoon combined.
 
 — fable (claude-fable-5), 2026-08-11
+
+## Verification addendum (2026-08-12) — fable
+
+Independent verification of the disposition record's 45 closures, performed
+against the worktree `worktrees/p4-review` on **`phase/p4-daemon` @ cd9340e**.
+Method: for each finding, the original claim/failure scenario was re-read, the
+claimed remediation located in this branch's code/docs (wave table → `git
+show`), and checked for actually neutralizing the scenario — not merely
+touching the file; regression tests were executed (`RUSTFLAGS="-D warnings"
+cargo test --features store-sqlite` → **359 passed / 0 failed / 3 ignored**;
+default `cargo test` → **328 / 0 / 3**; plus every ci.yml feature-matrix row,
+see below). The 7 P1s were verified by the orchestrator (table included
+verbatim); this addendum independently verifies the 38 P2/P3 dispositions and
+spot-checks that P4's new daemon code does not regress them.
+
+### Headline: branch-lineage gap — the last three main commits are NOT on this branch
+
+Waves 1–7 (0cf585f, 671d99c, 1849d3e, 3083586, 95234b6, 6266f53) are ancestors
+of HEAD. **Wave 8 (28500f3, TEST-6/7/8), the wrap-up (99052e7,
+canonization_events.last_demotion_time convergence + the newest live evidence),
+and the closure commit (dc5da31, the disposition record itself) are NOT
+ancestors** — `phase/p4-daemon`'s first P4 commit (721dfe0, 08:29 IST) was cut
+from 6266f53 even though final main (dc5da31, 02:53 IST) existed ~5.5 h
+earlier. Consequences on this branch: (a) TEST-6/7/8 remediations are absent
+(worktree shows the original defects); (b) pre-existing SQLite/Cockroach
+databases would lack `canonization_events.last_demotion_time` (the wrap-up's
+idempotent ALTER/ensure_column is missing from `migrations/cockroach/001_init.sql`
+and `sqlite.rs::init_schema`); (c) this record file is the stale OPEN version
+(no disposition record). P4 touched none of the affected files
+(`git diff 6266f53..HEAD --stat`: only `src/daemon/*`, `src/graph/graph.rs`,
+`src/lib.rs`, two docs), so a merge into main keeps main's fixed versions —
+but the branch's own gates never ran against them, and the disposition claim
+"phase/p4-p7 fast-forwarded onto final main (COH-12)" is factually false for
+this branch. **Required before merge: merge/rebase final main into
+`phase/p4-daemon` and re-run the matrix.**
+
+### P4 regression found (TEST-2 surface, CON-4 class)
+
+`cargo test --no-default-features --features store-cockroach` and
+`--no-default-features --features store-sqlite` — two of the five ci.yml
+feature-matrix rows — **fail to build on this branch**: E0432 unresolved
+`crate::fixtures` at **src/daemon/conflict.rs:212** (module-level `use` in
+`#[cfg(test)] mod tests` without a `fixtures` gate) and
+**src/daemon/hotlist.rs:606** (`fixture_graph_predicate_revalidates_against_real_state`
+lacks `#[cfg(feature = "fixtures")]`; the sibling daemon tests are correctly
+gated). This is exactly the CON-4 class Wave 1 fixed in sqlite.rs. It shipped
+invisibly because CI cannot see this branch (see TEST-3 below). Matrix status
+on this branch: sqlite GREEN (359/0), minimal GREEN, demo GREEN,
+**sqlite-minimal RED, cockroach RED**. TEST-2 itself: VERIFIED on the P0–P3
+surface (main), **REGRESSED by P4** at the two lines above.
+
+### P1 verification (orchestrator, verbatim)
+
+| ID | Orchestrator verdict |
+|---|---|
+| GRAPH-1 | VERIFIED — canonical.rs ~:131 filters `concept_type != Observation` + `min_by_key(c.id.0)` deterministic tie-break; regression tests incl. Observation-must-not-match and Entity-wins-over-shadowing-Observation |
+| STORE-1 | VERIFIED (P3 scope) — UPSERT_SESSION_SQL carries embedding_kind/model/dim + ON CONFLICT updates; seed binds all three from snapshot.embedding; runtime attach enforcement T8.1-owned (PHASE-8-surface.md ~:83 dated owner note) |
+| TEST-1 | VERIFIED — live tests #[ignore]d; LAMBO_REQUIRE_LIVE=1 panics on missing DSN; non-ignored honesty-gate test; committed live evidence 20260812-025148-cockroach-live.txt (2/2 green, 65s, rustc 1.97.1) |
+| TEST-2 | VERIFIED — ci.yml feature-matrix job (sqlite / sqlite-minimal / minimal / cockroach / demo) under RUSTFLAGS=-D warnings; both previously-broken combos re-run green locally by orchestrator (183+3 and 179+3) |
+| COH-1 | VERIFIED as recorded decision — DECISION D1 in PHASE-7-embeddings.md ~:117 (global vector search + Rust-side session filter), T7.3 done-when requires committed EXPLAIN evidence; SQL intentionally unchanged until T7.3 |
+| CON-1 | VERIFIED — sqlite.rs connect: .create_if_missing(true) + WAL/busy_timeout for file-backed; bootstrap→flush→load→reopen round-trip test (~sqlite.rs:2794) |
+| CON-2 | VERIFIED — silent 400 retry-without-model removed; tracing::error! + hard EmbedError::Backend; rationale doc-pinned in bge_m3.rs |
+
+Note (branch scope): TEST-1's cited evidence file 20260812-025148 arrived with
+the wrap-up (99052e7) and is therefore main-only; this branch carries the
+Wave-1 evidence (20260811-233251) plus the #[ignore]/REQUIRE_LIVE machinery.
+
+### P2/P3 verification — 38 dispositions
+
+| ID | Claimed disposition | Verdict | Evidence (this branch) |
+|---|---|---|---|
+| GRAPH-2 | Wave 3 / 1849d3e | VERIFIED | `record_edge` §5 endpoint gate graph.rs:1116–1125 via `edge_endpoint_error` :1268; `assert_invariants` scan arm :948–955; tests `record_edge_rejects_type_invalid_endpoints` :1655, `assert_invariants_flags_type_invalid_edges` :1696. P4 spot-check: daemon prod paths write only via `remove_node`/`bump_gc_survived`/`upsert_edge` — no bypass |
+| GRAPH-3 | Wave 3 / 1849d3e | VERIFIED | iterative `dfs_cycle` (explicit stack, three-color, dead `path` vec gone) graph.rs:1211–1236; test `deep_chain_cycle_check_does_not_overflow_stack` :2511 |
+| GRAPH-4 | Wave 3 / 1849d3e | VERIFIED | `from_status != current` rejected graph.rs:599–605; §10 matrix `legal_canonization_transition` :606–612/:1301; matrix pinned as conservative inference in notes/adve-wave3-graph-decisions.md; tests `transition_from_status_mismatch_is_rejected` :1859, `illegal_transition_pairs_are_rejected` :1893. P4 spot-check: `set_root_goal` auto-Venerable routes THROUGH this gate (graph.rs:679–706) — no regression |
+| GRAPH-5 | Wave 3 / 1849d3e | VERIFIED | both-direction CoOccurrence probe, existing direction adopted, derive.rs:469–478; test `derive_swapped_order_reinforces_single_cooccurrence_edge` :1132 |
+| STORE-2 | Wave 4 / 3083586 | VERIFIED | `FLUSH_ATTEMPT_TIMEOUT` 30s flush.rs:73, timeout+panic containment :451–457; cockroach per-statement `statement_timeout` cockroach.rs:440–444/:838; test `hung_store_flush_times_out_never_wedges_the_loop` :1648 |
+| STORE-3 | Wave 4 / 3083586 | VERIFIED | degraded branch drops each drained batch + clears pending flush.rs:325–333 (spec §2.3 "none = pure RAM"); test `degrades_past_log_max_and_stops_flushing` :1252 |
+| STORE-4 | Wave 4 / 3083586 | VERIFIED | `StoreError::Constraint` types/mod.rs:496 + `is_retryable` :508; structured classifier store/error.rs:47–96 (SQLSTATE 23xxx / SQLITE code 19 → Constraint; 40xxx/08xxx/57P01-3/BUSY → retryable; substring "40001" gone); dead-letter drop-after-log + `FlushStats::dead_lettered` flush.rs:383/:111; test `constraint_violation_dead_letters_the_batch` :1731 |
+| TEST-3 | Wave 1 / 0cf585f | **NOT VERIFIED** | ci.yml:5 `branches: [main, master, 'phase-*']` — GitHub Actions `*` does not match `/`, and real phase branches are `phase/<slug>` (dev-diary/README.md:164/:214; this branch is `phase/p4-daemon`), so the push trigger can never fire for them (none is pushed to origin either). Failure scenario demonstrably NOT neutralized: 2/5 matrix rows are red on this branch, invisibly. Fix: `'phase/**'` + push phase branches |
+| TEST-4 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | exit criteria re-worded honestly (the review's own alternative): PHASE-1-contracts.md:82/:172 and PHASE-3-stores.md:186–194 name the three per-adapter suites and state "there is NO generic tests/store_conformance.rs" |
+| TEST-5 | Wave 1 / 0cf585f | VERIFIED | scripts/capture-cockroach-evidence.sh + committed dev-diary/evidence/20260811-233251-cockroach-live.txt (2/2 green). Note: the newer 20260812-025148 evidence is main-only (wrap-up commit) |
+| COH-2 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | rmcp-removed + T8.2 re-add owner named in all three claimed places: PHASE-0-ground.md:44/:132, spec §6.3 erratum (lambo-hackathon-spec-v0.1.md:549, incl. 0.1.x-vs-v3 choice), PHASE-8-surface.md:109 |
+| COH-3 | Wave 3 / 1849d3e (+ wrap-up 99052e7) | VERIFIED (Wave-3 scope) | `CanonizationEvent.last_demotion_time` types/mod.rs:456–463; `demote()` stamps demote.rs:151 (test :293–295); non-clobber propagation graph.rs:615–620; column in both DDLs (cockroach :48/:113, sqlite :81/:118); cockroach COALESCE :236–242 + SQL-shape test :1552–1554; sqlite insert :416; memory :159–162; P6 audit-row carry flagged in the decisions note. **Caveat:** the wrap-up convergence for pre-existing DBs (99052e7) is NOT on this branch — see headline |
+| COH-5 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | PHASE-4-daemon.md:50–54: poll `Graph::epoch()`, "There is no mutation-notify channel and no T3.5 rescore signal — both were explicitly deferred", seam lands T8.1. Survived P4's edits; P4's daemon actually implements the polling design (:191–192) |
+| COH-6 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | PHASE-8-surface.md:36–64: opus46-S1 "v0.7.0" closure declared unsound; P8-owned hand-rolled drain in `Memory::close` (Notify stop + `biased;` select + requeue_pending, drain via drain_log + direct store.flush). Consistent with code: FlushTask still exposes no stop/drain (T8.1-owned by design) |
+| CON-3 | Wave 2 / 671d99c | VERIFIED | sqlite-without-path hard error store/mod.rs:368–377 ("SqliteStore requires a path (store.path or LAMBO_SQLITE_PATH)"); test `sqlite_without_path_is_hard_error` :517–530 |
+| GRAPH-6 | Wave 3 / 1849d3e | VERIFIED | zero-interaction snapshot = valid empty graph graph.rs:161–166; test `empty_snapshot_roundtrips` :2478 |
+| GRAPH-7 | Wave 3 / 1849d3e | VERIFIED | duplicate natural-key edges rejected up front graph.rs:197–208; test `from_snapshot_rejects_duplicate_natural_key_edges` :2490 |
+| GRAPH-8 | Wave 3 / 1849d3e | VERIFIED | `reject_empty_key` read-only pre-pass derive.rs:204–227/:489 and action.rs:260–266/:346; test `record_action_rejects_empty_and_stopword_only_content` action.rs:752 |
+| GRAPH-9 | **none — absent from the wave table** | **NOT VERIFIED** | No NFC/NFKC normalization anywhere (no unicode-normalization dep in Cargo.toml; canonical.rs unchanged on this axis), and no disposition/acceptance recorded — `git grep GRAPH-9 dc5da31` hits only the finding's own two lines. The disposition table ("GRAPH-1..8, GRAPH-10") silently skips it: **"all 45 findings CLOSED" is arithmetically false — 44 dispositioned** |
+| GRAPH-10 | Wave 3 / 1849d3e | DOC-DISPOSITIONED | batch contract corrected as the review recommended: graph/mod.rs:20–30 — record_action after a drain produces edge-only batches; "Adapters MUST tolerate edge rows" whose endpoints committed in a prior flush |
+| STORE-5 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | accepted divergence recorded on the trait: store/mod.rs:91–95 "created_at parity (STORE-5, accepted divergence)... do NOT rely on created_at presence" — matches the review's one-line-note recommendation |
+| STORE-6 | Wave 4 / 3083586 | VERIFIED | MemoryStore working-copy + swap-on-full-success memory.rs:198–261; test `failed_flush_leaves_session_state_unchanged` :999 |
+| STORE-7 | Waves 6/7 / 6266f53 | VERIFIED | `session_embedding_from_parts` cockroach.rs:402–417: kind-XOR-dim → typed Backend corruption error (negative dim typed), mirroring sqlite; test `session_embedding_xor_corruption_errors_not_silent_none` :1737 |
+| STORE-8 | Waves 6/7 / 6266f53 | VERIFIED | sqlite.rs load paths: 57 `.try_get(` sites, zero remaining panicking `row.get(` (swept grep) |
+| STORE-9 | Wave 2 / 671d99c | VERIFIED | file-backed WAL + busy_timeout(8s) sqlite.rs:217–228; `is_in_memory_uri` sqlx-grammar guard :244; non-vacuous 8s>5s-default assertion test :2809–2811 |
+| TEST-6 | Wave 8 / 28500f3 | **NOT VERIFIED (on this branch)** | worktree scripts/provision.sh:77–79 is still the line-based `grep -v -i 'CREATE VECTOR INDEX'` split — the statement-aware scanner exists only on main (28500f3 not an ancestor). P4 didn't touch the file; a merge restores the fix, but this branch's provisioning is the original defect |
+| TEST-7 | Wave 8 / 28500f3 | **NOT VERIFIED (on this branch)** | scripts/fetch-bge-m3.sh has no sha256/checksum verification in the worktree (grep: zero hits); pinned-sha fix is main-only |
+| TEST-8 | Wave 8 / 28500f3 | **NOT VERIFIED (on this branch)** | rust-toolchain.toml `channel = "stable"` and ci.yml `dtolnay/rust-toolchain@stable` (:18) still float under `-D warnings`; the 1.97.1 pin is main-only |
+| COH-7 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | board denominators corrected and survived P4's board edit: dev-diary/README.md — P0 3/4, P1 5/5, P7 1/4 (P4 row 6/6 added alongside, not clobbering) |
+| COH-9 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | adversarial-review/README.md indexes all 22 records (verified against the directory: 23 files − README). Branch-lineage note: the e2e row still reads OPEN here because dc5da31 is main-only |
+| COH-10 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | PHASE-7-embeddings.md:243 "Live smoke status (COH-10, 2026-08-12 — corrected): ... PASSED"; :217 now cites adve-review-t70-embeddings.md, which exists |
+| COH-11 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | PHASE-1-contracts.md:258–261: erratum record now names §12.2 and §14 explicitly, with the COH-11 correction note |
+| COH-12 | Waves 6/7 / 6266f53 (claim: "phase/p4-p7 fast-forwarded onto final main") | **NOT VERIFIED — violated by this branch** | phase/p4-daemon forked from 6266f53; P4 work began 08:29 IST, ~5.5 h after Wave 8/wrap-up/closure landed on main — the branch sits three commits behind final main, the exact lineage-hygiene failure COH-12 flagged (no twin-commit duplication observed on the branch itself, but the recorded fast-forward claim is false for the one phase branch now in flight) |
+| CON-5 | Wave 5 / 95234b6 | VERIFIED | `resolve_backends` fail-closed both-direction check (VECTOR_SEARCH ⇄ vector_dimensions) resolve.rs:43–66; stub-store refusal tests :209–285 |
+| CON-6 | Wave 3 / 1849d3e | DOC-DISPOSITIONED (rule pinned, D6) | trait doc store/mod.rs:117–124: implementers MUST narrow at the write gate via `u32::try_from` → typed invariant error, never a silent `as`; D6 recorded in notes/adve-wave3-graph-decisions.md. (Read-side i64→i32 `as` casts remain at cockroach.rs:722/:779 — load-path, outside D6's pinned write-gate scope; worth a P6-era sweep) |
+| CON-7 | Wave 5 / 95234b6 | VERIFIED | Embedder trait input contract embed/mod.rs:37–41 (empty/whitespace MUST reject with Unavailable); FixtureEmbedder enforces identically fixture.rs:119–123; test `rejects_empty_and_whitespace_input` :144 |
+| CON-8 | Wave 5 / 95234b6 | VERIFIED (upgraded beyond the doc-note recommendation) | shared codec store/vector.rs (non-finite rejected); sqlite upsert+select carry `Concept.embedding` (sqlite.rs:6–7 module doc; corrupt blobs → typed error); parity covered in the green sqlite suite |
+| CON-9 | Wave 2 / 671d99c | VERIFIED | .env.example documents `LAMBO_SQLITE_PATH=./lambo.db` with the hard-error/no-silent-memory note (mirrors CON-3) |
+
+### Not verified / regressed — goes to the P4 remediation
+
+1. **Branch lineage (headline):** merge/rebase final main (dc5da31) into
+   `phase/p4-daemon` before the P4 merge — restores TEST-6/7/8, the COH-3
+   wrap-up convergence, the closed record + index, and the pinned toolchain.
+   No file overlap with P4's diff, so it is a clean merge.
+2. **TEST-2 surface REGRESSED by P4:** src/daemon/conflict.rs:212 (module-level
+   `use crate::fixtures;`) and src/daemon/hotlist.rs:606 (ungated fixture test)
+   break `--no-default-features --features store-cockroach` and
+   `--no-default-features --features store-sqlite` (E0432; 2/5 matrix rows
+   red). Gate both with `#[cfg(feature = "fixtures")]` (CON-4 pattern).
+3. **TEST-3 NOT VERIFIED:** ci.yml `'phase-*'` glob cannot match `phase/<slug>`
+   branches (GitHub `*` doesn't cross `/`). Change to `'phase/**'` and push the
+   phase branches — this exact gap is why item 2 shipped invisibly.
+4. **GRAPH-9 NOT VERIFIED / undispositioned:** no NFC/NFKC remediation and no
+   recorded acceptance anywhere (wave table skips it). Either fix (normalize in
+   `canonicalize`) or record an explicit accepted-residual-risk disposition;
+   until then the record's "all 45 CLOSED" claim is false by one.
+5. **COH-12 NOT VERIFIED:** the recorded "fast-forwarded onto final main" claim
+   is false for `phase/p4-daemon`; re-anchor the branch (item 1) and correct or
+   re-date the claim.
+6. **TEST-6/7/8 NOT VERIFIED on this branch** (remediations are main-only,
+   28500f3): resolved automatically by item 1.
+
+**Verification: 7/7 P1, 32/38 P2/P3 verified (21 code + 11 doc-dispositioned);
+closure stands except GRAPH-9, TEST-3, COH-12 — and, on this branch only,
+TEST-6/7/8 (Wave 8 absent) plus a P4 regression of the TEST-2 matrix. Merge
+final main into phase/p4-daemon, gate the two fixtures imports, fix the CI
+glob, and disposition GRAPH-9 before phase/p4-daemon merges.**
+
+— fable (claude-fable-5), verification pass, 2026-08-12 (phase/p4-daemon @ cd9340e)
