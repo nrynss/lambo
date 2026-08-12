@@ -1,7 +1,10 @@
 //! Small bounded LRU for recall results (T5.4, spec §8).
 //!
 //! Keyed by `(query_hash, top_k, traversal_depth, mutation_epoch)`. Epoch
-//! invalidation only: any graph mutation bumps [`crate::graph::Graph::epoch`],
+//! invalidation only: any graph mutation — mutation-log writes AND RAM-local
+//! reservation transitions ([`crate::graph::Graph::set_reservation`] /
+//! [`crate::graph::Graph::clear_reservation`] bump the epoch directly, since
+//! no Mutation kind exists for them) — bumps [`crate::graph::Graph::epoch`],
 //! so an entry whose key carries a stale epoch is simply a miss. There are no
 //! generation counters (the arena is gone).
 //!
@@ -29,11 +32,10 @@ pub const DEFAULT_CACHE_CAPACITY: usize = 128;
 
 /// Cached payload: the full recall output.
 ///
-/// Type alias for [`RecallResult`], which derives `Serialize`/`Deserialize`:
-/// the cache is therefore reusable verbatim (the integrator could persist
-/// entries for a warm start without a new type). Storing the result clone
-/// directly with no per-insert serialization is the boring choice for an
-/// in-RAM cache.
+/// Type alias for [`RecallResult`] — the [`RecallCache`] default value type.
+/// The cache is generic over its value so callers can store the epoch-stable
+/// pipeline artifact instead (the recall entry caches phase-1 + expansion and
+/// re-renders time-sensitive output on every call).
 pub type CacheValue = RecallResult;
 
 /// Cache key: identity of a recall invocation.
@@ -76,13 +78,13 @@ impl CacheKey {
 /// Bounded LRU cache of recall results.
 ///
 /// Not `Sync`-friendly by design; wrap in a lock at the call site.
-pub struct RecallCache {
-    entries: HashMap<CacheKey, (CacheValue, u64)>,
+pub struct RecallCache<V = RecallResult> {
+    entries: HashMap<CacheKey, (V, u64)>,
     capacity: usize,
     tick: u64,
 }
 
-impl RecallCache {
+impl<V> RecallCache<V> {
     /// Create a cache with [`DEFAULT_CACHE_CAPACITY`].
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CACHE_CAPACITY)
@@ -102,7 +104,7 @@ impl RecallCache {
     }
 
     /// Fetch a cached result, marking the entry most-recently-used on a hit.
-    pub fn get(&mut self, key: &CacheKey) -> Option<&CacheValue> {
+    pub fn get(&mut self, key: &CacheKey) -> Option<&V> {
         let tick = self.next_tick();
         if let Some((result, entry_tick)) = self.entries.get_mut(key) {
             *entry_tick = tick;
@@ -114,7 +116,7 @@ impl RecallCache {
 
     /// Store a result. A fresh key at capacity evicts the least-recently-used
     /// entry; an existing key is overwritten and re-stamped.
-    pub fn insert(&mut self, key: CacheKey, result: CacheValue) {
+    pub fn insert(&mut self, key: CacheKey, result: V) {
         let tick = self.next_tick();
         if let Some((slot, entry_tick)) = self.entries.get_mut(&key) {
             *slot = result;

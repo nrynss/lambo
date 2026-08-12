@@ -85,6 +85,17 @@ pub struct ScoreTable {
 /// Production uses [`Utc::now`]; tests swap in a controllable clock
 /// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
 /// window (e.g. staleness) without waiting on the wall clock.
+/// The epoch-stable recall pipeline artifact: phase-1 candidates plus the
+/// phase-2 expansion. Cached as a unit; assembly and rendering re-run on
+/// every call so time-sensitive output (hot-list `seconds_ago`,
+/// reservations, liveness) is never frozen by a cache hit (spec §9
+/// "conditions re-validated on each recall()"; P5 phase-close finding).
+#[derive(Clone)]
+pub struct RecallPipeline {
+    phase1: Vec<Scored<NodeId>>,
+    expanded: expand::ExpandedSet,
+}
+
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Background scorer + detector + event publisher (T4.1 skeleton, T4.6
@@ -299,6 +310,26 @@ impl Daemon {
     /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
     /// A store error during `gather` degrades to an empty vector leg with a
     /// warning rather than failing the read.
+    /// Three-phase recall (spec §8; P5).
+    ///
+    /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
+    /// lock: the vector leg is async and must not run while the graph lock is
+    /// held. The pipeline then runs under the documented lock order
+    /// (graph read -> hot write). The daemon's inverted index must be
+    /// installed via [`Daemon::with_index`]; without it recall returns an
+    /// empty hit list with a warning (P8 wires the owner's index).
+    ///
+    /// `cache` is session-scoped: spec §8's key carries no session id, so the
+    /// caller owns one [`RecallCache`] per session and hands it over by
+    /// `&mut` (the cache has no interior synchronization). The cache stores
+    /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
+    /// re-validation and context rendering run on EVERY call with the
+    /// caller's current `now`, so warning lines are always fresh.
+    ///
+    /// `embedding` is the query embedding when an embedder is configured;
+    /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
+    /// A store error during `gather` degrades to an empty vector leg with a
+    /// warning rather than failing the read.
     pub async fn recall(
         &self,
         session: &SessionId,
@@ -306,7 +337,7 @@ impl Daemon {
         store: &dyn crate::store::GraphStore,
         embedding: Option<&[f32]>,
         weights: RecallWeights,
-        cache: &mut RecallCache,
+        cache: &mut RecallCache<RecallPipeline>,
     ) -> RecallResult {
         // Cache probe needs only the epoch: a brief graph read, no gather.
         let key = CacheKey::new(
@@ -315,53 +346,70 @@ impl Daemon {
             query.traversal_depth,
             self.graph.read().epoch(),
         );
-        if let Some(cached) = cache.get(&key) {
-            return cached.clone();
-        }
+        let pipeline = match cache.get(&key) {
+            Some(pipeline) => pipeline.clone(),
+            None => {
+                // Gather BEFORE the graph lock: vector_candidates is store I/O.
+                let input = match candidates::gather(store, session, embedding, query.top_k).await {
+                    Ok(input) => input,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "lambo::recall",
+                            "phase-1 gather degraded: {err}"
+                        );
+                        candidates::Phase1Input::default()
+                    }
+                };
 
-        // Gather BEFORE the graph lock: vector_candidates is store I/O.
-        let input = match candidates::gather(store, session, embedding, query.top_k).await {
-            Ok(input) => input,
-            Err(err) => {
-                tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
-                candidates::Phase1Input::default()
+                // Scores snapshot before the locks (its own lock, no ordering
+                // constraint), then graph read -> index read.
+                let scores = self.scores.read().clone();
+                let graph = self.graph.read();
+                let index = self.index.as_ref().map(|i| i.read());
+
+                // Re-read the epoch under the graph lock: if a mutation landed
+                // between the probe and here, the insert key below reflects
+                // it, so the cache can never serve this compute across an
+                // epoch boundary.
+                let key = CacheKey::new(
+                    &query.query,
+                    query.top_k,
+                    query.traversal_depth,
+                    graph.epoch(),
+                );
+
+                let phase1 = match index.as_deref() {
+                    Some(index) => {
+                        candidates::candidates(&graph, index, input, &query.query, query.top_k)
+                    }
+                    // The missing-index warning is re-emitted on every call
+                    // below (it is time-invariant within an epoch).
+                    None => Vec::new(),
+                };
+                let expanded = expand::expand(&graph, phase1.clone(), query.traversal_depth);
+                let pipeline = RecallPipeline { phase1, expanded };
+
+                // Never cache a compute whose daemon scores lag the graph
+                // epoch (the rescore is epoch-gated, up to one tick late): the
+                // next call after the rescore must recompute against the fresh
+                // table (P5 phase-close finding).
+                if scores.epoch == graph.epoch() {
+                    cache.insert(key, pipeline.clone());
+                }
+                pipeline
             }
         };
 
-        // Scores snapshot before the locks (its own lock, no ordering
-        // constraint), then graph read -> index read -> hot write.
+        // Fresh per call: current scores, hot-list re-validation, reservations
+        // and rendering — none of it cached (spec §9).
         let scores = self.scores.read().clone();
         let graph = self.graph.read();
-        let index = self.index.as_ref().map(|i| i.read());
         let mut hot = self.hot.write();
-
-        // Re-read the epoch under the graph lock: if a mutation landed
-        // between the probe and here, the insert key below reflects it, so
-        // the cache can never serve this compute across an epoch boundary.
-        let key = CacheKey::new(
-            &query.query,
-            query.top_k,
-            query.traversal_depth,
-            graph.epoch(),
-        );
-
-        let mut warnings = Vec::new();
-        let phase1 = match index.as_deref() {
-            Some(index) => candidates::candidates(&graph, index, input, &query.query, query.top_k),
-            None => {
-                warnings.push(
-                    "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"
-                        .to_string(),
-                );
-                Vec::new()
-            }
-        };
-        let expanded = expand::expand(&graph, phase1.clone(), query.traversal_depth);
         let now = (self.clock)();
         let mut result = assemble::assemble(
             &graph,
-            &expanded,
-            &phase1,
+            &pipeline.expanded,
+            &pipeline.phase1,
             &scores,
             &mut hot,
             &query,
@@ -369,8 +417,13 @@ impl Daemon {
             now,
             assemble::default_token_count,
         );
-        result.warnings.extend(warnings);
-        cache.insert(key, result.clone());
+        let no_index = self.index.is_none();
+        if no_index {
+            result.warnings.push(
+                "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"
+                    .to_string(),
+            );
+        }
         result
     }
 
@@ -802,7 +855,7 @@ fn run_cycle(
     if cs.gc_pending.is_empty() && epoch.saturating_sub(cs.last_gc_epoch) >= params.gc_interval {
         let outcome = {
             let mut g = graph.write();
-            gc::run(
+            let outcome = gc::run(
                 &mut g,
                 gc::GcParams {
                     now,
@@ -813,13 +866,16 @@ fn run_cycle(
                     max_survivor_bumps: params.gc_survivor_bump_chunk,
                     ..Default::default()
                 },
-            )
+            );
+            // Spec §9 step 4 (XP-5): mirror collections into the owner's
+            // index when it gave us one. Held WITH the graph lock so
+            // recall's (graph, index) read pair sees an atomic publication
+            // (P5 phase-close finding); lock order stays graph -> index.
+            if let Some(index) = index.as_ref() {
+                gc::sync_index(&outcome, &mut index.write());
+            }
+            outcome
         };
-        // Spec §9 step 4 (XP-5): mirror collections into the owner's index
-        // when it gave us one. Never held with the graph lock.
-        if let Some(index) = index.as_ref() {
-            gc::sync_index(&outcome, &mut index.write());
-        }
         // XP-5: the tier had zero logging, so the advisory
         // `max_concept_nodes` warning and the canonical-budget signal were
         // unobservable. Both ride `GcOutcome::warnings`.
@@ -2446,6 +2502,11 @@ mod tests {
                 created_at: now,
             })
             .unwrap();
+        // The loop's rescore catches up to the new epoch within one tick; the
+        // entry's cache guard only skips caching while scores lag, so once
+        // caught up the new epoch key is stored.
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
         let _ = daemon
             .recall(
                 &session,
@@ -2460,6 +2521,215 @@ mod tests {
             cache.len(),
             2,
             "epoch bump invalidates: new key inserted on miss"
+        );
+    }
+
+    /// A reservation transition (RAM-local: no Mutation kind exists) bumps
+    /// the epoch, so a same-query recall misses and re-renders the
+    /// reservation line (P5 phase-close finding).
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn recall_reservation_transition_invalidates_cache_and_renders() {
+        use crate::config::RecallWeights;
+        use crate::daemon::score::rescore;
+        use crate::fixtures;
+        use crate::recall::cache::RecallCache;
+        use crate::types::Reservation;
+
+        let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
+        let snap = fixtures::load_snapshot("session-rest-api").unwrap();
+        let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
+        let index = Arc::new(RwLock::new(InvertedIndex::from_snapshot(&snap)));
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(Arc::new(move || now))
+        .with_index(index);
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+
+        let store = fixtures::load_store("session-rest-api").unwrap();
+        let mut cache = RecallCache::new();
+        let session = SessionId::from("session-rest-api");
+        let query = RecallQuery {
+            query: "update user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 2,
+        };
+        let _ = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(cache.len(), 1);
+
+        // Reserve a node in the expanded set (user schema, 001001).
+        let us = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
+        graph.write().set_reservation(Reservation {
+            session_id: session.clone(),
+            node_id: us,
+            agent_id: AgentId::from("agent-a"),
+            expires_at: now + chrono::Duration::seconds(60),
+        });
+
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+        let with_res = daemon
+            .recall(
+                &session,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(
+            cache.len(),
+            2,
+            "reservation transition bumps epoch -> cache miss"
+        );
+        assert!(
+            with_res.context.contains("Reserved by agent-a")
+                || with_res
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("Reserved by agent-a")),
+            "reservation line rendered; warnings: {:?}",
+            with_res.warnings
+        );
+    }
+
+    /// Cache hits re-render time-sensitive output: with a mutable clock and
+    /// no epoch change, a live conflict entry's age refreshes and a lapsed
+    /// window drops the warning line (spec §9 "conditions re-validated on
+    /// each recall()" — P5 phase-close finding).
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn recall_cache_hit_rerenders_fresh_warning_lines() {
+        use crate::config::RecallWeights;
+        use crate::daemon::score::rescore;
+        use crate::fixtures;
+        use crate::recall::cache::RecallCache;
+        use std::sync::Mutex;
+
+        let base = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let clock_now = Arc::new(Mutex::new(base));
+        let snap = fixtures::load_snapshot("session-rest-api").unwrap();
+        let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
+        let index = Arc::new(RwLock::new(InvertedIndex::from_snapshot(&snap)));
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(Arc::new({
+            let c = clock_now.clone();
+            move || *c.lock().unwrap()
+        }))
+        .with_index(index);
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+
+        // Live conflict entry on user schema: written 11s before `base`,
+        // 30s window.
+        let us = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
+        let agents = vec![AgentId::from("agent-a"), AgentId::from("agent-b")];
+        let write_at = base - chrono::Duration::seconds(11);
+        let entry = crate::daemon::hotlist::HotListEntry::new(
+            us,
+            Condition::Conflict,
+            crate::daemon::hotlist::HotListPayload::Conflict {
+                agents: agents.clone(),
+                writer: AgentId::from("agent-a"),
+                seconds_ago: 999, // stale sentinel: revalidate must rebuild
+            },
+            move |_, now| {
+                let secs = (now - write_at).num_seconds();
+                if (0..=30).contains(&secs) {
+                    Some(crate::daemon::hotlist::HotListPayload::Conflict {
+                        agents: agents.clone(),
+                        writer: AgentId::from("agent-a"),
+                        seconds_ago: secs as u64,
+                    })
+                } else {
+                    None
+                }
+            },
+        );
+        let _ = daemon.hot.write().insert(entry);
+
+        let store = fixtures::load_store("session-rest-api").unwrap();
+        let mut cache = RecallCache::new();
+        let session = SessionId::from("session-rest-api");
+        let query = RecallQuery {
+            query: "update user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 2,
+        };
+
+        let first = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert!(
+            first.context.contains("wrote to it 11 seconds ago"),
+            "age at read time: {}",
+            first.context
+        );
+        assert_eq!(cache.len(), 1);
+
+        // No epoch change; clock advances 5s -> cache HIT, age re-rendered.
+        *clock_now.lock().unwrap() = base + chrono::Duration::seconds(5);
+        let aged = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(cache.len(), 1, "same epoch -> cache hit, no new key");
+        assert!(
+            aged.context.contains("wrote to it 16 seconds ago"),
+            "age refreshed on cache hit: {}",
+            aged.context
+        );
+
+        // Window lapses (age 41s > 30s) -> warning line drops, still a hit.
+        *clock_now.lock().unwrap() = base + chrono::Duration::seconds(30);
+        let lapsed = daemon
+            .recall(
+                &session,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(cache.len(), 1, "same epoch -> cache hit");
+        assert!(
+            !lapsed.context.contains("wrote to it"),
+            "lapsed entry's warning dropped: {}",
+            lapsed.context
         );
     }
 }
