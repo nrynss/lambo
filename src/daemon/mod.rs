@@ -23,7 +23,8 @@
 //!
 //! [`Daemon::spawn`] returns the `JoinHandle`; aborting it stops the loop (a
 //! graceful stop is a P8 concern per the COH-6 note).
-
+pub mod conflict;
+pub mod hotlist;
 pub mod score;
 
 use parking_lot::RwLock;
