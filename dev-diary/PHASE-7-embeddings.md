@@ -158,6 +158,16 @@ far text creates a fresh concept; with a no-capability store, behavior is byte-i
   and commit phases (spec §2.2) is an accepted design constraint; `src/graph/canonical.rs` is
   inalienable and was not touched.
 
+- **Known issue — post-review note (2026-08-13, adversarial whole-worktree sweep, see
+  `adversarial-review/adve-review-p7-hybrid-vectors.md` MAJOR-1):** hybrid eagerly
+  canonicalizes ALL items in phase 1 and does not re-canonicalize / collapse by
+  canonical key at commit, so a single hybrid call whose distinct contents share a
+  canonical key ("user schema" + "schema user") hard-errors on the second
+  `insert_concept` (UNIQUE key collision) after the first node was already written —
+  a partial-write divergence from sync `derive`, which collapses them. Fix: mirror
+  sync `derive` by re-canonicalizing (or key-deduping against nodes written this
+  call) at commit, plus a collapse regression test.
+
 ---
 
 ### T7.3 — Live `vector_candidates` on CockroachDB ★ (hackathon requirement)
