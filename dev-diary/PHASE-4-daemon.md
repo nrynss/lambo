@@ -41,7 +41,7 @@ Binding notes for P4 tasks; source: grok branch review (CLOSED). Do not re-deriv
 requires:   T1.1
 fixture-ok: yes
 owns:       src/daemon/score.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT after 1 remediation round; merged 40fdaee)
 ```
 Spec §9 verbatim:
 `score = recency·0.25 + frequency·0.20 + session_activity·0.20 + density·0.35 + edge_type_bonus + concept_type_modifier`
