@@ -119,10 +119,14 @@ pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
 pub fn blast_radii(graph: &Graph) -> HashMap<NodeId, u64> {
     let sources = inbound_sources(graph);
     let mut out: HashMap<NodeId, u64> = HashMap::new();
-    for (_, srcs) in sources {
+    for (dst, srcs) in sources {
         if srcs.len() == 1 {
             let only = srcs[0];
-            *out.entry(only).or_insert(0) += 1;
+            // A structural self-loop (srcs[dst] == {dst}) is not a dependent;
+            // blast_radius and all durable stores exclude it (dst != node).
+            if only != dst {
+                *out.entry(only).or_insert(0) += 1;
+            }
         }
     }
     out
@@ -580,6 +584,24 @@ mod tests {
                 radii.get(&uid(id)).copied().unwrap_or(0)
             );
         }
+        // Self-loop divergence (deep-review F2): a node whose only inbound
+        // structural edge is a self-loop is NOT its own dependent. The batched
+        // map must agree with the single-node blast_radius (and the stores).
+        let mut g = Graph::new(sid());
+        let origin = interaction(97, "a");
+        g.insert_interaction(origin.clone()).unwrap();
+        g.insert_concept(concept_for_blast(uid(0), origin.id, "self"), origin.id)
+            .unwrap();
+        // Structural self-loop: uid(0) depends on uid(0) alone.
+        g.upsert_edge(dep_edge(1, uid(0), uid(0))).unwrap();
+        let radii = blast_radii(&g);
+        let solo = blast_radius(&g, uid(0));
+        assert_eq!(
+            radii.get(&uid(0)).copied().unwrap_or(0),
+            solo,
+            "blast_radii and blast_radius agree on a structural self-loop"
+        );
+        assert_eq!(radii.get(&uid(0)).copied().unwrap_or(0), 0);
     }
 
     #[test]

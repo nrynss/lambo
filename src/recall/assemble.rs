@@ -113,8 +113,12 @@ where
         .cloned()
         .collect();
     for s in &mut members {
-        let d = daemon.get(&s.item).copied().unwrap_or(0.0);
-        let r = relevance.get(&s.item).copied().unwrap_or(0.0);
+        // d and r are multiplied unguarded, so sanitize them like the weights
+        // (module doc: final score is finite for every input - a non-finite
+        // store-provided relevance must not poison the total order, GPT5.6sol
+        // P1-4 / deep-review F3).
+        let d = sane_weight(daemon.get(&s.item).copied().unwrap_or(0.0));
+        let r = sane_weight(relevance.get(&s.item).copied().unwrap_or(0.0));
         s.score = d * w_daemon + r * w_query;
     }
     members.sort_by(|a, b| {
@@ -471,6 +475,49 @@ mod tests {
         );
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].score, 0.0);
+    }
+
+    #[test]
+    fn non_finite_daemon_or_relevance_inputs_sanitize_to_zero() {
+        // Deep-review F3: the "final score finite for every input" contract is
+        // honored for the INPUTS too, not just the weights. A non-finite
+        // store-provided relevance (or daemon score) must sanitize to 0.0 and
+        // never rank first via total_cmp.
+        let g = graph_with(2);
+        let expanded = ExpandedSet {
+            required: vec![Scored::new(uid(1), 0.0), Scored::new(uid(2), 0.0)],
+            siblings: Vec::new(),
+        };
+        // uid(1): non-finite daemon AND relevance; uid(2): sane.
+        let phase1 = vec![Scored::new(uid(1), f64::NAN), Scored::new(uid(2), 1.0)];
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![Scored::new(uid(1), f64::NAN), Scored::new(uid(2), 1.0)],
+        };
+        let result = assemble(
+            &g,
+            &expanded,
+            &phase1,
+            &scores,
+            &mut HotList::new(),
+            &query(10, 10_000),
+            RecallWeights::default(),
+            ts(0),
+            default_token_count,
+        );
+        // uid(1) sanitizes to 0.0; uid(2) ranks above it.
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(
+            result.hits[0].node_id,
+            uid(2),
+            "non-finite input must not rank first"
+        );
+        assert_eq!(result.hits[1].node_id, uid(1));
+        assert!(
+            result.hits[1].score.is_finite(),
+            "sanitized score is finite"
+        );
+        assert_eq!(result.hits[1].score, 0.0);
     }
 
     // -----------------------------------------------------------------------
@@ -939,7 +986,12 @@ mod tests {
             &[],
             &scores,
             &mut HotList::new(),
-            &query(3, 34),
+            // Discriminating budget: block1+block2 (no separators) == 62 <= 63
+            // (old buggy code accepted 2 blocks), but block1+sep+block2 == 64
+            // > 63, so the fixed code stops at block1. Proves in-context
+            // separator charging (the same budget, under a separator-free
+            // accumulator, would render two blocks).
+            &query(3, 63),
             RecallWeights::default(),
             ts(60),
             byte_len,
@@ -965,6 +1017,56 @@ mod tests {
             byte_len,
         );
         assert_eq!(all.context.split("\n\n").count(), 3);
+    }
+
+    // Deep-review F1 / GPT5.6sol P1-4: the context is a STRICT ranked prefix.
+    // A lower-ranked block that would fit alone must NOT appear after a
+    // higher-ranked block that does not fit. Sizes are computed at runtime so
+    // the test is robust to render changes.
+    #[test]
+    fn ranked_prefix_stops_at_first_nonfit_block() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1);
+        g.insert_interaction(i1.clone()).unwrap();
+        // Long, highest-scoring block (does not fit); short, lower-scoring block
+        // (fits alone). Correct code: long blocks everything -> empty context.
+        g.insert_concept(concept(1, i1.id, &"A".repeat(60)), i1.id)
+            .unwrap();
+        g.insert_concept(concept(2, i1.id, "B"), i1.id).unwrap();
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![Scored::new(uid(1), 1.0), Scored::new(uid(2), 0.1)],
+        };
+        let expanded = ExpandedSet {
+            required: vec![Scored::new(uid(1), 0.0), Scored::new(uid(2), 0.0)],
+            siblings: Vec::new(),
+        };
+        let long = format!("{} [Entity] (score 0.50)", "A".repeat(60));
+        let short = "B [Entity] (score 0.05)".to_owned();
+        assert!(long.len() > short.len());
+        // Budget fits the short block alone but not the long block.
+        let budget = short.len() + 2;
+        assert!(budget < long.len(), "budget must exclude the long block");
+        let result = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut HotList::new(),
+            &RecallQuery {
+                query: "irrelevant".into(),
+                top_k: 2,
+                max_tokens: budget,
+                traversal_depth: 2,
+            },
+            RecallWeights::default(),
+            ts(60),
+            byte_len,
+        );
+        assert_eq!(
+            result.context, "",
+            "a non-fitting top block yields empty context, never a lower block"
+        );
     }
 
     // P2-5 (GPT5.6sol): a graph-missing member within top_k (e.g. a stale durable
