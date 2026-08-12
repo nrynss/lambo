@@ -82,6 +82,15 @@ status:     not-started
 within the expanded set force-included **after condition re-validation** (call T4.2's
 `revalidate`). Assembly to `max_tokens` via `ceil(bytes / 3.5)` or caller `token_fn`.
 
+**T4.2 `revalidate` signature (revised, XP-3 — 2026-08-12):**
+`revalidate(&mut self, graph: &Graph, node: NodeId, now: DateTime<Utc>) -> bool`. Pass
+**recall's own `now`** — the predicate re-derives its recency window from it, so an entry
+whose window elapsed between detection and this read is dropped here instead of surviving
+against a captured instant. On `true`, the entry's `payload` has just been rebuilt against
+that `now`, so render it directly: `seconds_ago` is the age at *read* time. Do not cache the
+payload across reads. Per-entry re-validation is per-node (one neighborhood walk), so
+force-including a handful of hot nodes under the graph lock is cheap.
+
 The context format is v0.6.0 §9.2 verbatim — includes the `[canonical]` marker, the
 blast-radius warning line
 (`⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.`), the conflict

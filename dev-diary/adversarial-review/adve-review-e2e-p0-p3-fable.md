@@ -590,6 +590,7 @@ Wave-1 evidence (20260811-233251) plus the #[ignore]/REQUIRE_LIVE machinery.
    recorded acceptance anywhere (wave table skips it). Either fix (normalize in
    `canonicalize`) or record an explicit accepted-residual-risk disposition;
    until then the record's "all 45 CLOSED" claim is false by one.
+   GRAPH-9 remediated in this branch (`phase/p4-daemon`, Wave 7).
 5. **COH-12 NOT VERIFIED:** the recorded "fast-forwarded onto final main" claim
    is false for `phase/p4-daemon`; re-anchor the branch (item 1) and correct or
    re-date the claim.

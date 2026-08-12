@@ -1,9 +1,12 @@
 //! Canonicalization pipeline (T2.2) — spec §7.1 steps 1–5.
 //!
 //! Steps, in order:
-//! 1. Normalize — split camelCase boundaries, lowercase, split `[-_ ]` +
-//!    whitespace, strip stopwords ([`STOPWORDS`], pinned to the fixture
-//!    convention `scripts/gen-fixtures.py`).
+//! 1. Normalize — Unicode **NFC** (adve-review GRAPH-9: composed and decomposed
+//!    spellings of the same word must not become two concepts), split camelCase
+//!    boundaries, lowercase, split `[-_ ]` + whitespace, strip stopwords
+//!    ([`STOPWORDS`], pinned to the fixture convention
+//!    `scripts/gen-fixtures.py`). See [`normalize_tokens`] for why NFC and not
+//!    NFKC.
 //! 2. Stem — Porter via `rust-stemmers` (`Algorithm::English`; snowball and
 //!    custom stemmers are cut per spec §7.1).
 //! 3. Token-sort → canonical key (sorted stems joined with single spaces).
@@ -29,6 +32,7 @@
 use std::sync::LazyLock;
 
 use rust_stemmers::{Algorithm, Stemmer};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::graph::Graph;
 use crate::types::{ConceptType, LamboError, NodeId};
@@ -60,12 +64,38 @@ fn split_camel_case(s: &str) -> String {
 
 /// Spec §7.1 steps 1–2 — normalize + stem.
 ///
-/// Lowercase, split `[-_ ]` and camelCase boundaries, drop stopwords, Porter
-/// stem. NO sort, NO synonym lookup, NO join (those are [`canonical_key`]'s job).
-/// Pure — no `Graph` dependency, so recall's keyword index (T2.6) can tokenize
-/// without a graph.
+/// **Unicode NFC first** (adve-review GRAPH-9), then lowercase, split `[-_ ]`
+/// and camelCase boundaries, drop stopwords, Porter stem. NO sort, NO synonym
+/// lookup, NO join (those are [`canonical_key`]'s job). Pure — no `Graph`
+/// dependency, so recall's keyword index (T2.6) can tokenize without a graph.
+///
+/// ## Why NFC (GRAPH-9)
+///
+/// `"café"` composed (NFC, `é` = U+00E9) and decomposed (NFD, `e` + U+0301) are
+/// different byte strings and were therefore different canonical keys — so the
+/// same word typed by two agents on two platforms produced two concepts that
+/// canonicalization could never merge. macOS filesystems hand back NFD while
+/// most editors and HTTP clients emit NFC, so both reach the same session.
+/// Normalizing at the head of the tokenizer fixes **both** `canonical_key`
+/// paths, [`canonicalize`] included, and the T2.6 keyword index with them —
+/// they all tokenize through here, so key and index agree by construction.
+///
+/// NFC, not NFKC: NFKC folds compatibility characters (`ﬁ` → `fi`, `²` → `2`,
+/// full-width forms to ASCII), which changes what the content *says*. Canonical
+/// equivalence is the property we need — same character, same bytes — and it is
+/// the only one that is lossless.
+///
+/// Pure ASCII is a fixed point of NFC, so every committed fixture and every
+/// pinned canonicalization case is byte-identical through this change.
+///
+/// The raw synonym lookup in [`canonical_key`] / [`canonicalize`] stays
+/// byte-exact on the trimmed input (the pinned muse-spark S2 contract: synonym
+/// keys must match the raw call-site spelling, case included). A synonym key and
+/// a call site that disagree about composition therefore miss each other — the
+/// same shape as the existing case-sensitivity, and not widened here.
 pub fn normalize_tokens(content: &str) -> Vec<String> {
-    split_camel_case(content)
+    let nfc: String = content.nfc().collect();
+    split_camel_case(&nfc)
         .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
         .filter(|t| !t.is_empty())
         .map(str::to_lowercase)
@@ -391,6 +421,84 @@ mod tests {
             canonical_key("  register_user  ", fixture_synonyms),
             "creat user"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // GRAPH-9 — Unicode NFC
+    // ------------------------------------------------------------------
+
+    /// GRAPH-9: composed (NFC) and decomposed (NFD) spellings of the same word
+    /// must produce the same canonical key — and therefore resolve to the same
+    /// concept — instead of two concepts canonicalization can never merge.
+    #[test]
+    fn nfc_and_nfd_spellings_share_one_canonical_key() {
+        // "café server": é as U+00E9 (composed) vs e + U+0301 (decomposed).
+        let nfc = "caf\u{e9} server";
+        let nfd = "cafe\u{301} server";
+        assert_ne!(nfc, nfd, "the two inputs must differ byte-wise");
+        assert_eq!(
+            canonical_key(nfc, no_synonym),
+            canonical_key(nfd, no_synonym),
+            "canonical equivalence must collapse to one key"
+        );
+        assert_eq!(normalize_tokens(nfc), normalize_tokens(nfd));
+
+        // Step 5 follows: the decomposed spelling matches the concept created
+        // from the composed one. Pre-fix this was Unmatched — a duplicate.
+        let g = graph_with_concept(&canonical_key(nfc, no_synonym));
+        let expected = g.concepts().next().unwrap().id;
+        match canonicalize(nfd, &g).unwrap() {
+            CanonicalizeResult::Matched { node, .. } => assert_eq!(node, expected),
+            other => panic!("decomposed spelling must match the composed concept: {other:?}"),
+        }
+
+        // NFC, not NFKC: compatibility folding would change what the content
+        // says, so distinct characters stay distinct.
+        assert_ne!(
+            canonical_key("\u{fb01}le", no_synonym),
+            canonical_key("file", no_synonym),
+            "the ﬁ ligature is compatibility-equivalent, not canonically equal"
+        );
+    }
+
+    /// GRAPH-9: pure ASCII is a fixed point of NFC, so no pinned key moves.
+    #[test]
+    fn ascii_canonical_keys_are_unchanged_by_nfc() {
+        for input in [
+            "UserSchema",
+            "create_user",
+            "auth-middleware",
+            "  schema the user  ",
+            "creating cached systems",
+            "",
+        ] {
+            let nfc: String = input.nfc().collect();
+            assert_eq!(nfc, input, "ASCII must be a fixed point: {input:?}");
+            assert_eq!(
+                canonical_key(input, no_synonym),
+                canonical_key(&nfc, no_synonym)
+            );
+        }
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[test]
+    fn nfc_leaves_every_pinned_canonicalization_case_unchanged() {
+        // The frozen cases table is the contract (module docs); GRAPH-9 must be
+        // invisible to it. `canonicalization_cases` is ASCII throughout.
+        let cases = crate::fixtures::load_canonicalization_cases().unwrap();
+        let cases = cases.as_array().expect("cases table is a JSON array");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let input = case["input"].as_str().expect("every case has an input");
+            let nfc: String = input.nfc().collect();
+            assert_eq!(nfc, input, "fixture case must be ASCII: {input:?}");
+            // And the derived key is unchanged by the normalization step.
+            assert_eq!(
+                canonical_key(input, no_synonym),
+                canonical_key(&nfc, no_synonym)
+            );
+        }
     }
 
     #[test]
