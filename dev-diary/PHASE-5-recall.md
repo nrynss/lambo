@@ -43,7 +43,7 @@ Binding notes for P5 tasks; sources: grok branch review (CLOSED), P2 handoffs.
 requires:   T1.1, T2.6
 fixture-ok: yes
 owns:       src/recall/candidates.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged e230f71)
 ```
 Union of: BM25 keyword hits from the in-memory index; concepts of the N=3 most recent
 interactions; and — when embeddings are enabled — `store.vector_candidates()`. The vector
@@ -61,7 +61,7 @@ gather it before taking the graph lock.**
 requires:   T5.1
 fixture-ok: yes
 owns:       src/recall/expand.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged 53979b2)
 ```
 BFS from candidates to `traversal_depth=2`, edge priority
 `Dependency`/`Causal` → `Hierarchical` → `CoOccurrence` → `Semantic`, visited-set cycle
@@ -76,7 +76,7 @@ guard, `chunk_group_id` siblings force-included but scored independently (T2.5's
 requires:   T5.2       # + T4.2 for hot-list; stub behind a trait until it lands
 fixture-ok: yes
 owns:       src/recall/assemble.rs, src/recall/format.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT after 1 remediation round; merged 33fb935)
 ```
 `final_score = daemon_score × w_daemon + query_relevance × w_query`. Hot-listed nodes
 within the expanded set force-included **after condition re-validation** (call T4.2's
@@ -108,7 +108,7 @@ warning.
 requires:   T1.1
 fixture-ok: yes
 owns:       src/recall/cache.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged e5dde1a)
 ```
 LRU keyed `(query_hash, top_k, traversal_depth, mutation_epoch)`. Epoch invalidation only —
 no generation counters (arena is gone). Small, boring, independent: a good first task for
@@ -120,13 +120,57 @@ an agent waiting on T5.1.
 
 ## Exit criteria
 
-- [ ] All recall goldens green against fixture graphs
-- [ ] Context-format golden byte-exact
-- [ ] Hybrid leg proven behind capability gate (fake VECTOR_SEARCH on/off)
-- [ ] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise)
+> Superseded by the closed-out checklist in the Handoff Log (all [x], backed
+> by tests) — phase-close review P5-6.
+
+- [x] All recall goldens green against fixture graphs
+- [x] Context-format golden byte-exact
+- [x] Hybrid leg proven behind capability gate (fake VECTOR_SEARCH on/off)
+- [x] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise)
 
 ---
 
 ## Handoff Log
 
-> _Fill on completion._
+**What exists now (wave A, integrated e230f71 / 53979b2):**
+
+- `src/recall/candidates.rs` (T5.1) — phase-1 candidates: `gather(&dyn GraphStore, session, embedding, limit) -> Phase1Input` (async; the only store I/O — the vector leg, capability-gated; absent `VECTOR_SEARCH` → zero store calls + one log line) then `candidates(&Graph, &InvertedIndex, Phase1Input, query, limit) -> Vec<Scored<NodeId>>` (sync, safe under the graph lock). Union = BM25 keyword hits ∪ concepts of the 3 most recent interactions (`created_at` desc, ties by id asc) ∪ vector hits; per-node max-merge; score-desc then id-asc total order; `RECENT_SCORE = 0.5`.
+- `src/recall/cache.rs` (T5.4) — LRU keyed `(query_hash, top_k, traversal_depth, mutation_epoch)`; capacity const 128; epoch invalidation only; plain struct (caller wires locking).
+- Module declarations: `pub mod cache;` + `pub mod candidates;` added to `src/recall/mod.rs` by the two task branches (shared-file policy announcement — additive only).
+
+**Reconciliations (phase doc / fixture note vs shipped contract):**
+
+- **Keyword leg is the BM25 index, not the store substring path.** The `fixtures/recall-goldens.json` note ("EXACT under MemoryStore keyword_candidates, substring on content/canonical_key") predates the P2 index; the operative contract — proven by `recall_phase1_keyword_goldens_pass` (src/graph/index.rs) and `golden_keyword_leg_exact_within_union` (candidates.rs) — is `InvertedIndex::search` (BM25, stemmed, dedup'd query terms). `GraphStore::keyword_candidates` is NOT part of phase 1.
+- **Recent-interactions leg:** the 3 most recent by `created_at`, NOT chain order (the fixture's chain tail is the oldest); ties by id asc.
+
+**Recorded but not remediated (P3 doc-accuracy, verdict ACCEPT):** T54-1 (eviction-cost doc claim; capacity small, harmless), T54-2 ("Not Sync-friendly" phrasing; the struct is auto-Sync, real constraint is the `&mut self` API). See `adve-review-t5.4-cache.md`.
+
+**What exists now (wave B, integrated 33fb935):**
+
+- `src/recall/expand.rs` (T5.2) — phase-2 expansion: `expand(graph: &Graph, candidates: Vec<Scored<NodeId>>, depth: usize) -> ExpandedSet` (sync, zero I/O, lock-safe). `ExpandedSet { required, siblings }` — required = candidates (level 0, phase-1 scores carried) + BFS-reached concepts in deterministic discovery order (UNSCORED until T5.3); siblings = force-included `chunk_group_id` concepts (transitive closure over the group, id-asc, NOT BFS-expanded — a group tag is not a graph path). BFS follows `TRAVERSAL_ORDER = [Dependency, Causal, Hierarchical, CoOccurrence, Semantic]` (Derives/Temporal excluded, golden-pinned rationale); visited-set, first-discovery-wins, no re-expansion; `DEFAULT_TRAVERSAL_DEPTH = 2`; `UNSCORED = 0.0`.
+- Module declaration: `pub mod expand;` added to `src/recall/mod.rs` (shared-file policy announcement).
+
+**Wave-barrier gates (integrator, 2026-08-12):** rustfmt pass on wave-A files (`cb9c478` — the per-task `cargo check` reviews do not run the fmt/clippy gates; cache.rs/candidates.rs had drifted) and two clippy fixes (`e1414d5` — `len_without_is_empty` on `RecallCache`, `unnecessary_sort_by` in a candidates.rs test). Full default-tier gates green at the barrier: fmt, clippy `--all-targets -D warnings`, `cargo test --all` 395/0, no-default `store-memory`/`store-sqlite` `--all-targets` clean.
+
+**What exists now (wave C, integrated e5dde1a):**
+
+- `src/recall/assemble.rs` (T5.3) — `assemble<F>(graph, expanded, phase1, scores, hot, query, weights, now, token_fn) -> RecallResult`: final = daemon×w_daemon + relevance×w_query for every expanded member (required + siblings, scored independently); relevance = phase-1 score for keyword hits, 0.0 for BFS/sibling members; daemon missing -> 0.0; weights sanitized; score-desc/id-asc sort. Hot members force-included AFTER `HotList::revalidate(graph, node, now)` with recall's own `now`; lapsed dropped; payload rendered at read time. Assembly to `max_tokens` via `default_token_count` (ceil(bytes/3.5)) or caller `token_fn`; whole blocks only, longest score-ordered prefix; truncated blocks keep hits + warnings. `#[allow(clippy::too_many_arguments)]` (Wave-D entry bundles deps).
+- `src/recall/format.rs` (T5.3) — `blast_radius(graph, node) -> u64` (spec §4.1 + errata: inbound structural edges Dependency/Causal/Hierarchical, 1-hop, no recursion, Derives/Temporal excluded); `concept_label` with `[canonical]` marker; `blast_radius_warning`, `conflict_warning` (writer, never agents[0] — ALGO-2), `reservation_warning`; `render_context`.
+- `fixtures/recall-context-golden.txt` (T5.3) — byte-exact golden for the demo query "update user schema" (top_k=5, max_tokens=500, depth=2), wall-clock-free (fixed planted `now`).
+- Module declarations: `pub mod assemble;` + `pub mod format;` (shared-file policy announcement).
+
+**Spec-vs-data reconciliation (blast radius 8 vs 9):** the ⚑ line renders the GRAPH-COMPUTED dependent count, which on `session-rest-api.json` is **8** (pinned by fixtures.rs `Some(8)`, the Cockroach anchor, and gen-fixtures "blast_radius = 8 > 5"), not the 9 in spec §13 / PHASE-8 narration. The "9" belongs to the T8.4 live demo graph, which must plant a 9th dependent (or the fixture gains a 9th orphan plus updated pins — out of P5 scope). Format stays graph-truthful; golden pins 8.
+
+**Wave-barrier gates (integrator, 2026-08-12):** clippy `too_many_arguments` allow on `assemble` (repo precedent) + full no-default TEST matrix caught two T5.1 fixture-dependent tests running un-gated under no-default rows (fixture tests + `load_rest_api_fixture` gated, `629a61c`). Barrier gates: fmt clean; clippy `--all-targets -D warnings` clean; default 412/0; sqlite 444/0; sqlite-minimal 340/0; cockroach 335/0; minimal + demo checks clean.
+
+**Entry point (Wave D, d18a54b):** `Daemon::recall(session, RecallQuery, &dyn GraphStore, embedding: Option<&[f32]>, RecallWeights, &mut RecallCache) -> RecallResult` (src/daemon/mod.rs). Order: cache probe (brief graph read for epoch) -> `gather` (store I/O, BEFORE any lock; store error degrades to empty vector leg with a warning) -> scores snapshot -> graph read -> index read -> hot write (documented lock order) -> candidates/expand/assemble/format -> cache insert under the re-read epoch (a mutation between probe and compute can never be served stale). Index must be installed via `Daemon::with_index` (else keyword leg degrades with a warning); `embedding = None` degrades to keyword + recent legs (spec §3.2). Cache is session-scoped (spec §8 key carries no session id) — caller owns one per session. End-to-end test `recall_entry_reproduces_context_golden` proves the ENTRY reproduces the byte-exact golden block plus cache hit + epoch invalidation.
+
+**Phase-close review (2026-08-12):** three-lens review ACCEPT with 2 P2 + 4 P3; one remediation round (106d057). See `adve-review-p5-recall.md`. Notable cross-phase change: `Graph::set_reservation`/`clear_reservation` now bump the epoch directly (reservations render into recall context; they are RAM-local, no Mutation kind — P2, Lens C). Entry behavior: the cache stores the epoch-stable `RecallPipeline { phase1, expanded }`; assembly + hot re-validation + reservations + rendering run on EVERY call, so warning lines are always fresh (spec §9). Cache inserts are skipped while `scores.epoch != graph.epoch` (rescore lag guard). `run_cycle` now publishes GC index syncs inside the graph-write scope (atomic (graph, index) pair for recall readers).
+
+**Conflict-writer reconciliation (phase-close P5-5):** the golden's "Agent A wrote to it 11 seconds ago" is a PLANTED-PAYLOAD format pin; live detection on the shipped fixture names agent-b (newest qualifying write on 001001 is agent-b's Dependency at 09:35Z). T8.4 must arrange the live demo graph (writer agent-a, write 11s before demo time) just as it plants the 9th dependent for the blast-radius line.
+
+**Exit criteria:**
+- [x] All recall goldens green against fixture graphs (phase-1 exact, phase-2 membership, context byte-exact through the entry)
+- [x] Context-format golden byte-exact (`fixtures/recall-context-golden.txt`, "update user schema" demo query)
+- [x] Hybrid leg proven behind capability gate (SpyVectorStore VECTOR_SEARCH on/off; zero store calls + one log when absent)
+- [x] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise, asserted)

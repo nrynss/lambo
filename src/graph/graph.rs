@@ -777,10 +777,16 @@ impl Graph {
         } else {
             self.reservations.push(r);
         }
+        // Reservations render into recall context (T2.7 soft-lock line), so a
+        // transition must invalidate the epoch-keyed recall cache. Reservations
+        // are RAM-local (no Mutation kind), so bump the epoch directly (P5
+        // phase-close finding).
+        self.epoch += 1;
     }
 
     pub fn clear_reservation(&mut self, node_id: NodeId) {
         self.reservations.retain(|r| r.node_id != node_id);
+        self.epoch += 1;
     }
 
     // -----------------------------------------------------------------------
