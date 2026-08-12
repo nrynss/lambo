@@ -160,4 +160,10 @@ an agent waiting on T5.1.
 
 **Wave-barrier gates (integrator, 2026-08-12):** clippy `too_many_arguments` allow on `assemble` (repo precedent) + full no-default TEST matrix caught two T5.1 fixture-dependent tests running un-gated under no-default rows (fixture tests + `load_rest_api_fixture` gated, `629a61c`). Barrier gates: fmt clean; clippy `--all-targets -D warnings` clean; default 412/0; sqlite 444/0; sqlite-minimal 340/0; cockroach 335/0; minimal + demo checks clean.
 
-**Open:** recall() entry-point wiring (Wave D, integrator).
+**Entry point (Wave D, d18a54b):** `Daemon::recall(session, RecallQuery, &dyn GraphStore, embedding: Option<&[f32]>, RecallWeights, &mut RecallCache) -> RecallResult` (src/daemon/mod.rs). Order: cache probe (brief graph read for epoch) -> `gather` (store I/O, BEFORE any lock; store error degrades to empty vector leg with a warning) -> scores snapshot -> graph read -> index read -> hot write (documented lock order) -> candidates/expand/assemble/format -> cache insert under the re-read epoch (a mutation between probe and compute can never be served stale). Index must be installed via `Daemon::with_index` (else keyword leg degrades with a warning); `embedding = None` degrades to keyword + recent legs (spec §3.2). Cache is session-scoped (spec §8 key carries no session id) — caller owns one per session. End-to-end test `recall_entry_reproduces_context_golden` proves the ENTRY reproduces the byte-exact golden block plus cache hit + epoch invalidation.
+
+**Exit criteria:**
+- [x] All recall goldens green against fixture graphs (phase-1 exact, phase-2 membership, context byte-exact through the entry)
+- [x] Context-format golden byte-exact (`fixtures/recall-context-golden.txt`, "update user schema" demo query)
+- [x] Hybrid leg proven behind capability gate (SpyVectorStore VECTOR_SEARCH on/off; zero store calls + one log when absent)
+- [x] Recall performs zero store I/O when capabilities lack VECTOR_SEARCH (RAM-tier promise, asserted)
