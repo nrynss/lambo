@@ -52,8 +52,9 @@ independently verified. Two-round loop:
   sqlite+cockroach); default 368/0; sqlite 400/0; no-default sqlite 302/0;
   no-default cockroach 297/0; demo + no-default checks clean.
 - **Residuals ticketed** in the PHASE-4 Handoff Log (no merge impact):
-  Cockroach `SET_ROOT_GOAL_SQL` VERIFIED LIVE 2026-08-12 (dedicated conformance check; a
-  DSN is available); `conflict_at` rebuilds `WriterTimeline` per call
+  Cockroach `SET_ROOT_GOAL_SQL` — VERIFIED LIVE 2026-08-12 (dedicated conformance
+  check `check_set_root_goal_mutation_persists` added; evidence
+  `dev-diary/evidence/20260812-201338-cockroach-live.txt`); `conflict_at` rebuilds `WriterTimeline` per call
   (T5.3 perf note); synonym lookup is pre-NFC (documented contract); SQL
   adapters' keyword tokenizers do not NFC (parity note for P5).
 
