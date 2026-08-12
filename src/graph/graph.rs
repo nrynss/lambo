@@ -634,7 +634,53 @@ impl Graph {
             .insert(source_key.to_string(), canonical_key.to_string());
     }
 
+    /// Declare the session's root goal (spec §9 drift anchor).
+    ///
+    /// Spec §9: "Root goal nodes are automatically `Venerable`" — when the
+    /// goal is a string that names a concept (matched by `content` or
+    /// `canonical_key`), that concept is promoted to `Venerable` through the
+    /// T2.1 mutation path ([`Graph::apply_canonization_transition`]: audit
+    /// row + `Mutation::CanonizationTransition`), so the promotion is durable
+    /// and visible to the §10 state machine — not a bare field flip.
+    ///
+    /// The §10 state machine has no `Venerable -> Venerable` or
+    /// `Canonical -> Venerable` edge, so a goal concept that is already
+    /// `Venerable` or `Canonical` is left untouched (a `Canonical` root goal
+    /// is strictly stronger protection); clearing the goal (`None`) stores
+    /// the clear and never demotes. A structured (non-string) goal is stored
+    /// but cannot name a concept.
     pub fn set_root_goal(&mut self, goal: Option<serde_json::Value>) {
+        if let Some(text) = goal.as_ref().and_then(serde_json::Value::as_str) {
+            let goal_concept = self.nodes.iter().find_map(|(id, n)| match n {
+                Node::Concept(c) if c.content == text || c.canonical_key == text => Some(*id),
+                _ => None,
+            });
+            if let Some(cid) = goal_concept {
+                let status = match self.nodes.get(&cid) {
+                    Some(Node::Concept(c)) => c.canonization_status,
+                    _ => unreachable!("goal concept found by the scan above"),
+                };
+                if matches!(
+                    status,
+                    CanonizationStatus::None | CanonizationStatus::Candidate
+                ) {
+                    let event = CanonizationEvent {
+                        id: NodeId::new(),
+                        session_id: self.session_id.clone(),
+                        node_id: cid,
+                        from_status: status,
+                        to_status: CanonizationStatus::Venerable,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        occurred_at: chrono::Utc::now(),
+                    };
+                    // The only rejection modes are invariant violations that
+                    // cannot occur here (the concept exists; the pair is a
+                    // legal §10 edge), so the promotion is best-effort.
+                    let _ = self.apply_canonization_transition(event);
+                }
+            }
+        }
         self.root_goal = goal;
     }
 
@@ -1971,6 +2017,197 @@ mod tests {
         assert_eq!(demote_ev.last_demotion_time, Some(ts(4)));
         assert_eq!(h.canonization_events().len(), 5);
         g.assert_invariants().unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // set_root_goal — spec §9: root goal nodes are automatically Venerable
+    // ------------------------------------------------------------------
+
+    /// Fresh graph with a goal concept ("launch the product") + an unrelated
+    /// concept, both derived from one interaction.
+    fn goal_graph() -> (Graph, NodeId, NodeId) {
+        let mut g = Graph::new(sid());
+        let i = interaction(1, None, 0);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        let goal = concept(1, iid, "launch the product");
+        let goal_id = goal.id;
+        g.insert_concept(goal, iid).unwrap();
+        let other = concept(2, iid, "unrelated concept");
+        let other_id = other.id;
+        g.insert_concept(other, iid).unwrap();
+        (g, goal_id, other_id)
+    }
+
+    fn status_of(g: &Graph, id: NodeId) -> crate::types::CanonizationStatus {
+        match g.node(id).unwrap() {
+            Node::Concept(c) => c.canonization_status,
+            _ => panic!("concept"),
+        }
+    }
+
+    #[test]
+    fn set_root_goal_promotes_matching_concept_to_venerable() {
+        let (mut g, goal_id, other_id) = goal_graph();
+
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+
+        assert_eq!(
+            g.root_goal(),
+            Some(&serde_json::json!("launch the product"))
+        );
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Venerable,
+            "goal concept auto-promoted to Venerable"
+        );
+        assert_eq!(
+            status_of(&g, other_id),
+            crate::types::CanonizationStatus::None,
+            "non-goal concept untouched"
+        );
+        // Audited through the T2.1 mutation path: one transition event and one
+        // `Mutation::CanonizationTransition` in the write-behind log.
+        assert_eq!(g.canonization_events().len(), 1);
+        let ev = &g.canonization_events()[0];
+        assert_eq!(ev.node_id, goal_id);
+        assert_eq!(ev.from_status, crate::types::CanonizationStatus::None);
+        assert_eq!(ev.to_status, crate::types::CanonizationStatus::Venerable);
+        let batch = g.drain_log();
+        assert_eq!(
+            batch
+                .mutations
+                .iter()
+                .filter(|m| matches!(m, Mutation::CanonizationTransition { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn set_root_goal_is_idempotent_for_venerable_goal() {
+        let (mut g, goal_id, _) = goal_graph();
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Venerable
+        );
+        // The §10 state machine has no Venerable -> Venerable edge: the second
+        // call must not attempt a self-loop transition.
+        assert_eq!(g.canonization_events().len(), 1);
+    }
+
+    #[test]
+    fn set_root_goal_leaves_canonical_goal_untouched() {
+        let (mut g, goal_id, _) = goal_graph();
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+        // Earn Canonical via the mutation path (Venerable -> Canonical).
+        let promote = |to, at| CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: goal_id,
+            from_status: crate::types::CanonizationStatus::Venerable,
+            to_status: to,
+            blast_radius: Some(3),
+            last_demotion_time: None,
+            occurred_at: ts(at),
+        };
+        g.apply_canonization_transition(promote(crate::types::CanonizationStatus::Canonical, 1))
+            .unwrap();
+        let events_before = g.canonization_events().len();
+
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Canonical,
+            "a Canonical root goal must not be downgraded (no Canonical -> Venerable edge)"
+        );
+        assert_eq!(g.canonization_events().len(), events_before);
+    }
+
+    #[test]
+    fn clearing_root_goal_never_demotes() {
+        let (mut g, goal_id, _) = goal_graph();
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+
+        g.set_root_goal(None);
+
+        assert_eq!(g.root_goal(), None);
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Venerable,
+            "clearing the goal stores the clear but never demotes (demotion is T6.4's)"
+        );
+        assert_eq!(g.canonization_events().len(), 1);
+    }
+
+    #[test]
+    fn set_root_goal_matches_canonical_key_when_content_differs() {
+        let mut g = Graph::new(sid());
+        let i = interaction(1, None, 0);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        let mut c = concept(1, iid, "the product launch");
+        c.canonical_key = "launch product".into();
+        let goal_id = c.id;
+        g.insert_concept(c, iid).unwrap();
+
+        g.set_root_goal(Some(serde_json::json!("launch product")));
+
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Venerable,
+            "goal matching by canonical_key promotes"
+        );
+    }
+
+    #[test]
+    fn set_root_goal_promotes_candidate_goal_to_venerable() {
+        let (mut g, goal_id, _) = goal_graph();
+        let promote = |from, to, at| CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid(),
+            node_id: goal_id,
+            from_status: from,
+            to_status: to,
+            blast_radius: Some(2),
+            last_demotion_time: None,
+            occurred_at: ts(at),
+        };
+        g.apply_canonization_transition(promote(
+            crate::types::CanonizationStatus::None,
+            crate::types::CanonizationStatus::Candidate,
+            1,
+        ))
+        .unwrap();
+
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::Venerable,
+            "Candidate -> Venerable is a legal §10 edge (Stage 2 promotion)"
+        );
+        assert_eq!(g.canonization_events().len(), 2);
+    }
+
+    #[test]
+    fn structured_root_goal_is_stored_without_promotion() {
+        let (mut g, goal_id, _) = goal_graph();
+        let structured = serde_json::json!({ "goal": "launch the product" });
+
+        g.set_root_goal(Some(structured.clone()));
+
+        assert_eq!(g.root_goal(), Some(&structured), "structured goal stored");
+        assert_eq!(
+            status_of(&g, goal_id),
+            crate::types::CanonizationStatus::None,
+            "non-string goal names no concept -> no promotion"
+        );
+        assert!(g.canonization_events().is_empty());
     }
 
     #[test]
