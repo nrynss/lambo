@@ -98,3 +98,59 @@ default 416/0; sqlite 448/0; sqlite-minimal 340/0; cockroach 335/0;
 **Disposition: ACCEPT — `phase/p5-recall` is merge-ready (completely clean).**
 
 — integrator, orchestration + round-2 verification + R2 closure, 2026-08-12
+
+
+## Round-3 closure (GPT5.6sol adversarial review, `5968276`)
+
+A follow-up adversarial review (`adve-review-p5-recall-GPT5.6sol.md`) withdrew
+the "completely clean" ACCEPT above, raising **4 P1 + 4 P2** findings. All were
+validated against source and remediated (`b9e35ef`) with regression tests.
+
+### Validated findings and remediation
+
+- **P1-1** — cache probe epoch != pipeline epoch: gather (async, pre-lock)
+  could assemble against a later graph epoch than the key. **Fixed:** one graph
+  read guard spans cache-get/compute/assemble, so key epoch == pipeline epoch
+  == assembly graph.
+- **P1-2** — cache key omitted vector-source state (embedding presence, store
+  failures, write-behind). **Fixed:** results are cached only when
+  `embedding.is_none()`; the vector leg bypasses the cache entirely (correct
+  over hit-rate; the keyword+recent demo/golden path keeps caching). Test:
+  `recall_never_caches_vector_dependent_results`.
+- **P1-3** — `candidates` truncated phase-1 to `limit`, so the flat 0.5 recent
+  leg could evict strong keyword matches before assembly. **Fixed:**
+  `KEYWORD_OVERFETCH=4` keyword over-fetch via `search(query, limit*4)`, drop
+  the `truncate`; top_k decided at assembly on final score. Test:
+  `recent_leg_does_not_evict_keyword_matches`; golden regenerated (byte-exact,
+  matches both assemble and entry paths).
+- **P1-4** — token budget never charged inter-block separators; ranked-prefix
+  was broken; arithmetic unchecked. **Fixed:** context is built as an exact
+  ranked prefix measuring `token_fn` on the real joined string (separators
+  charged); `checked_add` with `break` on overflow/non-fit. Tests:
+  ranked-prefix + separator charging in assemble.
+- **P2-5** — `pos >= top_k` slot-counted graph-missing (stale vector) members.
+  **Fixed:** only valid graph-present members count toward top_k (graph-missing
+  skip, not slot). Test: stale-slot case in assemble.
+- **P2-6** — `None => Vec::new()` discarded gathered recent/vector legs when
+  the index is absent. **Fixed:** `candidates_without_keyword` preserves the
+  recent leg (lexical lookup only is lost). Tests: format + daemon entry
+  (`recall_without_index_keeps_recent_leg`).
+- **P2-7** — `blast_radius` was O(CxE) per canonical hit. **Fixed:** one-pass
+  `inbound_sources` + batched `blast_radii`; per-node wrapper kept. Tests: two
+  blast-radius tests in format.
+- **P2-8** — caller `session` not validated against the graph's authoritative
+  session. **Fixed:** mismatch -> warning + empty result, never mixed; gather
+  uses the graph session. Test: `recall_rejects_mismatched_session`.
+
+### Gates after R3 (all green)
+
+fmt clean; clippy `--all-targets -D warnings` clean; default suite 424/0;
+store-sqlite ok; sqlite-minimal ok; minimal check ok; cockroach ok; demo check
+ok. `recall_` entry tests 7/7 (incl. the new P1-2/P2-6/P2-8). Live-Cockroach +
+fixture-write tests remain `#[ignore]`d as before (not part of these rows).
+
+**Disposition: ACCEPT (revised) — all 8 GPT5.6sol findings remediated with
+regression tests; gates green. P5 is NOT merged to main; local main stays at
+`72f2a45` (`origin/main`).**
+
+— integrator, R3 closure (GPT5.6sol round), 2026-08-12
