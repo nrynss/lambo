@@ -158,15 +158,38 @@ far text creates a fresh concept; with a no-capability store, behavior is byte-i
   and commit phases (spec §2.2) is an accepted design constraint; `src/graph/canonical.rs` is
   inalienable and was not touched.
 
-- **Known issue — post-review note (2026-08-13, adversarial whole-worktree sweep, see
-  `adversarial-review/adve-review-p7-hybrid-vectors.md` MAJOR-1):** hybrid eagerly
-  canonicalizes ALL items in phase 1 and does not re-canonicalize / collapse by
-  canonical key at commit, so a single hybrid call whose distinct contents share a
-  canonical key ("user schema" + "schema user") hard-errors on the second
-  `insert_concept` (UNIQUE key collision) after the first node was already written —
-  a partial-write divergence from sync `derive`, which collapses them. Fix: mirror
-  sync `derive` by re-canonicalizing (or key-deduping against nodes written this
-  call) at commit, plus a collapse regression test.
+- **Review remediation (2026-08-13, adversarial whole-worktree sweep — see
+  [`adversarial-review/adve-review-p7-hybrid-vectors.md`](adversarial-review/adve-review-p7-hybrid-vectors.md)
+  for the committed finding record):** three actionable findings closed, two P3
+  tradeoffs left as documented decisions (no code change):
+  - **MAJOR-1 — commit-time canonical-key collapse (hybrid):** hybrid eagerly
+    canonicalized ALL items in phase 1 and did not re-canonicalize / collapse by
+    canonical key at commit, so a single hybrid call whose distinct contents share
+    a canonical key ("user schema" + "schema user") hard-errored on the second
+    `insert_concept` (UNIQUE key collision) after the first node was already
+    written — a partial-write divergence from sync `derive`. **Fixed:** the commit
+    loop now re-canonicalizes each content against the graph AS WRITTEN THIS CALL
+    and, on a Matched node already in the within-call `written` set, collapses to
+    it (records in `outcome.matched`, writes nothing) — mirroring sync derive's
+    `resolve_concept` (canonicalize -> insert -> written_this_call dedup).
+    Regression tests: `hybrid_collapses_contents_sharing_a_canonical_key`
+    (no-capability Fresh path) and `hybrid_collapses_shared_key_under_merge`
+    (both colliding contents HybridMerge against one target).
+  - **MINOR-2 — refused-merge concept is keyword-only:** on an invalid
+    non-Concept merge target, the HybridMerge commit arm previously kept the
+    concept's computed embedding while skipping the Semantic edge. **Fixed:** the
+    target is validated up front; the embedding is attached only when the merge
+    Semantic edge is actually written, and the refused-merge degrade path writes
+    `embedding: None` (true keyword-only). Assert pinned in
+    `hybrid_refused_merge_target_is_keyword_only`.
+  - **P3 §12.1 camera-proof (NOT a code fix):** left as an integrator/demo-time
+    decision — see the T7.3 handoff open-item note below. Do not fabricate
+    evidence.
+  - **P3 DECISION D1 (global-then-filter under-return under crowding):** kept — this
+    is the accepted documented approximation; not reverted to the session-filtered
+    anti-pattern.
+  - **Cosmetic unbounded `note_fallback_logged` set:** left as-is (documented
+    tradeoff, no fix this cycle).
 
 ---
 
@@ -256,6 +279,12 @@ stack merge via the index, and `EXPLAIN` output — captured into
   run the gated test `cargo test --features store-cockroach -- --ignored
   cockroach::conformance::vector_explain_camera_proof`. Do NOT treat the demo cluster's scan
   as a query bug — the rework is correct and the live session-scoping suite PASSES.
+- **OPEN ITEM for the integrator (T8.4 / ship):** the §12.1 vector-index camera-proof is
+  still PENDING (evidence at `dev-diary/evidence/<ts>-vector-index.txt`, honest scan-plan
+  recorded). This is an integrator/demo-time decision, not a code fix — capture the
+  `vector search` plan on a favorable deployment, then run `cargo test --features
+  store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof` (and
+  un-ignore it), or formally downgrade the claim. Do not re-architect the query.
 - **Next agent should not re-derive:** the global SQL shape, the k grow-and-retry heuristic,
   the Rust session filter, and the live session-scoping proof are done. If the camera-proof
   must land, only the favorable-deployment EXPLAIN capture (+ `vector_explain_camera_proof`)
@@ -277,6 +306,11 @@ stack merge via the index, and `EXPLAIN` output — captured into
   Titan when authorized. Dim 1024. Details: `notes/embeddings-portable.md`.
 - **2026-08-11:** Level B packaging (T1.5) — features `embed-bge` / `embed-fixture` /
   `embed-bedrock`; `build_embedder` fail-closed; see `notes/level-b-pluggability.md`.
+- **2026-08-13:** T7.2/T7.3 adversarial whole-worktree remediation — MAJOR-1
+  commit-time canonical-key collapse (hybrid) and MINOR-2 refused-merge keyword-only
+  both fixed in `src/graph/hybrid.rs` with regression tests; P3 §12.1 camera-proof left
+  as an integrator/demo-time open item. See committed
+  `adversarial-review/adve-review-p7-hybrid-vectors.md`.
 
 ---
 

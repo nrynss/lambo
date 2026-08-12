@@ -53,10 +53,15 @@
 //! — kept separate from `matched` because a merge does not re-upsert the target
 //! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
 //! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept degraded to
-//! keyword-only (below-threshold, capability-miss, or embed failure) is written
-//! with `embedding: None` — the precision bias must never persist a vector for a
-//! concept it refused to merge (MAJOR-1); likewise a failed embed never stamps
-//! the session's embedding contract (MINOR-2).
+//! keyword-only (below-threshold, capability-miss, embed-failure, or an invalid
+//! non-Concept merge target — see the commit-time validation) is written with
+//! `embedding: None`: the precision bias must never persist a vector for a
+//! concept it refused to merge (MAJOR-1 / MINOR-2); likewise a failed embed
+//! never stamps the session's embedding contract (MINOR-2). At commit, each
+//! content is re-canonicalized against the graph as written this call so that
+//! distinct contents collapsing onto one canonical key resolve Matched to the
+//! just-created node (mirroring sync `derive`'s within-call dedup) instead of
+//! erroring on `insert_concept`'s UNIQUE key collision (MAJOR-1).
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -419,6 +424,27 @@ pub async fn derive(
     let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
 
     for ((content, concept_type, _key, _matched), res) in items.iter().zip(resolutions.iter()) {
+        // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
+        // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
+        // lock before ANY node was written, so two distinct contents that
+        // collide on one canonical key (e.g. "user schema" + "schema user" ->
+        // "schema user") both resolved `Unmatched`. The first created its node
+        // above; the second must now collapse to it — mirroring sync derive's
+        // `resolve_concept` (canonicalize -> insert -> written_this_call dedup)
+        // — instead of re-inserting the same key and tripping
+        // `insert_concept`'s UNIQUE (session_id, canonical_key) invariant
+        // (hard error + partial write). Single-writer per session (spec §2.2)
+        // means the only node reachable as Matched here is one written earlier
+        // in THIS call; pre-existing nodes cannot match a phase-1-Unmatched key.
+        if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, &g)? {
+            if written.contains(&node) {
+                outcome.matched.push(node);
+                if !call_nodes.contains(&node) {
+                    call_nodes.push(node);
+                }
+                continue;
+            }
+        }
         let this_node: NodeId;
         match res {
             Resolution::CanonicalMatch { node } => {
@@ -471,6 +497,20 @@ pub async fn derive(
                 score,
                 embedding,
             } => {
+                // MINOR-2 (P7 remediation): the concept keeps its vector ONLY if
+                // the merge Semantic edge is actually written. Both endpoints
+                // must be concepts (GRAPH-2); validate the target up front and,
+                // when the store handed us a bogus non-Concept candidate, refuse
+                // the merge and degrade to a TRUE keyword-only concept
+                // (embedding: None) — the concept must never persist a vector for
+                // a merge it refused to make (consistent with the other
+                // below-threshold / capability-miss / embed-failure fallbacks).
+                let can_merge = matches!(g.node(*target), Some(Node::Concept(_)));
+                let embedding = if can_merge {
+                    Some(embedding.clone())
+                } else {
+                    None
+                };
                 let concept = new_concept(
                     &session_id,
                     content,
@@ -479,42 +519,38 @@ pub async fn derive(
                     interaction,
                     agent,
                     interaction_created_at,
-                    Some(embedding.clone()),
+                    embedding,
                 );
                 let id = concept.id;
                 g.insert_concept(concept, interaction)?;
                 written.insert(id);
                 outcome.created.push(id);
-                // Decaying Semantic edge to the matched concept. Both endpoints
-                // must be concepts (GRAPH-2); validate + drop the edge if the
-                // store handed us a bogus candidate (degrade to keyword-only —
-                // the concept was already written, so no partial state).
-                if let Some(Node::Concept(_)) = g.node(*target) {
-                    if *target != id {
-                        // Deterministic direction: order endpoints by NodeId's
-                        // inner UUID (NodeId itself is not Ord).
-                        let (s, t) = if target.0 < id.0 {
-                            (*target, id)
-                        } else {
-                            (id, *target)
-                        };
-                        g.upsert_edge(Edge {
-                            id: NodeId::new(),
-                            session_id: session_id.clone(),
-                            source: s,
-                            target: t,
-                            edge_type: EdgeType::Semantic,
-                            weight: semantic_weight(*score),
-                            reinforcements: 1,
-                            created_at: interaction_created_at,
-                            last_reinforced: interaction_created_at,
-                        })?;
-                        // Recorded separately from `matched`: a merge does not
-                        // re-upsert the target nor Derives-reinforce it, so the
-                        // outcome must not over-count `matched` as "re-derived"
-                        // (DeriveOutcome contract, MINOR-3).
-                        outcome.semantic_merged.push(*target);
-                    }
+                if can_merge && *target != id {
+                    // Decaying Semantic edge to the matched concept (deterministic
+                    // direction: order endpoints by NodeId's inner UUID, since
+                    // NodeId itself is not Ord). `*target != id` is defense-in-depth:
+                    // a store-returned target can never equal this fresh id.
+                    let (s, t) = if target.0 < id.0 {
+                        (*target, id)
+                    } else {
+                        (id, *target)
+                    };
+                    g.upsert_edge(Edge {
+                        id: NodeId::new(),
+                        session_id: session_id.clone(),
+                        source: s,
+                        target: t,
+                        edge_type: EdgeType::Semantic,
+                        weight: semantic_weight(*score),
+                        reinforcements: 1,
+                        created_at: interaction_created_at,
+                        last_reinforced: interaction_created_at,
+                    })?;
+                    // Recorded separately from `matched`: a merge does not
+                    // re-upsert the target nor Derives-reinforce it, so the
+                    // outcome must not over-count `matched` as "re-derived"
+                    // (DeriveOutcome contract, MINOR-3).
+                    outcome.semantic_merged.push(*target);
                 }
                 this_node = id;
             }
@@ -1347,6 +1383,173 @@ mod tests {
             last_reinforced: at,
         })
         .unwrap();
+        g.assert_invariants().unwrap();
+    }
+    /// P7 MAJOR-1 regression — mirrors sync
+    /// `derive::derive_collapses_contents_sharing_a_canonical_key` through
+    /// `hybrid::derive`. Without a VECTOR_SEARCH capability, every unmatched
+    /// concept is byte-identical to canonical derive: two distinct contents
+    /// that collapse onto one canonical key must yield ONE node — the second
+    /// content resolves `Matched` to the first's just-created node — never an
+    /// `insert_concept` UNIQUE (session_id, canonical_key) hard error + partial
+    /// write.
+    #[tokio::test]
+    async fn hybrid_collapses_contents_sharing_a_canonical_key() {
+        let sess = "hybrid-collapse";
+        let (graph, iid) = graph_with_interaction(sess, 1, 0, "user signs up");
+        let out = derive(
+            graph.clone(),
+            &SpyStore::without_vector(),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            iid,
+            &agent(),
+            &[
+                ("user schema", ConceptType::Entity),
+                ("schema user", ConceptType::Entity),
+                ("auth middleware", ConceptType::Logic),
+            ],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.created.len(), 2); // "user schema" + "auth middleware"
+        assert_eq!(out.matched.len(), 1); // "schema user" -> the first node
+        assert_eq!(out.matched[0], out.created[0]);
+        let g = graph.read();
+        assert_eq!(g.node_count(), 3); // interaction + 2 concepts
+                                       // No self-loop from the key collision: the collapsed node is the SAME
+                                       // node as the first concept, so `call_nodes` held it once.
+        assert!(
+            g.edge_between(out.created[0], out.created[0], EdgeType::CoOccurrence)
+                .is_none(),
+            "no self-loop from a key collision"
+        );
+        assert!(g
+            .edge_between(out.created[0], out.created[1], EdgeType::CoOccurrence)
+            .is_some());
+        g.assert_invariants().unwrap();
+    }
+
+    /// P7 MAJOR-1 regression (merge path): two distinct contents that collapse
+    /// onto one canonical key BOTH hybrid-merge against the same target. The
+    /// first creates its node + Semantic edge; the second must collapse to that
+    /// node (recorded in `matched`) rather than creating a canonical-key
+    /// duplicate or erroring.
+    #[tokio::test]
+    async fn hybrid_collapses_shared_key_under_merge() {
+        let sess = "hybrid-collapse-merge";
+        // Interaction 1 seeds a pre-existing concept C ("billing") with a key
+        // distinct from "schema user" so the colliding pair stays Unmatched.
+        let (graph, i1) = graph_with_interaction(sess, 1, 0, "invoicing a customer");
+        let c1 = {
+            let out = derive(
+                graph.clone(),
+                &SpyStore::with_vector(Vec::new()),
+                &RecordingEmbedder::new(),
+                &contract("fixture", 1024),
+                i1,
+                &agent(),
+                &[("billing flow", ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            )
+            .await
+            .unwrap();
+            out.created[0]
+        };
+        let mut second = interaction(2, Some(i1), 60, "designing the data model");
+        second.session_id = sid(sess);
+        let i2 = second.id;
+        graph.write().insert_interaction(second).unwrap();
+
+        // Both colliding contents embed, and the store returns C1 at 0.9 for
+        // each — so both resolve HybridMerge { target: c1 }.
+        let out = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![hit(c1, 0.9)]),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            i2,
+            &agent(),
+            &[
+                ("user schema", ConceptType::Entity),
+                ("schema user", ConceptType::Entity),
+            ],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+
+        // One created node; the second content collapses to it (matched),
+        // rather than a canonical-key duplicate or an insert error.
+        assert_eq!(out.created.len(), 1);
+        assert_eq!(out.matched, vec![out.created[0]]);
+        assert_eq!(out.semantic_merged, vec![c1]);
+        let g = graph.read();
+        let n1 = out.created[0];
+        assert_eq!(g.node_count(), 4); // i1, i2, c1, n1
+                                       // Exactly one Semantic merge edge (c1 <-> n1, direction by UUID order)
+                                       // — the collapse wrote no second edge and no duplicate node.
+        assert!(g
+            .edge_between(c1, n1, EdgeType::Semantic)
+            .or_else(|| g.edge_between(n1, c1, EdgeType::Semantic))
+            .is_some());
+        assert_eq!(
+            g.edges()
+                .filter(|e| e.edge_type == EdgeType::Semantic)
+                .count(),
+            1
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    /// P7 MINOR-2: when the store returns a candidate that is NOT a Concept
+    /// (a bogus/refused merge target), the concept must degrade to a TRUE
+    /// keyword-only node — `embedding: None`, no Semantic edge — never persist
+    /// a vector for a merge it refused to make.
+    #[tokio::test]
+    async fn hybrid_refused_merge_target_is_keyword_only() {
+        let sess = "hybrid-refused";
+        let (graph, iid) = graph_with_interaction(sess, 1, 0, "auth flow");
+        // The store hands back a hit pointing at the INTERACTION node (not a
+        // Concept) at/above threshold — the merge must be refused.
+        let out = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![hit(iid, 0.9)]),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            iid,
+            &agent(),
+            &[("create account", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.created.len(), 1);
+        assert!(out.matched.is_empty());
+        assert!(out.semantic_merged.is_empty());
+        let c = out.created[0];
+        let g = graph.read();
+        match g.node(c) {
+            Some(Node::Concept(con)) => assert!(
+                con.embedding.is_none(),
+                "refused-merge concept must be keyword-only (embedding: None)"
+            ),
+            _ => unreachable!(),
+        }
+        assert!(g.edge_between(iid, c, EdgeType::Semantic).is_none());
+        assert!(g.edge_between(c, iid, EdgeType::Semantic).is_none());
+        assert!(g.edge_between(iid, c, EdgeType::Derives).is_some());
         g.assert_invariants().unwrap();
     }
 }
