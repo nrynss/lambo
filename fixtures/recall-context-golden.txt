@@ -1,0 +1,11 @@
+user schema [Entity, canonical] (score 1.86, blast radius 8)
+⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.
+Agent A wrote to it 11 seconds ago
+
+user updated time [Entity] (score 1.64)
+
+database schema [Entity] (score 1.22)
+
+create user [Entity] (score 0.51)
+
+user id [Entity] (score 0.47)
