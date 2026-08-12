@@ -663,29 +663,57 @@ impl Graph {
 
     /// Declare the session's root goal (spec §9 drift anchor).
     ///
-    /// Spec §9: "Root goal nodes are automatically `Venerable`" — when the
-    /// goal is a string that names a concept (matched by `content` or
-    /// `canonical_key`), that concept is promoted to `Venerable` through the
-    /// T2.1 mutation path ([`Graph::apply_canonization_transition`]: audit
-    /// row + `Mutation::CanonizationTransition`), so the promotion is durable
-    /// and visible to the §10 state machine — not a bare field flip.
+    /// Spec §9: "Root goal nodes are automatically `Venerable`" — **every**
+    /// concept the goal names (matched by `content` or `canonical_key`) is
+    /// promoted to `Venerable` through the T2.1 mutation path
+    /// ([`Graph::apply_canonization_transition`]: audit row +
+    /// `Mutation::CanonizationTransition`), so the promotion is durable and
+    /// visible to the §10 state machine — not a bare field flip. The goal itself
+    /// is recorded as `Mutation::SetRootGoal` (XP-8), so it survives a reload.
+    ///
+    /// ## Accepted goal shapes ([`root_goal_texts`], ALGO-6)
+    ///
+    /// A bare string, **an array of strings** (spec §6.1's own example is a
+    /// list), or the `{content, key}` object form. Anything else is stored but
+    /// names no concept. A multi-goal session promotes all matches
+    /// **id-ascending** — the previous code took the first `HashMap` match,
+    /// which is iteration-order dependent and therefore nondeterministic under
+    /// multiple matches (ALGO-12).
     ///
     /// The §10 state machine has no `Venerable -> Venerable` or
     /// `Canonical -> Venerable` edge, so a goal concept that is already
     /// `Venerable` or `Canonical` is left untouched (a `Canonical` root goal
     /// is strictly stronger protection); clearing the goal (`None`) stores
-    /// the clear and never demotes. A structured (non-string) goal is stored
-    /// but cannot name a concept.
+    /// the clear and never demotes.
+    ///
+    /// `occurred_at` is **logical time** — the session's newest interaction
+    /// timestamp ([`Graph::logical_now`]) — not `Utc::now()`: this is otherwise
+    /// a wholly logical-time write path (`record_action` takes no clock), and a
+    /// wall-clock stamp made the audit trail non-monotonic against the rows
+    /// around it (ALGO-12).
     pub fn set_root_goal(&mut self, goal: Option<serde_json::Value>) {
-        if let Some(text) = goal.as_ref().and_then(serde_json::Value::as_str) {
-            let goal_concept = self.nodes.iter().find_map(|(id, n)| match n {
-                Node::Concept(c) if c.content == text || c.canonical_key == text => Some(*id),
-                _ => None,
-            });
-            if let Some(cid) = goal_concept {
+        let texts = root_goal_texts(goal.as_ref());
+        if !texts.is_empty() {
+            let occurred_at = self.logical_now();
+            let mut matches: Vec<NodeId> = self
+                .nodes
+                .iter()
+                .filter_map(|(id, n)| match n {
+                    Node::Concept(c)
+                        if texts
+                            .iter()
+                            .any(|t| c.content == *t || c.canonical_key == *t) =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            matches.sort_by_key(|id| id.0);
+            for cid in matches {
                 let status = match self.nodes.get(&cid) {
                     Some(Node::Concept(c)) => c.canonization_status,
-                    _ => unreachable!("goal concept found by the scan above"),
+                    _ => continue,
                 };
                 if matches!(
                     status,
@@ -699,7 +727,7 @@ impl Graph {
                         to_status: CanonizationStatus::Venerable,
                         blast_radius: None,
                         last_demotion_time: None,
-                        occurred_at: chrono::Utc::now(),
+                        occurred_at,
                     };
                     // The only rejection modes are invariant violations that
                     // cannot occur here (the concept exists; the pair is a
@@ -708,7 +736,30 @@ impl Graph {
                 }
             }
         }
-        self.root_goal = goal;
+        // XP-8: the goal is durable. A reload without this replayed an empty
+        // goal, which silently disabled drift detection and emptied GC's
+        // root-goal exclusion. The mutation also bumps the epoch, so T5.4's
+        // recall cache cannot serve results computed against the old goal.
+        if self.root_goal != goal {
+            self.root_goal = goal.clone();
+            self.append_mutation(Mutation::SetRootGoal {
+                session_id: self.session_id.clone(),
+                goal,
+            });
+        }
+    }
+
+    /// The session's logical "now": its newest interaction timestamp, falling
+    /// back to the newest concept's (a session with concepts but no interactions
+    /// is not constructible through the write API) and finally to the epoch
+    /// origin. Write paths that need a timestamp but take no clock use this so
+    /// the audit trail stays monotonic (ALGO-12).
+    pub fn logical_now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.interactions()
+            .map(|i| i.created_at)
+            .chain(self.concepts().map(|c| c.created_at))
+            .max()
+            .unwrap_or_else(|| chrono::DateTime::from_timestamp_nanos(0))
     }
 
     pub fn set_embedding(&mut self, contract: Option<crate::types::EmbeddingContract>) {
@@ -908,6 +959,14 @@ impl Graph {
 
     pub fn root_goal(&self) -> Option<&serde_json::Value> {
         self.root_goal.as_ref()
+    }
+
+    /// The concept-naming strings in the session's root goal — see
+    /// [`root_goal_texts`]. The single reading of the goal shape, shared by
+    /// [`Graph::set_root_goal`], drift detection and GC's exclusion list, so the
+    /// three cannot disagree about what "the root goal" names (ALGO-6).
+    pub fn root_goal_texts(&self) -> Vec<String> {
+        root_goal_texts(self.root_goal.as_ref())
     }
 
     pub fn embedding(&self) -> Option<&crate::types::EmbeddingContract> {
@@ -1319,6 +1378,44 @@ fn edge_endpoint_error(edge_type: EdgeType, source: &Node, target: &Node) -> Opt
             target.id()
         ))
     }
+}
+
+/// The concept-naming strings in a `root_goal` value (ALGO-6).
+///
+/// Accepted shapes, deduplicated and sorted so every consumer sees the same list
+/// in the same order:
+///
+/// * `"launch the product"` — a single goal.
+/// * `["launch the product", "ship the API"]` — spec §6.1's own `root_goal`
+///   example is a **list**, and the string-only reading silently disabled drift
+///   detection, auto-`Venerable` promotion and GC's root-goal exclusion for
+///   every array goal. Non-string elements are ignored rather than rejected: the
+///   goal is stored either way, so a partially structured goal still anchors the
+///   names it does carry.
+/// * `{"content": …, "key": …}` — the object form GC already accepted; kept so
+///   an existing session's exclusion list does not change meaning.
+///
+/// Any other shape names no concept (it is still stored — spec §6.1 types
+/// `root_goal` as free-form JSON).
+pub fn root_goal_texts(goal: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(goal) = goal else {
+        return Vec::new();
+    };
+    let mut texts: Vec<String> = match goal {
+        serde_json::Value::String(s) => vec![s.clone()],
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        serde_json::Value::Object(map) => ["content", "key"]
+            .iter()
+            .filter_map(|k| map.get(*k).and_then(|v| v.as_str()).map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    };
+    texts.sort();
+    texts.dedup();
+    texts
 }
 
 /// Legal spec §10 state-machine edges (adve-review GRAPH-4): Stage 1 promotes
@@ -2235,6 +2332,123 @@ mod tests {
         );
     }
 
+    /// ALGO-6: spec §6.1's own `root_goal` example is a **list**. A string-only
+    /// reading stored the array but named no concept, silently disabling drift
+    /// detection, auto-`Venerable` promotion and GC's root-goal exclusion.
+    ///
+    /// ALGO-12: **every** match is promoted, id-ascending, so the outcome does
+    /// not depend on `HashMap` iteration order.
+    #[test]
+    fn set_root_goal_accepts_an_array_and_promotes_every_match() {
+        let (mut g, goal_id, other_id) = goal_graph();
+        g.set_root_goal(Some(serde_json::json!([
+            "launch the product",
+            "unrelated concept"
+        ])));
+
+        assert_eq!(
+            g.root_goal_texts(),
+            vec![
+                "launch the product".to_string(),
+                "unrelated concept".to_string()
+            ],
+            "both names are read out of the array, sorted"
+        );
+        for id in [goal_id, other_id] {
+            assert_eq!(
+                status_of(&g, id),
+                crate::types::CanonizationStatus::Venerable,
+                "every named concept is auto-promoted, not just the first match"
+            );
+        }
+        // Audited id-ascending, so the event order is deterministic under
+        // multiple matches.
+        let events = g.canonization_events();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].node_id.0 < events[1].node_id.0);
+
+        // ALGO-12: `occurred_at` is logical time — the session's newest
+        // interaction stamp — not `Utc::now()`, so the audit trail stays
+        // monotonic against the rows around it.
+        let logical = g.logical_now();
+        assert_eq!(logical, ts(0));
+        assert!(
+            events.iter().all(|e| e.occurred_at == logical),
+            "occurred_at must come from logical time: {events:?}"
+        );
+    }
+
+    /// ALGO-6: an object goal keeps working, and an unrecognised shape is
+    /// stored but names nothing (spec §6.1 types `root_goal` as free-form JSON).
+    #[test]
+    fn root_goal_texts_reads_every_supported_shape() {
+        assert!(root_goal_texts(None).is_empty());
+        assert_eq!(
+            root_goal_texts(Some(&serde_json::json!("one"))),
+            vec!["one".to_string()]
+        );
+        assert_eq!(
+            root_goal_texts(Some(&serde_json::json!(["b", "a", "a"]))),
+            vec!["a".to_string(), "b".to_string()],
+            "sorted and deduplicated for determinism"
+        );
+        assert_eq!(
+            root_goal_texts(Some(&serde_json::json!({"content": "c", "key": "k"}))),
+            vec!["c".to_string(), "k".to_string()]
+        );
+        assert_eq!(
+            root_goal_texts(Some(&serde_json::json!(["ok", 7, null]))),
+            vec!["ok".to_string()],
+            "non-string elements are ignored, not fatal"
+        );
+        assert!(root_goal_texts(Some(&serde_json::json!(42))).is_empty());
+    }
+
+    /// XP-8: the root goal is durable. Before `Mutation::SetRootGoal` a reload
+    /// replayed an empty goal, so drift detection silently stopped and GC's
+    /// root-goal exclusion emptied. The mutation also bumps the epoch, so T5.4's
+    /// recall cache cannot serve results computed against the old goal.
+    #[test]
+    fn set_root_goal_emits_a_mutation_and_bumps_the_epoch() {
+        let (mut g, _, _) = goal_graph();
+        g.drain_log();
+        let epoch_before = g.epoch();
+
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+        assert!(g.epoch() > epoch_before, "a goal change bumps the epoch");
+        let batch = g.drain_log();
+        let goals: Vec<&Mutation> = batch
+            .mutations
+            .iter()
+            .filter(|m| matches!(m, Mutation::SetRootGoal { .. }))
+            .collect();
+        assert_eq!(goals.len(), 1, "one SetRootGoal: {:?}", batch.mutations);
+        match goals[0] {
+            Mutation::SetRootGoal { session_id, goal } => {
+                assert_eq!(*session_id, sid());
+                assert_eq!(
+                    goal.as_ref(),
+                    Some(&serde_json::json!("launch the product"))
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Re-setting the same goal is a no-op: no mutation, no epoch bump.
+        let epoch_after = g.epoch();
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+        assert_eq!(g.epoch(), epoch_after, "an unchanged goal writes nothing");
+        assert!(g.drain_log().is_empty());
+
+        // Clearing emits the clear so a reload does not resurrect the old goal.
+        g.set_root_goal(None);
+        let batch = g.drain_log();
+        assert!(batch
+            .mutations
+            .iter()
+            .any(|m| matches!(m, Mutation::SetRootGoal { goal: None, .. })));
+    }
+
     #[test]
     fn set_root_goal_is_idempotent_for_venerable_goal() {
         let (mut g, goal_id, _) = goal_graph();
@@ -2469,7 +2683,9 @@ mod tests {
                     assert!(saw_delete, "DeleteNode must follow incident DeleteEdges");
                     assert!(seen_nodes.contains(id), "{m:?}");
                 }
-                Mutation::CanonizationTransition { .. } => {}
+                // Neither carries graph topology, so neither participates in
+                // the endpoint-ordering contract.
+                Mutation::CanonizationTransition { .. } | Mutation::SetRootGoal { .. } => {}
             }
         }
         assert!(saw_delete);
@@ -2502,6 +2718,7 @@ mod tests {
                 Mutation::DeleteNode { .. } => "delete_node",
                 Mutation::DeleteEdge { .. } => "delete_edge",
                 Mutation::CanonizationTransition { .. } => "transition",
+                Mutation::SetRootGoal { .. } => "set_root_goal",
             })
             .collect();
         let expected = [

@@ -114,11 +114,13 @@
 //!
 //! ## Session-level metadata
 //!
-//! The mutation path (spec §2.4) has no `Mutation` kind for
-//! `root_goal`/`created_at`/`closed_at` — like MemoryStore, `load_session`
-//! returns `None` for all three. The `sessions` row is created (FK anchor,
-//! `created_at` DB-default) but its metadata columns are inert until a
-//! full-snapshot save path exists.
+//! `root_goal` **is** carried by the mutation path since XP-8
+//! (`Mutation::SetRootGoal`): `flush` updates `sessions.root_goal` with `seed`'s
+//! exact JSON encoding and `load_session` reads it back, so a reload no longer
+//! silently clears the drift anchor. `created_at`/`closed_at` still have no
+//! `Mutation` kind — like MemoryStore, `load_session` returns `None` for those
+//! two, and their columns stay inert (the row is created as an FK anchor with a
+//! `created_at` DB-default) until a full-snapshot save path exists.
 //!
 //! ## Embedding contract (session metadata)
 //!
@@ -519,6 +521,9 @@ impl GraphStore for SqliteStore {
                 Mutation::CanonizationTransition { event } => {
                     sessions.insert(event.session_id.0.clone());
                 }
+                Mutation::SetRootGoal { session_id, .. } => {
+                    sessions.insert(session_id.0.clone());
+                }
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }
         }
@@ -544,6 +549,9 @@ impl GraphStore for SqliteStore {
                 Mutation::CanonizationTransition { event } => {
                     apply_canonization_transition(&mut *tx, event).await?;
                 }
+                Mutation::SetRootGoal { session_id, goal } => {
+                    set_root_goal(&mut *tx, session_id, goal.as_ref()).await?;
+                }
             }
         }
 
@@ -564,9 +572,10 @@ impl GraphStore for SqliteStore {
             .map_err(|e| db_err("begin load transaction", e))?;
 
         // The existence probe doubles as the embedding-contract read (S5-class:
-        // snapshot-only — flush never writes these columns; see module doc).
+        // snapshot-only — flush never writes those columns; see module doc) and
+        // the `root_goal` read, which the mutation path DOES write (XP-8).
         let row = sqlx::query(
-            "SELECT embedding_kind, embedding_model, embedding_dim \
+            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal \
              FROM sessions WHERE session_id = ?",
         )
         .bind(&session.0)
@@ -582,6 +591,14 @@ impl GraphStore for SqliteStore {
         let embedding_model: Option<String> =
             row.try_get(1).map_err(|e| db_err("lookup session", e))?;
         let embedding_dim: Option<i64> = row.try_get(2).map_err(|e| db_err("lookup session", e))?;
+        // XP-8: `root_goal` survives a reload — `Mutation::SetRootGoal` writes
+        // it, so replaying the log no longer silently clears the drift anchor.
+        let root_goal: Option<String> = row.try_get(3).map_err(|e| db_err("lookup session", e))?;
+        let root_goal = root_goal
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
         let embedding = match (embedding_kind, embedding_dim) {
             (Some(kind), Some(dim)) => Some(EmbeddingContract {
                 kind,
@@ -621,9 +638,9 @@ impl GraphStore for SqliteStore {
 
         Ok(GraphSnapshot {
             session_id: session.clone(),
-            // Session-level metadata is not carried by the mutation path —
-            // None, matching MemoryStore (see module doc).
-            root_goal: None,
+            root_goal,
+            // `created_at`/`closed_at` are still snapshot-only (no Mutation
+            // kind) — None, matching MemoryStore (see module doc).
             created_at: None,
             closed_at: None,
             interactions,
@@ -1056,6 +1073,34 @@ async fn delete_node(tx: &mut sqlx::SqliteConnection, id: NodeId) -> Result<(), 
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("delete incident edges: {m}")))?;
+    Ok(())
+}
+
+/// XP-8: persist a session's `root_goal`. The column already exists (both
+/// schemas carry it, `seed` writes it) and the JSON encoding is `seed`'s
+/// exactly, so a goal set through the mutation path and one seeded from a
+/// snapshot are indistinguishable on reload. `ensure_sessions` has already
+/// created the row, so a zero-row update means the session vanished mid-batch.
+async fn set_root_goal(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+    goal: Option<&serde_json::Value>,
+) -> Result<(), StoreError> {
+    let encoded = goal
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| StoreError::Backend(format!("serialize root_goal: {e}")))?;
+    let res = sqlx::query("UPDATE sessions SET root_goal = ? WHERE session_id = ?")
+        .bind(encoded.as_deref())
+        .bind(&session.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
+    if res.rows_affected() == 0 {
+        return Err(StoreError::NotFound(format!(
+            "sessions row for {session} while setting root_goal"
+        )));
+    }
     Ok(())
 }
 
@@ -1492,6 +1537,71 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
+    }
+
+    /// XP-8: `root_goal` survives flush → load through the **mutation path**.
+    ///
+    /// Before `Mutation::SetRootGoal` the goal reached a store only via the
+    /// full-snapshot `seed` path, so a session reloaded from the write-behind log
+    /// came back with no goal — drift detection silently stopped and GC's
+    /// root-goal exclusion emptied. Covers the array shape (ALGO-6), a
+    /// last-write-wins replacement, and the explicit clear.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn root_goal_roundtrips_flush_and_load() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("goal-roundtrip");
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let goal = serde_json::json!(["launch the product", "ship the API"]);
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, NodeId::new(), None, ts),
+                Mutation::SetRootGoal {
+                    session_id: sid.clone(),
+                    goal: Some(goal.clone()),
+                },
+            ],
+        };
+        store.flush(&batch).await.unwrap();
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            loaded.root_goal.as_ref(),
+            Some(&goal),
+            "the array goal must survive flush→load (XP-8 / ALGO-6)"
+        );
+
+        // Last write wins, and a clear is durable (not "no change").
+        let replace = MutationBatch {
+            mutations: vec![Mutation::SetRootGoal {
+                session_id: sid.clone(),
+                goal: Some(serde_json::json!("only this one")),
+            }],
+        };
+        store.flush(&replace).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().root_goal,
+            Some(serde_json::json!("only this one"))
+        );
+        let clear = MutationBatch {
+            mutations: vec![Mutation::SetRootGoal {
+                session_id: sid.clone(),
+                goal: None,
+            }],
+        };
+        store.flush(&clear).await.unwrap();
+        assert_eq!(store.load_session(&sid).await.unwrap().root_goal, None);
+
+        #[cfg(feature = "store-memory")]
+        {
+            let memory = MemoryStore::new();
+            memory.flush(&batch).await.unwrap();
+            let want = memory.load_session(&sid).await.unwrap();
+            assert_eq!(
+                want.root_goal.as_ref(),
+                Some(&goal),
+                "MemoryStore applies SetRootGoal identically"
+            );
+        }
     }
 
     /// Acceptance (CON-8): `Concept.embedding` survives flush → load on SQLite

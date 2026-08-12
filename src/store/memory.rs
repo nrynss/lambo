@@ -169,6 +169,18 @@ impl MemoryStore {
                 }
                 snap.canonization_events.push(event.clone());
             }
+            // XP-8: session-level metadata reaches the store through the
+            // mutation path, not only `seed`. Same session-consistency gate as
+            // every other kind.
+            Mutation::SetRootGoal { session_id, goal } => {
+                if *session_id != snap.session_id {
+                    return Err(StoreError::Invariant(format!(
+                        "set_root_goal session {session_id} != snapshot {}",
+                        snap.session_id
+                    )));
+                }
+                snap.root_goal = goal.clone();
+            }
         }
         Ok(())
     }
@@ -205,6 +217,7 @@ impl GraphStore for MemoryStore {
                 Mutation::UpsertNode { node } => Some(node.session_id().clone()),
                 Mutation::UpsertEdge { edge } => Some(edge.session_id.clone()),
                 Mutation::CanonizationTransition { event } => Some(event.session_id.clone()),
+                Mutation::SetRootGoal { session_id, .. } => Some(session_id.clone()),
                 Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
                 Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
             }
@@ -245,6 +258,7 @@ impl GraphStore for MemoryStore {
                 Mutation::UpsertNode { node } => node.session_id().clone(),
                 Mutation::UpsertEdge { edge } => edge.session_id.clone(),
                 Mutation::CanonizationTransition { event } => event.session_id.clone(),
+                Mutation::SetRootGoal { session_id, .. } => session_id.clone(),
                 Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
                     Some(s) => s,
                     None => continue,

@@ -10,12 +10,15 @@
 //! ## Interpretation notes (T4.4 design decisions)
 //!
 //! * **Root goal nodes.** Spec §9: "Root goal nodes are automatically
-//!   `Venerable`" — the goal *concept* is the node whose `content` (or
-//!   `canonical_key`) equals the session's `root_goal` string
-//!   ([`root_goal_nodes`]; the same matcher [`Graph::set_root_goal`] uses to
-//!   auto-promote the concept). A session with no root goal, or a goal that
-//!   matches no concept, has no goal node → no hits (nothing to drift *from*).
-//!   A structured (non-string) goal is stored but cannot name a concept.
+//!   `Venerable`" — a goal *concept* is any node whose `content` or
+//!   `canonical_key` is named by the session's `root_goal`
+//!   ([`root_goal_nodes`], over [`Graph::root_goal_texts`] — the same reading
+//!   [`Graph::set_root_goal`] and GC's exclusion list use, so the three cannot
+//!   disagree). A goal may be a string, **an array of strings** (spec §6.1's own
+//!   example, ALGO-6) or the `{content, key}` object form; a session with no root
+//!   goal, or a goal that matches no concept, has no goal node → no hits
+//!   (nothing to drift *from*). Multiple goals are multiple BFS sources: a
+//!   concept is measured against the nearest one.
 //! * **Traversal edge set and direction.** Paths use only
 //!   [`DRIFT_EDGE_TYPES`] (Causal/Dependency/Hierarchical, spec §9), treated as
 //!   **undirected**. The committed fixture's chain is directed *away* from the
@@ -31,14 +34,20 @@
 //!   is the unweighted shortest-path hop count (multi-source BFS). Edge
 //!   weights are GC's concern (`min_edge_weight` decay), not drift's. "Warn
 //!   beyond" is strict: `dist > threshold` fires; `dist == threshold` does not.
-//! * **"… or no path".** A concept with **no** traversable route to any root
-//!   goal is *out of scope* and emits no hit: it is not drifted *from* the
-//!   goal — it shares no structural connection with it. The fixture's
-//!   isolated `isolated widget`/`isolated sibling` component is planted as GC
-//!   food, not drift ("disconnected component (GC step 3 food)", same
-//!   generator), and the acceptance "exactly one Drift event, for the planted
-//!   node" pins this reading. Reachability and distance come from the **same**
-//!   BFS, so every in-scope concept has a finite distance.
+//! * **"… or no path" (ALGO-5).** Spec §9 warns beyond `drift_threshold` hops
+//!   **or on no path**, so a concept with no traversable route to any root goal
+//!   *is* a hit — the maximally drifted case, reported with
+//!   [`DriftHit::hops`] = `None`. The earlier reading treated it as out of
+//!   scope, which meant the one case the spec is least ambiguous about never
+//!   warned.
+//!
+//!   The fixture's isolated `isolated widget`/`isolated sibling` pair is planted
+//!   as GC food ("disconnected component (GC step 3 food)", same generator), and
+//!   it now fires Drift once before GC collects it. That is correct, not a
+//!   conflict: a disconnected concept is drifted *and* garbage, and the daemon
+//!   detects on every cycle while GC runs every `gc_interval` mutations — so
+//!   the warning legitimately precedes the collection. Emission is
+//!   on-transition, so it fires once, not once per cycle.
 //! * **Cycle safety (G6).** Multi-hop `Hierarchical` cycles are writable
 //!   across calls, so the BFS keeps a visited set — the traversal can never
 //!   loop, and no `assert_invariants` guarantee is assumed.
@@ -58,6 +67,12 @@ use crate::types::{EdgeType, NodeId};
 /// Spec §9 `drift_threshold` — warn strictly beyond this many hops.
 pub const DRIFT_THRESHOLD: usize = 5;
 
+/// The `hops` value standing for "no path to any root goal" where the shape
+/// demands a number ([`HotListPayload::Drift`], `DaemonEvent::Drift`) — the
+/// maximally drifted case (ALGO-5). `DriftHit` itself carries `Option`, so this
+/// sentinel only appears at the two frozen boundaries.
+pub const DRIFT_HOPS_NO_PATH: u64 = u64::MAX;
+
 /// Edge types participating in drift paths (spec §9).
 pub const DRIFT_EDGE_TYPES: [EdgeType; 3] = [
     EdgeType::Causal,
@@ -74,11 +89,15 @@ pub struct DriftHit {
     /// The drifted concept.
     pub node: NodeId,
     /// The root goal it was measured against (the one reached first in BFS
-    /// order — shortest distance, ties → smallest-id goal in practice).
-    pub goal: NodeId,
-    /// Shortest-path hop count over `Causal`/`Dependency`/`Hierarchical`.
-    pub hops: usize,
-    /// Renderable summary ("concept X is N hops from root goal Y").
+    /// order — shortest distance, ties → smallest-id goal in practice), or
+    /// `None` when there is **no path** to any goal (ALGO-5).
+    pub goal: Option<NodeId>,
+    /// Shortest-path hop count over `Causal`/`Dependency`/`Hierarchical`, or
+    /// `None` for the no-path case — the maximally drifted concept, which has no
+    /// finite distance to report (ALGO-5).
+    pub hops: Option<usize>,
+    /// Renderable summary ("concept X is N hops from root goal Y", or "… has no
+    /// path to any root goal").
     pub detail: String,
 }
 
@@ -86,12 +105,17 @@ pub struct DriftHit {
 /// `canonical_key` equals the `root_goal` string. Empty when the goal is
 /// unset, non-string, or matches no concept. Deterministic (id-ascending).
 pub fn root_goal_nodes(graph: &Graph) -> Vec<NodeId> {
-    let Some(text) = graph.root_goal().and_then(serde_json::Value::as_str) else {
+    let texts = graph.root_goal_texts();
+    if texts.is_empty() {
         return Vec::new();
-    };
+    }
     let mut goals: Vec<NodeId> = graph
         .concepts()
-        .filter(|c| c.content == text || c.canonical_key == text)
+        .filter(|c| {
+            texts
+                .iter()
+                .any(|t| c.content == *t || c.canonical_key == *t)
+        })
         .map(|c| c.id)
         .collect();
     goals.sort_by_key(|id| id.0);
@@ -136,20 +160,18 @@ pub fn detect(graph: &Graph, threshold: usize) -> Vec<DriftHit> {
     let mut hits: Vec<DriftHit> = dist
         .iter()
         .filter(|(_, d)| **d > threshold)
-        .map(|(node, d)| {
-            // Every `dist` entry has a `src` entry (goals seed both; each
-            // discovery copies the parent's source).
-            let goal = src[node];
-            DriftHit {
-                node: *node,
-                goal,
-                hops: *d,
-                detail: format!(
-                    "concept {node} is {d} hops from root goal {goal} (threshold {threshold})"
-                ),
-            }
-        })
+        // Every `dist` entry has a `src` entry (goals seed both; each discovery
+        // copies the parent's source).
+        .filter_map(|(node, d)| drift_hit(*node, Some(src[node]), Some(*d), threshold))
         .collect();
+    // ALGO-5: spec §9's "or no path". Every concept the goal-seeded BFS never
+    // reached is unreachable from every goal — the maximally drifted case.
+    hits.extend(
+        graph
+            .concepts()
+            .filter(|c| !dist.contains_key(&c.id))
+            .filter_map(|c| drift_hit(c.id, None, None, threshold)),
+    );
     hits.sort_by_key(|h| h.node.0);
     hits
 }
@@ -178,7 +200,7 @@ pub fn drift_at(graph: &Graph, node: NodeId, threshold: usize) -> Option<DriftHi
             .filter(|n| goals.contains(n))
             .min_by_key(|n| n.0)
         {
-            return drift_hit(node, *goal, hops, threshold);
+            return drift_hit(node, Some(*goal), Some(hops), threshold);
         }
         let mut next: Vec<NodeId> = Vec::new();
         for cur in &frontier {
@@ -191,24 +213,48 @@ pub fn drift_at(graph: &Graph, node: NodeId, threshold: usize) -> Option<DriftHi
         frontier = next;
         hops += 1;
     }
-    // No path to any goal: out of scope, matching `detect` (see the module
-    // docs' "… or no path" note).
-    None
+    // ALGO-5: the ball around `node` closed without reaching a goal — no path,
+    // which spec §9 warns on. Only nodes that are actually in the graph qualify;
+    // a caller asking about an absent id gets `None`.
+    graph.node(node)?;
+    drift_hit(node, None, None, threshold)
 }
 
 /// A hit for a node at a known distance, or `None` when it is within threshold.
-fn drift_hit(node: NodeId, goal: NodeId, hops: usize, threshold: usize) -> Option<DriftHit> {
-    if hops <= threshold {
+/// `hops`/`goal` are `None` for the no-path case (ALGO-5), which always warns.
+fn drift_hit(
+    node: NodeId,
+    goal: Option<NodeId>,
+    hops: Option<usize>,
+    threshold: usize,
+) -> Option<DriftHit> {
+    if hops.is_some_and(|h| h <= threshold) {
         return None;
     }
+    let detail = match (hops, goal) {
+        (Some(h), Some(g)) => {
+            format!("concept {node} is {h} hops from root goal {g} (threshold {threshold})")
+        }
+        // ALGO-5: no path to any goal — maximally drifted, always a hit.
+        _ => format!("concept {node} has no path to any root goal (threshold {threshold} hops)"),
+    };
     Some(DriftHit {
         node,
         goal,
         hops,
-        detail: format!(
-            "concept {node} is {hops} hops from root goal {goal} (threshold {threshold})"
-        ),
+        detail,
     })
+}
+
+/// The hot-list payload for a hit. `HotListPayload::Drift` is `{hops: u64, root:
+/// NodeId}`, and the no-path case has neither: it renders as
+/// [`DRIFT_HOPS_NO_PATH`] hops against the nil root — the encoding
+/// `HotListPayload::Drift::root` has documented since T4.2 ("nil when no path").
+fn drift_payload(hit: &DriftHit) -> HotListPayload {
+    HotListPayload::Drift {
+        hops: hit.hops.map_or(DRIFT_HOPS_NO_PATH, |h| h as u64),
+        root: hit.goal.unwrap_or_default(),
+    }
 }
 
 /// Run [`detect`] and refresh the daemon hot list (T4.2): one
@@ -229,21 +275,9 @@ pub fn record(hotlist: &mut HotList, graph: &Graph, threshold: usize) -> Vec<Dri
         // re-linked closer to the goal drops out of a recall, and one that
         // drifted further renders its new hop count. Drift is clock-free, so
         // `now` is unused — the signature is uniform across conditions.
-        let holds = move |g: &Graph, _at: DateTime<Utc>| {
-            drift_at(g, node, t).map(|h| HotListPayload::Drift {
-                hops: h.hops as u64,
-                root: h.goal,
-            })
-        };
-        let entry = HotListEntry::new(
-            node,
-            Condition::Drift,
-            HotListPayload::Drift {
-                hops: hit.hops as u64,
-                root: hit.goal,
-            },
-            holds,
-        );
+        let holds =
+            move |g: &Graph, _at: DateTime<Utc>| drift_at(g, node, t).map(|h| drift_payload(&h));
+        let entry = HotListEntry::new(node, Condition::Drift, drift_payload(hit), holds);
         let _ = hotlist.insert(entry);
     }
     hits
@@ -397,11 +431,72 @@ mod tests {
         g.set_root_goal(Some(serde_json::json!("no such concept")));
         assert!(root_goal_nodes(&g).is_empty());
 
-        g.set_root_goal(Some(serde_json::json!({ "structured": true })));
+        g.set_root_goal(Some(serde_json::json!(42)));
         assert!(
             root_goal_nodes(&g).is_empty(),
-            "non-string goal names no concept"
+            "an unsupported goal shape names no concept"
         );
+    }
+
+    /// ALGO-6: spec §6.1's `root_goal` example is a **list**, and an array goal
+    /// used to silently disable drift entirely — `as_str()` on an array is
+    /// `None`, so there were no goal nodes and therefore no hits, ever.
+    #[test]
+    fn array_root_goal_anchors_drift_from_every_named_goal() {
+        // Two disjoint chains, each with its own goal concept.
+        let (mut g, goal_a, chain_a) = chain_graph(7);
+        let iid = g.interactions().next().unwrap().id;
+        let goal_b = concept(700, iid, "ship the API");
+        let goal_b_id = goal_b.id;
+        g.insert_concept(goal_b, iid).unwrap();
+        // A short chain off goal_b, well within threshold.
+        let mut prev = goal_b_id;
+        let mut chain_b = Vec::new();
+        for n in 0..2u64 {
+            let c = concept(710 + n, iid, &format!("b step {n}"));
+            let cid = c.id;
+            g.insert_concept(c, iid).unwrap();
+            g.upsert_edge(edge(8000 + n, prev, cid, EdgeType::Dependency))
+                .unwrap();
+            chain_b.push(cid);
+            prev = cid;
+        }
+
+        // String-only goal: chain_b's nodes have no path to it → they now warn
+        // (ALGO-5), and goal_b itself does too.
+        g.set_root_goal(Some(serde_json::json!("launch the product")));
+        let single = detect(&g, DRIFT_THRESHOLD);
+        assert!(
+            single
+                .iter()
+                .any(|h| h.node == goal_b_id && h.hops.is_none()),
+            "with only goal A declared, goal B's island is unreachable: {single:?}"
+        );
+
+        // Both goals declared as an array: chain_b is anchored and drops out,
+        // and chain_a's far nodes still report their distance from goal A.
+        g.set_root_goal(Some(serde_json::json!([
+            "launch the product",
+            "ship the API"
+        ])));
+        let both = detect(&g, DRIFT_THRESHOLD);
+        assert_eq!(root_goal_nodes(&g), {
+            let mut v = vec![goal_a, goal_b_id];
+            v.sort_by_key(|id| id.0);
+            v
+        });
+        for id in chain_b.iter().chain(std::iter::once(&goal_b_id)) {
+            assert!(
+                !both.iter().any(|h| h.node == *id),
+                "goal B's chain is within threshold of its own goal: {both:?}"
+            );
+        }
+        let far = both
+            .iter()
+            .find(|h| h.node == chain_a[6])
+            .expect("chain A's 7-hop node still drifts");
+        assert_eq!(far.hops, Some(7));
+        assert_eq!(far.goal, Some(goal_a));
     }
 
     // ------------------------------------------------------------------
@@ -427,8 +522,8 @@ mod tests {
         let hits = detect(&g, DRIFT_THRESHOLD);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node, chain[5]);
-        assert_eq!(hits[0].goal, goal_id);
-        assert_eq!(hits[0].hops, 6);
+        assert_eq!(hits[0].goal, Some(goal_id));
+        assert_eq!(hits[0].hops, Some(6));
     }
 
     #[test]
@@ -438,7 +533,7 @@ mod tests {
         // dist 1 > 0 and dist 2 > 0 for the chain nodes; dist 0 for the goal
         // itself never fires.
         assert_eq!(hits.iter().map(|h| h.node).collect::<Vec<_>>(), chain);
-        assert!(hits.iter().all(|h| h.goal == goal_id));
+        assert!(hits.iter().all(|h| h.goal == Some(goal_id)));
     }
 
     #[test]
@@ -461,12 +556,15 @@ mod tests {
     // Scope: disconnected components and cycles
     // ------------------------------------------------------------------
 
+    /// ALGO-5 (behavior change): a disconnected component now **does** warn.
+    ///
+    /// This test previously asserted `hits.len() == 1` — "no path = out of
+    /// scope". Spec §9 says warn beyond the threshold **or on no path**, so the
+    /// disconnected pair is in scope and reported with no finite distance. The
+    /// far chain node still reports its hop count as before.
     #[test]
-    fn disconnected_component_without_goal_is_out_of_scope() {
-        // Goal chain of 6 hops (terminal drifts) plus an isolated
-        // Dependency-linked pair with no route to the goal: the pair must
-        // produce no hits ("no path" = out of scope, module docs).
-        let (mut g, _, chain) = chain_graph(6);
+    fn disconnected_component_warns_with_no_finite_distance() {
+        let (mut g, goal_id, chain) = chain_graph(6);
         let iid = g.interactions().next().unwrap().id;
         let iso_a = concept(300, iid, "isolated a");
         let iso_a_id = iso_a.id;
@@ -478,8 +576,15 @@ mod tests {
             .unwrap();
 
         let hits = detect(&g, DRIFT_THRESHOLD);
-        assert_eq!(hits.len(), 1, "only the planted 6-hop node drifts");
-        assert_eq!(hits[0].node, chain[5]);
+        assert_eq!(hits.len(), 3, "the 6-hop node plus both isolates: {hits:?}");
+        let far = hits.iter().find(|h| h.node == chain[5]).unwrap();
+        assert_eq!(far.hops, Some(6));
+        assert_eq!(far.goal, Some(goal_id));
+        for id in [iso_a_id, iso_b_id] {
+            let hit = hits.iter().find(|h| h.node == id).unwrap();
+            assert_eq!(hit.hops, None, "unreachable: no finite distance");
+            assert_eq!(hit.goal, None);
+        }
     }
 
     #[test]
@@ -525,9 +630,9 @@ mod tests {
         let hits = detect(&g2, DRIFT_THRESHOLD);
         assert_eq!(hits.len(), 2, "6- and 7-hop nodes drift past the cycle");
         assert_eq!(hits[0].node, chain2[5]);
-        assert_eq!(hits[0].hops, 6);
+        assert_eq!(hits[0].hops, Some(6));
         assert_eq!(hits[1].node, chain2[6]);
-        assert_eq!(hits[1].hops, 7);
+        assert_eq!(hits[1].hops, Some(7));
     }
 
     #[test]
@@ -541,7 +646,10 @@ mod tests {
         for w in a.windows(2) {
             assert!(w[0].node.0 < w[1].node.0, "hits sorted by node id");
         }
-        assert_eq!(a.iter().map(|h| h.hops).collect::<Vec<_>>(), vec![6, 7, 8]);
+        assert_eq!(
+            a.iter().map(|h| h.hops).collect::<Vec<_>>(),
+            vec![Some(6), Some(7), Some(8)]
+        );
     }
 
     // ------------------------------------------------------------------
@@ -550,7 +658,7 @@ mod tests {
 
     #[cfg(feature = "fixtures")]
     #[test]
-    fn session_drift_fixture_fires_exactly_one_hit_for_planted_node() {
+    fn session_drift_fixture_fires_for_the_planted_node_and_the_isolated_pair() {
         use crate::fixtures::load_snapshot;
         let snap = load_snapshot("session-drift").unwrap();
         let g = Graph::from_snapshot(snap).unwrap();
@@ -564,24 +672,92 @@ mod tests {
         );
 
         let hits = detect(&g, DRIFT_THRESHOLD);
+        let by_content = |content: &str| {
+            let id = g
+                .concepts()
+                .find(|c| c.content == content)
+                .unwrap_or_else(|| panic!("fixture must contain {content:?}"))
+                .id;
+            hits.iter().find(|h| h.node == id).cloned()
+        };
+
+        // The planted far node: 6 hops past the 5-hop threshold.
+        let planted = by_content("far budget concept").expect("planted node must drift");
+        assert_eq!(planted.goal, Some(goals[0]));
+        assert_eq!(planted.hops, Some(6));
+
+        // ALGO-5: the isolated pair has no traversable path to the goal (their
+        // only edges are `Derives` provenance, which is not a drift edge type),
+        // so spec §9's "or no path" clause fires for them. They are also GC's
+        // step-3 food; the daemon warns once, then GC collects them on its own
+        // interval — a warning before the collection is correct, not a conflict.
+        for content in ["isolated widget", "isolated sibling"] {
+            let hit = by_content(content)
+                .unwrap_or_else(|| panic!("{content} has no path to the goal — §9 warns"));
+            assert_eq!(hit.hops, None);
+            assert_eq!(hit.goal, None);
+            assert!(hit.detail.contains("no path"), "{}", hit.detail);
+        }
+
         assert_eq!(
             hits.len(),
-            1,
-            "exactly one drift event for the planted node"
+            3,
+            "the planted node plus the two unreachable ones: {hits:?}"
         );
-        let planted = g
-            .concepts()
-            .find(|c| c.content == "far budget concept")
-            .expect("fixture must contain the planted drifted concept");
-        assert_eq!(hits[0].node, planted.id);
-        assert_eq!(hits[0].goal, goals[0]);
-        assert_eq!(hits[0].hops, 6);
-        // The 5-hop neighbor ("on path step five") must not fire, and the
-        // isolated GC component must not fire.
+        // The 5-hop neighbor ("on path step five") must still not fire.
         assert!(
-            hits.iter().all(|h| h.hops > 5),
-            "only nodes beyond the threshold fire"
+            by_content("on path step five").is_none(),
+            "at-threshold nodes do not fire"
         );
+    }
+
+    /// ALGO-5: spec §9 warns beyond `drift_threshold` hops **or on no path**.
+    /// The earlier reading filtered over the goal-reachable set only, so the
+    /// maximally drifted concept — the one with no structural connection to the
+    /// goal at all — was the single case that never warned.
+    #[test]
+    fn no_path_to_any_goal_is_the_maximally_drifted_case() {
+        let (mut g, goal_id, chain) = chain_graph(2);
+        // An orphan island: two concepts linked to each other and to nothing
+        // else on a drift edge type.
+        let iid = g.interactions().next().unwrap().id;
+        let a = concept(500, iid, "island a");
+        let a_id = a.id;
+        g.insert_concept(a, iid).unwrap();
+        let b = concept(501, iid, "island b");
+        let b_id = b.id;
+        g.insert_concept(b, iid).unwrap();
+        g.upsert_edge(edge(9500, a_id, b_id, EdgeType::Dependency))
+            .unwrap();
+
+        let hits = detect(&g, DRIFT_THRESHOLD);
+        let nodes: Vec<NodeId> = hits.iter().map(|h| h.node).collect();
+        assert!(nodes.contains(&a_id) && nodes.contains(&b_id), "{hits:?}");
+        assert!(
+            !nodes.contains(&goal_id) && !nodes.iter().any(|n| chain.contains(n)),
+            "the anchored chain is within threshold: {hits:?}"
+        );
+        for hit in hits.iter().filter(|h| h.node == a_id || h.node == b_id) {
+            assert_eq!(hit.hops, None, "no finite distance to report");
+            assert_eq!(hit.goal, None);
+            assert!(hit.detail.contains("no path"), "{}", hit.detail);
+        }
+
+        // The per-node primitive agrees, and the hot-list payload encodes the
+        // no-path case as the documented sentinel against the nil root.
+        let per_node = drift_at(&g, a_id, DRIFT_THRESHOLD).expect("per-node must agree");
+        assert_eq!(per_node.hops, None);
+        assert_eq!(
+            drift_payload(&per_node),
+            HotListPayload::Drift {
+                hops: DRIFT_HOPS_NO_PATH,
+                root: NodeId::default(),
+            }
+        );
+
+        // With no root goal at all there is nothing to drift *from* — unchanged.
+        g.set_root_goal(None);
+        assert!(detect(&g, DRIFT_THRESHOLD).is_empty());
     }
 
     // ------------------------------------------------------------------

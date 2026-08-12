@@ -269,11 +269,34 @@ pub struct Edge {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Mutation {
-    UpsertNode { node: Node },
-    UpsertEdge { edge: Edge },
-    DeleteNode { id: NodeId },
-    DeleteEdge { id: NodeId },
-    CanonizationTransition { event: CanonizationEvent },
+    UpsertNode {
+        node: Node,
+    },
+    UpsertEdge {
+        edge: Edge,
+    },
+    DeleteNode {
+        id: NodeId,
+    },
+    DeleteEdge {
+        id: NodeId,
+    },
+    CanonizationTransition {
+        event: CanonizationEvent,
+    },
+    /// The session's `root_goal` changed (XP-8). `None` clears it.
+    ///
+    /// Session-level metadata otherwise reaches a store only through the
+    /// full-snapshot `seed` path, so before this variant a reload replayed an
+    /// **empty** goal: drift detection silently stopped (no goal nodes → no
+    /// hits) and GC's root-goal exclusion emptied, leaving auto-`Venerable` as
+    /// the only surviving protection. Both SQL schemas already carry
+    /// `sessions.root_goal`, so applying this is an `UPDATE` of a column that
+    /// exists — the JSON encoding matches `seed`'s exactly.
+    SetRootGoal {
+        session_id: SessionId,
+        goal: Option<serde_json::Value>,
+    },
 }
 
 /// Ordered write-behind unit (spec §2.4). Apply nodes → edges → deletions → transitions.

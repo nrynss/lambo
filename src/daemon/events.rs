@@ -148,11 +148,17 @@ pub fn conflict_event(hit: &ConflictHit) -> DaemonEvent {
 }
 
 /// Map a drift hit to its broadcast event. [`DriftHit::detail`] already
-/// renders "concept X is N hops from root goal Y (threshold T)".
+/// renders "concept X is N hops from root goal Y (threshold T)", or the no-path
+/// sentence.
+///
+/// §6.1's `hops: u32` is frozen and has no "unreachable" encoding, so a no-path
+/// hit (ALGO-5) reports `u32::MAX` — the sentinel documented at
+/// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`]. Consumers render `detail`,
+/// which says so in words.
 pub fn drift_event(hit: &DriftHit) -> DaemonEvent {
     DaemonEvent::Drift {
         node_id: hit.node,
-        hops: hit.hops as u32,
+        hops: hit.hops.map_or(u32::MAX, |h| h as u32),
         detail: hit.detail.clone(),
     }
 }
@@ -666,8 +672,8 @@ mod tests {
 
         let d = drift_event(&DriftHit {
             node: nid(1, 2),
-            goal: nid(1, 3),
-            hops: 6,
+            goal: Some(nid(1, 3)),
+            hops: Some(6),
             detail: "concept X is 6 hops from root goal Y (threshold 5)".into(),
         });
         match d {

@@ -216,6 +216,14 @@ const DELETE_NODE_EDGES_SQL: &str = r#"
 DELETE FROM edges WHERE source = $1 OR target = $1 OR id = $1
 "#;
 
+/// XP-8: persist a session's `root_goal` from the mutation path. Same column and
+/// same JSONB cast `UPSERT_SESSION_SQL` (the `seed` path) uses, so a goal set
+/// through a mutation and one seeded from a snapshot are indistinguishable on
+/// reload. The bare-row upsert above has already created the row.
+const SET_ROOT_GOAL_SQL: &str = r#"
+UPDATE sessions SET root_goal = $2::JSONB WHERE session_id = $1
+"#;
+
 const DELETE_NODE_CONCEPTS_SQL: &str = r#"
 DELETE FROM concepts WHERE id = $1
 "#;
@@ -1096,6 +1104,7 @@ impl GraphStore for CockroachStore {
                     Mutation::UpsertNode { node } => node.session_id().as_str(),
                     Mutation::UpsertEdge { edge } => edge.session_id.as_str(),
                     Mutation::CanonizationTransition { event } => event.session_id.as_str(),
+                    Mutation::SetRootGoal { session_id, .. } => session_id.as_str(),
                     Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
                 };
                 if !sids.iter().any(|s| s == sid) {
@@ -1151,6 +1160,24 @@ impl GraphStore for CockroachStore {
                     }
                     Mutation::CanonizationTransition { event } => {
                         apply_canonization(&mut *tx, event).await?;
+                    }
+                    Mutation::SetRootGoal { session_id, goal } => {
+                        let encoded = goal
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
+                        let res = sqlx::query(SET_ROOT_GOAL_SQL)
+                            .bind(session_id.as_str())
+                            .bind(encoded.as_deref())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
+                        if res.rows_affected() == 0 {
+                            return Err(StoreError::NotFound(format!(
+                                "sessions row for {session_id} while setting root_goal"
+                            )));
+                        }
                     }
                 }
             }

@@ -1111,8 +1111,11 @@ mod tests {
         let mut rx = daemon.events();
         let handle = daemon.spawn();
 
-        // Warm-up: single-agent fixture → no conflict; drift is the only
-        // event (drift detection is clock-free, the chain is 6 hops).
+        // Warm-up: single-agent fixture → no conflict; drift is the only event
+        // kind (drift detection is clock-free, the chain is 6 hops). The planted
+        // node sorts first by id; the fixture's isolated pair follows with the
+        // no-path warning spec §9 requires (ALGO-5) — they are GC's step-3 food,
+        // and warning once before GC's interval collects them is correct.
         let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("planted drift within 2s")
@@ -1129,6 +1132,18 @@ mod tests {
             }
             other => panic!("first warm-up event must be the planted Drift, got {other:?}"),
         }
+        let mut no_path = 0;
+        while let Ok(evt) = rx.try_recv() {
+            match evt {
+                DaemonEvent::Drift { hops, detail, .. } => {
+                    assert_eq!(hops, u32::MAX, "unreachable sentinel: {detail}");
+                    assert!(detail.contains("no path"), "renderable detail: {detail}");
+                    no_path += 1;
+                }
+                other => panic!("the drift fixture must emit only Drift, got {other:?}"),
+            }
+        }
+        assert_eq!(no_path, 2, "the fixture's isolated pair");
         handle.abort();
     }
 

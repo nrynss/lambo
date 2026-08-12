@@ -8,10 +8,13 @@
 //!
 //! ## Spec → code mapping
 //!
-//! 1. **Edge cleanup** — every edge with `weight < min_edge_weight` whose last
-//!    reinforcement is older than `gc_edge_ttl` is removed. The TTL anchor is
-//!    `last_reinforced` (the edge's last activity; a never-reinforced edge is
-//!    dead from its write). All edge types qualify — the spec names none.
+//! 1. **Edge cleanup** — every **decaying** edge (spec §5 table:
+//!    `CoOccurrence`, `Semantic` — [`EdgeType::decays`]) with
+//!    `weight < min_edge_weight` whose last reinforcement is older than
+//!    `gc_edge_ttl` is removed (ALGO-9). The TTL anchor is `last_reinforced`
+//!    (the edge's last activity; a never-reinforced edge is dead from its
+//!    write). Structural types are exempt: their weight is a property of the
+//!    kind, not a decayed signal, and §5.7 depends on them surviving.
 //! 2. **Concept cleanup** — orphans (no incident edges after step 1) and
 //!    sub-threshold concepts are collected, **excluding** Venerable,
 //!    Canonical, and root-goal concepts. The cut takes the **session's**
@@ -213,10 +216,11 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     };
 
     // Protected classes: Venerable / Canonical / root-goal. Computed once —
-    // canonization statuses do not change during a GC run.
+    // canonization statuses and the root goal do not change during a GC run.
+    let goal_texts = graph.root_goal_texts();
     let protected: HashSet<NodeId> = graph
         .concepts()
-        .filter(|c| is_protected(graph, c))
+        .filter(|c| is_protected(c, &goal_texts))
         .map(|c| c.id)
         .collect();
 
@@ -405,54 +409,59 @@ fn eviction_score(
     }
 }
 
-/// A concept is protected when it is Venerable or Canonical, or it is the
-/// session's root-goal node (spec §9 step 2's exclusion list).
-fn is_protected(graph: &Graph, c: &Concept) -> bool {
+/// A concept is protected when it is Venerable or Canonical, or it is one of
+/// the session's root-goal nodes (spec §9 step 2's exclusion list).
+///
+/// `goal_texts` is [`Graph::root_goal_texts`], resolved **once per run** by the
+/// caller: the goal cannot change mid-run, and re-parsing it per concept would
+/// allocate once per concept.
+fn is_protected(c: &Concept, goal_texts: &[String]) -> bool {
     matches!(
         c.canonization_status,
         CanonizationStatus::Venerable | CanonizationStatus::Canonical
-    ) || is_root_goal_concept(graph, c)
+    ) || is_root_goal_concept(c, goal_texts)
 }
 
-/// The root-goal concept is the one whose content (or canonical key) equals
-/// the session's `root_goal`. The fixture carries `root_goal: "launch the
+/// A root-goal concept is one whose content (or canonical key) is named by the
+/// session's `root_goal`. The fixture carries `root_goal: "launch the
 /// product"` matching concept content; T4.4 additionally marks it Venerable
 /// via `set_root_goal` — this is belt-and-suspenders per spec §9 step 2's
 /// "excluding Venerable/Canonical/root-goal".
-fn is_root_goal_concept(graph: &Graph, c: &Concept) -> bool {
-    let Some(goal) = graph.root_goal() else {
-        return false;
-    };
-    match goal {
-        serde_json::Value::String(s) => c.content == *s || c.canonical_key == *s,
-        serde_json::Value::Object(map) => {
-            let content = map.get("content").and_then(|v| v.as_str());
-            let key = map.get("key").and_then(|v| v.as_str());
-            content.is_some_and(|s| c.content == s)
-                || key.is_some_and(|s| c.content == s || c.canonical_key == s)
-        }
-        _ => false,
-    }
+///
+/// The goal shape is read by [`Graph::root_goal_texts`] (ALGO-6), the one
+/// parser GC, drift and `set_root_goal` share — so an **array** goal (spec
+/// §6.1's own example) protects all of its concepts here instead of none.
+fn is_root_goal_concept(c: &Concept, goal_texts: &[String]) -> bool {
+    goal_texts
+        .iter()
+        .any(|t| c.content == *t || c.canonical_key == *t)
 }
 
 /// Edge ids qualifying for step-1 removal, id-ascending and deduplicated.
+///
+/// **Only decaying edge types** (ALGO-9): the spec §5 table marks `CoOccurrence`
+/// and `Semantic` as decaying and every other type as not, so a weight-and-TTL
+/// cut is only meaningful for those two — a structural edge's weight is a fixed
+/// property of its kind, not a decayed signal, and collecting one on a protected
+/// concept would break §5.7's structural guarantees. The margin today is
+/// **zero**: `record_action` writes `Causal`/`Dependency` at exactly
+/// [`MIN_EDGE_WEIGHT`] and the predicate is a strict `<`, so any weight tweak or
+/// a lower configured `min_edge_weight` would start deleting the demo's
+/// dependency graph out from under it. [`EdgeType::decays`] is the single source
+/// of truth for the table.
 fn dead_edge_ids(graph: &Graph, params: GcParams) -> Vec<NodeId> {
-    const ALL_TYPES: [EdgeType; 7] = [
-        EdgeType::Temporal,
-        EdgeType::Derives,
-        EdgeType::CoOccurrence,
-        EdgeType::Causal,
-        EdgeType::Dependency,
-        EdgeType::Hierarchical,
-        EdgeType::Semantic,
-    ];
+    const DECAYING_TYPES: [EdgeType; 2] = [EdgeType::CoOccurrence, EdgeType::Semantic];
+    debug_assert!(
+        DECAYING_TYPES.iter().all(|t| t.decays()),
+        "DECAYING_TYPES must mirror EdgeType::decays (spec §5 table)"
+    );
     let mut dead: Vec<NodeId> = Vec::new();
     for node in graph
         .interactions()
         .map(|i| i.id)
         .chain(graph.concepts().map(|c| c.id))
     {
-        for ty in ALL_TYPES {
+        for ty in DECAYING_TYPES {
             for tgt in graph.out_neighbors_typed(node, ty) {
                 if let Some(e) = graph.edge_between(node, tgt, ty) {
                     if e.weight < params.min_edge_weight
@@ -612,6 +621,57 @@ mod tests {
         assert!(outcome.concepts_collected.is_empty());
         assert_eq!(outcome.survivors, vec![nid(10), nid(11)]);
         assert!(outcome.epoch_after > outcome.epoch_before);
+    }
+
+    /// ALGO-9: step 1 only cuts **decaying** edge types (spec §5 table). A
+    /// structural edge that is stale and under the weight bar must survive —
+    /// its weight is a property of its kind, not a decayed signal, and §5.7
+    /// depends on it.
+    ///
+    /// The margin is zero today: `record_action` writes `Causal`/`Dependency` at
+    /// exactly `MIN_EDGE_WEIGHT` against a strict `<`, so this test uses a
+    /// sub-threshold structural weight — which the pre-fix pass collected — plus
+    /// a decaying edge at the same weight to prove the cut still bites.
+    #[test]
+    fn edge_cleanup_spares_non_decaying_edge_types() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        // Protected (Canonical) endpoints, so nothing is collected for score.
+        for n in [10u64, 11] {
+            let c = Concept {
+                canonization_status: CanonizationStatus::Canonical,
+                ..concept(n, 1, &format!("structural {n}"), ConceptType::Entity)
+            };
+            g.insert_concept(c, iid).unwrap();
+        }
+        // Stale + under weight, but structural: must survive (ALGO-9).
+        for (id, ty) in [
+            (200u64, EdgeType::Dependency),
+            (201, EdgeType::Causal),
+            (202, EdgeType::Hierarchical),
+        ] {
+            g.upsert_edge(edge(id, 10, 11, ty, 0.4, 0)).unwrap();
+        }
+        // Same weight and age, decaying type: must go.
+        g.upsert_edge(edge(203, 10, 11, EdgeType::CoOccurrence, 0.4, 0))
+            .unwrap();
+
+        let outcome = run(&mut g, default_params());
+        assert_eq!(
+            outcome.edges_removed,
+            vec![nid(203)],
+            "only the decaying edge is collected"
+        );
+        for id in [200u64, 201, 202] {
+            assert!(
+                g.edge(nid(id)).is_some(),
+                "structural edge {id} must survive step 1 (spec §5 table)"
+            );
+        }
+        // And the Derives provenance edges — also non-decaying — are intact.
+        assert!(g.edge_between(iid, nid(10), EdgeType::Derives).is_some());
     }
 
     // ------------------------------------------------------------------
@@ -945,6 +1005,77 @@ mod tests {
     // ------------------------------------------------------------------
     // Step 3 — disconnected-component cleanup
     // ------------------------------------------------------------------
+
+    /// ALGO-6: an **array** root goal must protect every concept it names.
+    ///
+    /// GC's exclusion list read only the string and object shapes, so an array
+    /// goal — spec §6.1's own example — protected nothing: the session's goal
+    /// concepts became ordinary GC candidates. Isolated (step-3) goal concepts
+    /// make the exclusion the only thing keeping them alive.
+    #[test]
+    fn array_root_goal_protects_every_named_concept() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "anchored", ConceptType::Entity), iid)
+            .unwrap();
+        // Both goal concepts are isolated: only the root-goal exclusion can
+        // save them from step 3.
+        let goal_a = insert_isolated(
+            &mut g,
+            concept(20, 1, "launch the product", ConceptType::Entity),
+            1,
+        );
+        let goal_b = insert_isolated(
+            &mut g,
+            concept(21, 1, "ship the API", ConceptType::Entity),
+            1,
+        );
+        // A third isolated concept the goal does NOT name — the control.
+        let bystander = insert_isolated(
+            &mut g,
+            concept(22, 1, "unnamed island", ConceptType::Entity),
+            1,
+        );
+
+        g.set_root_goal(Some(serde_json::json!([
+            "launch the product",
+            "ship the API"
+        ])));
+        assert_eq!(g.root_goal_texts().len(), 2);
+        // `set_root_goal` also auto-promotes both to Venerable (spec §9), which
+        // would protect them by status alone. Demote them so the *exclusion
+        // list* is the only thing under test.
+        for (ev, node) in [(60u64, 20u64), (61, 21)] {
+            g.apply_canonization_transition(transition(
+                ev,
+                node,
+                CanonizationStatus::Venerable,
+                CanonizationStatus::Canonical,
+            ))
+            .unwrap();
+            g.apply_canonization_transition(transition(
+                ev + 100,
+                node,
+                CanonizationStatus::Canonical,
+                CanonizationStatus::None,
+            ))
+            .unwrap();
+        }
+
+        let outcome = run(&mut g, default_params());
+        for id in [goal_a, goal_b] {
+            assert!(
+                g.node(id).is_some(),
+                "an array-named goal concept must be protected: {outcome:?}"
+            );
+        }
+        assert!(
+            g.node(bystander).is_none(),
+            "an unnamed isolated concept is still collected"
+        );
+    }
 
     #[test]
     fn protected_classes_survive_disconnected_component() {
