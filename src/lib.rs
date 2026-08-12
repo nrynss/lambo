@@ -14,6 +14,7 @@ pub mod graph;
 pub mod mcp;
 pub mod recall;
 pub mod resolve;
+
 pub mod store;
 #[cfg(test)]
 pub mod test_util;
@@ -22,6 +23,8 @@ pub mod types;
 pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
 #[cfg(feature = "embed-bge")]
 pub use embed::BgeM3LlamaCppEmbedder;
+
+pub use daemon::{Daemon, ScoreTable};
 pub use embed::{
     build_embedder, cosine, embedder_from_env, EmbedError, Embedder, EmbedderConfig, EmbedderKind,
 };
