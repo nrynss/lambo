@@ -215,7 +215,7 @@ Example: T2.3 conflict detection → `task/p2-t2.3-conflict-detection`,
 | P1 | `phase/p1-contracts` (historical, merged) |
 | P2 | `phase/p2-graph-core` (merged to main 2026-08-11) |
 | P3 | `phase/p3-stores` (merged to main 2026-08-11) |
-| P4 | `phase/p4-daemon` |
+| P4 | `phase/p4-daemon` (merged to main 2026-08-12) |
 | P5 | `phase/p5-recall` |
 | P6 | `phase/p6-canonization` |
 | P7 | `phase/p7-embeddings` |
