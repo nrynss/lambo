@@ -150,8 +150,8 @@ Keep this current; it is the only global view.
 | P1 | 5 / 5 | **COMPLETE** — T1.1–T1.5 (incl. T1.4 fixtures + T1.5 Level B packaging): P2–P7 unblocked |
 | P2 | 7 / 7 | **DONE + MERGED TO MAIN (2026-08-11, commit 9f9d2cb)** — graph core, canonicalization, derive, record_action, demote, BM25 index, reservations; exit criteria [x] (rebuild test); reviews CLOSED (per-task ACCEPT x2, muse-spark M1-M4, grok G1-G7); cross-phase contracts written into P3/P4/P5 docs |
 | P3 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-11, commit 4c816a2)** — DDL, CockroachStore + live conformance, SqliteStore, flush, load_session, structural-query three-way gate; exit criteria [x]; all reviews CLOSED (per-task ×2, gemini36flash + opus46 partials) |
-| P4 | 6 / 6 | T4.1–T4.6 done (scoring/skeleton, hot list, conflict, drift, GC, events — reviewed ACCEPT, merged 40fdaee/c8f64f6/8bcb816); branch ready for final review |
-| P5 | 0 / 4 | OPEN for claiming |
+| P4 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-12, commit 73aa894)** — T4.1–T4.6 (scoring, hot list, conflict, drift, GC, events); adversarial review CLOSED ACCEPT after 2 remediation rounds; exit criteria [x] |
+| P5 | 2 / 4 | T5.1 done (phase-1 candidates, merged e230f71), T5.4 done (recall cache, merged 53979b2) — both reviewed ACCEPT; T5.2/T5.3 OPEN |
 | P6 | 0 / 4 | OPEN for claiming |
 | P7 | 1 / 4 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
 | P8 | 0 / 5 | blocked on P2 P4 P5 |

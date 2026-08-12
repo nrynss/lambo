@@ -43,7 +43,7 @@ Binding notes for P5 tasks; sources: grok branch review (CLOSED), P2 handoffs.
 requires:   T1.1, T2.6
 fixture-ok: yes
 owns:       src/recall/candidates.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged e230f71)
 ```
 Union of: BM25 keyword hits from the in-memory index; concepts of the N=3 most recent
 interactions; and — when embeddings are enabled — `store.vector_candidates()`. The vector
@@ -61,7 +61,7 @@ gather it before taking the graph lock.**
 requires:   T5.1
 fixture-ok: yes
 owns:       src/recall/expand.rs
-status:     not-started
+status:     done (2026-08-12, reviewed ACCEPT; merged 53979b2)
 ```
 BFS from candidates to `traversal_depth=2`, edge priority
 `Dependency`/`Causal` → `Hierarchical` → `CoOccurrence` → `Semantic`, visited-set cycle
@@ -129,4 +129,17 @@ an agent waiting on T5.1.
 
 ## Handoff Log
 
-> _Fill on completion._
+**What exists now (wave A, integrated e230f71 / 53979b2):**
+
+- `src/recall/candidates.rs` (T5.1) — phase-1 candidates: `gather(&dyn GraphStore, session, embedding, limit) -> Phase1Input` (async; the only store I/O — the vector leg, capability-gated; absent `VECTOR_SEARCH` → zero store calls + one log line) then `candidates(&Graph, &InvertedIndex, Phase1Input, query, limit) -> Vec<Scored<NodeId>>` (sync, safe under the graph lock). Union = BM25 keyword hits ∪ concepts of the 3 most recent interactions (`created_at` desc, ties by id asc) ∪ vector hits; per-node max-merge; score-desc then id-asc total order; `RECENT_SCORE = 0.5`.
+- `src/recall/cache.rs` (T5.4) — LRU keyed `(query_hash, top_k, traversal_depth, mutation_epoch)`; capacity const 128; epoch invalidation only; plain struct (caller wires locking).
+- Module declarations: `pub mod cache;` + `pub mod candidates;` added to `src/recall/mod.rs` by the two task branches (shared-file policy announcement — additive only).
+
+**Reconciliations (phase doc / fixture note vs shipped contract):**
+
+- **Keyword leg is the BM25 index, not the store substring path.** The `fixtures/recall-goldens.json` note ("EXACT under MemoryStore keyword_candidates, substring on content/canonical_key") predates the P2 index; the operative contract — proven by `recall_phase1_keyword_goldens_pass` (src/graph/index.rs) and `golden_keyword_leg_exact_within_union` (candidates.rs) — is `InvertedIndex::search` (BM25, stemmed, dedup'd query terms). `GraphStore::keyword_candidates` is NOT part of phase 1.
+- **Recent-interactions leg:** the 3 most recent by `created_at`, NOT chain order (the fixture's chain tail is the oldest); ties by id asc.
+
+**Recorded but not remediated (P3 doc-accuracy, verdict ACCEPT):** T54-1 (eviction-cost doc claim; capacity small, harmless), T54-2 ("Not Sync-friendly" phrasing; the struct is auto-Sync, real constraint is the `&mut self` API). See `adve-review-t5.4-cache.md`.
+
+**Open:** T5.2 (expansion), T5.3 (scoring / assembly / context format).
