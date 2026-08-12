@@ -481,16 +481,10 @@ mod tests {
     // Golden membership (fixture)
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "fixtures")]
     fn load_rest_api_fixture() -> crate::types::GraphSnapshot {
-        #[cfg(feature = "fixtures")]
-        {
-            use crate::fixtures;
-            fixtures::load_snapshot("session-rest-api").expect("fixture loads")
-        }
-        #[cfg(not(feature = "fixtures"))]
-        {
-            panic!("this test requires the fixtures feature");
-        }
+        use crate::fixtures;
+        fixtures::load_snapshot("session-rest-api").expect("fixture loads")
     }
 
     /// For both golden queries the expansion CONTAINS the golden
