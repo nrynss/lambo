@@ -77,6 +77,24 @@ discriminate; full gates green — fmt, clippy `--all-targets -D warnings`,
 default 415/0, sqlite 447/0, sqlite-minimal 340/0, cockroach 335/0, minimal +
 demo checks clean.
 
-**Disposition: ACCEPT — `phase/p5-recall` is merge-ready.**
+## Round-2 verification (R2)
 
-— integrator, orchestration + round-2 verification, 2026-08-12
+Independent re-review of the remediation delta (106d057 + 3a41105): ACCEPT with
+2 P3s, both remediated (1d92a5d):
+
+- **R2-1** — the rescore-lag guard's skip branch had no direct test (every test
+  caught scores up first; removing the guard would pass). Fixed: new
+  `recall_rescore_lag_guard_skips_cache_insert_while_scores_lag` — mutate
+  without rescoring → cache.len() stays 1 (skip) while output still renders;
+  rescore catch-up → len 2.
+- **R2-2** — duplicate recall doc paragraphs (the restructure left two
+  overlapping blocks). Fixed: collapsed to one block carrying the lock-order +
+  pipeline detail.
+
+Final gates after R2: fmt clean; clippy `--all-targets -D warnings` clean;
+default 416/0; sqlite 448/0; sqlite-minimal 340/0; cockroach 335/0;
+`recall_` 7/7 (golden byte-exact through the entry on first call AND hit).
+
+**Disposition: ACCEPT — `phase/p5-recall` is merge-ready (completely clean).**
+
+— integrator, orchestration + round-2 verification + R2 closure, 2026-08-12
