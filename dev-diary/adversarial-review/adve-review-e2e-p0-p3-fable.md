@@ -2,7 +2,7 @@
 
 ```text
 ╔════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN — findings await disposition                     ║
+║  STATUS: CLOSED — all 45 findings dispositioned (2026-08-12)   ║
 ║  Scope:  E2E across P0 (ground), P1 (contracts), P2 (graph     ║
 ║          core), P3 (stores) — all claimed DONE + merged        ║
 ║  Source: main @ 61e37d9                                        ║
@@ -424,6 +424,44 @@ building on these surfaces Wednesday. Disposition the seven P1s first —
 items 1–4 above are an afternoon combined.
 
 — fable (claude-fable-5), 2026-08-11
+
+---
+
+## Disposition record (2026-08-12) — all 45 findings CLOSED
+
+Remediated in eight waves (one commit per wave, main, each gated by an
+adversarial review + remediation loop; the per-wave review agents caught 12
+additional defects in the remediation itself, all fixed and re-reviewed before
+their wave committed):
+
+| Wave | Findings | Commit |
+|---|---|---|
+| 1 — CI & trust | TEST-1/2/3/5, CON-4 | 0cf585f |
+| 2 — SQLite bootstrap/config | CON-1/3/9, STORE-9 | 671d99c |
+| 3 — Graph write gates | GRAPH-1..8, GRAPH-10, COH-3, CON-6 | 1849d3e |
+| 4 — Flush loop | STORE-2/3/4/6 | 3083586 |
+| 5 — Embedding integrity | STORE-1, CON-2/5/7/8 | 95234b6 |
+| 6/7 — Docs, decisions, git | COH-1/2/5/6/7/9/10/11/12, TEST-4, STORE-1 owner, STORE-5/7/8 | 6266f53 |
+| 8 — Scripts/toolchain | TEST-6/7/8 | 28500f3 |
+| Wrap-up — live-schema convergence | canonization_events.last_demotion_time on pre-existing clusters (caught by the Wave 1 loud-skip machinery on final main) | 99052e7 |
+
+Final gates (main @ 99052e7, 2026-08-12): fmt clean; clippy `-D warnings`
+clean; default 242 passed / 0 failed; `--features store-sqlite` 268+5 passed /
+0 failed; `--no-default-features --features store-cockroach` 182 passed / 0
+failed under `-D warnings`; `--features store-cockroach` 263 passed / 5 ignored
+(live tests honest); fixtures regenerate byte-identical; live Cockroach
+conformance 2/2 green with committed evidence
+(dev-diary/evidence/20260812-025148-cockroach-live.txt); phase/p4-p7
+fast-forwarded onto final main (COH-12).
+
+The three cross-cutting themes from this review are materially closed:
+the false-green triangle is gone (CI matrix covers all adapter combos, live
+skips are loud and countable, live evidence is committed); embedding-space
+integrity has a persisted contract write path with fail-closed resolve checks
+and no silent fallbacks; the graph write gates validate types, transitions,
+and content before mutation. Known follow-ups are tracked in the phase docs:
+T7.3 implements DECISION D1 (global vector search + Rust-side filter, EXPLAIN
+verified), and the T7.2/T8.1 owners are named in PHASE-7/PHASE-8.
 
 ## Verification addendum (2026-08-12) — fable
 

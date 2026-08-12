@@ -4,7 +4,7 @@ Complete index of the review records in this directory (22 records).
 
 | File | Scope | Status |
 |------|-------|--------|
-| **[adve-review-e2e-p0-p3-fable.md](adve-review-e2e-p0-p3-fable.md)** | Main — E2E P0–P3 (post-merge, whole-platform) | **OPEN** (45 findings: 7 P1 / 15 P2 / 23 P3; no false closures found) |
+| **[adve-review-e2e-p0-p3-fable.md](adve-review-e2e-p0-p3-fable.md)** | Main — E2E P0–P3 (post-merge, whole-platform) | **CLOSED** (45 findings: 7 P1 / 15 P2 / 23 P3; all dispositioned 2026-08-12 in 8 waves — see the disposition record in the file) |
 | **[adve-review-t14-fixtures.md](adve-review-t14-fixtures.md)** | Main — T1.4 fixture graphs | **CLOSED** (ACCEPT, residual notes only) |
 | **[adve-review-t70-embeddings.md](adve-review-t70-embeddings.md)** | Main — T7.0 embeddings (BGE-M3 / llama.cpp) | **CLOSED** (ACCEPT, residual ops only) |
 | [adve-review-t2.1-graph-structure.md](adve-review-t2.1-graph-structure.md) | T2.1 — Graph structure & invariants | **CLOSED** (ACCEPT; reverification audited 2026-08-11) |

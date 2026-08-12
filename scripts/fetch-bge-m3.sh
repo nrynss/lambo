@@ -29,6 +29,25 @@ FILE="${LAMBO_BGE_M3_GGUF:-bge-m3-FP16.gguf}"
 # Pinned revision (sha) for reproducibility - see dev-diary notes. Override to track another.
 REVISION="${LAMBO_BGE_M3_REVISION:-2d48f1737679ad900d5c26c5aad5410e9c70fdca}"
 
+# Pinned sha256 of $FILE at $REVISION (run `sha256sum` on the downloaded file
+# to update after intentionally switching builds). A partial or corrupt
+# download must never be trusted: any mismatch is a hard error.
+EXPECTED_SHA256="daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c"
+
+# Fail hard unless $1's sha256 matches EXPECTED_SHA256.
+verify_checksum() {
+  local file="$1" actual
+  actual="$(sha256sum "$file")" || { echo "error: cannot read $file" >&2; exit 1; }
+  actual="${actual%% *}"
+  if [[ "$actual" != "$EXPECTED_SHA256" ]]; then
+    echo "error: checksum mismatch for $file" >&2
+    echo "  expected: $EXPECTED_SHA256" >&2
+    echo "  actual  : $actual" >&2
+    echo "  the file is partial or corrupt — delete it and re-run this script to re-download" >&2
+    exit 1
+  fi
+}
+
 TARGET="$MODEL_DIR/$FILE"
 
 echo "== BGE-M3 GGUF download =="
@@ -37,7 +56,8 @@ echo "  file : $FILE @ $REVISION"
 echo "  dest : $TARGET"
 
 if [[ -f "$TARGET" ]]; then
-  echo "already present ($(du -h "$TARGET" | cut -f1)) — skipping."
+  verify_checksum "$TARGET"
+  echo "already present and verified ($(du -h "$TARGET" | cut -f1)) — skipping."
   exit 0
 fi
 
@@ -73,6 +93,7 @@ if [[ ! -f "$TARGET" ]]; then
   echo "error: download did not produce $TARGET" >&2
   exit 1
 fi
+verify_checksum "$TARGET"
 
 echo "== done =="
 echo "  $(du -h "$TARGET" | cut -f1)  $TARGET"
