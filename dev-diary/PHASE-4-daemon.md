@@ -388,7 +388,13 @@ second set of waves on the same branch:
 | R2-3 | NEW-3 — `events::EventSender` so every publisher advances the re-arm counter | `8fe86ed` |
 | R2-4 | NEW-4 — all same-instant writer candidates kept | `3eb137b` |
 | R2-5 | NEW-5, NEW-6, NEW-7 — one drift no-path sentinel, corrected scoring-switch direction, "weighted" wording, measured test counts | `9a2d5a4` |
-| R2-6 | Record/process accuracy + these handoff notes | *this commit* |
+| R2-6 | Record/process accuracy + the residual notes below | `fba88bc` |
+| R2-7 | Wrap-up: back-fill R2-6's SHA, final gate counts | *this commit* |
+
+A commit cannot contain its own hash, so the last row is the one placeholder that
+cannot be resolved in place — `git log --oneline phase/p4-daemon` is the anchor.
+Round 1's mistake was leaving `*this commit*` on a wave that had long since
+landed; every other row here carries a literal SHA.
 
 ### Contract changes (P8 / P5 / P6 must read these)
 
@@ -480,6 +486,27 @@ and every negative assertion waits on `Daemon::cycles()` via `wake_and_settle`
 rather than sleeping — "nothing was published" can no longer pass vacuously
 because the cycle had not started. One `sleep` remains, inside `wait_until`'s
 poll.
+
+### Gates at the close of round 2
+
+Every one run with `RUSTFLAGS="-D warnings"`, which is what CI sets job-wide.
+Round 1 verified the feature-matrix combos with bare `cargo` and so missed NEW-1,
+a hard dead-code **compile error** on two matrix rows.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets` | clean |
+| `cargo clippy --all-targets --features store-sqlite,store-cockroach` | clean |
+| `cargo test` (default) | 368 passed / 0 failed / 3 ignored |
+| `cargo test --features store-sqlite` | 400 passed / 0 failed / 3 ignored |
+| `cargo test --no-default-features --features store-sqlite` | 302 passed / 0 failed / 0 ignored |
+| `cargo test --no-default-features --features store-cockroach` | 297 passed / 0 failed / 0 ignored |
+| `cargo check --no-default-features` | clean |
+| `cargo check --features demo` | clean |
+
+The 3 ignored on the default and sqlite rows are the live-Cockroach test and the
+two `live_calibration` ones; the no-default-features rows do not compile them.
 
 ### Residual notes — not defects, read before the next tier touches these
 
