@@ -25,6 +25,7 @@
 //! graceful stop is a P8 concern per the COH-6 note).
 pub mod conflict;
 pub mod drift;
+pub mod gc;
 pub mod hotlist;
 pub mod score;
 

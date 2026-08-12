@@ -623,6 +623,33 @@ impl Graph {
         Ok(())
     }
 
+    /// GC survivor bookkeeping (T4.5, spec §9 step 5): increment `gc_survived`
+    /// on every surviving concept — canonization Stage 1's input.
+    ///
+    /// Missing ids are skipped; the count is **saturating** (`i32` is the
+    /// schema column type — 2^31 GC cycles would otherwise overflow). Each
+    /// bump is emitted as an `UpsertNode` mutation so the durable store
+    /// mirrors the counter (spec §2.4 log contract; the store's upsert
+    /// replaces the row in place).
+    pub fn bump_gc_survived(&mut self, concept_ids: &[NodeId]) -> usize {
+        let mut bumped = 0;
+        let mut updates: Vec<Concept> = Vec::new();
+        for &id in concept_ids {
+            let Some(Node::Concept(c)) = self.nodes.get_mut(&id) else {
+                continue;
+            };
+            c.gc_survived = c.gc_survived.saturating_add(1);
+            bumped += 1;
+            updates.push(c.clone());
+        }
+        for c in updates {
+            self.append_mutation(Mutation::UpsertNode {
+                node: Node::Concept(c),
+            });
+        }
+        bumped
+    }
+
     // -----------------------------------------------------------------------
     // Write path — session metadata, synonyms, reservations
     // -----------------------------------------------------------------------
@@ -2587,6 +2614,49 @@ mod tests {
         let c = concept(1, uid(999), "orphan");
         let err = g.insert_concept(c, uid(999)).unwrap_err().to_string();
         assert!(err.contains("not an interaction"), "{err}");
+    }
+
+    #[test]
+    fn bump_gc_survived_increments_and_emits_upserts() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let c1 = concept(1, iid, "survivor one");
+        let c1id = c1.id;
+        let c2 = concept(2, iid, "survivor two");
+        let c2id = c2.id;
+        g.insert_concept(c1, iid).unwrap();
+        g.insert_concept(c2, iid).unwrap();
+        // Discard the insert mutations so the count below isolates the bumps.
+        g.drain_log();
+        let epoch_before = g.epoch();
+        let bumped = g.bump_gc_survived(&[c1id, c2id]);
+
+        assert_eq!(bumped, 2);
+        let c1 = match g.node(c1id).unwrap() {
+            Node::Concept(c) => c,
+            _ => unreachable!(),
+        };
+        assert_eq!(c1.gc_survived, 1);
+        // Every bump emits an UpsertNode so the durable store mirrors it.
+        assert!(g.epoch() > epoch_before);
+        let batch = g.drain_log();
+        let upserts = batch
+            .mutations
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    Mutation::UpsertNode {
+                        node: Node::Concept(_)
+                    }
+                )
+            })
+            .count();
+        assert_eq!(upserts, 2);
+        // Missing ids are skipped, not fatal.
+        assert_eq!(g.bump_gc_survived(&[NodeId::nil()]), 0);
     }
 
     // Adve-review T2.1 I4: the owner (T2.3+ `Memory`) wraps Graph in
