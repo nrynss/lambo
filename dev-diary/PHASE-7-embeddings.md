@@ -76,7 +76,7 @@ gate) returns 1024 dims when AWS allows; without the feature, selection fails cl
 requires:   T2.2, T1.3
 fixture-ok: yes   # FixtureEmbedder near/far pairs (T1.3) drive all tests
 owns:       src/graph/hybrid.rs
-status:     not-started
+status:     done
 ```
 On canonical-key miss under `MatchStrategy::Hybrid`: embed, query
 `store.vector_candidates()`, accept above `semantic_match_threshold=0.85`, create a
@@ -99,6 +99,43 @@ do not re-derive the persistence layer.
 **Done when:** with `FixtureEmbedder`, the near pair merges with a `Semantic` edge and the
 far text creates a fresh concept; with a no-capability store, behavior is byte-identical to
 `MatchStrategy::Canonical`; swapping embedder kind mid-session errors without re-embed.
+
+**Handoff (T7.2, DONE — 2026-08-12):**
+
+- **What exists now:** `src/graph/hybrid.rs` (async twin of `derive` for
+  `MatchStrategy::Hybrid`) + 7 tests; registered as `pub mod hybrid` in
+  `src/graph/mod.rs`; `ParentOf::pairs()` read-accessor added to `src/graph/derive.rs`.
+  Seam: hybrid runs `canonicalize` + contract check under a brief read lock, then does
+  `embed` + `store.vector_candidates` **with no lock held**, then re-acquires the write
+  lock to stamp the contract and write concepts/edges. Never holds the graph lock across
+  an `.await` (spec §6.4). The store call goes through the `GraphStore` trait, not a
+  concrete store; a genuine (non-`Capability`) backend error propagates rather than
+  degrading.
+- **Contract:** stamps `GraphSnapshot.embedding` on first embed; later hybrid writes call
+  `embedding.ensure_compatible` BEFORE any embed — a mid-session kind/model/dim swap is
+  refused without re-embedding (`LamboError::Config`).
+- **Calibration rule enforced + test-asserted:** hybrid embeds the concept WITH its origin
+  interaction text (`"{name} — {origin}"`), never the bare label; `RecordingEmbedder` in
+  the tests asserts the embed input carries both. Absent origin, the safe `"Concept: …"`
+  framing is used.
+- **Resolved ambiguity — merge shape:** a `Semantic` edge is Concept→Concept
+  (`record_edge` rejects any other endpoint, GRAPH-2) and self-loops are rejected, so a
+  merge cannot be a bare node-reuse. The near content is therefore realized as its **own**
+  concept (distinct canonical key — never a canonical-key duplicate) joined to the matched
+  concept by a decaying `Semantic` edge whose weight = the accepted similarity. Recall
+  expansion follows `Semantic` (spec §8) and canonization (P6) folds them later.
+- **Degradation:** store without `Capabilities::VECTOR_SEARCH`, or an embed failure, yields
+  a byte-identical `MatchStrategy::Canonical` outcome (fresh keyword-only concept, zero
+  store I/O on the capability-absent path) with the fallback logged once per session
+  (module-level, session-keyed).
+- **Surprises:** the edit/`read` tool bases sit at the repo root while the worktree is a
+  sibling directory — ensure worktree changes land under `worktrees/p7-hybrid/`, never the
+  main checkout. `NodeId`/`EdgeType`/`ConceptType` implement `Eq` but not `Ord`, so tests
+  sort by derived keys rather than the types.
+- **Next agent should not re-derive:** the lock/await seam, the merge shape, the context
+  calibration rule, and `record_action`'s canonical path (SG-T2.4 `action.rs`) all still
+  use the sync `derive`; if `record_action` ever needs hybrid matching it should reuse
+  `hybrid::derive`'s `Unmatched` decision primitive rather than re-inventing the seam.
 
 ---
 

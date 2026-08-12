@@ -132,6 +132,13 @@ impl<'a> ParentOf<'a> {
     pub fn from_pairs(pairs: &'a [(&'a str, &'a str)]) -> Self {
         Self { pairs }
     }
+
+    /// Raw `(parent, child)` pairs in declaration order (read-only accessor so
+    /// the async hybrid twin in [`crate::graph::hybrid`] can mirror derive's
+    /// validation + Hierarchical edge steps without owning the field).
+    pub fn pairs(&self) -> &'a [(&'a str, &'a str)] {
+        self.pairs
+    }
 }
 
 /// Summary of one [`derive`] call.
