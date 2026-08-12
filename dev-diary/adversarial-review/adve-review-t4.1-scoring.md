@@ -24,8 +24,8 @@
 **Implementing commit:** `721dfe0` — *"P4 T4.1: scoring + daemon task skeleton
 (spec §9/§2.5)"*
 **Merged:** `40fdaee` (`task/p4-t4.1-scoring` → `phase/p4-daemon`)
-**Status line (PHASE-4-daemon.md:44):** *"done (2026-08-12, reviewed ACCEPT after
-1 remediation round; merged 40fdaee)"*
+**Status line** (PHASE-4-daemon.md, section *"T4.1 — Scoring"*): *"done
+(2026-08-12, reviewed ACCEPT after 1 remediation round; merged 40fdaee)"*
 **Board line (`dev-diary/README.md`, commit `d01abeb`):** *"T4.1 done (scoring +
 daemon skeleton, spec §9/§2.5, merged 40fdaee); T4.2–T4.6 OPEN"*
 
@@ -44,12 +44,13 @@ shipped module:
   §2.5), then rescoring is gated on `Graph::epoch()` changing; `ScoreTable
   { epoch, ranked }` replaced wholesale per rescore; `spawn` twice panics; no
   lock held across an `.await`.
-- 13 tests in `score.rs` and 4 loop tests in `mod.rs` at the time of merge:
+- 13 tests in `score.rs` and 5 loop tests in `mod.rs` at the time of merge
+  (counted in `40fdaee`):
   property tests (bounded input ⇒ bounded finite score, strict monotonicity per
   dimension, NaN/Inf handling), exact per-weight assertions for
   `session_activity` / `frequency`, the fixture-ordering test (`user schema` on
   top of `session-rest-api`, formula-driven rather than hardcoded), and
-  skeleton cycle / abort / wake coverage.
+  skeleton cycle / abort / wake coverage and the double-spawn panic guard.
 
 ## Verified clean (re-verified 2026-08-12 against the shipped code)
 

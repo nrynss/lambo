@@ -21,8 +21,9 @@
 window+agent attribution, hot-list wiring)"*
 **Merged:** `805586f` (`task/p4-t4.3-conflict` → `phase/p4-daemon`), rolled up in
 `c8f64f6`
-**Status line (PHASE-4-daemon.md:83):** *"done (2026-08-12, reviewed ACCEPT;
-merged c8f64f6)"* — no remediation round claimed
+**Status line** (PHASE-4-daemon.md, section *"T4.3 — Conflict detection"*):
+*"done (2026-08-12, reviewed ACCEPT; merged c8f64f6)"* — no remediation round
+claimed
 
 ## What the review had in front of it
 

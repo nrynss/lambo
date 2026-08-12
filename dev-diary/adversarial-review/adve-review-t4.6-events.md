@@ -27,8 +27,8 @@ wiring (spec §6.1/§9)"*
 **Merged:** `4331d9b` (`task/p4-t4.6-events` → `phase/p4-daemon`)
 **Final review pass:** `cd9340e` — *"P4 close: exit-criterion 1a coverage +
 Handoff Log (final review remediation)"*
-**Status line (PHASE-4-daemon.md:140):** *"done (2026-08-12, reviewed ACCEPT
-after 1 remediation round; merged 8bcb816)"*
+**Status line** (PHASE-4-daemon.md, section *"T4.6 — Event channel"*): *"done
+(2026-08-12, reviewed ACCEPT after 1 remediation round; merged 8bcb816)"*
 
 ## Round 1 — three loop redesigns (attested)
 
@@ -101,8 +101,12 @@ produced:
   "a deliberate, documented seam". The tier review's verdict on that
   (`#[allow(dead_code)]` was the compiler agreeing there was no caller) is
   XP-4 below.
-- **Gate numbers at close** beyond the tier figure recorded in PHASE-4's exit
-  criteria: 328 passed / 0 failed / 3 ignored.
+- **Gate numbers at close.** This record used to quote "328 passed / 0 failed /
+  3 ignored" as one figure from PHASE-4's exit criteria. It is a splice: the
+  pass/fail pair is the exit criteria's, but the **"3 ignored" is the P4 tier
+  review's** (`adve-review-p4-daemon-opus.md`, Gates table). Both were measured
+  after this task merged, so neither is this round's own gate output — which is
+  what is actually unrecoverable.
 
 ## Findings reopened by the later tier review
 

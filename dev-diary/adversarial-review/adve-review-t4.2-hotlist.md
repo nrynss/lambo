@@ -20,15 +20,16 @@
 condition payloads)"*
 **Merged:** `518680f` (`task/p4-t4.2-hotlist` → `phase/p4-daemon`), rolled up in
 the `c8f64f6` tier merge
-**Status line (PHASE-4-daemon.md:67):** *"done (2026-08-12, reviewed ACCEPT;
-merged c8f64f6)"* — no remediation round claimed
+**Status line** (PHASE-4-daemon.md, section *"T4.2 — Hot list"*): *"done
+(2026-08-12, reviewed ACCEPT; merged c8f64f6)"* — no remediation round claimed
 **Board line (`dev-diary/README.md`, commit `a5663cf`):** *"T4.1–T4.5 done
 (scoring/skeleton, hot list, conflict, drift, GC — reviewed ACCEPT, merged
 40fdaee + c8f64f6)"*
 
 ## What the review had in front of it
 
-Reconstructed from the shipped module (13 tests at merge):
+Reconstructed from the shipped module (12 tests at merge, counted in
+`518680f:src/daemon/hotlist.rs`):
 
 - A bounded priority queue at `hot_list_max = 1000`, ranked
   `(severity desc, recency desc, node id asc)`. `Condition::severity` assigns

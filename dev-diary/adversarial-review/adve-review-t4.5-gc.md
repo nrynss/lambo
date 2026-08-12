@@ -21,8 +21,8 @@ canonization Stage 1's input, which is why GC cannot be cut.
 **Implementing commit:** `74ad3c1` — *"P4 T4.5: GC (7-step periodic, gc_survived,
 epoch, budget record)"*
 **Merged:** `c8f64f6` (`task/p4-t4.5-gc` → `phase/p4-daemon`)
-**Status line (PHASE-4-daemon.md:117):** *"done (2026-08-12, reviewed ACCEPT;
-merged c8f64f6)"* — no remediation round claimed
+**Status line** (PHASE-4-daemon.md, section *"T4.5 — GC"*): *"done (2026-08-12,
+reviewed ACCEPT; merged c8f64f6)"* — no remediation round claimed
 
 ## What the review had in front of it
 

@@ -43,7 +43,12 @@ Convention:
   committed at the time; the file was rebuilt from the phase doc, commit history
   and code on 2026-08-12 as remediation for **XP-2**. Each such record marks
   what is evidence and what is unrecoverable. Treat them as weaker than a
-  contemporaneous record: they carry no reviewer prose and no gate numbers.
+  contemporaneous record: what is genuinely lost is the **reviewer's prose, the
+  finding severities, and the gate output of the round itself**. What they *do*
+  carry is re-derivable and checked: merge SHAs, status/board lines quoted
+  verbatim, and test counts recounted from the merge commit. Any tier-level pass/
+  fail figure they quote was measured *after* the task merged and is attributed to
+  its source, not presented as the round's own.
 
 Count discipline: the header count above must equal the number of table rows.
 XP-2 was found because the previous header claimed completeness while six T4.x

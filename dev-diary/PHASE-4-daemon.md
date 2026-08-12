@@ -364,11 +364,31 @@ review loop closes it; this entry is the implementation side.
 | 0 | XP-11, XP-1 — merge final main (`dc5da31`) into the branch; gate the two `use crate::fixtures;` imports behind `#[cfg(feature = "fixtures")]`; `ci.yml` branch glob `'phase-*'` → `'phase/**'` | `fda19d2` |
 | 1 | ALGO-1, ALGO-4, ALGO-10, ALGO-11 — GC calibration: `MIN_CONCEPT_SCORE` 0.3 → 0.12 against the observed distribution, frequency renormalized out of the cut while `access_count` is dead, the session's own `ScoringWeights`, per-type bar via `eviction_resistance`, non-finite weights sanitized | `34ba3ca` |
 | 2 | XP-3, ALGO-2, ALGO-3, CONC-5 | `49f735e` |
-| 3 | XP-4, CONC-2/ALGO-8, CONC-3 | `695938a` |
+| 3 | XP-4 (+ALGO-7), CONC-2/ALGO-8, CONC-3 | `695938a` |
 | 4 | CONC-1, CONC-6/XP-10 | `c3144f8` |
-| 5 | CONC-4, XP-5, XP-6, XP-7 | `aa237ad` |
-| 6 | ALGO-5, ALGO-6, ALGO-9, ALGO-12, XP-8 | `09e331e` |
-| 7 | XP-2, GRAPH-9, docs closure | *this commit* |
+| 5 | CONC-4, XP-5, XP-6 (+CONC-7), XP-7 | `aa237ad` |
+| 6 | ALGO-5 (+XP-9), ALGO-6, ALGO-9, ALGO-12, XP-8 | `09e331e` |
+| 7 | XP-2, GRAPH-9, docs closure | `9ec6812` |
+
+Every ID in the review record maps to a row above. Three were merged into a
+partner rather than fixed separately — the record itself pairs them the same way
+— and are shown as `(+ID)`: **ALGO-7** into XP-4 (the same unreachable P6 sender
+seam), **CONC-7** into XP-6 (the same vacuous negative assertions: paused time
+plus `Daemon::cycles` as the cycle-completion witness), **XP-9** into ALGO-5 (the
+same drift finding — its "weighted" wording half; NEW-7 later found two rustdoc
+copies the wave had missed).
+
+Round 2 (the verification review's must-fix list plus its ticket items) is a
+second set of waves on the same branch:
+
+| Wave | Findings | Commit |
+|---|---|---|
+| R2-1 | NEW-1 — gate the `stale_seconds` test helper behind `fixtures`; without it CI's `-D warnings` broke the `sqlite-minimal` and `cockroach` rows | `78e13b2` |
+| R2-2 | NEW-2 — deferred survivor bumps no longer credited toward the next `gc_interval` | `7d26495` |
+| R2-3 | NEW-3 — `events::EventSender` so every publisher advances the re-arm counter | `8fe86ed` |
+| R2-4 | NEW-4 — all same-instant writer candidates kept | `3eb137b` |
+| R2-5 | NEW-5, NEW-6, NEW-7 — one drift no-path sentinel, corrected scoring-switch direction, "weighted" wording, measured test counts | `9a2d5a4` |
+| R2-6 | Record/process accuracy + these handoff notes | *this commit* |
 
 ### Contract changes (P8 / P5 / P6 must read these)
 
@@ -442,8 +462,12 @@ review loop closes it; this entry is the implementation side.
   log; the next cycle re-derives everything from graph state.
 - **Root-goal shape and no-path drift** — see T4.4 above (ALGO-6, ALGO-5).
 - **XP-2 records are reconstructions.** The six `adve-review-t4.*.md` files were
-  rebuilt from this doc, the commit history and the code. They carry no reviewer
-  prose and no gate numbers, and each says so. T4.1's remediation round and the
+  rebuilt from this doc, the commit history and the code. What is lost is the
+  reviewer's prose, the finding severities and each round's own gate output — not
+  "all gate numbers": the merge SHAs, quoted status lines and per-merge test
+  counts they carry are re-derived and checked (round 2 recounted two that were
+  wrong, and re-attributed a figure that came from the tier review rather than
+  this doc). T4.1's remediation round and the
   T4.2–T4.5 ACCEPT rounds left no in-repo trace beyond their status lines — the
   task branches carry one commit each, so pre-remediation states were amended
   away. T4.6 is the best-attested: its three loop redesigns are named by number
@@ -456,3 +480,31 @@ and every negative assertion waits on `Daemon::cycles()` via `wake_and_settle`
 rather than sleeping — "nothing was published" can no longer pass vacuously
 because the cycle had not started. One `sleep` remains, inside `wait_until`'s
 poll.
+
+### Residual notes — not defects, read before the next tier touches these
+
+- **Cockroach `SET_ROOT_GOAL_SQL` is compile-verified only (XP-8).** The
+  `Mutation::SetRootGoal` applier and its statement typecheck and are covered by
+  the `#[ignore]`d live tests, but no run against a real DSN has happened — the
+  live-Cockroach tests stay ignored in CI. Needs **one live run** when a DSN is
+  available; SQLite's applier and load path *are* exercised by the default suite.
+- **`conflict::conflict_at` rebuilds `WriterTimeline` per call (CONC-5, NEW-4).**
+  The whole-graph `detect` builds one timeline and shares it across every node,
+  but the per-node primitive recall calls builds its own — `O(interactions)` per
+  call, and NEW-4 made each instant a `Vec`, so the build allocates per distinct
+  timestamp. T5.3 calls this per hot-list entry per recall. If that shows up in a
+  profile, hoist the timeline to the caller (`conflict_at_with` already takes one)
+  or cache it against `Graph::epoch`.
+- **Synonym lookup is pre-NFC (GRAPH-9).** `Graph::declare_synonym` /
+  `resolve_synonym` key on the **raw** string, not the NFC-normalized one: a
+  synonym declared with a decomposed spelling will not match a composed lookup.
+  This is intentional — the documented raw-lookup contract — because the synonym
+  table maps *caller-supplied keys*, not canonicalized content. Worth knowing
+  before P5 wires a user-facing alias path on top of it.
+- **The SQL adapters' keyword tokenizers do not NFC (GRAPH-9 parity).** NFC
+  normalization sits at the head of the graph-side `normalize_tokens` pipeline
+  only; SqliteStore's and CockroachStore's own keyword tokenizers are unchanged,
+  so a decomposed spelling tokenizes differently on the store side than in RAM.
+  No effect on v0.1 (every committed fixture is pure ASCII, a fixed point under
+  NFC), but it is a **parity gap P5 must close** if structural queries are ever
+  expected to agree with graph-side scoring on non-ASCII content.

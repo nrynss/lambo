@@ -22,8 +22,8 @@ auto-`Venerable`
 goal) + set_root_goal auto-Venerable"*
 **Merged:** `587f843` (`task/p4-t4.4-drift` → `phase/p4-daemon`), rolled up in
 `c8f64f6`
-**Status line (PHASE-4-daemon.md:100):** *"done (2026-08-12, reviewed ACCEPT;
-merged c8f64f6)"* — no remediation round claimed
+**Status line** (PHASE-4-daemon.md, section *"T4.4 — Drift detection"*): *"done
+(2026-08-12, reviewed ACCEPT; merged c8f64f6)"* — no remediation round claimed
 
 ## What the review had in front of it
 
