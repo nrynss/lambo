@@ -44,7 +44,8 @@ pub mod score;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -221,8 +222,36 @@ impl Daemon {
     /// A dropped receiver is not an error and a lagging receiver never blocks
     /// the daemon — it misses messages (`RecvError::Lagged`) and re-syncs to
     /// the newest retained window.
+    ///
+    /// ## Subscribe **before** [`Daemon::spawn`] (CONC-3)
+    ///
+    /// The loop's first cycle is the warm-up (spec §2.5), and it runs
+    /// immediately — on a resumed session it detects and publishes the whole
+    /// condition set the reload restored, including the planted demo
+    /// `Conflict`. `broadcast` delivers only what is sent *after* a receiver
+    /// subscribes, so a subscriber created after `spawn` races the warm-up and
+    /// normally loses: emission is on transition, so nothing re-publishes for
+    /// its benefit on the next cycle. The re-arm path (CONC-2) republishes a
+    /// still-held condition only once the ring has wrapped past it, which is
+    /// not a delivery guarantee for a late subscriber.
+    ///
+    /// P8 must therefore call `events()` **before** `spawn()`. Pinned by
+    /// `daemon::tests::late_subscriber_misses_the_warm_up_condition_set`.
     pub fn events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.events.subscribe()
+    }
+
+    /// The daemon's event **sender** (spec §6.1's single channel), for
+    /// non-daemon publishers — P6's canonization evaluator calls
+    /// [`events::emit_canonized`] with it (XP-4).
+    ///
+    /// Cloning a `broadcast::Sender` is the supported multi-producer pattern:
+    /// every clone feeds the same ring, so `Canonized` events reach the same
+    /// [`Daemon::events`] subscribers as the daemon's own detector events. The
+    /// daemon retains its own handle, so a dropped clone never closes the
+    /// channel.
+    pub fn event_sender(&self) -> broadcast::Sender<DaemonEvent> {
+        (*self.events).clone()
     }
 
     /// Handle to the daemon-owned hot list (recall, T5.3, reads it; tests
@@ -283,11 +312,37 @@ fn condition_set(
 ///    this cycle's fresh hits ([`HotList::retain_conditions`] drops entries
 ///    whose `(condition, node)` is no longer detected — no captured-`now`
 ///    predicate, no ghosts; finding 2). Events are **emit-on-transition**: a
-///    `DaemonEvent` fires only when a `(condition, node)` *enters* the
-///    detected set, so a persisting condition is published once, not once
-///    per cycle — a 256-capacity channel is never flooded with duplicates
-///    (finding 3). Exit = stop emitting (`DaemonEvent` has no resolved
-///    variant — frozen §6.1 enum). Hot-list entries still refresh per cycle.
+///    `DaemonEvent` fires when a `(condition, node)` *enters* the detected
+///    set, so a persisting condition is published once, not once per cycle —
+///    a 256-capacity channel is never flooded with duplicates (finding 3).
+///    Exit = stop emitting (`DaemonEvent` has no resolved variant — frozen
+///    §6.1 enum). Hot-list entries still refresh per cycle.
+///
+///    **Re-arm (CONC-2).** Emit-on-transition alone loses an event
+///    permanently: the transition is recorded whether or not any consumer
+///    received it, so an event evicted from the ring while its condition
+///    still holds is never re-published — and the demo's `Conflict` is
+///    exactly such an event. So each held pair remembers the emission count
+///    at its last publish, and once `event_capacity` further events have been
+///    published that event can no longer be in the retained window.
+///
+///    The policy is deliberately minimal: **at most one re-arm per cycle**,
+///    the pair whose last emission is oldest. Re-arming every eligible pair at
+///    once would rebuild the same burst that evicts events in the first place;
+///    one per cycle cannot itself overflow the ring, and always picking the
+///    oldest gives round-robin coverage of a held set of any size. It is also
+///    deliberately *conservative* — it re-arms on possible eviction, not on an
+///    observed `Lagged`, which `broadcast` gives the sender no way to see.
+///
+///    The guarantee is **liveness, not exactly-once**: a still-held condition
+///    is eventually re-published, and a duplicate advisory event is harmless
+///    (§6.1 has no resolved variant to reconcile against). What is ruled out
+///    is the permanent loss.
+///
+///    **Order.** Publication is highest-severity-first — Conflict, HighRisk,
+///    Drift, then the single session Stale ([`Condition::severity`]) — so a
+///    consumer draining a burst in order sees the most actionable event
+///    first. Ring-eviction protection is re-arm's job, not ordering's.
 /// 3. Run GC once the mutation counter crosses `gc_interval` (spec §9). The
 ///    counter spans the graph's whole lifetime; GC resets it to its own
 ///    `epoch_after` so the next interval measures session mutations only.
@@ -307,9 +362,15 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
     // None → the first cycle always rescorees (warm-up), then epoch-gated.
     let mut last_epoch: Option<u64> = None;
     let mut last_gc_epoch: u64 = 0;
-    // Emit-on-transition (finding 3): the previous cycle's detected set; an
-    // event fires only when a pair ENTERS it.
-    let mut prev_conditions: HashSet<(Condition, NodeId)> = HashSet::new();
+    // Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
+    // `(condition, node)` maps to the value of `emitted_total` at its last
+    // emission. A pair absent from the map is entering the set and publishes;
+    // a pair whose stamp is `event_capacity` emissions old has been pushed out
+    // of the broadcast ring and publishes again.
+    let mut armed: HashMap<(Condition, NodeId), u64> = HashMap::new();
+    // Total events this loop has published. Only ever compared as a difference
+    // against `armed`'s stamps, so wrap-around is not a concern (u64).
+    let mut emitted_total: u64 = 0;
     loop {
         tokio::select! {
             _ = interval.tick() => {}
@@ -351,31 +412,79 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 
         // Publish — fire-and-forget (spec §6.1): zero receivers → the event
         // is discarded; lagged receivers skip it. The daemon never blocks.
-        // Emit-on-transition: only pairs that ENTERED the set this cycle.
-        let entered: HashSet<(Condition, NodeId)> =
-            fresh.difference(&prev_conditions).copied().collect();
-        prev_conditions = fresh;
+        // A pair that left the detected set is disarmed (exit = stop emitting).
+        armed.retain(|pair, _| fresh.contains(pair));
+
+        // Pass 1 — pairs that ENTERED the set, highest severity first, so a
+        // consumer draining a burst in order sees the Conflict before the
+        // session Stale.
         for hit in &conflict_hits {
-            if entered.contains(&(Condition::Conflict, hit.node)) {
+            if let Entry::Vacant(slot) = armed.entry((Condition::Conflict, hit.node)) {
                 events::emit(&sender, events::conflict_event(hit));
-            }
-        }
-        for hit in &drift_hits {
-            if entered.contains(&(Condition::Drift, hit.node)) {
-                events::emit(&sender, events::drift_event(hit));
-            }
-        }
-        for hit in &stale_hits {
-            if entered.contains(&(Condition::StaleSession, hit.node)) {
-                events::emit(&sender, events::stale_event(hit.node, hit.seconds_inactive));
+                emitted_total += 1;
+                slot.insert(emitted_total);
             }
         }
         for hit in &high_risk_hits {
-            if entered.contains(&(Condition::HighRiskModification, hit.node)) {
+            if let Entry::Vacant(slot) = armed.entry((Condition::HighRiskModification, hit.node)) {
                 events::emit(
                     &sender,
                     events::high_risk_event(hit.node, hit.reason.clone()),
                 );
+                emitted_total += 1;
+                slot.insert(emitted_total);
+            }
+        }
+        for hit in &drift_hits {
+            if let Entry::Vacant(slot) = armed.entry((Condition::Drift, hit.node)) {
+                events::emit(&sender, events::drift_event(hit));
+                emitted_total += 1;
+                slot.insert(emitted_total);
+            }
+        }
+        for hit in &stale_hits {
+            if let Entry::Vacant(slot) = armed.entry((Condition::StaleSession, hit.node)) {
+                events::emit(&sender, events::stale_event(hit.node, hit.seconds_inactive));
+                emitted_total += 1;
+                slot.insert(emitted_total);
+            }
+        }
+
+        // Pass 2 — re-arm ONE held pair (CONC-2). Stamps are unique, so
+        // "oldest stamp" is a total order: the pair whose event has been out of
+        // the retained window longest goes first, and re-publishing it moves it
+        // to the back of the queue. One per cycle is what keeps re-arm from
+        // recreating the very burst it exists to repair.
+        if let Some((pair, stamp)) = armed
+            .iter()
+            .min_by_key(|(_, stamp)| **stamp)
+            .map(|(pair, stamp)| (*pair, *stamp))
+        {
+            if emitted_total - stamp >= params.event_capacity as u64 {
+                let event = match pair.0 {
+                    Condition::Conflict => conflict_hits
+                        .iter()
+                        .find(|h| h.node == pair.1)
+                        .map(events::conflict_event),
+                    Condition::HighRiskModification => high_risk_hits
+                        .iter()
+                        .find(|h| h.node == pair.1)
+                        .map(|h| events::high_risk_event(h.node, h.reason.clone())),
+                    Condition::Drift => drift_hits
+                        .iter()
+                        .find(|h| h.node == pair.1)
+                        .map(events::drift_event),
+                    Condition::StaleSession => stale_hits
+                        .iter()
+                        .find(|h| h.node == pair.1)
+                        .map(|h| events::stale_event(h.node, h.seconds_inactive)),
+                };
+                // `armed` is kept equal to `fresh`, so the hit is always found.
+                if let Some(event) = event {
+                    events::emit(&sender, event);
+                    emitted_total += 1;
+                    armed.insert(pair, emitted_total);
+                }
             }
         }
 
@@ -1168,7 +1277,7 @@ mod tests {
     }
 
     /// Parse the seconds out of a `stale_event` detail
-    /// ("node <id> untouched for <N>s").
+    /// ("... untouched for <N>s").
     fn stale_seconds(detail: &str) -> u64 {
         detail
             .trim_end_matches('s')
@@ -1181,17 +1290,18 @@ mod tests {
 
     #[cfg(feature = "fixtures")]
     #[tokio::test]
-    async fn loop_emits_stale_from_rest_api_fixture_after_writes_age_out() {
+    async fn loop_emits_one_session_stale_from_rest_api_fixture_after_writes_age_out() {
         // Final-review finding 1a: staleness had only a synthetic-clock loop
         // test. This one is fixture-driven: rebase session-rest-api so its
         // newest write lands 2h before `anchor` — past the 1h STALE_WINDOW
-        // and far outside the 30s conflict/high-risk windows. Every concept
-        // ages out, so the warm-up cycle must emit exactly the fixture's 22
-        // stale concepts, and nothing else: no Conflict (all writes are 2h
-        // old, outside conflict_recency_window), no Drift (the session has
-        // no root goal — drift.rs: no goal nodes → no hits), no HighRisk (no
-        // fresh in-window writes — user schema is Canonical/blast-radius 8
-        // but its write is 2h old).
+        // and far outside the 30s conflict/high-risk windows. The session as a
+        // whole is stale, so the warm-up cycle must emit exactly ONE Stale
+        // (CONC-2: per session, not per concept — this asserted 22 before) and
+        // nothing else: no Conflict (all writes are 2h old, outside
+        // conflict_recency_window), no Drift (the session has no root goal —
+        // drift.rs: no goal nodes → no hits), no HighRisk (no fresh in-window
+        // writes — user schema is Canonical/blast-radius 8 but its write is 2h
+        // old).
         use crate::fixtures;
         use crate::store::GraphStore;
 
@@ -1204,8 +1314,11 @@ mod tests {
             .await
             .unwrap();
         let g = Graph::from_snapshot(snap).unwrap();
-        let n_concepts = g.concepts().count();
-        assert_eq!(n_concepts, 22, "fixture must keep its 22 concepts");
+        assert_eq!(
+            g.concepts().count(),
+            22,
+            "fixture must keep its 22 concepts"
+        );
 
         let daemon = Daemon::new(
             Arc::new(RwLock::new(g)),
@@ -1218,41 +1331,256 @@ mod tests {
         let mut rx = daemon.events();
         let handle = daemon.spawn();
 
-        // The warm-up cycle emits every stale concept (id-ascending) in one
-        // pass — drain all 22 and demand no other event kind.
-        let mut stales: Vec<NodeId> = Vec::new();
-        for _ in 0..n_concepts {
-            let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("stale event within 2s")
-                .unwrap();
-            match evt {
-                DaemonEvent::Stale { node_id, detail } => {
-                    assert!(
-                        detail.contains("untouched for"),
-                        "renderable detail: {detail}"
-                    );
-                    assert!(
-                        stale_seconds(&detail) >= 7200,
-                        "2h rebase ⇒ every write is ≥ 2h old, got {detail}"
-                    );
-                    stales.push(node_id);
-                }
-                other => {
-                    panic!("aged-out fixture must emit only Stale, got {other:?}")
-                }
+        let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("session stale within 2s")
+            .unwrap();
+        let anchor_node = match evt {
+            DaemonEvent::Stale { node_id, detail } => {
+                assert!(
+                    detail.contains("untouched for"),
+                    "renderable detail: {detail}"
+                );
+                assert!(
+                    stale_seconds(&detail) >= 7200,
+                    "2h rebase ⇒ the newest write is ≥ 2h old, got {detail}"
+                );
+                node_id
             }
-        }
-        // Exactly the 22 concepts, once each — and nothing after them.
-        assert_eq!(stales.len(), n_concepts);
+            other => panic!("aged-out fixture must emit one session Stale, got {other:?}"),
+        };
+        // One event for the whole session — 22 concepts, one Stale.
         match rx.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
-            other => panic!("exactly {n_concepts} stale events, got more: {other:?}"),
+            other => panic!("staleness is per session: expected exactly one, got {other:?}"),
         }
-        // The hot list mirrors the fresh stale set.
+        // The hot list mirrors it: one entry, on the anchor node.
+        {
+            let h = daemon.hot_list();
+            let guard = h.read();
+            assert_eq!(guard.len(), 1, "one hot-list entry for the stale session");
+            assert!(guard.contains(anchor_node));
+        }
+        handle.abort();
+    }
+
+    // ------------------------------------------------------------------
+    // XP-4 / CONC-2 / CONC-3 — the event seam
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
+        // XP-4: P6's documented seam (`events::emit_canonized`) needs the
+        // broadcast Sender. Before `Daemon::event_sender()` no public path to it
+        // existed anywhere in the crate, so P6 could not reach the channel
+        // without owning the daemon's private field. This test is the seam: a
+        // caller that is *not* the daemon loop emits, and a `Daemon::events()`
+        // subscriber receives.
+        use crate::types::CanonizationEvent;
+
+        let (graph, cid) = locked_graph_with_one_concept();
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        );
+        let mut rx = daemon.events();
+
+        // The "P6 evaluator": holds only the sender, never the daemon.
+        let sender = daemon.event_sender();
+        let event = CanonizationEvent {
+            id: NodeId(Uuid::from_u64_pair(9, 1)),
+            session_id: sid(),
+            node_id: cid,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: Some(3),
+            occurred_at: ts(0),
+            last_demotion_time: None,
+        };
+        events::emit_canonized(&sender, event.clone());
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("Canonized within 2s")
+            .unwrap();
+        match got {
+            DaemonEvent::Canonized { event: e } => assert_eq!(e, event),
+            other => panic!("expected Canonized, got {other:?}"),
+        }
+        // The daemon's own handle keeps the channel open after the clone drops.
+        drop(sender);
+        assert_eq!(daemon.event_sender().receiver_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_subscriber_misses_the_warm_up_condition_set() {
+        // CONC-3: pins the documented P8 ordering obligation. The warm-up cycle
+        // publishes the whole restored condition set — including the demo's
+        // planted Conflict — and `broadcast` delivers only what is sent after a
+        // receiver exists. Emission is on transition, so nothing re-publishes
+        // for a late subscriber's benefit. P8 must subscribe BEFORE spawn; see
+        // `Daemon::events`.
+        let (graph, c1_id, _, _) = conflicted_graph();
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        );
+        let handle = daemon.spawn();
+        // The warm-up cycle has run once the hot list carries its conflict.
+        wait_until(|| daemon.hot_list().read().contains(c1_id)).await;
+
+        // Subscribe *after* the warm-up, then drive several more cycles: the
+        // condition still holds, so no transition fires and nothing arrives.
+        let mut late = daemon.events();
+        for _ in 0..3 {
+            daemon.wake();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        match late.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("a late subscriber must not see the warm-up set, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn held_condition_is_re_emitted_once_the_ring_wraps_past_it() {
+        // CONC-2: emit-on-transition alone loses an event permanently — the
+        // transition is recorded whether or not any consumer got it, so an
+        // event evicted from the ring while its condition still holds is never
+        // re-published. The demo's Conflict is exactly such an event.
+        //
+        // Capacity 2, and the consumer drains fully after every cycle so no
+        // event is ever lost to lag — the only way c1's Conflict can reappear
+        // is the re-arm path. Two later events push its emission out of the
+        // 2-slot retained window; the next cycle must re-publish it.
+        let (graph, c1_id, _, i2_id) = conflicted_graph();
+        let params = CycleParams {
+            event_capacity: 2,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        );
+        let mut rx = daemon.events();
+        let handle = daemon.spawn();
+
+        /// Everything currently queued, as `(is_conflict_on_target, node)`.
+        fn drain(rx: &mut broadcast::Receiver<DaemonEvent>) -> Vec<NodeId> {
+            let mut out = Vec::new();
+            while let Ok(evt) = rx.try_recv() {
+                if let DaemonEvent::Conflict { node_id, .. } = evt {
+                    out.push(node_id);
+                }
+            }
+            out
+        }
+
+        // Warm-up: the c1 conflict, emitted on entry.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("warm-up conflict within 2s")
+            .unwrap();
+        assert!(matches!(
+            first,
+            DaemonEvent::Conflict { node_id, .. } if node_id == c1_id
+        ));
+        assert!(drain(&mut rx).is_empty(), "warm-up emits exactly one event");
+
+        // Two more cycles, each introducing one new contested node: one
+        // entering event per cycle, drained immediately. After the second, two
+        // events have been published since c1's, so its slot is gone.
+        let mut seen_c1_again = false;
+        for n in 2..=3u64 {
+            let c = concept_at(n, i2_id, "agent-b", &format!("extra {n}"), wall_ts(3));
+            let cid = c.id;
+            graph.write().insert_concept(c, i2_id).unwrap();
+            graph
+                .write()
+                .upsert_edge(dep_edge_at(100 + n, c1_id, cid, wall_ts(3)))
+                .unwrap();
+            daemon.wake();
+            wait_until(|| daemon.scores().epoch == graph.read().epoch()).await;
+            // The cycle's publishes land before the score table is updated on
+            // the *next* cycle, so give this one a beat to finish emitting.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if drain(&mut rx).contains(&c1_id) {
+                seen_c1_again = true;
+            }
+        }
+
         assert!(
-            daemon.hot_list().read().contains(stales[0]),
-            "stale node must be on the hot list"
+            seen_c1_again,
+            "a still-held Conflict whose event left the retained window must be \
+             re-published (CONC-2 re-arm), not lost forever"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn entering_conditions_publish_highest_severity_first() {
+        // CONC-2: a burst must put the most actionable event first for a
+        // consumer draining in order — Conflict, HighRisk, Drift, Stale
+        // (`Condition::severity`). Pre-fix the order was Conflict, Drift,
+        // Stale, HighRisk: the hazard came last.
+        //
+        // The graph plants a Conflict and a HighRisk that enter together: a
+        // Canonical, high-blast-radius node written by a second agent. The two
+        // interactions carry distinct timestamps so the edge attributes cleanly
+        // to agent-b (ALGO-3) and only `contested` is contested.
+        let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let t1 = t0 + chrono::Duration::seconds(5);
+        let now = t0 + chrono::Duration::seconds(10);
+        let mut g = Graph::new(sid());
+        let i1 = interaction_at(1, None, "agent-a", t0);
+        let i1_id = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let i2 = interaction_at(2, Some(1), "agent-b", t1);
+        let i2_id = i2.id;
+        g.insert_interaction(i2).unwrap();
+        let contested = Concept {
+            canonization_status: CanonizationStatus::Canonical,
+            blast_radius: Some(8),
+            ..concept_at(1, i1_id, "agent-a", "user schema", t0)
+        };
+        let contested_id = contested.id;
+        g.insert_concept(contested, i1_id).unwrap();
+        let writer = concept_at(2, i2_id, "agent-b", "cache layer", t1);
+        let writer_id = writer.id;
+        g.insert_concept(writer, i2_id).unwrap();
+        g.upsert_edge(dep_edge_at(1, writer_id, contested_id, t1))
+            .unwrap();
+
+        let daemon = Daemon::new(
+            Arc::new(RwLock::new(g)),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(Arc::new(move || now));
+        let mut rx = daemon.events();
+        let handle = daemon.spawn();
+
+        // Both conditions enter on the warm-up cycle; Conflict must be first.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("warm-up burst within 2s")
+            .unwrap();
+        assert!(
+            matches!(first, DaemonEvent::Conflict { node_id, .. } if node_id == contested_id),
+            "Conflict outranks HighRisk in the burst, got {first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("second event within 2s")
+            .unwrap();
+        assert!(
+            matches!(second, DaemonEvent::HighRisk { node_id, .. } if node_id == contested_id),
+            "HighRisk follows Conflict, got {second:?}"
         );
         handle.abort();
     }

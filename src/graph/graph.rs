@@ -754,6 +754,13 @@ impl Graph {
             .and_then(|id| self.edges.get(id))
     }
 
+    /// Every edge, in unspecified order. For whole-graph folds that would
+    /// otherwise pay `incident_edges` per node (session-level staleness, T4.6);
+    /// callers needing determinism sort by `id`.
+    pub fn edges(&self) -> impl Iterator<Item = &Edge> {
+        self.edges.values()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }

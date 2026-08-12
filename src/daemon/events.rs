@@ -30,13 +30,18 @@
 //!   hot-list conditions ("conflict detected, high-risk modification, drift
 //!   detected, stale session") but defines **no quantitative triggers** for
 //!   the last two. v0.1 interpretation (documented seam — T5.x may refine):
-//!   * **Stale** — a concept whose most recent activity (creation, access,
-//!     or any incident-edge write) is older than [`STALE_WINDOW`]. The window
-//!     matches GC's `GC_EDGE_TTL` (1h) so "untouched for this long" means the
-//!     same thing to GC and to staleness. The T2/T3 writers never set
+//!   * **Stale** — the **session** whose most recent activity (any concept's
+//!     creation or access, any edge write) is older than [`STALE_WINDOW`]. The
+//!     window matches GC's `GC_EDGE_TTL` (1h) so "untouched for this long"
+//!     means the same thing to GC and to staleness. The T2/T3 writers never set
 //!     `last_accessed`, so activity is currently `max(created_at, edge
 //!     writes)`; once recall (T5.x) stamps `last_accessed`, accesses join the
-//!     max.
+//!     max. Scope is **per session, not per concept** (CONC-2/ALGO-8): spec §9
+//!     names the condition "stale session", one event fires per transition into
+//!     staleness, and the event's `node_id` is the session's activity anchor
+//!     ([`session_stale_at`]). Per-concept staleness emitted one event per
+//!     concept in a single warm-up burst — 22 on the shipped fixture, thousands
+//!     at scale — wrapping the same cycle's `Conflict` out of the ring.
 //!   * **HighRisk** — a fresh write to a **high-value** node: Canonical,
 //!     Venerable, or `blast_radius >= HIGH_RISK_BLAST_RADIUS` (spec §10
 //!     Stage-3 threshold: hypothetical removal would orphan > 5 nodes).
@@ -118,11 +123,10 @@ pub fn emit(sender: &broadcast::Sender<DaemonEvent>, event: DaemonEvent) {
 /// this at every transition; the daemon loop does not invent `Canonized`
 /// events.
 ///
-/// `#[allow(dead_code)]`: P6 is the only caller; until then the helper is a
-/// deliberate, documented seam (spec §6.1 requires the `Canonized` kind on
-/// the channel from day one).
-#[allow(dead_code)]
-pub(crate) fn emit_canonized(sender: &broadcast::Sender<DaemonEvent>, event: CanonizationEvent) {
+/// P6 gets the sender from [`crate::daemon::Daemon::event_sender`] (XP-4) —
+/// before that accessor existed this helper had no reachable caller, which is
+/// what the `#[allow(dead_code)]` it used to carry was really saying.
+pub fn emit_canonized(sender: &broadcast::Sender<DaemonEvent>, event: CanonizationEvent) {
     emit(sender, DaemonEvent::Canonized { event });
 }
 
@@ -153,11 +157,15 @@ pub fn drift_event(hit: &DriftHit) -> DaemonEvent {
     }
 }
 
-/// Build a `Stale` event from a detector hit.
+/// Build a `Stale` event from a detector hit. `node_id` is the session's
+/// activity anchor — the concept whose write is the session's most recent
+/// (spec §9 "stale session"; CONC-2).
 pub fn stale_event(node_id: NodeId, seconds_inactive: u64) -> DaemonEvent {
     DaemonEvent::Stale {
         node_id,
-        detail: format!("node {node_id} untouched for {seconds_inactive}s"),
+        detail: format!(
+            "session idle — newest activity at node {node_id}, untouched for {seconds_inactive}s"
+        ),
     }
 }
 
@@ -171,13 +179,18 @@ pub fn high_risk_event(node_id: NodeId, reason: String) -> DaemonEvent {
     }
 }
 
-/// One stale node (spec §6.1 `Stale`). Pure data; the loop turns it into a
-/// `DaemonEvent::Stale` and a hot-list entry.
+/// The session's staleness (spec §6.1 `Stale`, §9 "stale **session**"). Pure
+/// data; the loop turns it into a `DaemonEvent::Stale` and a hot-list entry.
+///
+/// Session-scoped, not concept-scoped (CONC-2/ALGO-8): `node` is the *anchor* —
+/// the concept carrying the session's most recent activity, i.e. the one whose
+/// write is the reason the session is only this stale. See
+/// [`session_stale_at`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleHit {
-    /// The stale concept.
+    /// The concept carrying the session's most recent activity.
     pub node: NodeId,
-    /// How long its most recent activity is in the past, in seconds.
+    /// How long the session's most recent activity is in the past, in seconds.
     pub seconds_inactive: u64,
 }
 
@@ -187,34 +200,65 @@ fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
 
-/// Most recent activity of a concept: its own creation/access or any incident
-/// edge write. `None` for a node missing from the graph (defensive).
-fn last_activity(graph: &Graph, node: NodeId) -> Option<DateTime<Utc>> {
-    let own = match graph.node(node) {
-        Some(crate::types::Node::Concept(c)) => c.last_accessed.unwrap_or(c.created_at),
-        _ => return None,
+/// The session's most recent activity at or before `now`, as
+/// `(anchor concept, instant)`.
+///
+/// One linear pass over concepts and edges — `O(nodes + edges)`, not
+/// `O(nodes × degree)`: an edge write counts as activity for both endpoints, so
+/// folding the edge set once is equivalent to per-node `last_activity` folds and
+/// strictly cheaper. Future-dated writes (mocked clocks) are ignored, matching
+/// every other detector. The anchor breaks ties by smallest id, so the result is
+/// deterministic.
+///
+/// `None` for a session with no concept whose activity is at or before `now`.
+fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, DateTime<Utc>)> {
+    let mut best: Option<(NodeId, DateTime<Utc>)> = None;
+    let mut consider = |node: NodeId, at: DateTime<Utc>| {
+        if at > now {
+            return;
+        }
+        let better = match &best {
+            None => true,
+            Some((id, t)) => at > *t || (at == *t && node.0 < id.0),
+        };
+        if better {
+            best = Some((node, at));
+        }
     };
-    let incident = graph
-        .incident_edges(node)
-        .iter()
-        .map(|e| e.last_reinforced.max(e.created_at))
-        .max()
-        .unwrap_or(own);
-    Some(own.max(incident))
+    for c in graph.concepts() {
+        consider(c.id, c.last_accessed.unwrap_or(c.created_at));
+    }
+    for e in graph.edges() {
+        let w = e.last_reinforced.max(e.created_at);
+        // Only concept endpoints anchor a *concept* activity claim; an edge from
+        // an interaction still refreshes the concept it lands on.
+        for endpoint in [e.source, e.target] {
+            if matches!(graph.node(endpoint), Some(crate::types::Node::Concept(_))) {
+                consider(endpoint, w);
+            }
+        }
+    }
+    best
 }
 
-/// Is this one node stale at `now`? The per-node primitive (CONC-5): one
-/// neighborhood walk, so a recall-time re-validation costs O(degree) rather
-/// than a whole-graph pass.
-pub fn stale_at(
-    graph: &Graph,
-    node: NodeId,
-    window: Duration,
-    now: DateTime<Utc>,
-) -> Option<StaleHit> {
+/// Is the **session** stale at `now` (spec §9 "stale session")?
+///
+/// The session is stale when *nothing in it* has been touched for longer than
+/// `window` — i.e. its most recent activity ([`session_last_activity`]) is
+/// outside the window. One hit for the whole session, anchored on the concept
+/// carrying that most recent activity.
+///
+/// Session scope is CONC-2/ALGO-8's fix. Per-concept staleness made warm-up on
+/// a resumed session (spec §2.5 — *every* restart) emit one `Stale` per concept
+/// in a single synchronous burst: 22 on the shipped fixture, ~4,000 at scale,
+/// into a 256-slot ring, wrapping the same cycle's `Conflict` out before any
+/// consumer could drain it. It also read the condition wrong: a session with one
+/// fresh write and a hundred old concepts is *not* a stale session, yet it fired
+/// a hundred Stale events.
+pub fn session_stale_at(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Option<StaleHit> {
     let window_start = now - chrono_window(window);
-    let last = last_activity(graph, node)?;
-    if last > now || last >= window_start {
+    let (node, last) = session_last_activity(graph, now)?;
+    if last >= window_start {
         return None;
     }
     Some(StaleHit {
@@ -223,16 +267,11 @@ pub fn stale_at(
     })
 }
 
-/// Detect every stale concept: activity older than `window` at `now`
-/// (see the module docs for the v0.1 rule). Pure; deterministic
-/// (id-ascending). Edges dated after `now` (mocked clocks) are not activity.
+/// The session's staleness as a hit list: at most **one** hit
+/// ([`session_stale_at`]). Kept vector-shaped so the loop treats all four
+/// detectors uniformly.
 pub fn detect_stale(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<StaleHit> {
-    let mut hits: Vec<StaleHit> = graph
-        .concepts()
-        .filter_map(|c| stale_at(graph, c.id, window, now))
-        .collect();
-    hits.sort_by_key(|h| h.node.0);
-    hits
+    session_stale_at(graph, window, now).into_iter().collect()
 }
 
 /// One high-risk modification (spec §6.1 `HighRisk`). Pure data; the loop
@@ -306,16 +345,16 @@ pub fn detect_high_risk(graph: &Graph, window: Duration, now: DateTime<Utc>) -> 
     hits
 }
 
-/// Detect stale nodes and refresh the hot list with one `StaleSession` entry
-/// per hit (mirrors `conflict::insert_conflicts`). Returns the hits: the
-/// daemon loop publishes them on transition and syncs the hot list against
-/// them.
+/// Detect session staleness and refresh the hot list with **one**
+/// `StaleSession` entry (CONC-2: one per session, not one per concept).
+/// Returns the hit list: the daemon loop publishes it on transition and syncs
+/// the hot list against it.
 ///
-/// Re-insertion refreshes the payload + re-validation predicate; the T4.6
-/// loop additionally drops entries whose `(node, condition)` is no longer
-/// detected ([`crate::daemon::hotlist::HotList::retain_conditions`]), so a
-/// node touched again (activity re-enters the window) is evicted on the next
-/// cycle — no captured-`now` predicate involved.
+/// Re-insertion refreshes the payload + re-validation predicate; the T4.6 loop
+/// additionally drops entries whose `(node, condition)` is no longer detected
+/// ([`crate::daemon::hotlist::HotList::retain_conditions`]), so a session
+/// touched again is evicted on the next cycle. A write that lands *and* moves
+/// the anchor evicts the old entry the same way — the pair changed.
 pub fn insert_stale(
     hot: &mut HotList,
     graph: &Graph,
@@ -324,16 +363,20 @@ pub fn insert_stale(
 ) -> Vec<StaleHit> {
     let hits = detect_stale(graph, window, now);
     for hit in &hits {
-        let node = hit.node;
-        // Per-node re-check against the caller's `now`, returning the refreshed
-        // payload (CONC-5 / XP-3).
+        // Session-level re-check against the caller's `now`, returning the
+        // refreshed payload (XP-3). The entry's node is the anchor; a
+        // re-validation that finds a *different* anchor means a write landed,
+        // which is exactly when the session stopped being stale.
+        let anchor = hit.node;
         let holds = move |g: &Graph, at: DateTime<Utc>| {
-            stale_at(g, node, window, at).map(|h| HotListPayload::Stale {
-                seconds_inactive: h.seconds_inactive,
-            })
+            session_stale_at(g, window, at)
+                .filter(|h| h.node == anchor)
+                .map(|h| HotListPayload::Stale {
+                    seconds_inactive: h.seconds_inactive,
+                })
         };
         let _ = hot.insert(HotListEntry::new(
-            node,
+            anchor,
             Condition::StaleSession,
             HotListPayload::Stale {
                 seconds_inactive: hit.seconds_inactive,
@@ -644,25 +687,31 @@ mod tests {
         }
     }
 
+    /// CONC-2/ALGO-8: staleness is a property of the **session**, not of each
+    /// concept. One fresh write anywhere keeps the session live, no matter how
+    /// many old concepts it carries; when the session does go stale, exactly
+    /// one hit fires, anchored on the newest activity.
+    ///
+    /// Pre-fix this graph produced two `Stale` hits (c1 and c3) while the
+    /// session had been written to 100s ago — the wrong condition, and the
+    /// per-concept burst that wrapped the demo `Conflict` out of the ring.
     #[test]
-    fn detect_stale_flags_only_nodes_untouched_beyond_the_window() {
+    fn detect_stale_is_a_session_property_not_a_per_concept_one() {
         let now = ts(7200);
         let (mut g, i1_id, i2_id) = base_graph();
-        // c1: created at 0, accessed at 400 -> stale (6800s inactive; the
-        // access is far older than the 1h window starting at 3600).
+        // c1: created at 0, accessed at 400 — old, but not the session's story.
         let mut c1 = concept(
             1,
             i1_id,
             "agent-a",
-            "stale one",
+            "old one",
             0,
             CanonizationStatus::None,
             None,
         );
         c1.last_accessed = Some(ts(400));
-        let c1_id = c1.id;
         g.insert_concept(c1, i1_id).unwrap();
-        // c2: created at 7000 (200s ago) -> fresh, never stale.
+        // c2: created at 7000 (200s ago) — the session is alive.
         let c2 = concept(
             2,
             i2_id,
@@ -674,13 +723,13 @@ mod tests {
         );
         let c2_id = c2.id;
         g.insert_concept(c2, i2_id).unwrap();
-        // c3: created at 0 but with an edge written at 7100 (100s ago) -> the
-        // edge write refreshes its activity; not stale.
+        // c3: created at 0, edge written at 7100 (100s ago) — the newest
+        // activity in the session, so the anchor if it ever goes stale.
         let c3 = concept(
             3,
             i1_id,
             "agent-a",
-            "refreshed one",
+            "edge-refreshed one",
             0,
             CanonizationStatus::None,
             None,
@@ -689,10 +738,24 @@ mod tests {
         g.insert_concept(c3, i1_id).unwrap();
         g.upsert_edge(edge(1, c2_id, c3_id, 7100)).unwrap();
 
-        let hits = detect_stale(&g, STALE_WINDOW, now);
-        assert_eq!(hits.len(), 1, "only c1 is stale: {hits:?}");
-        assert_eq!(hits[0].node, c1_id);
-        assert_eq!(hits[0].seconds_inactive, 6800);
+        assert!(
+            detect_stale(&g, STALE_WINDOW, now).is_empty(),
+            "a session written to 100s ago is not stale, whatever its oldest concept says"
+        );
+
+        // Two hours after that last write the whole session is stale: exactly
+        // one hit, anchored on the newest activity — the `c2 -> c3` edge at
+        // 7100 refreshes both endpoints, so the tie-break (smallest id) picks
+        // c2 over c3.
+        let much_later = ts(7100 + 7200);
+        let hits = detect_stale(&g, STALE_WINDOW, much_later);
+        assert_eq!(
+            hits.len(),
+            1,
+            "one hit per session, not per concept: {hits:?}"
+        );
+        assert_eq!(hits[0].node, c2_id, "anchor = newest activity, ties by id");
+        assert_eq!(hits[0].seconds_inactive, 7200);
     }
 
     #[test]
@@ -780,23 +843,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hot_list_entries_refresh_and_revalidate() {
-        let now = ts(7200);
+    /// A graph with a Canonical `c2`, a writer `cw`, and one `cw -> c2`
+    /// Dependency edge at `t=7190` — the session's newest activity. Returns
+    /// `(graph, c2, cw)`.
+    ///
+    /// Session-stale and high-risk are mutually exclusive by construction here
+    /// (CONC-2): a write fresh enough to be high-risk (30s) is far too fresh to
+    /// leave the session stale (1h), so the two conditions are exercised at
+    /// different `now`s rather than side by side.
+    fn canonical_write_graph() -> (Graph, NodeId, NodeId) {
         let (mut g, i1_id, _) = base_graph();
-        // One stale node (c1 @ 0) and one high-risk node (Canonical c2 with a
-        // fresh write at 7190, 10s before now -> inside the 30s window).
-        let c1 = concept(
-            1,
-            i1_id,
-            "agent-a",
-            "stale",
-            0,
-            CanonizationStatus::None,
-            None,
-        );
-        let c1_id = c1.id;
-        g.insert_concept(c1, i1_id).unwrap();
         let c2 = concept(
             2,
             i1_id,
@@ -820,20 +876,16 @@ mod tests {
         let cw_id = cw.id;
         g.insert_concept(cw, i1_id).unwrap();
         g.upsert_edge(edge(1, cw_id, c2_id, 7190)).unwrap();
+        (g, c2_id, cw_id)
+    }
+
+    #[test]
+    fn hot_list_entries_refresh_and_revalidate() {
+        let now = ts(7200);
+        let (mut g, c2_id, cw_id) = canonical_write_graph();
 
         let mut hot = HotList::new();
-        insert_stale(&mut hot, &g, STALE_WINDOW, now);
         insert_high_risk(&mut hot, &g, HIGH_RISK_WRITE_WINDOW, now);
-
-        let stale_entry = hot
-            .iter()
-            .find(|e| e.node == c1_id)
-            .expect("stale node must be on the hot list");
-        assert_eq!(stale_entry.condition, Condition::StaleSession);
-        match &stale_entry.payload {
-            HotListPayload::Stale { seconds_inactive } => assert_eq!(*seconds_inactive, 7200),
-            other => panic!("expected Stale payload, got {other:?}"),
-        }
 
         let hr_entry = hot
             .iter()
@@ -845,25 +897,33 @@ mod tests {
             other => panic!("expected HighRisk payload, got {other:?}"),
         }
 
+        // Two hours on, the session is stale: exactly one entry, anchored on
+        // the newest activity (c2 and cw tie at 7190; smallest id wins).
+        let stale_now = ts(7190 + 7200);
+        assert_eq!(insert_stale(&mut hot, &g, STALE_WINDOW, stale_now).len(), 1);
+        let stale_entry = hot
+            .iter()
+            .find(|e| e.condition == Condition::StaleSession)
+            .expect("the stale session must be on the hot list");
+        assert_eq!(stale_entry.node, c2_id, "anchor = newest activity");
+        match &stale_entry.payload {
+            HotListPayload::Stale { seconds_inactive } => assert_eq!(*seconds_inactive, 7200),
+            other => panic!("expected Stale payload, got {other:?}"),
+        }
+
         // Re-running with the same graph refreshes, never duplicates.
-        insert_stale(&mut hot, &g, STALE_WINDOW, now);
+        insert_stale(&mut hot, &g, STALE_WINDOW, stale_now);
         insert_high_risk(&mut hot, &g, HIGH_RISK_WRITE_WINDOW, now);
         assert_eq!(hot.len(), 2, "refresh must not duplicate entries");
 
-        // Re-validation: touch c1 (fresh edge write) and age out c2's write
-        // (remove the fresh edge) -> both predicates stop holding.
-        g.upsert_edge(edge(2, cw_id, c1_id, 7200)).unwrap(); // activity = now
-        g.remove_edge(edge(1, cw_id, c2_id, 7190).id).unwrap();
+        // Re-validation: a fresh write revives the session and ages c2's
+        // high-risk window out, so both predicates stop holding.
+        g.upsert_edge(edge(2, cw_id, c2_id, 7190 + 7200)).unwrap();
         assert!(
-            !hot.revalidate(&g, c1_id, now),
-            "touched node is no longer stale"
+            !hot.revalidate(&g, c2_id, ts(7190 + 7200 + 60)),
+            "a fresh write ends both the stale session and the old high-risk window"
         );
-        assert!(
-            !hot.revalidate(&g, c2_id, now),
-            "write aged out -> no longer high-risk"
-        );
-        assert!(!hot.contains(c1_id));
-        assert!(!hot.contains(c2_id));
+        assert!(hot.is_empty());
     }
 
     // ------------------------------------------------------------------
@@ -880,60 +940,27 @@ mod tests {
     #[test]
     fn revalidate_ages_clock_bound_conditions_out_without_touching_the_graph() {
         let detected_at = ts(7200);
-        let (mut g, i1_id, _) = base_graph();
-        let c1 = concept(
-            1,
-            i1_id,
-            "agent-a",
-            "stale",
-            0,
-            CanonizationStatus::None,
-            None,
-        );
-        let c1_id = c1.id;
-        g.insert_concept(c1, i1_id).unwrap();
-        let c2 = concept(
-            2,
-            i1_id,
-            "agent-a",
-            "canonical",
-            0,
-            CanonizationStatus::Canonical,
-            None,
-        );
-        let c2_id = c2.id;
-        g.insert_concept(c2, i1_id).unwrap();
-        let cw = concept(
-            3,
-            i1_id,
-            "agent-a",
-            "writer",
-            0,
-            CanonizationStatus::None,
-            None,
-        );
-        let cw_id = cw.id;
-        g.insert_concept(cw, i1_id).unwrap();
-        // c2's only fresh write: 10s before detection, inside the 30s window.
-        g.upsert_edge(edge(1, cw_id, c2_id, 7190)).unwrap();
+        let (g, c2_id, _) = canonical_write_graph();
 
+        // c2's only fresh write is at 7190 — 10s before detection, inside the
+        // 30s high-risk window.
         let mut hot = HotList::new();
-        insert_stale(&mut hot, &g, STALE_WINDOW, detected_at);
         insert_high_risk(&mut hot, &g, HIGH_RISK_WRITE_WINDOW, detected_at);
-        assert_eq!(hot.len(), 2);
+        assert!(hot.contains(c2_id));
 
         // 100s later, graph untouched: the write left the 30s window.
-        let later = ts(7300);
         assert!(
-            !hot.revalidate(&g, c2_id, later),
+            !hot.revalidate(&g, c2_id, ts(7300)),
             "the clock alone must age a high-risk write out"
         );
         assert!(!hot.contains(c2_id), "no ghost HighRisk entry");
 
-        // The stale node is still stale, but *more* stale — read time, not
-        // detection time.
-        assert!(hot.revalidate(&g, c1_id, later));
-        let refreshed = hot.iter().find(|e| e.node == c1_id).unwrap();
+        // Same for the stale session, in the other direction: once stale it
+        // stays stale, but `seconds_inactive` tracks read time.
+        let stale_now = ts(7190 + 7200);
+        insert_stale(&mut hot, &g, STALE_WINDOW, stale_now);
+        assert!(hot.revalidate(&g, c2_id, ts(7190 + 7300)));
+        let refreshed = hot.iter().find(|e| e.node == c2_id).unwrap();
         match &refreshed.payload {
             HotListPayload::Stale { seconds_inactive } => assert_eq!(
                 *seconds_inactive, 7300,
@@ -954,7 +981,7 @@ mod tests {
             1,
             i1_id,
             "agent-a",
-            "stale one",
+            "old one",
             0,
             CanonizationStatus::None,
             None,
@@ -985,15 +1012,8 @@ mod tests {
         g.insert_concept(c3, i1_id).unwrap();
         g.upsert_edge(edge(1, c2_id, c3_id, 7190)).unwrap();
 
-        let stale: Vec<StaleHit> = detect_stale(&g, STALE_WINDOW, now);
         let high_risk: Vec<HighRiskHit> = detect_high_risk(&g, HIGH_RISK_WRITE_WINDOW, now);
         for c in g.concepts() {
-            assert_eq!(
-                stale_at(&g, c.id, STALE_WINDOW, now).as_ref(),
-                stale.iter().find(|h| h.node == c.id),
-                "stale_at must agree with detect_stale for {}",
-                c.id
-            );
             assert_eq!(
                 high_risk_at(&g, c.id, HIGH_RISK_WRITE_WINDOW, now).as_ref(),
                 high_risk.iter().find(|h| h.node == c.id),
