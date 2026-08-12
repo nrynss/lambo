@@ -1,0 +1,18 @@
+Cockroach live conformance evidence — 2026-08-12T14:43:38Z
+Machine: Linux x86_64, rustc 1.97.1
+Command: LAMBO_COCKROACH_DSN=<local docker single-node, sslmode=disable> LAMBO_REQUIRE_LIVE=1 cargo test --features store-cockroach --lib -- --ignored store::cockroach
+
+=== run ===
+   Compiling lambo v0.1.0 (/home/nryn/work/lambo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.04s
+     Running unittests src/lib.rs (target/debug/deps/lambo-9824822baa63e645)
+
+running 2 tests
+test store::cockroach::conformance::build_store_returns_working_adapter ... ok
+test store::cockroach::conformance::conformance_suite ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 385 filtered out; finished in 1.91s
+
+=== db evidence ===
+session_id	goal
+live-set-root-goal	NULL

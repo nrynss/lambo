@@ -450,7 +450,12 @@ being shutdown"), and per-test pools multiplied connections past the cluster's c
 ("pool timed out while waiting for an open connection"). Live tests are
 `#[ignore]`d by default and only run explicitly; when they are run (live run via
 `-- --ignored` under `LAMBO_REQUIRE_LIVE=1`), a missing `LAMBO_COCKROACH_DSN` is a
-hard failure (`dsn_or_skip` panics) rather than a skip. `build_store_returns_working_adapter` is a plain sync
+hard failure (`dsn_or_skip` panics) rather than a skip. The suite HAS been run
+live against a real single-node cluster: during the T3.2 review (evidence
+`20260811-233251-cockroach-live.txt`, `20260812-025148-cockroach-live.txt`) and
+again 2026-08-12 with the P4-residual-closing `check_set_root_goal_mutation_persists`
+added (evidence `20260812-201338-cockroach-live.txt`; 2/2 green, incl. the
+`SET_ROOT_GOAL_SQL` UPDATE path set/clear round-trip). `build_store_returns_working_adapter` is a plain sync
 test (lazy pool ⇒ no runtime needed).
 
 **Verification:** `cargo build --features store-cockroach` clean (0 warnings);

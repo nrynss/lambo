@@ -518,9 +518,11 @@ two `live_calibration` ones; the no-default-features rows do not compile them.
   suite ran green against a real single-node CockroachDB
   (`LAMBO_COCKROACH_DSN` + `LAMBO_REQUIRE_LIVE=1`, `-- --ignored`):
   `build_store_returns_working_adapter` + `conformance_suite` (all checks,
-  incl. the new one) 2/2. Evidence: DB shows the `live-set-root-goal` session
-  row created with goal NULL after the clear half of the check. Non-live gates
-  unchanged (default 368/0; no-default cockroach 297/0).
+  incl. the new one) 2/2. Evidence: captured run + DB query in
+  `dev-diary/evidence/20260812-201338-cockroach-live.txt` (DB shows the
+  `live-set-root-goal` session row created, goal NULL after the clear half of
+  the check). Non-live gates unchanged (default 368/0; no-default cockroach
+  297/0).
 - **`conflict::conflict_at` rebuilds `WriterTimeline` per call (CONC-5, NEW-4).**
   The whole-graph `detect` builds one timeline and shares it across every node,
   but the per-node primitive recall calls builds its own — `O(interactions)` per
