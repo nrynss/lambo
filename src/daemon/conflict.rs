@@ -55,10 +55,13 @@
 //!
 //! [`insert_conflicts`] refreshes one entry per hit: the payload carries the
 //! agents + `seconds_ago`, and the entry's re-validation predicate is built
-//! from the same [`conflict_at`] logic and the same `now` used to detect, so
-//! re-validation at recall time is free (T4.2's contract). [`HotList`] dedups
-//! by `(node, condition)` — re-running the detector refreshes an existing
-//! conflict entry instead of duplicating it.
+//! from the same [`conflict_at`] logic and the same `now` used to detect
+//! (the recall-time path, T5.3). [`HotList`] dedups by `(node, condition)` —
+//! re-running the detector refreshes an existing conflict entry instead of
+//! duplicating it. The hits are returned: the daemon loop (T4.6) publishes
+//! them on transition and syncs the hot list against them with
+//! [`HotList::retain_conditions`], so a conflict that ages out of the
+//! recency window is dropped on the next cycle — no captured-`now` ghost.
 
 use std::time::Duration;
 
@@ -178,17 +181,29 @@ pub fn detect(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Vec<Confli
 /// [`HotList::insert`] dedups by `(node, condition)`, so re-running this with a
 /// fresh `now` refreshes the payload (`seconds_ago`) and the re-validation
 /// predicate instead of duplicating (T4.2's contract). Each entry's predicate
-/// re-checks the same conflict logic with the same `now` used here.
-pub fn insert_conflicts(hot: &mut HotList, graph: &Graph, window: Duration, now: DateTime<Utc>) {
-    for hit in detect(graph, window, now) {
+/// re-checks the same conflict logic with the same `now` used here (recall's
+/// re-validation path, T5.3).
+///
+/// Returns the hits — the daemon loop emits them on condition transition and
+/// uses them as the fresh set it syncs the hot list against
+/// ([`HotList::retain_conditions`]; T4.6 finding 2).
+pub fn insert_conflicts(
+    hot: &mut HotList,
+    graph: &Graph,
+    window: Duration,
+    now: DateTime<Utc>,
+) -> Vec<ConflictHit> {
+    let hits = detect(graph, window, now);
+    for hit in &hits {
         let node = hit.node;
         let payload = HotListPayload::Conflict {
-            agents: hit.agents,
+            agents: hit.agents.clone(),
             seconds_ago: hit.seconds_ago,
         };
         let holds = move |g: &Graph| conflict_at(g, node, window, now).is_some();
         let _ = hot.insert(HotListEntry::new(node, Condition::Conflict, payload, holds));
     }
+    hits
 }
 
 #[cfg(test)]

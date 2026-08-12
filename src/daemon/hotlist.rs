@@ -3,8 +3,10 @@
 //! A bounded priority queue of graph nodes whose conditions need surfacing in
 //! `recall()` (force-inclusion, spec §8). Entry conditions retained:
 //! **conflict detected**, **high-risk modification**, **drift detected**,
-//! **stale session**. Conditions are re-validated on each `recall()` — a
-//! condition that no longer holds is evicted then, never on a timer.
+//! **stale session**. The daemon loop (T4.6) keeps the list equal to the
+//! current cycle's fresh detector hits ([`HotList::retain_conditions`]); the
+//! per-entry predicate ([`ConditionCheck`]) remains available for
+//! recall-time re-validation (T5.3).
 //!
 //! ## Priority rule (T4.2 design decision)
 //!
@@ -37,12 +39,19 @@
 //! holds, as a closure over the current graph ([`ConditionCheck`]). The
 //! detector modules (T4.3 conflict, T4.4 drift) build the predicate at insert
 //! time from the same graph logic and `now` they used to detect; the hot list
-//! only evaluates it. [`HotList::revalidate`] takes `&Graph` explicitly —
-//! rather than stashing a graph handle inside the hot list — so recall never
-//! takes a hidden lock on top of the one it already holds (the daemon's
-//! `RwLock<Graph>` is not reentrant; spec §6.4 lock discipline).
+//! only evaluates it. Since T4.6 the daemon loop *does not* evaluate these
+//! predicates each cycle — it diffs the list against the fresh detection
+//! pass ([`HotList::retain_conditions`]), which replaces the old
+//! O(hot_len × graph) per-cycle re-validation scan and guarantees no
+//! captured-`now` ghosts linger (T4.6 finding 2). [`HotList::revalidate`]
+//! stays public for recall (T5.3) to re-check an entry at read time.
+//! It takes `&Graph` explicitly — rather than stashing a graph handle inside
+//! the hot list — so recall never takes a hidden lock on top of the one it
+//! already holds (the daemon's `RwLock<Graph>` is not reentrant; spec §6.4
+//! lock discipline).
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -268,6 +277,16 @@ impl HotList {
             }
         });
         any_valid
+    }
+    /// Drop every entry whose `(node, condition)` is not in `fresh` (T4.6
+    /// finding 2). The daemon loop calls this once per cycle with the
+    /// current detection pass's hits, so the hot list always equals the
+    /// *current* condition set: a HighRisk entry whose 30s window elapsed —
+    /// or any condition that stopped being detected — is evicted here,
+    /// deterministically, without evaluating captured-`now` predicates.
+    pub fn retain_conditions(&mut self, fresh: &HashSet<(Condition, NodeId)>) {
+        self.entries
+            .retain(|e| fresh.contains(&(e.condition, e.node)));
     }
 
     /// Is `node` on the hot list (without re-validating)?
@@ -552,6 +571,30 @@ mod tests {
         let g = Graph::new(sid());
         assert!(!list.revalidate(&g, nid(2)), "no entry → not hot");
         assert_eq!(list.len(), 1);
+    }
+    #[test]
+    fn retain_conditions_keeps_only_fresh_pairs() {
+        let mut list = HotList::new();
+        let _ = list.insert(entry(nid(1), Condition::Conflict));
+        let _ = list.insert(entry(nid(1), Condition::Drift));
+        let _ = list.insert(entry(nid(2), Condition::Conflict));
+        let _ = list.insert(entry(nid(3), Condition::StaleSession));
+
+        // Fresh pass: c1 and c2 conflicts still detected; c1's drift and
+        // c3's staleness no longer hold (windows elapsed / condition gone).
+        let fresh: HashSet<(Condition, NodeId)> =
+            [(Condition::Conflict, nid(1)), (Condition::Conflict, nid(2))]
+                .into_iter()
+                .collect();
+        list.retain_conditions(&fresh);
+
+        let survivors: Vec<(Condition, NodeId)> =
+            list.iter().map(|e| (e.condition, e.node)).collect();
+        assert_eq!(
+            survivors,
+            vec![(Condition::Conflict, nid(2)), (Condition::Conflict, nid(1)),],
+            "only fresh pairs survive, priority order preserved"
+        );
     }
 
     // ------------------------------------------------------------------
