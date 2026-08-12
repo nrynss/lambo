@@ -145,19 +145,24 @@ where
         }
     }
 
-    // top_k normal members, plus every force-included hot member, in order.
+    // top_k normal members (counted by VALID emitted hits — a graph-missing
+    // member such as a stale durable-vector id must not consume a top_k slot,
+    // GPT5.6sol P2-5), plus every force-included hot member, in score order.
+    // Blast radii for every canonical hit, computed ONCE (P2-7).
+    let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let mut blocks: Vec<String> = Vec::new();
-    let mut budget_used = 0usize;
-    for (pos, s) in members.iter().enumerate() {
+    let mut hit_blocks: Vec<String> = Vec::new(); // block per emitted hit, score order
+    let mut emitted = 0usize; // valid non-forced hits accepted toward top_k
+    for s in members {
         let forced = hot_payloads.contains_key(&s.item);
-        if pos >= query.top_k && !forced {
-            continue;
-        }
         let Some(Node::Concept(c)) = graph.node(s.item) else {
-            continue; // expanded members are concepts; defensive only
+            continue; // graph-missing (e.g. stale vector id): skip, no slot
         };
+        if !forced && emitted >= query.top_k {
+            continue; // keep scanning: a force-included hot member may sort lower
+        }
+
         let canonical = c.canonization_status == CanonizationStatus::Canonical;
         let hit = RecallHit {
             node_id: c.id,
@@ -166,7 +171,7 @@ where
             score: s.score,
             is_canonical: canonical,
             blast_radius: if canonical {
-                Some(format::blast_radius(graph, c.id))
+                Some(radii.get(&c.id).copied().unwrap_or(0))
             } else {
                 None
             },
@@ -177,8 +182,7 @@ where
         let mut lines: Vec<String> = Vec::new();
         if canonical {
             lines.push(format::blast_radius_warning(
-                hit.blast_radius
-                    .expect("canonical hits carry a blast radius"),
+                hit.blast_radius.unwrap_or_default(),
             ));
         }
         if let Some(payloads) = hot_payloads.get(&c.id) {
@@ -190,17 +194,36 @@ where
             lines.push(format::reservation_warning(r));
         }
 
+        // Warning lines reflect the included hit set, independent of the token
+        // budget (see module docs); a block truncated from the context still
+        // reports its conditions.
         let block = format::render_block(&hit, &lines);
-        let tokens = token_fn(&block);
-        if budget_used + tokens <= query.max_tokens {
-            budget_used += tokens;
-            blocks.push(block);
-        }
-        // Warnings reflect the included hit set, independent of the token
-        // budget (see module docs).
-
         warnings.extend(lines);
+        hit_blocks.push(block);
+        if !forced {
+            emitted += 1;
+        }
         hits.push(hit);
+    }
+
+    // Context: ranked-prefix over the hit blocks in score order, stopping at
+    // the first block that does not fit. The measured token count is of the
+    // ACTUAL joined context (separators `\n\n` included), so the rendered
+    // output is within budget; a lower-ranked block never follows a skipped
+    // one (GPT5.6sol P1-4). Checked arithmetic keeps overflow a no-op stop.
+    let mut blocks: Vec<String> = Vec::new();
+    for block in hit_blocks {
+        let mut provisional = blocks.join("\n\n");
+        if !provisional.is_empty() {
+            provisional.push('\n');
+            provisional.push('\n');
+        }
+        provisional.push_str(&block);
+        let tokens = token_fn(&provisional);
+        if tokens.checked_add(1).is_none() || tokens > query.max_tokens {
+            break;
+        }
+        blocks.push(block);
     }
 
     RecallResult {
@@ -209,6 +232,8 @@ where
         warnings,
     }
 }
+
+
 
 /// Finite, non-negative weight, else `0.0` (mirrors ALGO-10 sanitization).
 fn sane_weight(w: f64) -> f64 {
@@ -881,4 +906,75 @@ mod tests {
             ]
         );
     }
+
+    // P1-4 (GPT5.6sol): the token budget charges the separator AND stops at the
+    // first non-fitting block (ranked-prefix) — a lower-ranked short block must
+    // not follow a skipped higher-ranked one. Provable with a tiny token_fn
+    // that returns the byte length, and blocks whose sizes straddle a budget.
+    #[test]
+    fn budget_charges_separators_and_enforces_ranked_prefix() {
+        let g = graph_with(3);
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![
+                Scored::new(uid(1), 1.0),
+                Scored::new(uid(2), 0.5),
+                Scored::new(uid(3), 0.1),
+            ],
+        };
+        let expanded = ExpandedSet {
+            required: vec![
+                Scored::new(uid(1), 0.0),
+                Scored::new(uid(2), 0.0),
+                Scored::new(uid(3), 0.0),
+            ],
+            siblings: Vec::new(),
+        };
+        // token_fn = byte length; block for concept "concept 1" (len ~ "concept 1 [Entity]
+        // (score 1.00)" ~ 30) each block ~ >; use a budget that fits block 1 plus the
+        // separator but not block 2's separator+block? Instead: pick budget so block1
+        // fits alone and block1+sep+block2 does not -> only block1 rendered (ranked-prefix:
+        // block2, though it might fit alone, must NOT appear after block1).
+        let result = assemble(
+            &g, &expanded, &[], &scores, &mut HotList::new(),
+            &query(3, 34), RecallWeights::default(), ts(60), byte_len,
+        );
+        let contexts = result.context.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(contexts.len(), 1, "ranked-prefix: only the first block fits");
+        assert!(result.context.starts_with("concept 1"), "first block kept");
+
+        // With a large budget everything fits in rank order.
+        let all = assemble(
+            &g, &expanded, &[], &scores, &mut HotList::new(),
+            &query(3, 10_000), RecallWeights::default(), ts(60), byte_len,
+        );
+        assert_eq!(all.context.split("\n\n").count(), 3);
+    }
+
+    // P2-5 (GPT5.6sol): a graph-missing member within top_k (e.g. a stale durable
+    // vector id) must NOT consume a top_k slot — the next valid member fills it.
+    #[test]
+    fn stale_graph_missing_member_does_not_consume_top_k_slot() {
+        // expanded.required includes uid(9) which is NOT in the graph (stale
+        // vector id), ahead of the valid c1. top_k=1 must yield [c1], not [].
+        let g = graph_with(3);
+        let scores = ScoreTable { epoch: 0, ranked: vec![] };
+        let expanded = ExpandedSet {
+            required: vec![
+                Scored::new(uid(9), 0.9), // graph-missing / stale
+                Scored::new(uid(1), 0.1),
+            ],
+            siblings: Vec::new(),
+        };
+        let result = assemble(
+            &g, &expanded, &[], &scores, &mut HotList::new(),
+            &query(1, 10_000), RecallWeights::default(), ts(60), byte_len,
+        );
+        assert_eq!(ids_of(&result), vec![uid(1)], "valid member fills the slot");
+    }
+
+    fn byte_len(s: &str) -> usize {
+        s.len()
+    }
+
 }

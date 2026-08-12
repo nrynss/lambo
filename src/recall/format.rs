@@ -62,7 +62,7 @@
 //! conflict line"; spec §13's "eleven seconds ago" is demo narration, not
 //! quoted screen text (unlike the ⚑ line above).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::daemon::hotlist::HotListPayload;
 use crate::graph::Graph;
@@ -78,36 +78,54 @@ pub const STRUCTURAL_EDGE_TYPES: [EdgeType; 3] = [
 
 /// Stage-3 dependent count for `node` (spec §4.1 contract; see module docs).
 ///
-/// Deterministic for a given graph: the count is a pure set predicate over
-/// concepts and structural edges, independent of iteration order. Pure and
-/// lock-safe like the rest of the recall pipeline.
-pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
+/// A concept `c` "depends on" `node` when `node` is a structural source of `c`
+/// and `c` has no OTHER structural source. Deterministic for a given graph:
+/// the count is a pure set predicate over concepts and structural edges.
+///
+/// Both [`blast_radius`] (one node) and [`blast_radii`] (all nodes) share ONE
+/// graph pass building `inbound_sources`, so formatting many canonical hits
+/// under a lock is O(concepts + edges), not O(hits * concepts * edges)
+/// (GPT5.6sol P2-7). Pure and lock-safe.
+fn inbound_sources(graph: &Graph) -> HashMap<NodeId, Vec<NodeId>> {
     let concept_ids: HashSet<NodeId> = graph.concepts().map(|c| c.id).collect();
-    let mut count = 0u64;
-    for c in graph.concepts() {
-        if c.id == node {
+    let mut sources: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in graph.edges() {
+        if !STRUCTURAL_EDGE_TYPES.contains(&e.edge_type) {
             continue;
         }
-        let mut from_node = false;
-        let mut from_other = false;
-        for e in graph.edges() {
-            if e.target != c.id {
-                continue;
-            }
-            if !STRUCTURAL_EDGE_TYPES.contains(&e.edge_type) || !concept_ids.contains(&e.source) {
-                continue;
-            }
-            if e.source == node {
-                from_node = true;
-            } else {
-                from_other = true;
-            }
+        if !concept_ids.contains(&e.source) || !concept_ids.contains(&e.target) {
+            continue;
         }
-        if from_node && !from_other {
-            count += 1;
+        let dst_sources = sources.entry(e.target).or_default();
+        if !dst_sources.contains(&e.source) {
+            dst_sources.push(e.source);
         }
     }
-    count
+    sources
+}
+
+/// Dependent count for a single `node` (spec §4.1). Prefer [`blast_radii`]
+/// when several canonical hits render under one lock.
+pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
+    let sources = inbound_sources(graph);
+    sources
+        .into_iter()
+        .filter(|(dst, srcs)| *dst != node && srcs.len() == 1 && srcs[0] == node)
+        .count() as u64
+}
+
+/// All blast radii in ONE graph pass (GPT5.6sol P2-7): a map from each node to
+/// its dependent count. Use this when rendering multiple canonical hits.
+pub fn blast_radii(graph: &Graph) -> HashMap<NodeId, u64> {
+    let sources = inbound_sources(graph);
+    let mut out: HashMap<NodeId, u64> = HashMap::new();
+    for (_, srcs) in sources {
+        if srcs.len() == 1 {
+            let only = srcs[0];
+            *out.entry(only).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 /// The `[Entity, canonical]` label: concept content + type, plus the
@@ -514,4 +532,116 @@ mod tests {
             "user schema: 8 exclusive orphans (D1..D8). Spec §13's demo narration says 9; that number belongs to the T8.4 live demo graph (see module docs)."
         );
     }
+
+    #[test]
+    fn blast_radius_matches_batched_and_depends_only_on_exclusive_structural() {
+        // hub; leaf1 (hub Dependency + Semantic other => does NOT depend);
+        // leaf2 (hub Dependency only => depends); child (chain off leaf2 =>
+        // depends via leaf2 not hub? structural-only: leaf2 is a concept, so
+        // child has an exclusive structural source leaf2 -> leaf2 depends on hub,
+        // and child depends on leaf2, NOT hub).
+        let mut g = Graph::new(sid());
+        let hub = uid(100);
+        let origin = interaction(99, "a");
+        g.insert_interaction(origin.clone()).unwrap();
+        g.insert_concept(concept_for_blast(hub, origin.id, "hub"), origin.id)
+            .unwrap();
+        for id in [1u64, 2, 3, 4, 5] {
+            g.insert_concept(
+                concept_for_blast(uid(id), origin.id, &format!("leaf{id}")),
+                origin.id,
+            )
+            .unwrap();
+        }
+        // leaf1..5 each has ONLY a Dependency edge from hub => all 5 depend on hub.
+        for id in [1u64, 2, 3, 4, 5] {
+            g.upsert_edge(dep_edge(id, hub, uid(id))).unwrap();
+        }
+        // A concept with a NON-structural (Semantic) source from hub + a
+        // structural source from another concept => depends on NEITHER exclusively.
+        g.insert_concept(concept_for_blast(uid(6), origin.id, "mixed"), origin.id)
+            .unwrap();
+        g.upsert_edge(non_structural_edge(1, hub, uid(6))).unwrap();
+        g.upsert_edge(dep_edge(90, uid(1), uid(6))).unwrap();
+
+        let single = blast_radius(&g, hub);
+        assert_eq!(single, 5, "only the 5 exclusive-structural leaves depend on hub");
+
+        // Batched must agree per-node.
+        let radii = blast_radii(&g);
+        assert_eq!(radii.get(&hub).copied().unwrap_or(0), single);
+        // Every leaf also reports its own dependent count from the map.
+        for id in [1u64, 2, 3, 4, 5] {
+            assert_eq!(blast_radius(&g, uid(id)), radii.get(&uid(id)).copied().unwrap_or(0));
+        }
+    }
+
+    #[test]
+    fn blast_radii_one_pass_agrees_with_per_node_over_a_larger_graph() {
+        // A chain: 0 -> 1 -> 2 -> ... -> n. Each i>0 depends exclusively on
+        // i-1, so i (i>0) has blast radius 1 (its child). Node 0 has radius 1
+        // too (node 1). Ensure the batched map matches per-node calls.
+        let mut g = Graph::new(sid());
+        let n = 40;
+        let origin = interaction(98, "a");
+        g.insert_interaction(origin.clone()).unwrap();
+        for i in 0..=n {
+            g.insert_concept(concept_for_blast(uid(i as u64), origin.id, &format!("n{i}")), origin.id)
+                .unwrap();
+        }
+        for i in 1..=n {
+            g.upsert_edge(dep_edge(i as u64, uid((i - 1) as u64), uid(i as u64)))
+                .unwrap();
+        }
+        let radii = blast_radii(&g);
+        for i in 0..=n {
+            let node = uid(i as u64);
+            let count = if i == n { 0 } else { 1 }; // n has no children
+            assert_eq!(
+                radii.get(&node).copied().unwrap_or(0),
+                count,
+                "node {i} dependent count from one pass"
+            );
+            assert_eq!(blast_radius(&g, node), count, "node {i} per-node count");
+        }
+    }
+
+    fn concept_for_blast(id: NodeId, origin: NodeId, content: &str) -> crate::types::Concept {
+        let mut c = concept(0, origin, content);
+        // fix the id to `id`
+        c.id = id;
+        c.canonical_key = content.into();
+        c
+    }
+
+    fn dep_edge(id: u64, src: NodeId, tgt: NodeId) -> crate::types::Edge {
+        let now = ts(0);
+        crate::types::Edge {
+            id: NodeId(Uuid::from_u64_pair(7, id)),
+            session_id: sid(),
+            source: src,
+            target: tgt,
+            edge_type: crate::types::EdgeType::Dependency,
+            weight: 1.0,
+            reinforcements: 0,
+            created_at: now,
+            last_reinforced: now,
+        }
+    }
+
+    fn non_structural_edge(id: u64, src: NodeId, tgt: NodeId) -> crate::types::Edge {
+        let now = ts(0);
+        crate::types::Edge {
+            id: NodeId(Uuid::from_u64_pair(8, id)),
+            session_id: sid(),
+            source: src,
+            target: tgt,
+            edge_type: crate::types::EdgeType::Semantic,
+            weight: 1.0,
+            reinforcements: 0,
+            created_at: now,
+            last_reinforced: now,
+        }
+    }
+
 }

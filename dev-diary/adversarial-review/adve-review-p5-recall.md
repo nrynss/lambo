@@ -40,7 +40,7 @@
   pipeline artifact (`RecallPipeline { phase1, expanded }`); assembly, hot
   re-validation, reservations and rendering run on EVERY call. Regression
   tests: `recall_cache_hit_rerenders_fresh_warning_lines` (age refreshes
-  11s -> 16s across a cache hit; lapsed window drops the line), 
+  11s -> 16s across a cache hit; lapsed window drops the line),
   `recall_reservation_transition_invalidates_cache_and_renders`.
 - **P5-2 (P2, Lens C)** — Reservations never bumped `Graph::epoch`, so a
   reservation transition was invisible to the epoch-keyed cache (and the

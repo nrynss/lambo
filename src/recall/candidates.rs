@@ -63,6 +63,11 @@ pub const RECENT_INTERACTIONS: usize = 3;
 /// value is not spec-pinned, only its rank position relative to real matches.
 pub const RECENT_SCORE: f64 = 0.5;
 
+/// Phase-1 keyword over-fetch multiplier: the keyword leg is over-fetched so
+/// strong query matches cannot be evicted by the flat-scored recent/vector
+/// legs at phase-1 truncation (GPT5.6sol P1-3).
+pub(crate) const KEYWORD_OVERFETCH: usize = 4;
+
 /// Async-gathered inputs for the sync, lock-safe [`candidates`] step.
 ///
 /// This is the only channel by which store I/O reaches phase 1: [`gather`]
@@ -119,8 +124,14 @@ pub fn candidates(
     query: &str,
     limit: usize,
 ) -> Vec<Scored<NodeId>> {
+    // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
+    // is applied downstream in phase-3 assembly (by final score). Prematurely
+    // truncating here let the flat-scored recent/vector legs evict strong
+    // keyword matches (GPT5.6sol P1-3), so keyword is over-fetched (bounded)
+    // and the union is returned unreduced.
+    let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
     let mut merged: HashMap<NodeId, f64> = HashMap::new();
-    for s in index.search(query, limit) {
+    for s in index.search(query, keyword_cap) {
         merged.insert(s.item, s.score);
     }
     for id in recent_concepts(graph) {
@@ -144,7 +155,37 @@ pub fn candidates(
             .total_cmp(&a.score)
             .then_with(|| a.item.0.cmp(&b.item.0))
     });
-    out.truncate(limit);
+    out
+}
+
+/// Phase-1 candidates for the RECENT + VECTOR legs only (GPT5.6sol P2-6).
+///
+/// Used when no inverted index is installed: the keyword leg is unavailable,
+/// but the independently gathered recent and vector candidates must not be
+/// discarded. Same merge/sort rule as [`candidates`] minus the keyword leg.
+pub fn candidates_without_keyword(graph: &Graph, input: Phase1Input) -> Vec<Scored<NodeId>> {
+    let mut merged: HashMap<NodeId, f64> = HashMap::new();
+    for id in recent_concepts(graph) {
+        merged
+            .entry(id)
+            .and_modify(|v| *v = v.max(RECENT_SCORE))
+            .or_insert(RECENT_SCORE);
+    }
+    for s in input.vector {
+        merged
+            .entry(s.item)
+            .and_modify(|v| *v = v.max(s.score))
+            .or_insert(s.score);
+    }
+    let mut out: Vec<Scored<NodeId>> = merged
+        .into_iter()
+        .map(|(item, score)| Scored::new(item, score))
+        .collect();
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.item.0.cmp(&b.item.0))
+    });
     out
 }
 
@@ -707,4 +748,45 @@ mod tests {
             );
         }
     }
+
+    // P1-3 (GPT5.6sol): a bounded recent-interactions leg must not evict every
+    // strong lexical match at phase-1 truncation. With keyword over-fetch and
+    // NO union truncation in `candidates`, all keyword matches survive even
+    // when an unrelated recent leg is present.
+    #[test]
+    fn recent_leg_does_not_evict_keyword_matches() {
+        let mut g = Graph::new(sid());
+        // One recent interaction owning 8 unrelated concepts (the recent leg).
+        let ri = interaction(100, None, 0);
+        g.insert_interaction(ri.clone()).unwrap();
+        for k in 0..8 {
+            g.insert_concept(concept(200 + k, ri.id, &format!("recent-{k}")), ri.id)
+                .unwrap();
+        }
+        // A second interaction owning 20 concepts whose content matches "user".
+        let ki = interaction(101, Some(ri.id), 1);
+        g.insert_interaction(ki.clone()).unwrap();
+        let mut matched = Vec::new();
+        for k in 0..20 {
+            g.insert_concept(concept(300 + k, ki.id, &format!("user topic {k}")), ki.id)
+                .unwrap();
+            matched.push(NodeId(Uuid::from_u64_pair(2, 300 + k)));
+        }
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+
+        let out = candidates(&g, &index, Phase1Input::default(), "user", 5);
+        let ids: Vec<NodeId> = out.iter().map(|s| s.item).collect();
+        // Every keyword match survives (over-fetch, no truncation).
+        for want in &matched {
+            assert!(
+                ids.contains(want),
+                "keyword match {want} must survive in the phase-1 union"
+            );
+        }
+        // And the recent concepts are also present (union not keyword-only).
+        for k in 0..8 {
+            assert!(ids.contains(&NodeId(Uuid::from_u64_pair(2, 200 + k))));
+        }
+    }
+
 }

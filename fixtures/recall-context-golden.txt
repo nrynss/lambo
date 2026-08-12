@@ -6,6 +6,8 @@ user updated time [Entity] (score 1.64)
 
 database schema [Entity] (score 1.22)
 
-create user [Entity] (score 0.51)
+api layer [Entity] (score 0.53)
 
-user id [Entity] (score 0.47)
+user profile [Entity] (score 0.52)
+
+user status [Entity] (score 0.51)
