@@ -51,11 +51,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
 
-use crate::config::{Config, ScoringWeights};
+use crate::config::{Config, RecallWeights, ScoringWeights};
 use crate::daemon::hotlist::{Condition, HotList};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::types::{DaemonEvent, NodeId, Scored};
+use crate::recall::cache::{CacheKey, RecallCache};
+use crate::recall::{assemble, candidates, expand};
+use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId};
 
 /// Default daemon poll interval (XP-7).
 ///
@@ -278,6 +280,98 @@ impl Daemon {
     /// Snapshot of the daemon-owned score table.
     pub fn scores(&self) -> ScoreTable {
         self.scores.read().clone()
+    }
+
+    /// Three-phase recall (spec §8; P5).
+    ///
+    /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
+    /// lock: the vector leg is async and must not run while the graph lock is
+    /// held. The pipeline then runs under the documented lock order
+    /// (graph read -> hot write). The daemon's inverted index must be
+    /// installed via [`Daemon::with_index`]; without it recall returns an
+    /// empty hit list with a warning (P8 wires the owner's index).
+    ///
+    /// `cache` is session-scoped: spec §8's key carries no session id, so the
+    /// caller owns one [`RecallCache`] per session and hands it over by
+    /// `&mut` (the cache has no interior synchronization).
+    ///
+    /// `embedding` is the query embedding when an embedder is configured;
+    /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
+    /// A store error during `gather` degrades to an empty vector leg with a
+    /// warning rather than failing the read.
+    pub async fn recall(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        store: &dyn crate::store::GraphStore,
+        embedding: Option<&[f32]>,
+        weights: RecallWeights,
+        cache: &mut RecallCache,
+    ) -> RecallResult {
+        // Cache probe needs only the epoch: a brief graph read, no gather.
+        let key = CacheKey::new(
+            &query.query,
+            query.top_k,
+            query.traversal_depth,
+            self.graph.read().epoch(),
+        );
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+
+        // Gather BEFORE the graph lock: vector_candidates is store I/O.
+        let input = match candidates::gather(store, session, embedding, query.top_k).await {
+            Ok(input) => input,
+            Err(err) => {
+                tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
+                candidates::Phase1Input::default()
+            }
+        };
+
+        // Scores snapshot before the locks (its own lock, no ordering
+        // constraint), then graph read -> index read -> hot write.
+        let scores = self.scores.read().clone();
+        let graph = self.graph.read();
+        let index = self.index.as_ref().map(|i| i.read());
+        let mut hot = self.hot.write();
+
+        // Re-read the epoch under the graph lock: if a mutation landed
+        // between the probe and here, the insert key below reflects it, so
+        // the cache can never serve this compute across an epoch boundary.
+        let key = CacheKey::new(
+            &query.query,
+            query.top_k,
+            query.traversal_depth,
+            graph.epoch(),
+        );
+
+        let mut warnings = Vec::new();
+        let phase1 = match index.as_deref() {
+            Some(index) => candidates::candidates(&graph, index, input, &query.query, query.top_k),
+            None => {
+                warnings.push(
+                    "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"
+                        .to_string(),
+                );
+                Vec::new()
+            }
+        };
+        let expanded = expand::expand(&graph, phase1.clone(), query.traversal_depth);
+        let now = (self.clock)();
+        let mut result = assemble::assemble(
+            &graph,
+            &expanded,
+            &phase1,
+            &scores,
+            &mut hot,
+            &query,
+            weights,
+            now,
+            assemble::default_token_count,
+        );
+        result.warnings.extend(warnings);
+        cache.insert(key, result.clone());
+        result
     }
 
     /// Cycles completed since [`Daemon::spawn`] (XP-6).
@@ -2228,5 +2322,144 @@ mod tests {
             "HighRisk follows Conflict, got {second:?}"
         );
         handle.abort();
+    }
+
+    /// The P5 entry reproduces T5.3's golden context block end to end: same
+    /// fixture snapshot, same planted T4.3-shaped conflict entry, rescored
+    /// table, pinned clock — through `Daemon::recall` (the actual entry, not
+    /// the bespoke pipeline). Also proves cache hit + epoch invalidation
+    /// through the entry.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn recall_entry_reproduces_context_golden() {
+        use crate::config::RecallWeights;
+        use crate::daemon::score::rescore;
+        use crate::fixtures;
+        use crate::recall::cache::RecallCache;
+
+        // T5.3's pinned clock: base + 60 minutes (its ts(60)).
+        let now = Utc.timestamp_opt(1_752_000_000, 0).unwrap() + chrono::Duration::minutes(60);
+        let snap = fixtures::load_snapshot("session-rest-api").unwrap();
+        let graph = Arc::new(RwLock::new(Graph::from_snapshot(snap.clone()).unwrap()));
+        let index = Arc::new(RwLock::new(InvertedIndex::from_snapshot(&snap)));
+        let daemon = Daemon::new(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+        )
+        .with_clock(Arc::new(move || now))
+        .with_index(index);
+        daemon.scores.write().ranked = rescore(&graph.read(), &ScoringWeights::default());
+        daemon.scores.write().epoch = graph.read().epoch();
+
+        // Plant the T4.3-shaped conflict on "user schema" (001001), written
+        // 11s before `now` (30s window) — identical to T5.3's golden test.
+        let us = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
+        let agents = vec![AgentId::from("agent-a"), AgentId::from("agent-b")];
+        let writer = AgentId::from("agent-a");
+        let write_at = now - chrono::Duration::seconds(11);
+        let entry = crate::daemon::hotlist::HotListEntry::new(
+            us,
+            Condition::Conflict,
+            crate::daemon::hotlist::HotListPayload::Conflict {
+                agents: agents.clone(),
+                writer: writer.clone(),
+                seconds_ago: 999, // stale sentinel: revalidate must rebuild
+            },
+            move |_, now| {
+                let secs = (now - write_at).num_seconds();
+                if (0..=30).contains(&secs) {
+                    Some(crate::daemon::hotlist::HotListPayload::Conflict {
+                        agents: agents.clone(),
+                        writer: writer.clone(),
+                        seconds_ago: secs as u64,
+                    })
+                } else {
+                    None
+                }
+            },
+        );
+        let _ = daemon.hot.write().insert(entry);
+
+        let store = fixtures::load_store("session-rest-api").unwrap();
+        let mut cache = RecallCache::new();
+        let query = RecallQuery {
+            query: "update user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 2,
+        };
+        let session = SessionId::from("session-rest-api");
+        let golden = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/recall-context-golden.txt"
+        ))
+        .expect("golden context fixture present");
+
+        let result = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(
+            result.context, golden,
+            "entry must reproduce the golden block"
+        );
+        assert_eq!(cache.len(), 1, "first call populates the cache");
+
+        // Cache hit: identical second call does not grow the cache.
+        let again = daemon
+            .recall(
+                &session,
+                query.clone(),
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(again.context, golden);
+        assert_eq!(cache.len(), 1, "cache hit: no new key inserted");
+
+        // Epoch invalidation: any mutation bumps the epoch -> miss -> new key.
+        // The new interaction must link to the fixture's chain tail
+        // (insert_interaction enforces previous_id = current tail).
+        let tail = graph
+            .read()
+            .interactions()
+            .max_by_key(|i| i.created_at)
+            .expect("fixture has interactions")
+            .id;
+        graph
+            .write()
+            .insert_interaction(Interaction {
+                id: NodeId::new(),
+                session_id: session.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: None,
+                previous_id: Some(tail),
+                created_at: now,
+            })
+            .unwrap();
+        let _ = daemon
+            .recall(
+                &session,
+                query,
+                &store,
+                None,
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+        assert_eq!(
+            cache.len(),
+            2,
+            "epoch bump invalidates: new key inserted on miss"
+        );
     }
 }
