@@ -34,7 +34,11 @@
 //! 5. **`gc_survived += 1` on all survivors** — via
 //!    [`Graph::bump_gc_survived`] (saturating `i32`), which emits `UpsertNode`
 //!    mutations so the durable store mirrors the counter. Stage 1's input —
-//!    the reason GC cannot be cut.
+//!    the reason GC cannot be cut. **Chunked** (CONC-6/XP-10): one call applies
+//!    at most [`GC_SURVIVOR_BUMP_CHUNK`] bumps and returns the rest in
+//!    [`GcOutcome::survivors_pending`], which the owner drains with
+//!    [`drain_survivor_bumps`] over later cycles — see that function for why
+//!    the store still converges exactly.
 //! 6. **Canonical budget** — GC *records* the Canonical count and the
 //!    over-budget flag in [`GcOutcome`]; demotion (lowest-blast-radius, spec
 //!    §10) is T6.4's job — GC never demotes.
@@ -113,6 +117,17 @@ pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
 
+/// Step 5 bumps at most this many survivors per call; the rest come back as
+/// [`GcOutcome::survivors_pending`] for the owner to drain over later cycles
+/// with [`drain_survivor_bumps`] (CONC-6/XP-10).
+///
+/// Matches [`crate::config::Config::backend_flush_max_batch`] (500), so one
+/// GC cycle enqueues at most one flush batch of survivor upserts instead of
+/// twenty. An unchunked sweep at the advisory ceiling emitted 10,000
+/// full-`Concept` clones — ~40MB of clone traffic once P7 embeddings land —
+/// from inside the write guard, all in one burst.
+pub const GC_SURVIVOR_BUMP_CHUNK: usize = 500;
+
 /// Parameters for one GC run. [`Default`] carries the named v0.1 decisions.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GcParams {
@@ -136,6 +151,10 @@ pub struct GcParams {
     pub max_concept_nodes: usize,
     /// Step 6: Canonical budget ceiling; over it → `canonical_over_budget`.
     pub max_canonical_nodes: usize,
+    /// Step 5: how many survivor bumps this call may apply
+    /// ([`GC_SURVIVOR_BUMP_CHUNK`]). The remainder is returned in
+    /// [`GcOutcome::survivors_pending`].
+    pub max_survivor_bumps: usize,
 }
 
 impl Default for GcParams {
@@ -148,6 +167,7 @@ impl Default for GcParams {
             weights: ScoringWeights::default(),
             max_concept_nodes: MAX_CONCEPT_NODES,
             max_canonical_nodes: 1000, // spec §10
+            max_survivor_bumps: GC_SURVIVOR_BUMP_CHUNK,
         }
     }
 }
@@ -159,8 +179,13 @@ pub struct GcOutcome {
     pub edges_removed: Vec<NodeId>,
     /// Steps 2+3: concept ids collected, together with their incident edges.
     pub concepts_collected: Vec<NodeId>,
-    /// Step 5: concept ids that survived (each got `gc_survived += 1`).
+    /// Step 5: every concept id that survived this run.
     pub survivors: Vec<NodeId>,
+    /// Step 5: the tail of [`survivors`](GcOutcome::survivors) whose
+    /// `gc_survived += 1` this run **deferred** — the owner must drain it with
+    /// [`drain_survivor_bumps`] on later cycles (CONC-6/XP-10). Empty when the
+    /// survivor set fit in one chunk.
+    pub survivors_pending: Vec<NodeId>,
     /// Step 6: number of Canonical concepts after cleanup.
     pub canonical_count: usize,
     /// Step 6: `canonical_count > max_canonical_nodes` — recorded for T6.4's
@@ -258,10 +283,15 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     }
     outcome.concepts_collected.sort_by_key(|id| id.0);
 
-    // Step 5 — survivors: every remaining concept gets gc_survived += 1.
+    // Step 5 — survivors: every remaining concept gets gc_survived += 1, but at
+    // most `max_survivor_bumps` of them here; the tail is deferred to later
+    // cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for the convergence
+    // argument).
     let mut survivors: Vec<NodeId> = graph.concepts().map(|c| c.id).collect();
     survivors.sort_by_key(|id| id.0);
-    graph.bump_gc_survived(&survivors);
+    let split = survivors.len().min(params.max_survivor_bumps);
+    graph.bump_gc_survived(&survivors[..split]);
+    outcome.survivors_pending = survivors[split..].to_vec();
     outcome.survivors = survivors;
 
     // Step 6 — canonical budget: record only; T6.4 demotes (never here).
@@ -291,6 +321,35 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Step 7 — the epoch is bumped by the mutations above (see module docs).
     outcome.epoch_after = graph.epoch();
     outcome
+}
+
+/// Apply up to `max` deferred survivor bumps, removing them from `pending`
+/// (CONC-6/XP-10). The owner calls this each cycle until `pending` is empty,
+/// and must not start another [`run`] before then.
+///
+/// ## Why the store still converges exactly
+///
+/// Chunking changes *when* each `UpsertNode` is emitted, never *which*. Every
+/// survivor of a run receives exactly one `gc_survived += 1` and exactly one
+/// `UpsertNode` carrying the post-increment concept, whether it lands in the GC
+/// cycle or a later one — the emitted multiset is byte-identical to the
+/// unchunked sweep, so the store's converged state is identical.
+///
+/// Two edge cases, both benign:
+///
+/// * **A pending concept is collected before its bump lands.** It is skipped
+///   (`bump_gc_survived` ignores absent ids), and the store already has the
+///   `DeleteNode`. Under the unchunked sweep the row would have been upserted
+///   and then deleted — same final state, one fewer write.
+/// * **Interleaving with another run** cannot happen: the owner drains
+///   `pending` to empty before the next [`run`], so a concept never carries two
+///   outstanding bumps and can never be double-counted or skipped.
+///
+/// Returns the number of bumps applied.
+pub fn drain_survivor_bumps(graph: &mut Graph, pending: &mut Vec<NodeId>, max: usize) -> usize {
+    let take = pending.len().min(max.max(1));
+    let chunk: Vec<NodeId> = pending.drain(..take).collect();
+    graph.bump_gc_survived(&chunk)
 }
 
 /// T2.6 hook — mirror a GC run into the owner's inverted index.
@@ -415,7 +474,7 @@ mod tests {
     use super::*;
     use crate::graph::Graph;
     use crate::types::{
-        AgentId, CanonizationEvent, ConceptType, Edge, Interaction, Node, SessionId,
+        AgentId, CanonizationEvent, ConceptType, Edge, Interaction, Mutation, Node, SessionId,
     };
     use chrono::TimeZone;
     use uuid::Uuid;
@@ -1193,5 +1252,162 @@ mod tests {
 
         // The graph is well-formed again after cleanup.
         g.assert_invariants().unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // CONC-6 / XP-10 — bounded survivor-bump burst
+    // ------------------------------------------------------------------
+
+    /// A hub interaction plus `n` Canonical (protected) concepts, all
+    /// surviving every GC step, so step 5's survivor set is exactly `n`.
+    fn n_survivor_graph(n: u64) -> (Graph, Vec<NodeId>) {
+        let mut g = Graph::new(sid());
+        g.insert_interaction(interaction(1, None)).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let c = Concept {
+                canonization_status: CanonizationStatus::Canonical,
+                ..concept(100 + i, 1, &format!("concept {i}"), ConceptType::Entity)
+            };
+            ids.push(c.id);
+            g.insert_concept(c, nid(1)).unwrap();
+        }
+        ids.sort_by_key(|id| id.0);
+        (g, ids)
+    }
+
+    /// CONC-6/XP-10: one run bumps at most `max_survivor_bumps` survivors and
+    /// hands the rest back, so a sweep at the advisory ceiling cannot enqueue
+    /// twenty flush batches of full-`Concept` clones from inside the write
+    /// guard.
+    #[test]
+    fn survivor_bumps_are_chunked_and_the_remainder_is_reported() {
+        let (mut g, ids) = n_survivor_graph(10);
+        g.drain_log();
+        let params = GcParams {
+            max_survivor_bumps: 4,
+            ..default_params()
+        };
+        let outcome = run(&mut g, params);
+
+        assert_eq!(outcome.survivors, ids, "every concept survived");
+        assert_eq!(
+            outcome.survivors_pending,
+            ids[4..],
+            "the tail past the chunk is deferred, id-ascending"
+        );
+        let upserts = g
+            .drain_log()
+            .mutations
+            .iter()
+            .filter(|m| matches!(m, Mutation::UpsertNode { .. }))
+            .count();
+        assert_eq!(upserts, 4, "one flush chunk of upserts, not ten");
+        for (i, id) in ids.iter().enumerate() {
+            let c = match g.node(*id).unwrap() {
+                Node::Concept(c) => c,
+                _ => unreachable!(),
+            };
+            let expected = i32::from(i < 4);
+            assert_eq!(c.gc_survived, expected, "only the first chunk bumped yet");
+        }
+    }
+
+    /// CONC-6/XP-10 convergence: draining the deferred bumps leaves the graph
+    /// and the emitted mutation multiset identical to an unchunked sweep —
+    /// chunking changes *when*, never *which*.
+    #[test]
+    fn chunked_bumps_converge_to_the_unchunked_result() {
+        let (mut chunked, ids) = n_survivor_graph(10);
+        let (mut whole, _) = n_survivor_graph(10);
+        chunked.drain_log();
+        whole.drain_log();
+
+        let mut pending = run(
+            &mut chunked,
+            GcParams {
+                max_survivor_bumps: 3,
+                ..default_params()
+            },
+        )
+        .survivors_pending;
+        let mut drains = 0;
+        while !pending.is_empty() {
+            drain_survivor_bumps(&mut chunked, &mut pending, 3);
+            drains += 1;
+            assert!(drains < 10, "the drain must terminate");
+        }
+
+        let unchunked = run(
+            &mut whole,
+            GcParams {
+                max_survivor_bumps: usize::MAX,
+                ..default_params()
+            },
+        );
+        assert!(unchunked.survivors_pending.is_empty());
+
+        for id in &ids {
+            let a = match chunked.node(*id).unwrap() {
+                Node::Concept(c) => c.gc_survived,
+                _ => unreachable!(),
+            };
+            let b = match whole.node(*id).unwrap() {
+                Node::Concept(c) => c.gc_survived,
+                _ => unreachable!(),
+            };
+            assert_eq!(a, 1, "exactly one bump per survivor per run");
+            assert_eq!(a, b, "chunked and unchunked agree for {id}");
+        }
+        // Same mutation multiset: one UpsertNode per survivor either way.
+        let count_upserts = |g: &mut Graph| {
+            g.drain_log()
+                .mutations
+                .iter()
+                .filter(|m| matches!(m, Mutation::UpsertNode { .. }))
+                .count()
+        };
+        assert_eq!(count_upserts(&mut chunked), count_upserts(&mut whole));
+    }
+
+    /// CONC-6/XP-10: a concept collected before its deferred bump lands is
+    /// skipped, never resurrected — the store already has its `DeleteNode`.
+    #[test]
+    fn a_collected_concept_absorbs_its_pending_bump_silently() {
+        let (mut g, ids) = n_survivor_graph(4);
+        let mut pending = run(
+            &mut g,
+            GcParams {
+                max_survivor_bumps: 1,
+                ..default_params()
+            },
+        )
+        .survivors_pending;
+        assert_eq!(pending.len(), 3);
+
+        // Drop one pending concept (a demotion + a later sweep would do this).
+        let gone = pending[0];
+        g.remove_node(gone).unwrap();
+        g.drain_log();
+
+        let applied = drain_survivor_bumps(&mut g, &mut pending, 10);
+        assert_eq!(
+            applied, 2,
+            "the removed concept is skipped, not resurrected"
+        );
+        assert!(pending.is_empty());
+        assert!(g.node(gone).is_none());
+        assert!(!g
+            .drain_log()
+            .mutations
+            .iter()
+            .any(|m| matches!(m, Mutation::UpsertNode { node: Node::Concept(c) } if c.id == gone)));
+        for id in ids.iter().filter(|id| **id != gone) {
+            let c = match g.node(*id).unwrap() {
+                Node::Concept(c) => c,
+                _ => unreachable!(),
+            };
+            assert_eq!(c.gc_survived, 1);
+        }
     }
 }

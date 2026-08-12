@@ -114,6 +114,9 @@ pub struct CycleParams {
     pub max_canonical_nodes: usize,
     /// Broadcast capacity (see [`events::EVENT_CAPACITY`]).
     pub event_capacity: usize,
+    /// Survivor `gc_survived` bumps applied per cycle
+    /// ([`gc::GC_SURVIVOR_BUMP_CHUNK`], CONC-6/XP-10).
+    pub gc_survivor_bump_chunk: usize,
 }
 
 impl Default for CycleParams {
@@ -127,6 +130,7 @@ impl Default for CycleParams {
             gc_interval: 10_000,
             max_canonical_nodes: 1000,
             event_capacity: events::EVENT_CAPACITY,
+            gc_survivor_bump_chunk: gc::GC_SURVIVOR_BUMP_CHUNK,
         }
     }
 }
@@ -348,6 +352,23 @@ fn condition_set(
 ///    `epoch_after` so the next interval measures session mutations only.
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
+///
+///    **Scoring stays inside the write guard (CONC-1, decided).** GC's step-2
+///    rescore is deliberately *not* hoisted to a read snapshot. Step 2 must
+///    score post-step-1 state, so a hoist means write-guard step 1, release,
+///    score, re-acquire for steps 2–3 — a TOCTOU window in which a concurrent
+///    `record_action` can add edges to a node already marked for collection,
+///    and two write guards where the review verified one ("GC's mutations and
+///    epoch bumps happen under one write guard"). The measured 272ms guard was
+///    root-caused to `incident_edges` being a full edge scan, which the same
+///    finding fixes: with the adjacency index the rescore is `O(nodes ×
+///    degree)`, so atomicity is kept and the hold shrinks by the same factor.
+///    Revisit only if a profile at scale says otherwise.
+///
+///    Survivor bumps are chunked (CONC-6/XP-10): step 5 applies at most
+///    `gc_survivor_bump_chunk` per cycle and the loop drains the remainder on
+///    following cycles, so one sweep can no longer enqueue twenty flush batches
+///    from inside the guard. GC does not re-run while a drain is outstanding.
 async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, params: CycleParams) {
     let LoopState {
         graph,
@@ -371,6 +392,9 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
     // Total events this loop has published. Only ever compared as a difference
     // against `armed`'s stamps, so wrap-around is not a concern (u64).
     let mut emitted_total: u64 = 0;
+    // Survivor bumps the last GC run deferred (CONC-6/XP-10). Drained a chunk
+    // per cycle; GC does not re-run until it is empty.
+    let mut gc_pending: Vec<NodeId> = Vec::new();
     loop {
         tokio::select! {
             _ = interval.tick() => {}
@@ -488,8 +512,16 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
             }
         }
 
-        // 3. Periodic GC (spec §9): every `gc_interval` session mutations.
-        if epoch.saturating_sub(last_gc_epoch) >= params.gc_interval {
+        // 3a. Deferred survivor bumps from the last GC run (CONC-6/XP-10) —
+        //     one chunk per cycle, and always to empty before the next run, so
+        //     no concept ever carries two outstanding bumps.
+        if !gc_pending.is_empty() {
+            let mut g = graph.write();
+            gc::drain_survivor_bumps(&mut g, &mut gc_pending, params.gc_survivor_bump_chunk);
+        }
+
+        // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
+        if gc_pending.is_empty() && epoch.saturating_sub(last_gc_epoch) >= params.gc_interval {
             let outcome = {
                 let mut g = graph.write();
                 gc::run(
@@ -500,11 +532,13 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
                         // weights, not a second hardcoded default.
                         weights,
                         max_canonical_nodes: params.max_canonical_nodes,
+                        max_survivor_bumps: params.gc_survivor_bump_chunk,
                         ..Default::default()
                     },
                 )
             };
             last_gc_epoch = outcome.epoch_after;
+            gc_pending = outcome.survivors_pending;
         }
     }
 }
@@ -1064,6 +1098,74 @@ mod tests {
         let handle = daemon.spawn();
 
         wait_until(|| graph.read().node(cid).is_none()).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn loop_drains_deferred_survivor_bumps_to_convergence() {
+        // CONC-6/XP-10: GC hands back the survivor bumps it deferred, and the
+        // loop drains them a chunk per cycle. Every survivor must still end up
+        // with exactly one bump for that run — chunking changes when, not which.
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        // Six Canonical concepts: protected, so every GC step spares them and
+        // the survivor set is exactly these six.
+        let mut ids: Vec<NodeId> = Vec::new();
+        for n in 1..=6u64 {
+            let c = Concept {
+                canonization_status: CanonizationStatus::Canonical,
+                ..concept(n, iid, &format!("canonical {n}"))
+            };
+            ids.push(c.id);
+            g.insert_concept(c, iid).unwrap();
+        }
+        let graph = Arc::new(RwLock::new(g));
+
+        // gc_interval 3 → the warm-up epoch already crosses it; chunk 2 → the
+        // run bumps 2 and defers 4, drained over the next two cycles.
+        let params = CycleParams {
+            gc_interval: 3,
+            gc_survivor_bump_chunk: 2,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_millis(10),
+            params,
+        );
+        let handle = daemon.spawn();
+
+        let all_bumped = |want: i32| {
+            let g = graph.read();
+            ids.iter().all(|id| match g.node(*id) {
+                Some(crate::types::Node::Concept(c)) => c.gc_survived >= want,
+                _ => false,
+            })
+        };
+        wait_until(|| all_bumped(1)).await;
+        // And no survivor is double-counted: GC does not re-run while a drain
+        // is outstanding, so after convergence every counter is exactly 1 for
+        // the first run. Later runs may add more, so assert the floor held
+        // uniformly — an over-count would show as an inconsistent set.
+        {
+            let g = graph.read();
+            let counts: Vec<i32> = ids
+                .iter()
+                .map(|id| match g.node(*id) {
+                    Some(crate::types::Node::Concept(c)) => c.gc_survived,
+                    _ => unreachable!(),
+                })
+                .collect();
+            let max = *counts.iter().max().unwrap();
+            let min = *counts.iter().min().unwrap();
+            assert!(
+                max - min <= 1,
+                "chunked bumps must stay within one run of each other: {counts:?}"
+            );
+        }
         handle.abort();
     }
 

@@ -853,14 +853,37 @@ impl Graph {
     }
 
     /// All edges incident to `node` (out or in), in id-ascending order.
+    ///
+    /// Routed through the out/in adjacency index — `O(degree log degree)` for
+    /// the sort, never a scan of the edge set (adve-review CONC-1; `remove_node`
+    /// already used the index for the same reason). The daemon calls this per
+    /// concept in every detector and in `rescore`, so a full `edges.values()`
+    /// filter made each pass `O(nodes × edges)` and held the graph lock for
+    /// 186–272ms per cycle at 4k concepts. A self-loop appears in both maps, so
+    /// edge ids are deduplicated.
     pub fn incident_edges(&self, node: NodeId) -> Vec<&Edge> {
-        let mut v: Vec<&Edge> = self
-            .edges
-            .values()
-            .filter(|e| e.source == node || e.target == node)
-            .collect();
-        v.sort_by_key(|e| e.id.0);
-        v
+        let mut ids: Vec<NodeId> = Vec::new();
+        if let Some(by_type) = self.out.get(&node) {
+            for (ty, targets) in by_type {
+                for &tgt in targets {
+                    if let Some(&eid) = self.edge_keys.get(&(node, tgt, *ty)) {
+                        ids.push(eid);
+                    }
+                }
+            }
+        }
+        if let Some(by_type) = self.incoming.get(&node) {
+            for (ty, sources) in by_type {
+                for &src in sources {
+                    if let Some(&eid) = self.edge_keys.get(&(src, node, *ty)) {
+                        ids.push(eid);
+                    }
+                }
+            }
+        }
+        ids.sort_by_key(|id| id.0);
+        ids.dedup();
+        ids.iter().filter_map(|id| self.edges.get(id)).collect()
     }
 
     pub fn synonyms(&self) -> impl Iterator<Item = (&str, &str)> {
@@ -1715,6 +1738,100 @@ mod tests {
         g.add_adjacency(bad.source, bad.target, bad.edge_type);
         let err = g.assert_invariants().unwrap_err().to_string();
         assert!(err.contains("Semantic edge must connect"), "{err}");
+    }
+
+    /// CONC-1: `incident_edges` must read the **adjacency index**, not scan the
+    /// edge set. Structural, not timing-based: an edge present in `edges` +
+    /// `edge_keys` but *absent* from the adjacency maps is invisible to an
+    /// index-backed lookup and visible to a `edges.values()` filter — so this
+    /// fails on the pre-fix implementation and passes on the index-backed one.
+    ///
+    /// The daemon calls this per concept in every detector and in `rescore`, so
+    /// the scan made each pass `O(nodes × edges)` and held the graph lock for
+    /// hundreds of milliseconds per cycle at 4k concepts (§6.4's second clause).
+    #[test]
+    fn incident_edges_reads_the_adjacency_index_not_the_edge_map() {
+        let (mut g, iid, cid) = small_graph();
+        let c2 = concept(2, iid, "api layer");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::Dependency, 0.7))
+            .unwrap();
+
+        let via_index: Vec<NodeId> = g.incident_edges(cid).iter().map(|e| e.id).collect();
+        // Ground truth for this graph: the Derives provenance edge + the
+        // Dependency edge, id-ascending.
+        let mut expected: Vec<NodeId> = g
+            .edges
+            .values()
+            .filter(|e| e.source == cid || e.target == cid)
+            .map(|e| e.id)
+            .collect();
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(via_index, expected, "index-backed lookup must be complete");
+
+        // Now desynchronize: an edge in `edges`/`edge_keys` but not in the
+        // adjacency maps. An index-backed reader cannot see it; a full scan can.
+        let ghost = edge(99, c2id, cid, EdgeType::Causal, 0.6);
+        let ghost_id = ghost.id;
+        g.edges.insert(ghost_id, ghost.clone());
+        g.edge_keys
+            .insert((ghost.source, ghost.target, ghost.edge_type), ghost_id);
+
+        assert!(
+            !g.incident_edges(cid).iter().any(|e| e.id == ghost_id),
+            "incident_edges must be sourced from the adjacency index — a scan of \
+             the edge map would surface the un-indexed edge"
+        );
+        assert_eq!(
+            g.incident_edges(cid).len(),
+            expected.len(),
+            "and the indexed set is unchanged"
+        );
+    }
+
+    /// CONC-1: routing through the index must not change the id-ascending
+    /// contract existing callers rely on, including with a self-loop (which
+    /// appears in both the out and in maps and must appear once).
+    #[test]
+    fn incident_edges_stay_id_ascending_and_deduplicated() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let hub = concept(1, iid, "hub");
+        let hub_id = hub.id;
+        g.insert_concept(hub, iid).unwrap();
+        // Spokes attached in descending id order so insertion order and id
+        // order disagree.
+        for n in (2..=6u64).rev() {
+            let c = concept(n, iid, &format!("spoke {n}"));
+            let cid = c.id;
+            g.insert_concept(c, iid).unwrap();
+            g.upsert_edge(edge(100 + n, hub_id, cid, EdgeType::Dependency, 0.7))
+                .unwrap();
+        }
+        // A self-loop: present in both adjacency directions.
+        g.edges.insert(
+            uid(777),
+            Edge {
+                id: uid(777),
+                ..edge(777, hub_id, hub_id, EdgeType::CoOccurrence, 0.6)
+            },
+        );
+        g.edge_keys
+            .insert((hub_id, hub_id, EdgeType::CoOccurrence), uid(777));
+        g.add_adjacency(hub_id, hub_id, EdgeType::CoOccurrence);
+
+        let ids: Vec<NodeId> = g.incident_edges(hub_id).iter().map(|e| e.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_by_key(|id| id.0);
+        assert_eq!(ids, sorted, "id-ascending order is part of the contract");
+        assert_eq!(
+            ids.iter().filter(|id| **id == uid(777)).count(),
+            1,
+            "a self-loop must appear exactly once"
+        );
     }
 
     #[test]
