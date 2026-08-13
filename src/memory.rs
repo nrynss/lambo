@@ -250,8 +250,22 @@ fn register_session(session: &SessionId, agent: &AgentId) {
     agents.push(agent.clone());
 }
 
-/// Release a handle's registration. Called from [`Drop`] rather than `close`,
-/// so a handle that is never closed still releases when it goes.
+/// Release a handle's registration.
+///
+/// Reached through [`Memory::unregister_once`], from whichever comes first: a
+/// **successful** [`Memory::close`], or [`Drop`] (so a handle that is never
+/// closed still releases when it goes).
+///
+/// **A successful close releases; a failed one does not** (R2-4). Close then
+/// re-attach in the same process is the MCP server's ordinary shape — and this
+/// crate's own reload test — so holding the slot until `Drop` fired a
+/// `SecondSessionWriter` ERROR against a handle that had already made its tail
+/// durable and stopped every task: a false alarm on the one path that is
+/// certainly safe, which is how ops-level detectors get ignored. A **failed**
+/// close is the opposite case and keeps its slot: that handle still holds an
+/// undurable tail in its in-RAM graph and is documented as retryable, so a
+/// second writer arriving on the session is still the divergence the detector
+/// is for.
 fn unregister_session(session: &SessionId, agent: &AgentId) {
     let mut active = ACTIVE_SESSIONS.lock();
     if let Some(agents) = active.get_mut(session) {
@@ -474,7 +488,7 @@ impl MemoryBuilder {
             "Memory session attached (daemon + flush + canonization running)"
         );
         // Last, so nothing registers for a `build()` that failed. Released by
-        // `Drop` (T81-8).
+        // a successful `close()` (R2-4) or, failing that, by `Drop` (T81-8).
         register_session(&session, &agent);
 
         Ok(Memory {
@@ -497,6 +511,7 @@ impl MemoryBuilder {
             writers: AsyncRwLock::new(()),
             close_state: tokio::sync::Mutex::new(false),
             closed: AtomicBool::new(false),
+            registered: AtomicBool::new(true),
         })
     }
 }
@@ -639,6 +654,11 @@ pub struct Memory {
     /// back to the front of the log — can be retried (T81-5).
     close_state: tokio::sync::Mutex<bool>,
     closed: AtomicBool,
+    /// `true` while this handle holds a slot in [`ACTIVE_SESSIONS`]. A
+    /// **successful** `close()` releases it (R2-4) and clears this, so [`Drop`]
+    /// does not release a second time and take a *different* handle's slot with
+    /// it — the registry keys on session + agent id, which a re-attach reuses.
+    registered: AtomicBool,
 }
 
 impl Memory {
@@ -1287,6 +1307,7 @@ impl Memory {
 
         if tail.is_empty() {
             *succeeded = true;
+            self.unregister_once();
             return Ok(());
         }
 
@@ -1307,6 +1328,7 @@ impl Memory {
                     "Memory session closed (tail flushed)"
                 );
                 *succeeded = true;
+                self.unregister_once();
                 Ok(())
             }
             Err(err) => {
@@ -1377,6 +1399,20 @@ impl Memory {
         }
     }
 
+    /// Give up this handle's [`ACTIVE_SESSIONS`] slot, at most once (R2-4).
+    ///
+    /// Called by a successful `close()` and by [`Drop`], whichever comes first.
+    /// The flag is what makes it safe for both to call it: the registry keys on
+    /// session + agent id, so a second release would evict whichever *other*
+    /// handle had re-attached under the same ids in between — turning the
+    /// second-writer detector into a source of the very blind spot it exists to
+    /// remove.
+    fn unregister_once(&self) {
+        if self.registered.swap(false, Ordering::AcqRel) {
+            unregister_session(&self.session, &self.agent);
+        }
+    }
+
     fn ensure_open(&self) -> Result<(), LamboError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(self.closed_error());
@@ -1440,13 +1476,24 @@ impl std::fmt::Debug for Memory {
 }
 
 impl Drop for Memory {
-    /// Abort any task [`Memory::close`] did not stop.
+    /// Abort any task [`Memory::close`] did not stop, and say so if a tail dies
+    /// with this handle.
     ///
     /// This is the leak guard, not the shutdown path: dropping without `close`
     /// abandons the tail (see `close`'s drain), so it warns. After a successful
     /// `close` every handle is already `None` and this is a no-op.
+    ///
+    /// **Two ways to lose a tail, not one** (R2-2). Keying the warning on task
+    /// handles still being `Some` catches the never-closed handle but is blind
+    /// to the *closed-and-failed* one: a `close()` that failed (or was
+    /// cancelled) has already taken all three handles, so `leaked` is false —
+    /// while the mutations it kept are sitting in the log, about to be dropped
+    /// in silence. Precisely the case `close`'s "retry after failure" contract
+    /// asks the owner to act on, so it must not go out quietly. The log is
+    /// therefore checked too, whatever the handles say.
     fn drop(&mut self) {
-        unregister_session(&self.session, &self.agent);
+        // No-op if a successful `close()` already released the slot (R2-4).
+        self.unregister_once();
         let mut leaked = false;
         for handle in [&self.daemon_handle, &self.flush_handle, &self.canon_handle] {
             if let Some(handle) = handle.lock().take() {
@@ -1454,11 +1501,21 @@ impl Drop for Memory {
                 leaked = true;
             }
         }
+        let undrained = self.graph.read().log_len();
         if leaked {
             tracing::warn!(
                 session = %self.session,
-                "Memory dropped without close(): background tasks aborted and any un-flushed \
-                 tail was discarded"
+                mutations = undrained,
+                "Memory dropped without close(): background tasks aborted and {undrained} \
+                 un-flushed mutations were discarded"
+            );
+        } else if undrained > 0 {
+            tracing::warn!(
+                session = %self.session,
+                mutations = undrained,
+                "Memory dropped after a close() that did not finish: {undrained} un-flushed \
+                 mutations were discarded. close() returned an error (or was cancelled) and \
+                 kept that tail in the log for a retry that never came."
             );
         }
     }
@@ -2151,11 +2208,122 @@ mod tests {
         );
 
         first.close().await.unwrap();
+        assert_eq!(
+            live_handles("one-writer"),
+            1,
+            "a successful close releases its slot without waiting for Drop (R2-4)"
+        );
         drop(first);
         assert_eq!(live_handles("one-writer"), 1);
         // Dropped without close(): the registration is still released.
         drop(second);
         assert_eq!(live_handles("one-writer"), 0);
+    }
+
+    /// R2-4: close-then-reattach in one process — the MCP server's ordinary
+    /// shape, and this crate's own reload test — must be silent.
+    ///
+    /// `close()` used to leave the registration in place until `Drop`, so
+    /// rebuilding the session while the closed handle was still in scope fired
+    /// the ops-level `SecondSessionWriter` ERROR against a handle that had
+    /// already flushed its tail and stopped every task. A detector that cries
+    /// wolf on the one sequence that is certainly safe is a detector that gets
+    /// filtered out.
+    #[tokio::test]
+    async fn a_closed_handle_does_not_collide_with_a_reattach() {
+        let buf = Arc::new(PlMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = memory_on(store.clone(), "reattach").await;
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        mem.close().await.unwrap();
+        assert_eq!(live_handles("reattach"), 0);
+
+        // The closed handle is deliberately still in scope: the owner holds it
+        // (for `stats`, for a retry) while re-attaching.
+        let reattached = memory_on(store, "reattach").await;
+        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        assert!(
+            !logged.contains("SecondSessionWriter"),
+            "a re-attach after a successful close is not a second writer: {logged}"
+        );
+        assert_eq!(live_handles("reattach"), 1);
+
+        // ...and the closed handle's `Drop` must not release the *new* one's
+        // slot: the registry keys on session + agent id, which the re-attach
+        // reuses.
+        drop(mem);
+        assert_eq!(
+            live_handles("reattach"),
+            1,
+            "Drop after an already-released close must not evict the live handle"
+        );
+
+        reattached.close().await.unwrap();
+        assert_eq!(live_handles("reattach"), 0);
+    }
+
+    /// R2-2: dropping a handle whose `close()` **failed** must not be silent.
+    ///
+    /// The leak guard keyed on task handles still being `Some`; a failed close
+    /// has already taken all three, so `leaked` was false and `Drop` said
+    /// nothing — while the tail that same close deliberately kept in the log
+    /// (T81-5, for the retry it documents) went out with the handle. The exact
+    /// case an owner most needs told, lost most quietly.
+    ///
+    /// The failed close also keeps its registration, which is the other half of
+    /// the R2-4 policy: this handle still holds an undurable tail.
+    #[tokio::test]
+    async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
+        let buf = Arc::new(PlMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(FlakyStore::new(inner, usize::MAX));
+        let mem = memory_on(store, "drop-after-failed-close").await;
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("simulated outage"), "{err}");
+        let kept = mem.graph().read().log_len();
+        assert!(kept > 0, "the failed close kept the tail for a retry");
+        assert_eq!(
+            live_handles("drop-after-failed-close"),
+            1,
+            "a failed close keeps its registration — the tail is still undurable"
+        );
+        assert!(
+            !String::from_utf8_lossy(&buf.lock()).contains("dropped"),
+            "nothing dropped yet"
+        );
+
+        drop(mem);
+        assert_eq!(live_handles("drop-after-failed-close"), 0);
+
+        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        assert!(
+            logged.contains("un-flushed"),
+            "dropping a handle that still holds an un-flushed tail must warn: {logged}"
+        );
+        assert!(
+            logged.contains("close() that did not finish"),
+            "the warning must name the cause — a failed or cancelled close, not a \
+             forgotten one: {logged}"
+        );
+        assert!(logged.contains(&kept.to_string()), "{logged}");
     }
 
     // -- close / drain ------------------------------------------------------
