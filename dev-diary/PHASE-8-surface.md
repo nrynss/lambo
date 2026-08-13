@@ -591,3 +591,43 @@ clean, `cargo test` **528 lib + 5 integration + 1 doc-test passing, 3 ignored** 
    error rather than silently skipping the final flush) has no test — reaching it needs a
    backlog past `backend_log_max`. The branch is small and reads correctly, but it is
    untested.
+
+### T8.1 — remediation of the adversarial review (remediation agent, 2026-08-13)
+
+All nine findings (`adve-review-t8.1-memory-fable.md`) plus the implementer's self-flag #6.
+Gates: `cargo fmt --check` clean; `RUSTFLAGS="-D warnings" cargo check --all-targets` clean
+on default / `store-sqlite` / `store-cockroach`; `cargo test` **539 lib + 5 integration + 1
+doc, 0 failed, 3 ignored** (review baseline 528 + 5 + 1 — +11 lib, no regressions);
+`--features store-sqlite` **579 lib** (baseline 568), 0 failed.
+
+| Finding | Fix |
+|---|---|
+| T81-1 (P1) | **Writers gate.** New `Memory::writers: tokio::sync::RwLock<()>`. Every mutating method holds a READ permit for its whole body (awaits included) and re-checks `closed` after acquiring it; `close()` latches `closed` then takes the WRITE side **before** stopping tasks or draining. Sync methods use `try_read` (they never await, so the permit covers their whole mutation; a failed `try_read` means a close is in progress → closed error). Reads take no permit. |
+| T81-2 (P2) | `close()`'s step-4 flush now reuses `FLUSH_ATTEMPT_TIMEOUT` (made `pub(crate)`) and `CatchUnwindPoll` + `panic_message` from the flush path. |
+| T81-3 (P2) | Requeue chronology asserted as a **sequence** (retained batch first, in order; no edge upsert before its endpoints) + a direct `Graph::push_front_log` unit test. |
+| T81-4 (P3) | Long-in-flight-flush + stop + join-with-timeout test on the paused clock. |
+| T81-5 (P3) | A failed `close()` pushes the drained batch back to the log front and leaves the success flag unset: **close is retryable**, and no later `close()` returns `Ok` while the tail is undurable. Same for the degraded branch (which keeps returning its error). |
+| T81-6 (P3) | The close body is serialized behind a `tokio::sync::Mutex<bool>` carrying that flag; a concurrent second caller awaits the first and returns its outcome. |
+| T81-7 (P3) | Durability disclosure on `declare_synonym` and `reserve` (see the T8.2 warning below). |
+| T81-8 (P3) | Process-global session registry that **reports, does not refuse** — an ERROR line naming both agents. Refusal was rejected: it would add a `build()` failure mode for legitimate re-attaches while still being blind to the collisions that matter (other processes/hosts), i.e. a false sense of protection over a policy spec §2.2 gives deployment. |
+| T81-9 (P3) | Doc note: `ImpactReport` is measured before removal and can be stale vs a concurrent writer. |
+| self-flag #6 | The degraded-`close()` branch now has a test. |
+
+**Cross-phase writes in this pass** (both inside the existing T8.1 grants): `src/store/flush.rs`
+— `FLUSH_ATTEMPT_TIMEOUT` visibility `const` → `pub(crate)`, no behaviour change, nothing else
+touched; `src/graph/graph.rs` — one unit test for the granted `push_front_log` helper, no
+production change.
+
+**⚠ T8.2 must not assume synonym or reservation durability.** `declare_synonym` and `reserve`
+are **RAM-local for one handle's lifetime**: pinned contract S5 gives them no `Mutation` kind,
+so nothing — not the background flush, not `close()`'s final one — persists them, and
+`load_session` cannot restore them. Consequences an MCP server will hit: after a restart the
+same phrase that used to match an existing concept **creates a duplicate** instead, `retract`
+loses the alias as a resolution route, and "no reservation" does not mean "nobody else is
+working on this". A server that offers a synonym tool must re-declare its mappings on every
+attach (right after `build()`, before the first `derive`) or persist them itself.
+
+**`close()` semantics T8.2 should surface:** `Ok(())` means the tail is durable; an `Err` means
+it is not *and the tail was kept* — call `close()` again once the store is healthy. A second
+concurrent `close()` blocks until the first finishes rather than returning early, so a shutdown
+path may call it from more than one place safely.

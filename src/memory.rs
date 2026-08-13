@@ -61,8 +61,9 @@
 //! and backdating by 61s would neuter the whole `canonization_edge_min_age`
 //! inflation guard (P6 review F18). There is deliberately no API to pass one.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -204,6 +205,63 @@ pub struct MemoryStats {
     pub daemon_cycles: u64,
     pub canonization_cycles: u64,
     pub canonization_failures: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Second-writer detection (T81-8)
+// ---------------------------------------------------------------------------
+
+/// Live [`Memory`] handles per session, process-wide.
+///
+/// Two `Memory`s on one session each spawn a full task trio over **divergent
+/// in-RAM copies** and flush both copies into the same rows: the later flush
+/// wins, the other handle's writes are overwritten, one side's GC deletes nodes
+/// the other still holds — and neither side looks wrong from the inside. Cheap
+/// to detect, so it is detected.
+///
+/// **Reported, not refused.** Spec §2.2 assigns single-writer enforcement to
+/// deployment, and a process-global refusal would be both too strong and too
+/// weak: too strong because `build()` would gain a new failure mode for
+/// legitimate re-attaches (a leaked handle whose owner dropped the reference,
+/// a tool that opens a read-mostly second view), and far too weak because the
+/// collisions that actually corrupt a session come from *other processes and
+/// hosts*, which no in-process registry can see. Inventing a policy here would
+/// buy a false sense of protection; an ERROR line naming both agents buys T8.2
+/// the diagnostic it will actually want.
+static ACTIVE_SESSIONS: LazyLock<PlMutex<HashMap<SessionId, Vec<AgentId>>>> =
+    LazyLock::new(|| PlMutex::new(HashMap::new()));
+
+/// Record a handle; log loudly if the session already had one.
+fn register_session(session: &SessionId, agent: &AgentId) {
+    let mut active = ACTIVE_SESSIONS.lock();
+    let agents = active.entry(session.clone()).or_default();
+    if !agents.is_empty() {
+        tracing::error!(
+            session = %session,
+            agent = %agent,
+            existing = ?agents,
+            handles = agents.len() + 1,
+            "SecondSessionWriter: this process already holds a Memory handle for session \
+             {session} (agents {agents:?}) and is opening another for {agent}. Spec §2.2 is one \
+             writer per session: the two handles keep divergent in-RAM graphs and flush them into \
+             the same rows, so the later flush silently overwrites the other's writes. Close one."
+        );
+    }
+    agents.push(agent.clone());
+}
+
+/// Release a handle's registration. Called from [`Drop`] rather than `close`,
+/// so a handle that is never closed still releases when it goes.
+fn unregister_session(session: &SessionId, agent: &AgentId) {
+    let mut active = ACTIVE_SESSIONS.lock();
+    if let Some(agents) = active.get_mut(session) {
+        if let Some(position) = agents.iter().position(|a| a == agent) {
+            agents.remove(position);
+        }
+        if agents.is_empty() {
+            active.remove(session);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +473,9 @@ impl MemoryBuilder {
             dim = embedding.dim,
             "Memory session attached (daemon + flush + canonization running)"
         );
+        // Last, so nothing registers for a `build()` that failed. Released by
+        // `Drop` (T81-8).
+        register_session(&session, &agent);
 
         Ok(Memory {
             session,
@@ -1338,6 +1399,7 @@ impl Drop for Memory {
     /// abandons the tail (see `close`'s drain), so it warns. After a successful
     /// `close` every handle is already `None` and this is a no-op.
     fn drop(&mut self) {
+        unregister_session(&self.session, &self.agent);
         let mut leaked = false;
         for handle in [&self.daemon_handle, &self.flush_handle, &self.canon_handle] {
             if let Some(handle) = handle.lock().take() {
@@ -1883,6 +1945,85 @@ mod tests {
         // The matching contract still attaches.
         let ok = attach(contract("fixture", 1024)).await.unwrap();
         ok.close().await.unwrap();
+    }
+
+    /// Capturing writer for asserting on emitted tracing events (same shape as
+    /// `store::flush`'s).
+    #[derive(Clone)]
+    struct BufWriter(Arc<PlMutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn live_handles(session: &str) -> usize {
+        ACTIVE_SESSIONS
+            .lock()
+            .get(&SessionId::new(session))
+            .map(|agents| agents.len())
+            .unwrap_or(0)
+    }
+
+    /// T81-8: two same-process handles on one session are not refused (spec
+    /// §2.2 assigns that to deployment) but they are **reported**, loudly and
+    /// with both agent ids, and the registration is released when the handle
+    /// drops — including a handle that was never closed.
+    #[tokio::test]
+    async fn a_second_handle_on_one_session_is_reported_loudly() {
+        let buf = Arc::new(PlMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let first = memory_on(store.clone(), "one-writer").await;
+        assert_eq!(live_handles("one-writer"), 1);
+        assert!(
+            !String::from_utf8_lossy(&buf.lock()).contains("SecondSessionWriter"),
+            "the first handle is not a collision"
+        );
+
+        let second = Memory::builder()
+            .session("one-writer")
+            .agent("agent-b")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(live_handles("one-writer"), 2, "reported, not refused");
+
+        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        assert!(logged.contains("SecondSessionWriter"), "{logged}");
+        assert!(logged.contains("one-writer"), "{logged}");
+        assert!(
+            logged.contains("agent-a") && logged.contains("agent-b"),
+            "{logged}"
+        );
+
+        first.close().await.unwrap();
+        drop(first);
+        assert_eq!(live_handles("one-writer"), 1);
+        // Dropped without close(): the registration is still released.
+        drop(second);
+        assert_eq!(live_handles("one-writer"), 0);
     }
 
     // -- close / drain ------------------------------------------------------
