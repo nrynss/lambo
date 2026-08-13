@@ -2871,6 +2871,70 @@ mod tests {
         assert!(saw_delete);
     }
 
+    /// The requeue half of COH-6 (T81-3): a batch the flush task hands back on
+    /// stop goes to the **front** of the log — in its original order, ahead of
+    /// everything written while it sat in the task's pending buffer — and does
+    /// not bump the epoch.
+    ///
+    /// Order is the load-bearing part. Appending instead of prepending puts an
+    /// edge upsert ahead of the `UpsertNode` for one of its endpoints, which
+    /// breaks the `src/graph/mod.rs` "replay in order, never re-sort" premise a
+    /// conforming SQL adapter relies on (it would fail the whole final
+    /// transaction, i.e. lose the tail).
+    #[test]
+    fn push_front_log_prepends_the_returned_batch_in_order() {
+        let (mut g, iid, cid) = small_graph();
+
+        // What the flush task drained and failed to persist.
+        let retained = g.drain_log().mutations;
+        assert!(retained.len() >= 2, "need a multi-mutation batch");
+        assert_eq!(g.log_len(), 0);
+
+        // Writes that landed while the batch was retained in the task.
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5))
+            .unwrap();
+        let fresh_len = g.log_len();
+        assert!(fresh_len >= 2);
+        let epoch_before = g.epoch();
+
+        g.push_front_log(retained.clone());
+        assert_eq!(
+            g.epoch(),
+            epoch_before,
+            "requeueing re-counts nothing: the epoch must not move"
+        );
+
+        let combined = g.drain_log().mutations;
+        assert_eq!(combined.len(), retained.len() + fresh_len);
+        assert_eq!(
+            &combined[..retained.len()],
+            &retained[..],
+            "the returned batch must come FIRST, in its original order"
+        );
+
+        // The premise that ordering serves: no edge before its endpoints.
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for m in &combined {
+            match m {
+                Mutation::UpsertNode { node } => {
+                    seen.insert(node.id());
+                }
+                Mutation::UpsertEdge { edge } => {
+                    assert!(seen.contains(&edge.source), "endpoint missing: {m:?}");
+                    assert!(seen.contains(&edge.target), "endpoint missing: {m:?}");
+                }
+                _ => {}
+            }
+        }
+
+        // Empty is a no-op, not a panic.
+        g.push_front_log(Vec::new());
+        assert_eq!(g.log_len(), 0);
+    }
+
     #[test]
     fn mutation_log_is_chronological_across_interleaved_writes() {
         // Adve-review T2.1 M2: §2.4's phase grouping holds *within* a logical

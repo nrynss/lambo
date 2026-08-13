@@ -283,6 +283,7 @@ mod tests {
     use crate::config::ScoringWeights;
     use crate::daemon::events::event_channel;
     use crate::store::MemoryStore;
+    use crate::test_util::capture_logs;
     use crate::types::{
         AgentId, CanonizationStatus, Concept, ConceptType, DaemonEvent, Interaction, Mutation,
         MutationBatch, Node, NodeId, Scored, SessionId,
@@ -404,28 +405,6 @@ mod tests {
         .with_clock(Arc::new(ts))
     }
 
-    /// Capturing writer for asserting on emitted tracing events (mirrors the
-    /// flush suite's).
-    #[derive(Clone)]
-    struct BufWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     /// `MemoryStore` whose `record_canonization` can be told to fail or to
     /// panic — the loop's two non-`Ok(Ok(_))` arms (R2-5). Everything else
     /// delegates. Mirrors the flush suite's `PanicStore`.
@@ -532,12 +511,7 @@ mod tests {
     /// process's lifetime, silently.
     #[tokio::test(start_paused = true)]
     async fn a_failing_cycle_is_logged_and_the_loop_keeps_ticking() {
-        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let (graph, store, scores) = session();
         let store = Arc::new(FaultyStore::wrapping(store));
@@ -569,7 +543,7 @@ mod tests {
         assert_eq!(task.failures(), 1, "and the later cycle did not fail");
         assert!(!handle.is_finished());
 
-        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let out = logs.contents();
         assert!(
             out.contains("CanonizationCycleFailed"),
             "the failure must be logged: {out}"
@@ -587,12 +561,7 @@ mod tests {
     /// A panicking cycle does not count as completed.
     #[tokio::test(start_paused = true)]
     async fn a_panicking_cycle_is_contained_and_the_loop_continues() {
-        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::ERROR)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::ERROR);
 
         let (graph, store, scores) = session();
         let store = Arc::new(FaultyStore::wrapping(store));
@@ -624,7 +593,7 @@ mod tests {
         assert_eq!(task.cycles(), 1, "the loop continued with the next tick");
         assert!(!handle.is_finished());
 
-        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let out = logs.contents();
         assert!(
             out.contains("CanonizationCyclePanic"),
             "the panic must be logged: {out}"
