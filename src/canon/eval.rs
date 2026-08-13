@@ -787,6 +787,44 @@ mod tests {
         concept_status(graph, id).expect("concept")
     }
 
+    /// Ring arithmetic, degenerate inputs included: empty ring, zero window,
+    /// a cursor past the end (wrap), and a cursor whose node has **left** the
+    /// ring — the last is the churn case (F1), where the resume point must
+    /// still be "the first id strictly greater", not an index.
+    #[test]
+    fn ring_window_is_identity_anchored_and_wraps() {
+        let ring: Vec<NodeId> = (1..=5).map(nid).collect();
+        assert!(ring_window(&[], None, 3).is_empty(), "empty ring");
+        assert!(ring_window(&ring, None, 0).is_empty(), "zero window");
+        assert_eq!(ring_window(&ring, None, 2), vec![nid(1), nid(2)]);
+        assert_eq!(ring_window(&ring, Some(nid(2)), 2), vec![nid(3), nid(4)]);
+        assert_eq!(
+            ring_window(&ring, Some(nid(5)), 2),
+            vec![nid(1), nid(2)],
+            "a cursor at the end wraps to the head"
+        );
+        assert_eq!(
+            ring_window(&ring, Some(nid(9)), 2),
+            vec![nid(1), nid(2)],
+            "a cursor past every member wraps too"
+        );
+        // Churn: 3 and 4 promoted out since the cursor was set to 3.
+        let shrunk = vec![nid(1), nid(2), nid(5)];
+        assert_eq!(
+            ring_window(&shrunk, Some(nid(3)), 2),
+            vec![nid(5), nid(1)],
+            "a departed cursor resumes at the first surviving id above it"
+        );
+        // A window wider than the ring never repeats an id.
+        let full = ring_window(&ring, Some(nid(3)), 99);
+        assert_eq!(full.len(), ring.len());
+        assert_eq!(
+            full.iter().copied().collect::<HashSet<_>>().len(),
+            ring.len(),
+            "no duplicates: {full:?}"
+        );
+    }
+
     /// CON-6: `as i32` would wrap `i32::MAX + 1` to `i32::MIN`.
     #[test]
     fn blast_radius_narrow_rejects_unrepresentable_u64() {
