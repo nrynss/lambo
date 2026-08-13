@@ -1430,9 +1430,11 @@ mod tests {
     use crate::embed::FixtureEmbedder;
     use crate::store::MemoryStore;
     use crate::types::{
-        CanonizationEvent, GraphSnapshot, InteractionSpan, MutationBatch, Scored, StoreError,
+        CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Scored,
+        StoreError,
     };
     use async_trait::async_trait;
+    use std::collections::HashSet;
     use std::sync::atomic::AtomicUsize;
 
     fn contract(kind: &str, dim: usize) -> EmbeddingContract {
@@ -1464,7 +1466,9 @@ mod tests {
     struct FlakyStore {
         inner: Arc<dyn GraphStore>,
         fail_remaining: AtomicUsize,
-        batch_lens: PlMutex<Vec<usize>>,
+        /// Every batch it was handed, whole: the T81-3 assertions need the
+        /// mutation **sequence**, not just the lengths.
+        batches: PlMutex<Vec<MutationBatch>>,
     }
 
     impl FlakyStore {
@@ -1472,12 +1476,16 @@ mod tests {
             Self {
                 inner,
                 fail_remaining: AtomicUsize::new(fail_next),
-                batch_lens: PlMutex::new(Vec::new()),
+                batches: PlMutex::new(Vec::new()),
             }
         }
 
+        fn batches(&self) -> Vec<MutationBatch> {
+            self.batches.lock().clone()
+        }
+
         fn batch_lens(&self) -> Vec<usize> {
-            self.batch_lens.lock().clone()
+            self.batches.lock().iter().map(|b| b.len()).collect()
         }
     }
 
@@ -1490,7 +1498,7 @@ mod tests {
             self.inner.capabilities()
         }
         async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-            self.batch_lens.lock().push(batch.len());
+            self.batches.lock().push(batch.clone());
             let should_fail = self
                 .fail_remaining
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -2028,6 +2036,44 @@ mod tests {
             "close() must flush the retained batch AND the later writes as one \
              chronological batch (push-front), not just the later writes: {batches:?}"
         );
+
+        // ...and in that ORDER (T81-3). Length alone let a push-BACK mutant
+        // (`splice(0..0, ..)` -> `extend(..)`) survive the whole suite, while
+        // it puts an edge upsert ahead of its endpoint's UpsertNode and so
+        // fails a conforming adapter's in-order replay.
+        let flushed = flaky.batches();
+        let first_attempt = flushed.first().unwrap(); // what the task retained
+        let final_batch = flushed.last().unwrap();
+        assert_eq!(
+            first_attempt.len(),
+            retained,
+            "the failed attempt is exactly the retained batch"
+        );
+        assert_eq!(
+            &final_batch.mutations[..retained],
+            &first_attempt.mutations[..],
+            "the retained mutations must lead the final batch, in their original \
+             order, with the later writes behind them"
+        );
+
+        // The premise that order serves (`src/graph/mod.rs`: replay in order,
+        // never re-sort): no edge upsert before the nodes it points at.
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for m in &final_batch.mutations {
+            match m {
+                Mutation::UpsertNode { node } => {
+                    seen.insert(node.id());
+                }
+                Mutation::UpsertEdge { edge } => {
+                    assert!(
+                        seen.contains(&edge.source) && seen.contains(&edge.target),
+                        "edge upsert precedes an endpoint — the batch is not replayable \
+                         in order: {m:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     // -- close(): armor, retry, concurrency (T81-2 / T81-5 / T81-6) ---------
@@ -2165,6 +2211,74 @@ mod tests {
 
         let snap = inner
             .load_session(&SessionId::new("concurrent-close"))
+            .await
+            .unwrap();
+        assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+    }
+
+    /// Partial coverage for COH-6 clause 2 — `biased;` + stop-first in the
+    /// flush loop's `select!` (T81-4).
+    ///
+    /// The regression that clause guards is a **lost stop permit**: an unbiased
+    /// `select!` polls in a random start order, so a concurrently ready
+    /// `interval.tick()` can be polled first, consume-and-drop the stored
+    /// permit, and `close()`'s join then hangs forever. The tick is
+    /// concurrently ready exactly when a flush outlasts the interval — which is
+    /// what this builds: a 5s flush against a 1s interval, `stop()` arriving
+    /// while that flush is in flight.
+    ///
+    /// It cannot *prove* the ordering (a lost permit under an unbiased select
+    /// is probabilistic — pinning it needs loom); what it does pin is that this
+    /// shutdown shape terminates. A hang fails the test instead of wedging it,
+    /// because the join is wrapped in a timeout on the (paused) clock.
+    #[tokio::test(start_paused = true)]
+    async fn close_completes_when_stop_lands_during_a_long_flush() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let adverse = Arc::new(AdverseStore::new(
+            inner.clone(),
+            FlushBehaviour::Delay(Duration::from_secs(5)),
+        ));
+        let store: Arc<dyn GraphStore> = adverse.clone();
+        let mem = Memory::builder()
+            .session("slow-flush")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(1))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap();
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+
+        // Walk the clock to the first tick and stop as soon as the flush has
+        // started — not far enough for it to finish.
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
+            if adverse.flush_calls() > 0 {
+                break;
+            }
+        }
+        assert_eq!(adverse.flush_calls(), 1, "a flush must be in flight");
+        assert!(!adverse.flush_completed(), "and still in flight");
+
+        // The join must finish. A lost stop permit would spin the loop until
+        // this (virtual) deadline instead.
+        tokio::time::timeout(Duration::from_secs(300), mem.close())
+            .await
+            .expect("close() must not hang when stop lands during an in-flight flush")
+            .expect("close");
+        assert!(
+            adverse.flush_completed(),
+            "the in-flight flush ran to completion before the loop exited"
+        );
+
+        let snap = inner
+            .load_session(&SessionId::new("slow-flush"))
             .await
             .unwrap();
         assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
