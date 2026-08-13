@@ -1,10 +1,22 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (30 records).
+Complete index of the review records in this directory (42 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| **[adve-review-t8.1-memory-fable.md](adve-review-t8.1-memory-fable.md)** | phase/p8-surface — T8.1 `Memory` builder & assembly, fable deep | **OPEN** (REQUEST CHANGES: 1 P1 / 2 P2 / 6 P3; COH-6 clause 14 FAIL — writes racing `close()` silently lost; awaiting remediation) |
+| [adve-review-t5.1-candidates.md](adve-review-t5.1-candidates.md) | T5.1 — Phase-1 candidates | **CLOSED** (ACCEPT, no findings) |
+| [adve-review-t5.2-expand.md](adve-review-t5.2-expand.md) | T5.2 — Expansion | **CLOSED** (ACCEPT after 1 remediation round) |
+| [adve-review-t5.3-assemble.md](adve-review-t5.3-assemble.md) | T5.3 — Assembly | **CLOSED** (ACCEPT; 3 P3 recorded, no remediation) |
+| [adve-review-t5.4-cache.md](adve-review-t5.4-cache.md) | T5.4 — Recall cache | **CLOSED** (ACCEPT; 2 P3 doc-accuracy recorded) |
+| [adve-review-p5-recall-GPT5.6sol.md](adve-review-p5-recall-GPT5.6sol.md) | P5 recall tier — GPT5.6sol (branch-level) | **CLOSED** (REQUEST CHANGES → remediated; superseded by the deep pass below) |
+| [adve-review-p5-recall.md](adve-review-p5-recall.md) | P5 recall tier — branch-level | **CLOSED** (remediated, verification ACCEPT — merge-ready) |
+| [adve-review-p5-deep.md](adve-review-p5-deep.md) | P5 recall tier — independent deep pass @ 5dcf7ad | **CLOSED** (read-only re-attack of the ACCEPT claim) |
+| [adve-review-p6-canonization.md](adve-review-p6-canonization.md) | P6 serial close R1 @ 2cdb7a6 | **CLOSED** (REQUEST CHANGES: 2 P1; fixed 20f88a6) |
+| [adve-review-p6-canonization-r2.md](adve-review-p6-canonization-r2.md) | P6 serial close R2 @ 8be251a | **CLOSED** (REQUEST CHANGES: 1 P2 budget edge; fixed b48ec05) |
+| [adve-review-p6-canonization-r3.md](adve-review-p6-canonization-r3.md) | P6 serial close R3 @ a743350 | **CLOSED** (ACCEPT — clean) |
 | **[adve-review-p6-canonization-fable.md](adve-review-p6-canonization-fable.md)** | phase/p6-canonization — P6 canonization tier (T6.1–T6.4), fable ×5 | **CLOSED** (19 findings: 2 P1 / 5 P2 / 12 P3; 2 opus remediation rounds, R3 verify CLEAN 2026-08-13; residual P3s recorded for P8) |
+| [adve-review-p7-hybrid-vectors.md](adve-review-p7-hybrid-vectors.md) | P7 — hybrid vector recall | **CLOSED** (REMEDIATE 1 MAJOR + 4 MINOR → verified ACCEPT) |
 | **[adve-review-e2e-p0-p3-fable.md](adve-review-e2e-p0-p3-fable.md)** | Main — E2E P0–P3 (post-merge, whole-platform) | **CLOSED** (45 findings: 7 P1 / 15 P2 / 23 P3; all dispositioned 2026-08-12 in 8 waves — see the disposition record in the file) |
 | **[adve-review-t14-fixtures.md](adve-review-t14-fixtures.md)** | Main — T1.4 fixture graphs | **CLOSED** (ACCEPT, residual notes only) |
 | **[adve-review-t70-embeddings.md](adve-review-t70-embeddings.md)** | Main — T7.0 embeddings (BGE-M3 / llama.cpp) | **CLOSED** (ACCEPT, residual ops only) |
