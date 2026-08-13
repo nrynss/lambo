@@ -413,9 +413,19 @@ reset the session first. Re-seeding a live demo session and expecting canonizati
 follow will silently produce a demo that does not transition.
 
 **External dependency — start now, not at T8.4.** The CockroachDB managed MCP server needs
-console-side setup and is outside our control. So is the index-favorable `EXPLAIN`
-camera-proof carried over from T7.3 (`vector_explain_camera_proof` with
-`LAMBO_REQUIRE_VECTOR_INDEX=1` on a vector-search-favorable deployment). Neither is started.
+console-side setup and is outside our control. **Status 2026-08-13: console-side setup is
+DONE; the config may only take effect after a client restart, and the split-screen query
+still needs rehearsing.**
+
+**The `EXPLAIN` camera-proof is no longer an "external dependency" — it moved to
+[T7.4](PHASE-7-embeddings.md).** Root-caused 2026-08-13: it never failed for
+cost/deployment reasons. The test asserts `"vector search"` against `EXPLAIN (OPT,
+VERBOSE)`, which emits `"vector-search"`, so it could not pass on any cluster; and the
+query's `WHERE embedding IS NOT NULL` defeats a non-partial vector index (a partial index
+on the canonical name fixes that with no query change). **Note for anyone running live
+demos before T7.4 lands: the cluster schema currently DIVERGES from
+`migrations/cockroach/001_init.sql`** — a hand-created `concepts_embedding_nonnull_idx`
+exists on it — and the cluster was seeded to 2833 concepts / 2004 distinct vectors.
 
 **Done when:** `cargo run --features demo -- demo --scenario rest-api` (or equivalent)
 runs end-to-end against the live cluster twice consecutively with identical outcomes, and
