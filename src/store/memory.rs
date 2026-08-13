@@ -167,7 +167,16 @@ impl MemoryStore {
                         event.node_id
                     )));
                 }
-                snap.canonization_events.push(event.clone());
+                // Same contract as SQL `ON CONFLICT (id) DO NOTHING`: a
+                // dual-write (record_canonization + later flush of the
+                // write-behind log) must not duplicate the demo artifact.
+                if !snap
+                    .canonization_events
+                    .iter()
+                    .any(|existing| existing.id == event.id)
+                {
+                    snap.canonization_events.push(event.clone());
+                }
             }
             // XP-8: session-level metadata reaches the store through the
             // mutation path, not only `seed`. Same session-consistency gate as

@@ -228,10 +228,11 @@ impl Evaluator {
             outcome
                 .promotions
                 .push(commit_transition(graph, store, events, event).await?);
+            hopped.insert(id);
         }
 
         // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
-        demote_over_budget(graph, store, events, params, now, &mut outcome).await?;
+        demote_over_budget(graph, store, events, params, now, &hopped, &mut outcome).await?;
 
         Ok(outcome)
     }
@@ -287,6 +288,7 @@ async fn demote_over_budget(
     events: &EventSender,
     params: &EvalParams,
     now: DateTime<Utc>,
+    hopped: &HashSet<NodeId>,
     outcome: &mut EvalOutcome,
 ) -> Result<(), LamboError> {
     let session = graph.session_id().clone();
@@ -308,7 +310,12 @@ async fn demote_over_budget(
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
 
+    // Overflow is measured against every Canonical, including this cycle's
+    // Stage 3 promotions. Those ids already took their one legal hop and
+    // must not be demoted in the same tick (even if they now have the
+    // lowest blast). A pre-existing Canonical still absorbs the cut.
     let overflow = ranked.len() - params.max_canonical_nodes;
+    ranked.retain(|(_, id)| !hopped.contains(id));
     for &(_, id) in ranked.iter().take(overflow) {
         if concept_status(graph, id) != Some(CanonizationStatus::Canonical) {
             continue;
@@ -863,6 +870,113 @@ mod tests {
                 committed
             );
             assert_eq!(drain_canonized(&mut rx), committed);
+        }
+
+        #[tokio::test]
+        async fn just_promoted_canonical_not_demoted_in_same_cycle() {
+            // P1-1: a Venerable promoted to Canonical this tick must not be the
+            // same tick's budget-demotion victim, even when it has the lowest
+            // blast. The pre-existing Canonical absorbs the cut instead.
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+
+            // Pre-existing Canonical, blast 8.
+            let mut existing = concept(10, 1, 5, CanonizationStatus::Canonical);
+            existing.blast_radius = Some(8);
+            g.insert_concept(existing, iid(1)).unwrap();
+            attach_blast(&mut g, 10, 8, 100);
+
+            // Venerable that will clear Stage 3 (blast 6 > 5), lower than 8.
+            let venerable = concept(20, 1, 5, CanonizationStatus::Venerable);
+            g.insert_concept(venerable, iid(1)).unwrap();
+            attach_blast(&mut g, 20, 6, 200);
+
+            let store = store_from_graph(&g).await;
+            let mut p = params();
+            p.max_canonical_nodes = 1;
+            let (tx, mut rx) = channel();
+            let mut ev = Evaluator::new();
+            let now = ts();
+            let outcome = eval_cycle(&mut ev, &mut g, &store, &table(&[]), &tx, &p, now)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                status_of(&g, nid(20)),
+                CanonizationStatus::Canonical,
+                "the just-promoted pillar must survive its own tick"
+            );
+            assert_eq!(
+                status_of(&g, nid(10)),
+                CanonizationStatus::None,
+                "the pre-existing Canonical absorbs the budget cut"
+            );
+            assert_eq!(
+                outcome
+                    .demotions
+                    .iter()
+                    .map(|d| d.node_id)
+                    .collect::<Vec<_>>(),
+                vec![nid(10)],
+                "the demotion targets the pre-existing node, not the promotion"
+            );
+            match g.node(nid(20)) {
+                Some(Node::Concept(c)) => assert_eq!(c.last_demotion_time, None),
+                other => panic!("pillar must remain a concept, got {other:?}"),
+            }
+            assert_eq!(
+                drain_canonized(&mut rx).len(),
+                2,
+                "one promotion + one demotion"
+            );
+        }
+
+        #[tokio::test]
+        async fn flush_after_eval_does_not_duplicate_audit_rows() {
+            // P1-2: record_canonization (immediate) + write-behind flush must not
+            // double the demo audit trail. Reload after drain_log+flush must carry
+            // each committed transition exactly once.
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+            for id in 1..=20u64 {
+                g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
+                    .unwrap();
+            }
+            let store = store_from_graph(&g).await;
+            let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
+            pairs.push((20, 1.0));
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(
+                &mut ev,
+                &mut g,
+                &store,
+                &table(&pairs),
+                &tx,
+                &params(),
+                ts(),
+            )
+            .await
+            .unwrap();
+            let committed: Vec<_> = outcome.transitions().cloned().collect();
+            assert_eq!(committed.len(), 1, "one None→Candidate hop");
+
+            // Replay the write-behind log (the same transition as the live write).
+            let batch = g.drain_log();
+            assert!(!batch.is_empty());
+            store.flush(&batch).await.unwrap();
+
+            let reloaded = store
+                .load_session(&sid())
+                .await
+                .unwrap()
+                .canonization_events;
+            assert_eq!(
+                reloaded.len(),
+                committed.len(),
+                "flush must not duplicate the audit trail"
+            );
+            assert_eq!(reloaded, committed, "reloaded audit matches committed hops");
         }
     }
 
