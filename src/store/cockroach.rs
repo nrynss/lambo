@@ -560,6 +560,67 @@ const TX_RETRY_ATTEMPTS: usize = 5;
 /// under the 30s `LOAD_SESSION_TIMEOUT`.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// T7.4: accuracy dial for CockroachDB's **approximate** vector search.
+///
+/// Once `concepts_embedding_idx` is partial (spec §12.1), `vector_candidates`
+/// is served by an ANN index instead of an exact full scan: the search visits
+/// a bounded number of index neighbourhoods rather than every row, so a true
+/// near neighbour sitting in an unvisited neighbourhood can be missed. In Lambo
+/// that surfaces as a *silent* quality loss, not an error — hybrid matching
+/// fails to merge a genuine near-duplicate and writes a new concept instead,
+/// leaving the graph slightly less connected.
+///
+/// `vector_search_beam_size` is how many neighbourhoods the search visits:
+/// higher is more accurate and slower. CockroachDB's own default is 32 and the
+/// server enforces **1..=2048** (verified live 2026-08-13; out-of-range is a
+/// server-side error, not a clamp).
+///
+/// **This is deliberately unset by default** — omitting it inherits the server
+/// default, so enabling the partial index did not silently change search
+/// behaviour too. Raising the default is justified only by a recall
+/// measurement on a dense table, which does not exist yet (the demo cluster
+/// holds 4 distinct vectors, where ANN and exact trivially coincide); that
+/// measurement is a T7.4-review item. Until then this is an opt-in dial:
+///
+/// ```text
+/// LAMBO_VECTOR_BEAM_SIZE=128 lambo serve …
+/// ```
+///
+/// Applied per connection alongside `statement_timeout`, so it costs no
+/// per-query round trip. An invalid value is a hard error at pool construction
+/// (Level B fails closed — a silently ignored tuning knob is worse than none).
+const VECTOR_BEAM_SIZE_ENV: &str = "LAMBO_VECTOR_BEAM_SIZE";
+const VECTOR_BEAM_SIZE_MIN: u32 = 1;
+const VECTOR_BEAM_SIZE_MAX: u32 = 2048;
+
+/// Parse `LAMBO_VECTOR_BEAM_SIZE`. `Ok(None)` = unset, inherit the server
+/// default. Empty is treated as unset so an exported-but-blank var behaves like
+/// absence (same convention as `LAMBO_STORE`).
+fn vector_beam_size_from_env() -> Result<Option<u32>, StoreError> {
+    let raw = match std::env::var(VECTOR_BEAM_SIZE_ENV) {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(e) => return Err(backend(format!("{VECTOR_BEAM_SIZE_ENV}: {e}"))),
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let n: u32 = raw.parse().map_err(|_| {
+        backend(format!(
+            "{VECTOR_BEAM_SIZE_ENV} must be an integer in \
+             {VECTOR_BEAM_SIZE_MIN}..={VECTOR_BEAM_SIZE_MAX}, got {raw:?}"
+        ))
+    })?;
+    if !(VECTOR_BEAM_SIZE_MIN..=VECTOR_BEAM_SIZE_MAX).contains(&n) {
+        return Err(backend(format!(
+            "{VECTOR_BEAM_SIZE_ENV} must be in \
+             {VECTOR_BEAM_SIZE_MIN}..={VECTOR_BEAM_SIZE_MAX}, got {n}"
+        )));
+    }
+    Ok(Some(n))
+}
+
 /// STORE-4: structured retry decision for `tx_retry` — no message-text
 /// matching. Constraint violations (SQLSTATE 23xxx) are deterministic and are
 /// mapped to [`StoreError::Constraint`] by the write path: never replay them.
@@ -1009,28 +1070,42 @@ impl CockroachStore {
     async fn pool(&self) -> Result<&PgPool, StoreError> {
         self.pool
             .get_or_try_init(|| async {
-                let options = self
-                    .dsn
-                    .parse::<sqlx::postgres::PgConnectOptions>()
-                    .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
-                    // STORE-2: bound every statement server-side.
-                    // statement_timeout applies per statement, not per
-                    // transaction — a multi-statement flush batch can take
-                    // N x 20s. The whole-batch bound is the client-side
-                    // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
-                    // per-statement bound stays below it so the DB aborts a
-                    // hung statement before the client gives up on the
-                    // attempt (a hung statement must never wedge the flush
-                    // loop).
-                    .options([(
-                        "statement_timeout",
-                        format!("{}s", STATEMENT_TIMEOUT.as_secs()),
-                    )]);
                 Ok(PgPoolOptions::new()
                     .max_connections(MAX_POOL_CONNECTIONS)
-                    .connect_lazy_with(options))
+                    .connect_lazy_with(Self::connect_options(&self.dsn)?))
             })
             .await
+    }
+
+    /// Build the per-connection options. **Synchronous on purpose:** it reads
+    /// the environment, and a test that wants to pin an env-driven option must
+    /// be able to do so without holding a lock across an `.await` (spec §6.4,
+    /// enforced by `clippy::await_holding_lock`).
+    fn connect_options(dsn: &str) -> Result<sqlx::postgres::PgConnectOptions, StoreError> {
+        let options = dsn
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
+            // STORE-2: bound every statement server-side.
+            // statement_timeout applies per statement, not per
+            // transaction — a multi-statement flush batch can take
+            // N x 20s. The whole-batch bound is the client-side
+            // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
+            // per-statement bound stays below it so the DB aborts a
+            // hung statement before the client gives up on the
+            // attempt (a hung statement must never wedge the flush
+            // loop).
+            .options([(
+                "statement_timeout",
+                format!("{}s", STATEMENT_TIMEOUT.as_secs()),
+            )]);
+        // T7.4: opt-in ANN accuracy dial, applied per connection so it
+        // costs no per-query round trip. Unset => inherit the server
+        // default (32); an invalid value already failed closed above.
+        let options = match vector_beam_size_from_env()? {
+            Some(beam) => options.options([("vector_search_beam_size", beam.to_string())]),
+            None => options,
+        };
+        Ok(options)
     }
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
     /// seven tables in one transaction — the full-snapshot path that carries synonyms and
@@ -1780,6 +1855,49 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    /// T7.4: the ANN accuracy dial parses and fails closed. A tuning knob that
+    /// is silently ignored on a typo is worse than no knob — the operator
+    /// believes accuracy was raised when it was not.
+    #[test]
+    fn vector_beam_size_env_parses_and_fails_closed() {
+        let _g = crate::test_util::env_lock();
+        let restore = std::env::var(VECTOR_BEAM_SIZE_ENV).ok();
+
+        std::env::remove_var(VECTOR_BEAM_SIZE_ENV);
+        assert_eq!(
+            vector_beam_size_from_env().unwrap(),
+            None,
+            "unset must inherit the server default, not invent one"
+        );
+
+        // Exported-but-blank behaves as absent (same convention as LAMBO_STORE).
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "");
+        assert_eq!(vector_beam_size_from_env().unwrap(), None);
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "   ");
+        assert_eq!(vector_beam_size_from_env().unwrap(), None);
+
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(128));
+        // Server-enforced bounds, verified live 2026-08-13.
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "1");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(1));
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "2048");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(2048));
+
+        for bad in ["0", "2049", "-1", "64.5", "many", "1e3"] {
+            std::env::set_var(VECTOR_BEAM_SIZE_ENV, bad);
+            assert!(
+                vector_beam_size_from_env().is_err(),
+                "{bad:?} must be rejected at pool construction, not silently dropped"
+            );
+        }
+
+        match restore {
+            Some(v) => std::env::set_var(VECTOR_BEAM_SIZE_ENV, v),
+            None => std::env::remove_var(VECTOR_BEAM_SIZE_ENV),
+        }
+    }
+
     // Vector codec tests (roundtrip / rendering / non-finite) live in the shared
     // `super::vector` module — SQLite stores the same text form, so the codec's
     // coverage must run under either store feature (CON-8).
@@ -2472,6 +2590,65 @@ mod conformance {
     /// connection registered with a dead per-test runtime).
     fn new_store(dsn: &str) -> CockroachStore {
         CockroachStore::new(cfg(dsn.to_string())).unwrap()
+    }
+
+    /// T7.4: prove the ANN accuracy dial actually reaches the server **through
+    /// sqlx**, not merely that it parses.
+    ///
+    /// This test exists because the obvious way to check it by hand is wrong:
+    /// `PGOPTIONS=-c vector_search_beam_size=128 psql …` is silently IGNORED on
+    /// this deployment (measured 2026-08-13: still reports 32, and a
+    /// `statement_timeout` set the same way reports 0). Only the `options`
+    /// **connection parameter** in the startup message is honoured — which is
+    /// what `PgConnectOptions::options()` sets, and what `pool()` uses for both
+    /// `statement_timeout` and this dial. A hand-check with `PGOPTIONS` would
+    /// therefore "disprove" a setting that works perfectly.
+    ///
+    /// Also pins that `options()` APPENDS rather than replaces: sqlx 0.8 builds
+    /// one space-joined `-c k=v` string, so adding the beam size must not drop
+    /// the STORE-2 `statement_timeout` bound.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn vector_beam_size_reaches_the_server_and_keeps_statement_timeout() {
+        let Some(dsn) = dsn_or_skip("vector_beam_size_reaches_the_server") else {
+            return;
+        };
+        // Build the options under the env lock and RELEASE it before any await
+        // (spec §6.4 / clippy::await_holding_lock). This is exactly why
+        // `connect_options` is synchronous.
+        let options = {
+            let _g = crate::test_util::env_lock();
+            let restore = env::var(VECTOR_BEAM_SIZE_ENV).ok();
+            env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+            // Same normalization `CockroachStore::new` applies: sqlx + rustls
+            // cannot open libpq's `sslrootcert=system`, and `connect_options`
+            // is fed `self.dsn`, which is already rewritten.
+            let built = CockroachStore::connect_options(&dsn_for_rustls(&dsn));
+            match restore {
+                Some(v) => env::set_var(VECTOR_BEAM_SIZE_ENV, v),
+                None => env::remove_var(VECTOR_BEAM_SIZE_ENV),
+            }
+            built.unwrap()
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
+        let beam: String = sqlx::query_scalar("SHOW vector_search_beam_size")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(beam, "128", "beam size did not reach the server");
+        assert_ne!(
+            timeout, "0",
+            "adding the beam-size option dropped the STORE-2 statement_timeout \
+             — options() must append, not replace"
+        );
     }
 
     fn embed(seed: f32) -> Vec<f32> {
