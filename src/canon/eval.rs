@@ -128,10 +128,11 @@ pub struct EvalOutcome {
     /// The Stage 3 window this cycle ran through the predicate, in the order
     /// it was evaluated (score-descending).
     ///
-    /// F10: this is the **evaluated** window, not a candidate list. The
-    /// budget cap is applied when the window is taken, so a node the cycle
-    /// could never promote (no remaining budget) is neither listed here nor
-    /// stepped over by the cursor.
+    /// F10: this is the **evaluated** window, not a candidate list — every
+    /// node here was run through the Stage-3 predicate, including the ones
+    /// that failed it and the ones that passed but found the budget spent.
+    /// A cycle with no remaining budget evaluates nothing, so it lists
+    /// nothing and does not step the cursor either (R2-2).
     pub stage3_batch: Vec<NodeId>,
 }
 
@@ -221,8 +222,10 @@ struct CyclePlan {
     stage1: Vec<NodeId>,
     /// Stage 2: still-`Candidate` window off the identity cursor.
     stage2: Vec<NodeId>,
-    /// Stage 3: Venerable window off the identity cursor, score-descending,
-    /// already truncated to the remaining Canonical budget.
+    /// Stage 3: Venerable window off the identity cursor, score-descending.
+    /// Empty when the Canonical budget is already full; otherwise the whole
+    /// window — the budget cut happens in `apply`, on the nodes that passed
+    /// (R2-2).
     stage3: Vec<Stage3Probe>,
     /// Budget: Canonical ids to rank for demotion. Empty unless the session
     /// is **already** over budget — Stage 3 is capped at the remaining
@@ -357,20 +360,24 @@ impl Evaluator {
             self.stage2_cursor = Some(last);
         }
 
-        // Stage 3 — the Venerable ring, bounded by the remaining Canonical
-        // budget in two different ways, deliberately:
+        // Stage 3 — the Venerable ring. The Canonical budget gates whether
+        // this stage runs at all, and nothing finer:
         //
-        // * `remaining == 0` — take **nothing**. The old shape took the window
-        //   and then broke out of the promotion loop, so the ring rotated over
-        //   nodes it never evaluated and `stage3_batch` claimed them anyway
-        //   (F1's related note, F10).
-        // * `0 < remaining < batch_size` — take the whole ring window, rank it,
-        //   and evaluate the top `remaining`. Spec §10 orders the batch
-        //   score-descending, and under budget pressure that ordering is
-        //   exactly what decides *who gets in*; truncating the ring window
-        //   first would hand the last slot to the lowest NodeId instead. The
-        //   cursor still advances over the whole window, so the members this
-        //   cycle ranked below the cut come round again on the next wrap.
+        // * `remaining == 0` — take **nothing**. Not one node can promote, so
+        //   evaluating is pure cost and rotating the ring is a lie. The old
+        //   shape took the window and then broke out of the promotion loop, so
+        //   the cursor advanced over nodes it never evaluated and
+        //   `stage3_batch` claimed them anyway (F1's related note, F10).
+        // * `remaining > 0` — take the whole ring window and evaluate all of
+        //   it. **R2-2**: truncating to `remaining` here starved the ring.
+        //   The window is ranked score-descending, so when the ring fits in
+        //   `batch_size` (the common case) the same top-`remaining` members
+        //   were the only ones ever evaluated — a top-scoring Venerable that
+        //   cannot pass (blast <= 5, or cooling) held the slot forever and the
+        //   Canonical budget never filled. The ranking's job is to decide who
+        //   wins the last slot among the nodes that **pass**, which is not
+        //   knowable until the verdicts are in; `apply` does that cut, under
+        //   the write guard, against a freshly recomputed budget.
         let remaining = params
             .max_canonical_nodes
             .saturating_sub(canonical_count(graph));
@@ -384,14 +391,15 @@ impl Evaluator {
             self.stage3_cursor = Some(last);
         }
         // Score-descending within the window (spec §10), NodeId ascending
-        // tie-break. The cursor is anchored in RING order, taken above.
+        // tie-break — the evaluation order, and therefore the order `apply`
+        // spends the budget in. The cursor is anchored in RING order, taken
+        // above.
         let score_of = score_map(scores);
         window.sort_by(|a, b| {
             score_lookup(&score_of, *b)
                 .total_cmp(&score_lookup(&score_of, *a))
                 .then_with(|| a.0.cmp(&b.0))
         });
-        window.truncate(remaining);
         let stage3: Vec<Stage3Probe> = window
             .into_iter()
             .map(|node| Stage3Probe {
@@ -539,8 +547,10 @@ fn apply(
     }
 
     // --- Stage 3: Venerable → Canonical, capped at the remaining budget ---
-    // The window was already truncated at gather time; the budget is
-    // recomputed here because the graph was unlocked in between.
+    // This is the only budget cut (R2-2): the verdicts cover the whole ring
+    // window, and the passing nodes are spent against the budget in
+    // score-descending order. Recomputed here, under the write guard, because
+    // the graph was unlocked while the verdicts ran.
     let mut remaining = params
         .max_canonical_nodes
         .saturating_sub(canonical_count(graph));
@@ -1453,8 +1463,15 @@ mod tests {
         /// Venerables. Exactly one may promote, and spec §10's
         /// score-descending order within the batch is what decides which: the
         /// higher-scoring node wins even though it sorts later in the ring.
-        /// (Truncating the ring window before ranking would hand the slot to
-        /// the lowest NodeId instead.)
+        /// (Ranking the window before spending the budget is what makes that
+        /// true; spending it in ring order would hand the slot to the lowest
+        /// NodeId instead.)
+        ///
+        /// R2-2: both nodes are *evaluated* — the budget cut happens in
+        /// `apply`, on the nodes that passed, so `stage3_batch` names the
+        /// loser too. It has to: which of them can pass is not knowable at
+        /// gather time, and pre-selecting the top `remaining` starved the
+        /// ring whenever the top scorer could not pass.
         #[tokio::test]
         async fn budget_contention_gives_the_last_slot_to_the_higher_score() {
             let store = store_with_hubs(&[(1, 6), (2, 6)]).await;
@@ -1479,14 +1496,71 @@ mod tests {
 
             assert_eq!(
                 outcome.stage3_batch,
-                vec![nid(2)],
-                "only the node the budget can admit is evaluated"
+                vec![nid(2), nid(1)],
+                "the whole window is evaluated, score-descending"
             );
             assert_eq!(outcome.promotions.len(), 1);
             assert_eq!(outcome.promotions[0].node_id, nid(2));
             assert_eq!(status_of(&g.read(), nid(1)), CanonizationStatus::Venerable);
             assert_eq!(status_of(&g.read(), nid(2)), CanonizationStatus::Canonical);
             assert_eq!(canonical_count(&g.read()), 1);
+        }
+
+        /// R2-2: a top-scoring Venerable that cannot pass must not hold the
+        /// last budget slot hostage.
+        ///
+        /// Ring `[A(score .9, blast 2), B(.5, blast 8), C(.4, blast 8)]` with
+        /// `max_canonical_nodes = 1`. A fails Stage 3's `> 5`; B and C pass.
+        /// While gather truncated the score-ranked window to the remaining
+        /// budget, `stage3_batch` was `[A]` on all ten cycles and the budget
+        /// never filled — the ring fits in `batch_size`, so the truncation
+        /// re-selected the same blocked node forever. B must promote on the
+        /// first cycle, and the remaining nine must then evaluate nothing
+        /// (budget full).
+        #[tokio::test]
+        async fn a_blocked_top_scorer_does_not_starve_the_rest_of_the_ring() {
+            let store = store_with_hubs(&[(1, 2), (2, 8), (3, 8)]).await;
+            let g = RwLock::new(venerable_graph(&[1, 2, 3]));
+            let mut p = params();
+            p.max_canonical_nodes = 1;
+            let scores = table(&[(1, 0.9), (2, 0.5), (3, 0.4)]);
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let mut promoted = Vec::new();
+            for cycle in 0..10 {
+                let outcome = eval_cycle(&mut ev, &g, &store, &scores, &tx, &p, ts())
+                    .await
+                    .unwrap();
+                promoted.extend(outcome.promotions.iter().map(|e| e.node_id));
+                if cycle == 0 {
+                    assert_eq!(
+                        outcome.stage3_batch,
+                        vec![nid(1), nid(2), nid(3)],
+                        "the whole ring is evaluated score-descending, not just \
+                         the top slot's worth"
+                    );
+                } else {
+                    assert!(
+                        outcome.stage3_batch.is_empty(),
+                        "budget full from cycle 1 on: {:?}",
+                        outcome.stage3_batch
+                    );
+                }
+            }
+
+            assert_eq!(
+                promoted,
+                vec![nid(2)],
+                "the highest-scoring node that can actually pass takes the slot"
+            );
+            assert_eq!(status_of(&g.read(), nid(2)), CanonizationStatus::Canonical);
+            assert_eq!(
+                status_of(&g.read(), nid(1)),
+                CanonizationStatus::Venerable,
+                "the blocked top scorer stays put — it just stops blocking"
+            );
+            assert_eq!(status_of(&g.read(), nid(3)), CanonizationStatus::Venerable);
         }
 
         /// F19: demotion ties. Two Canonicals with the **same** blast radius
