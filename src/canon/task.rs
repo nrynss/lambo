@@ -32,6 +32,18 @@
 //! Same argument as the daemon loop (CONC-4) and the flush loop: a panic in
 //! one cycle is logged and the loop continues. Without it a single panicking
 //! store call would stop canonization for the process's lifetime, silently.
+//!
+//! ## Shutdown
+//!
+//! The handle stops the loop by `abort()`, which cancels the cycle future at
+//! whatever await it is parked on. That is safe here for two reasons: no
+//! `parking_lot` guard is ever live across an await (the cycle takes the graph
+//! lock only in synchronous scopes — the compiler enforces it, since a `!Send`
+//! guard held across an await would make this future un-`spawn`able), and a
+//! hop whose phase-4 `record_canonization` is cancelled is already committed
+//! to the graph, its audit, and the write-behind log, so the next flush
+//! carries it to the store (deduped on event id). Cancellation can lose the
+//! immediacy of the durable write, never the transition.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -328,7 +340,7 @@ mod tests {
 
     /// 20 non-Canonical peers so Stage 1's session gate opens; id 20 is the
     /// only one above P90.
-    fn session() -> (Arc<RwLock<Graph>>, Arc<MemoryStore>, ScoreTable) {
+    fn session() -> (Arc<RwLock<Graph>>, MemoryStore, ScoreTable) {
         let mut g = Graph::new(sid());
         g.insert_interaction(interaction()).unwrap();
         for id in 1..=20u64 {
@@ -353,7 +365,7 @@ mod tests {
         let epoch = g.epoch();
         (
             Arc::new(RwLock::new(g)),
-            Arc::new(store),
+            store,
             ScoreTable { epoch, ranked },
         )
     }
@@ -373,7 +385,7 @@ mod tests {
 
     fn task(
         graph: Arc<RwLock<Graph>>,
-        store: Arc<MemoryStore>,
+        store: Arc<dyn GraphStore>,
         scores: ScoreTable,
         events: EventSender,
     ) -> CanonizationTask {
@@ -392,6 +404,238 @@ mod tests {
         .with_clock(Arc::new(ts))
     }
 
+    /// Capturing writer for asserting on emitted tracing events (mirrors the
+    /// flush suite's).
+    #[derive(Clone)]
+    struct BufWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// `MemoryStore` whose `record_canonization` can be told to fail or to
+    /// panic — the loop's two non-`Ok(Ok(_))` arms (R2-5). Everything else
+    /// delegates. Mirrors the flush suite's `PanicStore`.
+    struct FaultyStore {
+        inner: MemoryStore,
+        fail_record: AtomicBool,
+        panic_record: AtomicBool,
+    }
+
+    impl FaultyStore {
+        fn wrapping(inner: MemoryStore) -> Self {
+            Self {
+                inner,
+                fail_record: AtomicBool::new(false),
+                panic_record: AtomicBool::new(false),
+            }
+        }
+
+        fn fail_records(&self, on: bool) {
+            self.fail_record.store(on, Ordering::SeqCst);
+        }
+
+        fn panic_records(&self, on: bool) {
+            self.panic_record.store(on, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GraphStore for FaultyStore {
+        async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> crate::store::Capabilities {
+            self.inner.capabilities()
+        }
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), crate::types::StoreError> {
+            self.inner.flush(batch).await
+        }
+        async fn load_session(
+            &self,
+            session: &SessionId,
+        ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, crate::types::StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(
+            &self,
+            event: &crate::types::CanonizationEvent,
+        ) -> Result<(), crate::types::StoreError> {
+            if self.panic_record.load(Ordering::SeqCst) {
+                panic!("simulated canonization panic (FaultyStore)");
+            }
+            if self.fail_record.load(Ordering::SeqCst) {
+                return Err(crate::types::StoreError::Backend(
+                    "record_canonization is down".into(),
+                ));
+            }
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// R2-5: the `Ok(Err(_))` arm. A cycle that returns `EvalError` must be
+    /// logged and the loop must keep ticking — a later cycle still runs.
+    /// Without containment one unhealthy store would end canonization for the
+    /// process's lifetime, silently.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_cycle_is_logged_and_the_loop_keeps_ticking() {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let (graph, store, scores) = session();
+        let store = Arc::new(FaultyStore::wrapping(store));
+        store.fail_records(true);
+        let (tx, _rx) = event_channel();
+        let task = task(graph.clone(), store.clone(), scores, tx);
+        let handle = task.spawn();
+
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert_eq!(task.cycles(), 1, "the failing cycle still counts as run");
+        assert_eq!(task.failures(), 1);
+        assert!(!handle.is_finished(), "the loop must survive a cycle error");
+        // The commit point held: the hop is in the graph even though its
+        // durable audit write failed.
+        assert_eq!(
+            graph
+                .read()
+                .concepts()
+                .find(|c| c.id == nid(20))
+                .unwrap()
+                .canonization_status,
+            CanonizationStatus::Candidate,
+        );
+
+        // The store recovers; the next tick's cycle succeeds.
+        store.fail_records(false);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(task.cycles(), 2, "the loop kept ticking");
+        assert_eq!(task.failures(), 1, "and the later cycle did not fail");
+        assert!(!handle.is_finished());
+
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("CanonizationCycleFailed"),
+            "the failure must be logged: {out}"
+        );
+        assert!(
+            out.contains("record_canonization is down"),
+            "with the store error attached: {out}"
+        );
+        handle.abort();
+    }
+
+    /// R2-5: the `Err(payload)` arm. A panicking cycle is contained by
+    /// `CatchUnwindPoll` — an uncontained one would abort the spawned task and
+    /// finish the `JoinHandle` — and the loop continues with the next tick.
+    /// A panicking cycle does not count as completed.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_cycle_is_contained_and_the_loop_continues() {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let (graph, store, scores) = session();
+        let store = Arc::new(FaultyStore::wrapping(store));
+        store.panic_records(true);
+        let (tx, _rx) = event_channel();
+        let task = task(graph.clone(), store.clone(), scores, tx);
+        let handle = task.spawn();
+
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert!(
+            !handle.is_finished(),
+            "an uncontained panic would have aborted the loop"
+        );
+        assert_eq!(task.cycles(), 0, "a panicking cycle does not count");
+        assert_eq!(task.failures(), 0);
+        // The panic landed in phase 4, after the commit point.
+        assert_eq!(
+            graph
+                .read()
+                .concepts()
+                .find(|c| c.id == nid(20))
+                .unwrap()
+                .canonization_status,
+            CanonizationStatus::Candidate,
+        );
+
+        store.panic_records(false);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(task.cycles(), 1, "the loop continued with the next tick");
+        assert!(!handle.is_finished());
+
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("CanonizationCyclePanic"),
+            "the panic must be logged: {out}"
+        );
+        assert!(
+            out.contains("simulated canonization panic (FaultyStore)"),
+            "panic payload missing: {out}"
+        );
+        handle.abort();
+    }
+
     /// F2: the loop exists, consumes `canonization_eval_interval`, and drives
     /// real transitions in a spawned task with the graph behind the
     /// production `Arc<RwLock<Graph>>` — the shape the review found had no
@@ -400,7 +644,7 @@ mod tests {
     async fn spawned_loop_promotes_through_the_shared_graph() {
         let (graph, store, scores) = session();
         let (tx, mut rx) = event_channel();
-        let task = task(graph.clone(), store, scores, tx);
+        let task = task(graph.clone(), Arc::new(store), scores, tx);
         let handle = task.spawn();
 
         task.wake();
@@ -436,7 +680,7 @@ mod tests {
     async fn cycles_are_driven_by_the_configured_interval() {
         let (graph, store, scores) = session();
         let (tx, _rx) = event_channel();
-        let mut task = task(graph, store, scores, tx);
+        let mut task = task(graph, Arc::new(store), scores, tx);
         task.interval = Duration::from_secs(60);
         let handle = task.spawn();
 
@@ -460,7 +704,7 @@ mod tests {
     async fn spawn_twice_panics() {
         let (graph, store, scores) = session();
         let (tx, _rx) = event_channel();
-        let task = task(graph, store, scores, tx);
+        let task = task(graph, Arc::new(store), scores, tx);
         let _first = task.spawn();
         let _second = task.spawn();
     }
@@ -478,7 +722,7 @@ mod tests {
             Duration::from_secs(3600),
         );
         let config = Config::default();
-        let task = CanonizationTask::from_daemon(graph, store, &daemon, &config);
+        let task = CanonizationTask::from_daemon(graph, Arc::new(store), &daemon, &config);
         assert_eq!(task.interval, config.canonization_eval_interval);
         assert_eq!(task.params, EvalParams::from_config(&config));
         assert!(
