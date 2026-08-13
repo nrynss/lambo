@@ -2213,5 +2213,106 @@ mod tests {
                 "SQLite canonization_events must match the in-graph audit"
             );
         }
+        /// Rewrite every `session_id` on a fixture snapshot to `new_sid`, so a
+        /// live adapter test runs in its own namespace instead of the shared
+        /// `session-rest-api` one (whose rows persist on the CockroachDB
+        /// cluster and would otherwise break the conformance roundtrip check).
+        #[cfg(feature = "store-cockroach")]
+        fn rest_to_sid(snap: &mut crate::types::GraphSnapshot, new_sid: SessionId) {
+            snap.session_id = new_sid.clone();
+            for i in snap.interactions.iter_mut() {
+                i.session_id = new_sid.clone();
+            }
+            for c in snap.concepts.iter_mut() {
+                c.session_id = new_sid.clone();
+            }
+            for e in snap.edges.iter_mut() {
+                e.session_id = new_sid.clone();
+            }
+            for s in snap.synonyms.iter_mut() {
+                s.session_id = new_sid.clone();
+            }
+            for r in snap.reservations.iter_mut() {
+                r.session_id = new_sid.clone();
+            }
+            for ev in snap.canonization_events.iter_mut() {
+                ev.session_id = new_sid.clone();
+            }
+        }
+
+        /// Live CockroachDB parity: the same three-hop progression, run
+        /// against the durable CockroachDB adapter. This exercises
+        /// CockroachDB's `blast_radius` / `interaction_span` / `record_canonization`
+        /// as the canonization loop's store, proving the SQL structural queries
+        /// yield the same verdict as MemoryStore. `#[ignore]`d: without
+        /// `LAMBO_COCKROACH_DSN` this must report as ignored, never skip-as-green.
+        #[cfg(feature = "store-cockroach")]
+        #[tokio::test]
+        #[ignore = "requires LAMBO_COCKROACH_DSN (run live via -- --ignored)"]
+        async fn cockroach_three_hop_progression_matches_memory() {
+            use crate::store::cockroach::CockroachStore;
+            use crate::store::{GraphStore, StoreConfig};
+
+            let Some(dsn) = crate::store::StoreConfig::dsn_from_env() else {
+                eprintln!("SKIP cockroach_three_hop_progression_matches_memory: LAMBO_COCKROACH_DSN not set");
+                return;
+            };
+            // Isolated namespace so re-runs against the persistent cluster
+            // never collide with the conformance suite's `session-rest-api`
+            // roundtrip assertion.
+            let unique = SessionId::from(format!("conformance-canoneval-{}", Uuid::new_v4()));
+            let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
+            rewind_canonicals(&mut snap);
+            rest_to_sid(&mut snap, unique.clone());
+            let graph = Graph::from_snapshot(snap.clone()).unwrap();
+            let store = CockroachStore::new(StoreConfig {
+                kind: crate::store::StoreKind::Cockroach,
+                dsn: Some(dsn),
+                path: None,
+            })
+            .unwrap();
+            store.init_schema().await.unwrap();
+            store.seed(&snap).await.unwrap();
+
+            let us = find_id(&graph, "user schema");
+            assert_eq!(status_of(&graph, us), CanonizationStatus::None);
+
+            let scores = ScoreTable {
+                epoch: graph.epoch(),
+                ranked: rescore(&graph, &ScoringWeights::default()),
+            };
+            let graph = RwLock::new(graph);
+            let mut p = params();
+            p.min_peer_count = crate::Config::default().canonization_min_peer_count;
+
+            let (tx, _rx) = crate::daemon::events::event_channel();
+            let mut ev = Evaluator::new();
+            for i in 0..3 {
+                let now = fixture_now() + chrono::Duration::seconds(60 * i as i64);
+                eval_cycle(&mut ev, &graph, &store, &scores, &tx, &p, now)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(status_of(&graph.read(), us), CanonizationStatus::Canonical);
+
+            let graph_events = graph.read().canonization_events().to_vec();
+            let us_hops = hops_for(&graph_events, us);
+            assert_eq!(
+                us_hops,
+                vec![
+                    (CanonizationStatus::None, CanonizationStatus::Candidate),
+                    (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+                    (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+                ],
+                "CockroachDB structural queries must yield the same progression: {us_hops:?}"
+            );
+
+            let reloaded = store.load_session(&unique).await.unwrap();
+            assert_eq!(
+                hops_for(&reloaded.canonization_events, us),
+                us_hops,
+                "CockroachDB canonization_events must match the in-graph audit"
+            );
+        }
     }
 }
