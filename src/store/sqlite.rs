@@ -749,6 +749,16 @@ impl GraphStore for SqliteStore {
         // excludes the node itself, and `e.created_at <= ?` gates the edge age
         // exactly like MemoryStore (the spec's span query gates only the
         // interaction age — see interaction_span).
+        //
+        // **Session scope (R2-3).** Both structural subqueries scope their
+        // source concept with `src.session_id = ?` / `src2.session_id = ?`,
+        // matching Cockroach's `BLAST_RADIUS_SQL` and MemoryStore's
+        // `concept_ids` (built from the session snapshot). Edges carry a
+        // `session_id` but the join to `concepts` did not, so a cross-session
+        // edge into a dependent satisfied the `NOT EXISTS` arm and
+        // **un-orphaned** it here and nowhere else — SQLite under-counted
+        // blast against both other backends, suppressing Stage-3 promotions
+        // and mis-ranking budget demotion.
         self.require_session(session).await?;
         // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
         let cutoff = cutoff_text(now, min_edge_age)?;
@@ -761,21 +771,23 @@ impl GraphStore for SqliteStore {
                AND c.id <> ? \
                AND EXISTS ( \
                    SELECT 1 FROM edges e \
-                   JOIN concepts src ON src.id = e.source \
+                   JOIN concepts src ON src.id = e.source AND src.session_id = ? \
                    WHERE e.target = c.id AND e.source = ? \
                      AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND e.created_at <= ?) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM edges e2 \
-                   JOIN concepts src2 ON src2.id = e2.source \
+                   JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = ? \
                    WHERE e2.target = c.id AND e2.source <> ? \
                      AND e2.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND e2.created_at <= ?)"
         ))
         .bind(&session.0)
         .bind(&node_text)
+        .bind(&session.0)
         .bind(&node_text)
         .bind(&cutoff)
+        .bind(&session.0)
         .bind(&node_text)
         .bind(&cutoff)
         .fetch_one(self.pool())
@@ -2348,6 +2360,77 @@ mod tests {
                 "SQLite must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
             );
         }
+    }
+
+    /// R2-3: `blast_radius` must be session-scoped on the **source** side of
+    /// both structural subqueries, exactly as Cockroach's `BLAST_RADIUS_SQL`
+    /// is and as MemoryStore is by construction (it walks one session's
+    /// snapshot, and its `concept_ids` set holds that session's concepts
+    /// only).
+    ///
+    /// `hub -> dep` in session `here` makes `dep` an exclusive dependent, so
+    /// blast is 1. A second structural edge into `dep` whose **source concept
+    /// lives in another session** must not un-orphan it: MemoryStore skips
+    /// that source (not in `concept_ids`), and SQLite used to join `concepts`
+    /// with no session predicate, satisfy the `NOT EXISTS` arm, and answer 0
+    /// — under-counting blast, which suppresses Stage-3 promotions and
+    /// mis-ranks budget demotion. The session-local answer is the contract on
+    /// every backend.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn blast_radius_ignores_cross_session_sources_like_memory() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let here = SessionId::from("here");
+        let there = SessionId::from("there");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        let hub = NodeId::new();
+        let dep = NodeId::new();
+        let foreign = NodeId::new();
+
+        let local = MutationBatch {
+            mutations: vec![
+                plant_interaction(&here, i1, None, ts),
+                plant_concept(&here, hub, i1, "hub", ConceptType::Entity, ts),
+                plant_concept(&here, dep, i1, "dep", ConceptType::Entity, ts),
+                plant_edge(&here, hub, dep, EdgeType::Dependency, ts),
+                // An edge recorded in `here` whose source concept belongs to
+                // `there` — the schema permits it (edges carry no FK) and
+                // `GraphStore::flush` is public.
+                plant_edge(&here, foreign, dep, EdgeType::Dependency, ts),
+            ],
+        };
+        let elsewhere = MutationBatch {
+            mutations: vec![
+                plant_interaction(&there, i2, None, ts),
+                plant_concept(&there, foreign, i2, "foreign", ConceptType::Entity, ts),
+            ],
+        };
+        store.flush(&local).await.unwrap();
+        store.flush(&elsewhere).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&local).await.unwrap();
+        memory.flush(&elsewhere).await.unwrap();
+
+        let want = memory
+            .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            want, 1,
+            "oracle sanity: a foreign-session source cannot un-orphan `dep`"
+        );
+        let got = store
+            .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            got, want,
+            "SQLite must scope the structural sources to the session, like \
+             MemoryStore and Cockroach"
+        );
     }
 
     /// Edge-age interaction (T3.6 matrix; round-1 review F1 remediation): an
