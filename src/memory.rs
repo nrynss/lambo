@@ -1207,6 +1207,19 @@ impl Memory {
     /// retry replays it, which the `src/graph/mod.rs` replay contract makes
     /// idempotent (the failure path has always made the same bet).
     ///
+    /// **Nor does it strand a background task** (R3-1). Cancellation lands on
+    /// whichever `.await` this future is parked on, and the longest of those is
+    /// the step-2 join — the one an external `timeout` almost always fires in.
+    /// A dropped `JoinHandle` *detaches* its task rather than stopping it, so
+    /// that used to leave a live flush loop still holding the tail in its own
+    /// `pending` buffer while the retry — finding an empty slot and an empty log
+    /// — took the shortcut below and returned `Ok(())`. Every handle therefore
+    /// travels in a [`HandleCustody`] guard that returns it to its slot unless
+    /// the join actually completed, so a retry re-joins the same task and picks
+    /// up the tail it requeues. The invariant that falls out of it —
+    /// no success is ever latched over an un-joined flush task — is asserted in
+    /// [`Memory::latch_success`].
+    ///
     /// ## The drain (COH-6)
     ///
     /// `FlushTask` owns its `pending` buffer, so a hard
@@ -1224,12 +1237,18 @@ impl Memory {
     ///    not just of the tasks. `abort()` is safe for both tasks: neither
     ///    holds a `parking_lot` guard across an `.await`, and the write-behind
     ///    log carries any canonization hop whose phase-4 record was cancelled.
+    ///    Both are then **joined**, not merely aborted: tokio cancels a running
+    ///    task at its next `.await`, so until the join returns an aborted
+    ///    producer can still finish a synchronous stretch — and append to the
+    ///    log (R3-1).
     /// 1. [`FlushTask::stop`] — the loop finishes its current `cycle()` (an
     ///    in-flight flush and its retry/backoff complete; a post-retry
     ///    `RETAINED_BACKOFF` hold is *not* waited out), re-appends `pending` to
     ///    the **front** of the graph log, and exits.
     /// 2. Await its handle — the task is gone and can no longer take the graph
-    ///    lock, so step 3 races nothing.
+    ///    lock, so step 3 races nothing. The handle is held in a
+    ///    [`HandleCustody`] guard for the whole of that await, so a cancelled
+    ///    join returns it to its slot instead of detaching the task (R3-1).
     /// 3. Take the graph lock, `drain_log()`, release. The batch is handed
     ///    straight to a [`TailCustody`] guard, which returns it to the log if
     ///    this future is dropped before step 4 makes it durable (R2-1).
@@ -1293,30 +1312,38 @@ impl Memory {
         self.closed.store(true, Ordering::Release);
         let _quiesced = self.writers.write().await;
 
-        // ...and the two mutation producers off, before the drain.
-        let canon_handle = self.canon_handle.lock().take();
-        if let Some(handle) = canon_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
-        let daemon_handle = self.daemon_handle.lock().take();
-        if let Some(handle) = daemon_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
+        // ...and the two mutation producers off, before the drain. Every
+        // handle travels in a `HandleCustody` guard: cancelled on a join, this
+        // future must hand the handle back to its slot rather than detach a
+        // task that is still able to write (R3-1). `abort()` is synchronous, so
+        // it cannot be skipped by a cancellation — but only the join proves the
+        // task has actually stopped.
+        let mut canon = HandleCustody::take(&self.canon_handle);
+        canon.abort();
+        let _ = canon.join().await;
+        drop(canon);
+
+        let mut daemon = HandleCustody::take(&self.daemon_handle);
+        daemon.abort();
+        let _ = daemon.join().await;
+        drop(daemon);
 
         // 1 — graceful stop; the loop returns custody of `pending`.
         self.flush.stop();
 
-        // 2 — join. After this the flush task cannot touch the graph.
-        let flush_handle = self.flush_handle.lock().take();
-        if let Some(handle) = flush_handle {
-            if let Err(err) = handle.await {
-                if !err.is_cancelled() {
-                    tracing::warn!(error = %err, "flush task did not stop cleanly");
-                }
+        // 2 — join. After this the flush task cannot touch the graph. This is
+        // the long await (the whole of `close`'s "worst case ≈ 2 minutes") and
+        // so the one an external timeout fires in: dropping the handle here
+        // used to leave a zombie flush task holding the tail in its own
+        // `pending`, invisible to the retry, to `Drop`'s warning and to the log
+        // (R3-1). Custody keeps it re-joinable instead.
+        let mut flush = HandleCustody::take(&self.flush_handle);
+        if let Some(Err(err)) = flush.join().await {
+            if !err.is_cancelled() {
+                tracing::warn!(error = %err, "flush task did not stop cleanly");
             }
         }
+        drop(flush);
 
         // 3 — final drain. Short critical section, guard dies with the block.
         let batch = { self.graph.write().drain_log() };
@@ -1358,8 +1385,7 @@ impl Memory {
         }
 
         if tail.is_empty() {
-            *succeeded = true;
-            self.unregister_once();
+            self.latch_success(&mut succeeded);
             return Ok(());
         }
 
@@ -1379,8 +1405,7 @@ impl Memory {
                     session = %self.session,
                     "Memory session closed (tail flushed)"
                 );
-                *succeeded = true;
-                self.unregister_once();
+                self.latch_success(&mut succeeded);
                 Ok(())
             }
             Err(err) => {
@@ -1463,6 +1488,33 @@ impl Memory {
         if self.registered.swap(false, Ordering::AcqRel) {
             unregister_session(&self.session, &self.agent);
         }
+    }
+
+    /// The one place `close()` latches success and gives up its registry slot.
+    ///
+    /// Both success paths — the empty-log shortcut and a completed step-4 flush
+    /// — go through here so the R3-1 invariant is asserted once for both: **no
+    /// `close()` may report success while a flush `JoinHandle` is still parked
+    /// in its slot un-joined.** A parked handle means a live flush task, and a
+    /// live flush task may hold the tail in its own `pending` buffer, where an
+    /// empty log looks exactly like a written one.
+    ///
+    /// [`HandleCustody`] is what *guarantees* it, and the guarantee is a
+    /// two-line argument: the slot is emptied only into a custody guard, and
+    /// that guard hands the handle back unless the join returned. So `None` at
+    /// step 3 means "reaped", never "detached" — the state that made the
+    /// shortcut a lie. The assertion is the pin on that reasoning rather than a
+    /// second mechanism, hence `debug_assert!`: it costs nothing in release and
+    /// turns a future regression in the guard into a loud test failure instead
+    /// of a quiet `Ok(())`.
+    fn latch_success(&self, succeeded: &mut bool) {
+        debug_assert!(
+            self.flush_handle.lock().is_none(),
+            "close() latched success with an un-joined flush task still in its slot: the tail may \
+             be sitting in that task's pending buffer (R3-1)"
+        );
+        *succeeded = true;
+        self.unregister_once();
     }
 
     fn ensure_open(&self) -> Result<(), LamboError> {
@@ -1581,6 +1633,87 @@ impl Drop for Memory {
                  mutations were discarded. close() returned an error (or was cancelled) and \
                  kept that tail in the log for a retry that never came."
             );
+        }
+    }
+}
+
+/// Custody of a background task's [`JoinHandle`] while `close()` stops and
+/// reaps it — R3-1.
+///
+/// `close()` used to lift each handle out of its slot (`slot.lock().take()`)
+/// and then `await` it as a bare local. That await is the long one — the flush
+/// join is what `close`'s "worst case ≈ 2 minutes" measures, and an external
+/// [`timeout`](tokio::time::timeout) around `close()` is the posture its own
+/// docs invite. Dropping the future there dropped the local `JoinHandle`, which
+/// **detaches** the task rather than stopping it: the flush loop kept running,
+/// kept its `pending` buffer — which holds the tail, the log having already
+/// been drained into it — and kept writing the session through its own `Arc`s.
+/// The slot was left `None`, so the retried `close()` skipped the join, drained
+/// an empty log, took the empty-log shortcut and returned `Ok(())` over a tail
+/// that was neither durable nor anywhere [`Drop`]'s R2-2 warning could see it
+/// (the log was empty because the zombie held the batch). COH-6 clause 13 — "a
+/// retained batch is never silently lost" — by the same route.
+///
+/// So a handle is never a bare local either. This guard owns it from the take
+/// until [`HandleCustody::join`] sees the task actually finish, and its `Drop`
+/// returns an un-reaped handle to its slot. A `JoinHandle` whose poll was
+/// cancelled is re-awaitable, so the retry re-joins *that* task, waits out its
+/// in-flight attempt and collects its `requeue_pending` (COH-6): the tail is
+/// back on the log before step 3 drains, and the empty-log shortcut is never
+/// reached with a live flush task behind it.
+///
+/// **All three handles, not only the flush one.** The daemon and canonization
+/// handles are `abort()`ed before their join, and `abort()` is a synchronous
+/// fire — cancellation cannot land between the take and the abort, because
+/// there is no await between them. What the abort does *not* buy is that the
+/// task has stopped: tokio cancels an already-running task at its next
+/// `.await`, so an aborted producer can still finish a synchronous stretch, and
+/// that stretch can append to the graph log. Only the join proves it is over.
+/// Detached at its join, such a task is left running while the retry goes
+/// straight to the drain — the same `Ok(())`-over-a-lost-mutation shape as the
+/// flush case, through a narrower window. Same guard, same reason.
+///
+/// Like [`TailCustody`], the `parking_lot` guard is taken for one statement and
+/// never across an `.await` (§6.4): `join` holds nothing while it waits.
+struct HandleCustody<'a> {
+    slot: &'a PlMutex<Option<JoinHandle<()>>>,
+    /// `None` once [`HandleCustody::join`] has reaped the task — that is what
+    /// tells `Drop` there is nothing to hand back.
+    handle: Option<JoinHandle<()>>,
+}
+
+impl<'a> HandleCustody<'a> {
+    /// Lift the handle out of `slot`. The slot stays empty only for as long as
+    /// this guard lives.
+    fn take(slot: &'a PlMutex<Option<JoinHandle<()>>>) -> Self {
+        let handle = slot.lock().take();
+        Self { slot, handle }
+    }
+
+    /// Signal cancellation. Synchronous, so no cancellation of `close()` can
+    /// land between this and the [`HandleCustody::join`] that follows it.
+    fn abort(&self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+
+    /// Wait for the task to finish; `None` if the slot was already empty (an
+    /// earlier `close()` reaped it).
+    ///
+    /// Custody ends only when the join **returns**. Cancelled mid-poll, the
+    /// handle is still owned here and `Drop` puts it back.
+    async fn join(&mut self) -> Option<Result<(), tokio::task::JoinError>> {
+        let outcome = self.handle.as_mut()?.await;
+        self.handle = None;
+        Some(outcome)
+    }
+}
+
+impl Drop for HandleCustody<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            *self.slot.lock() = Some(handle);
         }
     }
 }
@@ -2762,6 +2895,118 @@ mod tests {
             "Ok(()) from close() must mean the tail is durable"
         );
         assert_eq!(mem.graph().read().log_len(), 0);
+    }
+
+    /// R3-1: a `close()` cancelled at the **step-2 join** must not detach the
+    /// flush task.
+    ///
+    /// R2-1 covered the drain-to-flush window; this is the window before it,
+    /// and the likelier one — the join is the long await (`close`'s own "worst
+    /// case ≈ 2 minutes" is mostly this), so an external `timeout` fires here.
+    /// The handle was lifted out of its slot *before* that await, so dropping
+    /// the future dropped the local: the flush task was detached, not stopped —
+    /// still running, still holding the whole tail in its `pending` (it had
+    /// already drained the log into it), still writing through its own `Arc`s.
+    /// The retry then found `flush_handle == None`, skipped the join, drained an
+    /// empty log, took the empty-log shortcut, latched success, released the
+    /// [`ACTIVE_SESSIONS`] slot and returned `Ok(())` over a tail that was not
+    /// durable. `Drop`'s R2-2 warning was blind to it for the same reason the
+    /// shortcut was: the log really was empty.
+    ///
+    /// With [`HandleCustody`] the cancelled join hands the handle back, so the
+    /// retry re-joins that same task — a cancelled poll leaves a `JoinHandle`
+    /// re-awaitable — and the tail is written before any `Ok`.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_cancelled_at_the_flush_join_keeps_the_handle_and_reaps_the_task() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let adverse = Arc::new(AdverseStore::new(inner.clone(), FlushBehaviour::HangOnce));
+        let store: Arc<dyn GraphStore> = adverse.clone();
+        let mem = Memory::builder()
+            .session("cancelled-join")
+            .agent("agent-a")
+            // Short enough that the background loop is mid-attempt when the
+            // caller closes: the cancellation must land on step 2, not step 4.
+            .flush_interval(Duration::from_secs(1))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap();
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+
+        // Walk the clock to the first tick: the task's attempt is now hung
+        // inside the store, with the tail in its `pending` buffer.
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(200)).await;
+            tokio::task::yield_now().await;
+            if adverse.flush_calls() > 0 {
+                break;
+            }
+        }
+        assert_eq!(adverse.flush_calls(), 1, "a flush must be in flight");
+        assert!(!adverse.flush_completed(), "and still in flight");
+        assert_eq!(
+            mem.graph().read().log_len(),
+            0,
+            "the tail is in the task's pending buffer now, not in the log — which is what \
+             makes a detached task invisible to everything downstream"
+        );
+
+        // The caller gives up well inside the task's own FLUSH_ATTEMPT_TIMEOUT,
+        // so `close()` is dropped parked on the join.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), mem.close()).await;
+        assert!(
+            outcome.is_err(),
+            "the hung attempt must outlast the caller's patience"
+        );
+        assert_eq!(adverse.flush_calls(), 1, "step 4 was never reached");
+        assert!(
+            mem.flush_handle.lock().is_some(),
+            "a cancelled step-2 join must return the JoinHandle to its slot: detached, the task \
+             runs on and the retry skips the join entirely (R3-1)"
+        );
+        assert!(
+            inner
+                .load_session(&SessionId::new("cancelled-join"))
+                .await
+                .is_err(),
+            "nothing durable yet"
+        );
+
+        // The store is healthy for the task's next attempt. The retry re-joins
+        // that same task, so it waits out the attempt (and gets the tail with
+        // it) instead of blessing an empty log.
+        tokio::time::timeout(Duration::from_secs(300), mem.close())
+            .await
+            .expect("the retry must re-join the flush task, not hang")
+            .expect("close");
+
+        let snap = inner
+            .load_session(&SessionId::new("cancelled-join"))
+            .await
+            .expect("Ok(()) from close() must mean the tail is durable");
+        assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+        assert_eq!(mem.graph().read().log_len(), 0);
+
+        // ...and no zombie behind that `Ok`. Detached, the task's hung attempt
+        // times out at FLUSH_ATTEMPT_TIMEOUT and it goes right on flushing —
+        // after `close()` returned, which is how the reviewer's probe caught it.
+        assert!(
+            mem.flush_handle.lock().is_none(),
+            "a reaped task leaves its slot empty"
+        );
+        let after_ok = adverse.flush_calls();
+        tokio::time::advance(FLUSH_ATTEMPT_TIMEOUT * 4).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            adverse.flush_calls(),
+            after_ok,
+            "a store call after close() returned Ok means the flush task was never stopped"
+        );
     }
 
     /// T81-6: a second **concurrent** `close()` must not report `Ok` over an
