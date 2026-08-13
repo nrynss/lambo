@@ -1,0 +1,76 @@
+Vector index EXPLAIN — predicate finding
+captured: 2026-08-13T13:02:18Z
+cluster : nrynss-19495.jxf.gcp-asia-south1.cockroachlabs.cloud:26257  db=lambo
+concepts total: 2833
+with embedding: 2118
+distinct vectors: 2004
+
+== A. Production VECTOR_CANDIDATES_SQL shape (WITH 'embedding IS NOT NULL') ==
+-- this is what vector_explain_camera_proof asserts against --
+                                            info                                            
+--------------------------------------------------------------------------------------------
+ distribution: local
+ 
+ • top-k
+ │ estimated row count: 5
+ │ order: +dist
+ │ k: 5
+ │
+ └── • render
+     │
+     └── • filter
+         │ estimated row count: 2,118
+         │ filter: embedding IS NOT NULL
+         │
+         └── • scan
+               estimated row count: 2,833 (100% of the table; stats collected 1 minute ago)
+               table: concepts@concepts_pkey
+               spans: FULL SCAN
+(17 rows)
+
+
+== B. Same query, predicate REMOVED ==
+                         info                         
+------------------------------------------------------
+ distribution: local
+ 
+ • top-k
+ │ estimated row count: 5
+ │ order: +dist
+ │ k: 5
+ │
+ └── • render
+     │
+     └── • lookup join
+         │ table: concepts@concepts_pkey
+         │ equality: (id) = (id)
+         │ equality cols are key
+         │
+         └── • vector search
+               table: concepts@concepts_embedding_idx
+               target count: 5
+(17 rows)
+
+
+== C. Explicit index hint (proves the index is usable on this cluster) ==
+                         info                         
+------------------------------------------------------
+ distribution: local
+ 
+ • top-k
+ │ estimated row count: 5
+ │ order: +column21
+ │ k: 5
+ │
+ └── • render
+     │
+     └── • lookup join
+         │ table: concepts@concepts_pkey
+         │ equality: (id) = (id)
+         │ equality cols are key
+         │
+         └── • vector search
+               table: concepts@concepts_embedding_idx
+               target count: 5
+(17 rows)
+
