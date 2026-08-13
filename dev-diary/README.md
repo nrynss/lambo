@@ -164,7 +164,7 @@ Keep this current; it is the only global view.
 | P5 | 4 / 4 | **DONE + MERGED TO MAIN (2026-08-12)** — T5.1–T5.4 + entry `Daemon::recall`; reviews CLOSED (internal R1+R2, GPT5.6sol 4 P1 + 4 P2 remediated, independent deep adversarial ACCEPT); exit criteria [x] |
 | P6 | 4 / 4 | **DONE + MERGED TO MAIN (2026-08-13, commit 1dfffbc)** — T6.1–T6.4 (Candidate, Venerable, Canonical, eval loop/budget/demotion/audit); exit criteria [x] all four; reviews CLOSED (fable ×5 — 19 findings remediated, R2 round, R3 CLEAN); live-Cockroach canonization progression test committed (d816d28). Carryover is P8-owned, not P6 debt: F18 server-side `created_at` → T8.2; R3-1 `seed()` divergence → T8.4; F13/R3-4 eval-batch query volume → T8.2/T8.4 (all three already written into PHASE-8) |
 | P7 | 3 / 4 | **MERGED TO MAIN (2026-08-13, commit 9b0c603)** — T7.0 BGE-M3/llama.cpp (default path), T7.2 hybrid matching, T7.3 live `vector_candidates` on Cockroach all done. **T7.1 Titan is the only open task and is not blocked on us:** AWS account is not yet authorized for Bedrock — a PR adding the `embed-bedrock` adapter goes up regardless, and the access request is being pursued with AWS. The default dense path is BGE-M3, so the ship does not wait on it (spec §12.2 keeps Titan as the swap-in). Two integration items live downstream: T8.1 wires hybrid into live sessions, and ship needs an index-favorable camera-proof `EXPLAIN` |
-| P8 | 0 / 5 | **OPEN for claiming — the frontier.** All hard requires (P2 P4 P5 P6 T7.x) are on `main`; only T8.1 is serial, then T8.2 ‖ T8.3 ‖ T8.5 go wide |
+| P8 | 0 / 5 | **IN PROGRESS — the frontier.** All hard requires (P2 P4 P5 P6 T7.x) are on `main`. **Runs SERIAL, not wide** (decision 2026-08-13): one branch, one task at a time, with a task → adversarial-review → remediation → review agent loop and a hard stop after each agent. See [PHASE-8 §Execution protocol](PHASE-8-surface.md). Setup done: `owns` collisions in `src/cli/` fixed, T8.1 cross-phase writes authorized, rmcp 3.1.2 chosen, four build-not-wire gaps recorded |
 | P9 | 0 / 5 | blocked on P8 |
 
 ---
@@ -173,6 +173,15 @@ Keep this current; it is the only global view.
 
 Each **phase** is a `phase/<slug>` branch; each **task** is a worktree on a
 `task/<…>` branch. `main` is the single integrator.
+
+> **P8 is an explicit exception (decided 2026-08-13).** The convergence phase runs
+> **serial on a single branch with no task worktrees**: its tasks share `src/main.rs`
+> and `src/cli/`, so running them wide buys hours and costs conflicts in the one file
+> the demo depends on. P8 also adds a mandatory per-task agent loop (task →
+> adversarial review → remediation → review, repeat to CLEAN, hard stop after each
+> agent, orchestrator commits). The rules below still describe P0–P7 and any future
+> wide phase — see [PHASE-8 §Execution protocol](PHASE-8-surface.md) for what P8 does
+> instead.
 
 **Topology (star):** merge only `worker → phase → main`. **Never** merge one
 phase branch into another — cross-phase dependencies are resolved through `main`.

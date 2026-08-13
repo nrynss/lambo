@@ -5,12 +5,165 @@ id:       P8
 branch:   phase/p8-surface
 requires: [T2.3, T2.4, T4.3, T5.3, T6.4]   # soft: T3.2 (live store), T7.x (hybrid)
 blocks:   P9
-parallel: partial   # T8.1 first; then T8.2 ‖ T8.3 ‖ T8.5; T8.4 needs T8.2
+parallel: NO — serial by decision 2026-08-13 (see §Execution protocol)
 ```
 
 **Goal:** assemble the library into `lambo`, expose it over MCP, and make the spec §13
 two-agent demo scripted and reproducible. This is where the tracks converge; expect
 integration friction here, not in the tracks — budget for it.
+
+**Status as of 2026-08-13:** every hard prerequisite is on `main` (P2, P3, P4, P5, P6 merged;
+P7 merged except authorization-blocked T7.1). Nothing in P8 is waiting on another phase.
+
+---
+
+## Execution protocol (binding — read before claiming anything)
+
+P8 does **not** use the wide worktree swarm that P2–P7 used. It runs **serial, on one
+branch, with a fixed multi-agent review loop per task.** This was decided 2026-08-13
+because P8 is the convergence point: its tasks share `src/main.rs` and `src/cli/`, and
+integration bugs here are the ones that sink the demo.
+
+### Branch
+
+One branch for the whole phase: **`phase/p8-surface`**, cut from `main`. No task worktrees,
+no task branches. Merge `phase/p8-surface → main` when the phase exit criteria are met.
+
+### The loop, per task
+
+Each task runs this cycle. **Every step is a separate agent invocation, and there is a hard
+stop after each one** — the orchestrator commits and waits for a human go-ahead before
+spawning the next agent. No agent runs two roles. The orchestrator does not implement,
+review, or remediate; it briefs, commits, and gates.
+
+```text
+  ┌─────────────────────────────────────────────────────────────┐
+  │  1. TASK AGENT          implements the task                 │
+  │       ↓ orchestrator commits          ↓ HARD STOP           │
+  │  2. ADVERSARIAL REVIEW AGENT   finds defects, writes report │
+  │       ↓ orchestrator commits          ↓ HARD STOP           │
+  │  3. REMEDIATION AGENT   fixes the findings                  │
+  │       ↓ orchestrator commits          ↓ HARD STOP           │
+  │  4. REVIEW AGENT        re-reviews the remediation          │
+  │       ↓ orchestrator commits          ↓ HARD STOP           │
+  │       └── not clean? → back to 3.  clean? → next task.      │
+  └─────────────────────────────────────────────────────────────┘
+```
+
+| Step | Role | Writes to | Must NOT |
+|---|---|---|---|
+| 1 | **Task agent** | the task's `owns` paths | review its own work; skip the Handoff Log |
+| 2 | **Adversarial review agent** | `dev-diary/adversarial-review/adve-review-t8.N-<slug>.md` | fix anything it finds — findings only |
+| 3 | **Remediation agent** | the task's `owns` paths + the review file (mark each finding) | invent new scope; silently reject a finding without recording why |
+| 4 | **Review agent** | the review file (verdict) | rewrite code — verdict only |
+
+**Termination:** repeat 3 → 4 until the review agent returns **CLEAN**. A review that returns
+findings goes back to remediation. Record every round in the review file (R1, R2, R3 …), the
+same way P6 did — see `adve-review-p6-canonization-fable.md` for the shape to copy.
+
+**Finding severities:** P1 = must fix before the task is done. P2 = fix unless it forces new
+scope; if deferred, name the task that inherits it. P3 = record, fix only if cheap.
+
+**Commit discipline:** one commit per agent, message prefixed with the step —
+`feat(P8):` / `adve-review:` / `fix(P8):` / `docs(P8):`. The orchestrator commits; agents do
+not commit. This keeps the phase's history readable as the audit trail it is.
+
+### Why serial (do not "optimize" this back to parallel)
+
+T8.1 is a hard serial gate — nothing else can compile without `Memory`. After it, T8.2/T8.3/
+T8.5 are *nominally* parallel but all three write dispatch arms into `src/main.rs`, and T8.4
+lives inside T8.3's directory. Running them wide buys hours and costs merge conflicts in the
+one file that must work for the demo. Serial it is.
+
+---
+
+## Shared-file rules for P8 (the `owns` collisions, resolved)
+
+The original phase doc had three tasks claiming overlapping paths, which violates the
+`dev-diary/README.md` rule that no two tasks may own the same path. Resolved 2026-08-13:
+
+**`src/cli/` is split by file, not claimed wholesale.**
+
+| Path | Owner |
+|---|---|
+| `src/cli/mod.rs` | T8.3 (module decls; later tasks append their `pub mod` line only) |
+| `src/cli/recall.rs`, `saints.rs`, `inspect.rs`, `stats.rs`, `provision.rs` | T8.3 |
+| `src/cli/demo.rs` | **T8.4** — not T8.3 |
+| `src/cli/serve_web.rs` | **T8.5** — not T8.3 |
+
+**`src/main.rs` is a shared file with a primary owner.** T8.2 owns it (serve flags + wiring).
+T8.3, T8.4, and T8.5 may **append their own dispatch arm** to the existing `match` and add
+their subcommand's flags — nothing else. Any other edit to `main.rs` goes in the Handoff Log
+and gets flagged. Serial execution means this never races; the rule exists so the record is
+honest and so a future parallel run does not break.
+
+**Cross-phase path authorizations (approved 2026-08-13).** P8 tasks may write these files
+outside their own phase's paths. Each use MUST be named in the Handoff Log:
+
+| Task | May also write | Strictly limited to |
+|---|---|---|
+| T8.1 | `src/store/flush.rs` (P3 path) | adding the `Notify` stop channel + `stop()`; nothing else |
+| T8.1 | `src/graph/graph.rs` (P2 path) | adding the push-front-to-log helper; nothing else |
+| any | `Cargo.toml`, `Cargo.lock`, `src/lib.rs` | additive only, announced in the Handoff Log (standing rule) |
+
+---
+
+## What already exists (do not re-derive this — verified 2026-08-13)
+
+Every piece below is on `main`, compiles, and is covered by tests. `cargo test` on default
+features is green: 507 lib + 5 integration passing, 3 ignored (live-infra gated).
+
+| Concern | Call it like this | Notes |
+|---|---|---|
+| Startup load | `store::load_session(&*store, &session) -> Result<LoadedSession, StoreError>` | `LoadedSession { graph: Graph, index: InvertedIndex }`. A missing session is **not** an error — returns an empty graph + empty index |
+| Graph mutations | `graph::derive(&mut Graph, interaction: NodeId, &AgentId, &[(&str, ConceptType)], &ParentOf, max_cooccurrence) -> Result<DeriveOutcome, _>` | **sync** |
+| | `graph::record_action(&mut Graph, …, Action)` , `graph::demote(&mut Graph, interaction, &AgentId, chunk, chunk_group_id)` | **sync** |
+| | `graph::reserve(…)`, `graph::release(&mut Graph, node, &AgentId)` | **sync** |
+| Hybrid derive | `graph::hybrid::derive(Arc<RwLock<Graph>>, &dyn GraphStore, &dyn Embedder, &EmbeddingContract, interaction, &AgentId, concepts, &ParentOf, max_cooccurrence, semantic_match_threshold)` | **async** — see the sync/async ruling in T8.1 |
+| Daemon | `Daemon::from_config(Arc<RwLock<Graph>>, &Config)` → `.with_index(Arc<RwLock<InvertedIndex>>)` → `.spawn()` | also `events()`, `event_sender()`, `score_table()`, `hot_list()`, `wake()`, `cycles()` |
+| Recall | `daemon.recall(&SessionId, RecallQuery, &dyn GraphStore, Option<&[f32]>, RecallWeights, &mut RecallCache<RecallPipeline>) -> RecallResult` | **async**. `Memory` must own the cache |
+| Flush | `FlushTask::new(Arc<RwLock<Graph>>, Arc<dyn GraphStore>, FlushParams)` → `.spawn()` | `stats() -> FlushStats { lag, depth, .. }`, `degraded() -> bool` |
+| Canonization | `CanonizationTask::from_daemon(Arc<RwLock<Graph>>, Arc<dyn GraphStore>, &Daemon, &Config)` → `.spawn()` | shares the daemon's score table + event sender. `spawn()` **panics if called twice** |
+| Level B resolve | `resolve_from_config_path(Option<&Path>) -> Result<ResolvedBackends, _>` | `ResolvedBackends { store, embedder, store_cfg, embedder_cfg, embedding }` |
+| Contract check | `assert_session_embedding_compatible(...)` | the model-mixing refusal |
+| Blast radius | `store.blast_radius(&SessionId, node, min_edge_age: Duration, now: DateTime<Utc>) -> Result<u64, _>` | **async**; the substrate for `retract` |
+
+`Config` already carries every knob P8 needs: `canonization_edge_min_age`,
+`canonization_eval_interval`, `canonization_eval_batch_size`, `semantic_match_threshold`,
+`max_cooccurrence_per_derive`, `default_top_k` / `_max_tokens` / `_traversal_depth`,
+`match_strategy`, plus all flush and daemon timings. Do not add new knobs without a
+Handoff Log entry.
+
+`axum` 0.8 is **already** a dependency (T8.5 needs no Cargo change). `rmcp` is **not** —
+see T8.2.
+
+---
+
+## Four things P8 must BUILD, not wire (survey 2026-08-13)
+
+The task descriptions below read like pure assembly. These four are not. They were found by
+grepping the tree, not by reading docs — budget for them.
+
+1. **`retract(_, DryRun)` does not exist.** Zero hits for `retract` or `DryRun` anywhere in
+   `src/`. Spec §6.1 lists it; T8.1 owns building it. The substrate — `GraphStore::blast_radius`
+   — does exist. **Ruled 2026-08-13: this is inside T8.1**, not split out, because splitting
+   it complicates T8.3.
+2. **`canonical_memories()` (the "saints" list) does not exist.** No function, and no store
+   query for it either — only a `CanonizationStatus` field per concept. T8.1 builds it;
+   `lambo saints` (T8.3) and `lambo_saints` (T8.2) both depend on it. **Also ruled inside T8.1.**
+3. **`close()`'s drain needs code outside `src/memory.rs`.** `FlushTask` today exposes only
+   `new / spawn / stats / degraded` — there is no stop mechanism at all. The full design is
+   in T8.1 below; it requires the two cross-phase authorizations granted above.
+4. **`Memory` must manually mirror the inverted index.** This is a written contract at
+   `src/graph/mod.rs:42`: the graph is index-free by design, and **the session owner MUST**
+   call `index.add` on every concept create — including creations inside `derive`,
+   `record_action`, **and `demote`** — and `index.remove` on `remove_node`. A forgotten
+   mirror is *silent* staleness: recall returns stale keyword candidates and nothing
+   crashes. This is the single most likely integration bug in P8. The contract is tested by
+   `tests/p2_integration.rs::inverted_index_manual_sync_contract` — read that test before
+   writing `Memory`.
+
+---
 
 **Level B:** process start uses **`resolve_from_config_path` / `resolve_backends`** once
 (spec §3.4, `notes/level-b-pluggability.md`) and hands **`ResolvedBackends`** into the
@@ -39,7 +192,9 @@ checklist items:**
 requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3, T6.4, T1.5   # T6.4: build() wires CanonizationTask
 fixture-ok: yes   # assembles against MemoryStore first
 owns:       src/memory.rs
+also-writes: src/store/flush.rs (stop channel ONLY), src/graph/graph.rs (push-front helper ONLY)
 status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 The spec §6.1 surface, exactly: builder (`session`, `agent`, `store`, `embedder`,
 `match_strategy`, `flush_interval`, `scoring_weights`) → `build()` wires graph + daemon +
@@ -56,6 +211,26 @@ mutations land after the drain — `JoinHandle::abort()` is documented safe for 
 guard is live across its awaits and the write-behind log carries any hop whose phase-4
 record was cancelled). Cut list stays cut: no
 `correct`, `merge_concepts`, `resume`, `restart_daemon`, `checkpoint`.
+
+**Build the two missing methods (see §Four things above) — they are IN SCOPE for T8.1:**
+- **`retract(&self, target, DryRun) -> ImpactReport`** — build on
+  `GraphStore::blast_radius`. `DryRun::Yes` reports and mutates nothing; that is the
+  spec §13 blast-radius story and it is on the never-cut list.
+- **`canonical_memories(&self) -> Vec<…>`** — scan the graph for
+  `CanonizationStatus::Canonical`. No store query exists for this and none is required.
+
+**Mirror the inverted index on every mutation** (contract at `src/graph/mod.rs:42`,
+tested by `tests/p2_integration.rs::inverted_index_manual_sync_contract`). `Memory` holds
+the `Arc<RwLock<InvertedIndex>>` that `load_session` returned and that the daemon got via
+`with_index`. Forgetting this is silent recall staleness.
+
+**Sync/async ruling (2026-08-13): `Memory::derive` is `async`.** `graph::derive` is sync but
+`graph::hybrid::derive` is async, and hybrid is P7's headline capability. One async shape for
+both, dispatched on `match_strategy`, beats two divergent signatures. The spec §6.1 snippet
+shows `mem.derive(...)?` without `.await`; the doc-test is already inside an async block for
+`build().await`, so adding `.await` is a doc-test edit, not a spec violation. Note it in the
+Handoff Log.
+
 **`close()` final-flush drain (COH-6, 2026-08-12) — P8-owned, hand-rolled:** spec §6.1
 `close()` requires a final flush in v0.1, but `FlushTask` exposes only
 `new/spawn/stats/degraded` (no drain API; COH-6 adds only a stop signal, below); the
@@ -110,8 +285,8 @@ half (seed write path + `load_session` materialization) shipped in Wave 5. If th
 is missing at P8 time, T8.1 must build it — it is not optional.
 
 **Done when:** a doc-test mirroring the spec §6.1 snippet compiles and runs against
-`MemoryStore` (default features), `close()` flushes the tail, and session attach rejects
-embedder kind/model/dim mismatches.
+`MemoryStore` (default features), `close()` flushes the tail, session attach rejects
+embedder kind/model/dim mismatches, and `retract` + `canonical_memories` exist with tests.
 
 ---
 
@@ -119,8 +294,9 @@ embedder kind/model/dim mismatches.
 ```yaml
 requires:   T8.1
 fixture-ok: yes
-owns:       src/mcp/, src/main.rs (serve flags)
+owns:       src/mcp/, src/main.rs (primary owner — see shared-file rules)
 status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 `lambo serve --session S --transport stdio|http [--port 7700] [--config PATH]` via `rmcp`;
 **fallback authorized by spec §6.3: hand-rolled stdio JSON-RPC if rmcp fights — timebox the
@@ -129,11 +305,46 @@ fight to half a day.** Tools: `lambo_recall`, `lambo_derive`, `lambo_record_acti
 session (spec §2.2); tool calls from multiple MCP clients are tasks inside it, each
 carrying `agent_id`.
 
-**rmcp re-add (COH-2, 2026-08-12):** `rmcp` is **not** in Cargo.toml today — removed by
-8f9e527 (no MCP server ships yet; `src/mcp/` is an empty stub). T8.2 **owns re-adding it
-with a deliberate 0.1.x-vs-v3 choice** (the P8 implementer decides at that point; both
-0.1.x and v3 are viable — the hand-rolled JSON-RPC fallback in §6.3 covers either). Do
-not assume the crate is already present.
+**rmcp version ruling (2026-08-13 — supersedes the COH-2 "0.1.x vs v3" framing, which is
+stale; 0.1.x is long gone).** Researched against crates.io and the SDK's release notes:
+
+| | rmcp 2.2.0 | **rmcp 3.1.2 (chosen)** |
+|---|---|---|
+| Published | 2026-07-08 | 2026-08-07 |
+| Downloads | 965k | 52k (3.x line ~310k) |
+| MSRV | unset | 1.88 — repo is on 1.97.1 ✓ |
+| Protocol `LATEST` | 2025-11-25 | **2025-11-25** (2026-07-28 is opt-in) |
+
+Use exactly this, and do **not** take default features:
+```toml
+rmcp = { version = "3.1.2", default-features = false, features = [
+  "server", "macros", "transport-io", "transport-streamable-http-server" ] }
+```
+- **Why 3.x is safe:** its `ProtocolVersion::LATEST` is still `V_2025_11_25`. The
+  2026-07-28 sessionless-lifecycle rewrite that dominates the 3.0 release notes is
+  **opt-in**, so 3.x negotiates with Claude Code exactly as 2.x does.
+- **The one 3.0 break that touches us:** `ServerHandler::call_tool` / `get_prompt` /
+  `read_resource` now return MRTR-aware enums, and exhaustive `ServerResult` matches must
+  handle `InputRequiredResult`. Behind the `#[tool_router]` / `#[tool]` macros this is
+  largely hidden; in a hand-written `ServerHandler` it is not. Prefer the macros.
+- **Why `default-features = false` is REQUIRED, not style:** rmcp's optional `reqwest`
+  dependency is `^0.13.2` and this repo pins `reqwest 0.12` for BGE-M3. Pulling any
+  reqwest-flavoured rmcp feature compiles reqwest **twice**. The four features above were
+  traced at tag `rmcp-v3.1.2` and none reach `reqwest`: `server` → transport-async-rw +
+  schemars + pastey + uuid; `transport-io` → transport-async-rw + tokio/io-std;
+  `transport-streamable-http-server` → server-side-http (tower/http/sse-stream/bytes).
+- **Fallback ladder, in order:** if the tool-router macro path will not compile against a
+  `Memory` handle within ~2 hours → drop to `rmcp 2.2.0` (feature names are identical, so
+  it is a one-line Cargo edit) → if that also fights, hand-roll stdio JSON-RPC per §6.3.
+- **Caveat:** the above is metadata + release-note analysis; nothing has been compiled
+  against rmcp yet. **Validate the macro shape on a trivial tool BEFORE writing all seven
+  tools on top of it.**
+
+**F18 (P6 carryover) — server-side timestamps.** Every tool that creates an interaction MUST
+stamp `created_at` on the server. `derive` / `record_action` / `demote` all take their
+logical timestamp from the *interaction node's* `created_at`, so a client-supplied timestamp
+propagates to every concept and edge below it — and backdating by 61s neuters the whole
+`canonization_edge_min_age` inflation guard. Do not accept a client timestamp.
 
 **Level B:** on start, `resolve_from_config_path` → **`ResolvedBackends`** → inject into
 `Memory` (single construction). Fail closed if kinds are uncompiled, TOML has unknown keys,
@@ -148,14 +359,22 @@ real client returns the T5.3 context block. Config + resolve proven in `dev-diar
 ```yaml
 requires:   T8.1
 fixture-ok: yes
-owns:       src/cli/
+owns:       src/cli/mod.rs, src/cli/recall.rs, src/cli/saints.rs, src/cli/inspect.rs,
+            src/cli/stats.rs, src/cli/provision.rs
+not-owned:  src/cli/demo.rs (T8.4), src/cli/serve_web.rs (T8.5)   # collision fixed 2026-08-13
+appends-to: src/main.rs (dispatch arms + own flags only; T8.2 is primary owner)
 status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
-Spec §6.2: `demo --scenario rest-api`, `recall --session --query --top-k`,
-`saints --session`, `inspect --session --focus --depth`, `stats --session`, `provision`
-(wraps `scripts/provision.sh`). Global/shared `--config` where a store is needed. Read-only
-commands go straight to the store as reader processes (spec §2.2) — they must not spin up a
-writer against a session another process owns.
+Spec §6.2: `recall --session --query --top-k`, `saints --session`,
+`inspect --session --focus --depth`, `stats --session`, `provision` (wraps
+`scripts/provision.sh`). `demo --scenario rest-api` belongs to **T8.4**, not here.
+Global/shared `--config` where a store is needed. Read-only commands go straight to the
+store as reader processes (spec §2.2) — they must not spin up a writer against a session
+another process owns.
+
+`saints` consumes `Memory::canonical_memories` from T8.1 — if it is missing, stop and fix
+T8.1 rather than reimplementing the scan here.
 
 **Level B:** reader CLIs use `build_store` from resolved config (sqlite or cockroach under
 the matching feature). Do not open a second writer.
@@ -170,7 +389,9 @@ the matching feature). Do not open a second writer.
 requires:   T8.2, T6.4, T4.3   # live store strongly preferred: T3.2, T3.6
 fixture-ok: partial   # logic testable on MemoryStore; the artifact must run live
 owns:       src/cli/demo.rs, demo/
+appends-to: src/main.rs (demo dispatch arm only)
 status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Spec §13, scripted and **deterministic** — a demo that works 3 times in 5 is not done:
 
@@ -186,6 +407,16 @@ Spec §13, scripted and **deterministic** — a demo that works 3 times in 5 is 
    server** (read-only — the spec §2.2 reader story made concrete; needs console-side
    setup, do it early, it's an external dependency).
 
+**R3-1 (P6 carryover):** `seed()` on SQLite/Cockroach does NOT restore canonization state
+over an existing session (MemoryStore does). Seed fixtures only into a **fresh** session, or
+reset the session first. Re-seeding a live demo session and expecting canonization state to
+follow will silently produce a demo that does not transition.
+
+**External dependency — start now, not at T8.4.** The CockroachDB managed MCP server needs
+console-side setup and is outside our control. So is the index-favorable `EXPLAIN`
+camera-proof carried over from T7.3 (`vector_explain_camera_proof` with
+`LAMBO_REQUIRE_VECTOR_INDEX=1` on a vector-search-favorable deployment). Neither is started.
+
 **Done when:** `cargo run --features demo -- demo --scenario rest-api` (or equivalent)
 runs end-to-end against the live cluster twice consecutively with identical outcomes, and
 the MCP-server split-screen query is rehearsed and screenshotted into `dev-diary/evidence/`.
@@ -196,14 +427,18 @@ the MCP-server split-screen query is rehearsed and screenshotted into `dev-diary
 ```yaml
 requires:   T8.1        # http transport from T8.2 when it lands
 fixture-ok: yes
-owns:       web/, src/cli/serve_web.rs (if axum routes live in-binary)
+owns:       web/, src/cli/serve_web.rs
+appends-to: src/main.rs (serve-web dispatch arm only, if any)
 status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 The "functional demo app URL" deliverable (spec §12.4). Minimal axum-served page over the
 http transport: session view, live recall box showing the context block verbatim,
 canonization event feed, stats (flush lag / log depth). No framework ceremony — this is a
 window onto T5.3's text and T6.4's feed, not a product. Deployment target decided in P9
 (any public URL satisfies the judges).
+
+`axum` 0.8 is **already** in `Cargo.toml` — no dependency change needed.
 
 **Done when:** a browser against `lambo serve --transport http` shows a live recall and the
 event feed updating during the demo scenario.
@@ -213,13 +448,35 @@ event feed updating during the demo scenario.
 ## Exit criteria
 
 - [ ] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist
+- [ ] `retract(_, DryRun)` and `canonical_memories()` exist and are tested (T8.1 build items)
+- [ ] Inverted-index mirroring holds for `derive` / `record_action` / `demote` / removal
 - [ ] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed
 - [ ] MCP flow proven from a real Claude Code config
+- [ ] MCP tools stamp `created_at` server-side (F18)
 - [ ] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured
 - [ ] Demo app reachable and honest (renders real recall output, not canned text)
+- [ ] Every task reached a CLEAN review verdict; all review files closed in
+      `dev-diary/adversarial-review/`
 
 ---
 
 ## Handoff Log
 
 > _Fill on completion._
+
+### P8 setup (2026-08-13) — orchestration decisions, before any task started
+- **Serial execution on one branch** (`phase/p8-surface`), not the P2–P7 worktree swarm.
+  Per-task agent loop with a hard stop after every agent: task → adversarial review →
+  remediation → review, repeating remediation/review until CLEAN. Orchestrator commits;
+  agents do not. Rationale in §Execution protocol.
+- **`owns` collisions fixed.** T8.3 previously claimed `src/cli/` wholesale while T8.4 and
+  T8.5 claimed files inside it. `src/cli/` is now split file-by-file; `src/main.rs` has T8.2
+  as primary owner with append-only dispatch arms for the others.
+- **Cross-phase writes authorized for T8.1:** `src/store/flush.rs` (stop channel only) and
+  `src/graph/graph.rs` (push-front log helper only), both required by the `close()` drain.
+- **Survey findings recorded** (§Four things P8 must BUILD): `retract`/`DryRun` and
+  `canonical_memories` do not exist anywhere in `src/` and are ruled **inside T8.1**;
+  `FlushTask` has no stop mechanism; the inverted index must be mirrored by hand.
+- **`Memory::derive` is async** (hybrid derive is async; one shape for both).
+- **rmcp 3.1.2 chosen** with `default-features = false` and four server-side features —
+  the reqwest 0.12/0.13 duplication trap and the fallback ladder are documented in T8.2.
