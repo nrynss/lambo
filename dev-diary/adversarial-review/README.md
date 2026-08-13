@@ -1,6 +1,6 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (42 records).
+Complete index of the review records in this directory (43 records).
 
 | File | Scope | Status |
 |------|-------|--------|
@@ -17,6 +17,7 @@ Complete index of the review records in this directory (42 records).
 | [adve-review-p6-canonization-r3.md](adve-review-p6-canonization-r3.md) | P6 serial close R3 @ a743350 | **CLOSED** (ACCEPT — clean) |
 | **[adve-review-p6-canonization-fable.md](adve-review-p6-canonization-fable.md)** | phase/p6-canonization — P6 canonization tier (T6.1–T6.4), fable ×5 | **CLOSED** (19 findings: 2 P1 / 5 P2 / 12 P3; 2 opus remediation rounds, R3 verify CLEAN 2026-08-13; residual P3s recorded for P8) |
 | [adve-review-p7-hybrid-vectors.md](adve-review-p7-hybrid-vectors.md) | P7 — hybrid vector recall | **CLOSED** (REMEDIATE 1 MAJOR + 4 MINOR → verified ACCEPT) |
+| [adve-review-p7-t7-4-deepseekpro.md](adve-review-p7-t7-4-deepseekpro.md) | T7.4 — vector camera proof, deepseekpro | **CLOSED** (ACCEPT with findings: 1 MAJOR + 5 minor/nit, all remediated 9816ac9; NIT-6 carried as a T8.4 narration constraint) |
 | **[adve-review-e2e-p0-p3-fable.md](adve-review-e2e-p0-p3-fable.md)** | Main — E2E P0–P3 (post-merge, whole-platform) | **CLOSED** (45 findings: 7 P1 / 15 P2 / 23 P3; all dispositioned 2026-08-12 in 8 waves — see the disposition record in the file) |
 | **[adve-review-t14-fixtures.md](adve-review-t14-fixtures.md)** | Main — T1.4 fixture graphs | **CLOSED** (ACCEPT, residual notes only) |
 | **[adve-review-t70-embeddings.md](adve-review-t70-embeddings.md)** | Main — T7.0 embeddings (BGE-M3 / llama.cpp) | **CLOSED** (ACCEPT, residual ops only) |
