@@ -235,7 +235,11 @@ impl FlushTask {
 /// `degraded()==false` — silent durability loss). Dropping the future after a
 /// caught panic is safe: the backend only ever holds a `&MutationBatch`, so the
 /// loop's `pending` buffer cannot have been corrupted.
-struct CatchUnwindPoll<F>(F);
+///
+/// `pub(crate)`: P6's canonization loop makes the same argument for the same
+/// reason (a panicking store must not stop the loop for the process's
+/// lifetime), and one implementation means one behaviour to reason about.
+pub(crate) struct CatchUnwindPoll<F>(pub(crate) F);
 
 impl<F: Future> Future for CatchUnwindPoll<F> {
     type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
@@ -740,8 +744,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_edge_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
-            self.inner.blast_radius(session, node, min_edge_age).await
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
         }
 
         async fn interaction_span(
@@ -749,8 +756,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<InteractionSpan, StoreError> {
-            self.inner.interaction_span(session, node, min_age).await
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
         }
 
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
@@ -859,8 +869,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_edge_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
-            self.inner.blast_radius(session, node, min_edge_age).await
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
         }
 
         async fn interaction_span(
@@ -868,8 +881,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<InteractionSpan, StoreError> {
-            self.inner.interaction_span(session, node, min_age).await
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
         }
 
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
@@ -976,8 +992,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_edge_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
-            self.inner.blast_radius(session, node, min_edge_age).await
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
         }
 
         async fn interaction_span(
@@ -985,8 +1004,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<InteractionSpan, StoreError> {
-            self.inner.interaction_span(session, node, min_age).await
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
         }
 
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
@@ -1061,8 +1083,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_edge_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
-            self.inner.blast_radius(session, node, min_edge_age).await
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
         }
 
         async fn interaction_span(
@@ -1070,8 +1095,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<InteractionSpan, StoreError> {
-            self.inner.interaction_span(session, node, min_age).await
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
         }
 
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {

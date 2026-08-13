@@ -260,6 +260,7 @@ mod tests {
             _session: &crate::types::SessionId,
             _node: crate::types::NodeId,
             _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<u64, crate::types::StoreError> {
             unreachable!("resolve never queries")
         }
@@ -268,6 +269,7 @@ mod tests {
             _session: &crate::types::SessionId,
             _node: crate::types::NodeId,
             _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
             unreachable!("resolve never queries")
         }

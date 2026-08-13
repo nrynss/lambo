@@ -40,6 +40,7 @@ pub mod flush;
 
 use async_trait::async_trait;
 use bitflags::bitflags;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::env;
 use std::str::FromStr;
@@ -122,18 +123,30 @@ pub trait GraphStore: Send + Sync {
     /// ...))` — never a silent `as` cast: an out-of-range radius is an invariant
     /// violation, not a value to truncate. (P6's canonization sweep consumes
     /// this method and writes the i32 field.)
+    ///
+    /// **Injected clock (F8).** The age cutoff is `now - min_edge_age`, and
+    /// `now` is the **caller's** instant — adapters must not reach for
+    /// [`chrono::Utc::now`]. One canonization eval cycle takes its clock once
+    /// (P6 §"`now` is injected"); an adapter-internal wall clock made a single
+    /// cycle read two clocks and made the 60s inflation guard un-simulatable
+    /// under a mocked clock, so every eval-level test had to zero it.
     async fn blast_radius(
         &self,
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError>;
 
+    /// Distinct origin interactions behind `node`'s aged structural inbound
+    /// edges, plus the share of the session's temporal extent they cover
+    /// (spec §4.1). `now` is the caller's clock — see [`Self::blast_radius`].
     async fn interaction_span(
         &self,
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError>;
 
     async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError>;

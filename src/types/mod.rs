@@ -269,6 +269,36 @@ pub struct Edge {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Mutation {
+    /// Insert or update a node.
+    ///
+    /// **R2-1 — canonization columns are not this variant's to write.** On an
+    /// **existing** concept row every adapter leaves `canonization_status`,
+    /// `blast_radius` and `last_demotion_time` exactly as they are; only
+    /// [`Mutation::CanonizationTransition`] and
+    /// [`crate::store::GraphStore::record_canonization`] move them (the
+    /// initial INSERT of a brand-new row still carries the node's values, so
+    /// a concept born mid-progression persists correctly).
+    ///
+    /// Single-writer, because the alternative is a lost update with no
+    /// repair: this variant carries a **snapshot of the concept taken when
+    /// the mutation was appended**, and appenders that care nothing about
+    /// canonization append it — `bump_gc_survived` (T4.5 GC) is the common
+    /// one. A GC bump at `T`, a hop at `T+1`, and the flush at `T+2` puts
+    /// `[UpsertNode(stale), CanonizationTransition(hop)]` in one batch; the
+    /// transition is already recorded (the evaluator writes it immediately
+    /// via `record_canonization`), so its replay is a documented no-op, and
+    /// the stale upsert's write of the three columns would stand as the
+    /// durable state. Status regresses; worse, a demoted node reloads
+    /// `Canonical` with `last_demotion_time` erased — the re-promotion
+    /// cooldown gone (COH-3, "cooldown survives restart").
+    ///
+    /// Excluding the columns here rather than making the transition's UPDATE
+    /// monotonic is what makes the replay no-op's premise ("the effect is
+    /// already in the row") **true**: with one writer, nothing else can take
+    /// it back out. A monotonic UPDATE would repair only the batches that
+    /// happen to carry the transition behind the stale upsert, and leave the
+    /// row wrong (durably, across a crash) whenever the two land in different
+    /// flushes.
     UpsertNode {
         node: Node,
     },
