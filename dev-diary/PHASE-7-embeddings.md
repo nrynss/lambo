@@ -296,8 +296,12 @@ stack merge via the index, and `EXPLAIN` output — captured into
 - [x] BGE-M3 + llama.cpp path documented and smokeable (default, `embed-bge`) — T7.0
 - [ ] Bedrock path optional swap-in under `embed-bedrock` (same 1024-d contract) — T7.1
 - [ ] Hybrid merge demonstrated offline (fixtures) and live (Cockroach) — T7.2 / T7.3
-- [ ] Degraded mode proven equivalent to Canonical strategy
-- [ ] `EXPLAIN` evidence of index use committed
+  - offline fixture merge: DONE (T7.2 `near_pair_merges_with_decaying_semantic_edge`, no-capability Canonical-equivalence);
+    live end-to-end hybrid merge: PENDING until T8.1 Memory wires hybrid::derive against a live session (T8.4 demo).
+- [x] Degraded mode proven equivalent to Canonical strategy (T7.2 `no_capability_is_byte_identical_to_canonical`)
+- [ ] `EXPLAIN` evidence of index use committed — camera-proof PENDING on the multi-region demo cluster
+  (committed evidence shows the optimizer's scan choice, honestly labeled; un-ignore `vector_explain_camera_proof`
+  on a vector-search-favorable deployment before ship — open integrator item, see T7.3 handoff)
 - [x] Level B: embedder registry + features fail closed for missing kinds
 
 ## Handoff Log
