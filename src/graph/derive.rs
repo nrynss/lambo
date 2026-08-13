@@ -1261,7 +1261,7 @@ mod tests {
                     assert!(seen_nodes.contains(&edge.source), "{m:?}");
                     assert!(seen_nodes.contains(&edge.target), "{m:?}");
                 }
-                Mutation::SetRootGoal { .. } => {}
+                Mutation::SetRootGoal { .. } | Mutation::SetEmbedding { .. } => {}
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {
                     panic!("derive must not delete: {m:?}");
                 }

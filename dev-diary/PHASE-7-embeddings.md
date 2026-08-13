@@ -56,7 +56,7 @@ without models; binary without `embed-bge` fails closed if `kind=bge_m3`.
 requires:   T1.3, T1.5, T0.4
 fixture-ok: yes   # written from the T0.4 handoff; live call behind an integration gate
 owns:       src/embed/bedrock.rs
-status:     not-started
+status:     blocked   # account authorization; implementation is the only unfinished P7 task
 feature:    embed-bedrock
 ```
 Titan Text Embeddings V2, 1024-dim, gated on `embed-bedrock`, registered in `build_embedder`
@@ -88,13 +88,11 @@ Sits behind T2.2's `Unmatched` seam — do not modify `canonical.rs`.
 later hybrid writes, `ensure_compatible` with the live contract — refuse kind/model/dim
 swaps (BGE vs Titan is the common trap; same dim is not enough).
 
-**Owner (STORE-1, 2026-08-12):** the contract **write path** already exists — Wave 5
-shipped it: `GraphStore::seed` (cockroach + sqlite) persists
-`embedding_kind/model/dim` from `GraphSnapshot.embedding`, and `load_session`
-materializes it back (regression-locked in the live conformance suite + sqlite parity
-tests). T7.2 owns only the **stamp + refusal**: stamping `GraphSnapshot.embedding` on
-first embed and refusing mid-session kind/model/dim swaps via `ensure_compatible` —
-do not re-derive the persistence layer.
+**Durability contract:** the first stamp is an ordered `Mutation::SetEmbedding`, applied
+transactionally by Memory, SQLite, and Cockroach stores before/alongside vector-bearing
+concept writes. `load_session` materializes it back. Snapshot `seed` remains supported,
+but is not the ordinary write-behind path. This prevents restart from forgetting the
+vector space and accepting an incompatible model.
 
 **Done when:** with `FixtureEmbedder`, the near pair merges with a `Semantic` edge and the
 far text creates a fresh concept; with a no-capability store, behavior is byte-identical to
@@ -185,9 +183,9 @@ far text creates a fresh concept; with a no-capability store, behavior is byte-i
   - **P3 §12.1 camera-proof (NOT a code fix):** left as an integrator/demo-time
     decision — see the T7.3 handoff open-item note below. Do not fabricate
     evidence.
-  - **P3 DECISION D1 (global-then-filter under-return under crowding):** kept — this
-    is the accepted documented approximation; not reverted to the session-filtered
-    anti-pattern.
+  - **P3 DECISION D1 (historical):** the global indexed fast path was retained,
+    but the documented under-return was later closed by an exact session-scoped
+    fallback after the 2,048-row cap is exhausted (2026-08-13 GPT-5.6-sol review).
   - **Cosmetic unbounded `note_fallback_logged` set:** left as-is (documented
     tradeoff, no fix this cycle).
 
@@ -241,18 +239,17 @@ stack merge via the index, and `EXPLAIN` output — captured into
   `check_embedding_dim`, `session_exists` (→ `SessionNotFound`), `encode_vector`.
 - **k-sizing heuristic (deterministic, testable):** base `k = limit × 10`, floored at 10
   and **capped at `VECTOR_FETCH_CAP = 2048`** (`initial_fetch_k`) — the base is clamped
-  because `limit` is caller-supplied and unbounded (daemon passes `query.top_k`), so the
+  after validating the caller's `limit` against the public 2,048-result bound, so the
   documented 2048-row worst-case bound holds for the FIRST fetch too, not just growth
   (T7.3 remediation). A grow-and-retry loop re-queries with `k` doubled when a **full
   page** (`rows == k`) still yields fewer than `limit` in-session hits, capped at
   `VECTOR_FETCH_CAP = 2048`. Pure decisions in `initial_fetch_k`/`next_fetch_k`; the loop
-  STOPS EARLY (provable completeness) when the page does **not** fill (`rows < k`) — the
+  requests `k + 1` and STOPS EARLY (provable completeness) when that lookahead is absent — the
   global population is exhausted, so no in-session candidate can exist beyond it.
-  Constants `VECTOR_FETCH_MULTIPLIER/ GROWTH/ CAP`. **Tradeoff (inherent to "global top-k
-  + session filter"):** the approach is exact only when the caller's candidates sit inside
-  the fetched global top-k; crowding beyond `CAP` under-returns (rare, pathological;
-  bounded). This is a documented approximation, not a silent drop — the early-stop makes
-  the common case exact.
+  Constants `VECTOR_FETCH_MULTIPLIER/ GROWTH/ CAP`. If the page remains full and
+  under-delivers at `CAP`, correctness takes over: an exact session-scoped fallback returns
+  the caller's local top-k. The normal path remains index-friendly; only the adversarial
+  crowd-out case pays for the session-filtered scan.
 - **Tests added:** (live, `--features store-cockroach`) `check_vector_candidates_are_session_scoped`
   (a closer FOREIGN-session concept ranks first in the raw top-k yet is never returned;
   two in-session near paraphrases retrieve each other), `check_vector_explain_is_global_topk`
@@ -265,7 +262,8 @@ stack merge via the index, and `EXPLAIN` output — captured into
   `session_filter_keeps_only_caller_and_preserves_order`,
   `grow_retry_is_final_when_satisfied_exhausted_or_capped`,
   `initial_fetch_k_is_floor_but_capped_at_same_bound_as_growth` (huge/`usize::MAX` limit
-  clamps the base to `CAP`) (+ existing `distance_to_score`).
+  clamps the base to `CAP`), and `cap_crowd_out_uses_exact_session_fallback` (the caller's
+  nearest row is conceptually global rank 2,049) (+ existing `distance_to_score`).
 - **EXPLAIN evidence — STATUS: camera-proof PENDING on the multi-region demo cluster.**
   This is a genuine, evidence-backed finding, not an infra outage: the optimizer's choice
   of `vector search` is a COST decision. On the current multi-region cluster
@@ -285,13 +283,26 @@ stack merge via the index, and `EXPLAIN` output — captured into
   `vector search` plan on a favorable deployment, then run `cargo test --features
   store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof` (and
   un-ignore it), or formally downgrade the claim. Do not re-architect the query.
-- **Next agent should not re-derive:** the global SQL shape, the k grow-and-retry heuristic,
-  the Rust session filter, and the live session-scoping proof are done. If the camera-proof
+- **Next agent should not re-derive:** the global SQL shape, capped grow-and-retry fast path,
+  exact cap-exhaustion fallback, and live session-scoping proof are done. If the camera-proof
   must land, only the favorable-deployment EXPLAIN capture (+ `vector_explain_camera_proof`)
   remains — do not re-architect the query.
+
+**Determinism/resource hardening (2026-08-13):** vector limits are rejected above 2,048
+at Config, recall gather/daemon, and Cockroach entry points before store I/O. The global
+index-friendly query fetches one lookahead row; if an equal-distance group crosses the
+fetch boundary, the adapter switches to the exact session query ordered by distance then
+UUID. This makes equal-score results insertion-order independent. The exceptional tie or
+crowd-out path may scan the session; ordinary untied traffic retains the vector-index shape.
 ---
 
 ## Exit criteria
+
+P7's implementation is complete except for authorization-blocked T7.1. The unchecked
+items below are deliberately P8/ship integration evidence, not missing P7 adapter code:
+T8.1 must wire the hybrid entry point into live sessions, T8.4 must record the end-to-end
+merge, and the ship run must capture an index-favorable `EXPLAIN` before claiming index
+use on camera.
 
 - [x] BGE-M3 + llama.cpp path documented and smokeable (default, `embed-bge`) — T7.0
 - [ ] Bedrock path optional swap-in under `embed-bedrock` (same 1024-d contract) — T7.1
@@ -315,6 +326,11 @@ stack merge via the index, and `EXPLAIN` output — captured into
   both fixed in `src/graph/hybrid.rs` with regression tests; P3 §12.1 camera-proof left
   as an integrator/demo-time open item. See committed
   `adversarial-review/adve-review-p7-hybrid-vectors.md`.
+- **2026-08-13:** GPT-5.6-sol remediation hardens hybrid derive with epoch re-plan,
+  commit-lock contract validation, atomic staged commits, durable `SetEmbedding`, input
+  and I/O budgets, validated deterministic scores, and an exact session-scoped vector
+  fallback after global-cap crowd-out. This closes P7 implementation findings; P8 live
+  wiring/demo evidence and the index-favorable camera proof remain explicitly P8/ship work.
 
 ---
 

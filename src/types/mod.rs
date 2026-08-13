@@ -327,6 +327,16 @@ pub enum Mutation {
         session_id: SessionId,
         goal: Option<serde_json::Value>,
     },
+    /// The session's active dense embedding space changed. `None` clears it
+    /// only as part of an explicit re-embedding workflow.
+    ///
+    /// This is ordered with concept/vector mutations so a normal write-behind
+    /// flush cannot durably store vectors while losing the contract that makes
+    /// those vectors interpretable after restart.
+    SetEmbedding {
+        session_id: SessionId,
+        embedding: Option<EmbeddingContract>,
+    },
 }
 
 /// Ordered write-behind unit (spec §2.4). Apply nodes → edges → deletions → transitions.

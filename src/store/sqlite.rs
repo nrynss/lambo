@@ -129,10 +129,10 @@
 //! `chunk_group_id`). The full-snapshot `seed` path (fixtures track, STORE-1)
 //! persists `GraphSnapshot.embedding` into those columns; `load_session` reads
 //! them back into `GraphSnapshot.embedding` when present, treating a row with
-//! `embedding_kind` XOR `embedding_dim` as a corruption error. `flush` does
-//! NOT write them — no `Mutation` kind carries session metadata (S5:
-//! snapshot-only), so a flush after a seed leaves the stamped contract
-//! untouched (the round-trip test asserts exactly that).
+//! `embedding_kind` XOR `embedding_dim` as a corruption error. Ordinary
+//! write-behind persists first-use stamps through `Mutation::SetEmbedding`, in
+//! the same transaction as vector-bearing concepts; flush/load and incompatible
+//! restart regressions cover this path.
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -150,7 +150,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::vector::{decode_vector, encode_vector};
-use super::{map_write_err, Capabilities, GraphStore};
+use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
     InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
@@ -335,6 +335,12 @@ impl SqliteStore {
     /// survives `load_session` instead of being dropped.
     #[cfg(feature = "fixtures")]
     pub async fn seed(&self, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
+        let embedding_dim = snapshot
+            .embedding
+            .as_ref()
+            .map(|contract| i64::try_from(contract.dim))
+            .transpose()
+            .map_err(|_| StoreError::Invariant("embedding dimension does not fit i64".into()))?;
         let mut tx = self
             .pool()
             .begin()
@@ -347,13 +353,9 @@ impl SqliteStore {
             .transpose()
             .map_err(|e| StoreError::Backend(format!("serialize root_goal: {e}")))?;
         let embedding = snapshot.embedding.as_ref();
-        let (embedding_kind, embedding_model, embedding_dim) = match embedding {
-            Some(c) => (
-                Some(c.kind.as_str()),
-                c.model.as_deref(),
-                Some(c.dim as i64),
-            ),
-            None => (None, None, None),
+        let (embedding_kind, embedding_model) = match embedding {
+            Some(c) => (Some(c.kind.as_str()), c.model.as_deref()),
+            None => (None, None),
         };
         sqlx::query(
             "INSERT INTO sessions (\
@@ -532,6 +534,9 @@ impl GraphStore for SqliteStore {
                 Mutation::SetRootGoal { session_id, .. } => {
                     sessions.insert(session_id.0.clone());
                 }
+                Mutation::SetEmbedding { session_id, .. } => {
+                    sessions.insert(session_id.0.clone());
+                }
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }
         }
@@ -560,6 +565,12 @@ impl GraphStore for SqliteStore {
                 Mutation::SetRootGoal { session_id, goal } => {
                     set_root_goal(&mut *tx, session_id, goal.as_ref()).await?;
                 }
+                Mutation::SetEmbedding {
+                    session_id,
+                    embedding,
+                } => {
+                    set_embedding(&mut *tx, session_id, embedding.as_ref()).await?;
+                }
             }
         }
 
@@ -579,9 +590,9 @@ impl GraphStore for SqliteStore {
             .await
             .map_err(|e| db_err("begin load transaction", e))?;
 
-        // The existence probe doubles as the embedding-contract read (S5-class:
-        // snapshot-only — flush never writes those columns; see module doc) and
-        // the `root_goal` read, which the mutation path DOES write (XP-8).
+        // The existence probe doubles as the embedding-contract read. Both
+        // snapshot seed and `SetEmbedding` flush write these columns; root_goal
+        // likewise has its ordered mutation path (XP-8).
         let row = sqlx::query(
             "SELECT embedding_kind, embedding_model, embedding_dim, root_goal \
              FROM sessions WHERE session_id = ?",
@@ -729,8 +740,9 @@ impl GraphStore for SqliteStore {
         &self,
         _session: &SessionId,
         _embedding: &[f32],
-        _limit: usize,
+        limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        validate_vector_candidate_limit(limit)?;
         Err(StoreError::Capability(
             "SqliteStore has no VECTOR_SEARCH".into(),
         ))
@@ -1132,6 +1144,52 @@ async fn set_root_goal(
     Ok(())
 }
 
+/// Persist the embedding-space identity in the same ordered transaction as
+/// concept vectors. A reload must never observe vectors without their contract.
+async fn set_embedding(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+    embedding: Option<&crate::types::EmbeddingContract>,
+) -> Result<(), StoreError> {
+    let dim = embedding
+        .map(|e| i64::try_from(e.dim))
+        .transpose()
+        .map_err(|_| {
+            StoreError::Invariant(format!(
+                "embedding dimension does not fit i64 for {session}"
+            ))
+        })?;
+    if embedding.is_some() {
+        sqlx::query(
+            "UPDATE concepts SET embedding = NULL WHERE session_id = ? AND EXISTS (\
+             SELECT 1 FROM sessions WHERE session_id = ? \
+             AND embedding_kind IS NULL AND embedding_dim IS NULL)",
+        )
+        .bind(&session.0)
+        .bind(&session.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("quarantine legacy embeddings: {m}")))?;
+    }
+    let res = sqlx::query(
+        "UPDATE sessions SET embedding_kind = ?, embedding_model = ?, embedding_dim = ? \
+         WHERE session_id = ?",
+    )
+    .bind(embedding.map(|e| e.kind.as_str()))
+    .bind(embedding.and_then(|e| e.model.as_deref()))
+    .bind(dim)
+    .bind(&session.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
+    if res.rows_affected() == 0 {
+        return Err(StoreError::NotFound(format!(
+            "sessions row for {session} while setting embedding"
+        )));
+    }
+    Ok(())
+}
+
 /// Shared by the `CanonizationTransition` mutation and `record_canonization`:
 /// append the event row — the demo's on-screen artifact — then update the
 /// concept's status/blast_radius (NotFound if absent, like MemoryStore).
@@ -1476,7 +1534,7 @@ mod tests {
     use crate::graph::demote::demote;
     use crate::graph::derive::{derive, ParentOf};
     use crate::graph::reserve::reserve;
-    use crate::store::load::load_session;
+    use crate::store::load::{load_session, load_session_async};
     #[cfg(feature = "store-memory")]
     use crate::store::memory::MemoryStore;
     use crate::types::{AgentId, CanonizationStatus, ConceptType, EdgeType, Node as NodeKind};
@@ -1587,6 +1645,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
+        assert!(matches!(
+            store
+                .vector_candidates(
+                    &SessionId::from("x"),
+                    &[],
+                    crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
+                )
+                .await
+                .unwrap_err(),
+            StoreError::Invariant(_)
+        ));
     }
 
     /// XP-8: `root_goal` survives flush → load through the **mutation path**.
@@ -1654,6 +1723,67 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embedding_contract_roundtrips_flush_and_load() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("embedding-roundtrip");
+        let contract = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: 1024,
+        };
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(
+                        &sid,
+                        NodeId::new(),
+                        None,
+                        Utc.timestamp_opt(1_752_000_000, 0).unwrap(),
+                    ),
+                    Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(contract.clone()),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(loaded.embedding, Some(contract.clone()));
+        let reloaded = crate::graph::Graph::from_snapshot(loaded).unwrap();
+        let incompatible = crate::types::EmbeddingContract {
+            kind: "bedrock".into(),
+            model: Some("amazon.titan-embed-text-v2:0".into()),
+            dim: 1024,
+        };
+        assert!(reloaded
+            .embedding()
+            .unwrap()
+            .ensure_compatible(&incompatible)
+            .is_err());
+
+        #[cfg(feature = "store-memory")]
+        {
+            let memory = MemoryStore::new();
+            memory
+                .flush(&MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(contract.clone()),
+                    }],
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                memory.load_session(&sid).await.unwrap().embedding,
+                Some(contract)
+            );
+        }
+    }
+
     /// Acceptance (CON-8): `Concept.embedding` survives flush → load on SQLite
     /// (the column is now written and read), and the loaded snapshot deep-equals
     /// the MemoryStore oracle on the same batch.
@@ -1711,6 +1841,100 @@ mod tests {
                 "sqlite snapshot deep-equals the MemoryStore oracle (embedding included)"
             );
         }
+    }
+
+    /// Upgrade regression: pre-contract durable rows may contain vectors. They
+    /// remain loadable, but startup quarantines the unknown vectors rather than
+    /// guessing a model from their width.
+    #[tokio::test]
+    async fn legacy_vectors_without_contract_are_quarantined_on_materialization() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("legacy-vector-upgrade");
+        let interaction = NodeId::new();
+        let concept = NodeId::new();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let mut concept_mutation = plant_concept(
+            &sid,
+            concept,
+            interaction,
+            "legacy embedded concept",
+            ConceptType::Entity,
+            ts,
+        );
+        let Mutation::UpsertNode {
+            node: NodeKind::Concept(ref mut value),
+        } = concept_mutation
+        else {
+            unreachable!()
+        };
+        value.embedding = Some(vec![0.1, 0.2, 0.3]);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, interaction, None, ts),
+                    concept_mutation,
+                    Mutation::UpsertEdge {
+                        edge: Edge {
+                            id: NodeId::new(),
+                            session_id: sid.clone(),
+                            source: interaction,
+                            target: concept,
+                            edge_type: EdgeType::Derives,
+                            weight: 1.0,
+                            reinforcements: 1,
+                            created_at: ts,
+                            last_reinforced: ts,
+                        },
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let raw = store.load_session(&sid).await.unwrap();
+        assert!(raw.embedding.is_none());
+        assert!(raw.concepts[0].embedding.is_some());
+        let loaded = load_session_async(&store, &sid).await.unwrap();
+        assert!(loaded.graph.embedding().is_none());
+        assert!(loaded.graph.concepts().all(|c| c.embedding.is_none()));
+        assert!(loaded.graph.snapshot().concepts[0].embedding.is_none());
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(EmbeddingContract {
+                        kind: "fixture".into(),
+                        model: Some("fixture-v1".into()),
+                        dim: 3,
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        let migrated = store.load_session(&sid).await.unwrap();
+        assert!(migrated.concepts[0].embedding.is_none());
+        assert!(migrated.embedding.is_some());
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn oversized_seed_embedding_dimension_fails_before_transaction() {
+        let store = test_store();
+        let err = store
+            .seed(&GraphSnapshot {
+                session_id: SessionId::from("oversized-dim"),
+                embedding: Some(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: usize::MAX,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)));
     }
 
     /// Acceptance (STORE-1, offline gate): the full-snapshot `seed` path persists

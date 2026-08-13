@@ -51,6 +51,19 @@ use crate::types::{
     StoreError,
 };
 
+/// Maximum caller-requested vector result count. This bounds adapter queries,
+/// allocation, and integer narrowing at the public store/recall boundary.
+pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
+
+pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
+    if limit > MAX_VECTOR_CANDIDATE_LIMIT {
+        return Err(StoreError::Invariant(format!(
+            "vector candidate limit {limit} exceeds maximum {MAX_VECTOR_CANDIDATE_LIMIT}"
+        )));
+    }
+    Ok(())
+}
+
 bitflags! {
     /// Adapter capabilities (spec §3.2).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +118,8 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Vec<Scored<NodeId>>, StoreError>;
 
     /// Requires [`Capabilities::VECTOR_SEARCH`]; adapters without it return
-    /// [`StoreError::Capability`].
+    /// [`StoreError::Capability`]. `limit` must not exceed
+    /// [`MAX_VECTOR_CANDIDATE_LIMIT`].
     async fn vector_candidates(
         &self,
         session: &SessionId,
@@ -408,6 +422,13 @@ pub fn store_from_env() -> Result<Box<dyn GraphStore>, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vector_candidate_limit_is_bounded_and_checked() {
+        validate_vector_candidate_limit(0).unwrap();
+        validate_vector_candidate_limit(MAX_VECTOR_CANDIDATE_LIMIT).unwrap();
+        assert!(validate_vector_candidate_limit(MAX_VECTOR_CANDIDATE_LIMIT + 1).is_err());
+    }
     use crate::test_util::env_lock;
 
     #[test]

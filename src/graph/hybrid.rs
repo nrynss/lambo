@@ -30,14 +30,15 @@
 //!    through the [`GraphStore`] trait only. A capability-miss or embed failure
 //!    marks the concept for the canonical fallback (logged once per session); a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates.
-//! 3. **Commit (write lock, sync).** Re-acquire the write lock, stamp the
-//!    session's [`EmbeddingContract`] on first embed, then write concepts and
-//!    edges exactly as derive would, plus the `Semantic` merge edge. Drop the
-//!    lock. No `.await` is held here.
+//! 3. **Commit (write lock, sync).** Re-acquire the write lock and compare the
+//!    current epoch with the planned epoch. A concurrent daemon/MCP mutation
+//!    discards the stale gather and retries. Revalidate the embedding contract
+//!    under this lock, apply the logical derive to a cloned graph, and swap only
+//!    after every write succeeds. The stamp and all node/edge mutations are thus
+//!    atomic in RAM; no `.await` is held here.
 //!
-//! Single-writer per session (spec §2.2) is what makes the plan-then-commit
-//! split sound: no other writer can invalidate the phase-1 `canonicalize`
-//! results between the two lock acquisitions.
+//! This remains sound even when future callers introduce concurrent writers;
+//! correctness does not depend on every writer participating in a private mutex.
 //!
 //! # Merge shape (ambiguity resolved — see handoff)
 //!
@@ -65,6 +66,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -89,12 +91,38 @@ pub const SEMANTIC_MATCH_THRESHOLD_DEFAULT: f64 = 0.85;
 /// How many vector candidates to request from the store per concept.
 pub const VECTOR_CANDIDATE_LIMIT: usize = 8;
 
+/// Hard request bounds are checked before the first await. They prevent one
+/// derive call from turning attacker-controlled input into unbounded external
+/// embed/store work while leaving normal multi-concept calls ample headroom.
+pub const MAX_HYBRID_CONCEPTS: usize = 256;
+pub const MAX_HYBRID_PARENT_PAIRS: usize = 256;
+pub const MAX_HYBRID_WORK_ITEMS: usize = 512;
+pub const MAX_HYBRID_CONTEXT_BYTES: usize = 16 * 1024;
+pub const HYBRID_IO_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HYBRID_REPLANS: usize = 8;
+
 /// Initial weight of a `Semantic` merge edge: the accepted cosine similarity,
 /// clamped into the legal `[0, MAX_EDGE_WEIGHT]` range. A merge only happens
 /// at >= 0.85, so the weight is always positive and finite, and the edge
 /// decays over time (see the spec §5 decay table, where `Semantic` decays).
 fn semantic_weight(score: f64) -> f64 {
     score.clamp(0.0, crate::graph::MAX_EDGE_WEIGHT)
+}
+
+fn best_candidate(
+    hits: &[crate::types::Scored<NodeId>],
+    threshold: f64,
+) -> Option<&crate::types::Scored<NodeId>> {
+    hits.iter()
+        .filter(|c| c.score.is_finite() && (0.0..=1.0).contains(&c.score) && c.score >= threshold)
+        // Prefer higher similarity, then the lexicographically smaller UUID.
+        // Reversing the UUID comparison is required because `max_by` selects
+        // Ordering::Greater.
+        .max_by(|a, b| {
+            a.score
+                .total_cmp(&b.score)
+                .then_with(|| b.item.0.cmp(&a.item.0))
+        })
 }
 
 /// The per-concept resolution computed by the async gather phase.
@@ -214,12 +242,48 @@ pub async fn derive(
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
 ) -> Result<DeriveOutcome, LamboError> {
-    // -----------------------------------------------------------------------
-    // Phase 1 — plan under a brief read lock (no I/O, no await).
-    // -----------------------------------------------------------------------
-    let (session_id, interaction_created_at, origin_text, stamped, items) =
-        {
+    if !semantic_match_threshold.is_finite() || !(0.0..=1.0).contains(&semantic_match_threshold) {
+        return Err(LamboError::Config(format!(
+            "semantic_match_threshold must be finite and in [0, 1], got {semantic_match_threshold}"
+        )));
+    }
+    if concepts.len() > MAX_HYBRID_CONCEPTS {
+        return Err(LamboError::Config(format!(
+            "hybrid derive accepts at most {MAX_HYBRID_CONCEPTS} concepts, got {}",
+            concepts.len()
+        )));
+    }
+    if parent_of.pairs().len() > MAX_HYBRID_PARENT_PAIRS
+        || concepts.len().saturating_add(parent_of.pairs().len()) > MAX_HYBRID_WORK_ITEMS
+    {
+        return Err(LamboError::Config(format!(
+            "hybrid derive accepts at most {MAX_HYBRID_PARENT_PAIRS} parent pairs and \
+             {MAX_HYBRID_WORK_ITEMS} combined work items"
+        )));
+    }
+    for text in concepts
+        .iter()
+        .map(|(content, _)| *content)
+        .chain(parent_of.pairs().iter().flat_map(|(a, b)| [*a, *b]))
+    {
+        if text.len() > MAX_HYBRID_CONTEXT_BYTES {
+            return Err(LamboError::Config(format!(
+                "hybrid derive input exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
+            )));
+        }
+    }
+
+    // Writers outside hybrid (daemon maintenance, future MCP tasks) need not
+    // share a mutex with this function. Epoch validation makes their mutations
+    // visible; a stale gather is discarded and planned again.
+    let io_deadline = tokio::time::Instant::now() + HYBRID_IO_TIMEOUT;
+    for _attempt in 0..MAX_HYBRID_REPLANS {
+        // -----------------------------------------------------------------------
+        // Phase 1 — plan under a brief read lock (no I/O, no await).
+        // -----------------------------------------------------------------------
+        let (planned_epoch, session_id, interaction_created_at, origin_text, stamped, items) = {
             let g = graph.read();
+            let planned_epoch = g.epoch();
             let session_id = g.session_id().clone();
             let (interaction_created_at, origin_text) = match g.node(interaction) {
                 Some(Node::Interaction(i)) => (i.created_at, i.prompt_text.clone()),
@@ -280,7 +344,27 @@ pub async fn derive(
                 items.push((content, concept_type, key, matched));
             }
 
+            if origin_text
+                .as_ref()
+                .is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES)
+            {
+                return Err(LamboError::Config(format!(
+                    "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
+                )));
+            }
+            let origin_len = origin_text.as_deref().map(str::trim).map_or(0, str::len);
+            if items.iter().any(|(content, _, _, matched)| {
+                matched.is_none()
+                    && content.len().saturating_add(origin_len).saturating_add(3)
+                        > MAX_HYBRID_CONTEXT_BYTES
+            }) {
+                return Err(LamboError::Config(format!(
+                    "hybrid embedding context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
+                )));
+            }
+
             (
+                planned_epoch,
                 session_id,
                 interaction_created_at,
                 origin_text,
@@ -289,287 +373,381 @@ pub async fn derive(
             )
         };
 
-    // The vector leg can run only when the store advertises it. Probed once,
-    // synchronously, before any I/O (mirrors the recall RAM-tier promise:
-    // zero async store calls when the capability is absent).
-    let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
+        // The vector leg can run only when the store advertises it. Probed once,
+        // synchronously, before any I/O (mirrors the recall RAM-tier promise:
+        // zero async store calls when the capability is absent).
+        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
 
-    // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
-    // ("without re-embed"). Only enforced when we are actually about to embed
-    // (capability present and at least one unmatched concept). ensure_compatible
-    // is a pure comparison; it never embeds.
-    let has_unmatched = items.iter().any(|(_, _, _, matched)| matched.is_none());
-    if vector_ok && has_unmatched {
-        if let Some(existing) = &stamped {
-            existing.ensure_compatible(embedding)?;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 2 — async gather (no lock held).
-    // -----------------------------------------------------------------------
-    // First-session fallback log for the capability-absent path (zero I/O, so
-    // acceptable here); embed-failure logging happens per concept below.
-    let mut attempted_embed = false;
-    let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
-    for (content, _concept_type, key, matched) in &items {
-        let res = match matched {
-            Some(node) => Resolution::CanonicalMatch { node: *node },
-            None if !vector_ok => {
-                if note_fallback_logged(&session_id) {
-                    tracing::warn!(
-                        target: "lambo::hybrid",
-                        session = %session_id,
-                        "hybrid matching disabled: store lacks VECTOR_SEARCH — degrading to \
-                         MatchStrategy::Canonical (creating keyword-only concept)"
-                    );
-                }
-                Resolution::Fresh {
-                    key: key.clone(),
-                    embedding: None,
-                }
+        // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
+        // ("without re-embed"). Only enforced when we are actually about to embed
+        // (capability present and at least one unmatched concept). ensure_compatible
+        // is a pure comparison; it never embeds.
+        let has_unmatched = items.iter().any(|(_, _, _, matched)| matched.is_none());
+        if vector_ok && has_unmatched {
+            if let Some(existing) = &stamped {
+                existing.ensure_compatible(embedding)?;
             }
-            None => {
-                let context = context_text(content, origin_text.as_deref());
-                match embedder.embed(&context).await {
-                    Err(e) => {
-                        if note_fallback_logged(&session_id) {
-                            tracing::warn!(
-                                target: "lambo::hybrid",
-                                session = %session_id,
-                                error = %e,
-                                "hybrid embed failed — degrading to MatchStrategy::Canonical \
-                                 (creating keyword-only concept)"
-                            );
-                        }
-                        Resolution::Fresh {
-                            key: key.clone(),
-                            embedding: None,
-                        }
+        }
+
+        // -----------------------------------------------------------------------
+        // Phase 2 — async gather (no lock held).
+        // -----------------------------------------------------------------------
+        // First-session fallback log for the capability-absent path (zero I/O, so
+        // acceptable here); embed-failure logging happens per concept below.
+        let mut attempted_embed = false;
+        let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
+        for (content, _concept_type, key, matched) in &items {
+            let res = match matched {
+                Some(node) => Resolution::CanonicalMatch { node: *node },
+                None if !vector_ok => {
+                    if note_fallback_logged(&session_id) {
+                        tracing::warn!(
+                            target: "lambo::hybrid",
+                            session = %session_id,
+                            "hybrid matching disabled: store lacks VECTOR_SEARCH — degrading to \
+                             MatchStrategy::Canonical (creating keyword-only concept)"
+                        );
                     }
-                    Ok(emb) => {
-                        // An embed only counts as "attempted" for the contract
-                        // stamp once it actually returned a vector — a failed
-                        // attempt must not bind the session to an embedding
-                        // space it produced no vector in (MINOR-2).
-                        attempted_embed = true;
-                        match store
-                            .vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT)
+                    Resolution::Fresh {
+                        key: key.clone(),
+                        embedding: None,
+                    }
+                }
+                None => {
+                    let context = context_text(content, origin_text.as_deref());
+                    match tokio::time::timeout_at(io_deadline, embedder.embed(&context)).await {
+                        Err(_) => {
+                            if note_fallback_logged(&session_id) {
+                                tracing::warn!(
+                                    target: "lambo::hybrid",
+                                    session = %session_id,
+                                    "hybrid embed timed out - degrading to MatchStrategy::Canonical"
+                                );
+                            }
+                            Resolution::Fresh {
+                                key: key.clone(),
+                                embedding: None,
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            if note_fallback_logged(&session_id) {
+                                tracing::warn!(
+                                    target: "lambo::hybrid",
+                                    session = %session_id,
+                                    error = %e,
+                                    "hybrid embed failed — degrading to MatchStrategy::Canonical \
+                                     (creating keyword-only concept)"
+                                );
+                            }
+                            Resolution::Fresh {
+                                key: key.clone(),
+                                embedding: None,
+                            }
+                        }
+                        Ok(Ok(emb)) => {
+                            // An embed only counts as "attempted" for the contract
+                            // stamp once it actually returned a vector — a failed
+                            // attempt must not bind the session to an embedding
+                            // space it produced no vector in (MINOR-2).
+                            attempted_embed = true;
+                            match tokio::time::timeout_at(
+                                io_deadline,
+                                store.vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT),
+                            )
                             .await
-                        {
-                            Ok(hits) => {
-                                // Highest-scoring candidate at/above threshold (store
-                                // results are not guaranteed sorted). The candidate is
-                                // validated to be a real distinct concept at commit.
-                                let best = hits
-                                    .iter()
-                                    .filter(|c| c.score >= semantic_match_threshold)
-                                    .max_by(|a, b| a.score.total_cmp(&b.score));
-                                match best {
-                                    Some(c) => Resolution::HybridMerge {
-                                        key: key.clone(),
-                                        target: c.item,
-                                        score: c.score,
-                                        embedding: emb,
-                                    },
-                                    // Below threshold: fresh concept, keyword-only.
-                                    // Writing the vector here would let a 'far'
-                                    // concept become a future vector candidate —
-                                    // the exact over-merge the precision bias
-                                    // prevents (PHASE-7 T7.2 law, MAJOR-1).
-                                    None => Resolution::Fresh {
+                            {
+                                Err(_) => {
+                                    return Err(StoreError::Backend(format!(
+                                        "hybrid vector candidate lookup timed out after \
+                                         {HYBRID_IO_TIMEOUT:?}"
+                                    ))
+                                    .into())
+                                }
+                                Ok(Ok(hits)) => {
+                                    // Highest-scoring candidate at/above threshold (store
+                                    // results are not guaranteed sorted). The candidate is
+                                    // validated to be a real distinct concept at commit.
+                                    let best = best_candidate(&hits, semantic_match_threshold);
+                                    match best {
+                                        Some(c) => Resolution::HybridMerge {
+                                            key: key.clone(),
+                                            target: c.item,
+                                            score: c.score,
+                                            embedding: emb,
+                                        },
+                                        // Below threshold: fresh concept, keyword-only.
+                                        // Writing the vector here would let a 'far'
+                                        // concept become a future vector candidate —
+                                        // the exact over-merge the precision bias
+                                        // prevents (PHASE-7 T7.2 law, MAJOR-1).
+                                        None => Resolution::Fresh {
+                                            key: key.clone(),
+                                            embedding: None,
+                                        },
+                                    }
+                                }
+                                Ok(Err(StoreError::Capability(_))) => {
+                                    if note_fallback_logged(&session_id) {
+                                        tracing::warn!(
+                                            target: "lambo::hybrid",
+                                            session = %session_id,
+                                            "store refused vector_candidates (capability miss) — \
+                                             degrading to MatchStrategy::Canonical (creating \
+                                             keyword-only concept)"
+                                        );
+                                    }
+                                    Resolution::Fresh {
                                         key: key.clone(),
                                         embedding: None,
-                                    },
+                                    }
                                 }
+                                Ok(Err(e)) => return Err(e.into()),
                             }
-                            Err(StoreError::Capability(_)) => {
-                                if note_fallback_logged(&session_id) {
-                                    tracing::warn!(
-                                        target: "lambo::hybrid",
-                                        session = %session_id,
-                                        "store refused vector_candidates (capability miss) — \
-                                         degrading to MatchStrategy::Canonical (creating \
-                                         keyword-only concept)"
-                                    );
-                                }
-                                Resolution::Fresh {
-                                    key: key.clone(),
-                                    embedding: None,
-                                }
-                            }
-                            Err(e) => return Err(e.into()),
                         }
                     }
                 }
+            };
+            resolutions.push(res);
+        }
+        let _ = has_unmatched;
+
+        // -----------------------------------------------------------------------
+        // Phase 3 — commit under a write lock (sync, no await).
+        // -----------------------------------------------------------------------
+        let mut guard = graph.write();
+        if guard.epoch() != planned_epoch {
+            continue;
+        }
+        if attempted_embed {
+            if let Some(existing) = guard.embedding() {
+                // Revalidate under the commit lock. Two first writers can both plan
+                // against `None`; only the winner may stamp its vector space.
+                existing.ensure_compatible(embedding)?;
             }
-        };
-        resolutions.push(res);
-    }
-    let _ = has_unmatched;
+        }
 
-    // -----------------------------------------------------------------------
-    // Phase 3 — commit under a write lock (sync, no await).
-    // -----------------------------------------------------------------------
-    let mut g = graph.write();
-    if attempted_embed && g.embedding().is_none() {
-        // Stamp the embedding space on first embed (persistence is already the
-        // store's job; T7.2 owns only the stamp + refusal).
-        g.set_embedding(Some(embedding.clone()));
-    }
-    let session_id = g.session_id().clone();
+        // Stage every graph mutation on a private clone. Any invariant failure in
+        // concept, co-occurrence, or hierarchy construction drops the clone and
+        // leaves both live state and its ordered mutation log untouched.
+        let mut g = guard.clone();
+        if attempted_embed && g.embedding().is_none() {
+            g.stamp_embedding(embedding.clone())?;
+        }
+        let session_id = g.session_id().clone();
 
-    let mut outcome = DeriveOutcome::default();
-    let mut written: HashSet<NodeId> = HashSet::new();
-    let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
+        let mut outcome = DeriveOutcome::default();
+        let mut written: HashSet<NodeId> = HashSet::new();
+        let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
 
-    for ((content, concept_type, _key, _matched), res) in items.iter().zip(resolutions.iter()) {
-        // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
-        // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
-        // lock before ANY node was written, so two distinct contents that
-        // collide on one canonical key (e.g. "user schema" + "schema user" ->
-        // "schema user") both resolved `Unmatched`. The first created its node
-        // above; the second must now collapse to it — mirroring sync derive's
-        // `resolve_concept` (canonicalize -> insert -> written_this_call dedup)
-        // — instead of re-inserting the same key and tripping
-        // `insert_concept`'s UNIQUE (session_id, canonical_key) invariant
-        // (hard error + partial write). Single-writer per session (spec §2.2)
-        // means the only node reachable as Matched here is one written earlier
-        // in THIS call; pre-existing nodes cannot match a phase-1-Unmatched key.
-        if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, &g)? {
-            if written.contains(&node) {
-                outcome.matched.push(node);
-                if !call_nodes.contains(&node) {
-                    call_nodes.push(node);
+        for ((content, concept_type, _key, _matched), res) in items.iter().zip(resolutions.iter()) {
+            // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
+            // AS WRITTEN THIS CALL. Phase-1 canonicalization ran under the read
+            // lock before ANY node was written, so two distinct contents that
+            // collide on one canonical key (e.g. "user schema" + "schema user" ->
+            // "schema user") both resolved `Unmatched`. The first created its node
+            // above; the second must now collapse to it — mirroring sync derive's
+            // `resolve_concept` (canonicalize -> insert -> written_this_call dedup)
+            // — instead of re-inserting the same key and tripping
+            // `insert_concept`'s UNIQUE (session_id, canonical_key) invariant
+            // (hard error + partial write). Epoch validation means any external
+            // writer would have forced a re-plan, so the only newly Matched node
+            // here is one written earlier in THIS staged call.
+            if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, &g)? {
+                if written.contains(&node) {
+                    outcome.matched.push(node);
+                    if !call_nodes.contains(&node) {
+                        call_nodes.push(node);
+                    }
+                    continue;
                 }
+            }
+            let this_node: NodeId;
+            match res {
+                Resolution::CanonicalMatch { node } => {
+                    if written.contains(node) {
+                        // Key collision with a node written earlier this call — skip
+                        // the write (one call never self-reinforces), record the match.
+                        outcome.matched.push(*node);
+                        this_node = *node;
+                    } else {
+                        let existing = match g.node(*node) {
+                            Some(Node::Concept(c)) => c.clone(),
+                            _ => {
+                                return Err(LamboError::Store(StoreError::Invariant(format!(
+                                    "hybrid derive: canonicalize matched {node} but the stored \
+                                 node is not a Concept"
+                                ))))
+                            }
+                        };
+                        if g.edge_between(interaction, *node, EdgeType::Derives)
+                            .is_some()
+                        {
+                            outcome.reinforced += 1;
+                        }
+                        g.insert_concept(existing, interaction)?;
+                        written.insert(*node);
+                        outcome.matched.push(*node);
+                        this_node = *node;
+                    }
+                }
+                Resolution::Fresh { key, embedding } => {
+                    let concept = new_concept(
+                        &session_id,
+                        content,
+                        *concept_type,
+                        key.clone(),
+                        interaction,
+                        agent,
+                        interaction_created_at,
+                        embedding.clone(),
+                    );
+                    let id = concept.id;
+                    g.insert_concept(concept, interaction)?;
+                    written.insert(id);
+                    outcome.created.push(id);
+                    this_node = id;
+                }
+                Resolution::HybridMerge {
+                    key,
+                    target,
+                    score,
+                    embedding,
+                } => {
+                    // MINOR-2 (P7 remediation): the concept keeps its vector ONLY if
+                    // the merge Semantic edge is actually written. Both endpoints
+                    // must be concepts (GRAPH-2); validate the target up front and,
+                    // when the store handed us a bogus non-Concept candidate, refuse
+                    // the merge and degrade to a TRUE keyword-only concept
+                    // (embedding: None) — the concept must never persist a vector for
+                    // a merge it refused to make (consistent with the other
+                    // below-threshold / capability-miss / embed-failure fallbacks).
+                    let can_merge = matches!(g.node(*target), Some(Node::Concept(_)));
+                    let embedding = if can_merge {
+                        Some(embedding.clone())
+                    } else {
+                        None
+                    };
+                    let concept = new_concept(
+                        &session_id,
+                        content,
+                        *concept_type,
+                        key.clone(),
+                        interaction,
+                        agent,
+                        interaction_created_at,
+                        embedding,
+                    );
+                    let id = concept.id;
+                    g.insert_concept(concept, interaction)?;
+                    written.insert(id);
+                    outcome.created.push(id);
+                    if can_merge && *target != id {
+                        // Decaying Semantic edge to the matched concept (deterministic
+                        // direction: order endpoints by NodeId's inner UUID, since
+                        // NodeId itself is not Ord). `*target != id` is defense-in-depth:
+                        // a store-returned target can never equal this fresh id.
+                        let (s, t) = if target.0 < id.0 {
+                            (*target, id)
+                        } else {
+                            (id, *target)
+                        };
+                        g.upsert_edge(Edge {
+                            id: NodeId::new(),
+                            session_id: session_id.clone(),
+                            source: s,
+                            target: t,
+                            edge_type: EdgeType::Semantic,
+                            weight: semantic_weight(*score),
+                            reinforcements: 1,
+                            created_at: interaction_created_at,
+                            last_reinforced: interaction_created_at,
+                        })?;
+                        // Recorded separately from `matched`: a merge does not
+                        // re-upsert the target nor Derives-reinforce it, so the
+                        // outcome must not over-count `matched` as "re-derived"
+                        // (DeriveOutcome contract, MINOR-3).
+                        outcome.semantic_merged.push(*target);
+                    }
+                    this_node = id;
+                }
+            }
+            if !call_nodes.contains(&this_node) {
+                call_nodes.push(this_node);
+            }
+        }
+
+        // Step 5 — pairwise CoOccurrence (mirror derive: earlier-in-call -> later,
+        // reinforce an existing edge, cap at max_cooccurrence_per_derive).
+        let mut written_co = 0usize;
+        'pairs: for i in 0..call_nodes.len() {
+            for j in (i + 1)..call_nodes.len() {
+                if written_co >= max_cooccurrence_per_derive {
+                    break 'pairs;
+                }
+                let (source, target) = pair_direction(&g, call_nodes[i], call_nodes[j]);
+                if g.edge_between(source, target, EdgeType::CoOccurrence)
+                    .is_some()
+                {
+                    outcome.reinforced += 1;
+                }
+                g.upsert_edge(Edge {
+                    id: NodeId::new(),
+                    session_id: session_id.clone(),
+                    source,
+                    target,
+                    edge_type: EdgeType::CoOccurrence,
+                    weight: COOCCURRENCE_WEIGHT,
+                    reinforcements: 1,
+                    created_at: interaction_created_at,
+                    last_reinforced: interaction_created_at,
+                })?;
+                written_co += 1;
+            }
+        }
+
+        // Step 6 — Hierarchical edges from ParentOf (mirror derive: reflexivity
+        // already rejected in phase 1; dedup on resolved pair).
+        let mut seen_pairs: HashSet<(NodeId, NodeId)> =
+            HashSet::with_capacity(parent_of.pairs().len());
+        for &(parent, child) in parent_of.pairs() {
+            if parent == child {
+                return Err(LamboError::Store(StoreError::Invariant(format!(
+                    "hybrid derive: parent_of pair ({parent}, {child}) is reflexive — a \
+                 Hierarchical self-loop is a cycle (spec §5.7)"
+                ))));
+            }
+            let parent_node = self::resolve_concept(
+                &mut g,
+                parent,
+                PARENT_OF_CONCEPT_TYPE,
+                interaction,
+                agent,
+                interaction_created_at,
+                &session_id,
+                &mut written,
+                &mut outcome,
+            )?;
+            let child_node = self::resolve_concept(
+                &mut g,
+                child,
+                PARENT_OF_CONCEPT_TYPE,
+                interaction,
+                agent,
+                interaction_created_at,
+                &session_id,
+                &mut written,
+                &mut outcome,
+            )?;
+            if parent_node == child_node {
+                return Err(LamboError::Store(StoreError::Invariant(format!(
+                "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same concept \
+                 {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
+            ))));
+            }
+            if !seen_pairs.insert((parent_node, child_node)) {
                 continue;
             }
-        }
-        let this_node: NodeId;
-        match res {
-            Resolution::CanonicalMatch { node } => {
-                if written.contains(node) {
-                    // Key collision with a node written earlier this call — skip
-                    // the write (one call never self-reinforces), record the match.
-                    outcome.matched.push(*node);
-                    this_node = *node;
-                } else {
-                    let existing = match g.node(*node) {
-                        Some(Node::Concept(c)) => c.clone(),
-                        _ => {
-                            return Err(LamboError::Store(StoreError::Invariant(format!(
-                                "hybrid derive: canonicalize matched {node} but the stored \
-                                 node is not a Concept"
-                            ))))
-                        }
-                    };
-                    if g.edge_between(interaction, *node, EdgeType::Derives)
-                        .is_some()
-                    {
-                        outcome.reinforced += 1;
-                    }
-                    g.insert_concept(existing, interaction)?;
-                    written.insert(*node);
-                    outcome.matched.push(*node);
-                    this_node = *node;
-                }
-            }
-            Resolution::Fresh { key, embedding } => {
-                let concept = new_concept(
-                    &session_id,
-                    content,
-                    *concept_type,
-                    key.clone(),
-                    interaction,
-                    agent,
-                    interaction_created_at,
-                    embedding.clone(),
-                );
-                let id = concept.id;
-                g.insert_concept(concept, interaction)?;
-                written.insert(id);
-                outcome.created.push(id);
-                this_node = id;
-            }
-            Resolution::HybridMerge {
-                key,
-                target,
-                score,
-                embedding,
-            } => {
-                // MINOR-2 (P7 remediation): the concept keeps its vector ONLY if
-                // the merge Semantic edge is actually written. Both endpoints
-                // must be concepts (GRAPH-2); validate the target up front and,
-                // when the store handed us a bogus non-Concept candidate, refuse
-                // the merge and degrade to a TRUE keyword-only concept
-                // (embedding: None) — the concept must never persist a vector for
-                // a merge it refused to make (consistent with the other
-                // below-threshold / capability-miss / embed-failure fallbacks).
-                let can_merge = matches!(g.node(*target), Some(Node::Concept(_)));
-                let embedding = if can_merge {
-                    Some(embedding.clone())
-                } else {
-                    None
-                };
-                let concept = new_concept(
-                    &session_id,
-                    content,
-                    *concept_type,
-                    key.clone(),
-                    interaction,
-                    agent,
-                    interaction_created_at,
-                    embedding,
-                );
-                let id = concept.id;
-                g.insert_concept(concept, interaction)?;
-                written.insert(id);
-                outcome.created.push(id);
-                if can_merge && *target != id {
-                    // Decaying Semantic edge to the matched concept (deterministic
-                    // direction: order endpoints by NodeId's inner UUID, since
-                    // NodeId itself is not Ord). `*target != id` is defense-in-depth:
-                    // a store-returned target can never equal this fresh id.
-                    let (s, t) = if target.0 < id.0 {
-                        (*target, id)
-                    } else {
-                        (id, *target)
-                    };
-                    g.upsert_edge(Edge {
-                        id: NodeId::new(),
-                        session_id: session_id.clone(),
-                        source: s,
-                        target: t,
-                        edge_type: EdgeType::Semantic,
-                        weight: semantic_weight(*score),
-                        reinforcements: 1,
-                        created_at: interaction_created_at,
-                        last_reinforced: interaction_created_at,
-                    })?;
-                    // Recorded separately from `matched`: a merge does not
-                    // re-upsert the target nor Derives-reinforce it, so the
-                    // outcome must not over-count `matched` as "re-derived"
-                    // (DeriveOutcome contract, MINOR-3).
-                    outcome.semantic_merged.push(*target);
-                }
-                this_node = id;
-            }
-        }
-        if !call_nodes.contains(&this_node) {
-            call_nodes.push(this_node);
-        }
-    }
-
-    // Step 5 — pairwise CoOccurrence (mirror derive: earlier-in-call -> later,
-    // reinforce an existing edge, cap at max_cooccurrence_per_derive).
-    let mut written_co = 0usize;
-    'pairs: for i in 0..call_nodes.len() {
-        for j in (i + 1)..call_nodes.len() {
-            if written_co >= max_cooccurrence_per_derive {
-                break 'pairs;
-            }
-            let (source, target) = pair_direction(&g, call_nodes[i], call_nodes[j]);
-            if g.edge_between(source, target, EdgeType::CoOccurrence)
+            if g.edge_between(parent_node, child_node, EdgeType::Hierarchical)
                 .is_some()
             {
                 outcome.reinforced += 1;
@@ -577,78 +755,23 @@ pub async fn derive(
             g.upsert_edge(Edge {
                 id: NodeId::new(),
                 session_id: session_id.clone(),
-                source,
-                target,
-                edge_type: EdgeType::CoOccurrence,
-                weight: COOCCURRENCE_WEIGHT,
+                source: parent_node,
+                target: child_node,
+                edge_type: EdgeType::Hierarchical,
+                weight: HIERARCHICAL_WEIGHT,
                 reinforcements: 1,
                 created_at: interaction_created_at,
                 last_reinforced: interaction_created_at,
             })?;
-            written_co += 1;
         }
+
+        *guard = g;
+        return Ok(outcome);
     }
 
-    // Step 6 — Hierarchical edges from ParentOf (mirror derive: reflexivity
-    // already rejected in phase 1; dedup on resolved pair).
-    let mut seen_pairs: HashSet<(NodeId, NodeId)> = HashSet::with_capacity(parent_of.pairs().len());
-    for &(parent, child) in parent_of.pairs() {
-        if parent == child {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
-                "hybrid derive: parent_of pair ({parent}, {child}) is reflexive — a \
-                 Hierarchical self-loop is a cycle (spec §5.7)"
-            ))));
-        }
-        let parent_node = self::resolve_concept(
-            &mut g,
-            parent,
-            PARENT_OF_CONCEPT_TYPE,
-            interaction,
-            agent,
-            interaction_created_at,
-            &session_id,
-            &mut written,
-            &mut outcome,
-        )?;
-        let child_node = self::resolve_concept(
-            &mut g,
-            child,
-            PARENT_OF_CONCEPT_TYPE,
-            interaction,
-            agent,
-            interaction_created_at,
-            &session_id,
-            &mut written,
-            &mut outcome,
-        )?;
-        if parent_node == child_node {
-            return Err(LamboError::Store(StoreError::Invariant(format!(
-                "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same concept \
-                 {parent_node} — a Hierarchical self-loop is a cycle (spec §5.7)"
-            ))));
-        }
-        if !seen_pairs.insert((parent_node, child_node)) {
-            continue;
-        }
-        if g.edge_between(parent_node, child_node, EdgeType::Hierarchical)
-            .is_some()
-        {
-            outcome.reinforced += 1;
-        }
-        g.upsert_edge(Edge {
-            id: NodeId::new(),
-            session_id: session_id.clone(),
-            source: parent_node,
-            target: child_node,
-            edge_type: EdgeType::Hierarchical,
-            weight: HIERARCHICAL_WEIGHT,
-            reinforcements: 1,
-            created_at: interaction_created_at,
-            last_reinforced: interaction_created_at,
-        })?;
-    }
-
-    Ok(outcome)
+    Err(LamboError::Store(StoreError::Backend(format!(
+        "hybrid derive could not commit after {MAX_HYBRID_REPLANS} concurrent graph changes"
+    ))))
 }
 
 /// CoOccurrence is symmetric; adopt the existing direction so a swapped re-derive
@@ -734,6 +857,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
+    use tokio::sync::{Barrier, Notify};
     use uuid::Uuid;
 
     use super::*;
@@ -803,6 +927,7 @@ mod tests {
         caps: Capabilities,
         hits: Vec<Scored<NodeId>>,
         backend_err: bool,
+        vector_calls: Arc<AtomicUsize>,
     }
 
     impl SpyStore {
@@ -811,6 +936,7 @@ mod tests {
                 caps: Capabilities::VECTOR_SEARCH | Capabilities::HISTORY,
                 hits,
                 backend_err: false,
+                vector_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn without_vector() -> Self {
@@ -818,6 +944,7 @@ mod tests {
                 caps: Capabilities::HISTORY,
                 hits: Vec::new(),
                 backend_err: false,
+                vector_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn failing() -> Self {
@@ -825,7 +952,11 @@ mod tests {
                 caps: Capabilities::VECTOR_SEARCH | Capabilities::HISTORY,
                 hits: Vec::new(),
                 backend_err: true,
+                vector_calls: Arc::new(AtomicUsize::new(0)),
             }
+        }
+        fn vector_calls(&self) -> usize {
+            self.vector_calls.load(Ordering::SeqCst)
         }
         fn unexpected(&self) -> ! {
             panic!("SpyStore: unexpected async store call (only vector_candidates allowed)")
@@ -862,6 +993,7 @@ mod tests {
             _embedding: &[f32],
             _limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.vector_calls.fetch_add(1, Ordering::SeqCst);
             if self.backend_err {
                 return Err(StoreError::Backend("boom".into()));
             }
@@ -872,6 +1004,7 @@ mod tests {
             _session: &SessionId,
             _node: NodeId,
             _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<u64, StoreError> {
             self.unexpected()
         }
@@ -880,6 +1013,7 @@ mod tests {
             _session: &SessionId,
             _node: NodeId,
             _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             self.unexpected()
         }
@@ -947,6 +1081,310 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(EmbedError::Unavailable("server down".into()))
         }
+    }
+
+    #[derive(Debug)]
+    struct BarrierEmbedder {
+        barrier: Barrier,
+        calls: AtomicUsize,
+    }
+
+    impl BarrierEmbedder {
+        fn new(parties: usize) -> Self {
+            Self {
+                barrier: Barrier::new(parties),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Embedder for BarrierEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                self.barrier.wait().await;
+            }
+            Ok(vec![0.0; 1024])
+        }
+    }
+
+    #[derive(Debug)]
+    struct PausingEmbedder {
+        started: Notify,
+        release: Notify,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Embedder for PausingEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(vec![0.0; 1024])
+        }
+    }
+
+    #[test]
+    fn candidate_validation_and_ties_are_deterministic() {
+        let lower = NodeId(Uuid::from_u64_pair(0, 1));
+        let higher = NodeId(Uuid::from_u64_pair(0, 2));
+        let invalid = NodeId(Uuid::from_u64_pair(0, 3));
+        let a = vec![
+            hit(higher, 0.9),
+            hit(invalid, f64::NAN),
+            hit(lower, 0.9),
+            hit(invalid, 1.1),
+        ];
+        let mut b = a.clone();
+        b.reverse();
+        assert_eq!(best_candidate(&a, 0.85).unwrap().item, lower);
+        assert_eq!(best_candidate(&b, 0.85).unwrap().item, lower);
+        assert!(best_candidate(&[hit(invalid, f64::INFINITY)], 0.85).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-contract-race", 1, 0, "concurrent contract race");
+        let embedder = Arc::new(BarrierEmbedder::new(2));
+        let store = Arc::new(SpyStore::with_vector(Vec::new()));
+
+        let spawn = |kind: &'static str, content: &'static str| {
+            let graph = graph.clone();
+            let embedder = embedder.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                derive(
+                    graph,
+                    store.as_ref(),
+                    embedder.as_ref(),
+                    &contract(kind, 1024),
+                    interaction,
+                    &agent(),
+                    &[(content, ConceptType::Entity)],
+                    &ParentOf::none(),
+                    10,
+                    SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                )
+                .await
+            })
+        };
+        let (a, b) = tokio::join!(spawn("fixture-a", "alpha"), spawn("fixture-b", "beta"));
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(outcomes.iter().filter(|r| r.is_err()).count(), 1);
+        let g = graph.read();
+        assert_eq!(
+            g.concepts().count(),
+            1,
+            "losing vector space writes nothing"
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_use_empty_candidates_still_commits_contract() {
+        // Cockroach returns this safe empty shape for a missing/unstamped
+        // session before the first SetEmbedding commit.
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-first-use", 1, 0, "first use context");
+        let store = SpyStore::with_vector(Vec::new());
+        let embedder = FixtureEmbedder::new();
+        derive(
+            graph.clone(),
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[("first embedded concept", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.vector_calls(), 1);
+        let mut g = graph.write();
+        assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
+        assert_eq!(g.concepts().count(), 1);
+        // Precision-biased hybrid writes a fresh candidate keyword-only when
+        // the store has no trusted matches; the contract is still committed
+        // so later writes/searches use one known vector space.
+        assert!(g.concepts().all(|concept| concept.embedding.is_none()));
+        assert!(g.drain_log().mutations.iter().any(|mutation| matches!(
+            mutation,
+            crate::types::Mutation::SetEmbedding {
+                embedding: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn intervening_graph_mutation_discards_stale_gather_and_replans() {
+        let (graph, interaction) = graph_with_interaction("hybrid-epoch-race", 1, 0, "epoch race");
+        let embedder = Arc::new(PausingEmbedder {
+            started: Notify::new(),
+            release: Notify::new(),
+            calls: AtomicUsize::new(0),
+        });
+        let store = Arc::new(SpyStore::with_vector(Vec::new()));
+        let task = {
+            let graph = graph.clone();
+            let embedder = embedder.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                derive(
+                    graph,
+                    store.as_ref(),
+                    embedder.as_ref(),
+                    &contract("fixture", 1024),
+                    interaction,
+                    &agent(),
+                    &[("stale plan", ConceptType::Entity)],
+                    &ParentOf::none(),
+                    10,
+                    SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                )
+                .await
+            })
+        };
+        embedder.started.notified().await;
+        graph
+            .write()
+            .set_root_goal(Some(serde_json::json!("concurrent daemon mutation")));
+        embedder.release.notify_one();
+        task.await.unwrap().unwrap();
+
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.vector_calls(), 2);
+        let g = graph.read();
+        assert_eq!(g.concepts().count(), 1, "stale attempt wrote nothing");
+        g.assert_invariants().unwrap();
+    }
+
+    #[tokio::test]
+    async fn intervening_synonym_change_discards_stale_gather_and_replans() {
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-synonym-race", 1, 0, "synonym race");
+        let embedder = Arc::new(PausingEmbedder {
+            started: Notify::new(),
+            release: Notify::new(),
+            calls: AtomicUsize::new(0),
+        });
+        let store = Arc::new(SpyStore::with_vector(Vec::new()));
+        let task = {
+            let graph = graph.clone();
+            let embedder = embedder.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                derive(
+                    graph,
+                    store.as_ref(),
+                    embedder.as_ref(),
+                    &contract("fixture", 1024),
+                    interaction,
+                    &agent(),
+                    &[("alias", ConceptType::Entity)],
+                    &ParentOf::none(),
+                    10,
+                    SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                )
+                .await
+            })
+        };
+        embedder.started.notified().await;
+        graph.write().declare_synonym("alias", "canonical target");
+        embedder.release.notify_one();
+        task.await.unwrap().unwrap();
+
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.vector_calls(), 2);
+        let concept = graph.read().concepts().next().unwrap().clone();
+        assert_eq!(concept.canonical_key, "canon target");
+    }
+
+    #[tokio::test]
+    async fn invalid_or_oversized_requests_do_no_external_work() {
+        let (graph, interaction) = graph_with_interaction("hybrid-bounds", 1, 0, "bounded");
+        let embedder = FailingEmbedder::new();
+        let store = SpyStore::with_vector(Vec::new());
+        let concepts = vec![("x", ConceptType::Entity); MAX_HYBRID_CONCEPTS + 1];
+        let err = derive(
+            graph.clone(),
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &concepts,
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LamboError::Config(_)));
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(store.vector_calls(), 0);
+
+        let parents: Vec<(String, String)> = (0..=MAX_HYBRID_PARENT_PAIRS)
+            .map(|n| (format!("parent-{n}"), format!("child-{n}")))
+            .collect();
+        let parent_refs: Vec<(&str, &str)> = parents
+            .iter()
+            .map(|(parent, child)| (parent.as_str(), child.as_str()))
+            .collect();
+        let before = graph.read().snapshot();
+        let err = derive(
+            graph.clone(),
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[("valid", ConceptType::Entity)],
+            &ParentOf::from_pairs(&parent_refs),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LamboError::Config(_)));
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(store.vector_calls(), 0);
+        assert_eq!(graph.read().snapshot(), before, "rejection mutates nothing");
+
+        let err = derive(
+            graph,
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[("valid", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            f64::NAN,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LamboError::Config(_)));
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(store.vector_calls(), 0);
     }
 
     #[tokio::test]
@@ -1216,7 +1654,10 @@ mod tests {
         // arriving with a different live kind (bedrock) must be refused BEFORE
         // embedding — the embedder must never be called.
         let (graph, i1) = graph_with_interaction(sess, 1, 0, "auth flow");
-        graph.write().set_embedding(Some(contract("fixture", 1024)));
+        graph
+            .write()
+            .stamp_embedding(contract("fixture", 1024))
+            .unwrap();
         let failing = FailingEmbedder::new(); // would panic the test if called via embed -> no, it fails; use a panic embedder
 
         let err = derive(

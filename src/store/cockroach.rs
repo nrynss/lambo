@@ -69,8 +69,8 @@
 //!   The concept upsert writes it and `load_session` reads it back — a flush→load
 //!   cycle now PRESERVES the T5.2 sibling co-retrieval key (regression-locked in the
 //!   live conformance suite).
-//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) persists on the
-//!   full-snapshot `seed` path.** The sessions table carries `embedding_kind
+//! - **`GraphSnapshot::embedding` (the `EmbeddingContract`) is durable.** The
+//!   sessions table carries `embedding_kind
 //!   STRING`, `embedding_model STRING`, `embedding_dim INT` (nullable; same
 //!   CREATE + ALTER `ADD COLUMN IF NOT EXISTS` idempotency pattern as
 //!   `chunk_group_id`), `seed` upserts all three from the snapshot's contract,
@@ -78,11 +78,9 @@
 //!   `embedding_kind` is present (STORE-1 remediation). **Corruption parity
 //!   (STORE-7):** a row with exactly one of `embedding_kind` / `embedding_dim`
 //!   set (kind XOR dim) is a `Backend` corruption error from `load_session` —
-//!   mirroring sqlite — never a silent `None`. `flush` still does NOT
-//!   write them — there is no session-metadata `Mutation` kind (S5-class;
-//!   documented in the T3.2 handoff), so a flush after a seed leaves the
-//!   stamped contract untouched (regression-locked by the live conformance
-//!   suite).
+//!   mirroring sqlite — never a silent `None`. `flush` applies the ordered
+//!   `Mutation::SetEmbedding` in the same transaction as concept vectors, so
+//!   ordinary write-behind and full-snapshot seed converge on the same columns.
 //!   The DDL column width *is* read from the schema: `vector_dimensions()` parses
 //!   `VECTOR(n)` out of the embedded `001_init.sql` (not a global constant), so
 //!   `resolve::check_vector_compatibility` can reject mismatched embedders.
@@ -107,7 +105,9 @@ use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
 use super::vector::{decode_vector, encode_vector};
-use super::{map_write_err, Capabilities, GraphStore, StoreConfig};
+use super::{
+    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, StoreConfig,
+};
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
     GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId,
@@ -138,18 +138,22 @@ const MAX_POOL_CONNECTIONS: u32 = 4;
 //   - BASE: the first global fetch is `limit × VECTOR_FETCH_MULTIPLIER` (a generous
 //     headroom over the session's expected concept population), floored at the
 //     multiplier and CAPPED at `VECTOR_FETCH_CAP` ([`initial_fetch_k`]) — `limit` is
-//     caller-supplied and unbounded, so the cap keeps even the base fetch within the
+//     caller-supplied but validated at the public 2,048-result bound, so the cap
+//     keeps even the base fetch within the
 //     documented worst-case bound (T7.3 remediation).
-//   - GROW-AND-RETRY: if a fetched page fully fills (`rows == k`) yet yields fewer
-//     than `limit` in-session hits, more global rows may exist beyond this page, so
+//   - GROW-AND-RETRY: the adapter requests `k + 1`; when that lookahead exists yet
+//     the first `k` rows yield fewer than `limit` in-session hits, more global rows
+//     exist beyond this window, so
 //     re-query with `k` doubled (cheap: index-backed top-k is O(log n + k)), up to
 //     `VECTOR_FETCH_CAP` ([`next_fetch_k`]).
-//   - Completeness bound: the retry STOPS EARLY when the page does NOT fill
-//     (`rows < k`) — the global population is exhausted, so no further in-session
+//   - Completeness bound: retry STOPS EARLY when the `k + 1` lookahead is absent —
+//     the global population is exhausted, so no further in-session
 //     candidate can exist; the result is provably complete, never a silent
 //     under-return.
-//   - Cap: an unlucky pathological dataset (k = CAP still fully crowded) returns
-//     whatever in-session hits the top-CAP surfaced. This bounds worst-case cost.
+//   - Cap fallback: if the global page is still full and crowded at CAP, run an
+//     exact session-scoped query. That path may not use the global vector index,
+//     but it preserves the GraphStore completeness contract for adversarial
+//     multi-tenant distributions. Normal traffic stays on the indexed fast path.
 const VECTOR_FETCH_MULTIPLIER: usize = 10;
 const VECTOR_FETCH_GROWTH: usize = 2;
 const VECTOR_FETCH_CAP: usize = 2048;
@@ -157,7 +161,9 @@ const VECTOR_FETCH_CAP: usize = 2048;
 /// GLOBAL vector top-k — deliberately omits any session predicate so the planner
 /// uses `concepts@concepts_embedding_idx` (DECISION D1). `session_id` is selected so
 /// the Rust side can drop foreign-session rows. Ordering is L2 distance ascending
-/// (`<->`), i.e. similarity (score) descending — the trait's ordering contract.
+/// (`<->`), i.e. similarity (score) descending. The adapter requests `k + 1`:
+/// a lookahead tied with the kth distance triggers the exact, UUID-ordered
+/// session fallback, while an untied boundary remains on this index-friendly path.
 const VECTOR_CANDIDATES_SQL: &str = r#"
 SELECT id::STRING AS id, session_id::STRING AS session_id,
        embedding <-> $1::VECTOR AS dist
@@ -165,6 +171,17 @@ FROM concepts
 WHERE embedding IS NOT NULL
 ORDER BY dist ASC
 LIMIT $2
+"#;
+
+/// Correctness fallback when foreign-session rows crowd the caller out of the
+/// capped global index query. This deliberately prioritizes exact session-local
+/// top-k over index use; it runs only after the bounded fast path is exhausted.
+const SESSION_VECTOR_CANDIDATES_SQL: &str = r#"
+SELECT id::STRING AS id, embedding <-> $1::VECTOR AS dist
+FROM concepts
+WHERE session_id = $2 AND embedding IS NOT NULL
+ORDER BY dist ASC, id ASC
+LIMIT $3
 "#;
 
 // ---------------------------------------------------------------------------
@@ -275,6 +292,22 @@ DELETE FROM edges WHERE source = $1 OR target = $1 OR id = $1
 /// reload. The bare-row upsert above has already created the row.
 const SET_ROOT_GOAL_SQL: &str = r#"
 UPDATE sessions SET root_goal = $2::JSONB WHERE session_id = $1
+"#;
+
+const SET_EMBEDDING_SQL: &str = r#"
+UPDATE sessions
+SET embedding_kind = $2::STRING,
+    embedding_model = $3::STRING,
+    embedding_dim = $4::INT
+WHERE session_id = $1
+"#;
+
+const QUARANTINE_LEGACY_EMBEDDINGS_SQL: &str = r#"
+UPDATE concepts SET embedding = NULL
+WHERE session_id = $1 AND EXISTS (
+    SELECT 1 FROM sessions
+    WHERE session_id = $1 AND embedding_kind IS NULL AND embedding_dim IS NULL
+)
 "#;
 
 const DELETE_NODE_CONCEPTS_SQL: &str = r#"
@@ -501,6 +534,15 @@ fn session_embedding_from_parts(
     }
 }
 
+fn vector_contract_allows_query(
+    kind: Option<String>,
+    model: Option<String>,
+    dim: Option<i64>,
+    session_id: &str,
+) -> Result<bool, StoreError> {
+    Ok(session_embedding_from_parts(kind, model, dim, session_id)?.is_some())
+}
+
 /// CockroachDB serializable transactions abort with SQLSTATE 40001
 /// (`restart transaction: ... RETRY_SERIALIZABLE ...`) when they conflict with a
 /// concurrent commit; sqlx does not auto-retry, so the client must replay the whole
@@ -607,16 +649,31 @@ fn distance_to_score(dist: f64) -> f64 {
 /// the survivors keep that order — the trait's score-descending ordering contract.
 /// Pure & deterministic: unit-tested without a cluster.
 fn filter_session_rows(session: &SessionId, rows: &[(NodeId, f64, String)]) -> Vec<Scored<NodeId>> {
-    rows.iter()
-        .filter(|(_, _, sid)| sid == &session.0)
+    let mut scored: Vec<_> = rows
+        .iter()
+        .filter(|(_, dist, sid)| sid == &session.0 && dist.is_finite())
         .map(|(id, dist, _)| Scored::new(*id, distance_to_score(*dist)))
-        .collect()
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.item.0.cmp(&b.item.0))
+    });
+    scored
+}
+
+fn has_boundary_tie(rows: &[(NodeId, f64, String)], k: usize) -> bool {
+    k > 0
+        && rows.len() > k
+        && rows[k - 1].1.is_finite()
+        && rows[k].1.is_finite()
+        && rows[k - 1].1.total_cmp(&rows[k].1).is_eq()
 }
 
 /// DECISION D1 base global fetch size. `limit × multiplier`, floored at the
 /// multiplier so a non-trivial query always pulls some headroom, and CAPPED at
-/// [`VECTOR_FETCH_CAP`] — `limit` is caller-supplied and unbounded (daemon passes
-/// `query.top_k`), so without the cap the first global fetch could exceed the
+/// [`VECTOR_FETCH_CAP`] — `limit` is validated at the public boundary, and the
+/// cap additionally ensures the first global fetch cannot exceed the
 /// documented 2048-row worst-case bound. The growth step in [`next_fetch_k`] is
 /// already capped; this extends the same bound to the BASE. `limit == 0` is
 /// short-circuited by the caller before reaching here.
@@ -627,24 +684,29 @@ fn initial_fetch_k(limit: usize) -> usize {
         .clamp(VECTOR_FETCH_MULTIPLIER, VECTOR_FETCH_CAP)
 }
 
-/// Grow-and-retry decision for the global vector fetch (DECISION D1). Given how many
-/// rows this page returned, how many were in-session, and the current `k`, return
+/// Grow-and-retry decision for the global vector fetch (DECISION D1). Given
+/// whether the `k + 1` lookahead found another row, how many rows were
+/// in-session, and the current `k`, return
 /// the next `k` to fetch, or `None` when the current result is final.
 ///
 /// Final when any of:
 ///   - at least `limit` in-session hits were surfaced (`in_session >= limit`);
-///   - the page did not fill (`page_len < k`) — the global population is exhausted,
+///   - lookahead found no more row (`has_more == false`) — the global population is exhausted,
 ///     so no further in-session candidate can exist (provable completeness);
 ///   - `k` is at `VECTOR_FETCH_CAP`.
 ///
-/// Otherwise the page was full yet under-delivered — more global rows may hold
+/// Otherwise the page has more rows yet under-delivered — more global rows may hold
 /// in-session candidates — so double `k` (capped) and retry.
-fn next_fetch_k(in_session: usize, page_len: usize, k: usize, limit: usize) -> Option<usize> {
-    if in_session >= limit || page_len < k || k >= VECTOR_FETCH_CAP {
+fn next_fetch_k(in_session: usize, has_more: bool, k: usize, limit: usize) -> Option<usize> {
+    if in_session >= limit || !has_more || k >= VECTOR_FETCH_CAP {
         None
     } else {
         Some((k.saturating_mul(VECTOR_FETCH_GROWTH)).min(VECTOR_FETCH_CAP))
     }
+}
+
+fn needs_session_fallback(in_session: usize, has_more: bool, k: usize, limit: usize) -> bool {
+    in_session < limit && has_more && k >= VECTOR_FETCH_CAP
 }
 
 /// Parse the dense-vector column width out of the DDL (`VECTOR(n)`). The schema is the
@@ -978,6 +1040,12 @@ impl CockroachStore {
     #[cfg(feature = "fixtures")]
     pub async fn seed(&self, snapshot: &GraphSnapshot) -> Result<(), StoreError> {
         let sid = &snapshot.session_id.0;
+        let embedding_dim = snapshot
+            .embedding
+            .as_ref()
+            .map(|contract| i64::try_from(contract.dim))
+            .transpose()
+            .map_err(|_| StoreError::Invariant("embedding dimension does not fit i64".into()))?;
         let pool = self.pool().await?;
         let root_goal = snapshot
             .root_goal
@@ -992,7 +1060,6 @@ impl CockroachStore {
         // Copy handles for the same FnMut-reborrow reason as root_goal.
         let embedding_kind = embedding.map(|c| c.kind.as_str());
         let embedding_model = embedding.and_then(|c| c.model.as_deref());
-        let embedding_dim = embedding.map(|c| c.dim as i64);
         tx_retry(|| async move {
             let mut tx = pool
                 .begin()
@@ -1056,6 +1123,29 @@ impl CockroachStore {
             .await
             .map_err(backend)?;
         Ok(row.is_some())
+    }
+
+    /// Return whether vector candidates are trusted for this session. Missing
+    /// and fully unstamped rows are safe empty-search states: hybrid first use
+    /// must gather before its atomic commit emits `SetEmbedding`. Partial
+    /// metadata remains a hard corruption error.
+    async fn has_vector_contract(&self, session: &SessionId) -> Result<bool, StoreError> {
+        let pool = self.pool().await?;
+        let Some(row) = sqlx::query(SELECT_SESSION_SQL)
+            .bind(session.as_str())
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?
+        else {
+            return Ok(false);
+        };
+        let trusted = vector_contract_allows_query(
+            row.try_get("embedding_kind").map_err(backend)?,
+            row.try_get("embedding_model").map_err(backend)?,
+            row.try_get("embedding_dim").map_err(backend)?,
+            session.as_str(),
+        )?;
+        Ok(trusted)
     }
 
     /// Normalized keyword tokens (MemoryStore parity: trim + lowercase, drop empties).
@@ -1238,6 +1328,7 @@ impl GraphStore for CockroachStore {
                     Mutation::UpsertEdge { edge } => edge.session_id.as_str(),
                     Mutation::CanonizationTransition { event } => event.session_id.as_str(),
                     Mutation::SetRootGoal { session_id, .. } => session_id.as_str(),
+                    Mutation::SetEmbedding { session_id, .. } => session_id.as_str(),
                     Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
                 };
                 if !sids.iter().any(|s| s == sid) {
@@ -1312,6 +1403,45 @@ impl GraphStore for CockroachStore {
                             )));
                         }
                     }
+                    Mutation::SetEmbedding {
+                        session_id,
+                        embedding,
+                    } => {
+                        if embedding.is_some() {
+                            sqlx::query(QUARANTINE_LEGACY_EMBEDDINGS_SQL)
+                                .bind(session_id.as_str())
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|e| {
+                                    map_write_err(e, |m| {
+                                        format!("quarantine legacy embeddings: {m}")
+                                    })
+                                })?;
+                        }
+                        let res = sqlx::query(SET_EMBEDDING_SQL)
+                            .bind(session_id.as_str())
+                            .bind(embedding.as_ref().map(|e| e.kind.as_str()))
+                            .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
+                            .bind(
+                                embedding
+                                    .as_ref()
+                                    .map(|e| i64::try_from(e.dim))
+                                    .transpose()
+                                    .map_err(|_| {
+                                        StoreError::Invariant(format!(
+                                            "embedding dimension does not fit i64 for {session_id}"
+                                        ))
+                                    })?,
+                            )
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
+                        if res.rows_affected() == 0 {
+                            return Err(StoreError::NotFound(format!(
+                                "sessions row for {session_id} while setting embedding"
+                            )));
+                        }
+                    }
                 }
             }
             tx.commit()
@@ -1344,10 +1474,8 @@ impl GraphStore for CockroachStore {
                 .transpose()
                 .map_err(|e| backend(format!("parse root_goal JSONB: {e}")))?;
 
-            // Snapshot-only embedding contract (S5-class, see module doc): read the
-            // nullable kind/model/dim columns into GraphSnapshot.embedding when a
-            // contract is stamped. `flush` never writes these — there is no
-            // session-metadata Mutation kind. STORE-7: a row with exactly one of
+            // Ordered `SetEmbedding` mutations and full-snapshot seed both persist
+            // the nullable kind/model/dim columns. STORE-7: a row with exactly one of
             // embedding_kind / embedding_dim set (kind XOR dim) is a corruption
             // error — mirroring sqlite — never a silent `None` (see
             // `session_embedding_from_parts`).
@@ -1485,12 +1613,13 @@ impl GraphStore for CockroachStore {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        validate_vector_candidate_limit(limit)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
         check_embedding_dim(embedding, self.vector_dim)?;
-        if !self.session_exists(session).await? {
-            return Err(StoreError::SessionNotFound(session.0.clone()));
+        if !self.has_vector_contract(session).await? {
+            return Ok(Vec::new());
         }
         let pool = self.pool().await?;
         let probe = encode_vector(embedding)?;
@@ -1501,9 +1630,15 @@ impl GraphStore for CockroachStore {
         // hits — bounding under-return while never reading outside the global top-k.
         let mut k = initial_fetch_k(limit);
         loop {
+            let fetch = k
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Invariant("vector fetch window overflow".into()))?;
+            let fetch = i64::try_from(fetch).map_err(|_| {
+                StoreError::Invariant("vector fetch window does not fit i64".into())
+            })?;
             let rows = sqlx::query(VECTOR_CANDIDATES_SQL)
                 .bind(&probe)
-                .bind(k as i64)
+                .bind(fetch)
                 .fetch_all(pool)
                 .await
                 .map_err(backend)?;
@@ -1519,8 +1654,40 @@ impl GraphStore for CockroachStore {
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?;
 
-            let mut in_session = filter_session_rows(session, &parsed);
-            match next_fetch_k(in_session.len(), rows.len(), k, limit) {
+            // Fetch one lookahead row. If it ties the kth boundary distance,
+            // SQL's arbitrary subset of that tie group cannot be made
+            // deterministic in Rust; switch to the exact session query.
+            let boundary_tie = has_boundary_tie(&parsed, k);
+            let has_more = parsed.len() > k;
+            let page_len = parsed.len().min(k);
+            let mut in_session = filter_session_rows(session, &parsed[..page_len]);
+            if boundary_tie || needs_session_fallback(in_session.len(), has_more, k, limit) {
+                let exact_limit = i64::try_from(limit).map_err(|_| {
+                    StoreError::Invariant("vector candidate limit does not fit i64".into())
+                })?;
+                let fallback_rows = sqlx::query(SESSION_VECTOR_CANDIDATES_SQL)
+                    .bind(&probe)
+                    .bind(session.as_str())
+                    .bind(exact_limit)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(backend)?;
+                return fallback_rows
+                    .iter()
+                    .map(|row| {
+                        let id: String = row.try_get("id").map_err(backend)?;
+                        let dist: f64 = row.try_get("dist").map_err(backend)?;
+                        let score = distance_to_score(dist);
+                        if !score.is_finite() {
+                            return Err(StoreError::Backend(format!(
+                                "non-finite vector distance for concept {id}"
+                            )));
+                        }
+                        Ok(Scored::new(parse_node_id(&id)?, score))
+                    })
+                    .collect();
+            }
+            match next_fetch_k(in_session.len(), has_more, k, limit) {
                 None => {
                     // Query returns rows in dist-asc (= score-desc); filter preserves that
                     // order (filter_session_rows). Truncate to the requested limit.
@@ -1720,30 +1887,97 @@ mod tests {
     }
 
     #[test]
+    fn vector_ties_are_ordered_by_uuid_or_trigger_exact_fallback() {
+        let sid = SessionId::from("ties");
+        let low = NodeId(Uuid::from_u64_pair(0, 1));
+        let mid = NodeId(Uuid::from_u64_pair(0, 2));
+        let high = NodeId(Uuid::from_u64_pair(0, 3));
+        let rows_a = vec![
+            (high, 0.25, sid.0.clone()),
+            (low, 0.25, sid.0.clone()),
+            (mid, 0.25, sid.0.clone()),
+        ];
+        let mut rows_b = rows_a.clone();
+        rows_b.reverse();
+        let ids = |rows: &[(NodeId, f64, String)]| {
+            filter_session_rows(&sid, rows)
+                .into_iter()
+                .map(|s| s.item)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&rows_a), vec![low, mid, high]);
+        assert_eq!(ids(&rows_b), vec![low, mid, high]);
+
+        // More equal-distance rows than the fetch window: k+1 exposes that the
+        // kth subset is arbitrary, so the caller must use exact fallback.
+        assert!(has_boundary_tie(&rows_a, 2));
+        assert!(has_boundary_tie(&rows_b, 2));
+        assert!(SESSION_VECTOR_CANDIDATES_SQL.contains("ORDER BY dist ASC, id ASC"));
+        assert!(!has_boundary_tie(
+            &[
+                (low, 0.1, sid.0.clone()),
+                (mid, 0.2, sid.0.clone()),
+                (high, 0.3, sid.0.clone()),
+            ],
+            2
+        ));
+    }
+
+    #[test]
     fn grow_retry_is_final_when_satisfied_exhausted_or_capped() {
         // Satisfied: enough in-session hits -> final, no retry.
-        assert_eq!(next_fetch_k(3, 30, 30, 3), None);
-        // Exhausted: the page did not fill (rows < k) -> no more global rows exist.
-        assert_eq!(next_fetch_k(1, 20, 30, 3), None);
+        assert_eq!(next_fetch_k(3, true, 30, 3), None);
+        // Exhausted: no k+1 lookahead -> no more global rows exist.
+        assert_eq!(next_fetch_k(1, false, 30, 3), None);
         // Capped: k already at the cap -> never grow past it.
-        assert_eq!(next_fetch_k(0, VECTOR_FETCH_CAP, VECTOR_FETCH_CAP, 5), None);
+        assert_eq!(next_fetch_k(0, true, VECTOR_FETCH_CAP, 5), None);
         // Page full + under-delivered + room to grow -> double (capped at VECTOR_FETCH_CAP).
-        assert_eq!(next_fetch_k(1, 30, 30, 5), Some(60), "grow retry doubles k");
+        assert_eq!(
+            next_fetch_k(1, true, 30, 5),
+            Some(60),
+            "grow retry doubles k"
+        );
         let near_cap = VECTOR_FETCH_CAP / 2;
         assert_eq!(
-            next_fetch_k(1, near_cap, near_cap, 5),
+            next_fetch_k(1, true, near_cap, 5),
             Some(VECTOR_FETCH_CAP),
             "growth clamps at the cap"
         );
     }
 
     #[test]
+    fn cap_crowd_out_uses_exact_session_fallback() {
+        // Adversarial distribution: 2,048 closer foreign-session rows put the
+        // caller's nearest concept at global rank 2,049. The capped fast path
+        // must not silently return empty; it switches to the exact session query.
+        let caller = SessionId::from("caller");
+        let mut globally_ranked: Vec<(NodeId, f64, String)> = (0..VECTOR_FETCH_CAP)
+            .map(|rank| (NodeId::new(), rank as f64 / 10_000.0, "foreign".to_string()))
+            .collect();
+        globally_ranked.push((NodeId::new(), 0.3, caller.0.clone()));
+        let capped_page = &globally_ranked[..VECTOR_FETCH_CAP];
+        let local = filter_session_rows(&caller, capped_page);
+        assert!(local.is_empty(), "local row is exactly global rank 2,049");
+        assert!(needs_session_fallback(
+            local.len(),
+            true,
+            VECTOR_FETCH_CAP,
+            1
+        ));
+        assert!(SESSION_VECTOR_CANDIDATES_SQL.contains("WHERE session_id = $2"));
+        assert!(SESSION_VECTOR_CANDIDATES_SQL.contains("ORDER BY dist ASC, id ASC"));
+
+        assert!(!needs_session_fallback(1, true, VECTOR_FETCH_CAP, 1));
+        assert!(!needs_session_fallback(0, false, VECTOR_FETCH_CAP, 1));
+    }
+
+    #[test]
     fn initial_fetch_k_is_floor_but_capped_at_same_bound_as_growth() {
         // The BASE global fetch must be floored at the multiplier (a non-trivial
         // query always pulls some headroom) and CAPPED at VECTOR_FETCH_CAP — the
-        // same worst-case bound the growth step enforces. `limit` is caller-supplied
-        // and unbounded, so a huge limit must not blow past the cap (DECISION D1
-        // cost bound). `limit == 0` is short-circuited by the caller, so 0 maps to
+        // same worst-case bound the growth step enforces. The public caller validates
+        // `limit`; this pure helper still saturates defensively. `limit == 0` is
+        // short-circuited by the caller, so 0 maps to
         // the floor here.
         assert_eq!(
             initial_fetch_k(0),
@@ -1766,7 +2000,35 @@ mod tests {
         assert_eq!(
             initial_fetch_k(usize::MAX),
             VECTOR_FETCH_CAP,
-            "unbounded limit saturating-clamps to the cap"
+            "defensive saturation clamps to the cap"
+        );
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn oversized_seed_embedding_dimension_fails_before_pool_use() {
+        let store = CockroachStore::new(StoreConfig {
+            kind: super::super::StoreKind::Cockroach,
+            dsn: Some("postgresql://localhost:26257/defaultdb?sslmode=disable".into()),
+            path: None,
+        })
+        .unwrap();
+        let err = store
+            .seed(&GraphSnapshot {
+                session_id: SessionId::from("oversized-dim"),
+                embedding: Some(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: usize::MAX,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)));
+        assert!(
+            store.pool.get().is_none(),
+            "dimension check precedes pool use"
         );
     }
 
@@ -2090,6 +2352,22 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn vector_contract_gate_distinguishes_unstamped_trusted_and_corrupt() {
+        assert!(!vector_contract_allows_query(None, None, None, "fresh").unwrap());
+        assert!(vector_contract_allows_query(
+            Some("fixture".into()),
+            Some("fixture-v1".into()),
+            Some(1024),
+            "trusted",
+        )
+        .unwrap());
+        assert!(vector_contract_allows_query(None, None, Some(1024), "corrupt").is_err());
+        assert!(
+            vector_contract_allows_query(Some("fixture".into()), None, None, "corrupt",).is_err()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2363,6 +2641,14 @@ mod conformance {
         store
             .flush(&MutationBatch {
                 mutations: vec![
+                    Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: Some("fixture-v1".into()),
+                            dim: store.vector_dim,
+                        }),
+                    },
                     plant_interaction(&sid, i1, ts),
                     plant_concept(&sid, a, i1, "alpha concept", ts, Some(probe.clone())),
                     plant_concept(&sid, b, i1, "beta concept", ts, Some(embed(0.5))),
@@ -2414,6 +2700,14 @@ mod conformance {
         store
             .flush(&MutationBatch {
                 mutations: vec![
+                    Mutation::SetEmbedding {
+                        session_id: sid_a.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: Some("fixture-v1".into()),
+                            dim: store.vector_dim,
+                        }),
+                    },
                     plant_interaction(&sid_a, i1, ts),
                     plant_concept(&sid_a, a, i1, "register user", ts, Some(probe.clone())),
                     plant_concept(&sid_a, c, i1, "create account", ts, Some(embed(0.115))),
@@ -2426,6 +2720,14 @@ mod conformance {
         store
             .flush(&MutationBatch {
                 mutations: vec![
+                    Mutation::SetEmbedding {
+                        session_id: sid_b.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: Some("fixture-v1".into()),
+                            dim: store.vector_dim,
+                        }),
+                    },
                     plant_interaction(&sid_b, i2, ts),
                     plant_concept(&sid_b, b, i2, "foreign closer", ts, Some(probe.clone())),
                 ],
@@ -2764,8 +3066,8 @@ mod conformance {
             }),
             "load_session must materialize the seeded embedding contract"
         );
-        // A subsequent flush (which only ensures the session row) must not clobber the
-        // snapshot-only metadata.
+        // A subsequent flush without a metadata mutation must not clobber the
+        // seeded contract.
         let i1 = NodeId::new();
         store
             .flush(&MutationBatch {
@@ -3308,6 +3610,75 @@ mod conformance {
         );
     }
 
+    async fn check_unstamped_vector_candidates_are_empty_until_contract_commit(
+        store: &CockroachStore,
+    ) {
+        let probe = embed(0.23);
+        let missing = SessionId::from(format!("conformance-vector-fresh-{}", Uuid::new_v4()));
+        assert!(store
+            .vector_candidates(&missing, &probe, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let legacy = SessionId::from(format!("conformance-vector-legacy-{}", Uuid::new_v4()));
+        let interaction = NodeId::new();
+        let concept = NodeId::new();
+        let now = Utc::now();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&legacy, interaction, now),
+                    plant_concept(
+                        &legacy,
+                        concept,
+                        interaction,
+                        "legacy unknown vector",
+                        now,
+                        Some(probe.clone()),
+                    ),
+                ],
+            })
+            .await
+            .unwrap();
+        assert!(store
+            .vector_candidates(&legacy, &probe, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: store.vector_dim,
+        };
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetEmbedding {
+                    session_id: legacy.clone(),
+                    embedding: Some(contract.clone()),
+                }],
+            })
+            .await
+            .unwrap();
+        let loaded = store.load_session(&legacy).await.unwrap();
+        assert_eq!(loaded.embedding, Some(contract));
+        assert!(loaded.concepts[0].embedding.is_none());
+        assert!(store
+            .vector_candidates(&legacy, &probe, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let corrupt = SessionId::from(format!("conformance-vector-corrupt-{}", Uuid::new_v4()));
+        sqlx::query("INSERT INTO sessions (session_id, embedding_dim) VALUES ($1, 1024)")
+            .bind(corrupt.as_str())
+            .execute(store.pool().await.unwrap())
+            .await
+            .unwrap();
+        assert!(store.vector_candidates(&corrupt, &probe, 5).await.is_err());
+    }
+
     /// P4 residual closure: `SET_ROOT_GOAL_SQL` (the UPDATE path) was
     /// compile-verified only until a live DSN was available. A `SetRootGoal`
     /// mutation through `flush` must persist the JSONB goal and read back
@@ -3341,6 +3712,28 @@ mod conformance {
         assert_eq!(snap.root_goal, None, "None clears the goal");
     }
 
+    async fn check_set_embedding_mutation_persists(store: &CockroachStore) {
+        let sid = SessionId::from(format!("live-set-embedding-{}", Uuid::new_v4()));
+        let embedding = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: store
+                .vector_dimensions()
+                .expect("Cockroach has a vector dimension"),
+        };
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(embedding.clone()),
+                }],
+            })
+            .await
+            .expect("flush SetEmbedding");
+        let snap = store.load_session(&sid).await.expect("load after stamp");
+        assert_eq!(snap.embedding, Some(embedding));
+    }
+
     /// All live checks run inside ONE test/runtime — see [`new_store`] for why (pool
     /// and connections must never cross Tokio runtimes). `#[ignore]`d: without
     /// `LAMBO_COCKROACH_DSN` this must report as ignored, not skip-as-green. Each
@@ -3371,7 +3764,9 @@ mod conformance {
         check_interaction_span_single_point_session_coverage(&store).await;
         check_record_canonization_appends_and_is_idempotent(&store).await;
         check_corrupt_contract_row_load_errors(&store).await;
+        check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;
         check_set_root_goal_mutation_persists(&store).await;
+        check_set_embedding_mutation_persists(&store).await;
     }
 
     /// DECISION D1 item 3 camera-proof: the global vector query must execute as

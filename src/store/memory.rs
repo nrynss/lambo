@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::{Capabilities, GraphStore};
+use super::{validate_vector_candidate_limit, Capabilities, GraphStore};
 use crate::types::{
     CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
     NodeId, Scored, SessionId, StoreError,
@@ -233,6 +233,26 @@ impl MemoryStore {
                 }
                 snap.root_goal = goal.clone();
             }
+            Mutation::SetEmbedding {
+                session_id,
+                embedding,
+            } => {
+                if *session_id != snap.session_id {
+                    return Err(StoreError::Invariant(format!(
+                        "set_embedding session {session_id} != snapshot {}",
+                        snap.session_id
+                    )));
+                }
+                if snap.embedding.is_none() && embedding.is_some() {
+                    // A first durable stamp is also the safe legacy upgrade:
+                    // vectors predating model identity are untrusted and must
+                    // not become trusted merely because a contract is added.
+                    for concept in &mut snap.concepts {
+                        concept.embedding = None;
+                    }
+                }
+                snap.embedding = embedding.clone();
+            }
         }
         Ok(())
     }
@@ -270,6 +290,7 @@ impl GraphStore for MemoryStore {
                 Mutation::UpsertEdge { edge } => Some(edge.session_id.clone()),
                 Mutation::CanonizationTransition { event } => Some(event.session_id.clone()),
                 Mutation::SetRootGoal { session_id, .. } => Some(session_id.clone()),
+                Mutation::SetEmbedding { session_id, .. } => Some(session_id.clone()),
                 Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
                 Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
             }
@@ -307,6 +328,7 @@ impl GraphStore for MemoryStore {
                 Mutation::UpsertEdge { edge } => edge.session_id.clone(),
                 Mutation::CanonizationTransition { event } => event.session_id.clone(),
                 Mutation::SetRootGoal { session_id, .. } => session_id.clone(),
+                Mutation::SetEmbedding { session_id, .. } => session_id.clone(),
                 Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
                     Some(s) => s,
                     None => continue,
@@ -386,8 +408,9 @@ impl GraphStore for MemoryStore {
         &self,
         _session: &SessionId,
         _embedding: &[f32],
-        _limit: usize,
+        limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        validate_vector_candidate_limit(limit)?;
         Err(StoreError::Capability(
             "MemoryStore has no VECTOR_SEARCH".into(),
         ))
@@ -997,6 +1020,17 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
         assert!(store.capabilities().is_empty());
+        assert!(matches!(
+            store
+                .vector_candidates(
+                    &SessionId::from("x"),
+                    &[],
+                    crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
+                )
+                .await
+                .unwrap_err(),
+            StoreError::Invariant(_)
+        ));
     }
 
     #[tokio::test]
@@ -1372,6 +1406,30 @@ mod tests {
         assert_eq!(
             before, after,
             "failed flush must not apply any prefix of the batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_contract_roundtrips_mutation_flush() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("embedding-mutation");
+        let embedding = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("v1".into()),
+            dim: 1024,
+        };
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(embedding.clone()),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().embedding,
+            Some(embedding)
         );
     }
 }

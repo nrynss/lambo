@@ -77,7 +77,7 @@ pub async fn load_session_async(
     store: &dyn GraphStore,
     session: &SessionId,
 ) -> Result<LoadedSession, StoreError> {
-    let snap = match store.load_session(session).await {
+    let mut snap = match store.load_session(session).await {
         Ok(snap) => snap,
         Err(StoreError::SessionNotFound(_)) => {
             return Ok(LoadedSession {
@@ -87,10 +87,35 @@ pub async fn load_session_async(
         }
         Err(e) => return Err(e),
     };
+    quarantine_legacy_vectors(&mut snap);
     // Index first (borrows the snapshot), then move the snapshot into the graph.
     let index = InvertedIndex::from_snapshot(&snap);
     let graph = Graph::from_snapshot(snap).map_err(lambo_to_store)?;
     Ok(LoadedSession { graph, index })
+}
+
+/// Safely upgrade pre-contract snapshots. Width alone cannot identify the
+/// model that produced a legacy vector, so materialization strips such vectors
+/// rather than inventing a compatible contract. The durable rows remain
+/// available for an explicit re-embedding migration.
+fn quarantine_legacy_vectors(snap: &mut crate::types::GraphSnapshot) {
+    if snap.embedding.is_some() {
+        return;
+    }
+    let mut stripped = 0;
+    for concept in &mut snap.concepts {
+        if concept.embedding.take().is_some() {
+            stripped += 1;
+        }
+    }
+    if stripped > 0 {
+        tracing::warn!(
+            target: "lambo::store::load",
+            session_id = %snap.session_id,
+            stripped_vectors = stripped,
+            "quarantined legacy vectors with no embedding contract; explicit re-embedding is required"
+        );
+    }
 }
 
 /// [`load_session_async`] bounded by a store-call timeout (F2): a hung store

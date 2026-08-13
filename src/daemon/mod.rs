@@ -336,6 +336,13 @@ impl Daemon {
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> RecallResult {
+        if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
+            return RecallResult {
+                hits: Vec::new(),
+                context: String::new(),
+                warnings: vec![format!("recall: {err}")],
+            };
+        }
         // P2-8: the caller's `session` must match the graph's authoritative
         // session — the keyword/recent/expansion legs come from the daemon's
         // graph while the vector leg is namespace-keyed by `session`. Deriving
