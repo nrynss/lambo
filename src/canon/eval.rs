@@ -772,17 +772,21 @@ fn score_lookup(map: &HashMap<NodeId, f64>, id: NodeId) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "store-memory")]
     use crate::types::{
         AgentId, Concept, ConceptType, DaemonEvent, Edge, EdgeType, Interaction, Scored, SessionId,
     };
+    #[cfg(feature = "store-memory")]
     use chrono::TimeZone;
     use std::collections::HashSet;
     use uuid::Uuid;
 
+    #[cfg(feature = "store-memory")]
     fn ts() -> DateTime<Utc> {
         Utc.timestamp_opt(1_752_000_000, 0).unwrap()
     }
 
+    #[cfg(feature = "store-memory")]
     fn sid() -> SessionId {
         SessionId::from("test-session")
     }
@@ -791,14 +795,17 @@ mod tests {
         NodeId(Uuid::from_u64_pair(2, id))
     }
 
+    #[cfg(feature = "store-memory")]
     fn iid(id: u64) -> NodeId {
         NodeId(Uuid::from_u64_pair(1, id))
     }
 
+    #[cfg(feature = "store-memory")]
     fn eid(id: u64) -> NodeId {
         NodeId(Uuid::from_u64_pair(3, id))
     }
 
+    #[cfg(feature = "store-memory")]
     fn interaction(id: u64, prev: Option<u64>, at: DateTime<Utc>) -> Interaction {
         Interaction {
             id: iid(id),
@@ -810,6 +817,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn concept(id: u64, origin: u64, gc: i32, status: CanonizationStatus) -> Concept {
         Concept {
             id: nid(id),
@@ -831,6 +839,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn table(pairs: &[(u64, f64)]) -> ScoreTable {
         ScoreTable {
             epoch: 0,
@@ -841,6 +850,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn params() -> EvalParams {
         EvalParams {
             min_age: Duration::ZERO,
@@ -849,6 +859,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "store-memory")]
     fn status_of(graph: &Graph, id: NodeId) -> CanonizationStatus {
         concept_status(graph, id).expect("concept")
     }
