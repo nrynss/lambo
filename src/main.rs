@@ -179,7 +179,19 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match runtime.block_on(lambo::mcp::serve(opts, *backends)) {
+            let result = runtime.block_on(lambo::mcp::serve(opts, *backends));
+
+            // Do not let the runtime's `Drop` wait for blocking tasks (R1/T82-1).
+            // The stdio transport parks a **blocking** read on stdin, and
+            // `Runtime::drop` waits for blocking tasks to return — so after a
+            // SIGINT/SIGTERM the process sat there with its session already
+            // closed until the client happened to close stdin, and a supervisor
+            // escalated to SIGKILL. `serve` has already awaited `Memory::close`
+            // by this point, so the tail is durable and the parked read holds
+            // nothing but a file descriptor.
+            runtime.shutdown_background();
+
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("lambo serve: {e}");

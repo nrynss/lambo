@@ -2,10 +2,10 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN — round R1                                         ║
-║  Verdict: REQUEST CHANGES                                        ║
+║  STATUS: R1 REMEDIATED — awaiting re-review                      ║
+║  Verdict: REQUEST CHANGES (R1)                                   ║
 ║  Findings: 3 P1 / 6 P2 / 7 P3                                    ║
-║  Opened: 2026-08-14                                              ║
+║  Opened: 2026-08-14 · Remediated: 2026-08-14 (see R1 remediation)║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -560,3 +560,363 @@ which of T82-12/T82-16 (if deferred) is inherited by T8.4/T8.5 respectively.
 
 **Tree state at review end:** all four mutations reverted, `git status` clean, gates re-run
 green (562 lib + 2 bin + 3 integration + 1 doc, 0 failed, 3 ignored).
+
+---
+
+# R1 remediation (2026-08-14)
+
+Remediation agent. The reviewer's text above is untouched; this section appends the
+disposition of every finding. Nothing in `src/memory.rs`, `src/store/`, `src/graph/`,
+`src/canon/`, `src/daemon/` or `src/recall/` was modified — `store::flush`'s existing
+`CatchUnwindPoll` / `panic_message` are *reused*, not changed.
+
+**Disposition summary: 16 FIXED, 1 DEFERRED, 0 DISPUTED.**
+
+| # | P | Disposition |
+|---|---|---|
+| T82-1 | P1 | **FIXED** — signal handling on stdio + runtime shutdown; demonstrated |
+| T82-2 | P1 | **FIXED** — bounded graceful shutdown; demonstrated with an SSE stream held open |
+| T82-3 | P1 | **FIXED** — `lambo_reserve` fails closed on a foreign `agent_id` |
+| T82-4 | P2 | **FIXED** — recursive schema walk **and** a golden allowlist; both mutations re-run |
+| T82-5 | P2 | **FIXED** — every handler body runs inside `CatchUnwindPoll` |
+| T82-6 | P2 | **FIXED** — `MAX_CONTENT_BYTES` on every client string |
+| T82-7 | P2 | **FIXED** — deterministic resolution; ambiguity refuses and lists candidates |
+| T82-8 | P2 | **FIXED** — all seven driven on the wire, requests captured; the overclaim corrected in both places it appeared |
+| T82-9 | P2 | **FIXED** — warnings go into the text content in all seven tools |
+| T82-10 | P2 | **FIXED** — unprovisioned store names `lambo provision` |
+| T82-11 | P3 | **FIXED** — `deny_unknown_fields` on all nine wire structs |
+| T82-12 | P3 | **DEFERRED → T8.4** (with a T8.3 note); reason below |
+| T82-13 | P3 | **FIXED** as far as T8.2 can — see below |
+| T82-14 | P3 | **FIXED** — documented *and* pinned by a test |
+| T82-15 | P3 | **FIXED** — budget check moved above `seen.insert` |
+| T82-16 | P3 | **FIXED in part**, remainder **DEFERRED → T8.5/P9**; reason below |
+| T82-17 | P3 | **FIXED** — `event_pump.abort()` moved after `close()` |
+
+---
+
+## P1
+
+### T82-1 — FIXED. `close()` now runs on SIGINT/SIGTERM under stdio
+
+Two defects, not one. The reviewer found the first; fixing it exposed the second.
+
+1. **No signal handling on the stdio path.** `serve_stdio` now takes the service's
+   `cancellation_token()` before `waiting()` consumes the service, and runs both through a new
+   `run_until_shutdown` helper (`src/mcp/serve.rs`) shared with the HTTP path: race the
+   transport against `shutdown_signal()`, cancel on the signal, then wait up to
+   `SHUTDOWN_GRACE` (5 s) for it to actually finish, and return `Exit::Forced` if it does not.
+2. **The process then still did not exit.** With the signal handled, `close()` ran and logged
+   `session closed, tail durable` — and the process sat there. `tokio::runtime::Runtime::drop`
+   waits for **blocking** tasks, and the stdio transport parks a blocking read on stdin; it
+   only returned when the client happened to close stdin. `src/main.rs` now calls
+   `runtime.shutdown_background()` after `block_on`, which is safe precisely because `serve`
+   has already awaited `Memory::close` by then. Had only the first defect been fixed, the
+   reviewer's reproduction would still have reported a hang — this is the part that would have
+   been missed by coding without demonstrating.
+
+**The rustdoc is now true rather than aspirational**: `serve`'s doc comment says close runs on
+client disconnect, SIGINT/SIGTERM, or a transport error, and names the bounded-grace mechanism
+that makes the last case hold.
+
+**Reproduction re-run** (the reviewer's script: `preexec_fn=os.setsid`, real wire, a write in
+flight so the tail is non-empty):
+
+```
+before (R1)                            after
+[stdio-int]  rc=-2  close() ran: False → [stdio-SIGINT]  rc=0 after 0.00s  close() ran: True
+[stdio-term] rc=-15 close() ran: False → [stdio-SIGTERM] rc=0 after 0.00s  close() ran: True
+```
+
+Pinned by `a_shutdown_signal_cancels_the_transport_and_returns` and
+`a_transport_that_finishes_on_its_own_is_not_cancelled`.
+
+### T82-2 — FIXED. HTTP shutdown is bounded, so an open SSE stream cannot hold the tail
+
+`serve_http` now delegates to `serve_http_bounded`, which drives
+`axum::serve(..).with_graceful_shutdown(..)` through the same `run_until_shutdown`: the signal
+triggers the graceful phase, and if connections are still open `SHUTDOWN_GRACE` later, the
+server future is dropped and `close()` runs anyway. The forced close is logged at WARN naming
+the reason.
+
+**Choice worth stating plainly:** the grace window is a *fixed* 5 s, not configurable. A
+dropped connection is recoverable and a dropped write-behind tail is not, so when the two are
+in tension this now favours the tail. A client mid-response at the 5 s mark loses that
+response.
+
+**Reproduction re-run** (raw-socket `GET /mcp` with `Accept: text/event-stream` and a real
+`mcp-session-id`, exactly as R1):
+
+```
+before: DID NOT EXIT within 20s of SIGTERM     close() ran: False
+after:  [http-SIGTERM with SSE open] exited rc=0 after 5.02s   close() ran: True
+```
+
+Pinned twice: at the mechanism level
+(`a_transport_that_ignores_cancellation_is_forced_after_the_grace_window`) and end-to-end
+through axum with a request held in flight
+(`http_shutdown_is_bounded_even_with_a_request_in_flight`). The second was **mutation-verified**
+— raising the grace above the test timeout makes it hang, so it pins the bound and not merely
+the happy path.
+
+### T82-3 — FIXED. `lambo_reserve` fails closed on a foreign `agent_id`
+
+`LamboServer::require_session_agent` refuses **both** reserve and release when
+`agent_id != self.mem.agent()`, before touching the graph, as a `CallToolResult::error` whose
+text states that per-call identity is unsupported and that **NOTHING WAS RESERVED OR
+RELEASED**, then names the two workarounds (call as the session agent, or run one serve
+process per agent). No `Memory` change; the underlying `reserve_as`/`release_as` gap remains a
+T8.1 re-open and is not claimed as fixed here.
+
+The tool's published **description** now says reservations "are only accepted from the agent
+this server session runs as", so a model routing on descriptions learns the constraint before
+it calls.
+
+**Reproduction re-run on the real stdio wire** (captured in
+`stdio-all-seven-tools.jsonl`, frames noted):
+
+```
+A reserves            -> isError False  reserved 478416c2-… for agent 'agent-a'
+B reserves SAME node  -> isError True   "refusing to take a soft lock on behalf of 'agent-b' …
+                                         NOTHING WAS RESERVED OR RELEASED"
+C releases A's lock   -> isError True   same refusal
+inspect after both    -> "Reserved by agent-a until …"   (A's lock survived)
+```
+
+Pinned by `reserve_and_release_fail_closed_on_a_foreign_agent_id`, which also asserts the
+surviving reservation and that the owner can still release it.
+
+**Accepted cost:** with `--agent` defaulting to `lambo-serve` (T82-13), any client sending its
+own `agent_id` now gets a refusal from `lambo_reserve` where it previously got a false
+success. That is the intended direction — a refusal is legible and a false lock is not — but
+it does mean `lambo_reserve` is unusable by a differently-named client until the `Memory`
+change lands. T8.4 should note it.
+
+---
+
+## P2
+
+### T82-4 — FIXED. The F18 guard walks nested schemas, and there is now an allowlist
+
+Both halves of the reviewer's fix shape:
+
+- `schema_property_paths` walks the whole schema document — root `properties`, `$ref` into
+  `$defs`, `items`, `additionalProperties`, and `allOf`/`anyOf`/`oneOf` — with a depth bound
+  so a future recursive wire type cannot hang it. The existing denylist test now runs over
+  every collected path, and a small unit test (`the_schema_walker_reaches_nested_and_referenced_properties`)
+  pins that the walker actually descends, because a walker that silently stops at the root is
+  the exact bug being fixed and looks identical from outside.
+- `f18_tool_schemas_match_the_golden_property_set` asserts the **exact** property-path set of
+  all seven tools. This is the part that makes F18 a statement about client-supplied logical
+  time rather than about nine spellings.
+
+**Both reviewer mutations re-run:**
+
+| Mutation | Before | After |
+|---|---|---|
+| A — `created_at` on `WireConcept` (nested) | 562/562 passed | **both F18 tests FAIL**, naming `concepts[].created_at` |
+| C — `ts` / `as_of` / `client_clock_ms` on `DeriveParams` | 12/12 mcp passed | denylist still passes (as R1 said it would); **golden set FAILS** |
+
+Mutation C is the one that shows why the allowlist was the necessary half: the denylist cannot
+be made to catch it without enumerating every name anyone might choose.
+
+### T82-5 — FIXED. Panic containment at the MCP boundary
+
+Every `#[tool]` handler is now a thin wrapper `contain_panic("name", self.x_impl(p))`, with the
+body moved to a `*_impl` in a plain `impl` block. That structure is deliberate: the router can
+only reach the wrappers, so containment cannot be forgotten for one tool. `contain_panic`
+reuses `store::flush`'s `CatchUnwindPoll` and `panic_message` — one panic-containment behaviour
+in the tree, and the T8.1 argument for it applies unchanged.
+
+A panic becomes `isError: true` with `internal error (the failure was logged server-side)`;
+the payload goes to `tracing::error!` only. Pinned by
+`a_panicking_tool_body_is_contained_as_a_tool_error`, which uses R1's own payload and asserts
+neither `SECRET` nor `dsn=` reaches the client, plus
+`containment_does_not_disturb_a_normal_result`.
+
+### T82-6 — FIXED. One size bound, applied to every client string
+
+`MAX_CONTENT_BYTES = 16_384`, matching `MAX_HYBRID_CONTEXT_BYTES` so the MCP surface refuses
+before the graph does, checked on `agent_id`, `query`, `focus`, `action`, every
+`produces`/`modifies`/`depends_on` entry, every `concepts[].content`, and both ends of every
+`parent_of` pair. `oversized_client_strings_are_refused_by_every_tool` covers six shapes and
+additionally asserts `concept_count == 0` afterwards, so a refusal cannot have partially
+written.
+
+### T82-7 — FIXED. Deterministic resolution; ambiguity refuses
+
+`resolve_focus` replaces the two `.find(..)` calls over `Graph::concepts()`. Every leg now
+*collects* and sorts by a total order (content length, then content, then node id), so the
+answer is a function of the graph's contents and not of `HashMap` iteration order. The three
+outcomes:
+
+- exact content match (or a live UUID) → resolved silently, as before;
+- exactly one substring match → resolved, with `resolved '<focus>' → '<content>' (substring
+  match, single candidate)` **prepended to the text content**, not buried in a warning;
+- more than one → **refused**, listing up to 10 candidates with their node ids and telling the
+  caller to name one exactly or pass a node id.
+
+Refusing was chosen over best-match, per the reviewer's "safer default given the reserve path":
+the failure mode being closed is an agent silently operating on a concept it never named.
+Pinned by `inspect_refuses_an_ambiguous_focus_and_names_the_candidates`,
+`inspect_reports_a_fuzzy_resolution_in_the_text` and `focus_resolution_is_deterministic` (20
+repeats on the same graph).
+
+### T82-8 — FIXED. The overclaim is corrected and the evidence now covers seven tools
+
+Both, deliberately — the claim is corrected *and* the missing coverage was actually produced:
+
+- **New evidence** `dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl`: 33 frames,
+  **requests and responses both**, each request carrying a `note` naming what it demonstrates.
+  All seven tools driven over the real stdio wire, `lambo_reserve` / `lambo_inspect` /
+  `lambo_saints` among them, plus live wire experiments for T82-3, T82-6, T82-7, T82-9 and
+  T82-11.
+- **The claim is corrected in both places it appeared**: the evidence README now says the
+  original transcript holds four tools and responses only, with the correction stated rather
+  than the old sentence quietly rewritten; the Handoff Log sentence in `PHASE-8-surface.md` is
+  struck through and annotated with what was actually captured. The old transcript is kept as
+  captured.
+- The R1 "model-driven call NOT verified" disclosure is **unchanged** — it was accurate.
+
+**Not closed:** the store×embedder dim-mismatch fail-closed case still has no evidence entry.
+It is unit-tested in `resolve.rs` and unenforceable under default features
+(`MemoryStore::vector_dimensions()` is `None`), so producing wire evidence for it needs a
+compiled durable store — that arrives with T8.3's provisioning path. Recorded here rather than
+silently dropped.
+
+### T82-9 — FIXED. Warnings are in the text content in all seven tools
+
+`attach_warnings` appends a second `ContentBlock::text` beginning `warnings:` whenever the list
+is non-empty. `content[0]` is deliberately untouched, so `lambo_recall`'s first block is still
+the T5.3 context block verbatim and the existing test's contract holds. This carries
+`Memory::recall`'s embed-failure degradation warning to the model as well, which was the wider
+half of the finding. Pinned by
+`warnings_reach_the_text_content_not_only_structured_content`, which asserts both the warning's
+presence in the text and that `content[0]` still equals `structuredContent.context`.
+
+### T82-10 — FIXED. An unprovisioned store names the remedy
+
+`explain_startup_failure` in `src/mcp/serve.rs` maps the missing-schema shapes (`no such
+table`, `does not exist`, `undefined_table`, `42P01`) to:
+
+```
+session store is not provisioned — run 'lambo provision' (or scripts/provision.sh) against
+this store first, then retry. Underlying error: <original>
+```
+
+The original error is always kept, and an unrelated failure passes through untouched — pinned
+by `an_unprovisioned_store_names_the_provision_step` and
+`an_unrelated_startup_failure_is_passed_through`. The ownership ruling is unchanged: `serve`
+still does not call `init_schema()`, and T8.3 still owns bootstrap.
+
+---
+
+## P3
+
+### T82-11 — FIXED
+`#[serde(deny_unknown_fields)]` on all nine wire structs (seven params + `WireConcept` +
+`WireParentOf`). A bonus the reviewer did not ask for but which follows: schemars now publishes
+`additionalProperties: false` on every tool schema, so the constraint is visible to clients as
+well as enforced. Pinned by `unknown_fields_are_refused_by_every_params_struct`, which covers
+the nested case and the three denylist-evading names, and asserts the legitimate shape still
+parses. Verified on the wire: `unknown field 'created_at', expected one of 'agent_id',
+'concepts', 'parent_of'`.
+
+### T82-12 — DEFERRED → **T8.4**
+`--config` still reaches backends only; `MemoryBuilder::config()` is still uncalled from
+`serve`. **Reason:** wiring a `[config]` table into `LamboFile` means designing the serialized
+form of `Config` (scoring weights, match strategy, every timing knob) and its precedence
+against env — a config-surface design that belongs with the task that first needs it. T8.4
+needs a shortened `canonization_edge_min_age` and is that task. It fails closed today
+(`deny_unknown_fields` rejects `[config]`-shaped keys), so nothing is silently ignored in the
+meantime. **T8.4 inherits it**, and will otherwise have to build its own `Memory` in
+`src/cli/demo.rs` to get there.
+
+### T82-13 — FIXED as far as T8.2 can
+The `--agent` default is unchanged (`lambo-serve`): changing it cannot fix the underlying
+issue, and any default is wrong for some client. What is fixed is the consequence the finding
+named — the warning is no longer the only signal. `lambo_reserve` now *refuses* rather than
+warns (T82-3), and warnings reach the text content (T82-9), so the "warning nobody reads"
+failure mode is closed on the path where it was dangerous. The remaining mis-attribution on
+writes is the T8.1 `Memory` gap and is disclosed, not papered over.
+
+### T82-14 — FIXED
+Both halves: the `*_impl` block carries a rustdoc paragraph stating that `lambo_stats` /
+`lambo_saints` / `lambo_inspect` answer from the RAM graph after `close()` while writes and
+`lambo_recall` refuse — and why (a closed session's graph does not change, and an operator
+debugging a failed close still needs `lambo_stats`). `read_tools_still_answer_after_close` pins
+it, including the negative half for `lambo_recall`, so a future change to that behaviour has to
+be deliberate.
+
+### T82-15 — FIXED
+Budget check moved above `seen.insert(other)` in `render_neighbourhood`, with a comment
+explaining the trap. Output impact is nil, as R1 said; the point is the next person to touch
+the loop.
+
+### T82-16 — FIXED in part; remainder DEFERRED → **T8.5 / P9**
+Fixed here: the HTTP transport no longer hangs on shutdown (T82-2), and the unbounded-content
+half of the memory-exhaustion path is closed by `MAX_CONTENT_BYTES` (T82-6), which bounds the
+`record_action` writer the finding pairs it with. **Deferred:** authentication, rate limiting,
+a request-body-size layer and a cap on `LocalSessionManager` sessions. **Reason:** these are
+deployment-shaped decisions (what secret, whose header, which limits) that belong with the
+task that first exposes the server beyond loopback. **T8.5 inherits it**, and P9 must not ship
+`--bind 0.0.0.0` without at least a shared-secret header and a body-size layer — the R1
+finding's own wording, endorsed.
+
+### T82-17 — FIXED
+`event_pump.abort()` now runs *after* `mem.close()`, so canonization and conflict events
+emitted during the final drain still reach stderr — the window an operator debugging a failed
+close actually wants.
+
+---
+
+## Nothing disputed
+
+Every finding above is accepted as stated. Two carry a scope boundary rather than a
+disagreement (T82-12, T82-16), one is closed as far as this task's authorization reaches
+(T82-13), and one has a named residual (T82-8's dim-mismatch evidence gap).
+
+## New weak spots I introduce — for the next reviewer
+
+1. **`SHUTDOWN_GRACE` is a fixed 5 s with no knob.** Chosen so a client cannot hold the tail
+   hostage. A slow legitimate flush that needs longer than 5 s does *not* lose data (the grace
+   bounds the **transport**, not `close()`, which is awaited afterwards without a timeout) —
+   but a client mid-response at the 5 s mark loses that response.
+2. **`close()` itself is still unbounded.** If `Memory::close` hangs, the process hangs with
+   it, and no signal will now break it out — the shutdown path has already been consumed.
+   Arguably correct (that is the durability step) but it is a new single point of hang.
+3. **`runtime.shutdown_background()` abandons blocking tasks by design.** Safe today because
+   `close()` is awaited first and the only blocking task is the stdin read. If a future change
+   moves durability work onto `spawn_blocking`, this becomes a silent data-loss path. Worth a
+   grep next time `spawn_blocking` appears in the serve path.
+4. **`deny_unknown_fields` is a compatibility risk.** A client that sends an extra field —
+   some send `_meta` — now gets a hard deserialization failure rather than a working call. It
+   is the fail-closed posture the review asked for; it is also strictly less forgiving than
+   before, and the failure surfaces as `-32602`-style text rather than a tool error.
+5. **`lambo_reserve` is now unusable by a differently-named client** (T82-3's accepted cost)
+   until the `Memory` per-call agent change lands. Refusing beats a false lock, but T8.4's
+   two-agent story cannot use `lambo_reserve` through one serve process at all.
+6. **The ambiguity refusal in `lambo_inspect` can be noisy.** A short focus like `auth` on a
+   large session now fails rather than answers, listing up to 10 of possibly many candidates.
+   That is deliberate, but it makes `lambo_inspect` less useful for exploration; if a reviewer
+   judges the trade wrong, the alternative (best match plus a loud resolution line) is one
+   `match` arm away.
+7. **The golden property set is a maintenance surface.** Any legitimate schema change now
+   fails a test until the golden set is updated, and an agent in a hurry can "fix" it by
+   pasting the new set in without asking the F18 question. The assertion message says so
+   explicitly; that is the only defence.
+
+## Gates after remediation
+
+```
+cargo fmt --all -- --check                                              clean
+cargo clippy --all-targets -- -D warnings                               clean
+cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings   clean
+cargo check --no-default-features                                       clean
+cargo test    581 lib + 2 bin + 3 integration + 1 doc, 0 failed, 3 ignored
+```
+
+Lib tests **562 → 581** (+19). No test was weakened or removed: `git diff | grep '^-.*assert'`
+is empty. Files touched: `src/mcp/serve.rs`, `src/mcp/server.rs`, `src/main.rs`,
+`dev-diary/evidence/t8.2-mcp-client/README.md`,
+`dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl` (new),
+`dev-diary/PHASE-8-surface.md`, and this file.

@@ -22,6 +22,7 @@
 //! work", whose content the caller actually sees. Memory-level failures —
 //! conflicts, unknown nodes, a closed session — are the latter.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,7 @@ use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::memory::Memory;
 use crate::recall::format;
+use crate::store::flush::{panic_message, CatchUnwindPoll};
 use crate::types::{ConceptType, EdgeType, LamboError, NodeId, RecallQuery};
 
 /// Upper bound on `top_k` a client may ask for. Recall assembles and renders
@@ -55,6 +57,17 @@ const MAX_RESERVE_TTL_SECS: u64 = 3600;
 const MAX_INSPECT_DEPTH: usize = 5;
 /// Cap on neighbours rendered per `lambo_inspect` frontier level.
 const MAX_INSPECT_NODES: usize = 200;
+/// Upper bound on **every** client-supplied string this surface accepts.
+///
+/// Sized to match `graph::hybrid::MAX_HYBRID_CONTEXT_BYTES` so the MCP layer
+/// refuses before the graph does, and applied uniformly (R1/T82-6): before this,
+/// `lambo_derive` was bounded only as a side effect of the hybrid path's own
+/// check while `lambo_record_action` and `lambo_recall`'s `query` took input of
+/// any size, so one client could grow the process every other client shares
+/// through the tool that happened to have no guard.
+const MAX_CONTENT_BYTES: usize = 16_384;
+/// Candidate concepts listed when `lambo_inspect`'s focus is ambiguous.
+const MAX_INSPECT_CANDIDATES: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -86,6 +99,7 @@ impl From<WireConceptType> for ConceptType {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecallParams {
     /// Calling agent (spec §2.2 — see the attribution note in the tool docs).
     pub agent_id: String,
@@ -100,6 +114,7 @@ pub struct RecallParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WireConcept {
     /// The concept text.
     pub content: String,
@@ -108,12 +123,14 @@ pub struct WireConcept {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WireParentOf {
     pub parent: String,
     pub child: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeriveParams {
     pub agent_id: String,
     /// Concepts to derive from this interaction.
@@ -124,6 +141,7 @@ pub struct DeriveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
@@ -137,6 +155,7 @@ pub struct RecordActionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReserveParams {
     pub agent_id: String,
     /// Node to reserve, as a UUID string (from `lambo_recall` or
@@ -149,6 +168,7 @@ pub struct ReserveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InspectParams {
     pub agent_id: String,
     /// Concept content (or a node UUID) to centre the neighbourhood on.
@@ -158,11 +178,13 @@ pub struct InspectParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SaintsParams {
     pub agent_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StatsParams {
     pub agent_id: String,
 }
@@ -201,6 +223,67 @@ fn bad_param(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
+/// Refuse any client string over [`MAX_CONTENT_BYTES`] (R1/T82-6).
+fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
+    if value.len() > MAX_CONTENT_BYTES {
+        return Err(bad_param(format!(
+            "{field} exceeds {MAX_CONTENT_BYTES} bytes ({} given)",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Attach warnings to a result **where the model will actually read them**.
+///
+/// R1/T82-9: warnings used to live only in `structuredContent`, which MCP
+/// clients treat as optional and commonly do not surface — so the attribution
+/// warning, and `Memory::recall`'s embed-failure degradation warning, reached
+/// nobody. They are now a second text block. `content[0]` is deliberately left
+/// alone: for `lambo_recall` it is the T5.3 context block verbatim, and that is
+/// the artifact the calling agent reads.
+fn attach_warnings(out: &mut CallToolResult, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    let mut text = String::from("warnings:");
+    for w in warnings {
+        text.push_str("\n- ");
+        text.push_str(w);
+    }
+    out.content.push(ContentBlock::text(text));
+}
+
+/// Run a tool body with panic containment (R1/T82-5).
+///
+/// The MCP boundary is fed arbitrary client input, and a panicking handler used
+/// to drop the JSON-RPC response entirely: no result, no error, no
+/// cancellation, and the caller blocked until its own timeout. T8.1 armours
+/// every store attempt this way for the same reason; the same two helpers are
+/// reused here so there is one panic-containment behaviour in the tree.
+///
+/// The panic detail goes to the log, never to the client — a payload can
+/// interpolate anything, including a DSN.
+async fn contain_panic(
+    tool: &'static str,
+    fut: impl Future<Output = CallToolResult>,
+) -> CallToolResult {
+    match CatchUnwindPoll(fut).await {
+        Ok(out) => out,
+        Err(payload) => {
+            tracing::error!(
+                tool,
+                panic = %panic_message(&payload),
+                "mcp: tool handler panicked — contained and reported as a tool error"
+            );
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "{tool}: internal error (the failure was logged server-side); \
+                 the call had no effect beyond anything already written"
+            ))])
+        }
+    }
+}
+
 impl LamboServer {
     /// Wrap a live [`Memory`]. The `Arc` is the point: every clone of this
     /// server — one per HTTP request, in the streamable-http transport — shares
@@ -232,6 +315,7 @@ impl LamboServer {
         if agent_id.trim().is_empty() {
             return Err(bad_param("agent_id must be a non-empty string"));
         }
+        check_size("agent_id", agent_id)?;
         let owner = self.mem.agent().0.as_str();
         if agent_id == owner {
             Ok(Vec::new())
@@ -244,27 +328,151 @@ impl LamboServer {
             )])
         }
     }
+
+    /// **Fail closed** when the caller is not the agent this process writes as.
+    ///
+    /// R1/T82-3. For the read and write tools, the attribution gap is a
+    /// mis-attribution: the work happens, under the wrong name, and a warning
+    /// says so. For `lambo_reserve` it is a *false safety claim*. `graph::reserve`
+    /// and `graph::release` contend on the one `AgentId` this `Memory` was built
+    /// with, so through MCP one client could take a soft lock another client
+    /// already held, and a third could release it — each told `isError: false`.
+    /// The §11 conflict could not fire, because there was only ever one agent.
+    ///
+    /// Mutual exclusion that reports success without providing exclusion is
+    /// worse than no mutual exclusion, so a foreign `agent_id` is refused here
+    /// until `Memory` grows `reserve_as`/`release_as` (a T8.1 re-open). Refusing
+    /// costs a caller a lock it never really held.
+    fn require_session_agent(&self, agent_id: &str, what: &str) -> Result<(), CallToolResult> {
+        let owner = self.mem.agent().0.as_str();
+        if agent_id == owner {
+            return Ok(());
+        }
+        Err(CallToolResult::error(vec![ContentBlock::text(format!(
+            "lambo_reserve: refusing to {what} on behalf of '{agent_id}': this process holds \
+             the session as agent '{owner}' and soft locks are taken and released under that \
+             single identity, so a reservation made for you could not be told apart from \
+             '{owner}'s own — and you could release a lock you do not hold. \
+             NOTHING WAS RESERVED OR RELEASED. Per-call agent identity needs a Memory-level \
+             agent override (T8.1 re-open; see the T8.2 Handoff Log). Until then, call \
+             lambo_reserve with agent_id '{owner}', or run one serve process per agent."
+        ))]))
+    }
 }
 
+// Each `#[tool]` handler is a thin, panic-contained wrapper (R1/T82-5) around a
+// `*_impl` body in the plain `impl` block below. Keeping the bodies out of the
+// macro'd block means the containment cannot be forgotten for one tool: the
+// wrapper is the only thing the router can reach.
 #[tool_router]
 impl LamboServer {
     /// Three-phase recall (spec §8) rendered as the T5.3 context block.
     ///
     /// The block is returned verbatim as text content — it is the artifact the
-    /// calling agent is meant to read — with the hits and warnings alongside as
-    /// structured content.
+    /// calling agent is meant to read — with warnings appended as a *second*
+    /// text block and the hits alongside as structured content.
     #[tool(
         name = "lambo_recall",
         description = "Recall relevant memory for a query and return the Lambo context block \
                        (canonical markers, blast-radius warnings, conflict lines)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
+        contain_panic("lambo_recall", self.recall_impl(p)).await
+    }
+
+    /// Derive concepts from a fresh interaction (spec §7).
+    ///
+    /// The interaction's `created_at` is stamped server-side (F18) — this tool
+    /// takes no timestamp.
+    #[tool(
+        name = "lambo_derive",
+        description = "Derive concepts from the current interaction into session memory. \
+                       Timestamps are stamped server-side; do not send one."
+    )]
+    async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
+        contain_panic("lambo_derive", self.derive_impl(p)).await
+    }
+
+    /// Record an agent action (spec §7) — a `Resource` concept plus `Causal` /
+    /// `Dependency` edges, on a fresh server-stamped interaction (F18).
+    #[tool(
+        name = "lambo_record_action",
+        description = "Record an action the agent took, with what it produces, modifies and \
+                       depends on. Timestamps are stamped server-side; do not send one."
+    )]
+    async fn lambo_record_action(
+        &self,
+        Parameters(p): Parameters<RecordActionParams>,
+    ) -> CallToolResult {
+        contain_panic("lambo_record_action", self.record_action_impl(p)).await
+    }
+
+    /// Take (or release) a soft lock on a node — spec §11.
+    ///
+    /// Not durable: reservations are RAM-local to this process (pinned contract
+    /// S5). "No reservation" after a restart does **not** mean nobody else is
+    /// working on the node. A call whose `agent_id` is not this process's own
+    /// agent is refused outright — see [`LamboServer::require_session_agent`].
+    #[tool(
+        name = "lambo_reserve",
+        description = "Take a soft lock on a memory node before editing it (or release one). \
+                       Reservations are advisory, do not survive a server restart, and are \
+                       only accepted from the agent this server session runs as."
+    )]
+    async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
+        contain_panic("lambo_reserve", self.reserve_impl(p)).await
+    }
+
+    /// Neighbourhood around a focus concept — the read-only graph view.
+    #[tool(
+        name = "lambo_inspect",
+        description = "Inspect the neighbourhood around a concept: its type, canonization \
+                       status, blast radius and typed edges out to a depth."
+    )]
+    async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
+        contain_panic("lambo_inspect", self.inspect_impl(p)).await
+    }
+
+    /// The canonical ("saints") memories — spec §10.
+    #[tool(
+        name = "lambo_saints",
+        description = "List the session's canonical memories — concepts that earned Canonical \
+                       status through the audited transition path."
+    )]
+    async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
+        contain_panic("lambo_saints", self.saints_impl(p)).await
+    }
+
+    /// Session health — the spec §2.4 observable durability bound.
+    #[tool(
+        name = "lambo_stats",
+        description = "Session health: flush lag, write-behind log depth, node/edge/concept \
+                       counts, canonization progress and degraded state."
+    )]
+    async fn lambo_stats(&self, Parameters(p): Parameters<StatsParams>) -> CallToolResult {
+        contain_panic("lambo_stats", self.stats_impl(p)).await
+    }
+}
+
+/// The tool bodies. Everything the router can reach goes through
+/// [`contain_panic`] above; these are the parts that do the work.
+///
+/// **Read tools answer from the RAM graph even after `close()`** (R1/T82-14):
+/// `lambo_stats`, `lambo_saints` and `lambo_inspect` read state that is still
+/// valid — a closed session's graph does not change — while every write tool
+/// and `lambo_recall` refuse. That is deliberate: an operator inspecting why a
+/// close failed still needs `lambo_stats` to answer.
+impl LamboServer {
+    async fn recall_impl(&self, p: RecallParams) -> CallToolResult {
         let mut warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
         };
         if p.query.trim().is_empty() {
             return bad_param("query must be a non-empty string");
+        }
+        if let Err(e) = check_size("query", &p.query) {
+            return e;
         }
         let cfg = self.mem.config();
         let top_k = p.top_k.unwrap_or(cfg.default_top_k);
@@ -292,6 +500,10 @@ impl LamboServer {
             Ok(r) => r,
             Err(e) => return tool_err("lambo_recall", e),
         };
+        // These include `Memory::recall`'s embed-failure degradation warning —
+        // the signal that a recall dropped its vector leg and returned
+        // keyword-only hits. `attach_warnings` is what puts it where the model
+        // can see it (R1/T82-9).
         warnings.extend(result.warnings.iter().cloned());
 
         let hits: Vec<_> = result
@@ -309,7 +521,9 @@ impl LamboServer {
             })
             .collect();
 
+        // `content[0]` stays the context block verbatim; warnings follow it.
         let mut out = CallToolResult::success(vec![ContentBlock::text(result.context.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "context": result.context,
             "hits": hits,
@@ -318,16 +532,7 @@ impl LamboServer {
         out
     }
 
-    /// Derive concepts from a fresh interaction (spec §7).
-    ///
-    /// The interaction's `created_at` is stamped server-side (F18) — this tool
-    /// takes no timestamp.
-    #[tool(
-        name = "lambo_derive",
-        description = "Derive concepts from the current interaction into session memory. \
-                       Timestamps are stamped server-side; do not send one."
-    )]
-    async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
+    async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -343,6 +548,11 @@ impl LamboServer {
         if let Some(bad) = p.concepts.iter().find(|c| c.content.trim().is_empty()) {
             let _ = bad;
             return bad_param("every concept.content must be a non-empty string");
+        }
+        for c in &p.concepts {
+            if let Err(e) = check_size("concept.content", &c.content) {
+                return e;
+            }
         }
 
         // `derive` borrows `&[(&str, ConceptType)]` and `ParentOf<'_>` borrows
@@ -364,6 +574,14 @@ impl LamboServer {
         {
             return bad_param("parent_of entries must have non-empty parent and child");
         }
+        for (a, b) in &pairs {
+            if let Err(e) = check_size("parent_of.parent", a) {
+                return e;
+            }
+            if let Err(e) = check_size("parent_of.child", b) {
+                return e;
+            }
+        }
         let parent_of = if pairs.is_empty() {
             ParentOf::none()
         } else {
@@ -384,6 +602,7 @@ impl LamboServer {
             matched.len()
         );
         let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "summary": summary,
             "created": created,
@@ -393,23 +612,16 @@ impl LamboServer {
         out
     }
 
-    /// Record an agent action (spec §7) — a `Resource` concept plus `Causal` /
-    /// `Dependency` edges, on a fresh server-stamped interaction (F18).
-    #[tool(
-        name = "lambo_record_action",
-        description = "Record an action the agent took, with what it produces, modifies and \
-                       depends on. Timestamps are stamped server-side; do not send one."
-    )]
-    async fn lambo_record_action(
-        &self,
-        Parameters(p): Parameters<RecordActionParams>,
-    ) -> CallToolResult {
+    async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
         };
         if p.action.trim().is_empty() {
             return bad_param("action must be a non-empty string");
+        }
+        if let Err(e) = check_size("action", &p.action) {
+            return e;
         }
         let produces: Vec<&str> = p.produces.iter().flatten().map(String::as_str).collect();
         let modifies: Vec<&str> = p.modifies.iter().flatten().map(String::as_str).collect();
@@ -421,6 +633,11 @@ impl LamboServer {
             .any(|s| s.trim().is_empty())
         {
             return bad_param("produces / modifies / depends_on entries must be non-empty");
+        }
+        for s in produces.iter().chain(&modifies).chain(&depends_on) {
+            if let Err(e) = check_size("produces / modifies / depends_on entry", s) {
+                return e;
+            }
         }
 
         let action = Action {
@@ -442,6 +659,7 @@ impl LamboServer {
             outcome.edges
         );
         let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "summary": summary,
             "action_node": outcome.action_node.0.to_string(),
@@ -452,31 +670,34 @@ impl LamboServer {
         out
     }
 
-    /// Take (or release) a soft lock on a node — spec §11.
-    ///
-    /// Not durable: reservations are RAM-local to this process (pinned contract
-    /// S5). "No reservation" after a restart does **not** mean nobody else is
-    /// working on the node.
-    #[tool(
-        name = "lambo_reserve",
-        description = "Take a soft lock on a memory node before editing it (or release one). \
-                       Reservations are advisory and do not survive a server restart."
-    )]
-    async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
+    async fn reserve_impl(&self, p: ReserveParams) -> CallToolResult {
         let mut warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
         };
+        let releasing = p.release.unwrap_or(false);
+        // Fail closed before touching the graph (R1/T82-3).
+        if let Err(e) = self.require_session_agent(
+            &p.agent_id,
+            if releasing {
+                "release a soft lock"
+            } else {
+                "take a soft lock"
+            },
+        ) {
+            return e;
+        }
         let node_id = match uuid::Uuid::parse_str(p.node_id.trim()) {
             Ok(u) => NodeId(u),
             Err(e) => return bad_param(format!("node_id must be a UUID: {e}")),
         };
 
-        if p.release.unwrap_or(false) {
+        if releasing {
             return match self.mem.release(node_id) {
                 Ok(()) => {
                     let msg = format!("released {}", node_id.0);
                     let mut out = CallToolResult::success(vec![ContentBlock::text(msg.clone())]);
+                    attach_warnings(&mut out, &warnings);
                     out.structured_content =
                         Some(json!({ "released": true, "node_id": node_id.0.to_string(),
                                      "summary": msg, "warnings": warnings }));
@@ -504,6 +725,7 @@ impl LamboServer {
             reservation.agent_id.0
         );
         let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "summary": summary,
             "node_id": node_id.0.to_string(),
@@ -514,19 +736,16 @@ impl LamboServer {
         out
     }
 
-    /// Neighbourhood around a focus concept — the read-only graph view.
-    #[tool(
-        name = "lambo_inspect",
-        description = "Inspect the neighbourhood around a concept: its type, canonization \
-                       status, blast radius and typed edges out to a depth."
-    )]
-    async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
-        let warnings = match self.attribution(&p.agent_id) {
+    async fn inspect_impl(&self, p: InspectParams) -> CallToolResult {
+        let mut warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
         };
         if p.focus.trim().is_empty() {
             return bad_param("focus must be a non-empty string");
+        }
+        if let Err(e) = check_size("focus", &p.focus) {
+            return e;
         }
         let depth = p.depth.unwrap_or(2);
         if depth > MAX_INSPECT_DEPTH {
@@ -534,52 +753,77 @@ impl LamboServer {
         }
 
         // One short read section, no `.await` inside (spec §6.4).
-        let rendered = {
+        let resolved = {
             let g = self.mem.graph().read();
-            let focus = p.focus.trim();
-            // A UUID that names a live node wins; otherwise exact content
-            // (case-insensitive), then a substring match.
-            let target = uuid::Uuid::parse_str(focus)
-                .ok()
-                .map(NodeId)
-                .filter(|id| g.node(*id).is_some())
-                .or_else(|| {
-                    let needle = focus.to_lowercase();
-                    g.concepts()
-                        .find(|c| c.content.eq_ignore_ascii_case(focus))
-                        .or_else(|| {
-                            g.concepts()
-                                .find(|c| c.content.to_lowercase().contains(&needle))
-                        })
-                        .map(|c| c.id)
-                });
-            target.map(|t| render_neighbourhood(&g, t, depth))
+            match resolve_focus(&g, p.focus.trim()) {
+                Focus::Exact(id) => Ok((None, render_neighbourhood(&g, id, depth))),
+                Focus::Fuzzy { id, content } => Ok((
+                    Some(format!(
+                        "resolved '{}' → '{}' (substring match, single candidate)",
+                        p.focus.trim(),
+                        content
+                    )),
+                    render_neighbourhood(&g, id, depth),
+                )),
+                other => Err(other),
+            }
         };
 
-        let Some((text, structured)) = rendered else {
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "lambo_inspect: no concept matching '{}' in session '{}'",
-                p.focus,
-                self.mem.session().0
-            ))]);
+        let (note, (text, structured)) = match resolved {
+            Ok(v) => v,
+            Err(Focus::Ambiguous(candidates)) => {
+                // Refuse rather than pick (R1/T82-7): an arbitrary pick fed a
+                // node_id the caller never named into `lambo_reserve` and into
+                // edits, and the pick changed between calls.
+                let mut msg = format!(
+                    "lambo_inspect: '{}' matches {} concepts — name one exactly, or pass its \
+                     node_id:",
+                    p.focus.trim(),
+                    candidates.len()
+                );
+                for c in candidates.iter().take(MAX_INSPECT_CANDIDATES) {
+                    msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+                }
+                if candidates.len() > MAX_INSPECT_CANDIDATES {
+                    msg.push_str(&format!(
+                        "\n  … and {} more",
+                        candidates.len() - MAX_INSPECT_CANDIDATES
+                    ));
+                }
+                return CallToolResult::error(vec![ContentBlock::text(msg)]);
+            }
+            Err(_) => {
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "lambo_inspect: no concept matching '{}' in session '{}'",
+                    p.focus,
+                    self.mem.session().0
+                ))]);
+            }
+        };
+
+        // A fuzzy resolution is stated in the *text*, not only in a warning:
+        // "focus: <something the caller did not ask for>" is exactly the line a
+        // model reads straight past.
+        let text = match &note {
+            Some(n) => {
+                warnings.push(n.clone());
+                format!("{n}\n{text}")
+            }
+            None => text,
         };
 
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "view": text,
             "focus": structured,
+            "resolution": note,
             "warnings": warnings,
         }));
         out
     }
 
-    /// The canonical ("saints") memories — spec §10.
-    #[tool(
-        name = "lambo_saints",
-        description = "List the session's canonical memories — concepts that earned Canonical \
-                       status through the audited transition path."
-    )]
-    async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
+    async fn saints_impl(&self, p: SaintsParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -615,6 +859,7 @@ impl LamboServer {
             })
             .collect();
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "summary": text,
             "saints": rows,
@@ -623,13 +868,7 @@ impl LamboServer {
         out
     }
 
-    /// Session health — the spec §2.4 observable durability bound.
-    #[tool(
-        name = "lambo_stats",
-        description = "Session health: flush lag, write-behind log depth, node/edge/concept \
-                       counts, canonization progress and degraded state."
-    )]
-    async fn lambo_stats(&self, Parameters(p): Parameters<StatsParams>) -> CallToolResult {
+    async fn stats_impl(&self, p: StatsParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -657,6 +896,7 @@ impl LamboServer {
             s.canonization_failures,
         );
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+        attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
             "summary": text,
             "session": s.session.0,
@@ -677,6 +917,91 @@ impl LamboServer {
             "warnings": warnings,
         }));
         out
+    }
+}
+
+/// A concept `lambo_inspect` could have meant.
+#[derive(Clone, Debug)]
+struct FocusCandidate {
+    id: NodeId,
+    content: String,
+}
+
+/// How `lambo_inspect` resolved (or refused to resolve) its `focus`.
+#[derive(Debug)]
+enum Focus {
+    /// A node UUID, or an exact (case-insensitive) content match.
+    Exact(NodeId),
+    /// Exactly one substring match — usable, but the caller is told.
+    Fuzzy { id: NodeId, content: String },
+    /// Several substring matches; the caller must disambiguate.
+    Ambiguous(Vec<FocusCandidate>),
+    /// Nothing matched.
+    Missing,
+}
+
+/// Resolve `lambo_inspect`'s focus **deterministically** (R1/T82-7).
+///
+/// `Graph::concepts()` iterates a `HashMap`, so the previous `.find(..)` over
+/// it picked an arbitrary match — arbitrary across runs *and* within one run,
+/// since a `HashMap` reshuffles on resize. An `inspect` for "auth" could return
+/// a different concept each time, with nothing in the response saying a fuzzy
+/// match had happened, and that `node_id` then flowed into `lambo_reserve` and
+/// into edits. Every leg here collects and sorts by a total order, and the
+/// ambiguous case refuses instead of guessing.
+fn resolve_focus(g: &crate::graph::Graph, focus: &str) -> Focus {
+    if let Some(id) = uuid::Uuid::parse_str(focus)
+        .ok()
+        .map(NodeId)
+        .filter(|id| g.node(*id).is_some())
+    {
+        return Focus::Exact(id);
+    }
+
+    let mut exact: Vec<FocusCandidate> = g
+        .concepts()
+        .filter(|c| c.content.eq_ignore_ascii_case(focus))
+        .map(|c| FocusCandidate {
+            id: c.id,
+            content: c.content.clone(),
+        })
+        .collect();
+    if !exact.is_empty() {
+        // Case-insensitive duplicates are the same concept to the caller, so
+        // there is nothing to disambiguate — just pick one *stably*.
+        exact.sort_by(|a, b| a.content.cmp(&b.content).then(a.id.0.cmp(&b.id.0)));
+        return Focus::Exact(exact[0].id);
+    }
+
+    let needle = focus.to_lowercase();
+    let mut fuzzy: Vec<FocusCandidate> = g
+        .concepts()
+        .filter(|c| c.content.to_lowercase().contains(&needle))
+        .map(|c| FocusCandidate {
+            id: c.id,
+            content: c.content.clone(),
+        })
+        .collect();
+    if fuzzy.is_empty() {
+        return Focus::Missing;
+    }
+    // Shortest content first: the least-padded match is the closest to what was
+    // asked for. Content then id break ties, so the order is total.
+    fuzzy.sort_by(|a, b| {
+        a.content
+            .len()
+            .cmp(&b.content.len())
+            .then_with(|| a.content.cmp(&b.content))
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
+    if fuzzy.len() == 1 {
+        let c = fuzzy.remove(0);
+        Focus::Fuzzy {
+            id: c.id,
+            content: c.content,
+        }
+    } else {
+        Focus::Ambiguous(fuzzy)
     }
 }
 
@@ -737,11 +1062,16 @@ fn render_neighbourhood(
                 } else {
                     edge.source
                 };
-                if !seen.insert(other) {
-                    continue;
-                }
+                // Budget first, `seen` second (R1/T82-15): marking a node seen
+                // and *then* discovering the budget is spent permanently
+                // excludes a neighbour that was never rendered. The `break`
+                // only leaves the edge loop, so the outer frontier loop went on
+                // burning one neighbour per remaining node.
                 if budget == 0 {
                     break;
+                }
+                if !seen.insert(other) {
+                    continue;
                 }
                 budget -= 1;
                 let dir = if edge.source == node { "->" } else { "<-" };
@@ -926,22 +1256,169 @@ mod tests {
         ];
         for t in tools(&s) {
             let schema = serde_json::to_value(&*t.input_schema).unwrap();
-            let props = schema["properties"]
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            for key in props.keys() {
-                let k = key.to_lowercase();
+            for path in schema_property_paths(&schema) {
+                let leaf = path.rsplit('.').next().unwrap_or(&path).to_lowercase();
+                let leaf = leaf.trim_end_matches("[]").to_string();
                 assert!(
-                    !BANNED.contains(&k.as_str()),
+                    !BANNED.contains(&leaf.as_str()),
                     "F18: tool {} accepts '{}' — timestamps are stamped server-side and no \
                      tool may take one from the client",
                     t.name,
-                    key
+                    path
                 );
             }
         }
         s.mem.close().await.expect("close");
+    }
+
+    /// Collect **every** property path in a published schema, following `$ref`
+    /// into `$defs`, `items` into array element schemas, `additionalProperties`
+    /// into map values and the `allOf`/`anyOf`/`oneOf` combinators.
+    ///
+    /// R1/T82-4: the F18 guard used to read only the **root** `properties` map,
+    /// so a `created_at` added to `WireConcept` — which `lambo_derive` publishes
+    /// through `properties.concepts.items.$ref` → `$defs.WireConcept` — passed
+    /// the entire suite. Mutation-verified: adding that field now fails this
+    /// test and `f18_tool_schemas_match_the_golden_property_set` below.
+    fn schema_property_paths(schema: &serde_json::Value) -> Vec<String> {
+        fn walk(
+            node: &serde_json::Value,
+            prefix: &str,
+            root: &serde_json::Value,
+            depth: usize,
+            out: &mut Vec<String>,
+        ) {
+            // `$defs` are acyclic here, but a recursive wire type would be a
+            // legitimate future shape — bound the walk rather than hang.
+            if depth > 16 {
+                return;
+            }
+            if let Some(r) = node.get("$ref").and_then(|v| v.as_str()) {
+                if let Some(name) = r.strip_prefix("#/$defs/") {
+                    if let Some(target) = root.get("$defs").and_then(|d| d.get(name)) {
+                        walk(target, prefix, root, depth + 1, out);
+                    }
+                }
+            }
+            if let Some(props) = node.get("properties").and_then(|v| v.as_object()) {
+                for (k, v) in props {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    out.push(path.clone());
+                    walk(v, &path, root, depth + 1, out);
+                }
+            }
+            if let Some(items) = node.get("items") {
+                walk(items, &format!("{prefix}[]"), root, depth + 1, out);
+            }
+            if let Some(ap) = node.get("additionalProperties") {
+                if ap.is_object() {
+                    walk(ap, &format!("{prefix}.*"), root, depth + 1, out);
+                }
+            }
+            for key in ["allOf", "anyOf", "oneOf"] {
+                if let Some(arr) = node.get(key).and_then(|v| v.as_array()) {
+                    for sub in arr {
+                        walk(sub, prefix, root, depth + 1, out);
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(schema, "", schema, 0, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// **F18 as an allowlist, not a denylist** (R1/T82-4).
+    ///
+    /// A denylist of nine spellings is not a statement about client-supplied
+    /// logical time: `ts`, `as_of` and `client_clock_ms` all sail through one.
+    /// This pins the exact set of property paths every tool publishes, so
+    /// *any* new field on *any* tool — nested or not, however named — fails
+    /// here and forces a human to decide whether it is a timestamp in
+    /// disguise. Update it deliberately, and only after answering that.
+    #[tokio::test]
+    async fn f18_tool_schemas_match_the_golden_property_set() {
+        let s = server("mcp-f18-golden").await;
+        let golden: std::collections::BTreeMap<&str, Vec<&str>> = [
+            (
+                "lambo_derive",
+                vec![
+                    "agent_id",
+                    "concepts",
+                    "concepts[].concept_type",
+                    "concepts[].content",
+                    "parent_of",
+                    "parent_of[].child",
+                    "parent_of[].parent",
+                ],
+            ),
+            ("lambo_inspect", vec!["agent_id", "depth", "focus"]),
+            (
+                "lambo_recall",
+                vec![
+                    "agent_id",
+                    "max_tokens",
+                    "query",
+                    "top_k",
+                    "traversal_depth",
+                ],
+            ),
+            (
+                "lambo_record_action",
+                vec!["action", "agent_id", "depends_on", "modifies", "produces"],
+            ),
+            (
+                "lambo_reserve",
+                vec!["agent_id", "node_id", "release", "ttl_seconds"],
+            ),
+            ("lambo_saints", vec!["agent_id"]),
+            ("lambo_stats", vec!["agent_id"]),
+        ]
+        .into_iter()
+        .collect();
+
+        for t in tools(&s) {
+            let schema = serde_json::to_value(&*t.input_schema).unwrap();
+            let found = schema_property_paths(&schema);
+            let expected = golden
+                .get(t.name.as_ref())
+                .unwrap_or_else(|| panic!("no golden property set for tool {}", t.name));
+            assert_eq!(
+                found,
+                expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "tool {} publishes a different property set than the golden one. If the \
+                 change is intended, confirm no new field carries client-supplied logical \
+                 time (F18) and then update the golden set.",
+                t.name
+            );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// The walker must actually descend — a guard that only ever sees the root
+    /// is the bug R1/T82-4 found, and it looks identical from the outside.
+    #[test]
+    fn the_schema_walker_reaches_nested_and_referenced_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "concepts": { "type": "array", "items": { "$ref": "#/$defs/Wire" } },
+                "bag": { "additionalProperties": { "properties": { "deep": {} } } }
+            },
+            "$defs": { "Wire": { "properties": { "created_at": {}, "content": {} } } }
+        });
+        let paths = schema_property_paths(&schema);
+        assert!(
+            paths.contains(&"concepts[].created_at".to_string()),
+            "a $ref'd nested property must be reachable, got {paths:?}"
+        );
+        assert!(paths.contains(&"bag.*.deep".to_string()), "{paths:?}");
     }
 
     /// Drive a tool by its published name, from the JSON a client would send.
@@ -1231,6 +1708,433 @@ mod tests {
         )
         .await;
         assert_eq!(out.is_error, Some(true), "{out:?}");
+    }
+
+    /// Pull the concatenated text content out of a result — what an MCP client
+    /// actually feeds the model.
+    fn text_of(out: &CallToolResult) -> String {
+        out.content
+            .iter()
+            .filter_map(|c| match c {
+                ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **R1/T82-3 pinned.** The reviewer's three-agent reproduction: `agent-b`
+    /// must not be able to reserve a node `agent-a` holds, and `agent-c` must
+    /// not be able to release it — and neither may be told it worked.
+    #[tokio::test]
+    async fn reserve_and_release_fail_closed_on_a_foreign_agent_id() {
+        let s = server("mcp-reserve-foreign").await;
+        let derived = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "shared config", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        let node = derived.structured_content.unwrap()["created"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let a = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-a", "node_id": node, "ttl_seconds": 60}),
+        )
+        .await;
+        assert_eq!(
+            a.is_error,
+            Some(false),
+            "the session's own agent may reserve"
+        );
+
+        let b = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-b", "node_id": node, "ttl_seconds": 60}),
+        )
+        .await;
+        assert_eq!(
+            b.is_error,
+            Some(true),
+            "a foreign agent_id must NOT be told it took a lock it does not hold: {b:?}"
+        );
+        assert!(
+            text_of(&b).contains("NOTHING WAS RESERVED"),
+            "the refusal must say plainly that no lock was taken: {}",
+            text_of(&b)
+        );
+
+        let c = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-c", "node_id": node, "release": true}),
+        )
+        .await;
+        assert_eq!(
+            c.is_error,
+            Some(true),
+            "a foreign agent_id must NOT be able to release someone else's lock: {c:?}"
+        );
+
+        // And the original lock is still there to be released by its owner.
+        assert!(
+            s.mem
+                .graph()
+                .read()
+                .reservation(NodeId(node.parse().unwrap()))
+                .is_some(),
+            "agent-a's reservation must have survived both refusals"
+        );
+        let freed = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-a", "node_id": node, "release": true}),
+        )
+        .await;
+        assert_eq!(freed.is_error, Some(false), "{freed:?}");
+        s.mem.close().await.expect("close");
+    }
+
+    /// **R1/T82-9 pinned.** `structuredContent` is optional and commonly not
+    /// surfaced; a warning only ever written there is a warning nobody reads.
+    #[tokio::test]
+    async fn warnings_reach_the_text_content_not_only_structured_content() {
+        let s = server("mcp-warn-text").await;
+        for tool in ["lambo_stats", "lambo_saints"] {
+            let out = call(&s, tool, serde_json::json!({"agent_id": "agent-b"})).await;
+            assert_eq!(out.is_error, Some(false));
+            assert!(
+                text_of(&out).contains("attribution:"),
+                "{tool}: the attribution warning must be in the text content, got: {}",
+                text_of(&out)
+            );
+        }
+
+        // Recall keeps `content[0]` as the verbatim context block, with the
+        // warnings in a block after it.
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "cache layer", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        let out = call(
+            &s,
+            "lambo_recall",
+            serde_json::json!({"agent_id": "agent-b", "query": "cache layer"}),
+        )
+        .await;
+        let structured = out.structured_content.clone().unwrap();
+        match &out.content[0] {
+            ContentBlock::Text(t) => assert_eq!(
+                t.text, structured["context"],
+                "content[0] must stay the context block verbatim"
+            ),
+            other => panic!("expected text, got {other:?}"),
+        }
+        assert!(
+            text_of(&out).contains("attribution:"),
+            "the warning must still reach the text: {}",
+            text_of(&out)
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **R1/T82-6 pinned.** Every client string is bounded, not just the ones
+    /// the hybrid derive path happened to guard.
+    #[tokio::test]
+    async fn oversized_client_strings_are_refused_by_every_tool() {
+        let s = server("mcp-oversized").await;
+        let big = "A".repeat(MAX_CONTENT_BYTES + 1);
+        for (tool, args) in [
+            (
+                "lambo_record_action",
+                serde_json::json!({"agent_id": "agent-a", "action": big}),
+            ),
+            (
+                "lambo_record_action",
+                serde_json::json!({"agent_id": "agent-a", "action": "ok", "produces": [big]}),
+            ),
+            (
+                "lambo_recall",
+                serde_json::json!({"agent_id": "agent-a", "query": big}),
+            ),
+            (
+                "lambo_derive",
+                serde_json::json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": big, "concept_type": "entity"}]
+                }),
+            ),
+            (
+                "lambo_inspect",
+                serde_json::json!({"agent_id": "agent-a", "focus": big}),
+            ),
+            ("lambo_saints", serde_json::json!({"agent_id": big})),
+        ] {
+            let out = call(&s, tool, args).await;
+            assert_eq!(
+                out.is_error,
+                Some(true),
+                "{tool} must refuse a string over {MAX_CONTENT_BYTES} bytes"
+            );
+            assert!(
+                text_of(&out).contains("exceeds"),
+                "{tool}: the refusal must say what was wrong, got {}",
+                text_of(&out)
+            );
+        }
+        // The graph must be untouched by all of that.
+        let stats = call(
+            &s,
+            "lambo_stats",
+            serde_json::json!({"agent_id": "agent-a"}),
+        )
+        .await;
+        assert_eq!(
+            stats.structured_content.unwrap()["concept_count"]
+                .as_u64()
+                .unwrap(),
+            0,
+            "a refused oversized write must not have reached the graph"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **R1/T82-7 pinned.** An ambiguous focus is refused with the candidates
+    /// named, rather than resolved to an arbitrary one of them whose `node_id`
+    /// then flows into `lambo_reserve` and into edits.
+    #[tokio::test]
+    async fn inspect_refuses_an_ambiguous_focus_and_names_the_candidates() {
+        let s = server("mcp-inspect-ambiguous").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "auth middleware", "concept_type": "entity"},
+                    {"content": "auth middleware rewrite", "concept_type": "entity"},
+                    {"content": "legacy auth middleware shim", "concept_type": "entity"}
+                ]
+            }),
+        )
+        .await;
+
+        let out = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth"}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        let text = text_of(&out);
+        for expected in [
+            "auth middleware",
+            "auth middleware rewrite",
+            "legacy auth middleware shim",
+        ] {
+            assert!(
+                text.contains(expected),
+                "candidate {expected} missing: {text}"
+            );
+        }
+
+        // An exact name still resolves, and says nothing about resolution.
+        let exact = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(exact.is_error, Some(false), "{exact:?}");
+        assert!(
+            !text_of(&exact).contains("resolved '"),
+            "{}",
+            text_of(&exact)
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// A single substring match is usable — but the caller is told, in the
+    /// text, that it was not what they literally asked for.
+    #[tokio::test]
+    async fn inspect_reports_a_fuzzy_resolution_in_the_text() {
+        let s = server("mcp-inspect-fuzzy").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "postgres connection pool", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        let out = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "connection"}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{out:?}");
+        let text = text_of(&out);
+        assert!(
+            text.contains("resolved 'connection' → 'postgres connection pool'"),
+            "a fuzzy match must announce itself in the text: {text}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// Resolution must be a function of the graph's contents, not of hash
+    /// iteration order: same graph, same answer, every time.
+    #[tokio::test]
+    async fn focus_resolution_is_deterministic() {
+        let s = server("mcp-inspect-determinism").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "queue worker", "concept_type": "entity"},
+                    {"content": "queue worker retry", "concept_type": "entity"},
+                    {"content": "dead letter queue worker", "concept_type": "entity"}
+                ]
+            }),
+        )
+        .await;
+        let first = {
+            let g = s.mem.graph().read();
+            format!("{:?}", resolve_focus(&g, "queue"))
+        };
+        for _ in 0..20 {
+            let g = s.mem.graph().read();
+            assert_eq!(
+                format!("{:?}", resolve_focus(&g, "queue")),
+                first,
+                "focus resolution must not depend on HashMap iteration order"
+            );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// **R1/T82-5 pinned.** A panicking handler used to drop the JSON-RPC
+    /// response entirely — no result, no error, no cancellation — leaving the
+    /// caller blocked until its own timeout. It must become a readable tool
+    /// error, and the panic detail must not cross the protocol.
+    #[tokio::test]
+    async fn a_panicking_tool_body_is_contained_as_a_tool_error() {
+        let out = contain_panic("lambo_stats", async {
+            panic!("MUTATION-PANIC internal detail: dsn=postgres://user:SECRET@host/db");
+        })
+        .await;
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        let text = text_of(&out);
+        assert!(text.contains("internal error"), "{text}");
+        assert!(
+            !text.contains("SECRET") && !text.contains("dsn="),
+            "the panic payload must not cross the protocol to the client: {text}"
+        );
+    }
+
+    /// A tool body that does not panic must pass its result through untouched.
+    #[tokio::test]
+    async fn containment_does_not_disturb_a_normal_result() {
+        let out = contain_panic("lambo_stats", async {
+            CallToolResult::success(vec![ContentBlock::text("fine")])
+        })
+        .await;
+        assert_eq!(out.is_error, Some(false));
+        assert_eq!(text_of(&out), "fine");
+    }
+
+    /// **R1/T82-11 pinned.** An unknown field is refused, not silently
+    /// discarded — including a `created_at` on a *nested* wire type. A client
+    /// that believes it backdated an interaction must be told it did not.
+    #[test]
+    fn unknown_fields_are_refused_by_every_params_struct() {
+        let ts = "1999-01-01T00:00:00Z";
+        assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
+            "agent_id": "a", "concepts": [], "created_at": ts
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
+            "agent_id": "a",
+            "concepts": [{"content": "x", "concept_type": "entity", "created_at": ts}]
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<RecallParams>(serde_json::json!({
+            "agent_id": "a", "query": "x", "ts": 1
+        }))
+        .is_err());
+        assert!(
+            serde_json::from_value::<RecordActionParams>(serde_json::json!({
+                "agent_id": "a", "action": "x", "as_of": ts
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<ReserveParams>(serde_json::json!({
+            "agent_id": "a", "node_id": "x", "client_clock_ms": 1
+        }))
+        .is_err());
+        // …and the legitimate shapes still parse.
+        assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
+            "agent_id": "a", "concepts": [{"content": "x", "concept_type": "entity"}]
+        }))
+        .is_ok());
+    }
+
+    /// **R1/T82-14 pinned.** The read tools answer from the RAM graph after
+    /// `close()` — documented on the impl block, and now asserted, so a future
+    /// change to that behaviour is a deliberate one.
+    #[tokio::test]
+    async fn read_tools_still_answer_after_close() {
+        let s = server("mcp-closed-reads").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "before the close", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        s.mem.close().await.expect("close");
+
+        for (tool, args) in [
+            ("lambo_stats", serde_json::json!({"agent_id": "agent-a"})),
+            ("lambo_saints", serde_json::json!({"agent_id": "agent-a"})),
+            (
+                "lambo_inspect",
+                serde_json::json!({"agent_id": "agent-a", "focus": "before the close"}),
+            ),
+        ] {
+            let out = call(&s, tool, args).await;
+            assert_eq!(
+                out.is_error,
+                Some(false),
+                "{tool} reads a closed session's RAM graph, which does not change: {out:?}"
+            );
+        }
+        // Recall, which needs the embedder and the store, still refuses.
+        let recall = call(
+            &s,
+            "lambo_recall",
+            serde_json::json!({"agent_id": "agent-a", "query": "before the close"}),
+        )
+        .await;
+        assert_eq!(recall.is_error, Some(true), "{recall:?}");
     }
 
     #[tokio::test]

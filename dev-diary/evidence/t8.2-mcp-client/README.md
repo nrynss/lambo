@@ -13,6 +13,7 @@ Cockroach DSN (fail-closed case B below) uses a redacted placeholder host.
 | 1 | A **real Claude Code client** completes the MCP handshake against `--transport stdio` | `claude mcp add` + `claude mcp list` / `claude mcp get` (Claude Code 2.1.226) | **PASS** — `✔ Connected` |
 | 2 | Tool discovery lists all seven tools with usable schemas | `tools/list` over the real stdio transport | **PASS** — see `stdio-tools-list.jsonl` |
 | 3 | `lambo_recall` returns the T5.3 context block | `tools/call` over the real stdio transport | **PASS** — see below |
+| 3b | **All seven tools** driven over the real stdio wire, requests *and* responses captured | `tools/call` × 7, R1 remediation | **PASS** — see `stdio-all-seven-tools.jsonl` |
 | 4 | Streamable HTTP transport serves MCP | `curl POST /mcp` with `initialize` | **PASS** — 200, `mcp-session-id`, SSE result frame |
 | 5 | Level B fails closed | four negative configs | **PASS** — see the table below |
 | — | A **model-driven** tool call from Claude Code | `claude -p --allowedTools …` | **NOT VERIFIED** — see the honest limitation below |
@@ -57,8 +58,17 @@ telling the model never to send a timestamp (F18).
 
 ### 3. `lambo_recall` context block — `stdio-jsonrpc-session.jsonl`
 
-A full session over one stdio process: `initialize` → `lambo_derive` →
-`lambo_record_action` → `lambo_recall` → `lambo_stats`.
+A session over one stdio process driving **four** of the seven tools:
+`initialize` → `lambo_derive` → `lambo_record_action` → `lambo_recall` →
+`lambo_stats`.
+
+> **Corrected in R1 remediation.** This file, and the sentence that used to
+> introduce it, claimed "all seven tools were driven end-to-end". It holds four
+> — `lambo_reserve`, `lambo_inspect` and `lambo_saints` were never on the wire —
+> and it records **responses only**, so the requests behind it cannot be
+> checked. The R1 review (T82-8) caught the overclaim. The gap is closed by
+> `stdio-all-seven-tools.jsonl` below rather than by rewording, and this file is
+> kept as captured.
 
 `lambo_recall(query = "update user schema")` returned this as the **text content
 of the tool result, verbatim** — this is T5.3's renderer output, not a summary:
@@ -104,6 +114,59 @@ INFO lambo::mcp::serve: lambo serve: session closed, tail durable
 ```
 
 — i.e. `Memory::close()` ran and the tail is durable.
+
+### 3b. All seven tools on the wire — `stdio-all-seven-tools.jsonl`
+
+Captured during R1 remediation, one stdio process, session `t8.2-evidence`,
+agent `agent-a`. **33 frames, requests and responses both**, each request
+carrying a `note` saying what it demonstrates. Every tool call is a real
+`tools/call` over the MCP wire protocol:
+
+```
+1/7 lambo_derive         isError=False  derived 3 concept(s): 3 created, 0 matched existing
+2/7 lambo_record_action  isError=False  recorded action 'created migrations/003.sql': 2 concept(s), 2 edge(s)
+3/7 lambo_recall         isError=False  user schema [Entity] (score 1.83) …
+4/7 lambo_stats          isError=False  session 't8.2-evidence' (owner agent 'agent-a') nodes=7 edges=11 …
+5/7 lambo_saints         isError=False  0 canonical memories in session 't8.2-evidence'
+6/7 lambo_inspect        isError=False  focus: user schema [Entity] / hop 1: CoOccurrence -> auth middleware …
+7/7 lambo_reserve        isError=False  reserved 478416c2-… until … for agent 'agent-a'
+```
+
+The same transcript carries the R1 fixes, each as a live wire experiment:
+
+| Finding | Frame note | Result on the wire |
+|---|---|---|
+| T82-3 | `agent-b` reserves a node `agent-a` holds | `isError=True` — *"refusing to take a soft lock on behalf of 'agent-b' … NOTHING WAS RESERVED OR RELEASED"* |
+| T82-3 | `agent-c` releases `agent-a`'s lock | `isError=True` — same refusal |
+| T82-3 | `lambo_inspect` after both refusals | `Reserved by agent-a until …` — the original lock survived |
+| T82-9 | `lambo_stats` as `agent-b` | the `attribution:` warning is now in the **text** content, after a `warnings:` line |
+| T82-7 | `lambo_inspect(focus="auth")` with three matches | `isError=True` — *"'auth' matches 3 concepts — name one exactly, or pass its node_id"*, candidates listed with node ids |
+| T82-6 | `lambo_record_action` with a 16 KiB + 1 action | `isError=True` — `action exceeds 16384 bytes (16385 given)` |
+| T82-11 | `lambo_derive` with a client `created_at` | `isError=True` — `unknown field 'created_at', expected one of 'agent_id', 'concepts', 'parent_of'` |
+
+Server stderr ended with `lambo serve: session closed, tail durable`, exit 0.
+
+### 3c. Shutdown on a signal — R1/T82-1 and T82-2
+
+The R1 review demonstrated that `Memory::close()` did **not** run on SIGINT or
+SIGTERM under stdio, and that HTTP hung forever when a real client held its SSE
+channel open. Re-running the same experiment against the fixed binary (spawned
+with `preexec_fn=os.setsid`, so signal dispositions are the true defaults):
+
+```
+[stdio-SIGINT]              exited rc=0 after 0.00s   close() ran: True
+[stdio-SIGTERM]             exited rc=0 after 0.00s   close() ran: True
+[http-SIGINT  no SSE]       exited rc=0 after 0.00s   close() ran: True
+[http-SIGINT  with SSE open]exited rc=0 after 5.02s   close() ran: True
+[http-SIGTERM no SSE]       exited rc=0 after 0.00s   close() ran: True
+[http-SIGTERM with SSE open]exited rc=0 after 5.02s   close() ran: True
+```
+
+R1 measured `rc=-2` / `rc=-15` with `close() ran: False` for the two stdio
+cases, and *never exited* for the two SSE cases. The 5.02 s is the bounded
+grace window (`SHUTDOWN_GRACE`) expiring on the SSE stream that will never
+finish on its own, after which the connection is dropped and the session
+closes: the tail is flushed rather than held hostage.
 
 ### 4. HTTP transport
 
@@ -154,8 +217,9 @@ health-checks the server as `✔ Connected` (evidence 1), which requires a
 successful `initialize` handshake over stdio.
 
 What is therefore **proven**: a real Claude Code client launches and handshakes
-with `lambo serve`, and every tool — including `lambo_recall` returning the T5.3
-block — works over the real MCP wire protocol.
+with `lambo serve`, and all seven tools — including `lambo_recall` returning the
+T5.3 block — work over the real MCP wire protocol (evidence 3b; the handshake
+itself is evidence 1, with a real client).
 
 What is **not proven**: that a *model* chooses and invokes these tools, i.e. that
 the descriptions and schemas are good enough for Claude to route to them

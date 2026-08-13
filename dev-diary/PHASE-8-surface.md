@@ -776,10 +776,15 @@ registered with `claude mcp add`, `claude mcp list` reports `✔ Connected`. Tha
 interoperates. Registration was made in a scratch directory, never the repo, and removed
 afterwards.
 
-**All seven tools were driven end-to-end over the real MCP wire protocol** (`initialize` →
-`lambo_derive` → `lambo_record_action` → `lambo_recall` → `lambo_stats`), with
-`lambo_recall` returning the T5.3 context block verbatim. HTTP transport verified with
-`curl POST /mcp`. Transcripts in `dev-diary/evidence/t8.2-mcp-client/`.
+~~**All seven tools were driven end-to-end over the real MCP wire protocol** (`initialize` →
+`lambo_derive` → `lambo_record_action` → `lambo_recall` → `lambo_stats`)~~ — **overclaimed;
+corrected in R1 remediation (T82-8).** As originally captured, **four** tools were driven
+(`lambo_derive`, `lambo_record_action`, `lambo_recall`, `lambo_stats`) and the transcript held
+responses only. R1 remediation drove all seven over the real stdio wire with requests *and*
+responses captured, in `dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl`; that
+file, not this sentence, is what supports the seven-tool claim. `lambo_recall` returns the
+T5.3 context block verbatim. HTTP transport verified with `curl POST /mcp`. Transcripts in
+`dev-diary/evidence/t8.2-mcp-client/`.
 
 **NOT verified: a model-driven tool call.** `claude -p` failed reproducibly with
 `Failed to authenticate: OAuth session expired and could not be refreshed` — the nested CLI
