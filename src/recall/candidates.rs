@@ -214,11 +214,9 @@ fn recent_concepts(graph: &Graph) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::capture_logs;
     use chrono::{DateTime, TimeZone, Utc};
-    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -399,55 +397,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Log capture
-    // -----------------------------------------------------------------------
-
-    struct BufWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            BufWriter(self.0.clone())
-        }
-    }
-
-    /// Install a capturing subscriber; returns the guard and the buffer.
-    fn capture_logs() -> (tracing::subscriber::DefaultGuard, Arc<Mutex<Vec<u8>>>) {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(BufWriter(buf.clone()))
-            .finish();
-        let guard = tracing::subscriber::set_default(sub);
-        (guard, buf)
-    }
-
-    fn log_lines(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<String> {
-        String::from_utf8_lossy(&buf.lock())
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    // -----------------------------------------------------------------------
     // gather: capability gate
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn gather_without_capability_zero_store_calls_one_log() {
         let store = SpyVectorStore::without_vector();
-        let (_guard, buf) = capture_logs();
+        let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
         let input = gather(&store, &sid(), Some(&[0.5; 8]), 5)
             .await
@@ -455,7 +411,7 @@ mod tests {
         assert!(input.vector.is_empty());
         assert_eq!(store.async_calls(), 0, "zero async store calls (RAM-tier)");
 
-        let lines = log_lines(&buf);
+        let lines = logs.lines();
         assert_eq!(lines.len(), 1, "exactly one log line, got {lines:?}");
         assert!(
             lines[0].contains("VECTOR_SEARCH"),
@@ -470,14 +426,14 @@ mod tests {
         let c2 = NodeId(Uuid::from_u64_pair(2, 2));
         let c3 = NodeId(Uuid::from_u64_pair(2, 3));
         let store = SpyVectorStore::with_vector(vec![Scored::new(c2, 0.8)]);
-        let (_guard, buf) = capture_logs();
+        let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
         let input = gather(&store, &sid(), Some(&[0.5; 8]), 5)
             .await
             .expect("capability present");
         assert_eq!(input.vector.len(), 1);
         assert_eq!(store.async_calls(), 1, "exactly one store I/O call");
-        assert!(log_lines(&buf).is_empty(), "no capability-absent log");
+        assert!(logs.lines().is_empty(), "no capability-absent log");
 
         // "beta" is the keyword hit for query "beta"; c2 is BOTH the keyword
         // hit and the vector hit -> max-merge keeps the BM25 score, and the
@@ -493,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn gather_with_capability_but_no_embedding_skips_vector() {
         let store = SpyVectorStore::with_vector(vec![Scored::new(NodeId::nil(), 0.9)]);
-        let (_guard, buf) = capture_logs();
+        let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
         let input = gather(&store, &sid(), None, 5)
             .await
@@ -501,7 +457,7 @@ mod tests {
         assert!(input.vector.is_empty());
         assert_eq!(store.async_calls(), 0, "no embedding -> no store I/O");
 
-        let lines = log_lines(&buf);
+        let lines = logs.lines();
         assert_eq!(lines.len(), 1, "exactly one log line, got {lines:?}");
         assert!(
             lines[0].contains("no query embedding"),

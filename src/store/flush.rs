@@ -589,6 +589,7 @@ mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
     use crate::store::Capabilities;
+    use crate::test_util::{capture_logs, quiet_logs};
     use crate::types::{
         AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, GraphSnapshot,
         Interaction, InteractionSpan, NodeId, Scored, SessionId,
@@ -596,8 +597,6 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
     use std::future::Future;
-    use std::io;
-    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -705,27 +704,6 @@ mod tests {
             retries,
             log_max,
         }
-    }
-
-    /// Install a thread-local default that registers tracing callsites as
-    /// `always`-interested while dropping every event.
-    ///
-    /// `tracing` caches each callsite's `Interest` process-wide at first
-    /// registration; with no default subscriber that interest is `never` and
-    /// the shared `BackendFlushFailed` warn callsite (in `cycle`) becomes
-    /// permanently disabled for *every* test — including
-    /// [`degrades_past_log_max_and_stops_flushing`], which asserts that event
-    /// through a capturing subscriber. Any flush test that can reach that warn
-    /// without its own subscriber must install this guard so the callsite can
-    /// never be poisoned. `TRACE` keeps the filter from returning `never`; the
-    /// sink writer keeps the events silent.
-    fn keep_callsites_enabled() -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        )
     }
 
     /// `GraphStore` mock: fails the first `fail_next(n)` flush calls (or
@@ -1192,27 +1170,6 @@ mod tests {
         }
     }
 
-    /// Capturing writer for asserting on emitted tracing events.
-    #[derive(Clone)]
-    struct BufWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     #[tokio::test(start_paused = true)]
     async fn flushes_on_interval_tick() {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
@@ -1366,12 +1323,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn degrades_past_log_max_and_stops_flushing() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1427,7 +1379,7 @@ mod tests {
         assert_eq!(task.stats().depth, 0);
         assert!(task.degraded());
 
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert!(out.contains("BackendFlushFailed"), "warn missing: {out}");
         assert!(out.contains("FlushDegraded"), "error missing: {out}");
         assert!(out.contains("ERROR"), "error level missing: {out}");
@@ -1436,8 +1388,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stats_depth_and_lag_across_success_and_failure() {
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1513,8 +1465,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retained_batch_and_new_drains_flush_together_in_order() {
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1563,8 +1515,8 @@ mod tests {
         // warn) on every interval tick. Attempts stay flat while the hold is
         // active; exactly one new attempt happens once it elapses.
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1627,12 +1579,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn panicking_backend_is_contained_batch_retained_then_lands() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(PanicStore::new(inner));
@@ -1687,7 +1634,7 @@ mod tests {
         );
 
         // Each caught panic logged its payload via the BackendFlushPanic warn.
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert_eq!(
             out.matches("BackendFlushPanic").count(),
             2,
@@ -1701,12 +1648,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn repeated_panics_lead_to_degrade_past_log_max() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(PanicStore::new(inner));
@@ -1747,7 +1689,7 @@ mod tests {
         assert!(!handle.is_finished(), "degrade must not abort the loop");
 
         // Every caught panic logged BackendFlushPanic; degrade logged too.
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert_eq!(
             out.matches("BackendFlushPanic").count(),
             2,
@@ -1768,7 +1710,7 @@ mod tests {
         // retain), the session keeps working, and the loop never dies, never
         // degrades. Reaches the shared BackendFlushFailed warn; keep its
         // callsite from registering `never`.
-        let _callsites = keep_callsites_enabled();
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(HungStore::new(inner));
@@ -1849,12 +1791,7 @@ mod tests {
         // — logged and dropped (visible in stats), NOT retried, NOT retained,
         // NOT degraded. The session continues and the next batch flushes
         // fresh (no head-of-line poisoning).
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(ConstraintStore::new(inner));
@@ -1889,7 +1826,7 @@ mod tests {
         assert_eq!(task.stats().depth, 0);
         assert!(!task.degraded());
 
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
         assert!(out.contains("23505"), "constraint code missing: {out}");
     }
@@ -1899,7 +1836,7 @@ mod tests {
         // STORE-4 contrast: transient (Backend) failures keep the EXISTING
         // retain path — retried, then retained — and never touch
         // `dead_lettered`. Only constraint violations dead-letter.
-        let _callsites = keep_callsites_enabled();
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));

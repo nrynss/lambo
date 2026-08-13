@@ -1865,6 +1865,7 @@ mod tests {
     use super::*;
     use crate::embed::FixtureEmbedder;
     use crate::store::MemoryStore;
+    use crate::test_util::capture_logs;
     use crate::types::{
         CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Scored,
         StoreError,
@@ -2333,68 +2334,6 @@ mod tests {
         ok.close().await.unwrap();
     }
 
-    /// Capturing writer for asserting on emitted tracing events (same shape as
-    /// `store::flush`'s).
-    #[derive(Clone)]
-    struct BufWriter(Arc<PlMutex<Vec<u8>>>);
-
-    impl std::io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// A dispatcher registered for the whole test binary and default nowhere,
-    /// held alive only to keep `tracing`'s global caches honest.
-    ///
-    /// Callsite interest and the global max level are cached **globally**, and
-    /// `tracing_core` rebuilds them from *the calling thread's* default
-    /// subscriber whenever only one dispatcher is registered
-    /// (`Rebuilder::JustOne` -> `get_default`). These tests run in parallel,
-    /// each installing its own `set_default` subscriber at its own max level
-    /// and dropping it again — so a rebuild triggered from a thread whose
-    /// subscriber is ERROR-only pins the global max level at ERROR, and another
-    /// thread's WARN event is discarded before any subscriber sees it. Measured
-    /// at roughly one suite run in twenty, as the R2-2 drop-warning assertion
-    /// failing against a buffer that was missing an event the code had
-    /// definitely emitted.
-    ///
-    /// A second live registrant keeps the registry past that one-dispatcher
-    /// shortcut, so every rebuild takes the max over *all* live dispatchers.
-    /// `NoSubscriber` gives no level hint — which counts as TRACE — and claims
-    /// no callsite (`Interest::never`), so it raises the ceiling without
-    /// capturing anything or changing what any subscriber receives.
-    static TRACE_FLOOR: LazyLock<tracing::Dispatch> =
-        LazyLock::new(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
-
-    /// Capture this thread's tracing output at `level`, for as long as the
-    /// returned guard lives. Forces [`TRACE_FLOOR`] first, so this subscriber's
-    /// own registration is the rebuild that re-evaluates every callsite with it
-    /// included.
-    fn capture_logs(
-        level: tracing::Level,
-    ) -> (Arc<PlMutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
-        LazyLock::force(&TRACE_FLOOR);
-        let buf = Arc::new(PlMutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(level)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        (buf, guard)
-    }
-
     fn live_handles(session: &str) -> usize {
         ACTIVE_SESSIONS
             .lock()
@@ -2409,13 +2348,13 @@ mod tests {
     /// drops — including a handle that was never closed.
     #[tokio::test]
     async fn a_second_handle_on_one_session_is_reported_loudly() {
-        let (buf, _guard) = capture_logs(tracing::Level::ERROR);
+        let (logs, _guard) = capture_logs(tracing::Level::ERROR);
 
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let first = memory_on(store.clone(), "one-writer").await;
         assert_eq!(live_handles("one-writer"), 1);
         assert!(
-            !String::from_utf8_lossy(&buf.lock()).contains("SecondSessionWriter"),
+            !logs.contains("SecondSessionWriter"),
             "the first handle is not a collision"
         );
 
@@ -2431,7 +2370,7 @@ mod tests {
             .unwrap();
         assert_eq!(live_handles("one-writer"), 2, "reported, not refused");
 
-        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        let logged = logs.contents();
         assert!(logged.contains("SecondSessionWriter"), "{logged}");
         assert!(logged.contains("one-writer"), "{logged}");
         assert!(
@@ -2463,7 +2402,7 @@ mod tests {
     /// filtered out.
     #[tokio::test]
     async fn a_closed_handle_does_not_collide_with_a_reattach() {
-        let (buf, _guard) = capture_logs(tracing::Level::ERROR);
+        let (logs, _guard) = capture_logs(tracing::Level::ERROR);
 
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let mem = memory_on(store.clone(), "reattach").await;
@@ -2476,7 +2415,7 @@ mod tests {
         // The closed handle is deliberately still in scope: the owner holds it
         // (for `stats`, for a retry) while re-attaching.
         let reattached = memory_on(store, "reattach").await;
-        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        let logged = logs.contents();
         assert!(
             !logged.contains("SecondSessionWriter"),
             "a re-attach after a successful close is not a second writer: {logged}"
@@ -2509,7 +2448,7 @@ mod tests {
     /// the R2-4 policy: this handle still holds an undurable tail.
     #[tokio::test]
     async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
-        let (buf, _guard) = capture_logs(tracing::Level::WARN);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store: Arc<dyn GraphStore> = Arc::new(FlakyStore::new(inner, usize::MAX));
@@ -2527,15 +2466,12 @@ mod tests {
             1,
             "a failed close keeps its registration — the tail is still undurable"
         );
-        assert!(
-            !String::from_utf8_lossy(&buf.lock()).contains("dropped"),
-            "nothing dropped yet"
-        );
+        assert!(!logs.contains("dropped"), "nothing dropped yet");
 
         drop(mem);
         assert_eq!(live_handles("drop-after-failed-close"), 0);
 
-        let logged = String::from_utf8_lossy(&buf.lock()).into_owned();
+        let logged = logs.contents();
         assert!(
             logged.contains("un-flushed"),
             "dropping a handle that still holds an un-flushed tail must warn: {logged}"
