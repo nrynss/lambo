@@ -911,6 +911,20 @@ impl Memory {
     /// `retract` holds the writers gate across this await, so an unbounded wait
     /// here is also an unbounded `close()` (its step 0 waits for exactly this
     /// permit).
+    ///
+    /// **This includes a dry run** (R3-3). [`DryRun::Yes`] mutates nothing, so
+    /// nothing is at stake in *proceeding* — it could have degraded to the
+    /// warning path like the error arm does. It does not, for three reasons.
+    /// The asymmetry above is a judgement about the **store** ("an error is an
+    /// answer, a hang is not"), and what this call was going to do next cannot
+    /// change what the store said. A dry run is the *preview* an operator
+    /// authorises the real retraction from, so quietly returning a report whose
+    /// durable half is missing is least defensible exactly when the backend is
+    /// wedged. And the two calls are meant to be read together: an operator who
+    /// gets `Ok` from `DryRun::Yes` and, a second later, a timeout error from
+    /// `DryRun::No` has been told two different things about one store. So a
+    /// dry run against an unresponsive backend **errors**, having (as always)
+    /// mutated nothing.
     pub async fn retract(&self, target: &str, dry_run: DryRun) -> Result<ImpactReport, LamboError> {
         // The gate spans the store call below, so a `close()` racing a live
         // retraction waits for it rather than draining past its removal —
@@ -962,7 +976,10 @@ impl Memory {
             Err(_elapsed) => {
                 // Fatal, unlike the error arm above — see the rustdoc: an error
                 // is an answer ("no such session yet"), a hang is not, and this
-                // one holds the writers gate open behind it.
+                // one holds the writers gate open behind it. Fatal for a DRY
+                // RUN too (R3-3): a dry run is the preview the real retraction
+                // is authorised from, so it must not be the one call that
+                // quietly reports less about a wedged store.
                 //
                 // Nothing has been mutated at this point: every graph write is
                 // below, so the retraction is refused whole rather than left
@@ -3680,6 +3697,51 @@ mod tests {
         assert!(!mem.index().read().search("stale", 10).is_empty());
 
         // ...and the writers gate is free again, so shutdown is bounded too.
+        tokio::time::timeout(Duration::from_secs(60), mem.close())
+            .await
+            .expect("close() must not wait on the hung query")
+            .expect("close");
+    }
+
+    /// R3-3: the bound applies to [`DryRun::Yes`] as well, and the rustdoc now
+    /// says so.
+    ///
+    /// A dry run mutates nothing, so it *could* have degraded to the warning
+    /// path the store-error arm uses — the reason it does not is that the
+    /// asymmetry is a judgement about the store, not about this call, and a dry
+    /// run is the preview the real retraction gets authorised from. Whichever
+    /// way that decision goes it must be pinned, because the two arms of the
+    /// same `match` now differ on it.
+    #[tokio::test(start_paused = true)]
+    async fn retract_bounds_a_hanging_query_for_a_dry_run_too() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let parking = Arc::new(ParkingStore::new(inner, ParkPoint::BlastRadius));
+        let store: Arc<dyn GraphStore> = parking.clone();
+        let mem = memory_on(store, "retract-hang-dry").await;
+
+        mem.derive(
+            &[("stale dependency", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+        let before = mem.stats();
+
+        let err = tokio::time::timeout(
+            RETRACT_IO_TIMEOUT * 10,
+            mem.retract("stale dependency", DryRun::Yes),
+        )
+        .await
+        .expect("a dry run must bound its durable-radius query too")
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+
+        // Inert as ever — the failure changes nothing about that.
+        let after = mem.stats();
+        assert_eq!(after.node_count, before.node_count);
+        assert_eq!(after.edge_count, before.edge_count);
+        assert_eq!(after.epoch, before.epoch, "no mutation was logged");
+
         tokio::time::timeout(Duration::from_secs(60), mem.close())
             .await
             .expect("close() must not wait on the hung query")
