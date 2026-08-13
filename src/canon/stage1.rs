@@ -289,6 +289,56 @@ mod tests {
         );
     }
 
+    /// The peer set is "**not** Canonical", not "== None". 19 `None` plus one
+    /// `Venerable` is 20 non-Canonical peers, so the session gate opens and a
+    /// high-scoring node must still be promoted. Under a `== None` peer set
+    /// this session silently stops producing Candidates forever — and the
+    /// stage-1 fixture cannot catch it (it holds exactly 20 `None` concepts,
+    /// so dropping its one Venerable still leaves the gate open at exactly
+    /// 20: pure luck).
+    #[test]
+    fn nineteen_none_plus_one_venerable_opens_the_session_gate() {
+        let mut concepts = n_none(19, 5);
+        concepts.push(concept(20, 5, CanonizationStatus::Venerable));
+        let g = graph_with(concepts);
+        let mut pairs: Vec<(u64, f64)> = (1..=18).map(|i| (i, 0.1)).collect();
+        pairs.push((19, 1.0));
+        pairs.push((20, 0.1));
+        let passed = stage1_candidates(&g, &table(&pairs), 20);
+        assert_eq!(
+            passed,
+            vec![nid(19)],
+            "a Venerable is a non-Canonical peer; the gate must open at 20"
+        );
+    }
+
+    /// The complement: a Venerable's score enters the P90 **distribution**,
+    /// so it moves the cut. 20 `None` + 1 `Venerable` is n=21, rank
+    /// `ceil(0.9 × 21) = 19` → P90 is the 19th smallest (0.5), and only the
+    /// 0.6 node clears it. Excluding the Venerable gives n=20, rank 18 → P90
+    /// is 0.4 and the 0.5 node passes too — a different answer, which is what
+    /// makes this discriminating where a `contains` assertion would not be.
+    /// The Venerable carries `gc_survived = 0` so it cannot pass itself and
+    /// muddy the output.
+    #[test]
+    fn a_venerable_peers_score_moves_the_p90_cut() {
+        let mut concepts = n_none(20, 5);
+        concepts.push(concept(21, 0, CanonizationStatus::Venerable));
+        let g = graph_with(concepts);
+        let mut pairs: Vec<(u64, f64)> = (1..=17).map(|i| (i, 0.1)).collect();
+        pairs.push((18, 0.4));
+        pairs.push((19, 0.5));
+        pairs.push((20, 0.6));
+        pairs.push((21, 10.0));
+        let passed = stage1_candidates(&g, &table(&pairs), 20);
+        assert_eq!(
+            passed,
+            vec![nid(20)],
+            "the Venerable's 10.0 must be in the peer distribution, lifting \
+             P90 from 0.4 to 0.5 and rejecting the 0.5 node"
+        );
+    }
+
     /// Canonicals are not peers (their score must not lift P90) and are not
     /// candidates. Discriminating: 17×0.1 + 0.4 + two×0.5. Correct P90
     /// (n=20, rank 18) is 0.4 so both 0.5s pass; including Canonical 10.0

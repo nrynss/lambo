@@ -272,6 +272,140 @@ mod tests {
         );
     }
 
+    /// F16: the coverage floor is **inclusive**. Supports at 0/15/30s over a
+    /// 100s session extent land the ratio on exactly 0.3; the surrounding
+    /// tests bracket at 0.2 / 0.5 / 0.545 and never pin the boundary itself,
+    /// so a `>=` → `>` regression survives them.
+    #[tokio::test]
+    async fn coverage_exactly_0_3_passes() {
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let t = |secs: i64| t0 + ChronoDuration::seconds(secs);
+        let store = seed(
+            &[
+                interaction(1, t(0)),
+                interaction(2, t(15)),
+                interaction(3, t(30)),
+                interaction(4, t(100)),
+            ],
+            &[
+                concept(10, 1, t(0), CanonizationStatus::None),
+                concept(1, 1, t(0), CanonizationStatus::None),
+                concept(2, 2, t(15), CanonizationStatus::None),
+                concept(3, 3, t(30), CanonizationStatus::None),
+            ],
+            &[
+                edge(1, 1, 10, EdgeType::Dependency, t(0)),
+                edge(2, 2, 10, EdgeType::Causal, t(15)),
+                edge(3, 3, 10, EdgeType::Hierarchical, t(30)),
+            ],
+        )
+        .await;
+
+        let span = store
+            .interaction_span(&sid(), cid(10), Duration::ZERO, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(span.distinct, 3);
+        assert_eq!(
+            span.coverage, MIN_COVERAGE,
+            "fixture premise: 30s of a 100s extent is exactly the floor"
+        );
+        assert!(
+            stage2_passes(&store, &sid(), cid(10), Duration::ZERO, Utc::now())
+                .await
+                .unwrap(),
+            "coverage exactly at the floor must pass (>=, not >)"
+        );
+    }
+
+    /// F17 (a): the age guard is TWO gates, and this one attacks only the
+    /// **edge** gate — three aged origin interactions reached by three edges
+    /// created just now. The module's burst test fires both gates together,
+    /// so an adapter that dropped the `e.created_at` clause stayed green here
+    /// (it was caught only in the store suites).
+    #[tokio::test]
+    async fn fresh_edges_from_aged_interactions_do_not_pass() {
+        let now = Utc::now();
+        let t = |secs: i64| now - ChronoDuration::seconds(secs);
+        let min_age = Duration::from_secs(60);
+        let store = seed(
+            &[
+                interaction(1, t(300)),
+                interaction(2, t(200)),
+                interaction(3, t(100)),
+            ],
+            &[
+                concept(10, 1, t(300), CanonizationStatus::Candidate),
+                concept(1, 1, t(300), CanonizationStatus::None),
+                concept(2, 2, t(200), CanonizationStatus::None),
+                concept(3, 3, t(100), CanonizationStatus::None),
+            ],
+            // Every origin interaction is aged; every EDGE is brand new.
+            &[
+                edge(1, 1, 10, EdgeType::Dependency, now),
+                edge(2, 2, 10, EdgeType::Causal, now),
+                edge(3, 3, 10, EdgeType::Hierarchical, now),
+            ],
+        )
+        .await;
+
+        assert!(
+            stage2_passes(&store, &sid(), cid(10), Duration::ZERO, now)
+                .await
+                .unwrap(),
+            "premise: the evidence is sufficient once ages are ignored"
+        );
+        assert!(
+            !stage2_passes(&store, &sid(), cid(10), min_age, now)
+                .await
+                .unwrap(),
+            "fresh edges must be cut even when their origins are old"
+        );
+    }
+
+    /// F17 (b): the mirror attack on the **interaction** gate — three aged
+    /// edges whose source concepts all trace back to interactions created
+    /// just now.
+    #[tokio::test]
+    async fn aged_edges_from_fresh_interactions_do_not_pass() {
+        let now = Utc::now();
+        let t = |secs: i64| now - ChronoDuration::seconds(secs);
+        let min_age = Duration::from_secs(60);
+        let store = seed(
+            // Interactions are brand new; the edges below are aged.
+            &[
+                interaction(1, now),
+                interaction(2, now),
+                interaction(3, now),
+            ],
+            &[
+                concept(10, 1, t(300), CanonizationStatus::Candidate),
+                concept(1, 1, t(300), CanonizationStatus::None),
+                concept(2, 2, t(200), CanonizationStatus::None),
+                concept(3, 3, t(100), CanonizationStatus::None),
+            ],
+            &[
+                edge(1, 1, 10, EdgeType::Dependency, t(300)),
+                edge(2, 2, 10, EdgeType::Causal, t(200)),
+                edge(3, 3, 10, EdgeType::Hierarchical, t(100)),
+            ],
+        )
+        .await;
+
+        assert!(
+            stage2_passes(&store, &sid(), cid(10), Duration::ZERO, now)
+                .await
+                .unwrap(),
+            "premise: the evidence is sufficient once ages are ignored"
+        );
+        assert!(
+            !stage2_passes(&store, &sid(), cid(10), min_age, now)
+                .await
+                .unwrap(),
+            "fresh origin interactions must be cut even behind aged edges"
+        );
+    }
+
     /// Aged evidence stays below threshold; a fresh Dependency/Causal/
     /// Hierarchical burst would pass if counted. `min_age = 60s` must
     /// still fail; the same graph passes at `min_age = 0`.

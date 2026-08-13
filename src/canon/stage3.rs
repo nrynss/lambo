@@ -300,6 +300,66 @@ mod tests {
         );
     }
 
+    /// F7: `min_edge_age` must reach the blast query. Every dependent edge in
+    /// `store_with_blast` is created at `ts()`, so at `now = ts()` and the
+    /// production 60s floor the inflation guard sees **nothing** — blast 0,
+    /// refused — while the same graph at `min_edge_age = 0` measures 6 and
+    /// passes. A refactor that forwards `Duration::ZERO` (the review's mutant,
+    /// which shipped green through both CI gates) fails the first assertion.
+    ///
+    /// This test only became possible once the store took the caller's clock
+    /// (F8): with a wall clock inside `blast_radius` there was no way to place
+    /// `ts()`-dated fixture edges on the young side of the cutoff.
+    #[tokio::test]
+    async fn min_edge_age_is_forwarded_and_refuses_fresh_edges() {
+        let now = ts();
+        let store = store_with_blast(6).await;
+        let g = graph_with(concept(10, 1, now, None));
+        let guard = crate::Config::default().canonization_edge_min_age;
+        assert_eq!(guard, Duration::from_secs(60), "production default");
+
+        assert_eq!(
+            store
+                .blast_radius(&sid(), cid(10), guard, now)
+                .await
+                .unwrap(),
+            0,
+            "fixture premise: every edge is younger than the 60s floor"
+        );
+        assert_eq!(
+            stage3_passes(
+                &store,
+                &sid(),
+                cid(10),
+                last_demotion_time(&g, cid(10)),
+                guard,
+                default_cooldown(),
+                now,
+            )
+            .await
+            .unwrap(),
+            None,
+            "a fresh burst must not clear Stage 3 at min_edge_age = 60s"
+        );
+
+        assert_eq!(
+            stage3_passes(
+                &store,
+                &sid(),
+                cid(10),
+                last_demotion_time(&g, cid(10)),
+                Duration::ZERO,
+                default_cooldown(),
+                now,
+            )
+            .await
+            .unwrap(),
+            Some(6),
+            "the same graph passes with the guard off — the refusal above is \
+             the guard, not missing evidence"
+        );
+    }
+
     /// `last_demotion_time == None` is not a cooldown, even at the
     /// default 300s window.
     #[tokio::test]

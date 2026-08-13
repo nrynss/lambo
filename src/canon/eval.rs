@@ -357,19 +357,29 @@ impl Evaluator {
             self.stage2_cursor = Some(last);
         }
 
-        // Stage 3 — Venerable ring, truncated to the remaining Canonical
-        // budget BEFORE the window is taken. Taking the window first and
-        // breaking out of the loop later rotated the cursor over nodes the
-        // cycle never evaluated and reported them as evaluated (F1, F10).
+        // Stage 3 — the Venerable ring, bounded by the remaining Canonical
+        // budget in two different ways, deliberately:
+        //
+        // * `remaining == 0` — take **nothing**. The old shape took the window
+        //   and then broke out of the promotion loop, so the ring rotated over
+        //   nodes it never evaluated and `stage3_batch` claimed them anyway
+        //   (F1's related note, F10).
+        // * `0 < remaining < batch_size` — take the whole ring window, rank it,
+        //   and evaluate the top `remaining`. Spec §10 orders the batch
+        //   score-descending, and under budget pressure that ordering is
+        //   exactly what decides *who gets in*; truncating the ring window
+        //   first would hand the last slot to the lowest NodeId instead. The
+        //   cursor still advances over the whole window, so the members this
+        //   cycle ranked below the cut come round again on the next wrap.
         let remaining = params
             .max_canonical_nodes
             .saturating_sub(canonical_count(graph));
         let venerable = ids_with_status(graph, CanonizationStatus::Venerable);
-        let mut window = ring_window(
-            &venerable,
-            self.stage3_cursor,
-            params.batch_size.min(remaining),
-        );
+        let mut window = if remaining == 0 {
+            Vec::new()
+        } else {
+            ring_window(&venerable, self.stage3_cursor, params.batch_size)
+        };
         if let Some(&last) = window.last() {
             self.stage3_cursor = Some(last);
         }
@@ -381,6 +391,7 @@ impl Evaluator {
                 .total_cmp(&score_lookup(&score_of, *a))
                 .then_with(|| a.0.cmp(&b.0))
         });
+        window.truncate(remaining);
         let stage3: Vec<Stage3Probe> = window
             .into_iter()
             .map(|node| Stage3Probe {
@@ -1397,6 +1408,140 @@ mod tests {
                 ev.stage3_cursor(),
                 None,
                 "the ring must not rotate over nodes the cycle could not evaluate"
+            );
+        }
+
+        /// F19: budget contention — `remaining == 1` with two eligible
+        /// Venerables. Exactly one may promote, and spec §10's
+        /// score-descending order within the batch is what decides which: the
+        /// higher-scoring node wins even though it sorts later in the ring.
+        /// (Truncating the ring window before ranking would hand the slot to
+        /// the lowest NodeId instead.)
+        #[tokio::test]
+        async fn budget_contention_gives_the_last_slot_to_the_higher_score() {
+            let store = store_with_hubs(&[(1, 6), (2, 6)]).await;
+            let g = RwLock::new(venerable_graph(&[1, 2]));
+            let mut p = params();
+            p.max_canonical_nodes = 1;
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            // Ring order is [1, 2]; scores put 2 first.
+            let outcome = eval_cycle(
+                &mut ev,
+                &g,
+                &store,
+                &table(&[(1, 0.1), (2, 0.9)]),
+                &tx,
+                &p,
+                ts(),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                outcome.stage3_batch,
+                vec![nid(2)],
+                "only the node the budget can admit is evaluated"
+            );
+            assert_eq!(outcome.promotions.len(), 1);
+            assert_eq!(outcome.promotions[0].node_id, nid(2));
+            assert_eq!(status_of(&g.read(), nid(1)), CanonizationStatus::Venerable);
+            assert_eq!(status_of(&g.read(), nid(2)), CanonizationStatus::Canonical);
+            assert_eq!(canonical_count(&g.read()), 1);
+        }
+
+        /// F19: demotion ties. Two Canonicals with the **same** blast radius
+        /// over a budget of 1 — spec §10 demotes the lowest blast radius
+        /// first, and the documented tie-break is NodeId ascending. Without
+        /// it the victim would depend on `HashMap` walk order.
+        #[tokio::test]
+        async fn demotion_blast_radius_tie_breaks_on_node_id() {
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+            for id in [20u64, 21] {
+                let mut c = concept(id, 1, 5, CanonizationStatus::Canonical);
+                c.blast_radius = Some(3);
+                g.insert_concept(c, iid(1)).unwrap();
+            }
+            // Equal blast radii (3 each) — the tie-break is the only signal.
+            attach_blast(&mut g, 20, 3, 100);
+            attach_blast(&mut g, 21, 3, 200);
+
+            let store = store_from_graph(&g).await;
+            for id in [20u64, 21] {
+                assert_eq!(
+                    store
+                        .blast_radius(&sid(), nid(id), Duration::ZERO, ts())
+                        .await
+                        .unwrap(),
+                    3,
+                    "fixture premise: the two hubs must tie"
+                );
+            }
+            let g = RwLock::new(g);
+            let mut p = params();
+            p.max_canonical_nodes = 1;
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+                .await
+                .unwrap();
+            assert_eq!(outcome.demotions.len(), 1);
+            assert_eq!(
+                outcome.demotions[0].node_id,
+                nid(20),
+                "a blast tie demotes the lower NodeId, deterministically"
+            );
+            assert_eq!(status_of(&g.read(), nid(21)), CanonizationStatus::Canonical);
+        }
+
+        /// F7 at the eval seam: `EvalParams::min_edge_age` must reach the
+        /// Stage-3 blast query. The hub's dependents are attached with edges
+        /// created AT `now`, so the 60s inflation guard sees blast 0 and
+        /// refuses; the same graph promotes at `min_edge_age = 0`. A refactor
+        /// that forwards `Duration::ZERO` (the mutant the review shipped green
+        /// through both gates) fails the first half.
+        #[tokio::test]
+        async fn eval_forwards_min_edge_age_to_the_blast_query() {
+            let store = store_with_hubs(&[(1, 6)]).await;
+            let mut p = params();
+            p.min_edge_age = Duration::from_secs(60);
+            let (tx, _rx) = channel();
+
+            // `now` is the instant the fixture edges were created, so every
+            // dependent edge is younger than the 60s floor.
+            let guarded = RwLock::new(venerable_graph(&[1]));
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(&mut ev, &guarded, &store, &table(&[]), &tx, &p, ts())
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome.stage3_batch,
+                vec![nid(1)],
+                "the node is evaluated — it just must not pass"
+            );
+            assert!(
+                outcome.promotions.is_empty(),
+                "fresh edges must not inflate blast radius past the guard"
+            );
+            assert_eq!(
+                status_of(&guarded.read(), nid(1)),
+                CanonizationStatus::Venerable
+            );
+
+            // Same graph, guard off: the promotion is real, so the first half
+            // above cannot pass for want of evidence.
+            let open = RwLock::new(venerable_graph(&[1]));
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(&mut ev, &open, &store, &table(&[]), &tx, &params(), ts())
+                .await
+                .unwrap();
+            assert_eq!(outcome.promotions.len(), 1);
+            assert_eq!(
+                status_of(&open.read(), nid(1)),
+                CanonizationStatus::Canonical
             );
         }
 
