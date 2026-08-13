@@ -159,7 +159,7 @@ impl Evaluator {
             .collect();
         s2.sort_by_key(|id| id.0);
         for id in s2 {
-            if !stage2_passes(store, &session, id, params.min_age).await? {
+            if !stage2_passes(store, &session, id, params.min_age, now).await? {
                 continue;
             }
             if concept_status(graph, id) != Some(CanonizationStatus::Candidate) {
@@ -225,7 +225,7 @@ impl Evaluator {
                 continue;
             }
             let blast = store
-                .blast_radius(&session, id, params.min_edge_age)
+                .blast_radius(&session, id, params.min_edge_age, now)
                 .await?;
             let narrowed = narrow_blast_radius(blast)?;
             let event = promotion_event(
@@ -314,7 +314,7 @@ async fn demote_over_budget(
     let mut ranked: Vec<(u64, NodeId)> = Vec::with_capacity(canonicals.len());
     for id in canonicals {
         let blast = store
-            .blast_radius(&session, id, params.min_edge_age)
+            .blast_radius(&session, id, params.min_edge_age, now)
             .await?;
         ranked.push((blast, id));
     }
@@ -649,7 +649,7 @@ mod tests {
 
             let store = store_from_graph(&g).await;
             assert!(
-                stage2_passes(&store, &sid(), nid(20), Duration::ZERO)
+                stage2_passes(&store, &sid(), nid(20), Duration::ZERO, Utc::now())
                     .await
                     .unwrap(),
                 "fixture premise: hub must clear Stage 2"
@@ -697,14 +697,14 @@ mod tests {
             let store = store_from_graph(&g).await;
             assert_eq!(
                 store
-                    .blast_radius(&sid(), nid(10), Duration::ZERO)
+                    .blast_radius(&sid(), nid(10), Duration::ZERO, Utc::now())
                     .await
                     .unwrap(),
                 8
             );
             assert_eq!(
                 store
-                    .blast_radius(&sid(), nid(11), Duration::ZERO)
+                    .blast_radius(&sid(), nid(11), Duration::ZERO, Utc::now())
                     .await
                     .unwrap(),
                 1
@@ -995,6 +995,15 @@ mod tests {
             SessionId::from("session-rest-api")
         }
 
+        /// Injected clock for the `session-rest-api` fixture (F8): every
+        /// planted timestamp is 2026-08-10T09:00–09:55Z, so the cycle's `now`
+        /// must sit *after* the session — the store adapters age their cutoffs
+        /// against the caller's clock, and the module-level `ts()` predates the
+        /// fixture by a year (it would cut every structural edge away).
+        fn fixture_now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap()
+        }
+
         fn rewind_canonicals(snap: &mut crate::types::GraphSnapshot) {
             for c in snap.concepts.iter_mut() {
                 if c.canonization_status == CanonizationStatus::Canonical {
@@ -1045,9 +1054,10 @@ mod tests {
             let mut ev = Evaluator::new();
             let mut all_committed = Vec::new();
             for _ in 0..3 {
-                let outcome = eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, ts())
-                    .await
-                    .unwrap();
+                let outcome =
+                    eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, fixture_now())
+                        .await
+                        .unwrap();
                 all_committed.extend(outcome.transitions().cloned());
             }
 
@@ -1128,9 +1138,17 @@ mod tests {
             let (tx, _rx) = crate::daemon::events::event_channel();
             let mut ev = Evaluator::new();
             for _ in 0..3 {
-                eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &params(), ts())
-                    .await
-                    .unwrap();
+                eval_cycle(
+                    &mut ev,
+                    &mut graph,
+                    &store,
+                    &scores,
+                    &tx,
+                    &params(),
+                    fixture_now(),
+                )
+                .await
+                .unwrap();
             }
             assert_eq!(status_of(&graph, api_id), CanonizationStatus::Venerable);
             let hops = hops_for(graph.canonization_events(), api_id);
@@ -1177,7 +1195,7 @@ mod tests {
             for i in 0..3 {
                 // Advance the clock per cycle as production does, so each hop
                 // gets a distinct occurred_at and the SQL audit orders by it.
-                let now = ts() + chrono::Duration::seconds(60 * i as i64);
+                let now = fixture_now() + chrono::Duration::seconds(60 * i as i64);
                 eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, now)
                     .await
                     .unwrap();

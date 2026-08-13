@@ -7,7 +7,7 @@
 //!
 //! A concept passes when **both**:
 //!
-//! 1. **`store.blast_radius(session, node, min_edge_age) > 5`**
+//! 1. **`store.blast_radius(session, node, min_edge_age, now) > 5`**
 //!    (strict). The store returns [`u64`]; the comparison is against
 //!    `5u64`. [`Concept::blast_radius`] is a frozen `Option<i32>`
 //!    (CON-6) and is **not** consulted — never a silent `as i32`.
@@ -18,7 +18,9 @@
 //!    cooldown. Default cooldown is
 //!    [`crate::Config::canonization_repromotion_cooldown`] (300s).
 //!
-//! `now` is injected — the predicate has no wall clock.
+//! `now` is injected — the predicate has no wall clock, and (F8) neither
+//! does the store: the same instant anchors the cooldown comparison and the
+//! `min_edge_age` cutoff, so a mocked clock drives both gates.
 //!
 //! `min_edge_age` is forwarded unchanged (same inflation idea as
 //! Stage 2). Callers that want the T1.4 / T3.6 fixture numbers
@@ -54,7 +56,7 @@ pub async fn stage3_passes(
     cooldown: Duration,
     now: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let blast = store.blast_radius(session, node, min_edge_age).await?;
+    let blast = store.blast_radius(session, node, min_edge_age, now).await?;
     if in_repromotion_cooldown(graph, node, cooldown, now) {
         return Ok(false);
     }
@@ -245,7 +247,7 @@ mod tests {
         let g5 = graph_with(concept(10, 1, now, None));
         let s5 = store_with_blast(5).await;
         assert_eq!(
-            s5.blast_radius(&sid(), cid(10), Duration::ZERO)
+            s5.blast_radius(&sid(), cid(10), Duration::ZERO, now)
                 .await
                 .unwrap(),
             5
@@ -258,7 +260,7 @@ mod tests {
         let g6 = graph_with(concept(10, 1, now, None));
         let s6 = store_with_blast(6).await;
         assert_eq!(
-            s6.blast_radius(&sid(), cid(10), Duration::ZERO)
+            s6.blast_radius(&sid(), cid(10), Duration::ZERO, now)
                 .await
                 .unwrap(),
             6
@@ -295,7 +297,7 @@ mod tests {
         let store = store_with_blast(8).await;
         assert_eq!(
             store
-                .blast_radius(&sid(), cid(10), Duration::ZERO)
+                .blast_radius(&sid(), cid(10), Duration::ZERO, now)
                 .await
                 .unwrap(),
             8
@@ -363,6 +365,16 @@ mod tests {
         (store, graph, sid)
     }
 
+    /// Injected clock for the `session-rest-api` fixture (F8): every planted
+    /// timestamp is 2026-08-10T09:00–09:55Z, so the store's age cutoff must be
+    /// anchored *after* the session. `ts()` predates the fixture by a year and
+    /// would cut every edge out of the blast radius now that the adapters read
+    /// the caller's clock instead of the wall clock.
+    #[cfg(feature = "fixtures")]
+    fn fixture_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap()
+    }
+
     #[cfg(feature = "fixtures")]
     fn fixture_id(content: &str, graph: &Graph) -> NodeId {
         graph
@@ -380,10 +392,13 @@ mod tests {
         let (store, graph, sid) = rest_api().await;
         let us = fixture_id("user schema", &graph);
         let api = fixture_id("api layer", &graph);
-        let now = ts();
+        let now = fixture_now();
         let cooldown = default_cooldown();
 
-        let us_blast = store.blast_radius(&sid, us, Duration::ZERO).await.unwrap();
+        let us_blast = store
+            .blast_radius(&sid, us, Duration::ZERO, now)
+            .await
+            .unwrap();
         assert_eq!(us_blast, 8, "fixture premise: user schema blast=8");
         match graph.node(us) {
             Some(Node::Concept(c)) => assert!(c.last_demotion_time.is_none()),
@@ -396,7 +411,10 @@ mod tests {
             "user schema blast=8 / last_demotion None must pass Stage 3"
         );
 
-        let api_blast = store.blast_radius(&sid, api, Duration::ZERO).await.unwrap();
+        let api_blast = store
+            .blast_radius(&sid, api, Duration::ZERO, now)
+            .await
+            .unwrap();
         assert_eq!(api_blast, 1, "fixture premise: api layer blast=1");
         assert!(
             !stage3_passes(&store, &graph, &sid, api, Duration::ZERO, cooldown, now,)
@@ -415,7 +433,7 @@ mod tests {
         let store = crate::fixtures::load_store("session-rest-api").unwrap();
         let sid = SessionId::from("session-rest-api");
         let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
-        let now = ts();
+        let now = fixture_now();
         let us_id = snap
             .concepts
             .iter()
@@ -433,7 +451,7 @@ mod tests {
         let graph = Graph::from_snapshot(snap).unwrap();
         assert_eq!(
             store
-                .blast_radius(&sid, us_id, Duration::ZERO)
+                .blast_radius(&sid, us_id, Duration::ZERO, now)
                 .await
                 .unwrap(),
             8

@@ -741,6 +741,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         // Spec §4.1 ported to `?` placeholders; the cutoff is computed in Rust
         // (SQLite has no INTERVAL) and bound as the fixed ISO-8601 TEXT.
@@ -749,7 +750,8 @@ impl GraphStore for SqliteStore {
         // exactly like MemoryStore (the spec's span query gates only the
         // interaction age — see interaction_span).
         self.require_session(session).await?;
-        let cutoff = cutoff_text(Utc::now(), min_edge_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff_text(now, min_edge_age)?;
         let node_text = node.0.to_string();
 
         let row = sqlx::query(&format!(
@@ -788,6 +790,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         // Spec §4.1 span query: distinct origin interactions of concept-sourced
         // structural edges into `node`, aged on BOTH the edge and the origin
@@ -796,7 +799,8 @@ impl GraphStore for SqliteStore {
         // is MemoryStore's naive answer). Coverage is computed in Rust in ms,
         // identical to MemoryStore's formula.
         self.require_session(session).await?;
-        let cutoff = cutoff_text(Utc::now(), min_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff_text(now, min_age)?;
         let node_text = node.0.to_string();
 
         let row =
@@ -2183,12 +2187,24 @@ mod tests {
         let mut assertions = 0;
         for node in &node_ids {
             for age in ages {
-                let br = store.blast_radius(sid, *node, age).await.unwrap();
-                let br_want = memory.blast_radius(sid, *node, age).await.unwrap();
+                let br = store
+                    .blast_radius(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let br_want = memory
+                    .blast_radius(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(br, br_want, "blast_radius {node} age {age:?}");
 
-                let span = store.interaction_span(sid, *node, age).await.unwrap();
-                let span_want = memory.interaction_span(sid, *node, age).await.unwrap();
+                let span = store
+                    .interaction_span(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let span_want = memory
+                    .interaction_span(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(span, span_want, "interaction_span {node} age {age:?}");
                 assertions += 2;
             }
@@ -2234,13 +2250,13 @@ mod tests {
                     .id;
                 assert_eq!(
                     sqlite
-                        .blast_radius(&sid, hub, Duration::from_secs(0))
+                        .blast_radius(&sid, hub, Duration::from_secs(0), Utc::now())
                         .await
                         .unwrap(),
                     8
                 );
                 let span = sqlite
-                    .interaction_span(&sid, hub, Duration::from_secs(0))
+                    .interaction_span(&sid, hub, Duration::from_secs(0), Utc::now())
                     .await
                     .unwrap();
                 assert_eq!(span.distinct, 6);
@@ -2293,9 +2309,15 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
-            let want = memory.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let want = memory
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
-            let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(
                 got, want,
                 "SQLite must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
@@ -2386,11 +2408,23 @@ mod tests {
         let one_hour = Duration::from_secs(3600);
         for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::from_secs(0), one_hour] {
-                let br = store.blast_radius(&sid, node, min_age).await.unwrap();
-                let br_want = memory.blast_radius(&sid, node, min_age).await.unwrap();
+                let br = store
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let br_want = memory
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(br, br_want, "blast_radius {node} age {min_age:?}");
-                let span = store.interaction_span(&sid, node, min_age).await.unwrap();
-                let span_want = memory.interaction_span(&sid, node, min_age).await.unwrap();
+                let span = store
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let span_want = memory
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(span, span_want, "interaction_span {node} age {min_age:?}");
             }
         }
@@ -2399,7 +2433,7 @@ mod tests {
         // 1h when the fresh edge is filtered.
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, Duration::from_secs(0))
+                .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2408,7 +2442,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, one_hour)
+                .interaction_span(&sid, orphan, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2419,7 +2453,7 @@ mod tests {
         // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, Duration::from_secs(0))
+                .interaction_span(&sid, probe_victim, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2428,7 +2462,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, one_hour)
+                .interaction_span(&sid, probe_victim, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2438,7 +2472,10 @@ mod tests {
         // blast_radius is origin-agnostic: the aged probe edge counts at 1h
         // even though its origin is fresh (span-only i-gate, MemoryStore parity).
         assert_eq!(
-            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, probe_src, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "blast_radius ignores origin age"
         );
@@ -2447,14 +2484,17 @@ mod tests {
         // 1h it is filtered and the orphan still counts.
         assert_eq!(
             store
-                .blast_radius(&sid, pillar, Duration::from_secs(0))
+                .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap(),
             0,
             "fresh edge counts at min_age=0"
         );
         assert_eq!(
-            store.blast_radius(&sid, pillar, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, pillar, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "fresh edge filtered at min_age=1h"
         );
@@ -2529,11 +2569,11 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         let got = store
-            .interaction_span(&here, target, Duration::from_secs(0))
+            .interaction_span(&here, target, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         let want = memory
-            .interaction_span(&here, target, Duration::from_secs(0))
+            .interaction_span(&here, target, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(
@@ -2590,11 +2630,11 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         let span = store
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         let span_want = memory
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(span, span_want, "MemoryStore parity");
@@ -2603,11 +2643,11 @@ mod tests {
 
         // Unsupported target: no inbound structural edges -> 0.0 on both.
         let empty = store
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         let empty_want = memory
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(empty, empty_want);

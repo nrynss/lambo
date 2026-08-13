@@ -1401,12 +1401,14 @@ impl GraphStore for CockroachStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
         let pool = self.pool().await?;
-        let cutoff = cutoff(Utc::now(), min_edge_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff(now, min_edge_age)?;
         let row = sqlx::query(BLAST_RADIUS_SQL)
             .bind(&session.0)
             .bind(node.0)
@@ -1423,12 +1425,14 @@ impl GraphStore for CockroachStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
         let pool = self.pool().await?;
-        let cutoff = cutoff(Utc::now(), min_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff(now, min_age)?;
         let row = sqlx::query(INTERACTION_SPAN_SQL)
             .bind(&session.0)
             .bind(node.0)
@@ -2524,11 +2528,23 @@ mod conformance {
         let mut assertions = 0usize;
         for node in &node_ids {
             for age in ages {
-                let mem_br = mem.blast_radius(&sid, *node, age).await.unwrap();
-                let crdb_br = store.blast_radius(&sid, *node, age).await.unwrap();
+                let mem_br = mem
+                    .blast_radius(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_br = store
+                    .blast_radius(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(mem_br, crdb_br, "blast_radius({fixture}, {node}, {age:?})");
-                let mem_span = mem.interaction_span(&sid, *node, age).await.unwrap();
-                let crdb_span = store.interaction_span(&sid, *node, age).await.unwrap();
+                let mem_span = mem
+                    .interaction_span(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_span = store
+                    .interaction_span(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(
                     mem_span, crdb_span,
                     "interaction_span({fixture}, {node}, {age:?}): mem={mem_span:?} crdb={crdb_span:?}"
@@ -2548,12 +2564,15 @@ mod conformance {
                 .unwrap()
                 .id;
             assert_eq!(
-                store.blast_radius(&sid, hub, Duration::ZERO).await.unwrap(),
+                store
+                    .blast_radius(&sid, hub, Duration::ZERO, Utc::now())
+                    .await
+                    .unwrap(),
                 8,
                 "hub 1001 blast radius anchor"
             );
             let span = store
-                .interaction_span(&sid, hub, Duration::ZERO)
+                .interaction_span(&sid, hub, Duration::ZERO, Utc::now())
                 .await
                 .unwrap();
             assert_eq!(span.distinct, 6);
@@ -2642,11 +2661,23 @@ mod conformance {
         // freshly created other -> orphan edge, plus the i-gate probe).
         for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::ZERO, one_hour] {
-                let mem_br = mem.blast_radius(&sid, node, min_age).await.unwrap();
-                let crdb_br = store.blast_radius(&sid, node, min_age).await.unwrap();
+                let mem_br = mem
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_br = store
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(mem_br, crdb_br, "blast_radius({node}, {min_age:?})");
-                let mem_span = mem.interaction_span(&sid, node, min_age).await.unwrap();
-                let crdb_span = store.interaction_span(&sid, node, min_age).await.unwrap();
+                let mem_span = mem
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_span = store
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(
                     mem_span, crdb_span,
                     "interaction_span({node}, {min_age:?}): mem={mem_span:?} crdb={crdb_span:?}"
@@ -2658,7 +2689,7 @@ mod conformance {
         // 1h when the fresh edge is filtered.
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, Duration::ZERO)
+                .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2667,7 +2698,7 @@ mod conformance {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, one_hour)
+                .interaction_span(&sid, orphan, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2678,7 +2709,7 @@ mod conformance {
         // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, Duration::ZERO)
+                .interaction_span(&sid, probe_victim, Duration::ZERO, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2687,7 +2718,7 @@ mod conformance {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, one_hour)
+                .interaction_span(&sid, probe_victim, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2697,7 +2728,10 @@ mod conformance {
         // blast_radius is origin-agnostic: the aged probe edge counts at 1h
         // even though its origin is fresh (span-only i-gate, MemoryStore parity).
         assert_eq!(
-            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, probe_src, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "blast_radius ignores origin age"
         );
@@ -2706,14 +2740,17 @@ mod conformance {
         // still counts.
         assert_eq!(
             store
-                .blast_radius(&sid, pillar, Duration::ZERO)
+                .blast_radius(&sid, pillar, Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             0,
             "fresh edge counts at min_age=0"
         );
         assert_eq!(
-            store.blast_radius(&sid, pillar, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, pillar, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "fresh edge filtered at min_age=1h"
         );
@@ -2755,9 +2792,15 @@ mod conformance {
         mem.flush(&batch).await.unwrap();
 
         for min_age in [Duration::ZERO, Duration::from_secs(3600)] {
-            let want = mem.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let want = mem
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
-            let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(
                 got, want,
                 "Cockroach must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
@@ -2799,11 +2842,11 @@ mod conformance {
         .unwrap();
 
         let crdb_span = store
-            .interaction_span(&sid, orphan, Duration::ZERO)
+            .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         let mem_span = mem
-            .interaction_span(&sid, orphan, Duration::ZERO)
+            .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(
@@ -2815,11 +2858,11 @@ mod conformance {
 
         // Unsupported target: no inbound structural edges -> 0.0 on both.
         let empty_crdb = store
-            .interaction_span(&sid, pillar, Duration::ZERO)
+            .interaction_span(&sid, pillar, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         let empty_mem = mem
-            .interaction_span(&sid, pillar, Duration::ZERO)
+            .interaction_span(&sid, pillar, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(empty_crdb, empty_mem);

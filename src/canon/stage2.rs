@@ -4,7 +4,7 @@
 //! interaction-span evidence. It does **not** apply a
 //! `Candidate → Venerable` transition (T6.4 owns writes).
 //!
-//! A concept passes when `store.interaction_span(session, node, min_age)`
+//! A concept passes when `store.interaction_span(session, node, min_age, now)`
 //! reports **both**:
 //!
 //! 1. **`distinct >= 3`** inbound structural sources tracing to distinct
@@ -16,10 +16,17 @@
 //! unchanged — callers pass [`crate::Config::canonization_edge_min_age`]
 //! (default 60s). Fresh edges must not inflate the span.
 //!
+//! `now` is injected (F8) and forwarded to the store as the age cutoff's
+//! anchor — the predicate and the adapter it queries read the **same** clock,
+//! so one eval cycle has exactly one `now` and a mocked clock can drive the
+//! inflation guard end to end.
+//!
 //! Stage 2 is evidence-only: [`CanonizationStatus`] is not consulted.
 //! Candidate is not a prerequisite (T6.4 sequences transitions).
 
 use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 
 use crate::store::GraphStore;
 use crate::types::{NodeId, SessionId, StoreError};
@@ -35,8 +42,9 @@ pub async fn stage2_passes(
     session: &SessionId,
     node: NodeId,
     min_age: Duration,
+    now: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let span = store.interaction_span(session, node, min_age).await?;
+    let span = store.interaction_span(session, node, min_age, now).await?;
     Ok(span.distinct >= MIN_DISTINCT && span.coverage >= MIN_COVERAGE)
 }
 
@@ -158,13 +166,13 @@ mod tests {
         .await;
 
         let span = store
-            .interaction_span(&sid(), cid(10), Duration::ZERO)
+            .interaction_span(&sid(), cid(10), Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 2);
         assert_eq!(span.coverage, 1.0);
         assert!(
-            !stage2_passes(&store, &sid(), cid(10), Duration::ZERO)
+            !stage2_passes(&store, &sid(), cid(10), Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             "distinct=2 must fail even at coverage=1.0"
@@ -199,7 +207,7 @@ mod tests {
         .await;
 
         let span = store
-            .interaction_span(&sid(), cid(10), Duration::ZERO)
+            .interaction_span(&sid(), cid(10), Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 3);
@@ -209,7 +217,7 @@ mod tests {
             span.coverage
         );
         assert!(
-            !stage2_passes(&store, &sid(), cid(10), Duration::ZERO)
+            !stage2_passes(&store, &sid(), cid(10), Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             "coverage < 0.3 must fail even at distinct=3; coverage={}",
@@ -246,7 +254,7 @@ mod tests {
         .await;
 
         let span = store
-            .interaction_span(&sid(), cid(10), Duration::ZERO)
+            .interaction_span(&sid(), cid(10), Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 3);
@@ -256,7 +264,7 @@ mod tests {
             span.coverage
         );
         assert!(
-            stage2_passes(&store, &sid(), cid(10), Duration::ZERO)
+            stage2_passes(&store, &sid(), cid(10), Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             "None-status node with span evidence must pass; coverage={}",
@@ -303,7 +311,7 @@ mod tests {
         .await;
 
         let aged = store
-            .interaction_span(&sid(), cid(10), min_age)
+            .interaction_span(&sid(), cid(10), min_age, now)
             .await
             .unwrap();
         assert!(
@@ -311,14 +319,14 @@ mod tests {
             "aged evidence must sit below threshold: {aged:?}"
         );
         assert!(
-            !stage2_passes(&store, &sid(), cid(10), min_age)
+            !stage2_passes(&store, &sid(), cid(10), min_age, now)
                 .await
                 .unwrap(),
             "fresh burst must not promote at min_age=60s; aged={aged:?}"
         );
 
         let all = store
-            .interaction_span(&sid(), cid(10), Duration::ZERO)
+            .interaction_span(&sid(), cid(10), Duration::ZERO, now)
             .await
             .unwrap();
         assert!(
@@ -326,7 +334,7 @@ mod tests {
             "uncut graph must clear the threshold: {all:?}"
         );
         assert!(
-            stage2_passes(&store, &sid(), cid(10), Duration::ZERO)
+            stage2_passes(&store, &sid(), cid(10), Duration::ZERO, now)
                 .await
                 .unwrap(),
             "same graph must pass at min_age=0; span={all:?}"
@@ -349,7 +357,7 @@ mod tests {
             .id;
 
         let span = store
-            .interaction_span(&sid, api, Duration::ZERO)
+            .interaction_span(&sid, api, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 3, "distinct={}", span.distinct);
@@ -359,7 +367,7 @@ mod tests {
             span.coverage
         );
         assert!(
-            stage2_passes(&store, &sid, api, Duration::ZERO)
+            stage2_passes(&store, &sid, api, Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             "api layer must pass at min_age=0; span={span:?}"
@@ -368,7 +376,9 @@ mod tests {
         // Fixture timestamps are 2026-08-10 ISO dates — older than 60s vs now.
         let min_age = crate::Config::default().canonization_edge_min_age;
         assert!(
-            stage2_passes(&store, &sid, api, min_age).await.unwrap(),
+            stage2_passes(&store, &sid, api, min_age, Utc::now())
+                .await
+                .unwrap(),
             "api layer must pass at default min_age={min_age:?}"
         );
     }
@@ -391,7 +401,7 @@ mod tests {
         assert_eq!(us.canonization_status, CanonizationStatus::Canonical);
 
         let span = store
-            .interaction_span(&sid, us.id, Duration::ZERO)
+            .interaction_span(&sid, us.id, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 6, "distinct={}", span.distinct);
@@ -401,7 +411,7 @@ mod tests {
             span.coverage
         );
         assert!(
-            stage2_passes(&store, &sid, us.id, Duration::ZERO)
+            stage2_passes(&store, &sid, us.id, Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             "Canonical user schema must still pass Stage 2; span={span:?}"

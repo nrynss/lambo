@@ -359,10 +359,11 @@ impl GraphStore for MemoryStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         // Spec §4.1 (1-hop): count concepts that have at least one aged inbound edge from
-        // `node` and no aged inbound edge from any other source.
-        let now = Utc::now();
+        // `node` and no aged inbound edge from any other source. `now` is the caller's
+        // clock (F8) — the adapter has no wall clock of its own.
         let min_created = Self::cutoff(now, min_edge_age)?;
         let map = self.inner.read();
         let data = map
@@ -413,10 +414,11 @@ impl GraphStore for MemoryStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         // Spec §4.1: inbound Dependency/Causal/Hierarchical from concepts whose
-        // origin_interaction is old enough; distinct interaction count + temporal coverage.
-        let now = Utc::now();
+        // origin_interaction is old enough; distinct interaction count + temporal
+        // coverage. `now` is the caller's clock (F8).
         let min_created = Self::cutoff(now, min_age)?;
         let map = self.inner.read();
         let data = map
@@ -773,7 +775,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let r = store
-            .blast_radius(&sid, pillar, Duration::from_secs(0))
+            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(r, 1, "only orphan is exclusively dependent on pillar");
@@ -818,7 +820,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let span = store
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 1);
@@ -826,7 +828,7 @@ mod tests {
 
         // The unsupported case still reports 0.0: no interaction matches.
         let empty_span = store
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(empty_span.distinct, 0);
@@ -888,7 +890,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let r = store
-            .blast_radius(&sid, pillar, Duration::from_secs(0))
+            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(r, 1, "Derives provenance must not un-orphan the dependent");
