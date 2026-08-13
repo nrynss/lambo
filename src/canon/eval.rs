@@ -71,6 +71,22 @@
 //! A failed *apply* still does not emit — a fabricated transition is worse
 //! than a missing one.
 //!
+//! ## Store faults and Stage 1 (R2-4)
+//!
+//! Phase 2 issues **every** store query before phase 3 commits **anything**,
+//! so a cycle is never half-applied against a half-answered store. The cost
+//! is that one failing query would fail the whole cycle — including Stage 1,
+//! which asks the store nothing and could always have landed. Under a store
+//! outage that stopped progression dead at the first stage.
+//!
+//! So a phase-2 error is not fatal to Stage 1: the cycle applies the Stage-1
+//! plan alone, through the same commit point, and returns it inside the
+//! [`EvalError`]'s outcome. Stages 2 and 3 and the budget probe are dropped
+//! whole — they have no verdicts, and a stage never runs on a guess. Phase 4
+//! is skipped for those hops (the store is the thing that just failed); the
+//! write-behind log carries them on the next flush, deduped on event id, the
+//! same guarantee a failed `record_canonization` leans on.
+//!
 //! `now` is injected — the cycle has no wall clock, and neither do the store
 //! queries it issues (see [`crate::store::GraphStore::blast_radius`]).
 
@@ -294,8 +310,48 @@ impl Evaluator {
         // 2. Verdicts — store I/O, no lock held.
         let verdicts = match verdicts(store, &plan, params, now).await {
             Ok(verdicts) => verdicts,
-            // Nothing has been committed yet, so the partial outcome is empty.
-            Err(err) => return Err(EvalError::new(EvalOutcome::default(), err)),
+            // R2-4: Stage 1 asked the store nothing, so a store fault is no
+            // reason to hold its hops back. Every Stage-2/Stage-3 query runs
+            // before anything commits (the atomicity that makes a half-applied
+            // cycle impossible), which also means one failing query used to
+            // halt the whole cycle — including a stage that needs no verdict
+            // at all. Under a store outage that stalled progression entirely;
+            // at 06fcc00 the Stage-1 hops landed before Stage 2's first call.
+            //
+            // So: apply the Stage-1 plan alone — same commit point, same
+            // emit, and the partial outcome names what landed. Stages 2/3 and
+            // the budget probe are dropped whole, never half-applied.
+            // Phase 4 is skipped: the store just failed, and the write-behind
+            // log carries these hops to it on the next flush (deduped on
+            // event id) exactly as it does for a failed `record`.
+            Err(err) => {
+                let stage1_only = CyclePlan {
+                    session: plan.session.clone(),
+                    stage1: plan.stage1.clone(),
+                    stage2: Vec::new(),
+                    stage3: Vec::new(),
+                    demotion: Vec::new(),
+                };
+                let mut outcome = EvalOutcome::default();
+                let applied = {
+                    let mut g = graph.write();
+                    apply(
+                        &mut g,
+                        events,
+                        &stage1_only,
+                        &Verdicts::default(),
+                        params,
+                        now,
+                        &mut outcome,
+                    )
+                };
+                // A failed apply is the more specific fault; either way the
+                // caller gets what committed.
+                if let Err(apply_err) = applied {
+                    return Err(EvalError::new(outcome, apply_err));
+                }
+                return Err(EvalError::new(outcome, err));
+            }
         };
 
         // 3. Apply — write guard, released before the next await. Commit point.
@@ -1157,27 +1213,51 @@ mod tests {
             assert_eq!(ev.stage3_cursor(), Some(nid(45)));
         }
 
-        /// `MemoryStore` whose `record_canonization` always fails, so the
-        /// cycle's durable-audit phase can be exercised (F19: previously
+        /// `MemoryStore` with an injectable fault, so the cycle's
+        /// store-facing phases can be exercised (F19 / R2-4: previously
         /// unasserted). Everything else delegates.
-        struct RecordFails(MemoryStore);
+        struct FaultyStore {
+            inner: MemoryStore,
+            /// Phase 4 — the durable audit write (F3).
+            fail_record: bool,
+            /// Phase 2 — Stage 2's span query (R2-4).
+            fail_span: bool,
+        }
+
+        impl FaultyStore {
+            fn record_fails(inner: MemoryStore) -> Self {
+                Self {
+                    inner,
+                    fail_record: true,
+                    fail_span: false,
+                }
+            }
+
+            fn span_fails(inner: MemoryStore) -> Self {
+                Self {
+                    inner,
+                    fail_record: false,
+                    fail_span: true,
+                }
+            }
+        }
 
         #[async_trait::async_trait]
-        impl GraphStore for RecordFails {
+        impl GraphStore for FaultyStore {
             async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
-                self.0.init_schema().await
+                self.inner.init_schema().await
             }
             fn capabilities(&self) -> crate::store::Capabilities {
-                self.0.capabilities()
+                self.inner.capabilities()
             }
             async fn flush(&self, batch: &MutationBatch) -> Result<(), crate::types::StoreError> {
-                self.0.flush(batch).await
+                self.inner.flush(batch).await
             }
             async fn load_session(
                 &self,
                 session: &SessionId,
             ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
-                self.0.load_session(session).await
+                self.inner.load_session(session).await
             }
             async fn keyword_candidates(
                 &self,
@@ -1185,7 +1265,7 @@ mod tests {
                 tokens: &[String],
                 limit: usize,
             ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
-                self.0.keyword_candidates(session, tokens, limit).await
+                self.inner.keyword_candidates(session, tokens, limit).await
             }
             async fn vector_candidates(
                 &self,
@@ -1193,7 +1273,9 @@ mod tests {
                 embedding: &[f32],
                 limit: usize,
             ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
-                self.0.vector_candidates(session, embedding, limit).await
+                self.inner
+                    .vector_candidates(session, embedding, limit)
+                    .await
             }
             async fn blast_radius(
                 &self,
@@ -1202,7 +1284,9 @@ mod tests {
                 min_edge_age: Duration,
                 now: DateTime<Utc>,
             ) -> Result<u64, crate::types::StoreError> {
-                self.0.blast_radius(session, node, min_edge_age, now).await
+                self.inner
+                    .blast_radius(session, node, min_edge_age, now)
+                    .await
             }
             async fn interaction_span(
                 &self,
@@ -1211,13 +1295,21 @@ mod tests {
                 min_age: Duration,
                 now: DateTime<Utc>,
             ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
-                self.0.interaction_span(session, node, min_age, now).await
+                if self.fail_span {
+                    return Err(StoreError::Backend("interaction_span is down".into()));
+                }
+                self.inner
+                    .interaction_span(session, node, min_age, now)
+                    .await
             }
             async fn record_canonization(
                 &self,
-                _event: &CanonizationEvent,
+                event: &CanonizationEvent,
             ) -> Result<(), crate::types::StoreError> {
-                Err(StoreError::Backend("record_canonization is down".into()))
+                if self.fail_record {
+                    return Err(StoreError::Backend("record_canonization is down".into()));
+                }
+                self.inner.record_canonization(event).await
             }
         }
 
@@ -1239,7 +1331,7 @@ mod tests {
                 g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
                     .unwrap();
             }
-            let store = RecordFails(store_from_graph(&g).await);
+            let store = FaultyStore::record_fails(store_from_graph(&g).await);
             let g = RwLock::new(g);
             let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
             pairs.push((20, 1.0));
@@ -1281,6 +1373,70 @@ mod tests {
             );
             assert_eq!(emitted[0].node_id, nid(20));
             // And the write-behind log still carries it to the store later.
+            assert!(!g.write().drain_log().is_empty());
+        }
+
+        /// R2-4: a phase-2 store fault must not hold back Stage 1, which
+        /// needs no verdict at all.
+        ///
+        /// `verdicts()` issues every Stage-2/Stage-3 query before anything
+        /// commits — that atomicity is deliberate — but it also meant a single
+        /// failing `interaction_span` returned an EvalError with an *empty*
+        /// outcome, stalling progression at the first stage for as long as the
+        /// store was unhealthy. The Stage-1 hop must commit, emit, and appear
+        /// in the partial outcome; Stages 2/3 must be dropped whole rather
+        /// than guessed at.
+        #[tokio::test]
+        async fn store_fault_still_lands_the_io_free_stage_1_hops() {
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+            for id in 1..=20u64 {
+                g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
+                    .unwrap();
+            }
+            // One pre-existing Candidate, so Stage 2 has a window member and
+            // the cycle actually reaches the failing query.
+            g.insert_concept(concept(21, 1, 5, CanonizationStatus::Candidate), iid(1))
+                .unwrap();
+            let store = FaultyStore::span_fails(store_from_graph(&g).await);
+            let g = RwLock::new(g);
+            let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
+            pairs.push((20, 1.0));
+            pairs.push((21, 0.1));
+            let (tx, mut rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let err = eval_cycle(&mut ev, &g, &store, &table(&pairs), &tx, &params(), ts())
+                .await
+                .unwrap_err();
+            assert!(
+                err.source.to_string().contains("interaction_span is down"),
+                "the store error must still surface: {err}"
+            );
+            assert_eq!(
+                err.outcome
+                    .transitions()
+                    .map(|e| (e.node_id, e.to_status))
+                    .collect::<Vec<_>>(),
+                vec![(nid(20), CanonizationStatus::Candidate)],
+                "the I/O-free Stage-1 hop must land and be reported"
+            );
+            assert_eq!(status_of(&g.read(), nid(20)), CanonizationStatus::Candidate);
+            assert_eq!(
+                status_of(&g.read(), nid(21)),
+                CanonizationStatus::Candidate,
+                "Stage 2 had no verdict, so it must not have run"
+            );
+            assert!(
+                err.outcome.stage3_batch.is_empty(),
+                "Stage 3 was dropped whole: {:?}",
+                err.outcome.stage3_batch
+            );
+            let emitted = drain_canonized(&mut rx);
+            assert_eq!(emitted.len(), 1, "the commit point still emits");
+            assert_eq!(emitted[0].node_id, nid(20));
+            // Phase 4 was skipped (the store is what failed); the write-behind
+            // log is what carries the hop to it.
             assert!(!g.write().drain_log().is_empty());
         }
 
