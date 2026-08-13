@@ -4,7 +4,7 @@ Complete index of the review records in this directory (43 records).
 
 | File | Scope | Status |
 |------|-------|--------|
-| **[adve-review-t8.1-memory-fable.md](adve-review-t8.1-memory-fable.md)** | phase/p8-surface — T8.1 `Memory` builder & assembly, fable deep | **OPEN** (REQUEST CHANGES: 1 P1 / 2 P2 / 6 P3; COH-6 clause 14 FAIL — writes racing `close()` silently lost; awaiting remediation) |
+| **[adve-review-t8.1-memory-fable.md](adve-review-t8.1-memory-fable.md)** | phase/p8-surface — T8.1 `Memory` builder & assembly, fable deep | **CLOSED** (1 P1 / 2 P2 / 6 P3 + 9 follow-on findings across rounds; 3 opus remediation rounds, R4 verify CLEAN 2026-08-14; COH-6 all 15 clauses PASS; merged c6576f7) |
 | [adve-review-t5.1-candidates.md](adve-review-t5.1-candidates.md) | T5.1 — Phase-1 candidates | **CLOSED** (ACCEPT, no findings) |
 | [adve-review-t5.2-expand.md](adve-review-t5.2-expand.md) | T5.2 — Expansion | **CLOSED** (ACCEPT after 1 remediation round) |
 | [adve-review-t5.3-assemble.md](adve-review-t5.3-assemble.md) | T5.3 — Assembly | **CLOSED** (ACCEPT; 3 P3 recorded, no remediation) |

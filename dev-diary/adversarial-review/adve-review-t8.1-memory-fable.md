@@ -2,9 +2,10 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN                                                    ║
-║  Verdict: REQUEST CHANGES — 1 P1 / 2 P2 / 6 P3                   ║
-║  Opened: 2026-08-13                                              ║
+║  STATUS: CLOSED                                                  ║
+║  Disposition: ACCEPT after 3 remediation rounds; R4 verify CLEAN ║
+║  Findings: 1 P1 / 2 P2 / 6 P3 (+R2: 1 P2, 5 P3; +R3: 1 P2, 2 P3) ║
+║  Opened: 2026-08-13 / Closed: 2026-08-14                         ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -64,8 +65,24 @@ Single construction site; load → STORE-1 check (kind/model/dim each rejected, 
 
 Rulings on the implementer's 6 self-flags: #1 escalated → T81-2; #2/#3/#4/#5 accepted as documented trade-offs (#4: T8.2 must call `events()` once at startup); #6 (degraded-close branch untested) stands — fold into remediation if cheap.
 
-## Disposition
+## Disposition (CLOSED 2026-08-14)
 
-Pending remediation. Suggested order: T81-1 (writers gate — the only P1), T81-2 (reuse the flush path's timeout + CatchUnwindPoll armor on step 4), T81-3 (sequence assertion + `push_front_log` order test), then the P3 wave (T81-5/6 close-retry semantics, T81-7 rustdoc disclosure + T8.2 handoff note, T81-4 partial coverage test, T81-8 optional registry, T81-9 doc note).
+Remediated on `task/t8.1-remediation` in three opus rounds, each independently verified by a fresh opus adversarial round; round-4 verify **CLEAN**. Merged into `phase/p8-surface` at `c6576f7`.
 
-Reopen criteria: regression in the COH-6 compliance table, the "Verified holds" list, or the drain/requeue tests.
+**Round 1 — fix (4 commits):** all nine findings + the untested degraded-close branch. Writers gate (`tokio::sync::RwLock<()>`: mutating methods hold a read permit across their whole body with a post-acquire `closed` re-check; `close()` latches then takes the write side before draining); step-4 flush armored with `FLUSH_ATTEMPT_TIMEOUT` + `CatchUnwindPoll`; retryable close (`Ok(())` always means the tail is durable); requeue chronology pinned (push-back mutant now kills 3 tests); close serialized behind a state mutex; durability disclosures on `declare_synonym`/`reserve` + T8.2 handoff note; report-don't-refuse session registry.
+
+**Round 2 — verify:** the P1 confirmed dead (fix discriminates both ways under mutation), but the rewrite opened R2-1 (P2: *cancelling* `close()` dropped the drained batch as a local; next `close()` returned a lying `Ok(())`) + 5 P3s (silent Drop after failed close; degraded+empty-log `Ok`; false `SecondSessionWriter` on close-then-reattach; unbounded `retract` I/O parking the gate; unpinned post-acquire re-check).
+
+**Round 2 — remediate (4 commits):** `TailCustody` RAII guard — the drained batch survives cancellation, error, and degraded paths through one hand-back in `Drop`; degraded checked before the empty shortcut; Drop warns on a kept tail; successful close releases the registry slot (failed close keeps it — documented policy); `RETRACT_IO_TIMEOUT`; the re-check pinned. Bonus: root-caused and fixed a pre-existing ~1-in-20 tracing-capture flake (`tracing_core` `Rebuilder::JustOne` global max-level pinning).
+
+**Round 3 — verify:** all six R2 fixes genuine (full mutant battery, each killed by exactly its intended test), but R3-1 (P2): the same cancellation hazard one await earlier — cancelling at the step-2 flush-task **join** detached the task (zombie writer holding the tail in its `pending`, still flushing after a retry's `Ok(())`, both warning paths blind). Plus R3-2 (tracing floor forced at 1 of 9 capture sites), R3-3 (dry-run timeout undisclosed).
+
+**Round 3 — remediate (5 commits):** `HandleCustody` — every task `JoinHandle` travels in a guard whose `Drop` returns an un-reaped handle to its slot; applied uniformly to all three tasks (abort() only *schedules* cancellation; only the join proves a task stopped); both success paths centralized in `latch_success`; shared `test_util` tracing floor across all capture sites; dry-run timeout kept + disclosed (three-reason justification).
+
+**Round 4 — verify: CLEAN.** Cancellation-safety enumeration of all six awaits in `close()`: each custody-guarded, restore-guarded, or provably safe (nothing taken yet). COH-6 clause 13 closed at every await. Re-entrancy, double-abort, join-error taxonomy (cancelled ≠ panic), drop-order composition all traced and held. Three doc-accuracy P3s (R4-1/2/3) fixed in the closing commit.
+
+**Residual blind spots (documented in code, carried):** `begin_write_sync` post-acquire re-check unreachable-as-written; `biased;` stop-first ordering loom-only; canon/daemon custody untestable-narrow window (uniform defense, R4-3 coverage note); `close()` unbounded at the flush join by COH-6 design (bounded in practice by the task's own timeout ladder). For T8.2: call `events()` once at startup; do not assume synonym/reservation durability; do not construct a second `Memory` per session.
+
+**Final gates (merged tree):** fmt clean; `-D warnings` check clean ×3 feature sets; tests **548/0** (default lib), **588/0** (store-sqlite lib), doc-test green. Test count 528 → 548 (+20, zero removals across all rounds; `grep '^-.*assert'` empty every round).
+
+Reopen criteria: regression in the COH-6 compliance table (all 15 clauses now PASS), the "Verified holds" list, the custody guards' drop-order semantics, or any mutation-pinned test named above.
