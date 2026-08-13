@@ -120,23 +120,33 @@ status:     not-started        # not-started | claimed:<agent> | done
 
 ## Calendar
 
-Spec §14 build plan, mapped to what actually remains:
+Spec §14 build plan, mapped to what actually remains. **The plan dates below are the plan —
+they do not move.** As of Thu Aug 13 08:20 ET we are running ahead of them (P2–P7 all merged
+to `main` by Thursday morning, against a plan that had the tracks still converging Friday);
+that shows up as margin against each date, not as an earlier delivery date.
 
-| Date | Plan |
-|---|---|
-| Sun Aug 9 | Spike day per spec — **not evidenced in repo; P0 is now first order of business** |
-| Mon–Tue Aug 10–11 | Spec says paused for Native Builder / DataHub. Any Lambo time goes to **P0 + P1 only** — they are the neck |
-| Wed Aug 12 | P2/P3/P4/P5/P6/P7 launch wide |
-| Thu Aug 13 | Tracks continue; P3 live adapters land; P6 swaps to live structural queries |
-| Fri Aug 14 | Tracks converge; P8 starts as soon as T2.x + T5.3 allow |
-| Sat Aug 15 | P8 complete: serve, demo scenario reproducible end-to-end |
-| Sun Aug 16 | Full-system adversarial review; buffer |
-| Mon Aug 17 | P9: video, README, diagram, Devpost draft |
-| Tue Aug 18 | Submit **before** 5:00 pm ET |
+| Date | Plan | Actual |
+|---|---|---|
+| Sun Aug 9 | Spike day per spec — **not evidenced in repo; P0 is now first order of business** | P0 deferred; absorbed into Aug 10–11 without cost |
+| Mon–Tue Aug 10–11 | Spec says paused for Native Builder / DataHub. Any Lambo time goes to **P0 + P1 only** — they are the neck | ✅ P0 (GO on Rust) + P1 complete, **plus P2 and P3 merged early** |
+| Wed Aug 12 | P2/P3/P4/P5/P6/P7 launch wide | ✅ P4 + P5 merged — ahead of a day that only planned to *launch* the tracks |
+| Thu Aug 13 | Tracks continue; P3 live adapters land; P6 swaps to live structural queries | ✅ **P6 (1dfffbc) and P7 (9b0c603) merged before 08:20 ET.** P3 live adapters landed Aug 11 |
+| Fri Aug 14 | Tracks converge; P8 starts as soon as T2.x + T5.3 allow | P8 is unblocked early — every hard require is already on `main` |
+| Sat Aug 15 | P8 complete: serve, demo scenario reproducible end-to-end | — |
+| Sun Aug 16 | Full-system adversarial review; buffer | — |
+| Mon Aug 17 | P9: video, README, diagram, Devpost draft | — |
+| Tue Aug 18 | Submit **before** 5:00 pm ET | **Delivery date. T-5d 8h as of this update** |
 
-**Decision gate (spec §14, still open):** if `sqlx` × CockroachDB `VECTOR` (T0.3) is not
-working by end of the first P0 session, fall back to Python — the graph logic is identical.
-Do not let a driver fight eat a mid-week day.
+**Decision gate (spec §14) — CLOSED, GO on Rust.** T0.3 proved `sqlx` × CockroachDB
+`VECTOR` works; the Python fallback is off the table and T7.3 has since shipped live
+`vector_candidates` against the cluster.
+
+**Cut order (spec §14) — nothing is cut.** The schedule has not slipped, so the cut list
+(Lambda sweep → ccloud scripting → SQLite adapter → reservations → drift) stays untouched;
+SQLite, reservations, and drift all shipped. The one open task, **T7.1 Titan, is gated on
+an external AWS authorization, not on our schedule** — its adapter PR goes up regardless
+and the access request is being pursued with AWS. BGE-M3 remains the default dense path,
+so no deliverable depends on that gate clearing.
 
 ---
 
@@ -152,9 +162,9 @@ Keep this current; it is the only global view.
 | P3 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-11, commit 4c816a2)** — DDL, CockroachStore + live conformance, SqliteStore, flush, load_session, structural-query three-way gate; exit criteria [x]; all reviews CLOSED (per-task ×2, gemini36flash + opus46 partials) |
 | P4 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-12, commit 73aa894)** — T4.1–T4.6 (scoring, hot list, conflict, drift, GC, events); adversarial review CLOSED ACCEPT after 2 remediation rounds; exit criteria [x]; live-Cockroach verification 2026-08-12 (SET_ROOT_GOAL residual closed) |
 | P5 | 4 / 4 | **DONE + MERGED TO MAIN (2026-08-12)** — T5.1–T5.4 + entry `Daemon::recall`; reviews CLOSED (internal R1+R2, GPT5.6sol 4 P1 + 4 P2 remediated, independent deep adversarial ACCEPT); exit criteria [x] |
-| P6 | 0 / 4 | OPEN for claiming |
-| P7 | 3 / 4 | Implementation complete except T7.1 Titan (blocked on account authorization). T7.0, T7.2, and T7.3 are done; P8 owns live hybrid wiring/demo evidence, while ship still needs an index-favorable camera-proof EXPLAIN. |
-| P8 | 0 / 5 | blocked on P2 P4 P5 |
+| P6 | 4 / 4 | **DONE + MERGED TO MAIN (2026-08-13, commit 1dfffbc)** — T6.1–T6.4 (Candidate, Venerable, Canonical, eval loop/budget/demotion/audit); exit criteria [x] all four; reviews CLOSED (fable ×5 — 19 findings remediated, R2 round, R3 CLEAN); live-Cockroach canonization progression test committed (d816d28). Carryover is P8-owned, not P6 debt: F18 server-side `created_at` → T8.2; R3-1 `seed()` divergence → T8.4; F13/R3-4 eval-batch query volume → T8.2/T8.4 (all three already written into PHASE-8) |
+| P7 | 3 / 4 | **MERGED TO MAIN (2026-08-13, commit 9b0c603)** — T7.0 BGE-M3/llama.cpp (default path), T7.2 hybrid matching, T7.3 live `vector_candidates` on Cockroach all done. **T7.1 Titan is the only open task and is not blocked on us:** AWS account is not yet authorized for Bedrock — a PR adding the `embed-bedrock` adapter goes up regardless, and the access request is being pursued with AWS. The default dense path is BGE-M3, so the ship does not wait on it (spec §12.2 keeps Titan as the swap-in). Two integration items live downstream: T8.1 wires hybrid into live sessions, and ship needs an index-favorable camera-proof `EXPLAIN` |
+| P8 | 0 / 5 | **OPEN for claiming — the frontier.** All hard requires (P2 P4 P5 P6 T7.x) are on `main`; only T8.1 is serial, then T8.2 ‖ T8.3 ‖ T8.5 go wide |
 | P9 | 0 / 5 | blocked on P8 |
 
 ---
@@ -216,8 +226,8 @@ Example: T2.3 conflict detection → `task/p2-t2.3-conflict-detection`,
 | P2 | `phase/p2-graph-core` (merged to main 2026-08-11) |
 | P3 | `phase/p3-stores` (merged to main 2026-08-11) |
 | P4 | `phase/p4-daemon` (merged to main 2026-08-12) |
-| P5 | `phase/p5-recall` |
-| P6 | `phase/p6-canonization` |
-| P7 | `phase/p7-embeddings` |
-| P8 | `phase/p8-surface` |
+| P5 | `phase/p5-recall` (merged to main 2026-08-12) |
+| P6 | `phase/p6-canonization` (merged to main 2026-08-13) |
+| P7 | `phase/p7-embeddings` (merged to main 2026-08-13; T7.1 Titan still open on its own branch when AWS access lands) |
+| P8 | `phase/p8-surface` ← **next** |
 | P9 | `phase/p9-ship` |
