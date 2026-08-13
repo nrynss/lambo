@@ -153,7 +153,7 @@ Keep this current; it is the only global view.
 | P4 | 6 / 6 | **DONE + MERGED TO MAIN (2026-08-12, commit 73aa894)** — T4.1–T4.6 (scoring, hot list, conflict, drift, GC, events); adversarial review CLOSED ACCEPT after 2 remediation rounds; exit criteria [x]; live-Cockroach verification 2026-08-12 (SET_ROOT_GOAL residual closed) |
 | P5 | 4 / 4 | **DONE + MERGED TO MAIN (2026-08-12)** — T5.1–T5.4 + entry `Daemon::recall`; reviews CLOSED (internal R1+R2, GPT5.6sol 4 P1 + 4 P2 remediated, independent deep adversarial ACCEPT); exit criteria [x] |
 | P6 | 0 / 4 | OPEN for claiming |
-| P7 | 1 / 4 | T7.0 done (BGE-M3 embedder); T7.1 blocked on account; T7.2/T7.3 OPEN |
+| P7 | 3 / 4 | Implementation complete except T7.1 Titan (blocked on account authorization). T7.0, T7.2, and T7.3 are done; P8 owns live hybrid wiring/demo evidence, while ship still needs an index-favorable camera-proof EXPLAIN. |
 | P8 | 0 / 5 | blocked on P2 P4 P5 |
 | P9 | 0 / 5 | blocked on P8 |
 

@@ -43,7 +43,7 @@ const DERIVES_WEIGHT: f64 = 0.9;
 type EdgeKey = (NodeId, NodeId, EdgeType);
 
 /// In-RAM session graph. Owns no lock (see `src/graph/mod.rs`).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Graph {
     session_id: SessionId,
     nodes: HashMap<NodeId, Node>,
@@ -421,6 +421,22 @@ impl Graph {
                 c.id
             )));
         }
+        if let Some(vector) = &c.embedding {
+            let contract = self.embedding.as_ref().ok_or_else(|| {
+                invariant(format!(
+                    "concept {} carries a vector without a session embedding contract",
+                    c.id
+                ))
+            })?;
+            if vector.len() != contract.dim || vector.iter().any(|x| !x.is_finite()) {
+                return Err(invariant(format!(
+                    "concept {} vector is non-finite or has width {} != contract {}",
+                    c.id,
+                    vector.len(),
+                    contract.dim
+                )));
+            }
+        }
         // Schema §4 `UNIQUE (session_id, canonical_key)`, partial for
         // Observations (spec errata 2026-08-11 / muse-spark M1-M2): two
         // non-Observation concepts must never share a canonical key — a
@@ -655,10 +671,16 @@ impl Graph {
     // -----------------------------------------------------------------------
 
     /// Declare (or replace) a direct synonym mapping. RAM-local: synonyms have no
-    /// `Mutation` kind and round-trip through the snapshot only.
+    /// `Mutation` kind and round-trip through the snapshot only. A changed
+    /// mapping still bumps the epoch because it changes canonicalization results
+    /// observed by hybrid planning and recall.
     pub fn declare_synonym(&mut self, source_key: &str, canonical_key: &str) {
-        self.synonyms
-            .insert(source_key.to_string(), canonical_key.to_string());
+        let changed = self.synonyms.get(source_key).map(String::as_str) != Some(canonical_key);
+        if changed {
+            self.synonyms
+                .insert(source_key.to_string(), canonical_key.to_string());
+            self.epoch += 1;
+        }
     }
 
     /// Declare the session's root goal (spec §9 drift anchor).
@@ -762,8 +784,44 @@ impl Graph {
             .unwrap_or_else(|| chrono::DateTime::from_timestamp_nanos(0))
     }
 
-    pub fn set_embedding(&mut self, contract: Option<crate::types::EmbeddingContract>) {
-        self.embedding = contract;
+    /// Stamp the session's embedding space on first vector work, or verify an
+    /// existing stamp. Ordinary callers cannot clear or replace the contract.
+    pub fn stamp_embedding(
+        &mut self,
+        contract: crate::types::EmbeddingContract,
+    ) -> Result<(), LamboError> {
+        if let Some(existing) = &self.embedding {
+            existing.ensure_compatible(&contract)?;
+            return Ok(());
+        }
+        self.embedding = Some(contract.clone());
+        self.append_mutation(Mutation::SetEmbedding {
+            session_id: self.session_id.clone(),
+            embedding: Some(contract),
+        });
+        Ok(())
+    }
+
+    /// Explicit contract replacement/clear gate for an atomic re-embedding
+    /// workflow. It is safe only after every vector-bearing concept has been
+    /// removed or rewritten in the same staged graph transaction.
+    pub fn replace_embedding_without_vectors(
+        &mut self,
+        contract: Option<crate::types::EmbeddingContract>,
+    ) -> Result<(), LamboError> {
+        if self.concepts().any(|c| c.embedding.is_some()) {
+            return Err(invariant(
+                "cannot clear or replace embedding contract while concept vectors remain",
+            ));
+        }
+        if self.embedding != contract {
+            self.embedding = contract.clone();
+            self.append_mutation(Mutation::SetEmbedding {
+                session_id: self.session_id.clone(),
+                embedding: contract,
+            });
+        }
+        Ok(())
     }
     /// Advisory soft lock (spec §11). Same-agent re-reservation extends; cross-agent
     /// denial is T2.7's policy — this stores what it is given.
@@ -1024,6 +1082,23 @@ impl Graph {
                     n.session_id(),
                     self.session_id
                 ));
+            }
+            if let Node::Concept(c) = n {
+                if let Some(vector) = &c.embedding {
+                    match &self.embedding {
+                        Some(contract)
+                            if vector.len() == contract.dim
+                                && vector.iter().all(|x| x.is_finite()) => {}
+                        Some(contract) => v.push(format!(
+                            "concept {} vector invalid for embedding contract width {}",
+                            c.id, contract.dim
+                        )),
+                        None => v.push(format!(
+                            "concept {} carries a vector without an embedding contract",
+                            c.id
+                        )),
+                    }
+                }
             }
         }
 
@@ -2471,6 +2546,65 @@ mod tests {
     }
 
     #[test]
+    fn set_embedding_is_ordered_durable_metadata() {
+        let mut g = Graph::new(sid());
+        let embedding = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("v1".into()),
+            dim: 1024,
+        };
+        let epoch = g.epoch();
+        g.stamp_embedding(embedding.clone()).unwrap();
+        assert!(g.epoch() > epoch);
+        let batch = g.drain_log();
+        assert_eq!(
+            batch.mutations,
+            vec![Mutation::SetEmbedding {
+                session_id: sid(),
+                embedding: Some(embedding.clone()),
+            }]
+        );
+
+        let epoch = g.epoch();
+        g.stamp_embedding(embedding).unwrap();
+        assert_eq!(g.epoch(), epoch, "an identical contract is a no-op");
+        assert!(g.drain_log().is_empty());
+    }
+
+    #[test]
+    fn embedding_contract_cannot_change_while_vectors_remain() {
+        let (mut g, interaction, _) = small_graph();
+        let fixture = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("v1".into()),
+            dim: 1024,
+        };
+        g.stamp_embedding(fixture.clone()).unwrap();
+        let mut vector_concept = concept(99, interaction, "vector-bearing");
+        vector_concept.embedding = Some(vec![0.0; 1024]);
+        g.insert_concept(vector_concept, interaction).unwrap();
+        g.drain_log();
+        let before = g.snapshot();
+        let mut corrupt_reload = before.clone();
+        corrupt_reload.embedding = None;
+        assert!(
+            Graph::from_snapshot(corrupt_reload).is_err(),
+            "load rejects vectors whose contract was lost"
+        );
+
+        let other = crate::types::EmbeddingContract {
+            kind: "bedrock".into(),
+            model: Some("titan-v2".into()),
+            dim: 1024,
+        };
+        assert!(g.stamp_embedding(other.clone()).is_err());
+        assert!(g.replace_embedding_without_vectors(Some(other)).is_err());
+        assert!(g.replace_embedding_without_vectors(None).is_err());
+        assert_eq!(g.snapshot(), before);
+        assert!(g.drain_log().is_empty());
+    }
+
+    #[test]
     fn set_root_goal_leaves_canonical_goal_untouched() {
         let (mut g, goal_id, _) = goal_graph();
         g.set_root_goal(Some(serde_json::json!("launch the product")));
@@ -2584,13 +2718,20 @@ mod tests {
     #[test]
     fn synonyms_declare_lookup_and_snapshot() {
         let mut g = Graph::new(sid());
+        let epoch = g.epoch();
         g.declare_synonym("register_user", "create_user");
+        assert_eq!(g.epoch(), epoch + 1);
+        let unchanged = g.epoch();
+        g.declare_synonym("register_user", "create_user");
+        assert_eq!(g.epoch(), unchanged, "identical synonym is a no-op");
         g.declare_synonym("delete_user", "remove_user");
         assert_eq!(g.synonym("register_user"), Some("create_user"));
         assert_eq!(g.synonym("delete_user"), Some("remove_user"));
         assert_eq!(g.synonym("unknown"), None);
         // Replace wins.
+        let before_replace = g.epoch();
         g.declare_synonym("register_user", "signup_user");
+        assert_eq!(g.epoch(), before_replace + 1);
         assert_eq!(g.synonym("register_user"), Some("signup_user"));
 
         let snap = g.snapshot();
@@ -2691,7 +2832,9 @@ mod tests {
                 }
                 // Neither carries graph topology, so neither participates in
                 // the endpoint-ordering contract.
-                Mutation::CanonizationTransition { .. } | Mutation::SetRootGoal { .. } => {}
+                Mutation::CanonizationTransition { .. }
+                | Mutation::SetRootGoal { .. }
+                | Mutation::SetEmbedding { .. } => {}
             }
         }
         assert!(saw_delete);
@@ -2725,6 +2868,7 @@ mod tests {
                 Mutation::DeleteEdge { .. } => "delete_edge",
                 Mutation::CanonizationTransition { .. } => "transition",
                 Mutation::SetRootGoal { .. } => "set_root_goal",
+                Mutation::SetEmbedding { .. } => "set_embedding",
             })
             .collect();
         let expected = [

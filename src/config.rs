@@ -169,6 +169,31 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Validate product-level knobs that must fail closed rather than poison
+    /// semantic selection. Callers that construct `Config` programmatically
+    /// should invoke this before starting a session; the hybrid entry point
+    /// repeats the threshold check at the trust boundary.
+    pub fn validate(&self) -> Result<(), LamboError> {
+        if !self.semantic_match_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.semantic_match_threshold)
+        {
+            return Err(LamboError::Config(format!(
+                "semantic_match_threshold must be finite and in [0, 1], got {}",
+                self.semantic_match_threshold
+            )));
+        }
+        if self.default_top_k > crate::store::MAX_VECTOR_CANDIDATE_LIMIT {
+            return Err(LamboError::Config(format!(
+                "default_top_k {} exceeds maximum {}",
+                self.default_top_k,
+                crate::store::MAX_VECTOR_CANDIDATE_LIMIT
+            )));
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Level B process file — store + embedder selection
 // ---------------------------------------------------------------------------
@@ -296,6 +321,29 @@ mod tests {
         let s = serde_json::to_string(&c.scoring).unwrap();
         let back: ScoringWeights = serde_json::from_str(&s).unwrap();
         assert_eq!(c.scoring, back);
+    }
+
+    #[test]
+    fn semantic_threshold_validation_fails_closed() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 1.01] {
+            let c = Config {
+                semantic_match_threshold: bad,
+                ..Config::default()
+            };
+            assert!(c.validate().is_err(), "accepted invalid threshold {bad}");
+        }
+        for good in [0.0, 0.85, 1.0] {
+            let c = Config {
+                semantic_match_threshold: good,
+                ..Config::default()
+            };
+            c.validate().unwrap();
+        }
+        let oversized = Config {
+            default_top_k: crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
+            ..Config::default()
+        };
+        assert!(oversized.validate().is_err());
     }
 
     #[test]

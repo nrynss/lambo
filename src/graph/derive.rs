@@ -132,17 +132,36 @@ impl<'a> ParentOf<'a> {
     pub fn from_pairs(pairs: &'a [(&'a str, &'a str)]) -> Self {
         Self { pairs }
     }
-}
 
-/// Summary of one [`derive`] call.
+    /// Raw `(parent, child)` pairs in declaration order (read-only accessor so
+    /// the async hybrid twin in [`crate::graph::hybrid`] can mirror derive's
+    /// validation + Hierarchical edge steps without owning the field).
+    pub fn pairs(&self) -> &'a [(&'a str, &'a str)] {
+        self.pairs
+    }
+}
+/// Summary of one `derive` call — returned by both the sync
+/// [`derive`] and its async hybrid twin ([`crate::graph::hybrid::derive`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeriveOutcome {
     /// Concepts created by this call (fresh nodes), in resolution order:
     /// `concepts` argument first, then `ParentOf` contents.
     pub created: Vec<NodeId>,
     /// Concepts matched to pre-existing nodes (or to a node created earlier in
-    /// this same call), in the same resolution order.
+    /// this same call), in the same resolution order. `matched` is faithful to
+    /// the `derive` contract: every entry here was re-upserted (or, within the
+    /// same call, written) and carries/reinforces a `Derives` edge from the
+    /// interaction. Hybrid semantic merges are NOT recorded here — see
+    /// [`Self::semantic_merged`].
     pub matched: Vec<NodeId>,
+    /// Targets of hybrid semantic merges (only populated by
+    /// [`crate::graph::hybrid::derive`]): pre-existing concepts a hybrid write
+    /// merged against via a decaying `Semantic` edge. Kept separate from
+    /// [`Self::matched`] because a merge does NOT re-upsert the target nor add
+    /// a `Derives` edge to it — `matched` must retain its "re-derived /
+    /// Derives-reinforced" meaning for sync `derive` consumers (PHASE-7 T7.2
+    /// remediation, MINOR-3).
+    pub semantic_merged: Vec<NodeId>,
     /// Number of duplicate natural-key writes in this call that bumped an
     /// existing edge (`Derives` / `CoOccurrence` / `Hierarchical`).
     pub reinforced: usize,
@@ -1242,7 +1261,7 @@ mod tests {
                     assert!(seen_nodes.contains(&edge.source), "{m:?}");
                     assert!(seen_nodes.contains(&edge.target), "{m:?}");
                 }
-                Mutation::SetRootGoal { .. } => {}
+                Mutation::SetRootGoal { .. } | Mutation::SetEmbedding { .. } => {}
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {
                     panic!("derive must not delete: {m:?}");
                 }

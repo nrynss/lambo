@@ -50,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::store::{Capabilities, GraphStore};
+use crate::store::{validate_vector_candidate_limit, Capabilities, GraphStore};
 use crate::types::{NodeId, Scored, SessionId, StoreError};
 
 /// Number of most-recent interactions whose concepts join phase 1 (spec §8).
@@ -94,6 +94,7 @@ pub async fn gather(
     embedding: Option<&[f32]>,
     limit: usize,
 ) -> Result<Phase1Input, StoreError> {
+    validate_vector_candidate_limit(limit)?;
     if !store.capabilities().contains(Capabilities::VECTOR_SEARCH) {
         tracing::debug!(
             target: "lambo::recall",
@@ -505,6 +506,25 @@ mod tests {
         assert!(
             lines[0].contains("no query embedding"),
             "log explains the skip"
+        );
+    }
+
+    #[tokio::test]
+    async fn gather_rejects_oversized_top_k_before_store_io() {
+        let store = SpyVectorStore::with_vector(Vec::new());
+        let err = gather(
+            &store,
+            &sid(),
+            Some(&[0.5; 8]),
+            crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)));
+        assert_eq!(
+            store.async_calls(),
+            0,
+            "invalid top_k performs no store I/O"
         );
     }
 

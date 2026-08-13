@@ -71,5 +71,9 @@ pub mod index;
 pub mod reserve;
 // T2.4 — spec §7 record_action + write-time Causal/Dependency cycle check (see `action.rs`).
 pub mod action;
+// T7.2 — hybrid matching, canonicalization step 6 (spec §7.1): async twin of
+// derive for MatchStrategy::Hybrid (see `hybrid.rs`). Additive: cutting the
+// feature is deleting this line + `hybrid.rs`.
+pub mod hybrid;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};

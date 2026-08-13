@@ -286,6 +286,7 @@ mod tests {
                 // regenerated (the batch's five-kind coverage is its contract);
                 // a future fixture carrying one would count here.
                 Mutation::SetRootGoal { .. } => "set_root_goal",
+                Mutation::SetEmbedding { .. } => "set_embedding",
             };
             kinds.insert(k);
         }

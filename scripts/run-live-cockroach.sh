@@ -12,6 +12,8 @@
 # Usage:
 #   ./scripts/run-live-cockroach.sh          # full live suite
 #   DSN_OVERRIDE=... ./scripts/run-live-cockroach.sh
+#   LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh
+#       # additionally require the deployment-specific vector-index camera proof
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,9 +43,11 @@ echo "Running live CockroachDB tests against host: $HOST"
 export LAMBO_COCKROACH_DSN="$DSN"
 export LAMBO_REQUIRE_LIVE=1
 
-# Full live CRDB scope: conformance suite + canon three-hop progression + any
-# vector EXPLAIN live test. `-- --ignored` runs every ignored test, so also set
-# LAMBO_LLAMA_EMBED_URL to '' guard — the BGE live test honest-skips without it.
+# Full live CRDB scope: conformance suite + canon three-hop progression + global
+# vector-query EXPLAIN. The strict camera-proof test honest-skips unless
+# LAMBO_REQUIRE_VECTOR_INDEX=1 because index selection is deployment/cost specific.
+# `-- --ignored` runs every ignored test, so also set LAMBO_LLAMA_EMBED_URL to ''
+# guard — the BGE live test honest-skips without it.
 export LAMBO_LLAMA_EMBED_URL="${LAMBO_LLAMA_EMBED_URL:-}"
 
 exec cargo test --features store-cockroach,store-memory,fixtures --lib -- --ignored
