@@ -1692,6 +1692,16 @@ impl Drop for Memory {
 ///
 /// Like [`TailCustody`], the `parking_lot` guard is taken for one statement and
 /// never across an `.await` (§6.4): `join` holds nothing while it waits.
+///
+/// **Composition with [`TailCustody`].** `close()` drops each of these
+/// explicitly once its join has returned, so at most one custody guard is ever
+/// live and the two never overlap: a cancellation at step 2 restores a handle
+/// and no tail exists yet; a cancellation at step 4 restores the tail and every
+/// handle is already reaped. Both orders end the same way — every guard is a
+/// local declared *after* `_quiesced` and the `close_state` guard, so both run
+/// before the retry can enter `close()` at all. R2-1's rule ("the tail is back
+/// on the log before `close_state` releases") is unchanged, and R3-1's is its
+/// twin one step earlier.
 struct HandleCustody<'a> {
     slot: &'a PlMutex<Option<JoinHandle<()>>>,
     /// `None` once [`HandleCustody::join`] has reaped the task — that is what
