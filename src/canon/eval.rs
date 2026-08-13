@@ -1145,5 +1145,62 @@ mod tests {
                 "api layer blast=1 must never become Canonical: {hops:?}"
             );
         }
+
+        /// Exit criterion "same test green against SQLite once T3.6 lands":
+        /// the stage predicates and eval cycle are store-agnostic; running the
+        /// three-hop progression against SqliteStore proves the SQL structural
+        /// queries (blast_radius, interaction_span) yield the same verdict.
+        #[cfg(feature = "store-sqlite")]
+        #[tokio::test]
+        async fn sqlite_three_hop_progression_matches_memory() {
+            use crate::store::{GraphStore, SqliteStore};
+
+            let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
+            rewind_canonicals(&mut snap);
+            let mut graph = Graph::from_snapshot(snap.clone()).unwrap();
+            let store = SqliteStore::connect("sqlite::memory:").unwrap();
+            store.init_schema().await.unwrap();
+            store.seed(&snap).await.unwrap();
+
+            let us = find_id(&graph, "user schema");
+            assert_eq!(status_of(&graph, us), CanonizationStatus::None);
+
+            let scores = ScoreTable {
+                epoch: graph.epoch(),
+                ranked: rescore(&graph, &ScoringWeights::default()),
+            };
+            let mut p = params();
+            p.min_peer_count = crate::Config::default().canonization_min_peer_count;
+
+            let (tx, _rx) = crate::daemon::events::event_channel();
+            let mut ev = Evaluator::new();
+            for i in 0..3 {
+                // Advance the clock per cycle as production does, so each hop
+                // gets a distinct occurred_at and the SQL audit orders by it.
+                let now = ts() + chrono::Duration::seconds(60 * i as i64);
+                eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, now)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(status_of(&graph, us), CanonizationStatus::Canonical);
+
+            let us_hops = hops_for(graph.canonization_events(), us);
+            assert_eq!(
+                us_hops,
+                vec![
+                    (CanonizationStatus::None, CanonizationStatus::Candidate),
+                    (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+                    (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+                ],
+                "SQLite structural queries must yield the same progression: {us_hops:?}"
+            );
+
+            let reloaded = store.load_session(&rest_sid()).await.unwrap();
+            assert_eq!(
+                hops_for(&reloaded.canonization_events, us),
+                us_hops,
+                "SQLite canonization_events must match the in-graph audit"
+            );
+        }
     }
 }
