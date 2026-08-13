@@ -1138,16 +1138,15 @@ impl Memory {
     /// batch RETAINED after a failed flush, which sits at the front of that
     /// buffer. So:
     ///
-    /// 0. **Close the writers gate first** — latch `closed` (so new calls are
-    ///    refused) and take the write side of [`Memory::writers`], which waits
-    ///    out every write already in flight on a caller task (T81-1). Only then
-    ///    can "nothing new lands after the drain" be true of the *surface*, not
-    ///    just of the tasks.
-    /// 0b. **Stop the two mutation producers** — canonization, then the
-    ///    daemon — so nothing new lands after the drain. `abort()` is safe for
-    ///    both: neither holds a `parking_lot` guard across an `.await`, and the
-    ///    write-behind log carries any canonization hop whose phase-4 record
-    ///    was cancelled.
+    /// 0. **Shut the writers up — the surface's own, then the tasks'.** Latch
+    ///    `closed` so new calls are refused, take the write side of
+    ///    [`Memory::writers`], which waits out every write already in flight on
+    ///    a caller task (T81-1), and only then stop the two mutation producers,
+    ///    canonization first and the daemon second. It takes both halves for
+    ///    "nothing new lands after the drain" to be true of the *surface* and
+    ///    not just of the tasks. `abort()` is safe for both tasks: neither
+    ///    holds a `parking_lot` guard across an `.await`, and the write-behind
+    ///    log carries any canonization hop whose phase-4 record was cancelled.
     /// 1. [`FlushTask::stop`] — the loop finishes its current `cycle()` (an
     ///    in-flight flush and its retry/backoff complete; a post-retry
     ///    `RETAINED_BACKOFF` hold is *not* waited out), re-appends `pending` to
@@ -1199,7 +1198,7 @@ impl Memory {
         self.closed.store(true, Ordering::Release);
         let _quiesced = self.writers.write().await;
 
-        // 0b — producers off, before the drain.
+        // ...and the two mutation producers off, before the drain.
         let canon_handle = self.canon_handle.lock().take();
         if let Some(handle) = canon_handle {
             handle.abort();
