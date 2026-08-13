@@ -146,10 +146,13 @@ const MAX_POOL_CONNECTIONS: u32 = 4;
 //     exist beyond this window, so
 //     re-query with `k` doubled (cheap: index-backed top-k is O(log n + k)), up to
 //     `VECTOR_FETCH_CAP` ([`next_fetch_k`]).
-//   - Completeness bound: retry STOPS EARLY when the `k + 1` lookahead is absent —
-//     the global population is exhausted, so no further in-session
-//     candidate can exist; the result is provably complete, never a silent
-//     under-return.
+//   - Completeness bound: retry STOPS EARLY when the `k + 1` lookahead is absent.
+//     Under an EXACT scan (non-partial index) that means the global population is
+//     exhausted, so no further in-session candidate can exist. Under the PARTIAL
+//     ANN index (T7.4) `vector search` visits a bounded set of neighbourhoods, so a
+//     lookahead-absent page means the BEAM exhausted its visited neighbourhoods,
+//     not the table — a true near neighbour can be missed (see the ANN accuracy
+//     dial doc above); that miss is accepted for v0.1, not "provably complete".
 //   - Cap fallback: if the global page is still full and crowded at CAP, run an
 //     exact session-scoped query. That path may not use the global vector index,
 //     but it preserves the GraphStore completeness contract for adversarial
@@ -780,8 +783,10 @@ fn initial_fetch_k(limit: usize) -> usize {
 ///
 /// Final when any of:
 ///   - at least `limit` in-session hits were surfaced (`in_session >= limit`);
-///   - lookahead found no more row (`has_more == false`) — the global population is exhausted,
-///     so no further in-session candidate can exist (provable completeness);
+///   - lookahead found no more row (`has_more == false`). Exact scan: the global
+///     population is exhausted, so no further in-session candidate can exist. Partial
+///     ANN index (T7.4): the beam exhausted its visited neighbourhoods, so a true
+///     near neighbour may be missed — not provably complete (see the ANN dial doc);
 ///   - `k` is at `VECTOR_FETCH_CAP`.
 ///
 /// Otherwise the page has more rows yet under-delivered — more global rows may hold
