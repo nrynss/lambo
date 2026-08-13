@@ -575,20 +575,48 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// server enforces **1..=2048** (verified live 2026-08-13; out-of-range is a
 /// server-side error, not a clamp).
 ///
-/// **This is deliberately unset by default** — omitting it inherits the server
-/// default, so enabling the partial index did not silently change search
-/// behaviour too. Raising the default is justified only by a recall
-/// measurement on a dense table, which does not exist yet (the demo cluster
-/// holds 4 distinct vectors, where ANN and exact trivially coincide); that
-/// measurement is a T7.4-review item. Until then this is an opt-in dial:
+/// **Default 64, chosen from measurement** (adve-review MAJOR-1, 2026-08-13).
+/// Recall was measured against exact top-k on the live cluster, where exact
+/// ground truth is forced with the `concepts@concepts_pkey` hint (a FULL SCAN).
+/// Two 3,000-row datasets: uniform-random vectors, and clustered unit-norm
+/// vectors matching the geometry real embeddings actually have.
 ///
 /// ```text
-/// LAMBO_VECTOR_BEAM_SIZE=128 lambo serve …
+/// beam:      1     2     4     8    16    32*    64    128    256
+/// recall@10 .19   .23   .32   .47   .70   .93    .96   .96    .86
+/// recall@50 .07   .13   .22   .40   .64   .94    .99   .99    .97
+///                                        *server default
+/// ```
+///
+/// Two findings drove the value:
+/// * At the server default (32) roughly **6-7% of true nearest neighbours are
+///   missed**. For Lambo that is not a latency question — a missed neighbour is
+///   a near-duplicate that hybrid matching fails to merge, so the concept is
+///   silently re-created and the graph ends up less connected.
+/// * **Higher is not monotonically better.** Beam 256 scored *worse* than 64 in
+///   BOTH datasets, reproducibly (recall@10 .86 vs .96). So "crank it up" is
+///   wrong advice, and 64 — not the maximum — is the measured knee.
+///
+/// Recall never reached 1.000 at any beam: this index is approximate by
+/// construction and no setting makes it exact. Exactness is available only by
+/// giving up index use, which spec §12.1 requires us to demonstrate.
+///
+/// Override per process (still `1..=2048`, the server's own bound, verified
+/// live — out-of-range is a server-side error, not a clamp):
+///
+/// ```text
+/// LAMBO_VECTOR_BEAM_SIZE=32 lambo serve …   # back to the server default
 /// ```
 ///
 /// Applied per connection alongside `statement_timeout`, so it costs no
 /// per-query round trip. An invalid value is a hard error at pool construction
-/// (Level B fails closed — a silently ignored tuning knob is worse than none).
+/// (Level B fails closed — a silently ignored tuning knob is worse than none,
+/// because the operator believes accuracy was raised when it was not).
+///
+/// Caveat kept deliberately: both datasets are synthetic. The clustered set
+/// mimics embedding geometry but is not BGE-M3 output, so treat 64 as an
+/// evidence-based default rather than a tuned optimum.
+const DEFAULT_VECTOR_BEAM_SIZE: u32 = 64;
 const VECTOR_BEAM_SIZE_ENV: &str = "LAMBO_VECTOR_BEAM_SIZE";
 const VECTOR_BEAM_SIZE_MIN: u32 = 1;
 const VECTOR_BEAM_SIZE_MAX: u32 = 2048;
@@ -1098,13 +1126,11 @@ impl CockroachStore {
                 "statement_timeout",
                 format!("{}s", STATEMENT_TIMEOUT.as_secs()),
             )]);
-        // T7.4: opt-in ANN accuracy dial, applied per connection so it
-        // costs no per-query round trip. Unset => inherit the server
-        // default (32); an invalid value already failed closed above.
-        let options = match vector_beam_size_from_env()? {
-            Some(beam) => options.options([("vector_search_beam_size", beam.to_string())]),
-            None => options,
-        };
+        // T7.4: ANN accuracy dial, applied per connection so it costs no
+        // per-query round trip. Unset => DEFAULT_VECTOR_BEAM_SIZE (measured —
+        // see its doc comment); an invalid value already failed closed above.
+        let beam = vector_beam_size_from_env()?.unwrap_or(DEFAULT_VECTOR_BEAM_SIZE);
+        let options = options.options([("vector_search_beam_size", beam.to_string())]);
         Ok(options)
     }
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
@@ -1867,7 +1893,16 @@ mod tests {
         assert_eq!(
             vector_beam_size_from_env().unwrap(),
             None,
-            "unset must inherit the server default, not invent one"
+            "the parser reports absence; the DEFAULT is applied at the call site"
+        );
+        // Pin the measured default (adve-review MAJOR-1). 32 is CockroachDB's
+        // default and measured ~6-7% worse on recall; 256 measured WORSE than
+        // 64. If this constant changes, the measurement in its doc must be
+        // redone — it is evidence-backed, not a taste call.
+        assert_eq!(DEFAULT_VECTOR_BEAM_SIZE, 64);
+        assert!(
+            (VECTOR_BEAM_SIZE_MIN..=VECTOR_BEAM_SIZE_MAX).contains(&DEFAULT_VECTOR_BEAM_SIZE),
+            "default must satisfy the server's own bounds"
         );
 
         // Exported-but-blank behaves as absent (same convention as LAMBO_STORE).
@@ -2643,7 +2678,10 @@ mod conformance {
             .await
             .unwrap();
 
-        assert_eq!(beam, "128", "beam size did not reach the server");
+        assert_eq!(
+            beam, "128",
+            "explicit LAMBO_VECTOR_BEAM_SIZE did not reach the server"
+        );
         assert_ne!(
             timeout, "0",
             "adding the beam-size option dropped the STORE-2 statement_timeout \
@@ -2953,9 +2991,16 @@ mod conformance {
         // so the plan must NOT scan the anti-pattern `concepts_session_id_canonical_key_key`
         // (the T0.3-spike shape that bypassed the vector index). The plan is an ordered
         // top-k over the whole table; whether the optimizer accelerates that top-k with
-        // the vector index (`vector search`) is a cost decision that depends on
-        // deployment shape (see the standalone `vector_explain_camera_proof` gate —
-        // PENDING where the optimizer scans a small table).
+        // the vector index (`vector search`) is asserted separately by the standalone
+        // `vector_explain_camera_proof` gate.
+        //
+        // T7.4 correction (2026-08-13): this comment used to say that gate was
+        // "PENDING where the optimizer scans a small table". That was wrong on both
+        // counts — table size was never the cause. The proof failed because it asserted
+        // the spaced `vector search` against `EXPLAIN (OPT, VERBOSE)`, which spells the
+        // operator `vector-search`, and because a NON-partial vector index cannot imply
+        // the query's `embedding IS NOT NULL` predicate, forcing a FULL SCAN. With the
+        // index partial (migrations/cockroach/001_init.sql) the proof is green.
         //
         // T7.3 remediation (planner-variance hardening): EXPLAIN with a LITERAL
         // `LIMIT 5` (not a parameterized `LIMIT $2`) to match the captured T0.3
@@ -4022,20 +4067,22 @@ mod conformance {
         let store = new_store(&dsn);
         let pool = store.pool().await.unwrap();
         let probe = encode_vector(&embed(0.5)).unwrap();
-        // Byte-for-byte the shape of `VECTOR_CANDIDATES_SQL` (predicate included, bound
-        // `LIMIT $2` included) — the proof is worthless if it explains a query that
-        // production does not run.
-        let rows = sqlx::query(
-            "EXPLAIN \
-             SELECT id, session_id, embedding <-> $1::VECTOR AS dist \
-             FROM concepts WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT $2",
-        )
-        .bind(&probe)
-        .bind(5i64)
-        .fetch_all(pool)
-        .await
-        .map_err(backend)
-        .unwrap();
+        // EXPLAIN the production constant ITSELF, not a hand-copied lookalike.
+        // adve-review MINOR-4 caught the previous version claiming to be
+        // "byte-for-byte" `VECTOR_CANDIDATES_SQL` while actually dropping its
+        // `::STRING` output casts. The casts cannot change index selection, so
+        // the finding was cosmetic — but the entire value of this proof is that
+        // it explains the query production runs, so the claim has to be true by
+        // construction rather than by careful copying. Interpolating the
+        // constant also means a future edit to the query cannot silently
+        // desynchronize the camera proof from it.
+        let rows = sqlx::query(&format!("EXPLAIN {VECTOR_CANDIDATES_SQL}"))
+            .bind(&probe)
+            .bind(5i64)
+            .fetch_all(pool)
+            .await
+            .map_err(backend)
+            .unwrap();
         let plan: Vec<String> = rows
             .iter()
             .map(|r| r.try_get::<String, usize>(0).map_err(backend))

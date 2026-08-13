@@ -91,18 +91,26 @@ ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key
 -- dev-diary/evidence/20260813-130218-vector-index-predicate-finding.txt and
 -- …-131108-vector-index-camera-proof-diagnosis.txt.
 --
--- !! UPGRADING A PRE-T7.4 CLUSTER IS A ONE-TIME MANUAL STEP — READ THIS.
+-- !! UPGRADING A PRE-T7.4 CLUSTER — provision.sh handles it; read why.
 --
 -- Clusters provisioned before T7.4 carry a NON-partial index under this same
 -- canonical name, and the statement below will NOT fix them:
 -- `CREATE VECTOR INDEX IF NOT EXISTS` matches on NAME ONLY. Measured live
 -- 2026-08-13 against a legacy non-partial index: it reports `CREATE INDEX`,
 -- succeeds in ~1s, and leaves the non-partial index exactly as it was. It does
--- not error — it silently reports success. So on such a cluster, run this ONCE,
--- by hand, before provisioning (the DROP is ~3s; the rebuild is ~85-96s):
+-- not error — it silently reports success.
+--
+-- `./scripts/provision.sh` RECONCILES THIS AUTOMATICALLY (since d335130): it
+-- classifies the index as absent | partial | legacy, drops a legacy one first,
+-- and then FAILS LOUDLY if the result is not partial. No manual step is needed
+-- — just run it (the drop is ~3s, the rebuild ~85-96s):
+--
+--     ./scripts/provision.sh
+--
+-- Only if you are applying this file WITHOUT provision.sh (e.g. by hand) must
+-- you drop the legacy index yourself first:
 --
 --     DROP INDEX IF EXISTS concepts@concepts_embedding_idx;
---     ./scripts/provision.sh
 --
 -- WHY THE DROP IS NOT IN THIS FILE (this is deliberate, do not "fix" it by
 -- adding one): this file is not only applied by provision.sh — it is embedded

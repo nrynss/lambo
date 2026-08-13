@@ -1,0 +1,62 @@
+T7.4 / adve-review MAJOR-1 — ANN recall vs vector_search_beam_size
+captured: 2026-08-13  cluster: nrynss-19495 (gcp-asia-south1), db=lambo
+
+QUESTION
+  The partial vector index moved vector_candidates from an exact FULL SCAN to
+  CockroachDB's approximate (C-SPANN) search. How much recall does that cost,
+  and what beam size should Lambo default to?
+
+METHOD
+  Ground truth = exact top-k, forced with the `concepts@concepts_pkey` index
+  hint, which plans a FULL SCAN (verified by EXPLAIN) and therefore cannot be
+  served by the vector index. Candidate = the ordinary production query shape,
+  which the partial index serves as ANN. recall@k = |ANN ∩ EXACT| / k, mean over
+  25 probes drawn from the table itself.
+
+  Two datasets, 3,000 rows each, to separate geometry from method:
+   (A) uniform-random vectors — adversarial: in 1024-d, distance concentration
+       makes all pairs near-equidistant, so "true top-k" is nearly arbitrary.
+   (B) clustered unit-norm vectors (60 centers, sigma 0.15, L2-normalized) —
+       the geometry real embeddings actually have.
+
+RESULTS
+  dataset (A) uniform-random          dataset (B) clustered unit-norm
+  beam  recall@10  recall@50          beam  recall@10  recall@50
+     1      0.233      0.096             1      0.193      0.073
+     2      0.295      0.155             2      0.229      0.128
+     4      0.375      0.238             4      0.324      0.216
+     8      0.513      0.400             8      0.473      0.403
+    16      0.716      0.638            16      0.695      0.638
+    32      0.916      0.929  <- CRDB   32      0.931      0.938  <- CRDB
+    64      0.931      0.970            64      0.960      0.990
+   128      0.927      0.972           128      0.960      0.987
+   256      0.836      0.954           256      0.862      0.968
+
+FINDINGS
+  1. At CockroachDB's default beam (32), ~6-7% of true nearest neighbours are
+     missed. In Lambo this is not a latency issue: a missed neighbour is a
+     near-duplicate hybrid matching fails to merge, so the concept is silently
+     re-created and the graph ends up less connected. No error is raised.
+  2. HIGHER IS NOT MONOTONICALLY BETTER. Beam 256 scored WORSE than 64 in BOTH
+     datasets, reproducibly (recall@10 0.836 / 0.862 vs 0.931 / 0.960). "Crank
+     it up" is wrong advice. 64 is the measured knee, not the maximum.
+  3. Recall never reached 1.000 at ANY beam. This index is approximate by
+     construction; no setting makes it exact. Exactness is only available by
+     giving up index use, which spec §12.1 requires us to demonstrate.
+  4. Both geometries agree closely, so the result is not an artifact of the
+     adversarial uniform-random set.
+
+DECISION
+  DEFAULT_VECTOR_BEAM_SIZE = 64 (src/store/cockroach.rs), overridable with
+  LAMBO_VECTOR_BEAM_SIZE. recall@50 improves 0.938 -> 0.990 versus the server
+  default, at a scale where the extra work is negligible.
+
+CAVEAT
+  Both datasets are synthetic. (B) mimics embedding geometry but is not BGE-M3
+  output. 64 is an evidence-based default, not a tuned optimum. Re-measure with
+  real BGE-M3 vectors if hybrid merge quality is ever suspected.
+
+REPRODUCE
+  ./scripts/seed-vector-index.sh --count 3000     # or the clustered seeder
+  # exact:  SELECT id FROM concepts@concepts_pkey ... ORDER BY embedding <-> $probe
+  # ann:    SET vector_search_beam_size = N; SELECT id FROM concepts ... same ORDER BY

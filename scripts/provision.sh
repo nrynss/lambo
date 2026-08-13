@@ -87,16 +87,37 @@ run_sql_value() {
 # cannot be expressed in the migration at all.
 #
 # Echoes exactly one of: absent | partial | legacy
+# Matching notes (adve-review MINOR-3): the predicate is read from DDL text
+# because there is no catalog alternative — `crdb_internal` is blocked on
+# CockroachDB Cloud ("Access to crdb_internal and system is restricted") and
+# `SHOW INDEXES` exposes no partial-predicate column. So the text match is made
+# robust instead of clever:
+#   * the whole CREATE TABLE is canonicalized to ONE lowercase line with
+#     whitespace collapsed, so a predicate that wraps onto another line, or
+#     changes case, still matches;
+#   * the predicate is then looked for in a BOUNDED window immediately after
+#     this index's name, so another partial index on the same table
+#     (concepts_key_non_obs_idx has its own WHERE) cannot false-positive it.
+# Worst case if CockroachDB reformats beyond recognition: a misclassification
+# rebuilds the index once and then the final verification gate fails LOUDLY.
+# It cannot degrade into a silent full-scan cluster, which is the failure this
+# whole mechanism exists to prevent.
 vector_index_state() {
-  local create_stmt idx_line
+  local create_stmt canon after
   create_stmt="$(run_sql_value "SELECT create_statement FROM [SHOW CREATE TABLE concepts];" 2>/dev/null || true)"
-  # Inspect ONLY the line defining this index — a LIKE over the whole CREATE
-  # TABLE would false-positive off any other partial index on the table
-  # (e.g. concepts_key_non_obs_idx).
-  idx_line="$(printf '%s\n' "$create_stmt" | grep -i 'concepts_embedding_idx' || true)"
-  if [[ -z "$idx_line" ]]; then
+  # Lowercase + collapse all whitespace (newlines included) into single spaces.
+  canon="$(printf '%s' "${create_stmt,,}" | tr -s '[:space:]' ' ')"
+  if [[ "$canon" != *"concepts_embedding_idx"* ]]; then
     echo "absent"
-  elif [[ "$idx_line" == *"WHERE embedding IS NOT NULL"* ]]; then
+    return
+  fi
+  # Text following this index's name, bounded so a later index's WHERE cannot
+  # be attributed to this one. The pinned shape is
+  #   vector index concepts_embedding_idx (embedding vector_l2_ops) where embedding is not null
+  # which is ~50 chars of column spec before the predicate.
+  after="${canon#*concepts_embedding_idx}"
+  after="${after:0:120}"
+  if [[ "$after" == *"where embedding is not null"* ]]; then
     echo "partial"
   else
     echo "legacy"
@@ -231,6 +252,18 @@ fi
 
 echo "== applying base tables/indexes from $MIGRATION =="
 run_sql_file "$BASE_SQL"
+
+# adve-review NIT-7: the vector-index apply AND its verification are both
+# guarded by `-s "$VINDEX_SQL"`, so a routing bug that produced an empty vector
+# file would skip both — silently yielding exactly the full-scan cluster this
+# script exists to prevent. Assert the routing instead of trusting it: if the
+# migration declares a vector index, the splitter must have captured one.
+if grep -Eiq '^[[:space:]]*create[[:space:]]+vector[[:space:]]+index' "$MIGRATION" && [[ ! -s "$VINDEX_SQL" ]]; then
+  echo "error: $MIGRATION declares a CREATE VECTOR INDEX but the splitter routed none." >&2
+  echo "       Refusing to continue: provisioning would skip both the index and its" >&2
+  echo "       verification, leaving a cluster that silently plans a FULL SCAN." >&2
+  exit 1
+fi
 
 if [[ -s "$VINDEX_SQL" ]]; then
   # Upgrade a pre-T7.4 cluster. `CREATE VECTOR INDEX IF NOT EXISTS ... WHERE ...`

@@ -10,6 +10,80 @@
 - **Verdict:** ACCEPT with findings — no BLOCKER, 1 MAJOR (decision/measurement
   gap), 5 MINOR, 2 NIT.
 
+---
+
+## R1 remediation — 2026-08-13 — ALL FINDINGS ADDRESSED
+
+Every finding was verified against the code before being actioned; none was
+taken on faith, and none was dismissed. Status per finding:
+
+| # | Severity | Status | Resolution |
+|---|---|---|---|
+| MAJOR-1 | MAJOR | **FIXED (measured)** | Recall measured on the live cluster; `DEFAULT_VECTOR_BEAM_SIZE = 64` chosen from data. Evidence: `evidence/20260813-145209-ann-recall-vs-beam.txt` |
+| MINOR-2 | MINOR | **FIXED** | Migration header now states provision.sh auto-reconciles; manual drop retained only for the apply-by-hand path |
+| MINOR-3 | MINOR | **FIXED** | `vector_index_state()` canonicalizes (lowercase + whitespace-collapse) and bounds the predicate window |
+| MINOR-4 | MINOR | **FIXED (stronger)** | The proof now EXPLAINs the `VECTOR_CANDIDATES_SQL` constant itself, so the claim is true by construction |
+| MINOR-5 | MINOR | **FIXED** | Stale "PENDING" comment replaced with the actual T7.4 root cause |
+| NIT-6 | NIT | **ACCEPTED, not code** | Recorded as a T8.4 narration constraint — see below |
+| NIT-7 | NIT | **FIXED** | provision.sh asserts the splitter routed a vector index when the migration declares one |
+
+### MAJOR-1 — measured, not deferred
+
+The reviewer correctly identified that the exact→approximate change was
+unmeasured and that `SESSION_VECTOR_CANDIDATES_SQL` does **not** cover an
+ANN-miss (it triggers on boundary-tie/crowd-out only). Both points confirmed.
+
+Measurement run: exact ground truth forced via the `concepts@concepts_pkey`
+hint (FULL SCAN, EXPLAIN-verified), compared against the production query shape
+served by the partial index, 25 probes, two 3,000-row datasets — uniform-random
+and clustered unit-norm (real-embedding geometry).
+
+```
+beam:       1     2     4     8    16    32*    64    128    256
+recall@10  .19   .23   .32   .47   .70   .93    .96   .96    .86
+recall@50  .07   .13   .22   .40   .64   .94    .99   .99    .97
+                                        *CockroachDB default
+```
+
+1. At the server default (32), **~6-7% of true nearest neighbours are missed** —
+   i.e. near-duplicates hybrid matching silently fails to merge.
+2. **Higher is not monotonically better**: beam 256 was WORSE than 64 in *both*
+   datasets, reproducibly. This is why the default is measured rather than
+   maximised, and it invalidates "just turn it up" as guidance.
+3. **Recall never reached 1.000 at any beam.** The index is approximate by
+   construction; exactness is only available by giving up index use, which
+   spec §12.1 requires us to demonstrate. So the residual approximation is
+   **accepted for v0.1** — the reviewer's third option — but now with a number
+   attached instead of a shrug.
+
+Default raised from "unset (=32)" to **64**: recall@50 0.938 → 0.990 at a scale
+where the extra work is negligible. Caveat kept in the code and the evidence:
+both datasets are synthetic, so 64 is evidence-based, not a tuned optimum.
+
+### NIT-6 — accepted as a narration constraint, not fixed in code
+
+Correct and worth keeping. The PASSING plan reads `distribution: local`, so the
+capture demonstrates *vector indexing*, not the *distributed* half of §12.1's
+"Distributed Vector Indexing". Nothing in T7.4's scope can change that — it is a
+property of how the demo query is planned. **Carried to T8.4/P9:** either say
+"CockroachDB vector indexing" when narrating this plan, or capture a
+distributed plan separately. Do not let the video claim more than the artifact
+shows.
+
+### Reviewer accuracy note
+
+All seven findings were real. MINOR-4 was the sharpest: the "byte-for-byte"
+comment was false (the test dropped `::STRING` casts). It was cosmetic in
+effect — casts cannot change index selection — but the entire value of a camera
+proof is that it explains the query production runs, so it was fixed by
+construction rather than by rewording.
+
+**Verification after remediation:** live suite 6/6 including
+`vector_explain_camera_proof` on an unseeded, migration-only cluster;
+`cargo test` 528 lib + 5 integration + 1 doc; fmt clean; clippy clean under
+`store-cockroach,store-memory,fixtures`; provision.sh re-exercised. Both seed
+sessions removed — the cluster is back to demo-shaped data (1008 concepts).
+
 ## Verified independently
 
 - `cargo check` — clean.
