@@ -3,8 +3,8 @@
 //! Correctness notes (adversarial review):
 //! - Mutations in a batch are applied **in order** (spec §2.4).
 //! - Deletes must carry enough context: we resolve the session by scanning for the id.
-//! - Structural queries use the **caller's clock** (`Utc::now`) for age filters — tests that
-//!   need determinism should use `min_edge_age`/`min_age` of zero or plant aged timestamps.
+//! - Structural queries take the age cutoff's anchor from the **caller** (`now`), never a
+//!   wall clock of their own — one canonization cycle must read exactly one clock.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +21,30 @@ use crate::types::{
 #[derive(Default)]
 struct SessionData {
     snapshot: GraphSnapshot,
+    /// Ids already present in `snapshot.canonization_events` (F11).
+    ///
+    /// The dedupe contract (`ON CONFLICT (id) DO NOTHING`) needs a membership
+    /// test on every recorded transition, and the audit trail is append-only
+    /// and unbounded by design (spec §10 wants the whole history). Scanning
+    /// the vector per event made that O(n²) over a session's lifetime.
+    recorded_events: HashSet<NodeId>,
+}
+
+impl SessionData {
+    fn new(snapshot: GraphSnapshot) -> Self {
+        let recorded_events = snapshot.canonization_events.iter().map(|e| e.id).collect();
+        Self {
+            snapshot,
+            recorded_events,
+        }
+    }
+
+    fn empty(session: &SessionId) -> Self {
+        Self::new(GraphSnapshot {
+            session_id: session.clone(),
+            ..Default::default()
+        })
+    }
 }
 
 /// Complete in-memory store. Structural queries computed naively (correct, not fast).
@@ -38,12 +62,8 @@ impl MemoryStore {
         map: &'a mut HashMap<String, SessionData>,
         session: &SessionId,
     ) -> &'a mut SessionData {
-        map.entry(session.0.clone()).or_insert_with(|| SessionData {
-            snapshot: GraphSnapshot {
-                session_id: session.clone(),
-                ..Default::default()
-            },
-        })
+        map.entry(session.0.clone())
+            .or_insert_with(|| SessionData::empty(session))
     }
 
     /// Seed a prebuilt snapshot directly (used by `fixtures` to load committed graphs).
@@ -52,7 +72,7 @@ impl MemoryStore {
         let sid = snapshot.session_id.clone();
         self.inner
             .write()
-            .insert(sid.0.clone(), SessionData { snapshot });
+            .insert(sid.0.clone(), SessionData::new(snapshot));
         Ok(())
     }
 
@@ -83,7 +103,8 @@ impl MemoryStore {
         None
     }
 
-    fn apply_mutation(snap: &mut GraphSnapshot, m: &Mutation) -> Result<(), StoreError> {
+    fn apply_mutation(data: &mut SessionData, m: &Mutation) -> Result<(), StoreError> {
+        let snap = &mut data.snapshot;
         match m {
             Mutation::UpsertNode { node } => {
                 // Session consistency: ignore mismatches by forcing snapshot session.
@@ -152,6 +173,17 @@ impl MemoryStore {
                         event.session_id, snap.session_id
                     )));
                 }
+                // F12 — replay is a NO-OP, not a re-apply. The evaluator
+                // dual-writes (`record_canonization` now, flush of the same
+                // transition later), and the two are not ordered against each
+                // other: a lagging flush of hop 1 landing after hop 2's
+                // immediate write would otherwise *regress* the durable
+                // status. Once the event id is recorded, its effect is
+                // already in the row; the same guard is the `ON CONFLICT (id)
+                // DO NOTHING` dedupe the SQL adapters use.
+                if data.recorded_events.contains(&event.id) {
+                    return Ok(());
+                }
                 if let Some(c) = snap.concepts.iter_mut().find(|c| c.id == event.node_id) {
                     c.canonization_status = event.to_status;
                     c.blast_radius = event.blast_radius;
@@ -167,16 +199,8 @@ impl MemoryStore {
                         event.node_id
                     )));
                 }
-                // Same contract as SQL `ON CONFLICT (id) DO NOTHING`: a
-                // dual-write (record_canonization + later flush of the
-                // write-behind log) must not duplicate the demo artifact.
-                if !snap
-                    .canonization_events
-                    .iter()
-                    .any(|existing| existing.id == event.id)
-                {
-                    snap.canonization_events.push(event.clone());
-                }
+                snap.canonization_events.push(event.clone());
+                data.recorded_events.insert(event.id);
             }
             // XP-8: session-level metadata reaches the store through the
             // mutation path, not only `seed`. Same session-consistency gate as
@@ -247,13 +271,9 @@ impl GraphStore for MemoryStore {
             let data = match map.get(&sid.0) {
                 Some(d) => SessionData {
                     snapshot: d.snapshot.clone(),
+                    recorded_events: d.recorded_events.clone(),
                 },
-                None => SessionData {
-                    snapshot: GraphSnapshot {
-                        session_id: sid.clone(),
-                        ..Default::default()
-                    },
-                },
+                None => SessionData::empty(sid),
             };
             work.insert(sid.0.clone(), data);
         }
@@ -278,7 +298,7 @@ impl GraphStore for MemoryStore {
                 },
             };
             let data = work.get_mut(&sid.0).expect("affected session present");
-            Self::apply_mutation(&mut data.snapshot, m)?;
+            Self::apply_mutation(data, m)?;
         }
 
         // Commit: swap the working copies in on full success.
@@ -491,7 +511,7 @@ impl GraphStore for MemoryStore {
         let mut map = self.inner.write();
         let data = Self::ensure_session(&mut map, &event.session_id);
         Self::apply_mutation(
-            &mut data.snapshot,
+            data,
             &Mutation::CanonizationTransition {
                 event: event.clone(),
             },
@@ -568,6 +588,83 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.concepts[0].content, "user schema");
+    }
+
+    /// F12: the canonization dual-write is unordered — `record_canonization`
+    /// happens immediately, the same transition flushes later from the
+    /// write-behind log. A lagging replay of hop 1 arriving after hop 2's
+    /// immediate write must NOT regress the durable status back to Candidate:
+    /// a crash before hop 2's own flush would then reload a status the audit
+    /// has already moved past, and the evaluator would re-promote under a
+    /// fresh event id — the same hop twice in the demo's audit table.
+    #[tokio::test]
+    async fn replaying_an_older_transition_does_not_regress_the_status() {
+        let store = MemoryStore::new();
+        let (sid, i1, c1, _) = sample_session();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    },
+                    plant_concept(&sid, c1, i1, "user schema", ts),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let hop = |from, to, at| CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: from,
+            to_status: to,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: at,
+        };
+        let hop1 = hop(CanonizationStatus::None, CanonizationStatus::Candidate, ts);
+        let hop2 = hop(
+            CanonizationStatus::Candidate,
+            CanonizationStatus::Venerable,
+            ts + chrono::Duration::seconds(60),
+        );
+        store.record_canonization(&hop1).await.unwrap();
+        store.record_canonization(&hop2).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().concepts[0].canonization_status,
+            CanonizationStatus::Venerable
+        );
+
+        // The write-behind log now replays hop 1 — already recorded.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::CanonizationTransition {
+                    event: hop1.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable,
+            "a replayed hop must not roll the durable status back"
+        );
+        assert_eq!(
+            snap.canonization_events.len(),
+            2,
+            "and must not duplicate the audit row"
+        );
     }
 
     #[tokio::test]

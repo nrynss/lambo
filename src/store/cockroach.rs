@@ -1034,11 +1034,13 @@ async fn upsert_edge(tx: &mut sqlx::PgConnection, e: &Edge) -> Result<(), StoreE
     Ok(())
 }
 
+/// Append the audit row; `false` when the id was already there (the
+/// `ON CONFLICT (id) DO NOTHING` dedupe fired).
 async fn insert_canonization_event(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
-) -> Result<(), StoreError> {
-    sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
+) -> Result<bool, StoreError> {
+    let res = sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
         .bind(ev.id.0)
         .bind(&ev.session_id.0)
         .bind(ev.node_id.0)
@@ -1050,15 +1052,30 @@ async fn insert_canonization_event(
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("insert canonization event: {m}")))?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
-/// Apply a canonization transition: update the concept row, then append the audit event.
-/// Missing concept → `NotFound` (MemoryStore parity).
+/// Apply a canonization transition: append the audit event, then update the
+/// concept row. Missing concept → `NotFound` (MemoryStore parity).
+///
+/// **F12 — the audit row is the idempotency key.** The evaluator dual-writes
+/// (`record_canonization` immediately, the same transition again when the
+/// write-behind log flushes), and the two are not ordered against each other:
+/// a lagging flush of hop 1 landing after hop 2's immediate write would
+/// otherwise *regress* the durable status, and a crash before hop 2's own
+/// flush would leave the reload showing a status the audit already moved past
+/// — after which the evaluator re-promotes under a fresh event id and the same
+/// hop appears twice in the on-screen audit. So the INSERT goes first: if its
+/// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
+/// the row and the UPDATE is skipped. Both statements share the caller's
+/// transaction, so the ordering swap costs nothing on the first write.
 async fn apply_canonization(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
 ) -> Result<(), StoreError> {
+    if !insert_canonization_event(tx, ev).await? {
+        return Ok(());
+    }
     let res = sqlx::query(UPDATE_CONCEPT_STATUS_SQL)
         .bind(ev.node_id.0)
         .bind(canonization_status_sql(ev.to_status))
@@ -1074,7 +1091,7 @@ async fn apply_canonization(
             ev.node_id
         )));
     }
-    insert_canonization_event(tx, ev).await
+    Ok(())
 }
 
 #[async_trait]

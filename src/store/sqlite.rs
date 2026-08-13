@@ -1118,13 +1118,48 @@ async fn set_root_goal(
 }
 
 /// Shared by the `CanonizationTransition` mutation and `record_canonization`:
-/// update the concept's status/blast_radius (NotFound if absent, like
-/// MemoryStore) and append the event row — the demo's on-screen artifact.
+/// append the event row — the demo's on-screen artifact — then update the
+/// concept's status/blast_radius (NotFound if absent, like MemoryStore).
+///
+/// **F12 — the audit row is the idempotency key.** The evaluator dual-writes
+/// (`record_canonization` immediately, the same transition again when the
+/// write-behind log flushes), and the two are not ordered against each other:
+/// a lagging flush of hop 1 landing after hop 2's immediate write would
+/// otherwise *regress* the durable status, and a crash before hop 2's own
+/// flush would leave the reload showing a status the audit already moved past
+/// — after which the evaluator re-promotes under a fresh event id and the same
+/// hop appears twice on screen. So the INSERT goes first: if its
+/// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
+/// the row and the UPDATE is skipped. Both statements share the caller's
+/// transaction, so the ordering swap costs nothing on the first write.
 async fn apply_canonization_transition(
     tx: &mut sqlx::SqliteConnection,
     event: &CanonizationEvent,
 ) -> Result<(), StoreError> {
     let to_status = enum_to_text(&event.to_status, "to_status")?;
+    let from_status = enum_to_text(&event.from_status, "from_status")?;
+    let appended = sqlx::query(
+        "INSERT INTO canonization_events (\
+             id, session_id, node_id, from_status, to_status, blast_radius, \
+             last_demotion_time, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(event.id.0.to_string())
+    .bind(&event.session_id.0)
+    .bind(event.node_id.0.to_string())
+    .bind(from_status)
+    .bind(&to_status)
+    .bind(event.blast_radius)
+    .bind(event.last_demotion_time.map(ts_to_text))
+    .bind(ts_to_text(event.occurred_at))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
+    if appended.rows_affected() == 0 {
+        return Ok(());
+    }
+
     // COH-3: last_demotion_time = COALESCE(?, last_demotion_time) — a demotion
     // event (Some) stamps the concept; non-demotion events (None) leave a
     // previously demoted value untouched (spec §10).
@@ -1147,26 +1182,6 @@ async fn apply_canonization_transition(
             event.node_id
         )));
     }
-
-    let from_status = enum_to_text(&event.from_status, "from_status")?;
-    sqlx::query(
-        "INSERT INTO canonization_events (\
-             id, session_id, node_id, from_status, to_status, blast_radius, \
-             last_demotion_time, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(event.id.0.to_string())
-    .bind(&event.session_id.0)
-    .bind(event.node_id.0.to_string())
-    .bind(from_status)
-    .bind(to_status)
-    .bind(event.blast_radius)
-    .bind(event.last_demotion_time.map(ts_to_text))
-    .bind(ts_to_text(event.occurred_at))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
     Ok(())
 }
 
@@ -2737,6 +2752,24 @@ mod tests {
         };
         let err = store.record_canonization(&ghost).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+
+        // F12: the write-behind log now replays ev1, which was already
+        // recorded. The replay must be a no-op — not a status rollback to
+        // Candidate, and not a duplicate audit row.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable,
+            "a replayed hop must not roll the durable status back (F12)"
+        );
+        assert_eq!(snap.concepts[0].blast_radius, Some(4));
+        assert_eq!(snap.canonization_events.len(), 2);
     }
 
     /// COH-3 acceptance: a demotion event (Canonical -> None) carries

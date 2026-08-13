@@ -1098,6 +1098,133 @@ mod tests {
             assert_eq!(ev.stage3_cursor(), Some(nid(45)));
         }
 
+        /// `MemoryStore` whose `record_canonization` always fails, so the
+        /// cycle's durable-audit phase can be exercised (F19: previously
+        /// unasserted). Everything else delegates.
+        struct RecordFails(MemoryStore);
+
+        #[async_trait::async_trait]
+        impl GraphStore for RecordFails {
+            async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+                self.0.init_schema().await
+            }
+            fn capabilities(&self) -> crate::store::Capabilities {
+                self.0.capabilities()
+            }
+            async fn flush(&self, batch: &MutationBatch) -> Result<(), crate::types::StoreError> {
+                self.0.flush(batch).await
+            }
+            async fn load_session(
+                &self,
+                session: &SessionId,
+            ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+                self.0.load_session(session).await
+            }
+            async fn keyword_candidates(
+                &self,
+                session: &SessionId,
+                tokens: &[String],
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
+                self.0.keyword_candidates(session, tokens, limit).await
+            }
+            async fn vector_candidates(
+                &self,
+                session: &SessionId,
+                embedding: &[f32],
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
+                self.0.vector_candidates(session, embedding, limit).await
+            }
+            async fn blast_radius(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_edge_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<u64, crate::types::StoreError> {
+                self.0.blast_radius(session, node, min_edge_age, now).await
+            }
+            async fn interaction_span(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+                self.0.interaction_span(session, node, min_age, now).await
+            }
+            async fn record_canonization(
+                &self,
+                _event: &CanonizationEvent,
+            ) -> Result<(), crate::types::StoreError> {
+                Err(StoreError::Backend("record_canonization is down".into()))
+            }
+        }
+
+        /// F3: the graph apply is the commit point. A `record_canonization`
+        /// failure mid-cycle must not lose the `DaemonEvent::Canonized` (the
+        /// old order emitted only *after* the durable write, so a store hiccup
+        /// dropped the event forever — the flush replay re-records the row but
+        /// publishes nothing), and must not discard the `EvalOutcome` naming
+        /// the hops the graph has already committed.
+        ///
+        /// Realistic trigger: `NotFound` for a concept the flush loop has not
+        /// persisted yet — the graph runs ahead of the store by one flush
+        /// interval by design.
+        #[tokio::test]
+        async fn record_failure_keeps_the_emitted_event_and_the_partial_outcome() {
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+            for id in 1..=20u64 {
+                g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
+                    .unwrap();
+            }
+            let store = RecordFails(store_from_graph(&g).await);
+            let g = RwLock::new(g);
+            let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
+            pairs.push((20, 1.0));
+            let (tx, mut rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let err = eval_cycle(&mut ev, &g, &store, &table(&pairs), &tx, &params(), ts())
+                .await
+                .unwrap_err();
+            assert!(
+                err.source
+                    .to_string()
+                    .contains("record_canonization is down"),
+                "the store error must surface: {err}"
+            );
+            assert_eq!(
+                err.outcome
+                    .transitions()
+                    .map(|e| (e.node_id, e.to_status))
+                    .collect::<Vec<_>>(),
+                vec![(nid(20), CanonizationStatus::Candidate)],
+                "the partial outcome must name the hop the graph committed"
+            );
+            assert_eq!(
+                status_of(&g.read(), nid(20)),
+                CanonizationStatus::Candidate,
+                "the graph apply is the commit point; it stands"
+            );
+            assert_eq!(
+                g.read().canonization_events().len(),
+                1,
+                "the in-graph audit carries the hop"
+            );
+            let emitted = drain_canonized(&mut rx);
+            assert_eq!(
+                emitted.len(),
+                1,
+                "the Canonized event must survive a failed durable write"
+            );
+            assert_eq!(emitted[0].node_id, nid(20));
+            // And the write-behind log still carries it to the store later.
+            assert!(!g.write().drain_log().is_empty());
+        }
+
         /// Graph carrying only `hubs` (as Venerable) plus the seed
         /// interaction — blast radius comes from the store, so the evaluated
         /// graph needs no dependents.
