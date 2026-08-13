@@ -100,6 +100,21 @@ use crate::types::{
 // Value types
 // ---------------------------------------------------------------------------
 
+/// Bound on [`Memory::retract`]'s durable blast-radius query (R2-5).
+///
+/// It was the one store call on a user-facing path with no bound at all, and
+/// the writers gate turned that into `close()`'s problem: `retract` holds a
+/// read permit across this await, so `close()`'s step 0 waited on it — an
+/// unresponsive backend made shutdown unbounded, defeating the point of the
+/// `FLUSH_ATTEMPT_TIMEOUT` bound on step 4.
+///
+/// **The same 30s as [`hybrid::HYBRID_IO_TIMEOUT`]**, and defined from it so
+/// there is one number: that constant bounds exactly this shape — the store I/O
+/// of a `&self` write method that holds the gate — and `retract` earning its own
+/// value would only invite the two to drift. Named for its own site because the
+/// hybrid *derive* path is not the caller.
+const RETRACT_IO_TIMEOUT: Duration = hybrid::HYBRID_IO_TIMEOUT;
+
 /// Whether [`Memory::retract`] is allowed to mutate (spec §6.1, §13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DryRun {
@@ -883,6 +898,19 @@ impl Memory {
     /// the measurement, not as of the removal (an edge added in between is
     /// destroyed but uncounted). Report accuracy only — the removal itself is
     /// atomic under one write lock.
+    ///
+    /// ## The durable-radius query is bounded (R2-5)
+    ///
+    /// That store call gets [`RETRACT_IO_TIMEOUT`], and a timeout **fails the
+    /// whole retraction** — nothing is removed, since the await precedes every
+    /// mutation. Note the asymmetry with the arm above it, which is deliberate:
+    /// a store *error* is an answer, and the commonest one ("no such session
+    /// yet") is what a never-flushed session gives, so it degrades to a warning
+    /// and an in-RAM-only count. A store that never answers is a different
+    /// animal — the report's durable half cannot be honestly filled in, and
+    /// `retract` holds the writers gate across this await, so an unbounded wait
+    /// here is also an unbounded `close()` (its step 0 waits for exactly this
+    /// permit).
     pub async fn retract(&self, target: &str, dry_run: DryRun) -> Result<ImpactReport, LamboError> {
         // The gate spans the store call below, so a `close()` racing a live
         // retraction waits for it rather than draining past its removal —
@@ -913,21 +941,36 @@ impl Memory {
             )
         };
 
-        // Durable radius — no lock held (spec §6.4).
+        // Durable radius — no lock held (spec §6.4), and bounded (R2-5).
         let mut warnings = Vec::new();
-        let durable_blast_radius = match self
-            .store
-            .blast_radius(&self.session, node, Duration::ZERO, Utc::now())
-            .await
-        {
-            Ok(count) => Some(count),
-            Err(err) => {
+        let durable = tokio::time::timeout(
+            RETRACT_IO_TIMEOUT,
+            self.store
+                .blast_radius(&self.session, node, Duration::ZERO, Utc::now()),
+        )
+        .await;
+        let durable_blast_radius = match durable {
+            Ok(Ok(count)) => Some(count),
+            Ok(Err(err)) => {
                 // Not fatal: the graph is the primary tier and already answered.
                 // A never-flushed session legitimately lands here.
                 warnings.push(format!(
                     "durable blast radius unavailable ({err}); reporting the in-RAM count only"
                 ));
                 None
+            }
+            Err(_elapsed) => {
+                // Fatal, unlike the error arm above — see the rustdoc: an error
+                // is an answer ("no such session yet"), a hang is not, and this
+                // one holds the writers gate open behind it.
+                //
+                // Nothing has been mutated at this point: every graph write is
+                // below, so the retraction is refused whole rather than left
+                // half-done.
+                return Err(LamboError::Store(StoreError::Backend(format!(
+                    "retract: durable blast-radius query timed out after {RETRACT_IO_TIMEOUT:?}; \
+                     nothing was removed"
+                ))));
             }
         };
 
@@ -1203,9 +1246,18 @@ impl Memory {
     ///
     /// Bounded by the flush loop's current cycle (worst case
     /// `FLUSH_ATTEMPT_TIMEOUT × (retries + 1)`), plus the slowest write in
-    /// flight at step 0 (a caller-supplied store or embedder can make that
-    /// arbitrarily long — the gate waits for it rather than losing it), plus
+    /// flight at step 0 — the gate waits for it rather than losing it — plus
     /// one `FLUSH_ATTEMPT_TIMEOUT` for step 4.
+    ///
+    /// Step 0 is itself bounded now (R2-5): every store call a gated write can
+    /// be parked in has a timeout — [`RETRACT_IO_TIMEOUT`] for `retract`'s
+    /// durable radius, [`hybrid::HYBRID_IO_TIMEOUT`] over hybrid `derive`'s
+    /// whole embed/query phase. A caller-supplied **embedder** is the one
+    /// remaining way to stretch it: `Embedder` carries no bound of its own, so
+    /// an adapter that never returns still parks a permit indefinitely. An
+    /// owner that needs a hard wall-clock cap on `close()` should wrap it in a
+    /// `timeout` — which is safe: a dropped `close()` leaves the tail on the
+    /// log for the retry (see *Cancellation*).
     ///
     /// ## When it does not flush
     ///
@@ -3237,6 +3289,61 @@ mod tests {
         assert!(mem.graph().read().node(report.target).is_none());
 
         mem.close().await.unwrap();
+    }
+
+    /// R2-5: `retract`'s durable-radius query was the only store call on a
+    /// user-facing path with no bound, and the writers gate made it `close()`'s
+    /// problem — `retract` holds its permit across that await, so step 0 waited
+    /// on the hung backend for as long as it cared to hang.
+    ///
+    /// Bounded, it fails at [`RETRACT_IO_TIMEOUT`] having mutated nothing (the
+    /// await precedes every graph write), and the session still closes.
+    #[tokio::test(start_paused = true)]
+    async fn retract_bounds_a_hanging_durable_radius_query() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        // Parked and never released: the backend that never answers.
+        let parking = Arc::new(ParkingStore::new(inner, ParkPoint::BlastRadius));
+        let store: Arc<dyn GraphStore> = parking.clone();
+        let mem = memory_on(store, "retract-hang").await;
+
+        mem.derive(
+            &[("stale dependency", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+        let before = mem.stats();
+
+        // The outer bound is the test's safety net, an order of magnitude past
+        // the real one: an unbounded `retract` fails this assertion instead of
+        // wedging the suite on a store that never answers.
+        let started = tokio::time::Instant::now();
+        let err = tokio::time::timeout(
+            RETRACT_IO_TIMEOUT * 10,
+            mem.retract("stale dependency", DryRun::No),
+        )
+        .await
+        .expect("retract must bound its own durable-radius query")
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() >= RETRACT_IO_TIMEOUT,
+            "the bound must be the timeout, not something shorter"
+        );
+
+        // Nothing half-done: the removal is below the await, so a refused
+        // retraction leaves the node, its edges and its index posting.
+        let after = mem.stats();
+        assert_eq!(after.node_count, before.node_count);
+        assert_eq!(after.edge_count, before.edge_count);
+        assert_eq!(after.epoch, before.epoch, "no mutation was logged");
+        assert!(!mem.index().read().search("stale", 10).is_empty());
+
+        // ...and the writers gate is free again, so shutdown is bounded too.
+        tokio::time::timeout(Duration::from_secs(60), mem.close())
+            .await
+            .expect("close() must not wait on the hung query")
+            .expect("close");
     }
 
     #[tokio::test]
