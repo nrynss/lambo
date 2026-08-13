@@ -976,6 +976,12 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     // valid target (bare ON CONFLICT errors); legal duplicate Observation keys
     // (demote) never conflict with it, and a genuine duplicate non-Observation
     // key surfaces as an error (the graph tier already forbids it in RAM).
+    //
+    // R2-1: `canonization_status` / `blast_radius` / `last_demotion_time` are
+    // in the INSERT column list (a brand-new row must carry them) but
+    // deliberately **absent from the DO UPDATE SET list** — on an existing row
+    // the canonization path is their only writer. Rationale on
+    // `Mutation::UpsertNode`.
     let concept_type = enum_to_text(&c.concept_type, "concept_type")?;
     let status = enum_to_text(&c.canonization_status, "canonization_status")?;
     // CON-8: the embedding is written for flush→load round-trip parity. Same
@@ -1005,9 +1011,6 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
              access_count = excluded.access_count, \
              last_accessed = excluded.last_accessed, \
              gc_survived = excluded.gc_survived, \
-             canonization_status = excluded.canonization_status, \
-             blast_radius = excluded.blast_radius, \
-             last_demotion_time = excluded.last_demotion_time, \
              embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id",
     )
@@ -1132,6 +1135,13 @@ async fn set_root_goal(
 /// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
 /// the row and the UPDATE is skipped. Both statements share the caller's
 /// transaction, so the ordering swap costs nothing on the first write.
+///
+/// **R2-1 — what makes "already in the row" true.** Skipping the UPDATE is
+/// only sound while nothing else writes those three columns. `upsert_concept`
+/// used to, from a possibly stale `Mutation::UpsertNode` snapshot, so a batch
+/// shaped `[UpsertNode(stale), CanonizationTransition(already recorded)]` left
+/// the row regressed *and* the repair skipped. It no longer does — see
+/// `upsert_concept` and `Mutation::UpsertNode`.
 async fn apply_canonization_transition(
     tx: &mut sqlx::SqliteConnection,
     event: &CanonizationEvent,
@@ -2841,6 +2851,167 @@ mod tests {
         );
         assert_eq!(snap.canonization_events.len(), 2);
         assert_eq!(snap.canonization_events[1], promo);
+    }
+
+    /// Re-stamp a planted `UpsertNode` with a **stale** canonization snapshot
+    /// and a bumped `gc_survived` — exactly the shape T4.5's
+    /// `bump_gc_survived` appends: the concept as it stood when the mutation
+    /// was queued, not as it stands now (R2-1).
+    fn with_stale_canonization(
+        m: Mutation,
+        status: CanonizationStatus,
+        blast: Option<i32>,
+        last_demotion_time: Option<DateTime<Utc>>,
+    ) -> Mutation {
+        match m {
+            Mutation::UpsertNode {
+                node: NodeKind::Concept(mut c),
+            } => {
+                c.canonization_status = status;
+                c.blast_radius = blast;
+                c.last_demotion_time = last_demotion_time;
+                c.gc_survived += 1;
+                Mutation::UpsertNode {
+                    node: NodeKind::Concept(c),
+                }
+            }
+            other => panic!("expected a concept upsert, got {other:?}"),
+        }
+    }
+
+    /// R2-1 on the durable tier: a stale `UpsertNode` flushed **ahead of** an
+    /// already-recorded transition must not regress the concept row.
+    ///
+    /// `apply_canonization_transition` returns before the UPDATE when its
+    /// audit INSERT dedupes ("the effect is already in the row"). That premise
+    /// only holds while the canonization path owns the three columns —
+    /// `upsert_concept`'s `ON CONFLICT` list used to write them from a
+    /// snapshot queued before the hop, so this batch left the row wrong with
+    /// no repair. `gc_survived` still lands: the fix is column ownership, not
+    /// a blanket skip.
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("r2-1-status");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+            })
+            .await
+            .unwrap();
+
+        let hop = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts,
+        };
+        store.record_canonization(&hop).await.unwrap();
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::None, None, None),
+                    Mutation::CanonizationTransition { event: hop },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Candidate,
+            "a stale upsert must not take a recorded hop back out of the row"
+        );
+        assert_eq!(
+            snap.concepts[0].gc_survived, 1,
+            "the upsert's own columns must still land — only the canonization \
+             columns are excluded"
+        );
+        assert_eq!(snap.canonization_events.len(), 1, "no duplicate audit row");
+    }
+
+    /// R2-1, demotion variant — the worse half. The stale snapshot carries
+    /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
+    /// node used to reload `Canonical` with the re-promotion cooldown erased
+    /// (COH-3, "cooldown survives restart").
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("r2-1-cooldown");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_canonization(&CanonizationEvent {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                node_id: c1,
+                from_status: CanonizationStatus::Venerable,
+                to_status: CanonizationStatus::Canonical,
+                blast_radius: Some(8),
+                last_demotion_time: None,
+                occurred_at: ts,
+            })
+            .await
+            .unwrap();
+
+        let demote_at = ts + chrono::Duration::minutes(5);
+        let demote = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(demote_at),
+            occurred_at: demote_at,
+        };
+        store.record_canonization(&demote).await.unwrap();
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::Canonical, Some(8), None),
+                    Mutation::CanonizationTransition { event: demote },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::None,
+            "a demoted node must not reload as Canonical"
+        );
+        assert_eq!(snap.concepts[0].blast_radius, None);
+        assert_eq!(
+            snap.concepts[0].last_demotion_time,
+            Some(demote_at),
+            "the re-promotion cooldown must survive the stale upsert"
+        );
     }
 
     /// Acceptance: ISO-8601 timestamps use the FIXED 24-char ms format and

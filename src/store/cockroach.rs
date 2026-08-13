@@ -167,6 +167,17 @@ ON CONFLICT (id) DO UPDATE SET
 
 /// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
 /// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable.
+///
+/// **R2-1 — canonization columns are insert-only here.**
+/// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
+/// INSERT column list (a brand-new row must carry them) but deliberately
+/// **absent from the `DO UPDATE SET` list**: on an existing row the
+/// canonization path (`UPDATE_CONCEPT_STATUS_SQL`) is their only writer.
+/// A `Mutation::UpsertNode` carries a snapshot of the concept taken when it
+/// was appended — a GC `bump_gc_survived` from before a hop would otherwise
+/// overwrite the hop's effect from `EXCLUDED`, and the transition replaying
+/// behind it in the same batch is a no-op by design (its audit row is already
+/// recorded), so nothing repairs it. Full rationale on `Mutation::UpsertNode`.
 const UPSERT_CONCEPT_SQL: &str = r#"
 INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
@@ -185,9 +196,6 @@ ON CONFLICT (id) DO UPDATE SET
     access_count = EXCLUDED.access_count,
     last_accessed = EXCLUDED.last_accessed,
     gc_survived = EXCLUDED.gc_survived,
-    canonization_status = EXCLUDED.canonization_status,
-    blast_radius = EXCLUDED.blast_radius,
-    last_demotion_time = EXCLUDED.last_demotion_time,
     embedding = EXCLUDED.embedding,
     chunk_group_id = EXCLUDED.chunk_group_id
 "#;
@@ -1069,6 +1077,14 @@ async fn insert_canonization_event(
 /// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
 /// the row and the UPDATE is skipped. Both statements share the caller's
 /// transaction, so the ordering swap costs nothing on the first write.
+///
+/// **R2-1 — what makes "already in the row" true.** Skipping the UPDATE is
+/// only sound while nothing else writes those three columns.
+/// `UPSERT_CONCEPT_SQL` used to, from a possibly stale
+/// `Mutation::UpsertNode` snapshot, so a batch shaped
+/// `[UpsertNode(stale), CanonizationTransition(already recorded)]` left the
+/// row regressed *and* the repair skipped. It no longer does — see
+/// `UPSERT_CONCEPT_SQL` and `Mutation::UpsertNode`.
 async fn apply_canonization(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
@@ -1617,6 +1633,38 @@ mod tests {
         assert!(UPSERT_CONCEPT_SQL.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
         // Edge conflict targets the natural key; id is replaceable on conflict.
         assert!(UPSERT_EDGE_SQL.contains("ON CONFLICT (source, target, edge_type)"));
+    }
+
+    /// R2-1 (no live cluster: SQL text is the contract). The three
+    /// canonization columns are INSERT-only — present in the column list so a
+    /// brand-new row carries them, absent from `DO UPDATE SET` so a stale
+    /// `Mutation::UpsertNode` snapshot cannot take an already-recorded hop
+    /// back out of the row (or erase a demotion cooldown). `gc_survived`,
+    /// which shares the same appenders, must still be updated: the property
+    /// is column ownership, not a blanket skip.
+    #[test]
+    fn concept_upsert_does_not_write_the_canonization_columns_on_conflict() {
+        let (insert, on_conflict) = UPSERT_CONCEPT_SQL
+            .split_once("ON CONFLICT")
+            .expect("the concept upsert has a conflict clause");
+        for col in ["canonization_status", "blast_radius", "last_demotion_time"] {
+            assert!(
+                insert.contains(col),
+                "{col} must stay in the INSERT column list (new rows carry it)"
+            );
+            assert!(
+                !on_conflict.contains(col),
+                "{col} is written only by the canonization path (R2-1)"
+            );
+        }
+        assert!(
+            UPSERT_CONCEPT_SQL.contains("gc_survived = EXCLUDED.gc_survived"),
+            "the upsert's own columns must still update on conflict"
+        );
+        // The canonization path is that single writer.
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("canonization_status"));
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("blast_radius"));
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("last_demotion_time"));
     }
 
     #[test]
