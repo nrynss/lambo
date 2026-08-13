@@ -76,7 +76,11 @@ const POLL_QUANTUM: Duration = Duration::from_millis(100);
 /// retry path (same as any `Err`), so the loop still retries → retains →
 /// degrades as designed. Mirrors the F2 `LOAD_SESSION_TIMEOUT` (load.rs) —
 /// same 30s value, same naming convention.
-const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// `pub(crate)`: `Memory::close`'s hand-rolled final flush (COH-6 step 4) is
+/// one more attempt against the same store and bounds itself with the same
+/// constant — one value, one behaviour to reason about (T81-2).
+pub(crate) const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff base for flush retries; doubles per retry.
 const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Cap on a single backoff sleep (retries are bounded by `FlushParams::retries`

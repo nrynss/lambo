@@ -18,6 +18,26 @@
 //! GC uses — **graph → index** (`daemon::run_loop`; taking them the other way
 //! around would deadlock against a concurrent GC sync).
 //!
+//! ## The writers gate (COH-6 clause 14)
+//!
+//! `close()` stops the three background producers before it drains the log —
+//! but the surface's **own** writers run on caller tasks it does not own, and
+//! `derive` / `retract` cross `.await` points. Without a barrier a write that
+//! passed `ensure_open` before the latch could append to the graph log *after*
+//! the final drain: acknowledged to its caller, durable nowhere, and (for a
+//! retraction) resurrected on the next attach.
+//!
+//! So every mutating method holds a **read permit** on [`Memory::writers`] for
+//! its whole body, awaits included, and re-checks `closed` after acquiring it;
+//! [`Memory::close`] latches `closed` and then takes the **write** side before
+//! it stops anything. The two orders are the only two outcomes: an in-flight
+//! write finishes and lands in the final batch, or a late write is refused with
+//! the closed error. Nothing is acknowledged and lost.
+//!
+//! Read-only methods (`recall`, `stats`, `canonical_memories`, `events`) do
+//! **not** take the gate — a long recall must not delay shutdown, and they are
+//! refused after close by `ensure_open` as before.
+//!
 //! ## Inverted-index mirroring (the contract at `src/graph/mod.rs`)
 //!
 //! The graph is index-free by design and **the session owner MUST mirror every
@@ -47,7 +67,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex as PlMutex, RwLock};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock as AsyncRwLock, RwLockReadGuard as AsyncRwLockReadGuard};
 use tokio::task::JoinHandle;
 
 use crate::canon::CanonizationTask;
@@ -64,13 +84,15 @@ use crate::graph::{hybrid, Graph};
 use crate::recall::cache::RecallCache;
 use crate::recall::format;
 use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
-use crate::store::flush::{FlushParams, FlushTask};
+use crate::store::flush::{
+    panic_message, CatchUnwindPoll, FlushParams, FlushTask, FLUSH_ATTEMPT_TIMEOUT,
+};
 use crate::store::load::load_session_async;
 use crate::store::{Capabilities, GraphStore};
 use crate::types::{
     AgentId, CanonizationStatus, Concept, ConceptType, DaemonEvent, EmbeddingContract, Interaction,
-    LamboError, MatchStrategy, Node, NodeId, RecallQuery, RecallResult, Reservation, SessionId,
-    StoreError,
+    LamboError, MatchStrategy, MutationBatch, Node, NodeId, RecallQuery, RecallResult, Reservation,
+    SessionId, StoreError,
 };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +433,8 @@ impl MemoryBuilder {
             canon_handle: PlMutex::new(Some(canon_handle)),
             startup_events: PlMutex::new(Some(startup_events)),
             recall_cache: tokio::sync::Mutex::new(RecallCache::new()),
+            writers: AsyncRwLock::new(()),
+            close_state: tokio::sync::Mutex::new(false),
             closed: AtomicBool::new(false),
         })
     }
@@ -534,6 +558,25 @@ pub struct Memory {
     /// graph lock — holding it across an await is fine and only serializes
     /// concurrent recalls on this handle.
     recall_cache: tokio::sync::Mutex<RecallCache<RecallPipeline>>,
+    /// **Writers gate** (T81-1, COH-6 clause 14). Mutating methods hold the
+    /// READ side for their whole body — `.await`s included — and re-check
+    /// `closed` once they have it; [`Memory::close`] takes the WRITE side
+    /// before stopping the tasks, so it cannot drain past an in-flight write.
+    ///
+    /// A `tokio` RwLock, deliberately not `parking_lot`: `derive` and `retract`
+    /// hold this across `.await` (that is the entire point), which a
+    /// `parking_lot` guard may never do. It is **not** the graph lock and the
+    /// §6.4 rule is untouched — the graph lock is still taken, used and
+    /// released inside these methods without ever crossing an await.
+    writers: AsyncRwLock<()>,
+    /// Serializes `close()` bodies and holds its one-shot success flag: `true`
+    /// once a close has actually made the tail durable.
+    ///
+    /// A second **concurrent** caller parks here until the first finishes
+    /// rather than returning an early `Ok` over an in-flight final flush
+    /// (T81-6), and a **failed** close leaves it `false` so the tail — pushed
+    /// back to the front of the log — can be retried (T81-5).
+    close_state: tokio::sync::Mutex<bool>,
     closed: AtomicBool,
 }
 
@@ -589,7 +632,7 @@ impl Memory {
     /// goal names are promoted to `Venerable` through the audited transition
     /// path, so the promotion is durable.
     pub fn set_root_goal(&self, goals: &[&str]) -> Result<(), LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         let value = serde_json::to_value(goals)
             .map_err(|e| LamboError::Config(format!("set_root_goal: {e}")))?;
         self.graph.write().set_root_goal(Some(value));
@@ -598,8 +641,23 @@ impl Memory {
     }
 
     /// Map `source` onto `canonical` for canonicalization (spec §7.1 step 4).
+    ///
+    /// # Not durable (pinned upstream contract S5)
+    ///
+    /// Synonyms are **RAM-local for this handle's lifetime**. There is no
+    /// `Mutation` kind for them by pinned S5 design, so no flush — not even
+    /// [`Memory::close`]'s final one — writes them, and `load_session` cannot
+    /// restore them: after a reattach the map is empty again.
+    ///
+    /// The consequence is not cosmetic. A synonym is what makes
+    /// `register_user` resolve onto the existing `create_user` concept; once
+    /// it is gone the same phrase **creates a duplicate concept** instead of
+    /// matching, and [`Memory::retract`]'s resolution loses the alias too. A
+    /// caller that needs the mapping across restarts must re-declare it on
+    /// every attach (do it right after `build()`, before the first
+    /// [`Memory::derive`]).
     pub fn declare_synonym(&self, source: &str, canonical: &str) -> Result<(), LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         self.graph.write().declare_synonym(source, canonical);
         Ok(())
     }
@@ -628,7 +686,9 @@ impl Memory {
         concepts: &[(&str, ConceptType)],
         parent_of: &ParentOf<'_>,
     ) -> Result<DeriveOutcome, LamboError> {
-        self.ensure_open()?;
+        // Held across every await below, so a concurrent `close()` either
+        // waits for this whole derive or refuses it (T81-1).
+        let _writing = self.begin_write().await?;
         let prompt = concepts
             .iter()
             .map(|(content, _)| *content)
@@ -679,7 +739,7 @@ impl Memory {
     ///
     /// Synchronous — unlike `derive` there is no hybrid twin and no I/O.
     pub fn record_action(&self, action: &Action<'_>) -> Result<ActionOutcome, LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         let interaction = self.begin_interaction(Some(action.action.to_string()))?;
         let outcome = {
             let mut g = self.graph.write();
@@ -707,7 +767,7 @@ impl Memory {
     /// An empty or whitespace-only chunk is a no-op — not even an interaction
     /// is opened.
     pub fn demote(&self, chunk: &str, chunk_group_id: &str) -> Result<Vec<NodeId>, LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         if chunk.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -735,8 +795,21 @@ impl Memory {
     /// every incident edge from the graph and drops it from the inverted index
     /// in the same critical section, so no reader can observe the node gone
     /// from one and present in the other.
+    ///
+    /// The report is **measured before the removal**, under a read lock that is
+    /// released for the durable-radius store query: with a concurrent writer on
+    /// another task, `blast_radius` / `incident_edges` describe the graph as of
+    /// the measurement, not as of the removal (an edge added in between is
+    /// destroyed but uncounted). Report accuracy only — the removal itself is
+    /// atomic under one write lock.
     pub async fn retract(&self, target: &str, dry_run: DryRun) -> Result<ImpactReport, LamboError> {
-        self.ensure_open()?;
+        // The gate spans the store call below, so a `close()` racing a live
+        // retraction waits for it rather than draining past its removal —
+        // which would acknowledge a retraction that resurrects on reattach
+        // (T81-1). A DryRun::Yes retract takes the gate too: whether it will
+        // mutate is known here, but the store call is the same, and holding a
+        // shared read permit costs concurrent writers nothing.
+        let _writing = self.begin_write().await?;
 
         // Resolve + measure under ONE read lock; released before the store call.
         let (node, content, canonization_status, blast_radius, incident_edges) = {
@@ -804,8 +877,17 @@ impl Memory {
 
     /// Acquire or extend a soft lock on `node` for this handle's agent
     /// (spec §11). Cross-agent contention returns [`LamboError::Conflict`].
+    ///
+    /// # Not durable (pinned upstream contract S5)
+    ///
+    /// Reservations live in RAM only: like synonyms they have no `Mutation`
+    /// kind, so no flush — [`Memory::close`]'s final one included — persists
+    /// them and no reattach restores them. A restart releases every soft lock
+    /// in the session; a caller that reattaches must re-`reserve` anything it
+    /// still holds, and must not read "no reservation" after a restart as
+    /// "nobody else was working on this".
     pub fn reserve(&self, node: NodeId, ttl: Duration) -> Result<Reservation, LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
         graph_reserve(&mut g, node, &self.agent, ttl, Utc::now())
     }
@@ -813,7 +895,7 @@ impl Memory {
     /// Release this agent's soft lock on `node` — the pair of
     /// [`Memory::reserve`]. A non-owner gets [`LamboError::Conflict`].
     pub fn release(&self, node: NodeId) -> Result<(), LamboError> {
-        self.ensure_open()?;
+        let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
         graph_release(&mut g, node, &self.agent)
     }
@@ -962,7 +1044,30 @@ impl Memory {
 
     /// Final flush + clean shutdown of all three tasks (spec §6.1).
     ///
-    /// Idempotent: a second call is `Ok(())`.
+    /// Idempotent **after success**: once a close has made the tail durable
+    /// every later call is `Ok(())` and does nothing.
+    ///
+    /// ## Concurrent and repeated calls
+    ///
+    /// The body is serialized. A second caller that arrives while a close is in
+    /// flight **parks until it finishes** and then returns its outcome — it
+    /// never gets an early `Ok` over an in-flight final flush (which, if it
+    /// gated process exit, would let runtime teardown cancel that flush and
+    /// lose the tail).
+    ///
+    /// ## Retry after failure
+    ///
+    /// A close that fails is **retryable, and says so by staying failed**: the
+    /// drained batch goes back to the front of the graph log (where the next
+    /// `drain_log` finds it, in order), the failure is returned, and the
+    /// success flag is *not* set. Call `close()` again — after the store
+    /// recovers — and the same tail is flushed. Repeated calls keep returning
+    /// the failure for as long as the tail is undurable; `Ok(())` from
+    /// `close()` always means "the tail is written".
+    ///
+    /// The session is closed to writers from the first call regardless: the
+    /// background tasks are stopped and every mutating method is refused, so a
+    /// retry re-attempts exactly the same tail rather than a growing one.
     ///
     /// ## The drain (COH-6)
     ///
@@ -972,7 +1077,12 @@ impl Memory {
     /// batch RETAINED after a failed flush, which sits at the front of that
     /// buffer. So:
     ///
-    /// 0. **Stop the two mutation producers first** — canonization, then the
+    /// 0. **Close the writers gate first** — latch `closed` (so new calls are
+    ///    refused) and take the write side of [`Memory::writers`], which waits
+    ///    out every write already in flight on a caller task (T81-1). Only then
+    ///    can "nothing new lands after the drain" be true of the *surface*, not
+    ///    just of the tasks.
+    /// 0b. **Stop the two mutation producers** — canonization, then the
     ///    daemon — so nothing new lands after the drain. `abort()` is safe for
     ///    both: neither holds a `parking_lot` guard across an `.await`, and the
     ///    write-behind log carries any canonization hop whose phase-4 record
@@ -984,23 +1094,51 @@ impl Memory {
     /// 2. Await its handle — the task is gone and can no longer take the graph
     ///    lock, so step 3 races nothing.
     /// 3. Take the graph lock, `drain_log()`, release.
-    /// 4. `store.flush(&batch)` directly, with **no lock held**; its result is
-    ///    this method's result.
+    /// 4. `store.flush(&batch)` directly, with **no lock held**, armored like
+    ///    every background attempt is: a [`FLUSH_ATTEMPT_TIMEOUT`] bound
+    ///    (STORE-2) and panic containment, so a hung or panicking adapter
+    ///    yields an error instead of wedging or unwinding out of `close`.
+    ///    Its result is this method's result; on failure the batch is returned
+    ///    to the log (see *Retry after failure*).
     ///
     /// A retained batch is therefore flushed or surfaced — never silently lost.
+    ///
+    /// ## How long it can take
+    ///
+    /// Bounded by the flush loop's current cycle (worst case
+    /// `FLUSH_ATTEMPT_TIMEOUT × (retries + 1)`), plus the slowest write in
+    /// flight at step 0 (a caller-supplied store or embedder can make that
+    /// arbitrarily long — the gate waits for it rather than losing it), plus
+    /// one `FLUSH_ATTEMPT_TIMEOUT` for step 4.
     ///
     /// ## When it does not flush
     ///
     /// A session that degraded to `durability="none"` (spec §2.3) stopped all
     /// store I/O by design. `close` does not quietly resurrect it: it skips the
     /// final flush and returns an error saying the tail was not written, rather
-    /// than reporting a durability it did not deliver.
+    /// than reporting a durability it did not deliver. The tail stays in the
+    /// log (so `stats().log_depth` keeps telling the truth) and every later
+    /// `close()` returns the same error — a degraded session has no path back
+    /// to a durable tail, and saying `Ok` would be a lie.
     pub async fn close(&self) -> Result<(), LamboError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        // T81-6: one close body at a time. A concurrent second caller parks
+        // here and, when it gets in, either sees the success flag or re-runs
+        // the (idempotent) shutdown — never an early `Ok` over an in-flight
+        // final flush.
+        let mut succeeded = self.close_state.lock().await;
+        if *succeeded {
             return Ok(());
         }
 
-        // 0 — producers off, before the drain.
+        // 0 — the writers gate (T81-1). Latch first so new writes are refused,
+        // then take the write side: it is granted only once every write that
+        // slipped in before the latch has finished, so nothing this session
+        // acknowledged can still be on its way to the log. Held for the rest of
+        // `close` — the drain below must be the last word on the log.
+        self.closed.store(true, Ordering::Release);
+        let _quiesced = self.writers.write().await;
+
+        // 0b — producers off, before the drain.
         let canon_handle = self.canon_handle.lock().take();
         if let Some(handle) = canon_handle {
             handle.abort();
@@ -1029,6 +1167,7 @@ impl Memory {
         let batch = { self.graph.write().drain_log() };
 
         if batch.is_empty() {
+            *succeeded = true;
             return Ok(());
         }
         if self.flush.degraded() {
@@ -1039,6 +1178,11 @@ impl Memory {
                 "close: session is degraded (durability=\"none\"); {count} mutations were NOT \
                  written",
             );
+            // Back onto the log: the mutations are no more durable for having
+            // been drained, and leaving them there keeps `stats().log_depth`
+            // honest about what was lost (T81-5). `succeeded` stays false, so
+            // no later `close()` can report `Ok` over this tail.
+            self.graph.write().push_front_log(batch.mutations);
             return Err(LamboError::Store(StoreError::Backend(format!(
                 "close: session {} degraded to durability=\"none\"; {count} tail mutations were \
                  not flushed",
@@ -1046,14 +1190,34 @@ impl Memory {
             ))));
         }
 
-        // 4 — the final flush, no lock held.
-        self.store.flush(&batch).await?;
-        tracing::info!(
-            mutations = batch.len(),
-            session = %self.session,
-            "Memory session closed (tail flushed)"
-        );
-        Ok(())
+        // 4 — the final flush, no lock held, armored (T81-2).
+        let count = batch.len();
+        match final_flush(self.store.as_ref(), &batch).await {
+            Ok(()) => {
+                tracing::info!(
+                    mutations = count,
+                    session = %self.session,
+                    "Memory session closed (tail flushed)"
+                );
+                *succeeded = true;
+                Ok(())
+            }
+            Err(err) => {
+                // T81-5: the batch is NOT lost with the error. It goes back to
+                // the FRONT of the log — `push_front_log`'s documented purpose
+                // — so a retried `close()` (or an owner that fixes the store
+                // first) drains and flushes exactly this tail, in order.
+                self.graph.write().push_front_log(batch.mutations);
+                tracing::error!(
+                    error = %err,
+                    mutations = count,
+                    session = %self.session,
+                    "close: final flush failed; {count} tail mutations returned to the graph log \
+                     — retry close() once the store is healthy",
+                );
+                Err(LamboError::Store(err))
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1107,12 +1271,49 @@ impl Memory {
 
     fn ensure_open(&self) -> Result<(), LamboError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(LamboError::Config(format!(
-                "session {} is closed",
-                self.session
-            )));
+            return Err(self.closed_error());
         }
         Ok(())
+    }
+
+    fn closed_error(&self) -> LamboError {
+        LamboError::Config(format!("session {} is closed", self.session))
+    }
+
+    /// Enter the writers gate from an **async** method (T81-1).
+    ///
+    /// [`Memory::ensure_open`] first, so a write against an already-closed
+    /// session is refused without queueing behind `close()`'s write side; then
+    /// the read permit; then the check **again**, because `close()` may have
+    /// latched `closed` while this call waited for the permit.
+    ///
+    /// The second check is what makes the gate airtight. If it sees `closed`
+    /// as open, the latch had not happened yet, so `close()`'s later
+    /// `writers.write()` must wait for the permit this returns — the write
+    /// completes and its mutations are in `close()`'s final batch. If it sees
+    /// `closed`, the write is refused and never touched the graph.
+    async fn begin_write(&self) -> Result<AsyncRwLockReadGuard<'_, ()>, LamboError> {
+        self.ensure_open()?;
+        let permit = self.writers.read().await;
+        self.ensure_open()?;
+        Ok(permit)
+    }
+
+    /// Enter the writers gate from a **synchronous** method.
+    ///
+    /// `try_read` rather than `read().await`: these methods cannot await, and
+    /// `blocking_read` on a runtime worker would be worse than the race it
+    /// fixes. The only thing that holds the write side is `close()`, so a
+    /// failed `try_read` means exactly "a close is in progress" and maps to the
+    /// closed error. The post-acquire re-check is the same barrier as
+    /// [`Memory::begin_write`]'s — and since a sync method never awaits, the
+    /// permit is held continuously from the check to the last mutation, so
+    /// `close()` cannot drain past it.
+    fn begin_write_sync(&self) -> Result<AsyncRwLockReadGuard<'_, ()>, LamboError> {
+        self.ensure_open()?;
+        let permit = self.writers.try_read().map_err(|_| self.closed_error())?;
+        self.ensure_open()?;
+        Ok(permit)
     }
 }
 
@@ -1151,6 +1352,51 @@ impl Drop for Memory {
                  tail was discarded"
             );
         }
+    }
+}
+
+/// `close()`'s step-4 store attempt, armored exactly like a background one
+/// (T81-2).
+///
+/// The flush loop protects every `store.flush` twice — [`FLUSH_ATTEMPT_TIMEOUT`]
+/// (STORE-2) and [`CatchUnwindPoll`] — and both rationales apply verbatim to the
+/// final flush, which runs against the same caller-supplied adapter:
+///
+/// * **Timeout.** Without it a hung store hangs `close()` forever, and the
+///   handle's tail is stuck behind a call that will never return. The same
+///   constant, not a close-specific one: this is one `store.flush` attempt on
+///   the same store, so the bound STORE-2 chose for an attempt is the bound
+///   here. `close` makes exactly one attempt (no retry ladder), so 30s is the
+///   whole of it.
+/// * **Panic containment.** Without it a panicking adapter unwinds out of
+///   `close` *after* `closed` latched and the log drained — the tail would be
+///   unrecoverable even for a caller that catches the panic. Contained, it is
+///   an ordinary error and the caller's batch goes back on the log.
+///
+/// Dropping the timed-out future is safe for the same reason it is in the loop:
+/// the adapter only borrows `&MutationBatch`, which the caller still owns.
+async fn final_flush(store: &dyn GraphStore, batch: &MutationBatch) -> Result<(), StoreError> {
+    let attempt = async {
+        match CatchUnwindPoll(async { store.flush(batch).await }).await {
+            Ok(result) => result,
+            Err(payload) => {
+                let message = panic_message(&payload);
+                tracing::error!(
+                    panic = %message,
+                    "close: store.flush panicked during the final flush; treating it as a failed \
+                     flush (the tail returns to the graph log)"
+                );
+                Err(StoreError::Backend(format!(
+                    "close: store flush panicked: {message}"
+                )))
+            }
+        }
+    };
+    match tokio::time::timeout(FLUSH_ATTEMPT_TIMEOUT, attempt).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(StoreError::Backend(format!(
+            "close: store flush timed out after {FLUSH_ATTEMPT_TIMEOUT:?}"
+        ))),
     }
 }
 
@@ -1285,6 +1531,237 @@ mod tests {
             min_edge_age: Duration,
             now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// How [`AdverseStore::flush`] misbehaves — the two failure modes the
+    /// background flush path is armored against (STORE-2 timeout + panic
+    /// containment) plus a plain delay for the concurrency tests.
+    #[derive(Clone, Copy, Debug)]
+    enum FlushBehaviour {
+        /// Never returns: the hung backend `FLUSH_ATTEMPT_TIMEOUT` exists for.
+        Hang,
+        /// Unwinds inside the flush: the panicking adapter `CatchUnwindPoll`
+        /// exists for.
+        Panic,
+        /// Succeeds, slowly.
+        Delay(Duration),
+    }
+
+    /// Store double for `close()`'s step-4 armor (T81-2) and for the concurrent
+    /// -close test (T81-6). Everything except `flush` delegates.
+    struct AdverseStore {
+        inner: Arc<dyn GraphStore>,
+        behaviour: FlushBehaviour,
+        flush_calls: AtomicUsize,
+        flush_completed: AtomicBool,
+    }
+
+    impl AdverseStore {
+        fn new(inner: Arc<dyn GraphStore>, behaviour: FlushBehaviour) -> Self {
+            Self {
+                inner,
+                behaviour,
+                flush_calls: AtomicUsize::new(0),
+                flush_completed: AtomicBool::new(false),
+            }
+        }
+
+        fn flush_calls(&self) -> usize {
+            self.flush_calls.load(Ordering::SeqCst)
+        }
+
+        /// `true` once a `flush` has actually returned from the backend.
+        fn flush_completed(&self) -> bool {
+            self.flush_completed.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for AdverseStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            match self.behaviour {
+                FlushBehaviour::Hang => std::future::pending::<()>().await,
+                FlushBehaviour::Panic => panic!("store adapter exploded mid-flush"),
+                FlushBehaviour::Delay(d) => tokio::time::sleep(d).await,
+            }
+            let result = self.inner.flush(batch).await;
+            self.flush_completed.store(true, Ordering::SeqCst);
+            result
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// Which store call [`ParkingStore`] suspends (once) until released.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum ParkPoint {
+        /// `retract`'s durable-radius query — the await inside a **write**,
+        /// which is where the T81-1 race lives.
+        BlastRadius,
+        /// `recall`'s vector leg — the await inside a **read**, to show that
+        /// `close()` does not wait for readers.
+        VectorCandidates,
+    }
+
+    /// Delegating store that parks the **first** call to one chosen method on a
+    /// `Notify` and reports (on another `Notify`) that it got there. The
+    /// reviewer's deterministic race probe, kept as a fixture.
+    struct ParkingStore {
+        inner: Arc<dyn GraphStore>,
+        park_on: ParkPoint,
+        armed: AtomicBool,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl ParkingStore {
+        fn new(inner: Arc<dyn GraphStore>, park_on: ParkPoint) -> Self {
+            Self {
+                inner,
+                park_on,
+                armed: AtomicBool::new(true),
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        /// Notified once the parked call is suspended. `notify_one` latches, so
+        /// awaiting this after the fact still works.
+        fn entered(&self) -> Arc<tokio::sync::Notify> {
+            self.entered.clone()
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        async fn park(&self, point: ParkPoint) {
+            if point != self.park_on || !self.armed.swap(false, Ordering::SeqCst) {
+                return;
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for ParkingStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            // Claimed so `recall` actually takes its vector leg (MemoryStore
+            // itself has none); the leg then fails and recall degrades, which
+            // is fine — the park is what the test needs.
+            match self.park_on {
+                ParkPoint::VectorCandidates => {
+                    self.inner.capabilities() | Capabilities::VECTOR_SEARCH
+                }
+                ParkPoint::BlastRadius => self.inner.capabilities(),
+            }
+        }
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.inner.flush(batch).await
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.park(ParkPoint::VectorCandidates).await;
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.park(ParkPoint::BlastRadius).await;
             self.inner
                 .blast_radius(session, node, min_edge_age, now)
                 .await
@@ -1550,6 +2027,398 @@ mod tests {
             retained + fresh,
             "close() must flush the retained batch AND the later writes as one \
              chronological batch (push-front), not just the later writes: {batches:?}"
+        );
+    }
+
+    // -- close(): armor, retry, concurrency (T81-2 / T81-5 / T81-6) ---------
+
+    /// T81-2, timeout arm. A hung backend used to hang `close()` forever —
+    /// the background path bounds every attempt with `FLUSH_ATTEMPT_TIMEOUT`
+    /// and step 4 now does too. T81-5: the batch survives the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn close_bounds_a_hanging_store_and_keeps_the_tail() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(AdverseStore::new(inner, FlushBehaviour::Hang));
+        let mem = memory_on(store, "hang").await;
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let depth = mem.stats().log_depth;
+        assert!(depth > 0);
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(
+            mem.graph().read().log_len() >= depth,
+            "a timed-out final flush must return the tail to the log, not drop it"
+        );
+    }
+
+    /// T81-2, panic arm. A panicking adapter used to unwind out of `close()`
+    /// **after** the log was drained — the tail was unrecoverable even for a
+    /// caller that caught the panic.
+    #[tokio::test]
+    async fn close_contains_a_panicking_store_and_keeps_the_tail() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(AdverseStore::new(inner, FlushBehaviour::Panic));
+        let mem = memory_on(store, "panic").await;
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let depth = mem.stats().log_depth;
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("panicked"), "{err}");
+        assert!(
+            mem.graph().read().log_len() >= depth,
+            "a panicking final flush must return the tail to the log, not drop it"
+        );
+    }
+
+    /// T81-5: a failed `close()` is retryable and says so. The first close
+    /// fails (store outage), the tail goes back on the log rather than
+    /// vanishing with the error, and a second close — after the store
+    /// recovered — makes exactly that tail durable. `Ok(())` from `close()`
+    /// always means "the tail is written".
+    #[tokio::test]
+    async fn a_failed_close_keeps_the_tail_and_a_later_close_flushes_it() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        // Exactly one failing flush — and with an hour-long interval, close's
+        // is the only flush there is.
+        let store: Arc<dyn GraphStore> = Arc::new(FlakyStore::new(inner.clone(), 1));
+        let mem = memory_on(store, "close-retry").await;
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let depth = mem.stats().log_depth;
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("simulated outage"), "{err}");
+        assert!(
+            mem.graph().read().log_len() >= depth,
+            "a failed close must not drop the drained tail"
+        );
+        assert!(
+            inner
+                .load_session(&SessionId::new("close-retry"))
+                .await
+                .is_err(),
+            "nothing durable yet"
+        );
+
+        // The store recovered: the retry flushes the tail it kept.
+        mem.close().await.unwrap();
+        let snap = inner
+            .load_session(&SessionId::new("close-retry"))
+            .await
+            .unwrap();
+        assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+        assert_eq!(mem.graph().read().log_len(), 0);
+
+        // Durable now, so it is idempotent again.
+        mem.close().await.unwrap();
+    }
+
+    /// T81-6: a second **concurrent** `close()` must not report `Ok` over an
+    /// in-flight final flush (a caller gating process exit on that `Ok` would
+    /// let runtime teardown cancel the flush and lose the tail). Both callers
+    /// must observe the completed flush.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_closes_both_wait_for_the_one_final_flush() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let adverse = Arc::new(AdverseStore::new(
+            inner.clone(),
+            FlushBehaviour::Delay(Duration::from_secs(2)),
+        ));
+        let store: Arc<dyn GraphStore> = adverse.clone();
+        let mem = Arc::new(memory_on(store, "concurrent-close").await);
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+
+        let closer = |mem: Arc<Memory>, adverse: Arc<AdverseStore>| {
+            tokio::spawn(async move {
+                let result = mem.close().await;
+                (result, adverse.flush_completed())
+            })
+        };
+        let first = closer(mem.clone(), adverse.clone());
+        let second = closer(mem.clone(), adverse.clone());
+
+        let (first_result, first_saw_flush) = first.await.unwrap();
+        let (second_result, second_saw_flush) = second.await.unwrap();
+        first_result.expect("first close");
+        second_result.expect("second close");
+        assert!(
+            first_saw_flush && second_saw_flush,
+            "no close() may return before the final flush completed"
+        );
+        assert_eq!(
+            adverse.flush_calls(),
+            1,
+            "the tail is flushed once, not once per caller"
+        );
+
+        let snap = inner
+            .load_session(&SessionId::new("concurrent-close"))
+            .await
+            .unwrap();
+        assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+    }
+
+    /// The degraded-close branch (implementer self-flag #6, ruled in scope).
+    /// A session past `backend_log_max` stopped all store I/O by design;
+    /// `close()` must say the tail was not written instead of reporting a
+    /// durability it did not deliver — and must keep saying it.
+    #[tokio::test(start_paused = true)]
+    async fn close_refuses_to_claim_durability_for_a_degraded_session() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = Memory::builder()
+            .config(Config {
+                backend_flush_retries: 0,
+                // One mutation of headroom: the first cycle's drain is already
+                // past it, so the session degrades on backlog (STORE-3).
+                backend_log_max: 1,
+                ..Config::default()
+            })
+            .session("degraded")
+            .agent("agent-a")
+            .flush_interval(Duration::from_millis(100))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .unwrap();
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            tokio::time::advance(Duration::from_millis(150)).await;
+            tokio::task::yield_now().await;
+            if mem.stats().degraded {
+                break;
+            }
+        }
+        assert!(mem.stats().degraded, "the session must have degraded");
+
+        // A write after degradation is still in the log when close drains it.
+        mem.record_action(&Action {
+            action: "wrote docs/api.md",
+            produces: &["docs/api.md"],
+            modifies: &[],
+            depends_on: &[],
+        })
+        .unwrap();
+        assert!(mem.stats().log_depth > 0);
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("degraded"), "{err}");
+        assert!(
+            mem.graph().read().log_len() > 0,
+            "the un-written tail stays visible in log_depth"
+        );
+        // No `Ok` over an undurable tail, ever.
+        let again = mem.close().await.unwrap_err();
+        assert!(again.to_string().contains("degraded"), "{again}");
+    }
+
+    // -- the writers gate (T81-1) -------------------------------------------
+
+    /// The P1 race, as the reviewer demonstrated it, now as a regression test.
+    ///
+    /// A store double parks `retract`'s `blast_radius` call, so the retraction
+    /// is suspended *mid-write* — past `ensure_open`, before its mutation.
+    /// `close()` then starts. Without the writers gate `close()` completed
+    /// `Ok`, the retract resumed, reported `removed: true`, and its `DeleteNode`
+    /// sat in the log forever: an acknowledged retraction that resurrects on
+    /// reattach. With the gate there are only two legal outcomes and both are
+    /// asserted — `close()` waits and the removal is durable, or the retract is
+    /// refused with the closed error and nothing was acknowledged.
+    #[tokio::test]
+    async fn a_write_in_flight_when_close_starts_is_never_acknowledged_then_lost() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let parking = Arc::new(ParkingStore::new(inner.clone(), ParkPoint::BlastRadius));
+        let store: Arc<dyn GraphStore> = parking.clone();
+        let mem = Arc::new(memory_on(store, "write-vs-close").await);
+
+        mem.derive(
+            &[
+                ("victim", ConceptType::Entity),
+                ("survivor", ConceptType::Entity),
+            ],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+
+        let entered = parking.entered();
+        let retracting = tokio::spawn({
+            let mem = mem.clone();
+            async move { mem.retract("victim", DryRun::No).await }
+        });
+        entered.notified().await; // the retract is parked, holding a permit
+
+        let mut closing = tokio::spawn({
+            let mem = mem.clone();
+            async move { mem.close().await }
+        });
+        // A real chance to run to completion — the whole shutdown is
+        // sub-millisecond here — so this fails loudly if `close()` ever stops
+        // waiting for in-flight writers (it is what the P1 bug did).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut closing)
+                .await
+                .is_err(),
+            "close() must not drain while a write is in flight"
+        );
+
+        parking.release();
+        let report = retracting.await.unwrap();
+        closing.await.unwrap().expect("close");
+
+        assert_eq!(
+            mem.graph().read().log_len(),
+            0,
+            "no mutation may be left in the log after close()"
+        );
+        let snap = inner
+            .load_session(&SessionId::new("write-vs-close"))
+            .await
+            .unwrap();
+        assert!(snap.concepts.iter().any(|c| c.content == "survivor"));
+        match report {
+            Ok(report) => {
+                assert!(report.removed);
+                assert!(
+                    !snap.concepts.iter().any(|c| c.content == "victim"),
+                    "an acknowledged retraction must not resurrect on reattach"
+                );
+            }
+            Err(err) => {
+                assert!(err.to_string().contains("closed"), "{err}");
+                assert!(
+                    snap.concepts.iter().any(|c| c.content == "victim"),
+                    "a refused retraction must not have removed anything"
+                );
+            }
+        }
+    }
+
+    /// The other half of the gate: **readers do not take it**, so a long recall
+    /// cannot hold shutdown hostage. The store parks recall's vector leg; the
+    /// close must still finish (a gated reader would deadlock it). Reads after
+    /// close stay refused by `ensure_open`, exactly as before.
+    #[tokio::test]
+    async fn close_does_not_wait_for_an_in_flight_read() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let parking = Arc::new(ParkingStore::new(inner, ParkPoint::VectorCandidates));
+        let store: Arc<dyn GraphStore> = parking.clone();
+        // Canonical matching, so the one parked call is recall's — hybrid
+        // `derive` would otherwise consume the park on its own vector leg.
+        let mem = Arc::new(
+            Memory::builder()
+                .session("read-vs-close")
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .match_strategy(MatchStrategy::Canonical)
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(contract("fixture", 1024))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+
+        let entered = parking.entered();
+        let recalling = tokio::spawn({
+            let mem = mem.clone();
+            async move {
+                mem.recall(RecallQuery {
+                    query: "user schema".into(),
+                    top_k: 5,
+                    max_tokens: 500,
+                    traversal_depth: 2,
+                })
+                .await
+            }
+        });
+        entered.notified().await; // the recall is parked inside the store
+
+        tokio::time::timeout(Duration::from_secs(10), mem.close())
+            .await
+            .expect("close() must not wait for readers")
+            .expect("close");
+
+        parking.release();
+        recalling
+            .await
+            .unwrap()
+            .expect("the parked recall still returns");
+
+        // Reads after close are refused by `ensure_open`, as before.
+        let err = mem
+            .recall(RecallQuery {
+                query: "user schema".into(),
+                top_k: 5,
+                max_tokens: 500,
+                traversal_depth: 2,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("closed"), "{err}");
+    }
+
+    /// Every mutating method — async and sync — refuses after close. The sync
+    /// ones go through the gate's non-blocking arm, so this also pins that a
+    /// closed session's `try_read` path returns the closed error rather than
+    /// mutating.
+    #[tokio::test]
+    async fn every_mutating_method_is_refused_after_close() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = memory_on(store, "refuse-all").await;
+        let out = mem
+            .derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let node = out.created[0];
+        mem.close().await.unwrap();
+
+        let closed = |err: LamboError| assert!(err.to_string().contains("closed"), "{err}");
+        closed(mem.set_root_goal(&["late"]).unwrap_err());
+        closed(mem.declare_synonym("a", "b").unwrap_err());
+        closed(
+            mem.derive(&[("late", ConceptType::Entity)], &ParentOf::none())
+                .await
+                .unwrap_err(),
+        );
+        closed(
+            mem.record_action(&Action {
+                action: "late",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            })
+            .unwrap_err(),
+        );
+        closed(mem.demote("late chunk.", "chunk-late").unwrap_err());
+        closed(mem.retract("user schema", DryRun::No).await.unwrap_err());
+        closed(mem.reserve(node, Duration::from_secs(30)).unwrap_err());
+        closed(mem.release(node).unwrap_err());
+
+        assert_eq!(
+            mem.graph().read().log_len(),
+            0,
+            "a refused write must not have logged a mutation"
         );
     }
 
