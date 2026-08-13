@@ -73,3 +73,24 @@ jobs:
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.command }}
+
+  # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
+  # (CRDB conformance suite, canon progression, vector EXPLAIN) against the
+  # provisioned Lambo cloud cluster. `LAMBO_REQUIRE_LIVE=1` turns a missing
+  # DSN / dead cluster into a hard failure, never a silent skip-as-green.
+  cockroach-live:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+      LAMBO_COCKROACH_DSN: ${{ secrets.LAMBO_COCKROACH_DSN }}
+      LAMBO_REQUIRE_LIVE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Live CockroachDB tests (--ignored)
+        run: cargo test --features store-cockroach,store-memory,fixtures --lib -- --ignored
