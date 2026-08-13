@@ -1,0 +1,6 @@
+[store]
+kind = "memory"
+
+[embedder]
+kind = "fixture"
+dim = 1024

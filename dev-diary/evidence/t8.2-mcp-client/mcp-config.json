@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "lambo": {
+      "command": "/home/nryn/work/lambo/target/debug/lambo",
+      "args": ["--config", "<SCRATCH>/lambo-mcp-test.toml",
+               "serve", "--session", "t8.2-evidence",
+               "--agent", "agent-a", "--transport", "stdio"]
+    }
+  }
+}

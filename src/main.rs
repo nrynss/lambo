@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use lambo::mcp::{ServeOptions, Transport};
 use lambo::{resolve_from_config_path, resolve_store_only, ResolvedBackends};
 
 /// Lambo — agentic graph memory (MCP server + CLI).
@@ -21,15 +22,22 @@ struct Cli {
 enum Commands {
     /// Run the MCP server for a session (primary artifact).
     Serve {
-        /// Session id this process owns (single-writer model).
+        /// Session id this process owns (single-writer model, spec §2.2).
         #[arg(long)]
-        session: Option<String>,
+        session: String,
+        /// Agent identity this process writes as.
+        #[arg(long, default_value = "lambo-serve")]
+        agent: String,
         /// Transport: stdio | http
         #[arg(long, default_value = "stdio")]
         transport: String,
         /// HTTP port when transport=http
         #[arg(long, default_value_t = 7700)]
         port: u16,
+        /// Bind address when transport=http. Loopback by default — the HTTP
+        /// transport is unauthenticated and this process is a session *writer*.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
     },
     /// Scripted two-agent demo scenario.
     Demo {
@@ -135,19 +143,49 @@ fn main() -> ExitCode {
         (
             Commands::Serve {
                 session,
+                agent,
                 transport,
                 port,
+                bind,
             },
             Resolved::Full(backends),
         ) => {
-            // Hold backends so they are not dead-code; T8.2 will own them for the process life.
-            let _ = (&backends.store, &backends.embedder, &backends.embedding);
-            println!(
-                "lambo serve (stub): session={session:?} transport={transport} port={port} \
-                 (store+embedder resolved once: {} dim={})",
-                backends.embedding.kind, backends.embedding.dim
-            );
-            ExitCode::SUCCESS
+            // Diagnostics to stderr, before anything can log: under
+            // `--transport stdio`, stdout is the JSON-RPC channel and one stray
+            // line on it corrupts the framing.
+            lambo::mcp::init_tracing();
+
+            let transport = match transport.parse::<Transport>() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("lambo serve: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let opts = ServeOptions {
+                session,
+                agent,
+                transport,
+                port,
+                bind,
+            };
+
+            // `backends` is the single resolve from `resolve_for_command` above
+            // — serve does not resolve again (Level B single construction site).
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lambo serve: failed to start tokio runtime: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match runtime.block_on(lambo::mcp::serve(opts, *backends)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("lambo serve: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         (Commands::Demo { scenario }, Resolved::Full(backends)) => {
             let _ = backends;

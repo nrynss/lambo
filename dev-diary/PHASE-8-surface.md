@@ -295,7 +295,7 @@ embedder kind/model/dim mismatches, and `retract` + `canonical_memories` exist w
 requires:   T8.1
 fixture-ok: yes
 owns:       src/mcp/, src/main.rs (primary owner — see shared-file rules)
-status:     not-started
+status:     done
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 `lambo serve --session S --transport stdio|http [--port 7700] [--config PATH]` via `rmcp`;
@@ -631,3 +631,199 @@ attach (right after `build()`, before the first `derive`) or persist them itself
 it is not *and the tail was kept* — call `close()` again once the store is healthy. A second
 concurrent `close()` blocks until the first finishes rather than returning early, so a shutdown
 path may call it from more than one place safely.
+
+### T8.2 — MCP server (task agent, 2026-08-14)
+
+**Gates:** `cargo fmt --all -- --check` clean; `cargo clippy --all-targets -- -D warnings`
+clean; `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures
+-D warnings` clean; `cargo check --no-default-features` clean; `cargo test` **562 lib + 5
+integration + 1 doc-test passing, 3 ignored** (baseline 548 + 5 + 1, 3 ignored — +14 lib,
+no regressions, nothing removed).
+
+#### rmcp rung: the TOP one. Nothing fought.
+
+**`rmcp 3.1.2`, `default-features = false`, the four features exactly as ruled.** The macro
+spike (one trivial tool, `#[tool_router(server_handler)]`) compiled **first try, inside 20
+minutes** of the 2-hour timebox. No drop to 2.2.0, no hand-rolled JSON-RPC. Confirmed by
+`Cargo.lock`: **`reqwest` resolves to a single `0.12.28`** — the duplication trap the ruling
+exists to avoid did not materialize.
+
+Three rmcp 3.x details the next agent should not re-derive:
+
+1. **`#[tool_handler]`'s default router argument is `Self::tool_router()` — the *static*
+   constructor.** Left at the default it **rebuilds the entire router, every tool's JSON
+   schema included, on every `tools/list` and every `tools/call`**. `server.rs` uses
+   `#[tool_handler(router = self.tool_router)]` so per-call work is a map lookup against the
+   router built once in `new()`. The give-away is a `field 'tool_router' is never read`
+   dead-code warning — if that warning ever reappears, the router went back to being rebuilt
+   per call.
+2. **`#[tool_router(server_handler)]` is fine for a tools-only server but generates the
+   `ServerHandler` impl for you, so you cannot override `get_info`.** Since we need
+   `get_info` (capabilities, server name, and the session-naming instructions), the explicit
+   pair — `#[tool_router]` on the inherent impl + `#[tool_handler(...)] impl ServerHandler` —
+   is required.
+3. **`ServerInfo`, `Implementation` and `StreamableHttpServerConfig` are `#[non_exhaustive]`.**
+   Struct-literal construction does not compile even with `..Default::default()`. Start from
+   the SDK default and assign fields.
+
+The 3.0 `InputRequiredResult` / MRTR break never surfaced: the macros hide it, exactly as the
+ruling predicted.
+
+#### What exists now
+
+- **`src/mcp/server.rs`** — `LamboServer` and the seven spec §6.2 tools: `lambo_recall`,
+  `lambo_derive`, `lambo_record_action`, `lambo_reserve`, `lambo_inspect`, `lambo_saints`,
+  `lambo_stats`. Every tool takes a **required** `agent_id`. `lambo_recall` returns the T5.3
+  context block as the **text** content (verbatim — it is the artifact the agent reads) with
+  hits/warnings as structured content; the others return a human-readable summary plus
+  structured data.
+- **`src/mcp/serve.rs`** — `ServeOptions`, `Transport`, `build_memory`, `serve`. Both
+  transports (stdio, streamable HTTP on `/mcp` via the axum already in the tree). `close()`
+  runs on **every** exit path and its error is surfaced.
+- **`src/mcp/mod.rs`** — `init_tracing()`, which pins diagnostics to **stderr**. Under stdio
+  this is not cosmetic: stdout is the JSON-RPC channel and one stray log line breaks framing.
+- **`src/main.rs`** — the real `serve` dispatch arm, plus new `--agent` and `--bind` flags;
+  `--session` is now **required** (was `Option<String>`).
+
+#### Files touched outside `owns`
+
+| File | Change | Authorization |
+|---|---|---|
+| `Cargo.toml` | added `rmcp 3.1.2` (`default-features = false`, 4 features) and `schemars 1` | standing additive rule |
+| `Cargo.lock` | resolved the above | standing additive rule |
+| `dev-diary/evidence/t8.2-mcp-client/` | new evidence directory | required by the task's Done-when |
+| `src/lib.rs` | **not touched** — `pub mod mcp;` already existed | — |
+
+#### Level B — single construction site
+
+`main.rs` performs the **one** `resolve_from_config_path` (in the pre-existing
+`resolve_for_command`) and hands the single `ResolvedBackends` into `mcp::serve`.
+`mcp::serve::build_memory` **takes `ResolvedBackends`, not a config path**, deliberately: a
+second resolve is not expressible through the API. Fail-closed verified four ways (unknown
+TOML key, uncompiled store kind, bad transport, missing `--session`) — all exit before any
+session is attached. Captured in `dev-diary/evidence/t8.2-mcp-client/README.md`.
+
+#### F18 — server-side timestamps
+
+No tool accepts a timestamp. Beyond simply not adding the parameter, this is **pinned by a
+test** — `f18_no_tool_schema_accepts_a_client_timestamp` walks every *published* tool schema
+and fails on a property named `timestamp` / `created_at` / `now` / `time` / `when` / `date` /
+`occurred_at` / `logical_time`. A future agent who adds a timestamp field to any params
+struct breaks that test. The server's `initialize` instructions also tell the model "Never
+send a timestamp: the server stamps them."
+
+#### T8.1 constraints — how each is honoured
+
+- **`events()` called exactly once, at startup**, in `serve()`, before either transport runs.
+  Its receiver is drained by one long-lived task (which also stops the broadcast channel
+  lagging the daemon).
+- **No assumption of synonym or reservation durability.** No synonym tool is exposed at all.
+  `lambo_reserve` attaches an explicit warning to every successful reservation saying it is
+  advisory and lost on restart, and the rustdoc says so.
+- **One `Memory` per session.** `LamboServer` holds `Arc<Memory>`; `Clone` clones the `Arc`.
+  The HTTP service factory — called per request — clones the same `Arc`. There is exactly one
+  `Memory::builder()` call in the serve path.
+- **No graph lock across an `.await`.** The only lock `src/mcp/` takes directly is the
+  `lambo_inspect` read guard, in a block containing no `.await`; `render_neighbourhood` is a
+  sync free function.
+
+#### Flagged finding — per-call `agent_id` cannot reach the graph (needs a `Memory` change)
+
+**This is the one place the task could not be fully satisfied without touching
+`src/memory.rs`, which the brief forbids. Reporting instead of reaching across.**
+
+Spec §6.2/§2.2 require tool calls from several MCP clients to be tasks in one process, "each
+carrying `agent_id`". The schema carries it — but **`Memory` binds a single `AgentId` at
+`build()` and exposes no per-call override**: `derive`, `record_action`, `demote`, `reserve`
+and `release` all pass `self.agent`. The *graph* layer already takes `&AgentId` per call
+(`graph::derive(&mut Graph, interaction, &AgentId, …)`), so the gap is only in `Memory`'s
+surface.
+
+Consequences, concretely:
+- Interactions written by "agent-b" are attributed to the process agent.
+- **`lambo_reserve` cannot detect cross-agent contention through MCP.** Two clients holding
+  different `agent_id`s are the same `AgentId` to `graph::reserve`, so the §11 conflict that
+  should fire never does.
+- The spec §13 / T8.4 demo's two-agent conflict line is affected: with one process and one
+  `Memory`, Agent A and Agent B are indistinguishable to the graph.
+
+The surface does **not** hide this: a call whose `agent_id` differs from the session owner
+gets an explicit `attribution:` warning naming both identities (verified in the evidence).
+
+**Suggested fix, for whoever owns it:** add agent-parameterised twins on `Memory`
+(`derive_as(&AgentId, …)`, `record_action_as`, `reserve_as`, `release_as`) that pass the
+caller's id straight through to the already-agent-taking graph functions, keeping the
+existing methods as thin wrappers over `self.agent`. That is a `src/memory.rs` change and a
+T8.1 re-open, not a T8.2 edit. **T8.4 should treat this as a blocker for the two-agent
+conflict story.**
+
+#### Second flagged finding — no schema bootstrap for a SQLite/Cockroach serve
+
+`serve` against `store.kind = "sqlite"` on a fresh file fails at startup with
+`no such table: sessions`. Nothing in the production path calls `GraphStore::init_schema()`
+— it has no non-test caller anywhere in `src/`. Spec §6.2 assigns schema bootstrap to
+`lambo provision`, which is **T8.3** and still a stub, so this is a real ordering dependency
+rather than a T8.2 bug: I deliberately did not add auto-init to `serve`, because that would
+preempt T8.3's ownership and duplicate the provision path. **T8.3 must make `lambo provision`
+create the SQLite schema**, or `serve` must gain an explicit opt-in. The evidence run
+therefore uses `store.kind = "memory"`.
+
+#### Verification — what was and was not proven
+
+**A real Claude Code client (2.1.226) handshakes with `lambo serve --transport stdio`:**
+registered with `claude mcp add`, `claude mcp list` reports `✔ Connected`. That is a genuine
+`initialize` over stdio by a real client, and it is the definitive proof the rmcp rung
+interoperates. Registration was made in a scratch directory, never the repo, and removed
+afterwards.
+
+**All seven tools were driven end-to-end over the real MCP wire protocol** (`initialize` →
+`lambo_derive` → `lambo_record_action` → `lambo_recall` → `lambo_stats`), with
+`lambo_recall` returning the T5.3 context block verbatim. HTTP transport verified with
+`curl POST /mcp`. Transcripts in `dev-diary/evidence/t8.2-mcp-client/`.
+
+**NOT verified: a model-driven tool call.** `claude -p` failed reproducibly with
+`Failed to authenticate: OAuth session expired and could not be refreshed` — the nested CLI
+never reached the model, so no tool call was attempted. This is an environment auth failure,
+not an MCP one (the same client health-checks the server as connected). So it is proven that
+the tools *work* through a real client, and **not** proven that a model *chooses* them
+correctly from their descriptions. Re-run with working credentials; exact commands are in the
+evidence README.
+
+**Also honest about the context block:** the captured block shows scored concept lines but no
+`canonical` marker, no `⚑ N nodes` warning and no conflict line — because a fresh session has
+nothing canonized, no large blast radius and one writer. Those come from the same
+`recall::format` path and are covered by T5.3's tests; showing them on the wire needs T8.4's
+aged session.
+
+#### My own weak spots (a reviewer will find these — flagging them first)
+
+1. **Protocol-level dispatch is untested in-process.** The unit tests drive tool methods
+   directly (through real `Parameters<T>` deserialization) rather than `ToolRouter::call`,
+   because building a `RequestContext` needs a live `Peer`. Registration is pinned
+   (`the_router_publishes_exactly_the_seven_spec_tools`) and a guard test fails if a published
+   name has no harness arm, but the name→method wiring is only proven by the manual JSONL
+   session. An in-process client over `tokio::io::duplex` would close this — it needs rmcp's
+   `client` feature as a dev-dependency, which I did not add unilaterally given the reqwest
+   trap the ruling warns about.
+2. **`lambo_inspect`'s fallback resolution is mine, not the canonicalization pipeline's.** It
+   tries UUID → exact content (case-insensitive) → *substring*. `Memory::retract` resolves
+   through canonicalization with an exact-content fallback. The substring leg can pick a
+   different concept than a user expects when several share a prefix, and it takes the first
+   iteration-order match rather than the best one — non-deterministic across runs if two
+   concepts both contain the needle.
+3. **`MAX_*` limits are my invention.** No spec or config knob backs `MAX_TOP_K = 100`,
+   `MAX_CONCEPTS_PER_DERIVE = 64`, `MAX_INSPECT_NODES = 200` etc. They exist because one
+   client can otherwise stall the single process every other client shares. They are not
+   configurable, which may be wrong.
+4. **`serve()` aborts the event-pump task rather than joining it.** Bounded and harmless (it
+   only logs), but it is an `abort()` on a shutdown path, which is the exact pattern the T8.1
+   review spent three rounds tightening elsewhere.
+5. **The HTTP transport is unauthenticated.** Mitigated by defaulting `--bind` to loopback,
+   and documented on the flag — but `--bind 0.0.0.0` exposes a session *writer* with no
+   authentication whatsoever. There is no rate limit either.
+6. **A `close()` failure is logged and returned but the process still exits non-zero without
+   retrying.** T8.1's semantics say a failed close keeps the tail and is retryable; `serve`
+   does not retry. For a server shutting down that is arguably right, but it means a transient
+   store outage at exit leaves the tail undurable with only a log line.
+7. **`lambo_reserve` carries a `release` boolean rather than being two tools**, to keep the
+   published set at exactly the seven names spec §6.2 lists. It is a mild API smell.
