@@ -17,21 +17,44 @@ integration friction here, not in the tracks — budget for it.
 command. Serve and CLI never hard-code `CockroachStore::connect`, never rebuild store/
 embedder with a second config pass, and stamp/check `EmbeddingContract` on session attach.
 
+**P6 review carryover (adve-review-p6-canonization-fable.md, CLOSED 2026-08-13) — P8-owned
+checklist items:**
+- **F18 → T8.2:** the MCP layer MUST stamp `created_at` server-side. Interactions/edges
+  inherit caller-supplied timestamps end-to-end today; if `lambo_record_action` accepts a
+  client timestamp, backdating by 61s makes the entire `canonization_edge_min_age`
+  inflation guard a no-op.
+- **R3-1 → T8.4:** `seed()` on SQLite/Cockroach routes through the single-writer concept
+  upsert and does NOT restore canonization state over an existing session (MemoryStore
+  does — divergence). Seed fixtures only into fresh sessions, or reset the session first;
+  do not re-seed a live demo session and expect canonization state to follow.
+- **F13/R3-4 scale note → T8.2/T8.4:** each canonization cycle issues up to
+  `canonization_eval_batch_size` (50) sequential structural queries (`interaction_span`/
+  `blast_radius`) against the live store every 60s. Fine for the demo; budget for it when
+  sizing the cluster/session.
+
 ---
 
 ### T8.1 — `Memory` builder & assembly ★
 ```yaml
-requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3, T1.5
+requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3, T6.4, T1.5   # T6.4: build() wires CanonizationTask
 fixture-ok: yes   # assembles against MemoryStore first
 owns:       src/memory.rs
 status:     not-started
 ```
 The spec §6.1 surface, exactly: builder (`session`, `agent`, `store`, `embedder`,
 `match_strategy`, `flush_interval`, `scoring_weights`) → `build()` wires graph + daemon +
-flush task + startup load. Methods: `set_root_goal`, `declare_synonym`, `recall`, `derive`,
+flush task + **canonization task** + startup load. **Canonization wiring (P6 review
+2026-08-13):** construct `canon::CanonizationTask::from_daemon` alongside `FlushTask` —
+it shares the daemon's graph handle, `EventSender`, and `score_table()`, and consumes
+`canonization_eval_interval` (60s default). Without it no node ever transitions and T8.4
+step 2 is impossible. Methods: `set_root_goal`, `declare_synonym`, `recall`, `derive`,
 `record_action`, `demote`, `retract(_, DryRun)` (dry-run = blast-radius report, no
 mutation), `reserve`, `canonical_memories`, `stats` (must expose flush lag + log depth),
-`events`, `close` (final flush, clean shutdown of both tasks). Cut list stays cut: no
+`events`, `close` (final flush, clean shutdown of all three tasks — daemon, flush,
+canonization; stop the canonization task **before** the final-flush drain so no new
+mutations land after the drain — `JoinHandle::abort()` is documented safe for it: no
+guard is live across its awaits and the write-behind log carries any hop whose phase-4
+record was cancelled). Cut list stays cut: no
 `correct`, `merge_concepts`, `resume`, `restart_daemon`, `checkpoint`.
 **`close()` final-flush drain (COH-6, 2026-08-12) — P8-owned, hand-rolled:** spec §6.1
 `close()` requires a final flush in v0.1, but `FlushTask` exposes only

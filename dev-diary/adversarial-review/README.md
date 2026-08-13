@@ -1,9 +1,10 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (29 records).
+Complete index of the review records in this directory (30 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| **[adve-review-p6-canonization-fable.md](adve-review-p6-canonization-fable.md)** | phase/p6-canonization — P6 canonization tier (T6.1–T6.4), fable ×5 | **CLOSED** (19 findings: 2 P1 / 5 P2 / 12 P3; 2 opus remediation rounds, R3 verify CLEAN 2026-08-13; residual P3s recorded for P8) |
 | **[adve-review-e2e-p0-p3-fable.md](adve-review-e2e-p0-p3-fable.md)** | Main — E2E P0–P3 (post-merge, whole-platform) | **CLOSED** (45 findings: 7 P1 / 15 P2 / 23 P3; all dispositioned 2026-08-12 in 8 waves — see the disposition record in the file) |
 | **[adve-review-t14-fixtures.md](adve-review-t14-fixtures.md)** | Main — T1.4 fixture graphs | **CLOSED** (ACCEPT, residual notes only) |
 | **[adve-review-t70-embeddings.md](adve-review-t70-embeddings.md)** | Main — T7.0 embeddings (BGE-M3 / llama.cpp) | **CLOSED** (ACCEPT, residual ops only) |

@@ -135,3 +135,20 @@ the lowest blast radius with a recorded event.
 
 Gates: fmt clean; clippy `-D warnings` clean; default 461/0; `store-sqlite` row 494/0;
 no-default check clean.
+
+## Branch-level adversarial review (fable ×5, 2026-08-13) — CLOSED
+
+`adve-review/adve-review-p6-canonization-fable.md`: 19 findings (2 P1 / 5 P2 / 12 P3),
+remediated in 2 opus rounds (12 commits, `06fcc00..d3bdc6b`), round-3 verify **CLEAN**.
+The P1s reshaped T6.4: the eval loop is now real (`canon::CanonizationTask`, FlushTask-
+shaped, consumes `canonization_eval_interval`; `eval_cycle` is gather-before-lock over
+`&RwLock<Graph>`) and the Stage-3 cursor is identity-anchored (churn/starvation tested).
+Notable semantic changes vs the close notes above: the `hopped` set is gone (one hop per
+cycle is structural — disjoint pre-cycle status windows); the three canonization columns
+have a **single writer** (UpsertNode preserves them on conflict, all 3 backends); recall
+orders Canonical members first (spec §10); `now` is injected through
+`interaction_span`/`blast_radius`. Residual P3s + P8 checklist items (F18, R3-1, scale
+note) recorded in the review disposition and in PHASE-8-surface.md.
+
+Gates at close: fmt clean; `-D warnings` check clean ×3 feature sets; tests 490/0
+(default), 527/0 (store-sqlite), 513/0 (store-cockroach); zero test removals.

@@ -2,9 +2,10 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN                                                    ║
-║  Findings: 19 (2 P1 / 5 P2 / 12 P3) — awaiting disposition       ║
-║  Opened: 2026-08-13                                              ║
+║  STATUS: CLOSED                                                  ║
+║  Disposition: ACCEPT after 2 remediation rounds; R3 verify CLEAN ║
+║  Findings: 19 (2 P1 / 5 P2 / 12 P3) — all dispositioned          ║
+║  Opened / Closed: 2026-08-13                                     ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -120,8 +121,29 @@ Mutating stage3.rs:57 to pass `Duration::ZERO` instead of `min_edge_age` ran gre
 
 ---
 
-## Disposition
+## Disposition (CLOSED 2026-08-13)
 
-Pending. Suggested remediation order: F2 (restructure to gather-before-lock + daemon scheduling — everything else lands in the code this creates), F1 (identity-anchored cursor, trivial once F2's shape is settled), F3/F12 together (commit-point + dual-write semantics), F5 (two-line SQL fix), F6/F7/F16/F19 (test hardening wave), F8 (thread `now` through the two store methods — unlocks F7's proper test), F4 (recall-side, needs a decision on force-include vs rank-boost), F9/F10/F11/F13/F14/F15/F17 (polish wave), F18 (P8 checklist item, not a P6 change).
+Remediated in two rounds (opus), each independently verified by a fresh adversarial round (opus). All rounds ran on this branch; commit ranges below.
 
-Reopen criteria: any regression in the "Verified holds" list above.
+**Round 1 — fix (7 commits, `06fcc00..c5337ef`):** all of F1–F17 + F19 remediated; F18 carried as a P8 checklist item.
+`2a47300` F5 · `aac72ad` F8 · `a041bd1` F2/F1/F9/F10/F13/F15 · `62a5d13` F3/F12/F11 · `937298e` F6/F7/F16/F17/F19 · `39271a3` F4/F14 · `c5337ef` F1 edge cases + crate-root export.
+Notable accepted deviations: F2 wired as a sibling `CanonizationTask` (FlushTask-shaped) rather than inside the synchronous daemon cycle; the `hopped` set replaced by structural disjointness of the pre-cycle windows; `stage3_passes` no longer takes `&Graph` and returns the admitting blast measurement; `batch_size` reused to cap Stages 1–2.
+
+**Round 2 — verify (opus, adversarial):** every original finding confirmed FIXED — both P1s dead with the original demonstrations converted to passing regression tests; F6/F7 mutants re-run and killed. Found **2 new P2s + 4 P3s introduced or exposed by the fixes**:
+R2-1 (P2) stale `UpsertNode` + audit-dedupe skip permanently regresses the durable concept row (demotion variant erases the cooldown); R2-2 (P2) gather-time budget truncation re-breaks anti-starvation (blocked top scorer occupies the only slot forever); R2-3 (P3) SQLite `blast_radius` missing session predicates vs Cockroach; R2-4 (P3) a phase-2 store fault blocked I/O-free Stage-1 hops; R2-5 (P3) `CanonizationTask` resilience arms untested; R2-6 (P3) Canonical-first partition can consume `top_k` — **accepted design risk, no change**.
+
+**Round 2 — remediate (5 commits, `c5337ef..d3bdc6b`):**
+`1ad1dda` R2-1 — single-writer ownership: `canonization_status`/`blast_radius`/`last_demotion_time` on an existing row are written only by the canonization path; `UpsertNode` preserves them on conflict (all 3 backends) · `f0eafdf` R2-2 — truncation removed; budget cut only in `apply`, decrement on commit · `817e44c` R2-3 · `69c9351` R2-4 — Stage-1-only fallback plan through the same commit point, returned in `EvalError::outcome` · `d3bdc6b` R2-5.
+
+**Round 3 — verify (opus, adversarial): CLEAN.** All five R2 fixes pinned by tests that die under targeted mutants (9 mutants run, all killed, all reverted). The three holds R2-1 had broken (demotion semantics, COH-3, cooldown-survives-restart) explicitly re-verified, including the reverse flush order `[Transition, UpsertNode]`. Exhaustive search for other writers of the three canonization columns found none in production paths (`set_root_goal` routes through `apply_canonization_transition`; `demote_to_observation` INSERTs fresh ids; Cockroach's statement is `ON CONFLICT DO UPDATE`, not full-row `UPSERT`, so column preservation is real).
+
+**Residual P3s (recorded, non-blocking):**
+- **R3-1** — `seed()` on SQLite/Cockroach routes through the R2-1 upsert and no longer restores canonization state on a *non-empty* session (MemoryStore does; divergence). Unreachable in shipped code (all seed callers target fresh stores) but on P8's likely demo path → **P8 checklist alongside F18**.
+- **R3-2** — stage-2/3 cursors advance in `gather` even when a phase-2 fault drops the windows; skipped members return within one rotation (delay, not starvation).
+- **R3-3** — when the R2-4 fallback apply also fails, the root-cause store error is dropped from the logged error chain.
+- **R3-4** — accepted trade: up to `batch_size` `blast_radius` queries per cycle in the near-full-budget regime (correctness requires it; F9 keeps it to one per member). Scale note next to F13 for P8.
+- **F18** — P8 checklist: the MCP layer must stamp `created_at` server-side or the min-age inflation guard is bypassable by backdating.
+
+**Final gates (clean tree, `d3bdc6b`):** `cargo fmt --check` clean; `RUSTFLAGS="-D warnings" cargo check --all-targets` clean on default / `store-sqlite` / `store-cockroach`; tests **490/0** (default), **527/0** (store-sqlite), **513/0** (store-cockroach). Test-function diff `06fcc00..d3bdc6b`: zero removals, +24 (503 → 527); the single reworded assertion (`budget_contention` `stage3_batch` now `[nid(2), nid(1)]`) is required by F10's "what actually ran through the predicate" contract and was verified to still discriminate.
+
+Reopen criteria: any regression in the "Verified holds" list above, in the R1/R2 regression tests named in the disposition, or in the single-writer ownership of the three canonization columns.
