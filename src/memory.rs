@@ -1335,6 +1335,16 @@ impl Memory {
         // task that is still able to write (R3-1). `abort()` is synchronous, so
         // it cannot be skipped by a cancellation — but only the join proves the
         // task has actually stopped.
+        //
+        // Coverage note (R4-3): only the flush handle's custody is pinned by a
+        // test. The canon/daemon detach window (an aborted task finishing a
+        // synchronous stretch that appends to the log) is real — probed
+        // directly in review — but too narrow to exercise deterministically:
+        // neither loop has a long synchronous stretch to park in. Custody is
+        // applied uniformly anyway because the hazard class is identical and
+        // reasoning per-handle about window width is exactly the mistake R3-1
+        // caught. Same class of documented blind spot as `begin_write_sync`'s
+        // re-check (R2-6) and the flush select's `biased;` (T81-4).
         let mut canon = HandleCustody::take(&self.canon_handle);
         canon.abort();
         let _ = canon.join().await;
@@ -1521,9 +1531,12 @@ impl Memory {
     /// that guard hands the handle back unless the join returned. So `None` at
     /// step 3 means "reaped", never "detached" — the state that made the
     /// shortcut a lie. The assertion is the pin on that reasoning rather than a
-    /// second mechanism, hence `debug_assert!`: it costs nothing in release and
-    /// turns a future regression in the guard into a loud test failure instead
-    /// of a quiet `Ok(())`.
+    /// second mechanism, hence `debug_assert!` — and it is a *pin only* (R4-2):
+    /// a neutered guard leaves the slot `None`, the very state this asserts,
+    /// so the assertion cannot fire on the regression that matters. Detachment
+    /// is undetectable from here by construction; the enforcement is
+    /// [`HandleCustody`] and the R3-1 regression test's durability assertion,
+    /// not this line.
     fn latch_success(&self, succeeded: &mut bool) {
         debug_assert!(
             self.flush_handle.lock().is_none(),
@@ -1616,14 +1629,21 @@ impl Drop for Memory {
     /// abandons the tail (see `close`'s drain), so it warns. After a successful
     /// `close` every handle is already `None` and this is a no-op.
     ///
-    /// **Two ways to lose a tail, not one** (R2-2). Keying the warning on task
-    /// handles still being `Some` catches the never-closed handle but is blind
-    /// to the *closed-and-failed* one: a `close()` that failed (or was
-    /// cancelled) has already taken all three handles, so `leaked` is false —
-    /// while the mutations it kept are sitting in the log, about to be dropped
-    /// in silence. Precisely the case `close`'s "retry after failure" contract
-    /// asks the owner to act on, so it must not go out quietly. The log is
-    /// therefore checked too, whatever the handles say.
+    /// **Two ways to lose a tail, not one** (R2-2, amended by R3-1/R4-1).
+    /// Keying the warning on task handles still being `Some` catches the
+    /// never-closed handle but is blind to the *closed-and-failed* one: a
+    /// `close()` that **failed** has reaped all three handles, so `leaked` is
+    /// false — while the mutations it kept are sitting in the log, about to be
+    /// dropped in silence. Precisely the case `close`'s "retry after failure"
+    /// contract asks the owner to act on, so it must not go out quietly. The
+    /// log is therefore checked too, whatever the handles say.
+    ///
+    /// A **cancelled** `close()` is the third shape (R4-1): `HandleCustody`
+    /// has put the handles *back*, so `leaked` is true and the first branch
+    /// fires — but its count can understate the loss, because a tail drained
+    /// by the flush task before the cancellation lives in that task's
+    /// `pending`, not in the log this counts. The first message says so
+    /// rather than pretending the log count is the whole story.
     fn drop(&mut self) {
         // No-op if a successful `close()` already released the slot (R2-4).
         self.unregister_once();
@@ -1639,8 +1659,10 @@ impl Drop for Memory {
             tracing::warn!(
                 session = %self.session,
                 mutations = undrained,
-                "Memory dropped without close(): background tasks aborted and {undrained} \
-                 un-flushed mutations were discarded"
+                "Memory dropped with live background tasks (never closed, or a close() was \
+                 cancelled): tasks aborted and {undrained} un-flushed mutations in the log were \
+                 discarded — after a cancelled close(), mutations held in the flush task's \
+                 buffer are lost as well and are not in this count"
             );
         } else if undrained > 0 {
             tracing::warn!(
