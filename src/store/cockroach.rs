@@ -3791,26 +3791,51 @@ mod conformance {
 
     /// DECISION D1 item 3 camera-proof: the global vector query must execute as
     /// `vector search` on `concepts@concepts_embedding_idx` (spec §12.1 — "we used the
-    /// vector index", on camera). Selecting `vector search` is a COST decision by the
-    /// optimizer: it materializes on a deployment where the vector index is cheaper than a
-    /// scan (single-region and/or a large embedding population — matching the T0.3 spike
-    /// on `distribution: local`). On the small multi-region demo cluster the optimizer
-    /// legitimately scans instead, so this gate is PENDING infra there while
-    /// `check_vector_explain_is_global_topk` (in [`conformance_suite`]) still proves the
-    /// DECISION D1 *shape* (global top-k, no session-filtered anti-pattern index).
+    /// CockroachDB distributed vector index", on camera).
+    ///
+    /// **T7.4 (2026-08-13) — this gate is no longer deployment-conditional.** The
+    /// historical "PENDING on an index-favorable cluster" reading was wrong on both
+    /// counts, and both causes are now fixed:
+    ///
+    /// 1. The assertion could never match its own output. The test used
+    ///    `EXPLAIN (OPT, VERBOSE)`, whose operator is spelled `vector-search`
+    ///    (hyphenated), and asserted the spaced `vector search` — so it failed at the
+    ///    first assertion on ANY cluster, behind ANY index, even with a perfect vector
+    ///    plan. See `dev-diary/evidence/20260813-131108-…-camera-proof-diagnosis.txt`.
+    /// 2. `WHERE embedding IS NOT NULL` — which is load-bearing and must not be removed,
+    ///    since NULL-`dist` rows hard-error the `f64` decode — cannot be proven implied
+    ///    by a NON-partial vector index, so the optimizer planned a FULL SCAN. T7.4 made
+    ///    `concepts_embedding_idx` itself PARTIAL on that same predicate in
+    ///    `migrations/cockroach/001_init.sql`; the production query is unchanged.
+    ///
+    /// **Why plain `EXPLAIN` and not `EXPLAIN (OPT, VERBOSE)`** (a deliberate choice —
+    /// each format spells the operator differently, and asserting the union of both
+    /// spellings would be an assertion that cannot fail informatively):
+    /// - Plain `EXPLAIN` is the format that literally emits `vector search`, the wording
+    ///   DECISION D1 and spec §12.1 use, and it renders the proof in ~17 readable lines:
+    ///   `• vector search / table: concepts@concepts_embedding_idx (partial index)`.
+    /// - `OPT, VERBOSE` inlines the full 1024-element probe vector into the plan text,
+    ///   producing a ~52 KB blob (measured). That is unusable as an on-camera artifact
+    ///   and would make any assertion failure message unreadable — which is the entire
+    ///   argument that had favoured it.
+    ///
+    /// The plan below was re-verified against the test's **bound** `$1`/`$2` over the
+    /// extended protocol, not against literals: T7.3 round R2 established that a
+    /// parameterized `LIMIT` can change plan shape, so a literal-`LIMIT` measurement
+    /// would not have proven this test green.
     #[tokio::test]
-    #[ignore = "camera-proof: set LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"]
+    #[ignore = "camera-proof: set LAMBO_REQUIRE_VECTOR_INDEX=1 (spec §12.1 vector-index proof)"]
     async fn vector_explain_camera_proof() {
-        // The general live conformance tier runs every ignored test against the
-        // provisioned multi-region cluster. That cluster legitimately cost-selects
-        // a small-table scan, so the deployment-specific camera assertion must be
-        // requested independently. `conformance_suite` still verifies the global
-        // ordered query shape and rejects the session-index anti-pattern on every
-        // required-live run.
+        // Kept behind its own env gate (not merged into `conformance_suite`) so the
+        // §12.1 claim is asserted only when someone is deliberately capturing it, and
+        // so a cluster provisioned from an older migration fails LOUDLY here rather
+        // than reporting a green suite. `conformance_suite`'s
+        // `check_vector_explain_is_global_topk` independently proves the DECISION D1
+        // *shape* (global top-k, no session-filtered anti-pattern index) on every run.
         if env::var_os("LAMBO_REQUIRE_VECTOR_INDEX").is_none() {
             eprintln!(
-                "vector_explain_camera_proof: skipped; set \
-                 LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"
+                "vector_explain_camera_proof: skipped; set LAMBO_REQUIRE_VECTOR_INDEX=1 \
+                 against a cluster provisioned from migrations/cockroach/001_init.sql"
             );
             return;
         }
@@ -3820,8 +3845,11 @@ mod conformance {
         let store = new_store(&dsn);
         let pool = store.pool().await.unwrap();
         let probe = encode_vector(&embed(0.5)).unwrap();
+        // Byte-for-byte the shape of `VECTOR_CANDIDATES_SQL` (predicate included, bound
+        // `LIMIT $2` included) — the proof is worthless if it explains a query that
+        // production does not run.
         let rows = sqlx::query(
-            "EXPLAIN (OPT, VERBOSE) \
+            "EXPLAIN \
              SELECT id, session_id, embedding <-> $1::VECTOR AS dist \
              FROM concepts WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT $2",
         )
@@ -3837,13 +3865,22 @@ mod conformance {
             .collect::<Result<_, _>>()
             .unwrap();
         let text = plan.join("\n");
+        // The plan IS the artifact — print it so a `--nocapture` run is the camera shot.
+        eprintln!("vector_explain_camera_proof plan:\n{text}");
         assert!(
             text.contains("vector search"),
-            "EXPLAIN must show vector search on the index, got:\n{text}"
+            "EXPLAIN must show `vector search` (plain-EXPLAIN spelling), got:\n{text}"
         );
         assert!(
-            text.contains("concepts_embedding_idx"),
-            "EXPLAIN must reference concepts_embedding_idx, got:\n{text}"
+            text.contains("concepts@concepts_embedding_idx"),
+            "EXPLAIN must show the vector search on concepts@concepts_embedding_idx, got:\n{text}"
+        );
+        // The exact regression T7.4 fixed: with a NON-partial index the predicate forces
+        // `spans: FULL SCAN` on concepts_pkey. Assert it is gone, so a cluster that
+        // silently reverts to a non-partial index fails with a pointed message.
+        assert!(
+            !text.contains("FULL SCAN"),
+            "EXPLAIN must not fall back to a full scan (non-partial index?), got:\n{text}"
         );
     }
 }

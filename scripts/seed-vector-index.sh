@@ -2,19 +2,35 @@
 # seed-vector-index.sh — make the CockroachDB optimizer choose `vector search`
 # so the §12.1 vector-index camera-proof can be captured (T7.3 open item).
 #
-# WHY THIS EXISTS
-# ---------------
-# `vector_explain_camera_proof` fails on the demo cluster and this is NOT a query
-# bug — the T7.3 handoff is explicit that the query shape is correct and must not
-# be re-architected. Index selection is a COST decision: on a small table a scan
-# is genuinely cheaper, so the planner picks `scan concepts` and is right to.
+# STATUS (T7.4, 2026-08-13): **NOT REQUIRED FOR THE CAMERA-PROOF.** Seeding is
+# now an optional load/benchmark tool, nothing more. Do not run it before a demo
+# expecting it to make the proof pass — it is not what makes the proof pass.
 #
-# The blocker measured 2026-08-13 was not row count but *diversity*: the cluster
-# had 118 concepts carrying embeddings but only **4 distinct vectors**, because
-# the test fixtures reuse FixtureEmbedder's NEAR_A / NEAR_B / FAR / NEAR_PAIR
-# constants. A vector index over 4 distinct points cannot help any query, at any
-# table size. This script inserts genuinely distinct random unit-ish vectors so
-# the index has something to discriminate on.
+# WHY THIS EXISTS, AND WHY ITS ORIGINAL PREMISE WAS WRONG
+# -------------------------------------------------------
+# This script was written on the theory that `vector_explain_camera_proof` failed
+# because the optimizer cost-rejected the vector index on a small, low-diversity
+# table: 118 embedded concepts but only **4 distinct vectors**, because the test
+# fixtures reuse FixtureEmbedder's NEAR_A / NEAR_B / FAR / NEAR_PAIR constants.
+# Seeding 2000 genuinely distinct vectors was supposed to tip the cost model.
+#
+# That theory was FALSIFIED by T7.4. The camera-proof was failing for two
+# unrelated reasons that had nothing to do with data volume or diversity:
+#   1. the test asserted the spaced token `vector search` against
+#      `EXPLAIN (OPT, VERBOSE)`, which spells the operator `vector-search`; and
+#   2. the query's `WHERE embedding IS NOT NULL` cannot be proven implied by a
+#      NON-partial vector index, so the planner chose a FULL SCAN.
+# Making `concepts_embedding_idx` PARTIAL on that predicate fixed (2) with no
+# query change. MEASURED AFTER THE FIX, with this seed session REMOVED (--clean)
+# and NO manual ANALYZE — 858 concepts, 123 embedded, still only 4 distinct
+# vectors — the plan is `vector search` on
+# `concepts@concepts_embedding_idx (partial index)`. So the seed was neither
+# necessary nor sufficient. Evidence:
+# dev-diary/evidence/20260813-134333-vector-index-camera-proof-PASSING.txt
+#
+# T7.4 therefore left the demo cluster UNSEEDED (--clean applied): the §12.1
+# claim is stronger when the plan is captured against ordinary demo-shaped data
+# rather than 2000 rows of synthetic noise nobody can account for on camera.
 #
 # The rows land in ONE dedicated session (default `vector-index-seed`) so they
 # are trivially removable with --clean and never mix into a demo session.
@@ -26,7 +42,9 @@
 #   ./scripts/seed-vector-index.sh --status        # report, change nothing
 #   ./scripts/seed-vector-index.sh --clean         # delete the seed session
 #
-# Then capture the proof:
+# The camera-proof does NOT depend on any of the above; it needs only the partial
+# vector index from migrations/cockroach/001_init.sql:
+#   ./scripts/provision.sh
 #   LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh
 set -uo pipefail
 
@@ -43,7 +61,7 @@ while [[ $# -gt 0 ]]; do
     --session) SESSION="${2:?--session needs a value}"; shift 2 ;;
     --clean)   MODE="clean"; shift ;;
     --status)  MODE="status"; shift ;;
-    -h|--help) sed -n '1,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,48p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -164,4 +182,5 @@ echo
 echo "post-seed state:"
 report
 echo
-echo "next: LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh"
+echo "note: this seed is NOT required for the §12.1 camera-proof (T7.4) — the"
+echo "      partial vector index is. Remove it again with --clean when done."
