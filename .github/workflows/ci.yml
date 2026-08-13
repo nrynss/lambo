@@ -1,11 +1,64 @@
 name: ci
 
+# Third-party actions are pinned to full 40-char commit SHAs, with the human
+# version in a trailing comment. A tag (`@v4`) and a branch (`@1.97.1`) are both
+# mutable — whoever controls the action repo can repoint them at new code that
+# then runs with this workflow's token and secrets, including
+# `secrets.LAMBO_COCKROACH_DSN` in the cockroach-live job below. A SHA cannot be
+# repointed. Note `dtolnay/rust-toolchain@1.97.1` is a *branch*, not a tag, so it
+# was the most mutable of the three.
+# To upgrade: bump the SHA and the comment together, never the comment alone.
+#   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha
+# (annotated tags need a second deref through /git/tags/<sha>; use
+#  .../git/ref/heads/<branch> for a branch-versioned action)
+
+# Path filter: the dev-diary is written on every task handoff and adversarial
+# review, and none of it can change a build result. CI runs only for inputs the
+# compiler or the test binaries actually read.
+#
+# NOT just `src/**/*.rs` — three non-Rust trees are real compile/test inputs and
+# MUST stay in this list:
+#   * migrations/**       `include_str!` into store/cockroach.rs + store/sqlite.rs
+#   * fixtures/**         `include_str!` (mutations-batch.json) and golden files
+#                         read via CARGO_MANIFEST_DIR at test time
+#   * lambo.example.toml  `include_str!` in config.rs — it is a tested contract,
+#                         not documentation, despite the name
+# Adding a new include_str!/CARGO_MANIFEST_DIR read outside these paths means
+# adding that path here, or CI goes blind to it.
+#
+# Deliberately excluded: dev-diary/**, README.md, AGENTS.md, LICENSE, docs/**,
+# scripts/** (not executed by CI), spikes/** (standalone crates, not workspace
+# members — the root package has no [workspace], so `cargo test --all` never
+# builds them).
+#
+# The two lists below MUST be kept identical. GitHub Actions does not support
+# YAML anchors/aliases in workflow files, so this cannot be factored out.
 on:
   push:
     # `**` is required: GitHub branch globs do not let `*` cross `/`, and real
     # phase branches are `phase/<slug>` (XP-1 — `'phase-*'` matched nothing).
     branches: [main, master, 'phase/**']
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'migrations/**'
+      - 'fixtures/**'
+      - 'lambo.example.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'migrations/**'
+      - 'fixtures/**'
+      - 'lambo.example.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,15 +68,15 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -61,15 +114,15 @@ jobs:
           - name: demo
             command: cargo check --features demo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.command }}
@@ -85,12 +138,12 @@ jobs:
       LAMBO_COCKROACH_DSN: ${{ secrets.LAMBO_COCKROACH_DSN }}
       LAMBO_REQUIRE_LIVE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: rustfmt, clippy
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Live CockroachDB tests (--ignored)
         run: cargo test --features store-cockroach,store-memory,fixtures --lib -- --ignored
