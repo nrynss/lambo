@@ -170,12 +170,20 @@ const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 /// cutoff. `{STRUCTURAL_EDGE_IN}` is substituted at the call site (the
 /// predicate is shared with blast_radius); the substitution keeps this const
 /// assertable verbatim in tests.
+///
+/// **Session scope (F5).** `i.session_id = ?` is not redundant with
+/// `e.session_id = ?`: `concepts.origin_interaction` is a **global** FK, so a
+/// concept in session S may legally point at an interaction in session S′.
+/// Without the filter the span counted those foreign interactions — inflating
+/// `distinct` and (since their timestamps sit outside S's extent) the coverage
+/// ratio, both against a session `MemoryStore` never sees. The extent CTE was
+/// already session-filtered, so the two halves of the ratio disagreed.
 const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
      SELECT DISTINCT i.id, i.created_at \
      FROM edges e \
      JOIN concepts src ON src.id = e.source \
      JOIN interactions i ON i.id = src.origin_interaction \
-     WHERE e.target = ? AND e.session_id = ? \
+     WHERE e.target = ? AND e.session_id = ? AND i.session_id = ? \
        AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
        AND e.created_at <= ? AND i.created_at <= ? \
  ), \
@@ -794,6 +802,7 @@ impl GraphStore for SqliteStore {
         let row =
             sqlx::query(&INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN))
                 .bind(&node_text)
+                .bind(&session.0)
                 .bind(&session.0)
                 .bind(&cutoff)
                 .bind(&cutoff)
@@ -2467,6 +2476,78 @@ mod tests {
         assert!(
             INTERACTION_SPAN_SQL.contains("i.created_at <= ?"),
             "span SQL must gate the ORIGIN-INTERACTION timestamp"
+        );
+    }
+
+    /// F5: `concepts.origin_interaction` is a **global** FK, so a concept in
+    /// session S may legally point at an interaction in session S′. The span
+    /// CTE must scope the joined interaction to S (the extent CTE always was),
+    /// otherwise foreign interactions inflate `distinct` and — since their
+    /// timestamps sit outside S's extent — the coverage ratio, on a population
+    /// `MemoryStore` (which resolves origins inside the session snapshot only)
+    /// never sees. Pre-fix this returned `distinct = 3`, coverage clamped from
+    /// 200.0; MemoryStore returned `distinct = 0`.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn interaction_span_ignores_cross_session_origin_interactions() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let here = SessionId::from("span-here");
+        let there = SessionId::from("span-there");
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let t = |secs: i64| t0 + chrono::Duration::seconds(secs);
+
+        // `here` extent is 100s; `there` straddles it by ±10000s, so an
+        // unscoped ratio is 20000/100 = 200.0.
+        let (h0, h1) = (NodeId::new(), NodeId::new());
+        let (b0, b1, b2) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let target = NodeId::new();
+        let (s0, s1, s2) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut mutations = vec![
+            plant_interaction(&here, h0, None, t(0)),
+            plant_interaction(&here, h1, Some(h0), t(100)),
+            plant_interaction(&there, b0, None, t(-10_000)),
+            plant_interaction(&there, b1, Some(b0), t(0)),
+            plant_interaction(&there, b2, Some(b1), t(10_000)),
+            plant_concept(&here, target, h0, "target", ConceptType::Entity, t(0)),
+        ];
+        // Supports live in `here` but their origins point across sessions.
+        for (id, origin, name) in [(s0, b0, "s0"), (s1, b1, "s1"), (s2, b2, "s2")] {
+            mutations.push(plant_concept(
+                &here,
+                id,
+                origin,
+                name,
+                ConceptType::Entity,
+                t(0),
+            ));
+            mutations.push(plant_edge(&here, id, target, EdgeType::Dependency, t(0)));
+        }
+        let batch = MutationBatch { mutations };
+        store.flush(&batch).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&batch).await.unwrap();
+
+        let got = store
+            .interaction_span(&here, target, Duration::from_secs(0))
+            .await
+            .unwrap();
+        let want = memory
+            .interaction_span(&here, target, Duration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            got, want,
+            "cross-session origins must not diverge from MemoryStore"
+        );
+        assert_eq!(
+            got.distinct, 0,
+            "foreign-session origin interactions must not count"
+        );
+        assert_eq!(got.coverage, 0.0);
+        assert!(
+            got.coverage <= 1.0,
+            "coverage is a ratio of the session's own extent"
         );
     }
 

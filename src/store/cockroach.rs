@@ -368,13 +368,22 @@ WHERE c.session_id = $1
 /// covers exactly one case: a non-empty span over a **single-point session extent**
 /// (extent <= 0) — that interaction spans the whole session, so coverage is `1.0`
 /// (F1: canonization Stage 2 parity with MemoryStore in short sessions).
+///
+/// **Session scope (F5).** `i.session_id = $1` is not redundant with
+/// `e.session_id = $1`: `concepts.origin_interaction` is a **global** FK, so a
+/// concept in session S may legally point at an interaction in session S′.
+/// Without the filter the span counted those foreign interactions — inflating
+/// `distinct` against a session `MemoryStore` never sees, while the extent CTE
+/// stayed session-filtered. The `least`/`greatest` clamp is the same guard
+/// `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
+/// endpoints fall outside the session extent must not report a ratio above 1.0.
 /// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
 const INTERACTION_SPAN_SQL: &str = r#"
 WITH span AS (
     SELECT DISTINCT i.id AS iid, i.created_at AS ts
     FROM edges e
     JOIN concepts src ON src.id = e.source AND src.session_id = $1
-    JOIN interactions i ON i.id = src.origin_interaction
+    JOIN interactions i ON i.id = src.origin_interaction AND i.session_id = $1
     WHERE e.target = $2
       AND e.session_id = $1
       AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
@@ -390,8 +399,9 @@ SELECT
     CASE
         WHEN (SELECT count(*) FROM span) = 0 THEN 0.0
         WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
-            THEN extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
-                 / extract(epoch FROM (extent.hi - extent.lo))
+            THEN least(1.0, greatest(0.0,
+                 extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
+                 / extract(epoch FROM (extent.hi - extent.lo))))
         -- F1: non-empty span over a single-point session extent covers the
         -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
         ELSE 1.0
@@ -1613,6 +1623,26 @@ mod tests {
         // MemoryStore parity: interaction_span filters BOTH edge and interaction age.
         assert!(INTERACTION_SPAN_SQL.contains("e.created_at <= $3"));
         assert!(INTERACTION_SPAN_SQL.contains("i.created_at <= $3"));
+    }
+
+    /// F5: `origin_interaction` is a global FK, so the span CTE must scope the
+    /// joined interaction to the queried session — the extent CTE already is.
+    /// Without it, concepts pointing at another session's interactions inflate
+    /// `distinct` and push the ratio above 1.0 (MemoryStore never sees them).
+    /// Text-level like its `structural_query_placeholder_order_and_counts`
+    /// neighbour: the behavioural twin runs on SQLite
+    /// (`interaction_span_ignores_cross_session_origin_interactions`), which
+    /// needs no live cluster.
+    #[test]
+    fn span_sql_is_session_scoped_and_coverage_is_clamped() {
+        assert!(
+            INTERACTION_SPAN_SQL.contains("i.session_id = $1"),
+            "span CTE must scope the origin interaction to the session (F5)"
+        );
+        assert!(
+            INTERACTION_SPAN_SQL.contains("least(1.0, greatest(0.0,"),
+            "coverage must be clamped to [0,1] like MemoryStore/SQLite (F5)"
+        );
     }
 
     #[test]
