@@ -293,6 +293,20 @@ impl Daemon {
         self.scores.read().clone()
     }
 
+    /// Handle to the daemon-owned score table, for readers that must follow
+    /// it across cycles rather than take one snapshot — P6's
+    /// [`CanonizationTask`] reads it once per `canonization_eval_interval`
+    /// for Stage 1's P90 population.
+    ///
+    /// Daemon-owned: the rescore loop replaces the table wholesale each
+    /// cycle, so holders must only ever read. Lock order is unchanged (this
+    /// lock is never taken while the hot list is held).
+    ///
+    /// [`CanonizationTask`]: crate::canon::CanonizationTask
+    pub fn score_table(&self) -> Arc<RwLock<ScoreTable>> {
+        self.scores.clone()
+    }
+
     /// Three-phase recall (spec §8; P5).
     ///
     /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any

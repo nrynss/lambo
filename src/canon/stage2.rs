@@ -38,7 +38,7 @@ const MIN_COVERAGE: f64 = 0.3;
 
 /// Whether `node` currently clears Stage 2 on `store`.
 pub async fn stage2_passes(
-    store: &impl GraphStore,
+    store: &dyn GraphStore,
     session: &SessionId,
     node: NodeId,
     min_age: Duration,

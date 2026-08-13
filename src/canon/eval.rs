@@ -19,40 +19,84 @@
 //!    `Canonical → None` lowest [`GraphStore::blast_radius`] first
 //!    (NodeId ascending tie-break) until the count is within budget.
 //!
-//! ## Commit order
+//! One hop per cycle is **structural**, not bookkeeping: all three stage
+//! windows are read from the same pre-cycle graph state, where the `None` /
+//! `Candidate` / `Venerable` sets are disjoint by definition. A node that
+//! becomes Candidate in this cycle's Stage 1 was not in the Stage 2 window.
 //!
-//! Every hop (up and down) goes through [`commit_transition`]:
+//! ## Shape — gather → verdicts → apply → record (spec §6.4)
 //!
-//! 1. [`Graph::apply_canonization_transition`] — RAM + in-graph audit.
-//! 2. [`GraphStore::record_canonization`] — durable `canonization_events`.
-//! 3. [`events::emit_canonized`] — `DaemonEvent::Canonized`.
+//! The production owner holds the graph in `Arc<RwLock<Graph>>` and
+//! `parking_lot` guards are `!Send`, so no guard may be alive across an
+//! `.await` — the same rule the daemon loop is built around
+//! (`src/daemon/mod.rs`, "Lock discipline"). A cycle that took `&mut Graph`
+//! and awaited store calls underneath it therefore had no legal caller at
+//! all. The cycle is instead four phases:
 //!
-//! Graph is applied first so a store failure cannot leave a durable
-//! audit row without RAM state. A failed apply does **not** record or
-//! emit (an unrecorded transition is a demo bug; a fabricated one is
-//! worse). `now` is injected — the cycle has no wall clock.
+//! 1. [`Evaluator::gather`] — **synchronous, read guard.** Reads the three
+//!    stage windows, the Stage-3 cooldown inputs and the budget probe out of
+//!    the graph. No I/O.
+//! 2. [`verdicts`] — **async, no lock.** One `interaction_span` per Stage-2
+//!    window member and one `blast_radius` per Stage-3 window member /
+//!    budget probe. Touches no graph.
+//! 3. [`apply`] — **synchronous, write guard.** Re-checks each node's
+//!    current status, applies the transitions, emits `DaemonEvent::Canonized`.
+//! 4. [`record`] — **async, no lock.** `store.record_canonization` per hop.
 //!
-//! Callers that wrap the graph in `Arc<RwLock<Graph>>` must **not**
-//! hold that lock across this async function (spec §6.4). Tests pass
-//! an owned `&mut Graph`.
+//! [`Evaluator::eval_cycle`] composes the four over an `&RwLock<Graph>`;
+//! [`crate::canon::CanonizationTask`] drives it every
+//! `canonization_eval_interval` (spec §10's "every 60s").
+//!
+//! ## Commit point
+//!
+//! The **graph apply** is the commit point, and every hop goes through
+//! [`commit_transition`]:
+//!
+//! 1. [`Graph::apply_canonization_transition`] — RAM + in-graph audit + the
+//!    write-behind mutation log.
+//! 2. [`events::emit_canonized`] — `DaemonEvent::Canonized`.
+//!
+//! [`GraphStore::record_canonization`] follows in phase 4. Emission is at the
+//! commit point rather than after that store round-trip because the apply is
+//! what makes the transition real: it is in RAM, in the audit, and in the
+//! write-behind log, so the store learns of it on the next flush regardless.
+//! Ordering the emit behind the immediate durable write meant a single
+//! `record_canonization` failure lost the `Canonized` event **forever** (the
+//! flush replay re-records the row but publishes nothing) — by this phase's
+//! own standard, a demo bug.
+//!
+//! For the same reason a failed cycle returns [`EvalError`], which carries
+//! the partial [`EvalOutcome`]: the hops committed before the failure are
+//! real and the caller must not have them silently dropped on the floor.
+//! A failed *apply* still does not emit — a fabricated transition is worse
+//! than a missing one.
+//!
+//! `now` is injected — the cycle has no wall clock, and neither do the store
+//! queries it issues (see [`crate::store::GraphStore::blast_radius`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 
-use crate::canon::{stage1_candidates, stage2_passes, stage3_passes};
+use crate::canon::stage3;
+use crate::canon::{stage1_candidates, stage2_passes};
 use crate::daemon::events::{self, EventSender};
 use crate::daemon::ScoreTable;
 use crate::graph::Graph;
 use crate::store::GraphStore;
-use crate::types::{CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, StoreError};
+use crate::types::{
+    CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, SessionId, StoreError,
+};
 
-/// Round-robin cursor plus the one-cycle write path.
+/// Round-robin cursors plus the one-cycle write path.
 #[derive(Clone, Debug, Default)]
 pub struct Evaluator {
-    /// Index into the NodeId-sorted Venerable ring; persists across cycles.
-    stage3_cursor: usize,
+    /// Last Stage-2 Candidate evaluated; the next cycle resumes after it.
+    stage2_cursor: Option<NodeId>,
+    /// Last Stage-3 Venerable evaluated; the next cycle resumes after it.
+    stage3_cursor: Option<NodeId>,
 }
 
 /// Knobs for one [`eval_cycle`]. Defaults match [`crate::Config`].
@@ -64,7 +108,14 @@ pub struct EvalParams {
     /// Forwarded to Stage 3 / budget (`blast_radius` age floor).
     pub min_edge_age: Duration,
     pub cooldown: Duration,
-    /// Venerable nodes considered per cycle (spec default 50).
+    /// Nodes considered per stage per cycle (spec default 50).
+    ///
+    /// Spec §10 names this bound for the Stage-3 Venerable ring. It also caps
+    /// Stage 1's hops and Stage 2's window (F13): every member of either is a
+    /// per-node store round-trip or a durable write, so an uncapped stage
+    /// issues N sequential queries per tick against Cockroach forever. The
+    /// spec fixes no *lower* bound on throughput, so capping is compatible;
+    /// what it costs is latency, which the cursors bound fairly.
     pub batch_size: usize,
     pub max_canonical_nodes: usize,
 }
@@ -74,8 +125,60 @@ pub struct EvalParams {
 pub struct EvalOutcome {
     pub promotions: Vec<CanonizationEvent>,
     pub demotions: Vec<CanonizationEvent>,
-    /// Stage 3 window in the order it was evaluated (score-descending).
+    /// The Stage 3 window this cycle ran through the predicate, in the order
+    /// it was evaluated (score-descending).
+    ///
+    /// F10: this is the **evaluated** window, not a candidate list. The
+    /// budget cap is applied when the window is taken, so a node the cycle
+    /// could never promote (no remaining budget) is neither listed here nor
+    /// stepped over by the cursor.
     pub stage3_batch: Vec<NodeId>,
+}
+
+/// A cycle that failed partway, carrying what it had already committed.
+///
+/// The old `?`-per-hop shape discarded the whole [`EvalOutcome`] on the first
+/// store error — including hops already applied to the graph, emitted, and
+/// durably recorded earlier in the same cycle. The caller needs both halves:
+/// the error to log and back off on, the outcome to account for.
+#[derive(Debug)]
+pub struct EvalError {
+    /// Every hop this cycle committed to the graph before it failed.
+    pub outcome: EvalOutcome,
+    /// What went wrong.
+    pub source: LamboError,
+}
+
+impl EvalError {
+    fn new(outcome: EvalOutcome, source: impl Into<LamboError>) -> Self {
+        Self {
+            outcome,
+            source: source.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "canonization cycle failed after {} committed transition(s): {}",
+            self.outcome.transitions().count(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for EvalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl From<EvalError> for LamboError {
+    fn from(err: EvalError) -> Self {
+        err.source
+    }
 }
 
 impl EvalParams {
@@ -102,235 +205,365 @@ impl EvalOutcome {
     pub fn transitions(&self) -> impl Iterator<Item = &CanonizationEvent> {
         self.promotions.iter().chain(self.demotions.iter())
     }
+
+    /// Whether this cycle committed nothing (the steady state).
+    pub fn is_empty(&self) -> bool {
+        self.promotions.is_empty() && self.demotions.is_empty()
+    }
+}
+
+/// Everything one cycle reads from the graph, captured under a single read
+/// guard so the verdict phase can run with no lock held.
+#[derive(Clone, Debug, PartialEq)]
+struct CyclePlan {
+    session: SessionId,
+    /// Stage 1: still-`None` concepts clearing the Candidate predicate.
+    stage1: Vec<NodeId>,
+    /// Stage 2: still-`Candidate` window off the identity cursor.
+    stage2: Vec<NodeId>,
+    /// Stage 3: Venerable window off the identity cursor, score-descending,
+    /// already truncated to the remaining Canonical budget.
+    stage3: Vec<Stage3Probe>,
+    /// Budget: Canonical ids to rank for demotion. Empty unless the session
+    /// is **already** over budget — Stage 3 is capped at the remaining
+    /// budget, so a cycle can never create the overflow it then demotes
+    /// (the phase-R2 P2 / original P1-1 property).
+    demotion: Vec<NodeId>,
+}
+
+/// One Stage-3 window member plus the cooldown input read from its concept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stage3Probe {
+    node: NodeId,
+    last_demotion_time: Option<DateTime<Utc>>,
+}
+
+/// The store's answers for one [`CyclePlan`], computed with no lock held.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Verdicts {
+    /// Stage-2 window members that cleared the span predicate.
+    stage2_pass: Vec<NodeId>,
+    /// `(node, measured blast)` for Stage-3 admissions, in evaluation order.
+    /// The measurement is the one that admitted the node — it is what the
+    /// audit row is stamped with (F9), never a second query.
+    stage3_pass: Vec<(NodeId, u64)>,
+    /// `(blast, node)` for the budget ranking, blast-ascending then
+    /// NodeId-ascending (spec §10: lowest blast radius demoted first).
+    demotion_ranked: Vec<(u64, NodeId)>,
 }
 
 impl Evaluator {
     pub fn new() -> Self {
-        Self { stage3_cursor: 0 }
+        Self::default()
     }
 
-    /// Current Stage 3 ring index (tests; the next cycle starts here).
-    pub fn stage3_cursor(&self) -> usize {
+    /// The last Stage-3 Venerable this evaluator evaluated (tests; the next
+    /// cycle resumes at the first ring element strictly greater than it).
+    pub fn stage3_cursor(&self) -> Option<NodeId> {
         self.stage3_cursor
     }
 
-    /// One eval cycle. See the module docs for hop order and commit order.
+    /// The last Stage-2 Candidate this evaluator evaluated (tests).
+    pub fn stage2_cursor(&self) -> Option<NodeId> {
+        self.stage2_cursor
+    }
+
+    /// One eval cycle. See the module docs for hop order and phase order.
+    ///
+    /// Takes the lock itself, in three short scopes, so the `!Send` guards
+    /// structurally cannot span the store I/O — the future this returns is
+    /// `Send` and can be `tokio::spawn`ed.
     pub async fn eval_cycle(
         &mut self,
-        graph: &mut Graph,
-        store: &impl GraphStore,
+        graph: &RwLock<Graph>,
+        store: &dyn GraphStore,
         scores: &ScoreTable,
         events: &EventSender,
         params: &EvalParams,
         now: DateTime<Utc>,
-    ) -> Result<EvalOutcome, LamboError> {
-        let session = graph.session_id().clone();
-        let score_of = score_map(scores);
-        let mut hopped: HashSet<NodeId> = HashSet::new();
+    ) -> Result<EvalOutcome, EvalError> {
+        // 1. Gather — read guard, released before the first await.
+        let plan = {
+            let g = graph.read();
+            self.gather(&g, scores, params, now)
+        };
+
+        // 2. Verdicts — store I/O, no lock held.
+        let verdicts = match verdicts(store, &plan, params, now).await {
+            Ok(verdicts) => verdicts,
+            // Nothing has been committed yet, so the partial outcome is empty.
+            Err(err) => return Err(EvalError::new(EvalOutcome::default(), err)),
+        };
+
+        // 3. Apply — write guard, released before the next await. Commit point.
         let mut outcome = EvalOutcome::default();
-
-        // --- Stage 1: None → Candidate (one hop; no skip to Venerable) ---
-        let s1 = stage1_candidates(graph, scores, params.min_peer_count);
-        for id in s1 {
-            if concept_status(graph, id) != Some(CanonizationStatus::None) {
-                continue;
-            }
-            let event = promotion_event(
-                graph,
-                id,
-                CanonizationStatus::None,
-                CanonizationStatus::Candidate,
-                None,
-                now,
-            );
-            outcome
-                .promotions
-                .push(commit_transition(graph, store, events, event).await?);
-            hopped.insert(id);
+        let applied = {
+            let mut g = graph.write();
+            apply(&mut g, events, &plan, &verdicts, params, now, &mut outcome)
+        };
+        if let Err(err) = applied {
+            return Err(EvalError::new(outcome, err));
         }
 
-        // --- Stage 2: still-Candidate only (not this cycle's Stage 1 hops) ---
-        let mut s2: Vec<NodeId> = graph
-            .concepts()
-            .filter(|c| {
-                c.canonization_status == CanonizationStatus::Candidate && !hopped.contains(&c.id)
-            })
-            .map(|c| c.id)
-            .collect();
-        s2.sort_by_key(|id| id.0);
-        for id in s2 {
-            if !stage2_passes(store, &session, id, params.min_age, now).await? {
-                continue;
-            }
-            if concept_status(graph, id) != Some(CanonizationStatus::Candidate) {
-                continue;
-            }
-            let event = promotion_event(
-                graph,
-                id,
-                CanonizationStatus::Candidate,
-                CanonizationStatus::Venerable,
-                None,
-                now,
+        // 4. Record — durable audit, no lock held.
+        if let Err(err) = record(store, &outcome).await {
+            return Err(EvalError::new(outcome, err));
+        }
+        Ok(outcome)
+    }
+
+    /// Phase 1 — read the cycle's inputs out of the graph and advance the
+    /// cursors. Synchronous: the caller holds the read guard.
+    fn gather(
+        &mut self,
+        graph: &Graph,
+        scores: &ScoreTable,
+        params: &EvalParams,
+        _now: DateTime<Utc>,
+    ) -> CyclePlan {
+        let session = graph.session_id().clone();
+
+        // The P90 population is the graph's, the scores are the daemon's. A
+        // table older than the graph drags every concept born since the last
+        // rescore into the peer distribution at 0.0, which inflates `n` and
+        // floods the bottom of the P90 population. The daemon's rescore is
+        // epoch-gated and runs on its own (1s) tick while this cycle runs on
+        // a 60s one, so a brief lag is expected rather than a fault: report
+        // it and proceed. (Recall refuses a stale table only because it must
+        // not *cache* a compute keyed on the graph epoch.)
+        if scores.epoch != graph.epoch() {
+            tracing::debug!(
+                target: "lambo::canon",
+                scores_epoch = scores.epoch,
+                graph_epoch = graph.epoch(),
+                "canonization cycle running on a score table older than the graph"
             );
-            outcome
-                .promotions
-                .push(commit_transition(graph, store, events, event).await?);
-            hopped.insert(id);
         }
 
-        // --- Stage 3: Venerable ring, score-desc within the batch ---
-        let mut venerable: Vec<NodeId> = graph
-            .concepts()
-            .filter(|c| {
-                c.canonization_status == CanonizationStatus::Venerable && !hopped.contains(&c.id)
-            })
-            .map(|c| c.id)
+        // Stage 1 — still-None candidates, NodeId ascending. No cursor: the
+        // set drains (a promoted node leaves it), unlike Stage 2, whose
+        // members can fail their evidence gate cycle after cycle.
+        let stage1: Vec<NodeId> = stage1_candidates(graph, scores, params.min_peer_count)
+            .into_iter()
+            .filter(|&id| concept_status(graph, id) == Some(CanonizationStatus::None))
+            .take(params.batch_size)
             .collect();
-        venerable.sort_by_key(|id| id.0);
-        let mut batch = self.take_stage3_batch(&venerable, params.batch_size);
-        batch.sort_by(|a, b| {
+
+        // Stage 2 — one `interaction_span` round-trip per member, so the
+        // window is capped and walks the identity cursor (F13).
+        let candidates = ids_with_status(graph, CanonizationStatus::Candidate);
+        let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
+        if let Some(&last) = stage2.last() {
+            self.stage2_cursor = Some(last);
+        }
+
+        // Stage 3 — Venerable ring, truncated to the remaining Canonical
+        // budget BEFORE the window is taken. Taking the window first and
+        // breaking out of the loop later rotated the cursor over nodes the
+        // cycle never evaluated and reported them as evaluated (F1, F10).
+        let remaining = params
+            .max_canonical_nodes
+            .saturating_sub(canonical_count(graph));
+        let venerable = ids_with_status(graph, CanonizationStatus::Venerable);
+        let mut window = ring_window(
+            &venerable,
+            self.stage3_cursor,
+            params.batch_size.min(remaining),
+        );
+        if let Some(&last) = window.last() {
+            self.stage3_cursor = Some(last);
+        }
+        // Score-descending within the window (spec §10), NodeId ascending
+        // tie-break. The cursor is anchored in RING order, taken above.
+        let score_of = score_map(scores);
+        window.sort_by(|a, b| {
             score_lookup(&score_of, *b)
                 .total_cmp(&score_lookup(&score_of, *a))
                 .then_with(|| a.0.cmp(&b.0))
         });
-        outcome.stage3_batch = batch.clone();
+        let stage3: Vec<Stage3Probe> = window
+            .into_iter()
+            .map(|node| Stage3Probe {
+                node,
+                last_demotion_time: stage3::last_demotion_time(graph, node),
+            })
+            .collect();
 
-        // Cap promotions at the remaining Canonical budget (P2, phase R2): a
-        // cycle must never push the count over max_canonical_nodes, so a
-        // Venerable that would overflow stays Venerable for a later cycle.
-        // This also rules out the same-tick promote-then-demote the budget
-        // sweep would otherwise produce (the original P1-1).
-        let mut remaining = params
-            .max_canonical_nodes
-            .saturating_sub(canonical_count(graph));
-        for id in batch {
-            if remaining == 0 {
-                break;
-            }
-            if !stage3_passes(
-                store,
-                graph,
-                &session,
-                id,
-                params.min_edge_age,
-                params.cooldown,
-                now,
-            )
-            .await?
-            {
-                continue;
-            }
-            if concept_status(graph, id) != Some(CanonizationStatus::Venerable) {
-                continue;
-            }
-            let blast = store
-                .blast_radius(&session, id, params.min_edge_age, now)
-                .await?;
-            let narrowed = narrow_blast_radius(blast)?;
-            let event = promotion_event(
-                graph,
-                id,
-                CanonizationStatus::Venerable,
-                CanonizationStatus::Canonical,
-                Some(narrowed),
-                now,
-            );
-            outcome
-                .promotions
-                .push(commit_transition(graph, store, events, event).await?);
-            remaining -= 1;
+        // Budget — probe only when the session is already over the ceiling.
+        let canonicals = ids_with_status(graph, CanonizationStatus::Canonical);
+        let demotion = if canonicals.len() > params.max_canonical_nodes {
+            canonicals
+        } else {
+            Vec::new()
+        };
+
+        CyclePlan {
+            session,
+            stage1,
+            stage2,
+            stage3,
+            demotion,
         }
-
-        // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
-        demote_over_budget(graph, store, events, params, now, &mut outcome).await?;
-
-        Ok(outcome)
-    }
-
-    /// Next `batch_size` ids on the NodeId-sorted ring, then advance the cursor.
-    fn take_stage3_batch(&mut self, venerable: &[NodeId], batch_size: usize) -> Vec<NodeId> {
-        if venerable.is_empty() || batch_size == 0 {
-            return Vec::new();
-        }
-        let n = venerable.len();
-        let start = self.stage3_cursor % n;
-        let take = batch_size.min(n);
-        let mut batch = Vec::with_capacity(take);
-        for i in 0..take {
-            batch.push(venerable[(start + i) % n]);
-        }
-        self.stage3_cursor = (start + take) % n;
-        batch
     }
 }
 
-/// Free-function form of [`Evaluator::eval_cycle`].
-pub async fn eval_cycle(
-    evaluator: &mut Evaluator,
-    graph: &mut Graph,
-    store: &impl GraphStore,
-    scores: &ScoreTable,
-    events: &EventSender,
+/// The next `size` ids of `ring` starting at the first element **strictly
+/// greater** than `cursor`, wrapping. `ring` must be NodeId-ascending.
+///
+/// The cursor is an **identity**, not an index. A positional cursor into a
+/// vector rebuilt every cycle skids whenever the ring changes shape:
+/// promoting the window's members removes them, every later element shifts
+/// left, and the next window starts *past* the longest-waiting nodes. With a
+/// steady Stage-2 inflow straddling them in sort order the skid repeats and
+/// those nodes are never evaluated again — anti-starvation lost, silently.
+/// Anchoring on the last id evaluated is churn-immune by construction and
+/// costs one binary search.
+fn ring_window(ring: &[NodeId], cursor: Option<NodeId>, size: usize) -> Vec<NodeId> {
+    if ring.is_empty() || size == 0 {
+        return Vec::new();
+    }
+    let n = ring.len();
+    // `partition_point` is the first index whose id is strictly greater than
+    // the cursor; `% n` wraps when the cursor is at or past the ring's end
+    // (including the case where the cursor's node has left the ring entirely).
+    let start = match cursor {
+        Some(last) => ring.partition_point(|id| id.0 <= last.0) % n,
+        None => 0,
+    };
+    let take = size.min(n);
+    (0..take).map(|i| ring[(start + i) % n]).collect()
+}
+
+/// Phase 2 — the store's verdicts for `plan`. No lock is held here.
+async fn verdicts(
+    store: &dyn GraphStore,
+    plan: &CyclePlan,
     params: &EvalParams,
     now: DateTime<Utc>,
-) -> Result<EvalOutcome, LamboError> {
-    evaluator
-        .eval_cycle(graph, store, scores, events, params, now)
-        .await
+) -> Result<Verdicts, StoreError> {
+    let mut out = Verdicts::default();
+    for &id in &plan.stage2 {
+        if stage2_passes(store, &plan.session, id, params.min_age, now).await? {
+            out.stage2_pass.push(id);
+        }
+    }
+    for probe in &plan.stage3 {
+        if let Some(blast) = stage3::stage3_passes(
+            store,
+            &plan.session,
+            probe.node,
+            probe.last_demotion_time,
+            params.min_edge_age,
+            params.cooldown,
+            now,
+        )
+        .await?
+        {
+            out.stage3_pass.push((probe.node, blast));
+        }
+    }
+    for &id in &plan.demotion {
+        let blast = store
+            .blast_radius(&plan.session, id, params.min_edge_age, now)
+            .await?;
+        out.demotion_ranked.push((blast, id));
+    }
+    out.demotion_ranked
+        .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    Ok(out)
 }
 
-/// Graph first, then store, then emit. A failed apply does not emit.
-async fn commit_transition(
+/// Phase 3 — apply the verdicts. Synchronous: the caller holds the write
+/// guard, and this is the cycle's commit point.
+///
+/// Every hop re-checks the node's **current** status first: the graph was
+/// unlocked while the verdicts were computed, so another writer may have
+/// moved it. `outcome` is filled in as hops commit, so a mid-phase failure
+/// still hands the caller everything that did.
+fn apply(
     graph: &mut Graph,
-    store: &impl GraphStore,
     events: &EventSender,
-    event: CanonizationEvent,
-) -> Result<CanonizationEvent, LamboError> {
-    graph.apply_canonization_transition(event.clone())?;
-    store.record_canonization(&event).await?;
-    events::emit_canonized(events, event.clone());
-    Ok(event)
-}
-
-async fn demote_over_budget(
-    graph: &mut Graph,
-    store: &impl GraphStore,
-    events: &EventSender,
+    plan: &CyclePlan,
+    verdicts: &Verdicts,
     params: &EvalParams,
     now: DateTime<Utc>,
     outcome: &mut EvalOutcome,
 ) -> Result<(), LamboError> {
-    let session = graph.session_id().clone();
-    let canonicals: Vec<NodeId> = graph
-        .concepts()
-        .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
-        .map(|c| c.id)
-        .collect();
-    if canonicals.len() <= params.max_canonical_nodes {
-        return Ok(());
+    outcome.stage3_batch = plan.stage3.iter().map(|p| p.node).collect();
+
+    // --- Stage 1: None → Candidate (one hop; no skip to Venerable) ---
+    for &id in &plan.stage1 {
+        if concept_status(graph, id) != Some(CanonizationStatus::None) {
+            continue;
+        }
+        let event = promotion_event(
+            graph,
+            id,
+            CanonizationStatus::None,
+            CanonizationStatus::Candidate,
+            None,
+            now,
+        );
+        outcome
+            .promotions
+            .push(commit_transition(graph, events, event)?);
     }
 
-    let mut ranked: Vec<(u64, NodeId)> = Vec::with_capacity(canonicals.len());
-    for id in canonicals {
-        let blast = store
-            .blast_radius(&session, id, params.min_edge_age, now)
-            .await?;
-        ranked.push((blast, id));
+    // --- Stage 2: Candidate → Venerable ---
+    for &id in &verdicts.stage2_pass {
+        if concept_status(graph, id) != Some(CanonizationStatus::Candidate) {
+            continue;
+        }
+        let event = promotion_event(
+            graph,
+            id,
+            CanonizationStatus::Candidate,
+            CanonizationStatus::Venerable,
+            None,
+            now,
+        );
+        outcome
+            .promotions
+            .push(commit_transition(graph, events, event)?);
     }
-    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
 
-    // Promotions are capped at the budget inside eval_cycle, so an
-    // over-budget session here is pre-existing; demote lowest blast first
-    // until within budget.
-    let overflow = ranked.len() - params.max_canonical_nodes;
-    for &(_, id) in ranked.iter().take(overflow) {
+    // --- Stage 3: Venerable → Canonical, capped at the remaining budget ---
+    // The window was already truncated at gather time; the budget is
+    // recomputed here because the graph was unlocked in between.
+    let mut remaining = params
+        .max_canonical_nodes
+        .saturating_sub(canonical_count(graph));
+    for &(id, blast) in &verdicts.stage3_pass {
+        if remaining == 0 {
+            break;
+        }
+        if concept_status(graph, id) != Some(CanonizationStatus::Venerable) {
+            continue;
+        }
+        let narrowed = narrow_blast_radius(blast)?;
+        let event = promotion_event(
+            graph,
+            id,
+            CanonizationStatus::Venerable,
+            CanonizationStatus::Canonical,
+            Some(narrowed),
+            now,
+        );
+        outcome
+            .promotions
+            .push(commit_transition(graph, events, event)?);
+        remaining -= 1;
+    }
+
+    // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
+    let overflow = canonical_count(graph).saturating_sub(params.max_canonical_nodes);
+    for &(_, id) in verdicts.demotion_ranked.iter().take(overflow) {
         if concept_status(graph, id) != Some(CanonizationStatus::Canonical) {
             continue;
         }
         let event = CanonizationEvent {
             id: NodeId::new(),
-            session_id: session.clone(),
+            session_id: plan.session.clone(),
             node_id: id,
             from_status: CanonizationStatus::Canonical,
             to_status: CanonizationStatus::None,
@@ -340,9 +573,52 @@ async fn demote_over_budget(
         };
         outcome
             .demotions
-            .push(commit_transition(graph, store, events, event).await?);
+            .push(commit_transition(graph, events, event)?);
     }
     Ok(())
+}
+
+/// Phase 4 — the durable audit for every hop this cycle committed (spec §10:
+/// "**every** transition goes through `store.record_canonization`").
+///
+/// A failure here does not un-commit anything: the transitions are in the
+/// graph, in its audit, and in the write-behind log, so the flush task
+/// records the same rows (deduped on event id) on its next pass. The error is
+/// still surfaced — with the outcome attached — so the caller can log it.
+async fn record(store: &dyn GraphStore, outcome: &EvalOutcome) -> Result<(), StoreError> {
+    for event in outcome.transitions() {
+        store.record_canonization(event).await?;
+    }
+    Ok(())
+}
+
+/// Free-function form of [`Evaluator::eval_cycle`].
+#[allow(clippy::too_many_arguments)] // mirrors the method; one cycle's full input
+pub async fn eval_cycle(
+    evaluator: &mut Evaluator,
+    graph: &RwLock<Graph>,
+    store: &dyn GraphStore,
+    scores: &ScoreTable,
+    events: &EventSender,
+    params: &EvalParams,
+    now: DateTime<Utc>,
+) -> Result<EvalOutcome, EvalError> {
+    evaluator
+        .eval_cycle(graph, store, scores, events, params, now)
+        .await
+}
+
+/// Graph first, then emit — the commit point (see the module docs).
+///
+/// A failed apply does not emit.
+fn commit_transition(
+    graph: &mut Graph,
+    events: &EventSender,
+    event: CanonizationEvent,
+) -> Result<CanonizationEvent, LamboError> {
+    graph.apply_canonization_transition(event.clone())?;
+    events::emit_canonized(events, event.clone());
+    Ok(event)
 }
 
 /// Stage 1 / 2 keep the concept's current blast so apply does not wipe it.
@@ -389,6 +665,18 @@ fn concept_status(graph: &Graph, id: NodeId) -> Option<CanonizationStatus> {
     }
 }
 
+/// Concept ids with `status`, NodeId ascending — the ring order every cursor
+/// walks.
+fn ids_with_status(graph: &Graph, status: CanonizationStatus) -> Vec<NodeId> {
+    let mut ids: Vec<NodeId> = graph
+        .concepts()
+        .filter(|c| c.canonization_status == status)
+        .map(|c| c.id)
+        .collect();
+    ids.sort_by_key(|id| id.0);
+    ids
+}
+
 fn canonical_count(graph: &Graph) -> usize {
     graph
         .concepts()
@@ -411,6 +699,7 @@ mod tests {
         AgentId, Concept, ConceptType, DaemonEvent, Edge, EdgeType, Interaction, Scored, SessionId,
     };
     use chrono::TimeZone;
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn ts() -> DateTime<Utc> {
@@ -593,9 +882,7 @@ mod tests {
                 last_demotion_time: None,
                 occurred_at: ts(),
             };
-            let err = commit_transition(&mut g, &store, &tx, bad)
-                .await
-                .unwrap_err();
+            let err = commit_transition(&mut g, &tx, bad).unwrap_err();
             assert!(
                 err.to_string().contains("current status"),
                 "fabricated apply must fail: {err}"
@@ -648,6 +935,7 @@ mod tests {
                 .unwrap();
 
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             assert!(
                 stage2_passes(&store, &sid(), nid(20), Duration::ZERO, Utc::now())
                     .await
@@ -660,11 +948,11 @@ mod tests {
             let scores = table(&pairs);
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
-            let outcome = eval_cycle(&mut ev, &mut g, &store, &scores, &tx, &params(), ts())
+            let outcome = eval_cycle(&mut ev, &g, &store, &scores, &tx, &params(), ts())
                 .await
                 .unwrap();
 
-            assert_eq!(status_of(&g, nid(20)), CanonizationStatus::Candidate);
+            assert_eq!(status_of(&g.read(), nid(20)), CanonizationStatus::Candidate);
             let hops: Vec<_> = outcome
                 .transitions()
                 .filter(|e| e.node_id == nid(20))
@@ -675,7 +963,7 @@ mod tests {
                 vec![(CanonizationStatus::None, CanonizationStatus::Candidate)],
                 "Stage 2 evidence must not skip a stage in one tick: {hops:?}"
             );
-            assert_eq!(g.canonization_events().len(), 1);
+            assert_eq!(g.read().canonization_events().len(), 1);
             assert_eq!(drain_canonized(&mut rx).len(), 1);
         }
 
@@ -695,6 +983,7 @@ mod tests {
             attach_blast(&mut g, 11, 1, 200);
 
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             assert_eq!(
                 store
                     .blast_radius(&sid(), nid(10), Duration::ZERO, Utc::now())
@@ -715,13 +1004,13 @@ mod tests {
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
             let now = ts();
-            let outcome = eval_cycle(&mut ev, &mut g, &store, &table(&[]), &tx, &p, now)
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, now)
                 .await
                 .unwrap();
 
-            assert_eq!(status_of(&g, nid(10)), CanonizationStatus::Canonical);
-            assert_eq!(status_of(&g, nid(11)), CanonizationStatus::None);
-            match g.node(nid(11)) {
+            assert_eq!(status_of(&g.read(), nid(10)), CanonizationStatus::Canonical);
+            assert_eq!(status_of(&g.read(), nid(11)), CanonizationStatus::None);
+            match g.read().node(nid(11)) {
                 Some(Node::Concept(c)) => {
                     assert_eq!(c.blast_radius, None);
                     assert_eq!(c.last_demotion_time, Some(now));
@@ -738,8 +1027,8 @@ mod tests {
             assert_eq!(d.last_demotion_time, Some(now));
 
             let store_snap = store.load_session(&sid()).await.unwrap();
-            let recorded: Vec<_> = g
-                .canonization_events()
+            let graph_events = g.read().canonization_events().to_vec();
+            let recorded: Vec<_> = graph_events
                 .iter()
                 .chain(store_snap.canonization_events.iter())
                 .filter(|e| e.to_status == CanonizationStatus::None)
@@ -758,6 +1047,7 @@ mod tests {
                     .unwrap();
             }
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             // Higher id → higher score, so score-desc of window 1..=50 starts at 50.
             let pairs: Vec<(u64, f64)> = (1..=55).map(|i| (i, i as f64)).collect();
             let scores = table(&pairs);
@@ -767,7 +1057,7 @@ mod tests {
             let (tx, _rx) = channel();
             let mut ev = Evaluator::new();
 
-            let first = eval_cycle(&mut ev, &mut g, &store, &scores, &tx, &p, ts())
+            let first = eval_cycle(&mut ev, &g, &store, &scores, &tx, &p, ts())
                 .await
                 .unwrap();
             assert_eq!(
@@ -787,9 +1077,9 @@ mod tests {
                 "id 51 is past the first window: {:?}",
                 first.stage3_batch
             );
-            assert_eq!(ev.stage3_cursor(), 50);
+            assert_eq!(ev.stage3_cursor(), Some(nid(50)));
 
-            let second = eval_cycle(&mut ev, &mut g, &store, &scores, &tx, &p, ts())
+            let second = eval_cycle(&mut ev, &g, &store, &scores, &tx, &p, ts())
                 .await
                 .unwrap();
             assert_eq!(second.stage3_batch.len(), 50);
@@ -805,7 +1095,182 @@ mod tests {
             );
             // Window is 51..=55 + 1..=45; max score in that set is 55.
             assert_eq!(second.stage3_batch[0], nid(55));
-            assert_eq!(ev.stage3_cursor(), 45);
+            assert_eq!(ev.stage3_cursor(), Some(nid(45)));
+        }
+
+        /// Graph carrying only `hubs` (as Venerable) plus the seed
+        /// interaction — blast radius comes from the store, so the evaluated
+        /// graph needs no dependents.
+        fn venerable_graph(hubs: &[u64]) -> Graph {
+            let mut g = Graph::new(sid());
+            g.insert_interaction(interaction(1, None, ts())).unwrap();
+            for &h in hubs {
+                g.insert_concept(concept(h, 1, 0, CanonizationStatus::Venerable), iid(1))
+                    .unwrap();
+            }
+            g
+        }
+
+        /// Store view of the same session: every hub with `blast` exclusive
+        /// dependents, so `blast_radius(hub) == blast`.
+        async fn store_with_hubs(hubs: &[(u64, u64)]) -> MemoryStore {
+            let mut full = Graph::new(sid());
+            full.insert_interaction(interaction(1, None, ts())).unwrap();
+            for (i, &(h, blast)) in hubs.iter().enumerate() {
+                full.insert_concept(concept(h, 1, 0, CanonizationStatus::Venerable), iid(1))
+                    .unwrap();
+                attach_blast(&mut full, h, blast, 1_000 + 100 * i as u64);
+            }
+            store_from_graph(&full).await
+        }
+
+        /// F1: every successful promotion removes ring members, so a
+        /// **positional** cursor into the rebuilt ring skids past the
+        /// longest-waiting nodes. 6 Venerables, `batch_size = 2`: cycle 1
+        /// evaluates [1,2] and promotes both; cycle 2's ring is [3,4,5,6] and
+        /// must resume at 3. The positional cursor computed `2 % 4 = 2` and
+        /// produced [5,6] — 3 and 4 skipped, on every promoting cycle.
+        #[tokio::test]
+        async fn promotion_churn_does_not_skip_the_next_ring_members() {
+            let hubs = [1u64, 2, 3, 4, 5, 6];
+            let store = store_with_hubs(&hubs.map(|h| (h, 6))).await;
+            let g = RwLock::new(venerable_graph(&hubs));
+            let mut p = params();
+            p.batch_size = 2;
+            p.max_canonical_nodes = 10_000;
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let first = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+                .await
+                .unwrap();
+            assert_eq!(first.stage3_batch, vec![nid(1), nid(2)]);
+            assert_eq!(first.promotions.len(), 2, "both must promote (blast 6)");
+            assert_eq!(ev.stage3_cursor(), Some(nid(2)));
+
+            let second = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+                .await
+                .unwrap();
+            assert_eq!(
+                second.stage3_batch,
+                vec![nid(3), nid(4)],
+                "the ring shrank under the cursor; the next window must resume \
+                 at the first id after the last one evaluated"
+            );
+        }
+
+        /// F1: with a steady Stage-2 inflow the positional skid repeats and
+        /// the same victims are starved **forever** — the review's
+        /// demonstration, reproduced.
+        ///
+        /// Victims 10 and 11 have blast 0, so they never promote and never
+        /// leave the ring. Each cycle two fresh Venerables arrive and promote
+        /// out, alternately sorting *before* and *after* the victims, which
+        /// keeps a 4-element ring whose positional cursor alternates 0 → 2 →
+        /// 0 → 2 and lands on the inflow every time: [1,2], [20,21], [3,4],
+        /// [22,23] — the victims are never evaluated, for as long as the
+        /// session keeps producing Venerables. The identity cursor reaches
+        /// them on cycle 2, because "the first id after 2" is 10 whatever the
+        /// ring did in between.
+        #[tokio::test]
+        async fn sustained_inflow_does_not_starve_the_waiting_ring_members() {
+            // Everything promotes (blast 6) except the two victims.
+            let store = store_with_hubs(&[
+                (1, 6),
+                (2, 6),
+                (3, 6),
+                (4, 6),
+                (10, 0),
+                (11, 0),
+                (20, 6),
+                (21, 6),
+                (22, 6),
+                (23, 6),
+            ])
+            .await;
+            let g = RwLock::new(venerable_graph(&[1, 2, 10, 11]));
+            let mut p = params();
+            p.batch_size = 2;
+            p.max_canonical_nodes = 10_000;
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            // Alternating inflow, sustained: after the victims, then before,
+            // then after… The alternation is what pins the positional cursor
+            // to 0 → 2 → 0 → 2 while the ring stays four wide.
+            let inflow = [[20u64, 21], [3, 4], [22, 23], [5, 6]];
+            let mut evaluated: Vec<NodeId> = Vec::new();
+            for cycle in 0..4 {
+                let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+                    .await
+                    .unwrap();
+                evaluated.extend(outcome.stage3_batch);
+                if let Some(fresh) = inflow.get(cycle) {
+                    let mut graph = g.write();
+                    for &id in fresh {
+                        graph
+                            .insert_concept(
+                                concept(id, 1, 0, CanonizationStatus::Venerable),
+                                iid(1),
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+
+            assert!(
+                evaluated.contains(&nid(10)) && evaluated.contains(&nid(11)),
+                "the longest-waiting Venerables must be evaluated, not starved \
+                 by the inflow: {evaluated:?}"
+            );
+            assert!(
+                evaluated.iter().filter(|&&id| id == nid(20)).count() == 1
+                    && evaluated.contains(&nid(22)),
+                "the inflow is still served — fairness, not victim priority: \
+                 {evaluated:?}"
+            );
+            assert_eq!(
+                status_of(&g.read(), nid(10)),
+                CanonizationStatus::Venerable,
+                "a blast-0 victim stays Venerable; being evaluated is the point"
+            );
+        }
+
+        /// F1/F10: with the Canonical budget full the ring must not rotate at
+        /// all, and `stage3_batch` must report nothing — it names the window
+        /// the predicate **ran on**. The old shape took the window first and
+        /// broke out of the promotion loop, so the cursor advanced over nodes
+        /// that were never evaluated and the outcome claimed them anyway.
+        #[tokio::test]
+        async fn full_budget_evaluates_nothing_and_does_not_rotate_the_ring() {
+            let store = store_with_hubs(&[(1, 6), (2, 6), (3, 6)]).await;
+            let mut graph = venerable_graph(&[1, 2, 3]);
+            // One pre-existing Canonical fills a budget of 1.
+            let mut full = concept(10, 1, 5, CanonizationStatus::Canonical);
+            full.blast_radius = Some(8);
+            graph.insert_concept(full, iid(1)).unwrap();
+            let g = RwLock::new(graph);
+
+            let mut p = params();
+            p.batch_size = 2;
+            p.max_canonical_nodes = 1;
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
+                .await
+                .unwrap();
+            assert!(
+                outcome.stage3_batch.is_empty(),
+                "no budget, so nothing was evaluated: {:?}",
+                outcome.stage3_batch
+            );
+            assert!(outcome.promotions.is_empty());
+            assert_eq!(
+                ev.stage3_cursor(),
+                None,
+                "the ring must not rotate over nodes the cycle could not evaluate"
+            );
         }
 
         #[tokio::test]
@@ -817,21 +1282,14 @@ mod tests {
                     .unwrap();
             }
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
             pairs.push((20, 1.0));
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
-            eval_cycle(
-                &mut ev,
-                &mut g,
-                &store,
-                &table(&pairs),
-                &tx,
-                &params(),
-                ts(),
-            )
-            .await
-            .unwrap();
+            eval_cycle(&mut ev, &g, &store, &table(&pairs), &tx, &params(), ts())
+                .await
+                .unwrap();
 
             let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
@@ -857,25 +1315,18 @@ mod tests {
                     .unwrap();
             }
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
             pairs.push((20, 1.0));
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
-            let outcome = eval_cycle(
-                &mut ev,
-                &mut g,
-                &store,
-                &table(&pairs),
-                &tx,
-                &params(),
-                ts(),
-            )
-            .await
-            .unwrap();
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&pairs), &tx, &params(), ts())
+                .await
+                .unwrap();
 
             let committed: Vec<_> = outcome.transitions().cloned().collect();
             assert!(!committed.is_empty());
-            assert_eq!(g.canonization_events(), committed.as_slice());
+            assert_eq!(g.read().canonization_events(), committed.as_slice());
             assert_eq!(
                 store
                     .load_session(&sid())
@@ -908,27 +1359,28 @@ mod tests {
             attach_blast(&mut g, 20, 6, 200);
 
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             let mut p = params();
             p.max_canonical_nodes = 1;
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
-            let outcome = eval_cycle(&mut ev, &mut g, &store, &table(&[]), &tx, &p, ts())
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &p, ts())
                 .await
                 .unwrap();
 
             assert_eq!(
-                status_of(&g, nid(20)),
+                status_of(&g.read(), nid(20)),
                 CanonizationStatus::Venerable,
                 "budget full: the Venerable must wait, not overflow"
             );
             assert_eq!(
-                status_of(&g, nid(10)),
+                status_of(&g.read(), nid(10)),
                 CanonizationStatus::Canonical,
                 "the pre-existing Canonical is untouched when not over budget"
             );
             assert!(outcome.promotions.is_empty(), "no promotion over budget");
             assert!(outcome.demotions.is_empty(), "no demotion at exact budget");
-            assert_eq!(canonical_count(&g), 1, "count stays within budget");
+            assert_eq!(canonical_count(&g.read()), 1, "count stays within budget");
             assert!(
                 drain_canonized(&mut rx).is_empty(),
                 "no transitions committed"
@@ -947,26 +1399,19 @@ mod tests {
                     .unwrap();
             }
             let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
             let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
             pairs.push((20, 1.0));
             let (tx, _rx) = channel();
             let mut ev = Evaluator::new();
-            let outcome = eval_cycle(
-                &mut ev,
-                &mut g,
-                &store,
-                &table(&pairs),
-                &tx,
-                &params(),
-                ts(),
-            )
-            .await
-            .unwrap();
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&pairs), &tx, &params(), ts())
+                .await
+                .unwrap();
             let committed: Vec<_> = outcome.transitions().cloned().collect();
             assert_eq!(committed.len(), 1, "one None→Candidate hop");
 
             // Replay the write-behind log (the same transition as the live write).
-            let batch = g.drain_log();
+            let batch = g.write().drain_log();
             assert!(!batch.is_empty());
             store.flush(&batch).await.unwrap();
 
@@ -1036,7 +1481,7 @@ mod tests {
         async fn rest_api_user_schema_progresses_three_hops_with_audit() {
             let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
             rewind_canonicals(&mut snap);
-            let mut graph = Graph::from_snapshot(snap.clone()).unwrap();
+            let graph = Graph::from_snapshot(snap.clone()).unwrap();
             let store = crate::store::MemoryStore::new();
             store.seed(snap).unwrap();
 
@@ -1047,6 +1492,7 @@ mod tests {
                 epoch: graph.epoch(),
                 ranked: rescore(&graph, &ScoringWeights::default()),
             };
+            let graph = RwLock::new(graph);
             let mut p = params();
             p.min_peer_count = crate::Config::default().canonization_min_peer_count;
 
@@ -1054,15 +1500,14 @@ mod tests {
             let mut ev = Evaluator::new();
             let mut all_committed = Vec::new();
             for _ in 0..3 {
-                let outcome =
-                    eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, fixture_now())
-                        .await
-                        .unwrap();
+                let outcome = eval_cycle(&mut ev, &graph, &store, &scores, &tx, &p, fixture_now())
+                    .await
+                    .unwrap();
                 all_committed.extend(outcome.transitions().cloned());
             }
 
-            assert_eq!(status_of(&graph, us), CanonizationStatus::Canonical);
-            match graph.node(us) {
+            assert_eq!(status_of(&graph.read(), us), CanonizationStatus::Canonical);
+            match graph.read().node(us) {
                 Some(Node::Concept(c)) => {
                     assert_eq!(c.blast_radius, Some(8), "Stage 3 must stamp measured blast");
                     assert!(c.last_demotion_time.is_none());
@@ -1070,7 +1515,8 @@ mod tests {
                 other => panic!("user schema must be a concept, got {other:?}"),
             }
 
-            let us_hops = hops_for(graph.canonization_events(), us);
+            let graph_events = graph.read().canonization_events().to_vec();
+            let us_hops = hops_for(&graph_events, us);
             assert_eq!(
                 us_hops,
                 vec![
@@ -1128,19 +1574,20 @@ mod tests {
                 // must refuse Canonical.
                 api.canonization_status = CanonizationStatus::Candidate;
             }
-            let mut graph = Graph::from_snapshot(snap.clone()).unwrap();
+            let graph = Graph::from_snapshot(snap.clone()).unwrap();
             let store = crate::store::MemoryStore::new();
             store.seed(snap).unwrap();
             let scores = ScoreTable {
                 epoch: graph.epoch(),
                 ranked: rescore(&graph, &ScoringWeights::default()),
             };
+            let graph = RwLock::new(graph);
             let (tx, _rx) = crate::daemon::events::event_channel();
             let mut ev = Evaluator::new();
             for _ in 0..3 {
                 eval_cycle(
                     &mut ev,
-                    &mut graph,
+                    &graph,
                     &store,
                     &scores,
                     &tx,
@@ -1150,8 +1597,12 @@ mod tests {
                 .await
                 .unwrap();
             }
-            assert_eq!(status_of(&graph, api_id), CanonizationStatus::Venerable);
-            let hops = hops_for(graph.canonization_events(), api_id);
+            assert_eq!(
+                status_of(&graph.read(), api_id),
+                CanonizationStatus::Venerable
+            );
+            let graph_events = graph.read().canonization_events().to_vec();
+            let hops = hops_for(&graph_events, api_id);
             assert!(
                 hops.iter().any(|&(f, t)| f == CanonizationStatus::Candidate
                     && t == CanonizationStatus::Venerable),
@@ -1175,7 +1626,7 @@ mod tests {
 
             let mut snap = crate::fixtures::load_snapshot("session-rest-api").unwrap();
             rewind_canonicals(&mut snap);
-            let mut graph = Graph::from_snapshot(snap.clone()).unwrap();
+            let graph = Graph::from_snapshot(snap.clone()).unwrap();
             let store = SqliteStore::connect("sqlite::memory:").unwrap();
             store.init_schema().await.unwrap();
             store.seed(&snap).await.unwrap();
@@ -1187,6 +1638,7 @@ mod tests {
                 epoch: graph.epoch(),
                 ranked: rescore(&graph, &ScoringWeights::default()),
             };
+            let graph = RwLock::new(graph);
             let mut p = params();
             p.min_peer_count = crate::Config::default().canonization_min_peer_count;
 
@@ -1196,13 +1648,14 @@ mod tests {
                 // Advance the clock per cycle as production does, so each hop
                 // gets a distinct occurred_at and the SQL audit orders by it.
                 let now = fixture_now() + chrono::Duration::seconds(60 * i as i64);
-                eval_cycle(&mut ev, &mut graph, &store, &scores, &tx, &p, now)
+                eval_cycle(&mut ev, &graph, &store, &scores, &tx, &p, now)
                     .await
                     .unwrap();
             }
-            assert_eq!(status_of(&graph, us), CanonizationStatus::Canonical);
+            assert_eq!(status_of(&graph.read(), us), CanonizationStatus::Canonical);
 
-            let us_hops = hops_for(graph.canonization_events(), us);
+            let graph_events = graph.read().canonization_events().to_vec();
+            let us_hops = hops_for(&graph_events, us);
             assert_eq!(
                 us_hops,
                 vec![

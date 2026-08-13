@@ -7,16 +7,29 @@
 //!
 //! A concept passes when **both**:
 //!
-//! 1. **`store.blast_radius(session, node, min_edge_age, now) > 5`**
+//! 1. **Not inside the re-promotion cooldown.** `last_demotion_time` lives
+//!    on the [`Concept`] in the graph, so the **caller** reads it (with
+//!    [`last_demotion_time`]) and hands it in: the predicate borrows no
+//!    graph, which is what lets the eval cycle gather its inputs under the
+//!    read guard and then query the store with no lock held (spec §6.4).
+//!    If it is `Some(t)` and `now < t + cooldown`, the predicate refuses
+//!    even when blast radius is above the floor. `None` is not a cooldown.
+//!    Default cooldown is
+//!    [`crate::Config::canonization_repromotion_cooldown`] (300s).
+//! 2. **`store.blast_radius(session, node, min_edge_age, now) > 5`**
 //!    (strict). The store returns [`u64`]; the comparison is against
 //!    `5u64`. [`Concept::blast_radius`] is a frozen `Option<i32>`
 //!    (CON-6) and is **not** consulted — never a silent `as i32`.
-//! 2. **Not inside the re-promotion cooldown.** `last_demotion_time`
-//!    lives on the [`Concept`] in `graph`, not on the store query. If
-//!    it is `Some(t)` and `now < t + cooldown`, the predicate refuses
-//!    even when blast radius is above the floor. `None` is not a
-//!    cooldown. Default cooldown is
-//!    [`crate::Config::canonization_repromotion_cooldown`] (300s).
+//!
+//! **Gate order and the returned measurement (F9).** The cooldown is a field
+//! comparison; `blast_radius` is a structural query the eval cycle issues up
+//! to `batch_size` times per tick. The cheap gate therefore runs **first**: a
+//! cooling node costs no round-trip, and a store error on a node that was
+//! never eligible can no longer abort the cycle. On success the measured
+//! count comes back with the verdict — the caller stamps
+//! `CanonizationEvent::blast_radius` with the value that admitted the node
+//! instead of re-querying, which on a live store could stamp an audit row
+//! that contradicts the gate that let it through.
 //!
 //! `now` is injected — the predicate has no wall clock, and (F8) neither
 //! does the store: the same instant anchors the cooldown comparison and the
@@ -43,38 +56,40 @@ use crate::types::{Node, NodeId, SessionId, StoreError};
 /// greater than this `u64` (CON-6: do not narrow to `i32`).
 const MIN_BLAST_RADIUS: u64 = 5;
 
-/// Whether `node` currently clears Stage 3 on `store` / `graph`.
+/// Whether `node` currently clears Stage 3, and by how much.
 ///
-/// Cooldown is read from the concept in `graph`. Blast radius is
-/// queried from `store` and compared as `u64`.
+/// `Some(blast)` — passes, with the measurement that admitted it (stamp the
+/// audit row with **this** value). `None` — cooling, or blast radius at or
+/// below the floor. `last_demotion_time` comes from the caller (see
+/// [`last_demotion_time`]); blast radius is queried from `store` and compared
+/// as `u64`.
 pub async fn stage3_passes(
-    store: &impl GraphStore,
-    graph: &Graph,
+    store: &dyn GraphStore,
     session: &SessionId,
     node: NodeId,
+    last_demotion_time: Option<DateTime<Utc>>,
     min_edge_age: Duration,
     cooldown: Duration,
     now: DateTime<Utc>,
-) -> Result<bool, StoreError> {
-    let blast = store.blast_radius(session, node, min_edge_age, now).await?;
-    if in_repromotion_cooldown(graph, node, cooldown, now) {
-        return Ok(false);
+) -> Result<Option<u64>, StoreError> {
+    // F9: cheap gate first — a cooling node must not cost a store round-trip.
+    if in_repromotion_cooldown(last_demotion_time, cooldown, now) {
+        return Ok(None);
     }
-    Ok(blast > MIN_BLAST_RADIUS)
+    let blast = store.blast_radius(session, node, min_edge_age, now).await?;
+    Ok((blast > MIN_BLAST_RADIUS).then_some(blast))
 }
 
-/// `true` when `last_demotion_time` is `Some(t)` and `now < t + cooldown`.
+/// `true` when `last_demotion` is `Some(t)` and `now < t + cooldown`.
 ///
-/// A missing node, a non-concept, or `last_demotion_time == None` is
-/// not a cooldown. An unrepresentable `cooldown` is treated as still
-/// cooling (conservative; config default is 300s).
+/// `None` is not a cooldown. An unrepresentable `cooldown` is treated as
+/// still cooling (conservative; config default is 300s).
 fn in_repromotion_cooldown(
-    graph: &Graph,
-    node: NodeId,
+    last_demotion: Option<DateTime<Utc>>,
     cooldown: Duration,
     now: DateTime<Utc>,
 ) -> bool {
-    let Some(t) = last_demotion_time(graph, node) else {
+    let Some(t) = last_demotion else {
         return false;
     };
     let Ok(cd) = ChronoDuration::from_std(cooldown) else {
@@ -86,7 +101,12 @@ fn in_repromotion_cooldown(
     }
 }
 
-fn last_demotion_time(graph: &Graph, node: NodeId) -> Option<DateTime<Utc>> {
+/// The cooldown input for `node`, read from the graph.
+///
+/// Split out so the caller can take it under its read guard and pass it to
+/// [`stage3_passes`] afterwards (gather-before-lock). A missing node or a
+/// non-concept has no demotion time.
+pub fn last_demotion_time(graph: &Graph, node: NodeId) -> Option<DateTime<Utc>> {
     match graph.node(node) {
         Some(Node::Concept(c)) => c.last_demotion_time,
         _ => None,
@@ -234,9 +254,18 @@ mod tests {
         cooldown: Duration,
         now: DateTime<Utc>,
     ) -> bool {
-        stage3_passes(store, graph, &sid(), node, Duration::ZERO, cooldown, now)
-            .await
-            .unwrap()
+        stage3_passes(
+            store,
+            &sid(),
+            node,
+            last_demotion_time(graph, node),
+            Duration::ZERO,
+            cooldown,
+            now,
+        )
+        .await
+        .unwrap()
+        .is_some()
     }
 
     /// Strict `>`: blast == 5 fails, blast == 6 passes.
@@ -341,9 +370,9 @@ mod tests {
         let g = graph_with(concept(10, 1, ts(), None));
         let err = stage3_passes(
             &store,
-            &g,
             &sid(),
             cid(10),
+            last_demotion_time(&g, cid(10)),
             Duration::ZERO,
             default_cooldown(),
             ts(),
@@ -405,10 +434,20 @@ mod tests {
             other => panic!("user schema must be a concept, got {other:?}"),
         }
         assert!(
-            stage3_passes(&store, &graph, &sid, us, Duration::ZERO, cooldown, now,)
-                .await
-                .unwrap(),
-            "user schema blast=8 / last_demotion None must pass Stage 3"
+            stage3_passes(
+                &store,
+                &sid,
+                us,
+                last_demotion_time(&graph, us),
+                Duration::ZERO,
+                cooldown,
+                now,
+            )
+            .await
+            .unwrap()
+                == Some(8),
+            "user schema blast=8 / last_demotion None must pass Stage 3 and \
+             report the measurement that admitted it"
         );
 
         let api_blast = store
@@ -417,9 +456,18 @@ mod tests {
             .unwrap();
         assert_eq!(api_blast, 1, "fixture premise: api layer blast=1");
         assert!(
-            !stage3_passes(&store, &graph, &sid, api, Duration::ZERO, cooldown, now,)
-                .await
-                .unwrap(),
+            stage3_passes(
+                &store,
+                &sid,
+                api,
+                last_demotion_time(&graph, api),
+                Duration::ZERO,
+                cooldown,
+                now,
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "api layer blast=1 must fail Stage 3"
         );
     }
@@ -457,17 +505,18 @@ mod tests {
             8
         );
         assert!(
-            !stage3_passes(
+            stage3_passes(
                 &store,
-                &graph,
                 &sid,
                 us_id,
+                last_demotion_time(&graph, us_id),
                 Duration::ZERO,
                 default_cooldown(),
                 now,
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .is_none(),
             "just-demoted user schema must be refused despite blast 8"
         );
     }

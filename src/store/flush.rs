@@ -235,7 +235,11 @@ impl FlushTask {
 /// `degraded()==false` — silent durability loss). Dropping the future after a
 /// caught panic is safe: the backend only ever holds a `&MutationBatch`, so the
 /// loop's `pending` buffer cannot have been corrupted.
-struct CatchUnwindPoll<F>(F);
+///
+/// `pub(crate)`: P6's canonization loop makes the same argument for the same
+/// reason (a panicking store must not stop the loop for the process's
+/// lifetime), and one implementation means one behaviour to reason about.
+pub(crate) struct CatchUnwindPoll<F>(pub(crate) F);
 
 impl<F: Future> Future for CatchUnwindPoll<F> {
     type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
