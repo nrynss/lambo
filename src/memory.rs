@@ -1505,6 +1505,18 @@ impl Memory {
     /// [`Memory::begin_write`]'s — and since a sync method never awaits, the
     /// permit is held continuously from the check to the last mutation, so
     /// `close()` cannot drain past it.
+    ///
+    /// **Coverage note (R2-6).** The `try_read` refusal is pinned by
+    /// `a_sync_write_is_refused_while_the_gate_is_taken`; the re-check itself is
+    /// not, and cannot honestly be. Its window — `try_read` *succeeding* after
+    /// `close()` latched but before `close()` requests the write side — is one
+    /// instruction wide and needs true parallelism to enter, so no
+    /// deterministic single-threaded interleaving reaches it and a probabilistic
+    /// hammer would not fail reliably either. It is kept because it costs an
+    /// atomic load and closes the same hole `begin_write`'s does — where the
+    /// window is wide enough to construct, and *is* constructed, by
+    /// `a_write_that_takes_the_gate_after_close_latched_is_refused`. Same
+    /// blind-spot class as T81-4's `biased;`.
     fn begin_write_sync(&self) -> Result<AsyncRwLockReadGuard<'_, ()>, LamboError> {
         self.ensure_open()?;
         let permit = self.writers.try_read().map_err(|_| self.closed_error())?;
@@ -2210,6 +2222,46 @@ mod tests {
         }
     }
 
+    /// A dispatcher registered for the whole test binary and default nowhere,
+    /// held alive only to keep `tracing`'s global caches honest.
+    ///
+    /// Callsite interest and the global max level are cached **globally**, and
+    /// `tracing_core` rebuilds them from *the calling thread's* default
+    /// subscriber whenever only one dispatcher is registered
+    /// (`Rebuilder::JustOne` -> `get_default`). These tests run in parallel,
+    /// each installing its own `set_default` subscriber at its own max level
+    /// and dropping it again — so a rebuild triggered from a thread whose
+    /// subscriber is ERROR-only pins the global max level at ERROR, and another
+    /// thread's WARN event is discarded before any subscriber sees it. Measured
+    /// at roughly one suite run in twenty, as the R2-2 drop-warning assertion
+    /// failing against a buffer that was missing an event the code had
+    /// definitely emitted.
+    ///
+    /// A second live registrant keeps the registry past that one-dispatcher
+    /// shortcut, so every rebuild takes the max over *all* live dispatchers.
+    /// `NoSubscriber` gives no level hint — which counts as TRACE — and claims
+    /// no callsite (`Interest::never`), so it raises the ceiling without
+    /// capturing anything or changing what any subscriber receives.
+    static TRACE_FLOOR: LazyLock<tracing::Dispatch> =
+        LazyLock::new(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+
+    /// Capture this thread's tracing output at `level`, for as long as the
+    /// returned guard lives. Forces [`TRACE_FLOOR`] first, so this subscriber's
+    /// own registration is the rebuild that re-evaluates every callsite with it
+    /// included.
+    fn capture_logs(
+        level: tracing::Level,
+    ) -> (Arc<PlMutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        LazyLock::force(&TRACE_FLOOR);
+        let buf = Arc::new(PlMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_max_level(level)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (buf, guard)
+    }
+
     fn live_handles(session: &str) -> usize {
         ACTIVE_SESSIONS
             .lock()
@@ -2224,12 +2276,7 @@ mod tests {
     /// drops — including a handle that was never closed.
     #[tokio::test]
     async fn a_second_handle_on_one_session_is_reported_loudly() {
-        let buf = Arc::new(PlMutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::ERROR)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (buf, _guard) = capture_logs(tracing::Level::ERROR);
 
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let first = memory_on(store.clone(), "one-writer").await;
@@ -2283,12 +2330,7 @@ mod tests {
     /// filtered out.
     #[tokio::test]
     async fn a_closed_handle_does_not_collide_with_a_reattach() {
-        let buf = Arc::new(PlMutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::ERROR)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (buf, _guard) = capture_logs(tracing::Level::ERROR);
 
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let mem = memory_on(store.clone(), "reattach").await;
@@ -2334,12 +2376,7 @@ mod tests {
     /// the R2-4 policy: this handle still holds an undurable tail.
     #[tokio::test]
     async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
-        let buf = Arc::new(PlMutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (buf, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store: Arc<dyn GraphStore> = Arc::new(FlakyStore::new(inner, usize::MAX));
@@ -3037,6 +3074,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// R2-6: the **post-acquire** `closed` re-check in `begin_write` — the
+    /// second half of the gate, and the half a mutant could delete and still
+    /// pass 539/539.
+    ///
+    /// The window it covers is real but two instructions wide: a writer loads
+    /// `closed` as open, `close()` latches it and asks for the write side, and
+    /// only then does the writer ask for its read permit — which now queues.
+    /// Without the re-check that write wakes up *after* `close()` has drained,
+    /// flushed and returned, and appends to a log nobody will ever flush again:
+    /// T81-1 exactly, by the one route the gate itself opens.
+    ///
+    /// Held open deterministically here by taking the gate's write side in the
+    /// test, which is precisely the state `close()` is in between its latch and
+    /// its own acquisition. The tokio `RwLock` is FIFO-fair, so the queued
+    /// derive is granted its permit the moment the test's guard drops — with
+    /// `closed` already latched. Either order of the two waiters gives the same
+    /// verdict: a write that takes the gate after the latch is refused, never
+    /// silently appended.
+    #[tokio::test]
+    async fn a_write_that_takes_the_gate_after_close_latched_is_refused() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = Arc::new(memory_on(inner.clone(), "late-permit").await);
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let baseline = mem.graph().read().log_len();
+
+        // The gate is busy but the session is still OPEN: a writer arriving now
+        // passes the entry check and queues for its permit.
+        let gate = mem.writers.write().await;
+
+        let deriving = tokio::spawn({
+            let mem = mem.clone();
+            async move {
+                mem.derive(&[("late concept", ConceptType::Entity)], &ParentOf::none())
+                    .await
+            }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mem.graph().read().log_len(),
+            baseline,
+            "the derive must be queued for the permit, not past it"
+        );
+
+        let closing = tokio::spawn({
+            let mem = mem.clone();
+            async move { mem.close().await }
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            mem.closed.load(Ordering::Acquire),
+            "close() must have latched before the permit is handed over — that is \
+             the window under test"
+        );
+
+        drop(gate);
+        let derived = deriving.await.unwrap();
+        closing.await.unwrap().expect("close");
+
+        let err = derived.expect_err(
+            "a write granted the gate after close() latched must be refused by the \
+             post-acquire re-check, not mutate",
+        );
+        assert!(err.to_string().contains("closed"), "{err}");
+        assert_eq!(
+            mem.graph().read().log_len(),
+            0,
+            "and it must not have logged a mutation"
+        );
+        let snap = inner
+            .load_session(&SessionId::new("late-permit"))
+            .await
+            .unwrap();
+        assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
+        assert!(
+            !snap.concepts.iter().any(|c| c.content == "late concept"),
+            "a refused write must reach neither the log nor the store"
+        );
+    }
+
+    /// The sync arm of the same barrier (`begin_write_sync`): `try_read` fails
+    /// while `close()` holds — or is queued for — the write side, and that maps
+    /// to the closed error rather than to a mutation that would race the drain.
+    ///
+    /// Its own post-acquire re-check covers a window one instruction wide
+    /// (`try_read` succeeding between the latch and `close()`'s request) which
+    /// no single-threaded interleaving can construct; see `begin_write_sync`'s
+    /// rustdoc. This pins the arm that is reachable.
+    #[tokio::test]
+    async fn a_sync_write_is_refused_while_the_gate_is_taken() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = memory_on(store, "sync-gate").await;
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let baseline = mem.graph().read().log_len();
+
+        let gate = mem.writers.write().await;
+        let err = mem
+            .record_action(&Action {
+                action: "late",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("closed"), "{err}");
+        assert_eq!(
+            mem.graph().read().log_len(),
+            baseline,
+            "a refused sync write must not have logged a mutation"
+        );
+
+        drop(gate);
+        mem.close().await.unwrap();
     }
 
     /// The other half of the gate: **readers do not take it**, so a long recall
