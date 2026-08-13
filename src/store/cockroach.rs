@@ -167,6 +167,17 @@ ON CONFLICT (id) DO UPDATE SET
 
 /// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
 /// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable.
+///
+/// **R2-1 — canonization columns are insert-only here.**
+/// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
+/// INSERT column list (a brand-new row must carry them) but deliberately
+/// **absent from the `DO UPDATE SET` list**: on an existing row the
+/// canonization path (`UPDATE_CONCEPT_STATUS_SQL`) is their only writer.
+/// A `Mutation::UpsertNode` carries a snapshot of the concept taken when it
+/// was appended — a GC `bump_gc_survived` from before a hop would otherwise
+/// overwrite the hop's effect from `EXCLUDED`, and the transition replaying
+/// behind it in the same batch is a no-op by design (its audit row is already
+/// recorded), so nothing repairs it. Full rationale on `Mutation::UpsertNode`.
 const UPSERT_CONCEPT_SQL: &str = r#"
 INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
@@ -185,9 +196,6 @@ ON CONFLICT (id) DO UPDATE SET
     access_count = EXCLUDED.access_count,
     last_accessed = EXCLUDED.last_accessed,
     gc_survived = EXCLUDED.gc_survived,
-    canonization_status = EXCLUDED.canonization_status,
-    blast_radius = EXCLUDED.blast_radius,
-    last_demotion_time = EXCLUDED.last_demotion_time,
     embedding = EXCLUDED.embedding,
     chunk_group_id = EXCLUDED.chunk_group_id
 "#;
@@ -368,13 +376,22 @@ WHERE c.session_id = $1
 /// covers exactly one case: a non-empty span over a **single-point session extent**
 /// (extent <= 0) — that interaction spans the whole session, so coverage is `1.0`
 /// (F1: canonization Stage 2 parity with MemoryStore in short sessions).
+///
+/// **Session scope (F5).** `i.session_id = $1` is not redundant with
+/// `e.session_id = $1`: `concepts.origin_interaction` is a **global** FK, so a
+/// concept in session S may legally point at an interaction in session S′.
+/// Without the filter the span counted those foreign interactions — inflating
+/// `distinct` against a session `MemoryStore` never sees, while the extent CTE
+/// stayed session-filtered. The `least`/`greatest` clamp is the same guard
+/// `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
+/// endpoints fall outside the session extent must not report a ratio above 1.0.
 /// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
 const INTERACTION_SPAN_SQL: &str = r#"
 WITH span AS (
     SELECT DISTINCT i.id AS iid, i.created_at AS ts
     FROM edges e
     JOIN concepts src ON src.id = e.source AND src.session_id = $1
-    JOIN interactions i ON i.id = src.origin_interaction
+    JOIN interactions i ON i.id = src.origin_interaction AND i.session_id = $1
     WHERE e.target = $2
       AND e.session_id = $1
       AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
@@ -390,8 +407,9 @@ SELECT
     CASE
         WHEN (SELECT count(*) FROM span) = 0 THEN 0.0
         WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
-            THEN extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
-                 / extract(epoch FROM (extent.hi - extent.lo))
+            THEN least(1.0, greatest(0.0,
+                 extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
+                 / extract(epoch FROM (extent.hi - extent.lo))))
         -- F1: non-empty span over a single-point session extent covers the
         -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
         ELSE 1.0
@@ -1024,11 +1042,13 @@ async fn upsert_edge(tx: &mut sqlx::PgConnection, e: &Edge) -> Result<(), StoreE
     Ok(())
 }
 
+/// Append the audit row; `false` when the id was already there (the
+/// `ON CONFLICT (id) DO NOTHING` dedupe fired).
 async fn insert_canonization_event(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
-) -> Result<(), StoreError> {
-    sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
+) -> Result<bool, StoreError> {
+    let res = sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
         .bind(ev.id.0)
         .bind(&ev.session_id.0)
         .bind(ev.node_id.0)
@@ -1040,15 +1060,38 @@ async fn insert_canonization_event(
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("insert canonization event: {m}")))?;
-    Ok(())
+    Ok(res.rows_affected() > 0)
 }
 
-/// Apply a canonization transition: update the concept row, then append the audit event.
-/// Missing concept → `NotFound` (MemoryStore parity).
+/// Apply a canonization transition: append the audit event, then update the
+/// concept row. Missing concept → `NotFound` (MemoryStore parity).
+///
+/// **F12 — the audit row is the idempotency key.** The evaluator dual-writes
+/// (`record_canonization` immediately, the same transition again when the
+/// write-behind log flushes), and the two are not ordered against each other:
+/// a lagging flush of hop 1 landing after hop 2's immediate write would
+/// otherwise *regress* the durable status, and a crash before hop 2's own
+/// flush would leave the reload showing a status the audit already moved past
+/// — after which the evaluator re-promotes under a fresh event id and the same
+/// hop appears twice in the on-screen audit. So the INSERT goes first: if its
+/// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
+/// the row and the UPDATE is skipped. Both statements share the caller's
+/// transaction, so the ordering swap costs nothing on the first write.
+///
+/// **R2-1 — what makes "already in the row" true.** Skipping the UPDATE is
+/// only sound while nothing else writes those three columns.
+/// `UPSERT_CONCEPT_SQL` used to, from a possibly stale
+/// `Mutation::UpsertNode` snapshot, so a batch shaped
+/// `[UpsertNode(stale), CanonizationTransition(already recorded)]` left the
+/// row regressed *and* the repair skipped. It no longer does — see
+/// `UPSERT_CONCEPT_SQL` and `Mutation::UpsertNode`.
 async fn apply_canonization(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
 ) -> Result<(), StoreError> {
+    if !insert_canonization_event(tx, ev).await? {
+        return Ok(());
+    }
     let res = sqlx::query(UPDATE_CONCEPT_STATUS_SQL)
         .bind(ev.node_id.0)
         .bind(canonization_status_sql(ev.to_status))
@@ -1064,7 +1107,7 @@ async fn apply_canonization(
             ev.node_id
         )));
     }
-    insert_canonization_event(tx, ev).await
+    Ok(())
 }
 
 #[async_trait]
@@ -1391,12 +1434,14 @@ impl GraphStore for CockroachStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
         let pool = self.pool().await?;
-        let cutoff = cutoff(Utc::now(), min_edge_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff(now, min_edge_age)?;
         let row = sqlx::query(BLAST_RADIUS_SQL)
             .bind(&session.0)
             .bind(node.0)
@@ -1413,12 +1458,14 @@ impl GraphStore for CockroachStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
         let pool = self.pool().await?;
-        let cutoff = cutoff(Utc::now(), min_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff(now, min_age)?;
         let row = sqlx::query(INTERACTION_SPAN_SQL)
             .bind(&session.0)
             .bind(node.0)
@@ -1588,6 +1635,38 @@ mod tests {
         assert!(UPSERT_EDGE_SQL.contains("ON CONFLICT (source, target, edge_type)"));
     }
 
+    /// R2-1 (no live cluster: SQL text is the contract). The three
+    /// canonization columns are INSERT-only — present in the column list so a
+    /// brand-new row carries them, absent from `DO UPDATE SET` so a stale
+    /// `Mutation::UpsertNode` snapshot cannot take an already-recorded hop
+    /// back out of the row (or erase a demotion cooldown). `gc_survived`,
+    /// which shares the same appenders, must still be updated: the property
+    /// is column ownership, not a blanket skip.
+    #[test]
+    fn concept_upsert_does_not_write_the_canonization_columns_on_conflict() {
+        let (insert, on_conflict) = UPSERT_CONCEPT_SQL
+            .split_once("ON CONFLICT")
+            .expect("the concept upsert has a conflict clause");
+        for col in ["canonization_status", "blast_radius", "last_demotion_time"] {
+            assert!(
+                insert.contains(col),
+                "{col} must stay in the INSERT column list (new rows carry it)"
+            );
+            assert!(
+                !on_conflict.contains(col),
+                "{col} is written only by the canonization path (R2-1)"
+            );
+        }
+        assert!(
+            UPSERT_CONCEPT_SQL.contains("gc_survived = EXCLUDED.gc_survived"),
+            "the upsert's own columns must still update on conflict"
+        );
+        // The canonization path is that single writer.
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("canonization_status"));
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("blast_radius"));
+        assert!(UPDATE_CONCEPT_STATUS_SQL.contains("last_demotion_time"));
+    }
+
     #[test]
     fn structural_query_placeholder_order_and_counts() {
         // §4.1 SQL construction: exactly three binds, in (session, node, cutoff) order.
@@ -1613,6 +1692,26 @@ mod tests {
         // MemoryStore parity: interaction_span filters BOTH edge and interaction age.
         assert!(INTERACTION_SPAN_SQL.contains("e.created_at <= $3"));
         assert!(INTERACTION_SPAN_SQL.contains("i.created_at <= $3"));
+    }
+
+    /// F5: `origin_interaction` is a global FK, so the span CTE must scope the
+    /// joined interaction to the queried session — the extent CTE already is.
+    /// Without it, concepts pointing at another session's interactions inflate
+    /// `distinct` and push the ratio above 1.0 (MemoryStore never sees them).
+    /// Text-level like its `structural_query_placeholder_order_and_counts`
+    /// neighbour: the behavioural twin runs on SQLite
+    /// (`interaction_span_ignores_cross_session_origin_interactions`), which
+    /// needs no live cluster.
+    #[test]
+    fn span_sql_is_session_scoped_and_coverage_is_clamped() {
+        assert!(
+            INTERACTION_SPAN_SQL.contains("i.session_id = $1"),
+            "span CTE must scope the origin interaction to the session (F5)"
+        );
+        assert!(
+            INTERACTION_SPAN_SQL.contains("least(1.0, greatest(0.0,"),
+            "coverage must be clamped to [0,1] like MemoryStore/SQLite (F5)"
+        );
     }
 
     #[test]
@@ -2494,11 +2593,23 @@ mod conformance {
         let mut assertions = 0usize;
         for node in &node_ids {
             for age in ages {
-                let mem_br = mem.blast_radius(&sid, *node, age).await.unwrap();
-                let crdb_br = store.blast_radius(&sid, *node, age).await.unwrap();
+                let mem_br = mem
+                    .blast_radius(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_br = store
+                    .blast_radius(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(mem_br, crdb_br, "blast_radius({fixture}, {node}, {age:?})");
-                let mem_span = mem.interaction_span(&sid, *node, age).await.unwrap();
-                let crdb_span = store.interaction_span(&sid, *node, age).await.unwrap();
+                let mem_span = mem
+                    .interaction_span(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_span = store
+                    .interaction_span(&sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(
                     mem_span, crdb_span,
                     "interaction_span({fixture}, {node}, {age:?}): mem={mem_span:?} crdb={crdb_span:?}"
@@ -2518,12 +2629,15 @@ mod conformance {
                 .unwrap()
                 .id;
             assert_eq!(
-                store.blast_radius(&sid, hub, Duration::ZERO).await.unwrap(),
+                store
+                    .blast_radius(&sid, hub, Duration::ZERO, Utc::now())
+                    .await
+                    .unwrap(),
                 8,
                 "hub 1001 blast radius anchor"
             );
             let span = store
-                .interaction_span(&sid, hub, Duration::ZERO)
+                .interaction_span(&sid, hub, Duration::ZERO, Utc::now())
                 .await
                 .unwrap();
             assert_eq!(span.distinct, 6);
@@ -2612,11 +2726,23 @@ mod conformance {
         // freshly created other -> orphan edge, plus the i-gate probe).
         for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::ZERO, one_hour] {
-                let mem_br = mem.blast_radius(&sid, node, min_age).await.unwrap();
-                let crdb_br = store.blast_radius(&sid, node, min_age).await.unwrap();
+                let mem_br = mem
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_br = store
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(mem_br, crdb_br, "blast_radius({node}, {min_age:?})");
-                let mem_span = mem.interaction_span(&sid, node, min_age).await.unwrap();
-                let crdb_span = store.interaction_span(&sid, node, min_age).await.unwrap();
+                let mem_span = mem
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let crdb_span = store
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(
                     mem_span, crdb_span,
                     "interaction_span({node}, {min_age:?}): mem={mem_span:?} crdb={crdb_span:?}"
@@ -2628,7 +2754,7 @@ mod conformance {
         // 1h when the fresh edge is filtered.
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, Duration::ZERO)
+                .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2637,7 +2763,7 @@ mod conformance {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, one_hour)
+                .interaction_span(&sid, orphan, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2648,7 +2774,7 @@ mod conformance {
         // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, Duration::ZERO)
+                .interaction_span(&sid, probe_victim, Duration::ZERO, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2657,7 +2783,7 @@ mod conformance {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, one_hour)
+                .interaction_span(&sid, probe_victim, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2667,7 +2793,10 @@ mod conformance {
         // blast_radius is origin-agnostic: the aged probe edge counts at 1h
         // even though its origin is fresh (span-only i-gate, MemoryStore parity).
         assert_eq!(
-            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, probe_src, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "blast_radius ignores origin age"
         );
@@ -2676,14 +2805,17 @@ mod conformance {
         // still counts.
         assert_eq!(
             store
-                .blast_radius(&sid, pillar, Duration::ZERO)
+                .blast_radius(&sid, pillar, Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
             0,
             "fresh edge counts at min_age=0"
         );
         assert_eq!(
-            store.blast_radius(&sid, pillar, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, pillar, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "fresh edge filtered at min_age=1h"
         );
@@ -2725,9 +2857,15 @@ mod conformance {
         mem.flush(&batch).await.unwrap();
 
         for min_age in [Duration::ZERO, Duration::from_secs(3600)] {
-            let want = mem.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let want = mem
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
-            let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(
                 got, want,
                 "Cockroach must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
@@ -2769,11 +2907,11 @@ mod conformance {
         .unwrap();
 
         let crdb_span = store
-            .interaction_span(&sid, orphan, Duration::ZERO)
+            .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         let mem_span = mem
-            .interaction_span(&sid, orphan, Duration::ZERO)
+            .interaction_span(&sid, orphan, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(
@@ -2785,11 +2923,11 @@ mod conformance {
 
         // Unsupported target: no inbound structural edges -> 0.0 on both.
         let empty_crdb = store
-            .interaction_span(&sid, pillar, Duration::ZERO)
+            .interaction_span(&sid, pillar, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         let empty_mem = mem
-            .interaction_span(&sid, pillar, Duration::ZERO)
+            .interaction_span(&sid, pillar, Duration::ZERO, Utc::now())
             .await
             .unwrap();
         assert_eq!(empty_crdb, empty_mem);

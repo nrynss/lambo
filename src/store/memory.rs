@@ -3,8 +3,8 @@
 //! Correctness notes (adversarial review):
 //! - Mutations in a batch are applied **in order** (spec §2.4).
 //! - Deletes must carry enough context: we resolve the session by scanning for the id.
-//! - Structural queries use the **caller's clock** (`Utc::now`) for age filters — tests that
-//!   need determinism should use `min_edge_age`/`min_age` of zero or plant aged timestamps.
+//! - Structural queries take the age cutoff's anchor from the **caller** (`now`), never a
+//!   wall clock of their own — one canonization cycle must read exactly one clock.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +21,30 @@ use crate::types::{
 #[derive(Default)]
 struct SessionData {
     snapshot: GraphSnapshot,
+    /// Ids already present in `snapshot.canonization_events` (F11).
+    ///
+    /// The dedupe contract (`ON CONFLICT (id) DO NOTHING`) needs a membership
+    /// test on every recorded transition, and the audit trail is append-only
+    /// and unbounded by design (spec §10 wants the whole history). Scanning
+    /// the vector per event made that O(n²) over a session's lifetime.
+    recorded_events: HashSet<NodeId>,
+}
+
+impl SessionData {
+    fn new(snapshot: GraphSnapshot) -> Self {
+        let recorded_events = snapshot.canonization_events.iter().map(|e| e.id).collect();
+        Self {
+            snapshot,
+            recorded_events,
+        }
+    }
+
+    fn empty(session: &SessionId) -> Self {
+        Self::new(GraphSnapshot {
+            session_id: session.clone(),
+            ..Default::default()
+        })
+    }
 }
 
 /// Complete in-memory store. Structural queries computed naively (correct, not fast).
@@ -38,12 +62,8 @@ impl MemoryStore {
         map: &'a mut HashMap<String, SessionData>,
         session: &SessionId,
     ) -> &'a mut SessionData {
-        map.entry(session.0.clone()).or_insert_with(|| SessionData {
-            snapshot: GraphSnapshot {
-                session_id: session.clone(),
-                ..Default::default()
-            },
-        })
+        map.entry(session.0.clone())
+            .or_insert_with(|| SessionData::empty(session))
     }
 
     /// Seed a prebuilt snapshot directly (used by `fixtures` to load committed graphs).
@@ -52,7 +72,7 @@ impl MemoryStore {
         let sid = snapshot.session_id.clone();
         self.inner
             .write()
-            .insert(sid.0.clone(), SessionData { snapshot });
+            .insert(sid.0.clone(), SessionData::new(snapshot));
         Ok(())
     }
 
@@ -83,7 +103,8 @@ impl MemoryStore {
         None
     }
 
-    fn apply_mutation(snap: &mut GraphSnapshot, m: &Mutation) -> Result<(), StoreError> {
+    fn apply_mutation(data: &mut SessionData, m: &Mutation) -> Result<(), StoreError> {
+        let snap = &mut data.snapshot;
         match m {
             Mutation::UpsertNode { node } => {
                 // Session consistency: ignore mismatches by forcing snapshot session.
@@ -109,7 +130,19 @@ impl MemoryStore {
                             )));
                         }
                         if let Some(pos) = snap.concepts.iter().position(|x| x.id == c.id) {
-                            snap.concepts[pos] = c.clone();
+                            let mut next = c.clone();
+                            // R2-1 — the canonization columns have exactly one
+                            // writer, and it is not this path (a stale
+                            // snapshot would otherwise regress the status or
+                            // erase a demotion cooldown). Rationale in full on
+                            // `Mutation::UpsertNode`; the SQL adapters drop
+                            // the same three columns from their
+                            // `ON CONFLICT DO UPDATE` lists.
+                            let prev = &snap.concepts[pos];
+                            next.canonization_status = prev.canonization_status;
+                            next.blast_radius = prev.blast_radius;
+                            next.last_demotion_time = prev.last_demotion_time;
+                            snap.concepts[pos] = next;
                         } else {
                             snap.concepts.push(c.clone());
                         }
@@ -152,6 +185,24 @@ impl MemoryStore {
                         event.session_id, snap.session_id
                     )));
                 }
+                // F12 — replay is a NO-OP, not a re-apply. The evaluator
+                // dual-writes (`record_canonization` now, flush of the same
+                // transition later), and the two are not ordered against each
+                // other: a lagging flush of hop 1 landing after hop 2's
+                // immediate write would otherwise *regress* the durable
+                // status. Once the event id is recorded, its effect is
+                // already in the row; the same guard is the `ON CONFLICT (id)
+                // DO NOTHING` dedupe the SQL adapters use.
+                //
+                // R2-1: "already in the row" holds only because the
+                // `UpsertNode` arm above no longer writes those three columns
+                // on an existing concept — a stale snapshot flushed ahead of
+                // an already-recorded transition would otherwise regress the
+                // status (or erase a demotion cooldown) with the repair
+                // skipped. See `Mutation::UpsertNode`.
+                if data.recorded_events.contains(&event.id) {
+                    return Ok(());
+                }
                 if let Some(c) = snap.concepts.iter_mut().find(|c| c.id == event.node_id) {
                     c.canonization_status = event.to_status;
                     c.blast_radius = event.blast_radius;
@@ -168,6 +219,7 @@ impl MemoryStore {
                     )));
                 }
                 snap.canonization_events.push(event.clone());
+                data.recorded_events.insert(event.id);
             }
             // XP-8: session-level metadata reaches the store through the
             // mutation path, not only `seed`. Same session-consistency gate as
@@ -238,13 +290,9 @@ impl GraphStore for MemoryStore {
             let data = match map.get(&sid.0) {
                 Some(d) => SessionData {
                     snapshot: d.snapshot.clone(),
+                    recorded_events: d.recorded_events.clone(),
                 },
-                None => SessionData {
-                    snapshot: GraphSnapshot {
-                        session_id: sid.clone(),
-                        ..Default::default()
-                    },
-                },
+                None => SessionData::empty(sid),
             };
             work.insert(sid.0.clone(), data);
         }
@@ -269,7 +317,7 @@ impl GraphStore for MemoryStore {
                 },
             };
             let data = work.get_mut(&sid.0).expect("affected session present");
-            Self::apply_mutation(&mut data.snapshot, m)?;
+            Self::apply_mutation(data, m)?;
         }
 
         // Commit: swap the working copies in on full success.
@@ -350,10 +398,11 @@ impl GraphStore for MemoryStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         // Spec §4.1 (1-hop): count concepts that have at least one aged inbound edge from
-        // `node` and no aged inbound edge from any other source.
-        let now = Utc::now();
+        // `node` and no aged inbound edge from any other source. `now` is the caller's
+        // clock (F8) — the adapter has no wall clock of its own.
         let min_created = Self::cutoff(now, min_edge_age)?;
         let map = self.inner.read();
         let data = map
@@ -404,10 +453,11 @@ impl GraphStore for MemoryStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         // Spec §4.1: inbound Dependency/Causal/Hierarchical from concepts whose
-        // origin_interaction is old enough; distinct interaction count + temporal coverage.
-        let now = Utc::now();
+        // origin_interaction is old enough; distinct interaction count + temporal
+        // coverage. `now` is the caller's clock (F8).
         let min_created = Self::cutoff(now, min_age)?;
         let map = self.inner.read();
         let data = map
@@ -480,7 +530,7 @@ impl GraphStore for MemoryStore {
         let mut map = self.inner.write();
         let data = Self::ensure_session(&mut map, &event.session_id);
         Self::apply_mutation(
-            &mut data.snapshot,
+            data,
             &Mutation::CanonizationTransition {
                 event: event.clone(),
             },
@@ -557,6 +607,263 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.concepts[0].content, "user schema");
+    }
+
+    /// F12: the canonization dual-write is unordered — `record_canonization`
+    /// happens immediately, the same transition flushes later from the
+    /// write-behind log. A lagging replay of hop 1 arriving after hop 2's
+    /// immediate write must NOT regress the durable status back to Candidate:
+    /// a crash before hop 2's own flush would then reload a status the audit
+    /// has already moved past, and the evaluator would re-promote under a
+    /// fresh event id — the same hop twice in the demo's audit table.
+    #[tokio::test]
+    async fn replaying_an_older_transition_does_not_regress_the_status() {
+        let store = MemoryStore::new();
+        let (sid, i1, c1, _) = sample_session();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    },
+                    plant_concept(&sid, c1, i1, "user schema", ts),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let hop = |from, to, at| CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: from,
+            to_status: to,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: at,
+        };
+        let hop1 = hop(CanonizationStatus::None, CanonizationStatus::Candidate, ts);
+        let hop2 = hop(
+            CanonizationStatus::Candidate,
+            CanonizationStatus::Venerable,
+            ts + chrono::Duration::seconds(60),
+        );
+        store.record_canonization(&hop1).await.unwrap();
+        store.record_canonization(&hop2).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().concepts[0].canonization_status,
+            CanonizationStatus::Venerable
+        );
+
+        // The write-behind log now replays hop 1 — already recorded.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::CanonizationTransition {
+                    event: hop1.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable,
+            "a replayed hop must not roll the durable status back"
+        );
+        assert_eq!(
+            snap.canonization_events.len(),
+            2,
+            "and must not duplicate the audit row"
+        );
+    }
+
+    /// Re-stamp a planted `UpsertNode` with a **stale** canonization snapshot
+    /// and a bumped `gc_survived` — exactly the shape T4.5's
+    /// `bump_gc_survived` appends: the concept as it stood when the mutation
+    /// was queued, not as it stands now (R2-1).
+    fn with_stale_canonization(
+        m: Mutation,
+        status: CanonizationStatus,
+        blast: Option<i32>,
+        last_demotion_time: Option<DateTime<Utc>>,
+    ) -> Mutation {
+        match m {
+            Mutation::UpsertNode {
+                node: Node::Concept(mut c),
+            } => {
+                c.canonization_status = status;
+                c.blast_radius = blast;
+                c.last_demotion_time = last_demotion_time;
+                c.gc_survived += 1;
+                Mutation::UpsertNode {
+                    node: Node::Concept(c),
+                }
+            }
+            other => panic!("expected a concept upsert, got {other:?}"),
+        }
+    }
+
+    /// R2-1: a stale `UpsertNode` flushed **ahead of** an already-recorded
+    /// transition must not regress the durable status.
+    ///
+    /// The F12 replay guard returns before the concept UPDATE on the premise
+    /// that "the effect is already in the row". A GC `bump_gc_survived`
+    /// queued before the hop carries the pre-hop status, so the batch
+    /// `[UpsertNode(stale), CanonizationTransition(recorded)]` used to write
+    /// the stale value and then skip the repair — durably wrong, forever.
+    /// The upsert's *own* columns must still land (`gc_survived`): the fix is
+    /// column ownership, not a blanket skip.
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status() {
+        let store = MemoryStore::new();
+        let (sid, i1, c1, _) = sample_session();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "user schema", ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    },
+                    plant.clone(),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let hop = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts,
+        };
+        // The evaluator's immediate durable write.
+        store.record_canonization(&hop).await.unwrap();
+
+        // The write-behind log flushes: a GC bump queued BEFORE the hop, then
+        // the hop itself.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::None, None, None),
+                    Mutation::CanonizationTransition { event: hop },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Candidate,
+            "a stale upsert must not take a recorded hop back out of the row"
+        );
+        assert_eq!(
+            snap.concepts[0].gc_survived, 1,
+            "the upsert's own columns must still land — only the canonization \
+             columns are excluded"
+        );
+        assert_eq!(snap.canonization_events.len(), 1, "no duplicate audit row");
+    }
+
+    /// R2-1, demotion variant — the worse half. A stale upsert carries
+    /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
+    /// node used to reload `Canonical` with the re-promotion cooldown erased
+    /// (COH-3, "cooldown survives restart").
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
+        let store = MemoryStore::new();
+        let (sid, i1, c1, _) = sample_session();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "user schema", ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    },
+                    plant.clone(),
+                ],
+            })
+            .await
+            .unwrap();
+
+        let promote = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::Venerable,
+            to_status: CanonizationStatus::Canonical,
+            blast_radius: Some(8),
+            last_demotion_time: None,
+            occurred_at: ts,
+        };
+        store.record_canonization(&promote).await.unwrap();
+
+        let demote_at = ts + chrono::Duration::minutes(5);
+        let demote = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(demote_at),
+            occurred_at: demote_at,
+        };
+        store.record_canonization(&demote).await.unwrap();
+
+        // A GC bump snapshotted while the node was still Canonical, flushed
+        // after the demotion was recorded.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::Canonical, Some(8), None),
+                    Mutation::CanonizationTransition { event: demote },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::None,
+            "a demoted node must not reload as Canonical"
+        );
+        assert_eq!(snap.concepts[0].blast_radius, None);
+        assert_eq!(
+            snap.concepts[0].last_demotion_time,
+            Some(demote_at),
+            "the re-promotion cooldown must survive the stale upsert"
+        );
     }
 
     #[tokio::test]
@@ -764,7 +1071,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let r = store
-            .blast_radius(&sid, pillar, Duration::from_secs(0))
+            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(r, 1, "only orphan is exclusively dependent on pillar");
@@ -809,7 +1116,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let span = store
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(span.distinct, 1);
@@ -817,7 +1124,7 @@ mod tests {
 
         // The unsupported case still reports 0.0: no interaction matches.
         let empty_span = store
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(empty_span.distinct, 0);
@@ -879,7 +1186,7 @@ mod tests {
         });
         store.flush(&batch).await.unwrap();
         let r = store
-            .blast_radius(&sid, pillar, Duration::from_secs(0))
+            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(r, 1, "Derives provenance must not un-orphan the dependent");

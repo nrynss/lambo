@@ -29,7 +29,39 @@
 //!   score is finite for every input.
 //!
 //! Hits are sorted by `final_score` descending, ties broken by node id
-//! ascending (the same total order phase 1 uses).
+//! ascending (the same total order phase 1 uses) — **after** the canonical
+//! partition below.
+//!
+//! ## Canonical-first ordering (spec §10)
+//!
+//! Spec §10: "**Canonical nodes are:** eviction-immune; **always promoted
+//! first** with `is_canonical=True`; marked `[canonical]` in recall output
+//! with a blast-radius warning". The marker, the flag and the ⚑ warning
+//! landed in P5; "always promoted first" had no owner in any phase plan, so a
+//! Canonical concept that fell below the `top_k` cut was silently absent from
+//! the read the whole tier exists to produce. Canonization decides what is
+//! load-bearing; recall is where that decision is supposed to show up.
+//!
+//! So the sort key is `(is_canonical desc, final_score desc, node id asc)`:
+//! every Canonical member of the expanded set is ranked ahead of every
+//! non-Canonical one, and score order applies within each group.
+//!
+//! **Why ordering rather than a rank boost.** A boost is a magic constant
+//! added to a formula spec §8 states exactly (`daemon_score × w_daemon +
+//! query_relevance × w_query`) — it would make the reported `score` no longer
+//! mean what the spec says it means, and it would not implement the rule
+//! anyway: any *finite* boost can still be out-ranked by a high enough
+//! non-canonical score, so "always" would hold only up to a tuning accident.
+//! Partitioning is exact, keeps `score` honest, and needs no constant.
+//!
+//! **Why ordering rather than unbounded force-inclusion.** Hot-listed members
+//! are force-included past `top_k` because a live conflict warning is
+//! time-critical and rare. Canonical membership is neither: a session at its
+//! `max_canonical_nodes=1000` ceiling would blow past every `top_k` and turn
+//! the budget into the real output bound. Ranking first already guarantees
+//! presence for the first `top_k` Canonicals, which is what "promoted first"
+//! asks for; beyond that the token budget is the binding constraint and
+//! honouring it is the point of phase 3.
 //!
 //! ## Hot-list force-include
 //!
@@ -121,9 +153,19 @@ where
         let r = sane_weight(relevance.get(&s.item).copied().unwrap_or(0.0));
         s.score = d * w_daemon + r * w_query;
     }
+    // Spec §10 "always promoted first": Canonical members are partitioned
+    // ahead of the rest, score order applies inside each group. See the
+    // module docs for why this is a partition and not a score boost.
+    let is_canonical = |id: NodeId| {
+        matches!(
+            graph.node(id),
+            Some(Node::Concept(c)) if c.canonization_status == CanonizationStatus::Canonical
+        )
+    };
     members.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
+        is_canonical(b.item)
+            .cmp(&is_canonical(a.item))
+            .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| a.item.0.cmp(&b.item.0))
     });
 
@@ -415,6 +457,171 @@ mod tests {
         assert!(approx(score(uid(3)), 0.05));
         // The id-asc tie-break is exercised in the dedicated test below.
         assert!(result.warnings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Canonical-first ordering (spec §10 "always promoted first")
+    // -----------------------------------------------------------------------
+
+    /// Mark `ids` Canonical through the write path (the state machine forbids
+    /// skipping stages, so each concept walks None -> Candidate -> Venerable
+    /// -> Canonical).
+    fn canonize(g: &mut Graph, ids: &[u64]) {
+        use crate::types::CanonizationEvent;
+        for &id in ids {
+            for (from, to) in [
+                (CanonizationStatus::None, CanonizationStatus::Candidate),
+                (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+                (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+            ] {
+                g.apply_canonization_transition(CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: sid(),
+                    node_id: uid(id),
+                    from_status: from,
+                    to_status: to,
+                    blast_radius: None,
+                    last_demotion_time: None,
+                    occurred_at: ts(0),
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    /// Spec §10: a Canonical node ranks ahead of every non-Canonical one,
+    /// whatever the scores say. Here c1 is Canonical with the *lowest* daemon
+    /// score in the set, so pure score order would put it last.
+    #[test]
+    fn canonical_members_rank_ahead_of_higher_scoring_peers() {
+        let mut g = graph_with(4);
+        canonize(&mut g, &[1]);
+        let expanded = ExpandedSet {
+            required: (1..=4).map(|i| Scored::new(uid(i), 0.0)).collect(),
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![
+                Scored::new(uid(1), 0.1),
+                Scored::new(uid(2), 0.9),
+                Scored::new(uid(3), 0.8),
+                Scored::new(uid(4), 0.7),
+            ],
+        };
+        let mut hot = HotList::new();
+        let result = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut hot,
+            &query(10, 10_000),
+            RecallWeights {
+                w_daemon: 1.0,
+                w_query: 0.0,
+            },
+            ts(0),
+            default_token_count,
+        );
+        assert_eq!(
+            ids_of(&result),
+            vec![uid(1), uid(2), uid(3), uid(4)],
+            "the Canonical node is promoted first; the rest stay score-ordered"
+        );
+        assert!(result.hits[0].is_canonical);
+        assert!(
+            approx(result.hits[0].score, 0.1),
+            "ordering must not rewrite the spec §8 score: {}",
+            result.hits[0].score
+        );
+    }
+
+    /// The failure the rule exists to prevent: a Canonical concept below the
+    /// `top_k` cut was silently absent from the read. Four members, `top_k =
+    /// 2`, and the Canonical one scores worst — it must still be emitted (and
+    /// carry its `[canonical]` marker into the rendered context).
+    #[test]
+    fn canonical_member_below_the_top_k_cut_is_still_returned() {
+        let mut g = graph_with(4);
+        canonize(&mut g, &[4]);
+        let expanded = ExpandedSet {
+            required: (1..=4).map(|i| Scored::new(uid(i), 0.0)).collect(),
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![
+                Scored::new(uid(1), 0.9),
+                Scored::new(uid(2), 0.8),
+                Scored::new(uid(3), 0.7),
+                Scored::new(uid(4), 0.1),
+            ],
+        };
+        let mut hot = HotList::new();
+        let result = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut hot,
+            &query(2, 10_000),
+            RecallWeights {
+                w_daemon: 1.0,
+                w_query: 0.0,
+            },
+            ts(0),
+            default_token_count,
+        );
+        assert_eq!(
+            ids_of(&result),
+            vec![uid(4), uid(1)],
+            "spec §10: the Canonical node is promoted first, so top_k=2 keeps \
+             it and drops the lowest-scoring non-Canonical instead"
+        );
+        assert!(result.context.contains("[Entity, canonical]"));
+    }
+
+    /// Several Canonicals keep score order **among themselves**, and the
+    /// non-Canonical tail keeps its own — the partition is one level of the
+    /// sort key, not a replacement for it.
+    #[test]
+    fn canonical_group_is_score_ordered_internally() {
+        let mut g = graph_with(4);
+        canonize(&mut g, &[1, 3]);
+        let expanded = ExpandedSet {
+            required: (1..=4).map(|i| Scored::new(uid(i), 0.0)).collect(),
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![
+                Scored::new(uid(1), 0.2),
+                Scored::new(uid(2), 0.9),
+                Scored::new(uid(3), 0.5),
+                Scored::new(uid(4), 0.4),
+            ],
+        };
+        let mut hot = HotList::new();
+        let result = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut hot,
+            &query(10, 10_000),
+            RecallWeights {
+                w_daemon: 1.0,
+                w_query: 0.0,
+            },
+            ts(0),
+            default_token_count,
+        );
+        assert_eq!(
+            ids_of(&result),
+            vec![uid(3), uid(1), uid(2), uid(4)],
+            "canonicals first (0.5 then 0.2), then the rest (0.9 then 0.4)"
+        );
     }
 
     #[test]

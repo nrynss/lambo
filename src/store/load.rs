@@ -582,8 +582,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_edge_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<u64, StoreError> {
-            self.inner.blast_radius(session, node, min_edge_age).await
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
         }
 
         async fn interaction_span(
@@ -591,8 +594,11 @@ mod tests {
             session: &SessionId,
             node: NodeId,
             min_age: Duration,
+            now: DateTime<Utc>,
         ) -> Result<InteractionSpan, StoreError> {
-            self.inner.interaction_span(session, node, min_age).await
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
         }
 
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {

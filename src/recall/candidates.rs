@@ -376,6 +376,7 @@ mod tests {
             _session: &SessionId,
             _node: NodeId,
             _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<u64, StoreError> {
             self.unexpected_call()
         }
@@ -384,6 +385,7 @@ mod tests {
             _session: &SessionId,
             _node: NodeId,
             _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             self.unexpected_call()
         }

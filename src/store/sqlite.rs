@@ -170,12 +170,20 @@ const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 /// cutoff. `{STRUCTURAL_EDGE_IN}` is substituted at the call site (the
 /// predicate is shared with blast_radius); the substitution keeps this const
 /// assertable verbatim in tests.
+///
+/// **Session scope (F5).** `i.session_id = ?` is not redundant with
+/// `e.session_id = ?`: `concepts.origin_interaction` is a **global** FK, so a
+/// concept in session S may legally point at an interaction in session S′.
+/// Without the filter the span counted those foreign interactions — inflating
+/// `distinct` and (since their timestamps sit outside S's extent) the coverage
+/// ratio, both against a session `MemoryStore` never sees. The extent CTE was
+/// already session-filtered, so the two halves of the ratio disagreed.
 const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
      SELECT DISTINCT i.id, i.created_at \
      FROM edges e \
      JOIN concepts src ON src.id = e.source \
      JOIN interactions i ON i.id = src.origin_interaction \
-     WHERE e.target = ? AND e.session_id = ? \
+     WHERE e.target = ? AND e.session_id = ? AND i.session_id = ? \
        AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
        AND e.created_at <= ? AND i.created_at <= ? \
  ), \
@@ -733,6 +741,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         node: NodeId,
         min_edge_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
         // Spec §4.1 ported to `?` placeholders; the cutoff is computed in Rust
         // (SQLite has no INTERVAL) and bound as the fixed ISO-8601 TEXT.
@@ -740,8 +749,19 @@ impl GraphStore for SqliteStore {
         // excludes the node itself, and `e.created_at <= ?` gates the edge age
         // exactly like MemoryStore (the spec's span query gates only the
         // interaction age — see interaction_span).
+        //
+        // **Session scope (R2-3).** Both structural subqueries scope their
+        // source concept with `src.session_id = ?` / `src2.session_id = ?`,
+        // matching Cockroach's `BLAST_RADIUS_SQL` and MemoryStore's
+        // `concept_ids` (built from the session snapshot). Edges carry a
+        // `session_id` but the join to `concepts` did not, so a cross-session
+        // edge into a dependent satisfied the `NOT EXISTS` arm and
+        // **un-orphaned** it here and nowhere else — SQLite under-counted
+        // blast against both other backends, suppressing Stage-3 promotions
+        // and mis-ranking budget demotion.
         self.require_session(session).await?;
-        let cutoff = cutoff_text(Utc::now(), min_edge_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff_text(now, min_edge_age)?;
         let node_text = node.0.to_string();
 
         let row = sqlx::query(&format!(
@@ -751,21 +771,23 @@ impl GraphStore for SqliteStore {
                AND c.id <> ? \
                AND EXISTS ( \
                    SELECT 1 FROM edges e \
-                   JOIN concepts src ON src.id = e.source \
+                   JOIN concepts src ON src.id = e.source AND src.session_id = ? \
                    WHERE e.target = c.id AND e.source = ? \
                      AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND e.created_at <= ?) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM edges e2 \
-                   JOIN concepts src2 ON src2.id = e2.source \
+                   JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = ? \
                    WHERE e2.target = c.id AND e2.source <> ? \
                      AND e2.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND e2.created_at <= ?)"
         ))
         .bind(&session.0)
         .bind(&node_text)
+        .bind(&session.0)
         .bind(&node_text)
         .bind(&cutoff)
+        .bind(&session.0)
         .bind(&node_text)
         .bind(&cutoff)
         .fetch_one(self.pool())
@@ -780,6 +802,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         node: NodeId,
         min_age: Duration,
+        now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         // Spec §4.1 span query: distinct origin interactions of concept-sourced
         // structural edges into `node`, aged on BOTH the edge and the origin
@@ -788,12 +811,14 @@ impl GraphStore for SqliteStore {
         // is MemoryStore's naive answer). Coverage is computed in Rust in ms,
         // identical to MemoryStore's formula.
         self.require_session(session).await?;
-        let cutoff = cutoff_text(Utc::now(), min_age)?;
+        // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
+        let cutoff = cutoff_text(now, min_age)?;
         let node_text = node.0.to_string();
 
         let row =
             sqlx::query(&INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN))
                 .bind(&node_text)
+                .bind(&session.0)
                 .bind(&session.0)
                 .bind(&cutoff)
                 .bind(&cutoff)
@@ -963,6 +988,12 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     // valid target (bare ON CONFLICT errors); legal duplicate Observation keys
     // (demote) never conflict with it, and a genuine duplicate non-Observation
     // key surfaces as an error (the graph tier already forbids it in RAM).
+    //
+    // R2-1: `canonization_status` / `blast_radius` / `last_demotion_time` are
+    // in the INSERT column list (a brand-new row must carry them) but
+    // deliberately **absent from the DO UPDATE SET list** — on an existing row
+    // the canonization path is their only writer. Rationale on
+    // `Mutation::UpsertNode`.
     let concept_type = enum_to_text(&c.concept_type, "concept_type")?;
     let status = enum_to_text(&c.canonization_status, "canonization_status")?;
     // CON-8: the embedding is written for flush→load round-trip parity. Same
@@ -992,9 +1023,6 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
              access_count = excluded.access_count, \
              last_accessed = excluded.last_accessed, \
              gc_survived = excluded.gc_survived, \
-             canonization_status = excluded.canonization_status, \
-             blast_radius = excluded.blast_radius, \
-             last_demotion_time = excluded.last_demotion_time, \
              embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id",
     )
@@ -1105,13 +1133,55 @@ async fn set_root_goal(
 }
 
 /// Shared by the `CanonizationTransition` mutation and `record_canonization`:
-/// update the concept's status/blast_radius (NotFound if absent, like
-/// MemoryStore) and append the event row — the demo's on-screen artifact.
+/// append the event row — the demo's on-screen artifact — then update the
+/// concept's status/blast_radius (NotFound if absent, like MemoryStore).
+///
+/// **F12 — the audit row is the idempotency key.** The evaluator dual-writes
+/// (`record_canonization` immediately, the same transition again when the
+/// write-behind log flushes), and the two are not ordered against each other:
+/// a lagging flush of hop 1 landing after hop 2's immediate write would
+/// otherwise *regress* the durable status, and a crash before hop 2's own
+/// flush would leave the reload showing a status the audit already moved past
+/// — after which the evaluator re-promotes under a fresh event id and the same
+/// hop appears twice on screen. So the INSERT goes first: if its
+/// `ON CONFLICT (id) DO NOTHING` fires, this transition's effect is already in
+/// the row and the UPDATE is skipped. Both statements share the caller's
+/// transaction, so the ordering swap costs nothing on the first write.
+///
+/// **R2-1 — what makes "already in the row" true.** Skipping the UPDATE is
+/// only sound while nothing else writes those three columns. `upsert_concept`
+/// used to, from a possibly stale `Mutation::UpsertNode` snapshot, so a batch
+/// shaped `[UpsertNode(stale), CanonizationTransition(already recorded)]` left
+/// the row regressed *and* the repair skipped. It no longer does — see
+/// `upsert_concept` and `Mutation::UpsertNode`.
 async fn apply_canonization_transition(
     tx: &mut sqlx::SqliteConnection,
     event: &CanonizationEvent,
 ) -> Result<(), StoreError> {
     let to_status = enum_to_text(&event.to_status, "to_status")?;
+    let from_status = enum_to_text(&event.from_status, "from_status")?;
+    let appended = sqlx::query(
+        "INSERT INTO canonization_events (\
+             id, session_id, node_id, from_status, to_status, blast_radius, \
+             last_demotion_time, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(event.id.0.to_string())
+    .bind(&event.session_id.0)
+    .bind(event.node_id.0.to_string())
+    .bind(from_status)
+    .bind(&to_status)
+    .bind(event.blast_radius)
+    .bind(event.last_demotion_time.map(ts_to_text))
+    .bind(ts_to_text(event.occurred_at))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
+    if appended.rows_affected() == 0 {
+        return Ok(());
+    }
+
     // COH-3: last_demotion_time = COALESCE(?, last_demotion_time) — a demotion
     // event (Some) stamps the concept; non-demotion events (None) leave a
     // previously demoted value untouched (spec §10).
@@ -1134,26 +1204,6 @@ async fn apply_canonization_transition(
             event.node_id
         )));
     }
-
-    let from_status = enum_to_text(&event.from_status, "from_status")?;
-    sqlx::query(
-        "INSERT INTO canonization_events (\
-             id, session_id, node_id, from_status, to_status, blast_radius, \
-             last_demotion_time, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(event.id.0.to_string())
-    .bind(&event.session_id.0)
-    .bind(event.node_id.0.to_string())
-    .bind(from_status)
-    .bind(to_status)
-    .bind(event.blast_radius)
-    .bind(event.last_demotion_time.map(ts_to_text))
-    .bind(ts_to_text(event.occurred_at))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
     Ok(())
 }
 
@@ -2174,12 +2224,24 @@ mod tests {
         let mut assertions = 0;
         for node in &node_ids {
             for age in ages {
-                let br = store.blast_radius(sid, *node, age).await.unwrap();
-                let br_want = memory.blast_radius(sid, *node, age).await.unwrap();
+                let br = store
+                    .blast_radius(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let br_want = memory
+                    .blast_radius(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(br, br_want, "blast_radius {node} age {age:?}");
 
-                let span = store.interaction_span(sid, *node, age).await.unwrap();
-                let span_want = memory.interaction_span(sid, *node, age).await.unwrap();
+                let span = store
+                    .interaction_span(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
+                let span_want = memory
+                    .interaction_span(sid, *node, age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(span, span_want, "interaction_span {node} age {age:?}");
                 assertions += 2;
             }
@@ -2225,13 +2287,13 @@ mod tests {
                     .id;
                 assert_eq!(
                     sqlite
-                        .blast_radius(&sid, hub, Duration::from_secs(0))
+                        .blast_radius(&sid, hub, Duration::from_secs(0), Utc::now())
                         .await
                         .unwrap(),
                     8
                 );
                 let span = sqlite
-                    .interaction_span(&sid, hub, Duration::from_secs(0))
+                    .interaction_span(&sid, hub, Duration::from_secs(0), Utc::now())
                     .await
                     .unwrap();
                 assert_eq!(span.distinct, 6);
@@ -2284,14 +2346,91 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
-            let want = memory.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let want = memory
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(want, 1, "oracle sanity: Derives must not un-orphan");
-            let got = store.blast_radius(&sid, pillar, min_age).await.unwrap();
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
             assert_eq!(
                 got, want,
                 "SQLite must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
             );
         }
+    }
+
+    /// R2-3: `blast_radius` must be session-scoped on the **source** side of
+    /// both structural subqueries, exactly as Cockroach's `BLAST_RADIUS_SQL`
+    /// is and as MemoryStore is by construction (it walks one session's
+    /// snapshot, and its `concept_ids` set holds that session's concepts
+    /// only).
+    ///
+    /// `hub -> dep` in session `here` makes `dep` an exclusive dependent, so
+    /// blast is 1. A second structural edge into `dep` whose **source concept
+    /// lives in another session** must not un-orphan it: MemoryStore skips
+    /// that source (not in `concept_ids`), and SQLite used to join `concepts`
+    /// with no session predicate, satisfy the `NOT EXISTS` arm, and answer 0
+    /// — under-counting blast, which suppresses Stage-3 promotions and
+    /// mis-ranks budget demotion. The session-local answer is the contract on
+    /// every backend.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn blast_radius_ignores_cross_session_sources_like_memory() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let here = SessionId::from("here");
+        let there = SessionId::from("there");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        let hub = NodeId::new();
+        let dep = NodeId::new();
+        let foreign = NodeId::new();
+
+        let local = MutationBatch {
+            mutations: vec![
+                plant_interaction(&here, i1, None, ts),
+                plant_concept(&here, hub, i1, "hub", ConceptType::Entity, ts),
+                plant_concept(&here, dep, i1, "dep", ConceptType::Entity, ts),
+                plant_edge(&here, hub, dep, EdgeType::Dependency, ts),
+                // An edge recorded in `here` whose source concept belongs to
+                // `there` — the schema permits it (edges carry no FK) and
+                // `GraphStore::flush` is public.
+                plant_edge(&here, foreign, dep, EdgeType::Dependency, ts),
+            ],
+        };
+        let elsewhere = MutationBatch {
+            mutations: vec![
+                plant_interaction(&there, i2, None, ts),
+                plant_concept(&there, foreign, i2, "foreign", ConceptType::Entity, ts),
+            ],
+        };
+        store.flush(&local).await.unwrap();
+        store.flush(&elsewhere).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&local).await.unwrap();
+        memory.flush(&elsewhere).await.unwrap();
+
+        let want = memory
+            .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            want, 1,
+            "oracle sanity: a foreign-session source cannot un-orphan `dep`"
+        );
+        let got = store
+            .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            got, want,
+            "SQLite must scope the structural sources to the session, like \
+             MemoryStore and Cockroach"
+        );
     }
 
     /// Edge-age interaction (T3.6 matrix; round-1 review F1 remediation): an
@@ -2377,11 +2516,23 @@ mod tests {
         let one_hour = Duration::from_secs(3600);
         for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
             for min_age in [Duration::from_secs(0), one_hour] {
-                let br = store.blast_radius(&sid, node, min_age).await.unwrap();
-                let br_want = memory.blast_radius(&sid, node, min_age).await.unwrap();
+                let br = store
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let br_want = memory
+                    .blast_radius(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(br, br_want, "blast_radius {node} age {min_age:?}");
-                let span = store.interaction_span(&sid, node, min_age).await.unwrap();
-                let span_want = memory.interaction_span(&sid, node, min_age).await.unwrap();
+                let span = store
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
+                let span_want = memory
+                    .interaction_span(&sid, node, min_age, Utc::now())
+                    .await
+                    .unwrap();
                 assert_eq!(span, span_want, "interaction_span {node} age {min_age:?}");
             }
         }
@@ -2390,7 +2541,7 @@ mod tests {
         // 1h when the fresh edge is filtered.
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, Duration::from_secs(0))
+                .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2399,7 +2550,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, orphan, one_hour)
+                .interaction_span(&sid, orphan, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2410,7 +2561,7 @@ mod tests {
         // FRESH, so it is in the span at min-age 0 and must be excluded at 1h.
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, Duration::from_secs(0))
+                .interaction_span(&sid, probe_victim, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2419,7 +2570,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .interaction_span(&sid, probe_victim, one_hour)
+                .interaction_span(&sid, probe_victim, one_hour, Utc::now())
                 .await
                 .unwrap()
                 .distinct,
@@ -2429,7 +2580,10 @@ mod tests {
         // blast_radius is origin-agnostic: the aged probe edge counts at 1h
         // even though its origin is fresh (span-only i-gate, MemoryStore parity).
         assert_eq!(
-            store.blast_radius(&sid, probe_src, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, probe_src, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "blast_radius ignores origin age"
         );
@@ -2438,14 +2592,17 @@ mod tests {
         // 1h it is filtered and the orphan still counts.
         assert_eq!(
             store
-                .blast_radius(&sid, pillar, Duration::from_secs(0))
+                .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap(),
             0,
             "fresh edge counts at min_age=0"
         );
         assert_eq!(
-            store.blast_radius(&sid, pillar, one_hour).await.unwrap(),
+            store
+                .blast_radius(&sid, pillar, one_hour, Utc::now())
+                .await
+                .unwrap(),
             1,
             "fresh edge filtered at min_age=1h"
         );
@@ -2467,6 +2624,78 @@ mod tests {
         assert!(
             INTERACTION_SPAN_SQL.contains("i.created_at <= ?"),
             "span SQL must gate the ORIGIN-INTERACTION timestamp"
+        );
+    }
+
+    /// F5: `concepts.origin_interaction` is a **global** FK, so a concept in
+    /// session S may legally point at an interaction in session S′. The span
+    /// CTE must scope the joined interaction to S (the extent CTE always was),
+    /// otherwise foreign interactions inflate `distinct` and — since their
+    /// timestamps sit outside S's extent — the coverage ratio, on a population
+    /// `MemoryStore` (which resolves origins inside the session snapshot only)
+    /// never sees. Pre-fix this returned `distinct = 3`, coverage clamped from
+    /// 200.0; MemoryStore returned `distinct = 0`.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn interaction_span_ignores_cross_session_origin_interactions() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let here = SessionId::from("span-here");
+        let there = SessionId::from("span-there");
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let t = |secs: i64| t0 + chrono::Duration::seconds(secs);
+
+        // `here` extent is 100s; `there` straddles it by ±10000s, so an
+        // unscoped ratio is 20000/100 = 200.0.
+        let (h0, h1) = (NodeId::new(), NodeId::new());
+        let (b0, b1, b2) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let target = NodeId::new();
+        let (s0, s1, s2) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut mutations = vec![
+            plant_interaction(&here, h0, None, t(0)),
+            plant_interaction(&here, h1, Some(h0), t(100)),
+            plant_interaction(&there, b0, None, t(-10_000)),
+            plant_interaction(&there, b1, Some(b0), t(0)),
+            plant_interaction(&there, b2, Some(b1), t(10_000)),
+            plant_concept(&here, target, h0, "target", ConceptType::Entity, t(0)),
+        ];
+        // Supports live in `here` but their origins point across sessions.
+        for (id, origin, name) in [(s0, b0, "s0"), (s1, b1, "s1"), (s2, b2, "s2")] {
+            mutations.push(plant_concept(
+                &here,
+                id,
+                origin,
+                name,
+                ConceptType::Entity,
+                t(0),
+            ));
+            mutations.push(plant_edge(&here, id, target, EdgeType::Dependency, t(0)));
+        }
+        let batch = MutationBatch { mutations };
+        store.flush(&batch).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&batch).await.unwrap();
+
+        let got = store
+            .interaction_span(&here, target, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        let want = memory
+            .interaction_span(&here, target, Duration::from_secs(0), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            got, want,
+            "cross-session origins must not diverge from MemoryStore"
+        );
+        assert_eq!(
+            got.distinct, 0,
+            "foreign-session origin interactions must not count"
+        );
+        assert_eq!(got.coverage, 0.0);
+        assert!(
+            got.coverage <= 1.0,
+            "coverage is a ratio of the session's own extent"
         );
     }
 
@@ -2509,11 +2738,11 @@ mod tests {
         memory.flush(&batch).await.unwrap();
 
         let span = store
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         let span_want = memory
-            .interaction_span(&sid, orphan, Duration::from_secs(0))
+            .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(span, span_want, "MemoryStore parity");
@@ -2522,11 +2751,11 @@ mod tests {
 
         // Unsupported target: no inbound structural edges -> 0.0 on both.
         let empty = store
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         let empty_want = memory
-            .interaction_span(&sid, pillar, Duration::from_secs(0))
+            .interaction_span(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert_eq!(empty, empty_want);
@@ -2616,6 +2845,24 @@ mod tests {
         };
         let err = store.record_canonization(&ghost).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
+
+        // F12: the write-behind log now replays ev1, which was already
+        // recorded. The replay must be a no-op — not a status rollback to
+        // Candidate, and not a duplicate audit row.
+        store
+            .flush(&MutationBatch {
+                mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
+            })
+            .await
+            .unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Venerable,
+            "a replayed hop must not roll the durable status back (F12)"
+        );
+        assert_eq!(snap.concepts[0].blast_radius, Some(4));
+        assert_eq!(snap.canonization_events.len(), 2);
     }
 
     /// COH-3 acceptance: a demotion event (Canonical -> None) carries
@@ -2687,6 +2934,167 @@ mod tests {
         );
         assert_eq!(snap.canonization_events.len(), 2);
         assert_eq!(snap.canonization_events[1], promo);
+    }
+
+    /// Re-stamp a planted `UpsertNode` with a **stale** canonization snapshot
+    /// and a bumped `gc_survived` — exactly the shape T4.5's
+    /// `bump_gc_survived` appends: the concept as it stood when the mutation
+    /// was queued, not as it stands now (R2-1).
+    fn with_stale_canonization(
+        m: Mutation,
+        status: CanonizationStatus,
+        blast: Option<i32>,
+        last_demotion_time: Option<DateTime<Utc>>,
+    ) -> Mutation {
+        match m {
+            Mutation::UpsertNode {
+                node: NodeKind::Concept(mut c),
+            } => {
+                c.canonization_status = status;
+                c.blast_radius = blast;
+                c.last_demotion_time = last_demotion_time;
+                c.gc_survived += 1;
+                Mutation::UpsertNode {
+                    node: NodeKind::Concept(c),
+                }
+            }
+            other => panic!("expected a concept upsert, got {other:?}"),
+        }
+    }
+
+    /// R2-1 on the durable tier: a stale `UpsertNode` flushed **ahead of** an
+    /// already-recorded transition must not regress the concept row.
+    ///
+    /// `apply_canonization_transition` returns before the UPDATE when its
+    /// audit INSERT dedupes ("the effect is already in the row"). That premise
+    /// only holds while the canonization path owns the three columns —
+    /// `upsert_concept`'s `ON CONFLICT` list used to write them from a
+    /// snapshot queued before the hop, so this batch left the row wrong with
+    /// no repair. `gc_survived` still lands: the fix is column ownership, not
+    /// a blanket skip.
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("r2-1-status");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+            })
+            .await
+            .unwrap();
+
+        let hop = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts,
+        };
+        store.record_canonization(&hop).await.unwrap();
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::None, None, None),
+                    Mutation::CanonizationTransition { event: hop },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::Candidate,
+            "a stale upsert must not take a recorded hop back out of the row"
+        );
+        assert_eq!(
+            snap.concepts[0].gc_survived, 1,
+            "the upsert's own columns must still land — only the canonization \
+             columns are excluded"
+        );
+        assert_eq!(snap.canonization_events.len(), 1, "no duplicate audit row");
+    }
+
+    /// R2-1, demotion variant — the worse half. The stale snapshot carries
+    /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
+    /// node used to reload `Canonical` with the re-promotion cooldown erased
+    /// (COH-3, "cooldown survives restart").
+    #[tokio::test]
+    async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("r2-1-cooldown");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
+        let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
+        store
+            .flush(&MutationBatch {
+                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+            })
+            .await
+            .unwrap();
+
+        store
+            .record_canonization(&CanonizationEvent {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                node_id: c1,
+                from_status: CanonizationStatus::Venerable,
+                to_status: CanonizationStatus::Canonical,
+                blast_radius: Some(8),
+                last_demotion_time: None,
+                occurred_at: ts,
+            })
+            .await
+            .unwrap();
+
+        let demote_at = ts + chrono::Duration::minutes(5);
+        let demote = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(demote_at),
+            occurred_at: demote_at,
+        };
+        store.record_canonization(&demote).await.unwrap();
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    with_stale_canonization(plant, CanonizationStatus::Canonical, Some(8), None),
+                    Mutation::CanonizationTransition { event: demote },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts[0].canonization_status,
+            CanonizationStatus::None,
+            "a demoted node must not reload as Canonical"
+        );
+        assert_eq!(snap.concepts[0].blast_radius, None);
+        assert_eq!(
+            snap.concepts[0].last_demotion_time,
+            Some(demote_at),
+            "the re-promotion cooldown must survive the stale upsert"
+        );
     }
 
     /// Acceptance: ISO-8601 timestamps use the FIXED 24-char ms format and

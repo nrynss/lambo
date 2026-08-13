@@ -176,7 +176,7 @@ mod tests {
 
         // Stage 2: interaction_span >= 3 distinct interactions, coverage >= 0.3
         let span = store
-            .interaction_span(&sid, us, Duration::from_secs(0))
+            .interaction_span(&sid, us, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert!(span.distinct >= 6, "distinct={}", span.distinct);
@@ -184,7 +184,7 @@ mod tests {
 
         // Stage 3: blast_radius > 5
         let br = store
-            .blast_radius(&sid, us, Duration::from_secs(0))
+            .blast_radius(&sid, us, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert!(br > 5, "blast_radius={br}");
@@ -197,14 +197,14 @@ mod tests {
         let api = node_id("f0000000-0000-4000-8000-000000001012");
 
         let span = store
-            .interaction_span(&sid, api, Duration::from_secs(0))
+            .interaction_span(&sid, api, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert!(span.distinct >= 3, "distinct={}", span.distinct);
         assert!(span.coverage >= 0.3, "coverage={}", span.coverage);
 
         let br = store
-            .blast_radius(&sid, api, Duration::from_secs(0))
+            .blast_radius(&sid, api, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
         assert!(br <= 5, "blast_radius={br} (should fail Stage 3)");
