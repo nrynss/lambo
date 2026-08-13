@@ -1130,6 +1130,20 @@ impl Memory {
     /// background tasks are stopped and every mutating method is refused, so a
     /// retry re-attempts exactly the same tail rather than a growing one.
     ///
+    /// ## Cancellation
+    ///
+    /// **Dropping this future never destroys the tail** (R2-1). A caller that
+    /// wraps `close()` in a [`timeout`](tokio::time::timeout) or drops it out of
+    /// a `select!` leaves the drained mutations back at the front of the graph
+    /// log — the state a *failed* close leaves, and retryable the same way. The
+    /// session stays closed to writers, `succeeded` stays unset, and the next
+    /// `close()` re-drains and re-flushes exactly that tail. A cancelled close
+    /// can therefore never be followed by an `Ok(())` that did not write it.
+    ///
+    /// Cancelling mid-flush may still have let the store apply the batch: the
+    /// retry replays it, which the `src/graph/mod.rs` replay contract makes
+    /// idempotent (the failure path has always made the same bet).
+    ///
     /// ## The drain (COH-6)
     ///
     /// `FlushTask` owns its `pending` buffer, so a hard
@@ -1153,7 +1167,9 @@ impl Memory {
     ///    the **front** of the graph log, and exits.
     /// 2. Await its handle — the task is gone and can no longer take the graph
     ///    lock, so step 3 races nothing.
-    /// 3. Take the graph lock, `drain_log()`, release.
+    /// 3. Take the graph lock, `drain_log()`, release. The batch is handed
+    ///    straight to a [`TailCustody`] guard, which returns it to the log if
+    ///    this future is dropped before step 4 makes it durable (R2-1).
     /// 4. `store.flush(&batch)` directly, with **no lock held**, armored like
     ///    every background attempt is: a [`FLUSH_ATTEMPT_TIMEOUT`] bound
     ///    (STORE-2) and panic containment, so a hung or panicking adapter
@@ -1180,6 +1196,13 @@ impl Memory {
     /// log (so `stats().log_depth` keeps telling the truth) and every later
     /// `close()` returns the same error — a degraded session has no path back
     /// to a durable tail, and saying `Ok` would be a lie.
+    ///
+    /// **A degraded session errors even when its log is empty** (R2-3). While
+    /// degraded the flush task keeps draining the log and dropping what it
+    /// drained (STORE-3), so an empty log is that mode's steady state — the
+    /// tail was dead-lettered, not written — and an `Ok(())` there would be the
+    /// same lie by a quieter route. `degraded()` is therefore checked before
+    /// the empty-log shortcut, not after it.
     pub async fn close(&self) -> Result<(), LamboError> {
         // T81-6: one close body at a time. A concurrent second caller parks
         // here and, when it gets in, either sees the success flag or re-runs
@@ -1225,35 +1248,59 @@ impl Memory {
 
         // 3 — final drain. Short critical section, guard dies with the block.
         let batch = { self.graph.write().drain_log() };
+        // Custody of the drained tail passes to `TailCustody` immediately:
+        // from here until it is durable those mutations exist nowhere else,
+        // and `close()` is a future its caller may drop (R2-1).
+        let mut tail = TailCustody::new(&self.graph, batch);
 
-        if batch.is_empty() {
-            *succeeded = true;
-            return Ok(());
-        }
+        // A degraded session errors **before** the empty-log shortcut (R2-3).
+        // While degraded the flush task keeps draining the log and DROPPING
+        // each batch (STORE-3), so an empty log is the *normal* degraded
+        // state, not evidence that anything was written. Checked second, the
+        // shortcut turned exactly that state into `Ok(())` — a durability
+        // claim over a tail the session had already dead-lettered.
         if self.flush.degraded() {
-            let count = batch.len();
+            let count = tail.len();
             tracing::error!(
                 mutations = count,
                 session = %self.session,
-                "close: session is degraded (durability=\"none\"); {count} mutations were NOT \
-                 written",
+                "close: session is degraded (durability=\"none\"); the tail was NOT written \
+                 ({count} mutations still in the log)",
             );
-            // Back onto the log: the mutations are no more durable for having
-            // been drained, and leaving them there keeps `stats().log_depth`
-            // honest about what was lost (T81-5). `succeeded` stays false, so
-            // no later `close()` can report `Ok` over this tail.
-            self.graph.write().push_front_log(batch.mutations);
+            // `tail`'s `Drop` puts the batch back on the log: the mutations
+            // are no more durable for having been drained, and leaving them
+            // there keeps `stats().log_depth` honest about what was lost
+            // (T81-5). `succeeded` stays false, so no later `close()` can
+            // report `Ok` over this tail.
+            let detail = if count == 0 {
+                "the log is empty because degraded mode drops what it drains, not because the \
+                 tail was written"
+                    .to_string()
+            } else {
+                format!("{count} tail mutations were not flushed")
+            };
             return Err(LamboError::Store(StoreError::Backend(format!(
-                "close: session {} degraded to durability=\"none\"; {count} tail mutations were \
-                 not flushed",
+                "close: session {} degraded to durability=\"none\"; {detail}",
                 self.session
             ))));
         }
 
-        // 4 — the final flush, no lock held, armored (T81-2).
-        let count = batch.len();
-        match final_flush(self.store.as_ref(), &batch).await {
+        if tail.is_empty() {
+            *succeeded = true;
+            return Ok(());
+        }
+
+        // 4 — the final flush, no lock held, armored (T81-2). The result is
+        // bound out of the `match` scrutinee so the borrow of `tail` ends
+        // here rather than spanning the arms.
+        let count = tail.len();
+        let flushed = final_flush(self.store.as_ref(), tail.batch()).await;
+        match flushed {
             Ok(()) => {
+                // Custody ends: the tail is durable, so it must NOT go back
+                // on the log. Nothing awaits between here and the return, so
+                // no cancellation can land in this window.
+                tail.durable();
                 tracing::info!(
                     mutations = count,
                     session = %self.session,
@@ -1263,11 +1310,12 @@ impl Memory {
                 Ok(())
             }
             Err(err) => {
-                // T81-5: the batch is NOT lost with the error. It goes back to
-                // the FRONT of the log — `push_front_log`'s documented purpose
-                // — so a retried `close()` (or an owner that fixes the store
-                // first) drains and flushes exactly this tail, in order.
-                self.graph.write().push_front_log(batch.mutations);
+                // T81-5: the batch is NOT lost with the error. `tail`'s `Drop`
+                // puts it back at the FRONT of the log — `push_front_log`'s
+                // documented purpose — so a retried `close()` (or an owner
+                // that fixes the store first) drains and flushes exactly this
+                // tail, in order.
+                drop(tail);
                 tracing::error!(
                     error = %err,
                     mutations = count,
@@ -1413,6 +1461,79 @@ impl Drop for Memory {
                  tail was discarded"
             );
         }
+    }
+}
+
+/// Custody of the tail between `close()`'s drain (step 3) and the moment it is
+/// durable (step 4) — R2-1.
+///
+/// Between those two points the mutations exist **only** as a local inside
+/// `close()`: they are out of the graph log and the flush task that owned the
+/// other copy has already been joined. `close()` is an ordinary future, so a
+/// caller that wraps it in `tokio::time::timeout` or drops it out of a
+/// `select!` — the posture `close`'s own "How long it can take" section invites,
+/// and which this crate's own shutdown test uses — destroys that local mid-flush.
+/// The tail then existed nowhere: the log was empty, so the *next* `close()`
+/// drained nothing, took the empty-log shortcut and returned `Ok(())` over
+/// mutations nobody ever wrote.
+///
+/// So the batch is never a bare local. This guard owns it from the drain until
+/// [`TailCustody::durable`] is called, and its `Drop` — which runs on
+/// cancellation exactly as it runs on the error path — hands it back to the
+/// front of the log. Cancel a `close()` and the tail is where it started, for
+/// the retry (or for `Drop`'s R2-2 warning) to find.
+///
+/// `Drop` is synchronous and takes the `parking_lot` write lock for one
+/// statement, never across an `.await` (§6.4). Re-appending a batch whose flush
+/// may have partly landed is the same bet the failure path already makes: a
+/// mutation batch is replayed, and replay is idempotent by the `src/graph/mod.rs`
+/// contract.
+struct TailCustody<'a> {
+    graph: &'a RwLock<Graph>,
+    batch: MutationBatch,
+    /// Set by [`TailCustody::durable`]; suppresses the hand-back.
+    durable: bool,
+}
+
+impl<'a> TailCustody<'a> {
+    fn new(graph: &'a RwLock<Graph>, batch: MutationBatch) -> Self {
+        Self {
+            graph,
+            batch,
+            durable: false,
+        }
+    }
+
+    fn batch(&self) -> &MutationBatch {
+        &self.batch
+    }
+
+    fn len(&self) -> usize {
+        self.batch.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    /// The store took it: end custody, so `Drop` does not put a durable batch
+    /// back on the log (which would flush it twice and leave `log_depth`
+    /// claiming an undurable tail).
+    fn durable(&mut self) {
+        self.durable = true;
+    }
+}
+
+impl Drop for TailCustody<'_> {
+    fn drop(&mut self) {
+        if self.durable {
+            return;
+        }
+        // `push_front_log` is a no-op on an empty batch, so the empty-log and
+        // degraded-with-empty-log paths cost nothing here.
+        self.graph
+            .write()
+            .push_front_log(std::mem::take(&mut self.batch.mutations));
     }
 }
 
@@ -1627,6 +1748,10 @@ mod tests {
     enum FlushBehaviour {
         /// Never returns: the hung backend `FLUSH_ATTEMPT_TIMEOUT` exists for.
         Hang,
+        /// Hangs the **first** flush and delegates every later one: a store
+        /// that is unresponsive when the caller gives up on `close()` and
+        /// healthy when it retries (R2-1).
+        HangOnce,
         /// Unwinds inside the flush: the panicking adapter `CatchUnwindPoll`
         /// exists for.
         Panic,
@@ -1641,6 +1766,8 @@ mod tests {
         behaviour: FlushBehaviour,
         flush_calls: AtomicUsize,
         flush_completed: AtomicBool,
+        /// Armed for [`FlushBehaviour::HangOnce`]; disarmed by the first flush.
+        hang_armed: AtomicBool,
     }
 
     impl AdverseStore {
@@ -1650,6 +1777,7 @@ mod tests {
                 behaviour,
                 flush_calls: AtomicUsize::new(0),
                 flush_completed: AtomicBool::new(false),
+                hang_armed: AtomicBool::new(true),
             }
         }
 
@@ -1675,6 +1803,11 @@ mod tests {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             match self.behaviour {
                 FlushBehaviour::Hang => std::future::pending::<()>().await,
+                FlushBehaviour::HangOnce => {
+                    if self.hang_armed.swap(false, Ordering::SeqCst) {
+                        std::future::pending::<()>().await
+                    }
+                }
                 FlushBehaviour::Panic => panic!("store adapter exploded mid-flush"),
                 FlushBehaviour::Delay(d) => tokio::time::sleep(d).await,
             }
@@ -2308,6 +2441,72 @@ mod tests {
         mem.close().await.unwrap();
     }
 
+    /// R2-1: a **cancelled** `close()` must not destroy the tail.
+    ///
+    /// `close()` is an ordinary future, and its own rustdoc invites an external
+    /// bound ("a caller-supplied store can make step 0 arbitrarily long") —
+    /// `close_completes_when_stop_lands_during_a_long_flush` above wraps it in
+    /// exactly such a `timeout`. Dropped between the drain and the flush, the
+    /// batch used to die with the local: the log was empty, the flush task was
+    /// already joined, and the **second** `close()` drained nothing, latched
+    /// success and returned `Ok(())` — the documented "Ok means the tail is
+    /// durable" invariant, violated silently. (The reviewer's probe then found
+    /// `load_session` returning `SessionNotFound`.)
+    ///
+    /// With `TailCustody` the drop hands the batch back to the front of the
+    /// log, so the retry has something to flush — and the empty-log shortcut,
+    /// which is what turned the loss into an `Ok`, is never reached with a
+    /// taken-and-lost tail behind it.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_close_returns_the_tail_to_the_log_for_the_retry() {
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let adverse = Arc::new(AdverseStore::new(inner.clone(), FlushBehaviour::HangOnce));
+        let store: Arc<dyn GraphStore> = adverse.clone();
+        let mem = memory_on(store, "cancelled-close").await;
+
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let depth = mem.stats().log_depth;
+        assert!(depth > 0);
+
+        // The caller gives up while the store is hung — well inside step 4's
+        // own FLUSH_ATTEMPT_TIMEOUT, so this is a dropped future, not an
+        // internally-bounded failure.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), mem.close()).await;
+        assert!(
+            outcome.is_err(),
+            "the hung store must outlast the caller's patience"
+        );
+        assert_eq!(adverse.flush_calls(), 1, "the final flush was in flight");
+
+        assert!(
+            mem.graph().read().log_len() >= depth,
+            "a cancelled close() must return the drained tail to the log, not drop it with \
+             the future"
+        );
+        assert!(
+            inner
+                .load_session(&SessionId::new("cancelled-close"))
+                .await
+                .is_err(),
+            "nothing durable yet"
+        );
+
+        // The store recovered. The retry must find and flush that tail — the
+        // bug returned `Ok(())` here having written nothing at all.
+        mem.close().await.unwrap();
+        let snap = inner
+            .load_session(&SessionId::new("cancelled-close"))
+            .await
+            .unwrap();
+        assert!(
+            snap.concepts.iter().any(|c| c.content == "user schema"),
+            "Ok(()) from close() must mean the tail is durable"
+        );
+        assert_eq!(mem.graph().read().log_len(), 0);
+    }
+
     /// T81-6: a second **concurrent** `close()` must not report `Ok` over an
     /// in-flight final flush (a caller gating process exit on that `Ok` would
     /// let runtime teardown cancel the flush and lose the tail). Both callers
@@ -2424,22 +2623,19 @@ mod tests {
         assert!(snap.concepts.iter().any(|c| c.content == "user schema"));
     }
 
-    /// The degraded-close branch (implementer self-flag #6, ruled in scope).
-    /// A session past `backend_log_max` stopped all store I/O by design;
-    /// `close()` must say the tail was not written instead of reporting a
-    /// durability it did not deliver — and must keep saying it.
-    #[tokio::test(start_paused = true)]
-    async fn close_refuses_to_claim_durability_for_a_degraded_session() {
+    /// A session that has degraded to `durability="none"` on backlog (STORE-3):
+    /// one mutation of headroom, so the first cycle's drain is already past
+    /// `backend_log_max`. Returns it degraded, with its log already emptied by
+    /// that cycle's drain.
+    async fn degraded_session(session: &str) -> Memory {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let mem = Memory::builder()
             .config(Config {
                 backend_flush_retries: 0,
-                // One mutation of headroom: the first cycle's drain is already
-                // past it, so the session degrades on backlog (STORE-3).
                 backend_log_max: 1,
                 ..Config::default()
             })
-            .session("degraded")
+            .session(session)
             .agent("agent-a")
             .flush_interval(Duration::from_millis(100))
             .store(store)
@@ -2460,6 +2656,16 @@ mod tests {
             }
         }
         assert!(mem.stats().degraded, "the session must have degraded");
+        mem
+    }
+
+    /// The degraded-close branch (implementer self-flag #6, ruled in scope).
+    /// A session past `backend_log_max` stopped all store I/O by design;
+    /// `close()` must say the tail was not written instead of reporting a
+    /// durability it did not deliver — and must keep saying it.
+    #[tokio::test(start_paused = true)]
+    async fn close_refuses_to_claim_durability_for_a_degraded_session() {
+        let mem = degraded_session("degraded").await;
 
         // A write after degradation is still in the log when close drains it.
         mem.record_action(&Action {
@@ -2478,6 +2684,55 @@ mod tests {
             "the un-written tail stays visible in log_depth"
         );
         // No `Ok` over an undurable tail, ever.
+        let again = mem.close().await.unwrap_err();
+        assert!(again.to_string().contains("degraded"), "{again}");
+    }
+
+    /// R2-3: the same must hold with an **empty** log — the case the ordering
+    /// bug made `Ok(())`.
+    ///
+    /// Degraded mode keeps draining the log and DROPPING what it drained
+    /// (STORE-3, spec §2.3 "none = pure RAM"), so an empty log is that mode's
+    /// *steady state*: it means the tail was dead-lettered, not written. With
+    /// the empty-log shortcut ahead of the degraded check, a caller who closed
+    /// a moment after the drain got `Ok(())` — a durability claim over
+    /// mutations the session had already thrown away, and one that contradicted
+    /// the very next `close()` if a single write had landed in between.
+    #[tokio::test(start_paused = true)]
+    async fn close_refuses_a_degraded_session_even_when_its_log_is_empty() {
+        let mem = degraded_session("degraded-empty").await;
+
+        // Write, then let a degraded cycle drain-and-drop it: log empty, tail
+        // gone. Exactly the state the shortcut used to bless.
+        mem.record_action(&Action {
+            action: "wrote docs/api.md",
+            produces: &["docs/api.md"],
+            modifies: &[],
+            depends_on: &[],
+        })
+        .unwrap();
+        assert!(mem.stats().log_depth > 0);
+        for _ in 0..20 {
+            tokio::time::advance(Duration::from_millis(150)).await;
+            tokio::task::yield_now().await;
+            if mem.stats().log_depth == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            mem.stats().log_depth,
+            0,
+            "degraded draining drops what it drained (STORE-3)"
+        );
+        assert_eq!(mem.stats().flush_depth, 0, "and retains nothing");
+
+        let err = mem.close().await.unwrap_err();
+        assert!(err.to_string().contains("degraded"), "{err}");
+        assert!(
+            err.to_string().contains("not because the tail was written"),
+            "the error must say why an empty log is not durability: {err}"
+        );
+        // Still no `Ok`, however often it is asked.
         let again = mem.close().await.unwrap_err();
         assert!(again.to_string().contains("degraded"), "{again}");
     }
