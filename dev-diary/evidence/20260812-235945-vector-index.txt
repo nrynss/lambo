@@ -90,4 +90,4 @@ SET
 ##     FROM concepts WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT $k;
 ## Assert the plan contains BOTH 'vector search' and 'concepts_embedding_idx'. The
 ## gated test that enforces it:
-##   cargo test --features store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof
+##   LAMBO_REQUIRE_LIVE=1 LAMBO_REQUIRE_VECTOR_INDEX=1 cargo test --features store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof

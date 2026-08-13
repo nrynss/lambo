@@ -257,8 +257,9 @@ stack merge via the index, and `EXPLAIN` output — captured into
   captured T0.3 evidence — and asserts the plan is a global `top-k`/`limit` ordering
   construct and does NOT scan the anti-pattern `concepts_session_id_canonical_key_key`;
   the broad positive + strict no-anti-pattern keeps it green against planner variance),
-  and the standalone `#[ignore]` camera-proof `vector_explain_camera_proof` (asserts
-  `vector search` + `concepts_embedding_idx`). (unit, no cluster)
+  and the standalone `#[ignore]` + `LAMBO_REQUIRE_VECTOR_INDEX=1` camera-proof
+  `vector_explain_camera_proof` (asserts `vector search` +
+  `concepts_embedding_idx`). (unit, no cluster)
   `session_filter_keeps_only_caller_and_preserves_order`,
   `grow_retry_is_final_when_satisfied_exhausted_or_capped`,
   `initial_fetch_k_is_floor_but_capped_at_same_bound_as_growth` (huge/`usize::MAX` limit
@@ -274,15 +275,19 @@ stack merge via the index, and `EXPLAIN` output — captured into
   shape + the scan decision + PENDING note). To get the on-camera proof, run the query
   against a vector-search-favorable deployment (freshly ANALYZEd, >~1k DISTINCT embeddings,
   or single-region) until `vector search` on `concepts@concepts_embedding_idx` appears, and
-  run the gated test `cargo test --features store-cockroach -- --ignored
-  cockroach::conformance::vector_explain_camera_proof`. Do NOT treat the demo cluster's scan
+  run the gated test `LAMBO_REQUIRE_LIVE=1 LAMBO_REQUIRE_VECTOR_INDEX=1 cargo test
+  --features store-cockroach -- --ignored
+  cockroach::conformance::vector_explain_camera_proof`.
+  Do NOT treat the demo cluster's scan
   as a query bug — the rework is correct and the live session-scoping suite PASSES.
 - **OPEN ITEM for the integrator (T8.4 / ship):** the §12.1 vector-index camera-proof is
   still PENDING (evidence at `dev-diary/evidence/<ts>-vector-index.txt`, honest scan-plan
   recorded). This is an integrator/demo-time decision, not a code fix — capture the
-  `vector search` plan on a favorable deployment, then run `cargo test --features
-  store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof` (and
-  un-ignore it), or formally downgrade the claim. Do not re-architect the query.
+  `vector search` plan on a favorable deployment, then run
+  `LAMBO_REQUIRE_LIVE=1 LAMBO_REQUIRE_VECTOR_INDEX=1 cargo test --features
+  store-cockroach -- --ignored cockroach::conformance::vector_explain_camera_proof`, or
+  formally downgrade the claim.
+  Do not re-architect the query.
 - **Next agent should not re-derive:** the global SQL shape, capped grow-and-retry fast path,
   exact cap-exhaustion fallback, and live session-scoping proof are done. If the camera-proof
   must land, only the favorable-deployment EXPLAIN capture (+ `vector_explain_camera_proof`)
@@ -311,8 +316,9 @@ use on camera.
     live end-to-end hybrid merge: PENDING until T8.1 Memory wires hybrid::derive against a live session (T8.4 demo).
 - [x] Degraded mode proven equivalent to Canonical strategy (T7.2 `no_capability_is_byte_identical_to_canonical`)
 - [ ] `EXPLAIN` evidence of index use committed — camera-proof PENDING on the multi-region demo cluster
-  (committed evidence shows the optimizer's scan choice, honestly labeled; un-ignore `vector_explain_camera_proof`
-  on a vector-search-favorable deployment before ship — open integrator item, see T7.3 handoff)
+  (committed evidence shows the optimizer's scan choice, honestly labeled; run
+  `vector_explain_camera_proof` with `LAMBO_REQUIRE_VECTOR_INDEX=1` on a
+  vector-search-favorable deployment before ship — open integrator item, see T7.3 handoff)
 - [x] Level B: embedder registry + features fail closed for missing kinds
 
 ## Handoff Log

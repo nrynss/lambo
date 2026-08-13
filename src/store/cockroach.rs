@@ -2400,18 +2400,27 @@ mod conformance {
             .filter(|s| !s.is_empty())
     }
 
-    /// Returns the DSN when present. Without one: under `LAMBO_REQUIRE_LIVE=1` this
-    /// PANICS (an evidence-captured live run must never silently skip); otherwise it
-    /// prints a skip notice and returns None. Callers are `#[ignore]`d, so a missing
-    /// DSN surfaces as an ignored test in the default run, not a false `ok`.
+    fn missing_dsn_is_fatal(require_live: bool, require_vector_index: bool) -> bool {
+        require_live || require_vector_index
+    }
+
+    /// Returns the DSN when present. Without one: under `LAMBO_REQUIRE_LIVE=1` or
+    /// `LAMBO_REQUIRE_VECTOR_INDEX=1` this PANICS (an evidence-captured live run must
+    /// never silently skip); otherwise it prints a skip notice and returns None.
+    /// Callers are `#[ignore]`d, so a missing DSN surfaces as an ignored test in the
+    /// default run, not a false `ok`.
     fn dsn_or_skip(test: &str) -> Option<String> {
         match dsn() {
             Some(d) => Some(d),
             None => {
-                if env::var_os("LAMBO_REQUIRE_LIVE").is_some() {
+                let require_live = env::var_os("LAMBO_REQUIRE_LIVE").is_some();
+                let require_vector_index = env::var_os("LAMBO_REQUIRE_VECTOR_INDEX").is_some();
+                if missing_dsn_is_fatal(require_live, require_vector_index) {
                     panic!(
-                        "{test}: LAMBO_COCKROACH_DSN is unset but LAMBO_REQUIRE_LIVE=1 \
-                         is set — refusing to skip a live cockroach test"
+                        "{test}: LAMBO_COCKROACH_DSN is unset but a required-live flag \
+                         is set (LAMBO_REQUIRE_LIVE={require_live}, \
+                         LAMBO_REQUIRE_VECTOR_INDEX={require_vector_index}) — refusing \
+                         to skip a live cockroach test"
                     );
                 }
                 eprintln!("SKIP {test}: LAMBO_COCKROACH_DSN not set");
@@ -2426,14 +2435,25 @@ mod conformance {
     /// though the ignored tests themselves did not run.
     #[test]
     fn live_dsn_gate_fails_loudly_when_required() {
-        if env::var_os("LAMBO_REQUIRE_LIVE").is_none() {
+        let require_live = env::var_os("LAMBO_REQUIRE_LIVE").is_some();
+        let require_vector_index = env::var_os("LAMBO_REQUIRE_VECTOR_INDEX").is_some();
+        if !missing_dsn_is_fatal(require_live, require_vector_index) {
             return;
         }
         assert!(
             dsn().is_some(),
-            "LAMBO_REQUIRE_LIVE=1 requires LAMBO_COCKROACH_DSN: live cockroach tests \
-             must not be silently skipped (run with -- --ignored and a real DSN)"
+            "LAMBO_REQUIRE_LIVE=1 or LAMBO_REQUIRE_VECTOR_INDEX=1 requires \
+             LAMBO_COCKROACH_DSN: live cockroach tests must not be silently skipped \
+             (run with -- --ignored and a real DSN)"
         );
+    }
+
+    #[test]
+    fn vector_index_requirement_makes_missing_dsn_fatal() {
+        assert!(!missing_dsn_is_fatal(false, false));
+        assert!(missing_dsn_is_fatal(true, false));
+        assert!(missing_dsn_is_fatal(false, true));
+        assert!(missing_dsn_is_fatal(true, true));
     }
 
     fn cfg(dsn: String) -> StoreConfig {
@@ -3779,8 +3799,21 @@ mod conformance {
     /// `check_vector_explain_is_global_topk` (in [`conformance_suite`]) still proves the
     /// DECISION D1 *shape* (global top-k, no session-filtered anti-pattern index).
     #[tokio::test]
-    #[ignore = "camera-proof: needs a cluster where the optimizer chooses vector search (single-region/large data)"]
+    #[ignore = "camera-proof: set LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"]
     async fn vector_explain_camera_proof() {
+        // The general live conformance tier runs every ignored test against the
+        // provisioned multi-region cluster. That cluster legitimately cost-selects
+        // a small-table scan, so the deployment-specific camera assertion must be
+        // requested independently. `conformance_suite` still verifies the global
+        // ordered query shape and rejects the session-index anti-pattern on every
+        // required-live run.
+        if env::var_os("LAMBO_REQUIRE_VECTOR_INDEX").is_none() {
+            eprintln!(
+                "vector_explain_camera_proof: skipped; set \
+                 LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"
+            );
+            return;
+        }
         let Some(dsn) = dsn_or_skip("vector_explain_camera_proof") else {
             return;
         };
