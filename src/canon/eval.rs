@@ -196,7 +196,18 @@ impl Evaluator {
         });
         outcome.stage3_batch = batch.clone();
 
+        // Cap promotions at the remaining Canonical budget (P2, phase R2): a
+        // cycle must never push the count over max_canonical_nodes, so a
+        // Venerable that would overflow stays Venerable for a later cycle.
+        // This also rules out the same-tick promote-then-demote the budget
+        // sweep would otherwise produce (the original P1-1).
+        let mut remaining = params
+            .max_canonical_nodes
+            .saturating_sub(canonical_count(graph));
         for id in batch {
+            if remaining == 0 {
+                break;
+            }
             if !stage3_passes(
                 store,
                 graph,
@@ -228,11 +239,11 @@ impl Evaluator {
             outcome
                 .promotions
                 .push(commit_transition(graph, store, events, event).await?);
-            hopped.insert(id);
+            remaining -= 1;
         }
 
         // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
-        demote_over_budget(graph, store, events, params, now, &hopped, &mut outcome).await?;
+        demote_over_budget(graph, store, events, params, now, &mut outcome).await?;
 
         Ok(outcome)
     }
@@ -288,7 +299,6 @@ async fn demote_over_budget(
     events: &EventSender,
     params: &EvalParams,
     now: DateTime<Utc>,
-    hopped: &HashSet<NodeId>,
     outcome: &mut EvalOutcome,
 ) -> Result<(), LamboError> {
     let session = graph.session_id().clone();
@@ -310,12 +320,10 @@ async fn demote_over_budget(
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
 
-    // Overflow is measured against every Canonical, including this cycle's
-    // Stage 3 promotions. Those ids already took their one legal hop and
-    // must not be demoted in the same tick (even if they now have the
-    // lowest blast). A pre-existing Canonical still absorbs the cut.
+    // Promotions are capped at the budget inside eval_cycle, so an
+    // over-budget session here is pre-existing; demote lowest blast first
+    // until within budget.
     let overflow = ranked.len() - params.max_canonical_nodes;
-    ranked.retain(|(_, id)| !hopped.contains(id));
     for &(_, id) in ranked.iter().take(overflow) {
         if concept_status(graph, id) != Some(CanonizationStatus::Canonical) {
             continue;
@@ -379,6 +387,13 @@ fn concept_status(graph: &Graph, id: NodeId) -> Option<CanonizationStatus> {
         Some(Node::Concept(c)) => Some(c.canonization_status),
         _ => None,
     }
+}
+
+fn canonical_count(graph: &Graph) -> usize {
+    graph
+        .concepts()
+        .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
+        .count()
 }
 
 fn score_map(scores: &ScoreTable) -> HashMap<NodeId, f64> {
@@ -873,10 +888,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn just_promoted_canonical_not_demoted_in_same_cycle() {
-            // P1-1: a Venerable promoted to Canonical this tick must not be the
-            // same tick's budget-demotion victim, even when it has the lowest
-            // blast. The pre-existing Canonical absorbs the cut instead.
+        async fn stage3_promotion_capped_at_remaining_budget() {
+            // P2 (phase R2): a cycle must never push the Canonical count over
+            // max_canonical_nodes. A Venerable that would overflow stays
+            // Venerable; the pre-existing Canonical is not displaced and no
+            // same-tick promote-then-demote occurs (the original P1-1).
             let mut g = Graph::new(sid());
             g.insert_interaction(interaction(1, None, ts())).unwrap();
 
@@ -886,7 +902,7 @@ mod tests {
             g.insert_concept(existing, iid(1)).unwrap();
             attach_blast(&mut g, 10, 8, 100);
 
-            // Venerable that will clear Stage 3 (blast 6 > 5), lower than 8.
+            // Venerable that would clear Stage 3 (blast 6 > 5).
             let venerable = concept(20, 1, 5, CanonizationStatus::Venerable);
             g.insert_concept(venerable, iid(1)).unwrap();
             attach_blast(&mut g, 20, 6, 200);
@@ -896,38 +912,26 @@ mod tests {
             p.max_canonical_nodes = 1;
             let (tx, mut rx) = channel();
             let mut ev = Evaluator::new();
-            let now = ts();
-            let outcome = eval_cycle(&mut ev, &mut g, &store, &table(&[]), &tx, &p, now)
+            let outcome = eval_cycle(&mut ev, &mut g, &store, &table(&[]), &tx, &p, ts())
                 .await
                 .unwrap();
 
             assert_eq!(
                 status_of(&g, nid(20)),
-                CanonizationStatus::Canonical,
-                "the just-promoted pillar must survive its own tick"
+                CanonizationStatus::Venerable,
+                "budget full: the Venerable must wait, not overflow"
             );
             assert_eq!(
                 status_of(&g, nid(10)),
-                CanonizationStatus::None,
-                "the pre-existing Canonical absorbs the budget cut"
+                CanonizationStatus::Canonical,
+                "the pre-existing Canonical is untouched when not over budget"
             );
-            assert_eq!(
-                outcome
-                    .demotions
-                    .iter()
-                    .map(|d| d.node_id)
-                    .collect::<Vec<_>>(),
-                vec![nid(10)],
-                "the demotion targets the pre-existing node, not the promotion"
-            );
-            match g.node(nid(20)) {
-                Some(Node::Concept(c)) => assert_eq!(c.last_demotion_time, None),
-                other => panic!("pillar must remain a concept, got {other:?}"),
-            }
-            assert_eq!(
-                drain_canonized(&mut rx).len(),
-                2,
-                "one promotion + one demotion"
+            assert!(outcome.promotions.is_empty(), "no promotion over budget");
+            assert!(outcome.demotions.is_empty(), "no demotion at exact budget");
+            assert_eq!(canonical_count(&g), 1, "count stays within budget");
+            assert!(
+                drain_canonized(&mut rx).is_empty(),
+                "no transitions committed"
             );
         }
 
