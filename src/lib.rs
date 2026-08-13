@@ -12,6 +12,7 @@ pub mod embed;
 pub mod fixtures;
 pub mod graph;
 pub mod mcp;
+pub mod memory;
 pub mod recall;
 pub mod resolve;
 
@@ -32,6 +33,7 @@ pub use embed::{
 #[cfg(feature = "embed-fixture")]
 pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
 pub use graph::Graph;
+pub use memory::{CanonicalMemory, DryRun, ImpactReport, Memory, MemoryBuilder, MemoryStats};
 
 pub use resolve::{
     assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,

@@ -47,8 +47,14 @@
 //! [`Graph`]), so [`POLL_QUANTUM`] is the granularity of the early-flush
 //! trigger and of the depth observation.
 //!
-//! There is no shutdown signal (v0.1 keeps it simple): the task runs until the
-//! runtime drops it or the returned [`tokio::task::JoinHandle`] is aborted.
+//! ## Shutdown (COH-6, T8.1)
+//!
+//! [`FlushTask::stop`] signals a graceful stop: the loop finishes its current
+//! cycle, returns its task-owned `pending` buffer to the front of the graph's
+//! mutation log, and exits — so the owner's final `drain_log` + `store.flush`
+//! (`Memory::close`) sees every not-yet-durable mutation, retained batches
+//! included. A hard [`tokio::task::JoinHandle::abort`] still works but DROPS
+//! `pending`; prefer `stop()` whenever durability matters.
 
 use parking_lot::{Mutex, RwLock};
 use std::future::Future;
@@ -125,6 +131,10 @@ struct Shared {
     /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
     /// violations dropped after logging). Monotonic for the task's lifetime.
     dead_lettered: AtomicU64,
+    /// Graceful-stop channel (COH-6, T8.1). [`FlushTask::stop`] latches a
+    /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
+    /// fires, re-appends `pending` to the front of the graph log and exits.
+    stop: Arc<tokio::sync::Notify>,
 }
 
 impl Shared {
@@ -137,6 +147,7 @@ impl Shared {
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
+            stop: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -227,6 +238,34 @@ impl FlushTask {
     pub fn degraded(&self) -> bool {
         self.shared.degraded.load(Ordering::Acquire)
     }
+
+    /// Ask the flush loop to stop gracefully (COH-6 — `Memory::close`'s
+    /// shutdown drain, T8.1). Returns immediately; the task stops later.
+    ///
+    /// This is a **signal, not a drain API**: the loop finishes its current
+    /// [`FlushLoop::cycle`] (any in-flight flush and its retry/backoff run to
+    /// completion — a post-retry `RETAINED_BACKOFF` hold is not waited out),
+    /// re-appends whatever is still in its task-owned `pending` buffer to the
+    /// FRONT of the graph's mutation log ([`Graph::push_front_log`]), and
+    /// exits. The caller then `.await`s the [`tokio::task::JoinHandle`] and
+    /// owns the final `drain_log` + `store.flush` itself.
+    ///
+    /// **Why not `JoinHandle::abort()`:** `pending` is task-owned, so a hard
+    /// abort drops every mutation that was drained from the log but is not yet
+    /// durable — including a batch RETAINED after exhausted retries, which is
+    /// exactly the case where losing it matters most.
+    ///
+    /// **Why [`tokio::sync::Notify`] and not an `AtomicBool` poll:** the loop's
+    /// `select!` already awaits futures, so `notified()` is a native branch
+    /// with no `POLL_QUANTUM` coupling. `Notify` also *latches* — a
+    /// `notify_one()` during an in-flight `cycle()` stores a permit, so the
+    /// stop survives until the next `select!` poll instead of being missed.
+    ///
+    /// Idempotent: a second call stores no additional permit that matters —
+    /// the loop has already broken out.
+    pub fn stop(&self) {
+        self.shared.stop.notify_one();
+    }
 }
 
 /// Polls `F` inside [`std::panic::catch_unwind`], turning a panic during any
@@ -304,13 +343,55 @@ impl FlushLoop {
         // first real flush happens one interval after spawn.
         interval.tick().await;
 
+        // Cloned out of `shared` so the stop branch borrows nothing from
+        // `self` — `select!` evaluates every branch's future expression before
+        // polling, and `self.shared.stop.notified()` would conflict with the
+        // `&mut self` the `cycle` branches need.
+        let stop = self.shared.stop.clone();
+
         loop {
+            // `biased;` is REQUIRED, and the stop branch must be FIRST
+            // (COH-6). An unbiased `select!` polls branches in a random start
+            // order, so a concurrently-ready `interval.tick()` could be polled
+            // first, consume-and-drop the stored stop permit, and lose the stop
+            // forever — `close()`'s `join_handle.await` would then hang. The
+            // tick IS concurrently ready whenever an in-flight flush outlasts
+            // `interval`, which is the normal slow-flush shutdown case. With
+            // `biased;` polling follows written order and a ready stop wins
+            // before the tick is ever polled.
             tokio::select! {
+                biased;
+                _ = stop.notified() => {
+                    self.requeue_pending();
+                    break;
+                }
                 _ = interval.tick() => self.cycle(true).await,
                 // Early-flush poll: catch a batch reaching max_batch before the tick.
                 _ = tokio::time::sleep(POLL_QUANTUM) => self.cycle(false).await,
             }
         }
+    }
+
+    /// Hand the task-owned `pending` buffer back to the graph log on stop
+    /// (COH-6): everything in it was drained from the log but is not durable,
+    /// so it goes back to the FRONT (chronological order preserved) where
+    /// `Memory::close`'s final `drain_log` can see and flush it.
+    ///
+    /// Not a public drain API by design — the task never flushes here; it only
+    /// returns custody. The owner does the final `store.flush` with no task
+    /// running and no graph lock held.
+    fn requeue_pending(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        if !pending.mutations.is_empty() {
+            let count = pending.mutations.len();
+            // WRITE lock only for the splice; no I/O, no await under it.
+            self.graph.write().push_front_log(pending.mutations);
+            tracing::debug!(
+                count,
+                "FlushTask stopping: returned {count} not-yet-durable mutations to the graph log"
+            );
+        }
+        self.refresh_depth();
     }
 
     /// One flush cycle: drain the graph log, then flush the pending batch when

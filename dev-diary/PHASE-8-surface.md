@@ -193,7 +193,7 @@ requires:   T2.3, T2.4, T2.5, T3.4, T3.5, T4.1, T4.6, T5.3, T6.4, T1.5   # T6.4:
 fixture-ok: yes   # assembles against MemoryStore first
 owns:       src/memory.rs
 also-writes: src/store/flush.rs (stop channel ONLY), src/graph/graph.rs (push-front helper ONLY)
-status:     not-started
+status:     done
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 The spec §6.1 surface, exactly: builder (`session`, `agent`, `store`, `embedder`,
@@ -480,3 +480,104 @@ event feed updating during the demo scenario.
 - **`Memory::derive` is async** (hybrid derive is async; one shape for both).
 - **rmcp 3.1.2 chosen** with `default-features = false` and four server-side features —
   the reqwest 0.12/0.13 duplication trap and the fallback ladder are documented in T8.2.
+
+### T8.1 — `Memory` builder & assembly (task agent, 2026-08-13)
+
+**Gates:** `cargo fmt --all -- --check` clean, `cargo clippy --all-targets -- -D warnings`
+clean, `cargo test` **528 lib + 5 integration + 1 doc-test passing, 3 ignored** (baseline was
+507 + 5, 3 ignored — +21 lib, +1 doc-test, no regressions). `--no-default-features` and
+`--no-default-features --features store-memory,embed-fixture` both compile.
+
+#### Files touched outside `src/memory.rs` — every one, with the reason
+
+| File | Change | Authorization |
+|---|---|---|
+| `src/store/flush.rs` | `Shared.stop: Arc<tokio::sync::Notify>`; `FlushTask::stop()`; the loop's `select!` gained `biased;` + a stop branch FIRST; new private `FlushLoop::requeue_pending()`; module-doc "no shutdown signal" paragraph replaced by a "Shutdown (COH-6)" one | cross-phase grant, stop channel only. **Nothing else in the file was touched** — no refactor, no behaviour change to any existing path |
+| `src/graph/graph.rs` | added `Graph::push_front_log(Vec<Mutation>)` next to `drain_log` | cross-phase grant, push-front helper only |
+| `src/lib.rs` | `pub mod memory;` + `pub use memory::{CanonicalMemory, DryRun, ImpactReport, Memory, MemoryBuilder, MemoryStats};` | standing additive rule |
+| `Cargo.toml` | **not touched** — no new dependency was needed | — |
+
+#### What exists now
+
+- **`Memory` + `MemoryBuilder`** (`src/memory.rs`). `build().await` does startup load →
+  Level B contract check → daemon → flush task → **canonization task**, all three spawned
+  exactly once. Methods: `set_root_goal`, `declare_synonym`, `recall`, `derive`,
+  `record_action`, `demote`, `retract`, `reserve`, `release`, `canonical_memories`, `stats`,
+  `events`, `close`. Cut list stayed cut.
+- **`retract(target, DryRun) -> ImpactReport`** — built from scratch. Resolves the target
+  through canonicalization (synonyms/casing work) with an exact-`content` fallback so
+  demoted `Observation`s are reachable. `DryRun::Yes` provably mutates nothing (test asserts
+  node count, edge count, **epoch** and index all unchanged).
+- **`canonical_memories() -> Vec<CanonicalMemory>`** — built from scratch; graph scan for
+  `CanonizationStatus::Canonical`, totally ordered (blast radius desc, then created_at, then
+  id) so `lambo saints` is stable across runs.
+- **`close()`** — the COH-6 drain, implemented exactly as specified: stop canonization →
+  stop daemon → `FlushTask::stop()` → join → `drain_log()` → `store.flush()`.
+
+#### What the next agent should NOT re-derive
+
+- **Lock order is `graph → index → hot`.** Set by `daemon::run_loop`'s GC sync. `Memory`
+  follows it in `mirror_concepts` and `retract`. Taking index-then-graph anywhere will
+  deadlock against a concurrent GC.
+- **`store::load::load_session_async` is the right call in async code, not
+  `load_session`.** The sync wrapper parks a worker thread and `join()`s it, which blocks a
+  runtime worker from inside an async fn. The phase doc's `store::load_session(...)` line is
+  the sync API; `build()` uses the async core.
+- **A fresh session's log starts at depth 1**, not 0: `build()` stamps the embedding
+  contract and that stamp is a real `Mutation::SetEmbedding`. Any test asserting "log is
+  empty after build" is wrong.
+- **`Memory::stats()` must not read `FlushStats.depth` alone.** It only refreshes inside the
+  flush loop's cycle, so between cycles it is a stale zero — this cost three test failures
+  before it was found. `stats()` now reports `log_depth` (from `Graph::log_len`, always
+  current) **and** `flush_depth` (the task's view) as separate fields.
+- **`Daemon::events()` must be called before `Daemon::spawn()`** (CONC-3). `build()` does,
+  and hands that pre-spawn receiver to the **first** `Memory::events()` caller so the warm-up
+  condition set is not lost. T8.2 should call `events()` once at startup and keep it.
+- **The `spawn()`-panics-if-called-twice rule is already satisfied**: each of the three tasks
+  is spawned in exactly one place, inside `build()`. Do not add another `spawn` call.
+- `MemoryStore` reports `Capabilities::empty()` — no `VECTOR_SEARCH`. Hybrid derive and the
+  recall vector leg both degrade to keyword-only against it. That is why `Memory::recall`
+  skips the embed call entirely unless the store claims the capability.
+
+#### Where the phase doc met the real code
+
+- **Ruled-async `derive` is implemented as ruled** (one async shape, dispatched on
+  `match_strategy`). The doc-test carries the `.await`, as the ruling anticipated.
+  `record_action` and `demote` were left **sync** — the ruling named only `derive`, and
+  neither has an async twin or any I/O. Flagging in case the reviewer expected uniformity.
+- **`retract`'s headline radius is the in-RAM count, not the store's** — a deliberate
+  partial deviation from "build on `GraphStore::blast_radius`". The store lags the graph by
+  up to one flush interval and answers `SessionNotFound` for a never-flushed session, which
+  is exactly the demo's state. `ImpactReport` therefore carries **both**: `blast_radius`
+  (in-RAM, always available, same source as recall's `⚑ N nodes` line) and
+  `durable_blast_radius: Option<u64>` (the store query, `None` + a `warnings` entry when the
+  store cannot answer). Tested both ways. **If the reviewer wants the store value as the
+  headline, that is a one-line swap** — but a fresh session would then report 0.
+
+#### Weak spots I am flagging myself
+
+1. **`close()` waits on the flush join unboundedly** (P2). As designed by COH-6: the loop
+   finishes its current `cycle()` first. Worst case that is
+   `FLUSH_ATTEMPT_TIMEOUT (30s) × (retries + 1)` ≈ 2 minutes against a hung store. I
+   implemented the doc's design rather than adding an unauthorized timeout, because a
+   timeout + abort would drop exactly the batch the design exists to save. **If the demo
+   needs a bounded `close()`, that is a real decision to make, not an oversight.**
+2. **`stats()`'s "not yet durable" is a lower bound** (P2). `FlushLoop.pending` is
+   task-owned with no accessor, so `log_depth.max(flush_depth)` undercounts while a retained
+   batch and fresh writes coexist. Exact fix is `FlushTask::pending_len()` — deliberately
+   not added, since the flush.rs grant covers the stop channel only. Documented on the
+   `MemoryStats::flush_depth` field.
+3. **`derive` is not atomic end-to-end.** `begin_interaction` and the concept write are two
+   separate lock acquisitions, so another writer can interleave between them. This is safe
+   (the write path references the interaction by id and re-validates it; hybrid re-plans on
+   epoch change), but it is not serializable, and a `derive` that fails after the interaction
+   was opened leaves an empty interaction in the append-only chain.
+4. **`events()` is stateful on its first call** (returns the pre-spawn receiver, then fresh
+   subscriptions). It is the only way to give the first consumer the warm-up set without
+   changing the daemon, but it is surprising and worth a second opinion.
+5. **`close()` takes `&self`, not `self`.** Required so `Drop` can act as the leak guard
+   (aborting tasks when `close` was never called). `mem.close().await?` reads identically.
+6. **Not exercised anywhere yet:** the degraded-session branch of `close()` (returns an
+   error rather than silently skipping the final flush) has no test — reaching it needs a
+   backlog past `backend_log_max`. The branch is small and reads correctly, but it is
+   untested.

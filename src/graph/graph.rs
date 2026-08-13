@@ -1063,6 +1063,37 @@ impl Graph {
         }
     }
 
+    /// Re-append already-drained mutations to the **front** of the log,
+    /// preserving chronological order (T8.1 shutdown drain).
+    ///
+    /// The write-behind flush task owns its `pending` buffer, so a batch it
+    /// drained but has not yet made durable — most importantly one RETAINED
+    /// after exhausted retries — is invisible to [`Graph::drain_log`]. On
+    /// shutdown the task hands that buffer back here so `Memory::close`'s
+    /// final `drain_log` can see it and flush it (COH-6). A hard
+    /// `JoinHandle::abort()` would drop it with the task.
+    ///
+    /// Front, not back: everything in `mutations` was appended to the log
+    /// **before** anything still in it, so prepending is what restores
+    /// chronological order — the `src/graph/mod.rs` "replay in order, never
+    /// re-sort" contract.
+    ///
+    /// The epoch is **not** bumped: these mutations were counted when they
+    /// were first appended, the graph state they describe is already applied,
+    /// and re-counting them would needlessly invalidate every recall cache
+    /// entry at shutdown.
+    ///
+    /// This is the only re-entry point into the log and it is deliberately
+    /// narrow: it takes mutations that this graph already produced. Feeding it
+    /// anything else would put mutations in the log that the in-RAM graph does
+    /// not reflect.
+    pub fn push_front_log(&mut self, mutations: Vec<Mutation>) {
+        if mutations.is_empty() {
+            return;
+        }
+        self.mutation_log.splice(0..0, mutations);
+    }
+
     // -----------------------------------------------------------------------
     // Invariants
     // -----------------------------------------------------------------------
