@@ -13,6 +13,9 @@
 //!    caller's [`ScoreTable`]) is **strictly greater** than the 90th
 //!    percentile of non-Canonical peer scores. Exactly-at-P90 does not pass.
 //! 4. **Missing [`ScoreTable`] entry → `0.0`**, same as assemble (T5.3).
+//!    A non-finite or negative entry is likewise read as `0.0` — the ALGO-10
+//!    `sane_weight` convention `recall::assemble` applies to the identical
+//!    lookup (see [`sane_score`]).
 //!
 //! Non-Canonical peers are every concept with `status != Canonical`,
 //! **including the candidate** — the session-wide distribution is not
@@ -60,7 +63,7 @@ pub fn stage1_candidates(graph: &Graph, scores: &ScoreTable, min_peer_count: usi
     }
 
     let score_of: HashMap<NodeId, f64> = scores.ranked.iter().map(|s| (s.item, s.score)).collect();
-    let daemon_score = |id: NodeId| score_of.get(&id).copied().unwrap_or(0.0);
+    let daemon_score = |id: NodeId| sane_score(score_of.get(&id).copied().unwrap_or(0.0));
 
     let mut peer_scores: Vec<f64> = peers.iter().map(|c| daemon_score(c.id)).collect();
     peer_scores.sort_by(|a, b| a.total_cmp(b));
@@ -73,6 +76,26 @@ pub fn stage1_candidates(graph: &Graph, scores: &ScoreTable, min_peer_count: usi
         .collect();
     passed.sort_by_key(|id| id.0);
     passed
+}
+
+/// Finite, non-negative score, else `0.0` — ALGO-10's `sane_weight`
+/// convention, applied at the point of use.
+///
+/// The module claims parity with `recall::assemble`'s treatment of the same
+/// `ScoreTable` lookup, and assemble sanitizes. Without this the percentile
+/// is not merely wrong but *closing*: `total_cmp` sorts NaN above every real
+/// score, so three NaNs among twenty peers push P90 itself to NaN, `score >
+/// NaN` is false for everyone, and the stage silently admits nobody. No
+/// `rescore` path produces NaN today (every division is guarded), which is
+/// why this was P3 — but "unreachable from today's producer" is not the same
+/// contract as "sanitized at the point of use", and the doc claimed the
+/// latter.
+fn sane_score(score: f64) -> f64 {
+    if score.is_finite() && score >= 0.0 {
+        score
+    } else {
+        0.0
+    }
 }
 
 /// Nearest-rank percentile of a **sorted ascending** sample.
@@ -382,6 +405,31 @@ mod tests {
         assert!(
             passed.is_empty(),
             "missing score must be 0.0, not above P90=0.0: {passed:?}"
+        );
+    }
+
+    /// F14: a non-finite score is `0.0` at the point of use (ALGO-10), so it
+    /// cannot poison the percentile. Three NaNs among twenty peers sort above
+    /// every real score under `total_cmp`, which lands P90 (rank 18 of 20)
+    /// on NaN and makes `score > p90` false for everyone — the stage closes
+    /// silently. Sanitized, the NaNs sort to the bottom as zeros and the
+    /// genuine top scorer still passes.
+    #[test]
+    fn non_finite_scores_do_not_poison_the_percentile() {
+        let g = graph_with(n_none(20, 5));
+        let mut pairs: Vec<(u64, f64)> = vec![
+            (1, f64::NAN),
+            (2, f64::NAN),
+            (3, f64::NAN),
+            (4, f64::NEG_INFINITY),
+        ];
+        pairs.extend((5..=19).map(|i| (i, 0.1)));
+        pairs.push((20, 1.0));
+        let passed = stage1_candidates(&g, &table(&pairs), 20);
+        assert_eq!(
+            passed,
+            vec![nid(20)],
+            "NaN peers must read as 0.0, not close the stage"
         );
     }
 
