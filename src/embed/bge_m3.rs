@@ -407,13 +407,20 @@ mod tests {
         assert_eq!(e.dimensions(), 1024);
     }
 
-    /// Live smoke test against a running llama.cpp server (`./scripts/run-llama-embed.sh`).
-    /// Gated so CI (no server) never runs it.
+    /// Live smoke test against a running llama.cpp server
+    /// (`./scripts/run-llama-embed.sh`). `#[ignore]`d, and additionally
+    /// honest-skipped without `LAMBO_LLAMA_EMBED_URL`, so CI's `-- --ignored`
+    /// never tries localhost and crashes (no server there).
     #[tokio::test]
     #[ignore]
     async fn live_smoke_against_llama_server() {
-        let url = std::env::var("LAMBO_LLAMA_EMBED_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+        let Some(url) = std::env::var("LAMBO_LLAMA_EMBED_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+        else {
+            eprintln!("SKIP live_smoke_against_llama_server: LAMBO_LLAMA_EMBED_URL not set");
+            return;
+        };
         let e = BgeM3LlamaCppEmbedder::new(url.clone(), "", 1024).unwrap();
         e.check_health()
             .await
@@ -427,8 +434,6 @@ mod tests {
         assert_eq!(a.len(), 1024);
         let n: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((n - 1.0).abs() < 1e-4, "L2 norm {n} should be ~1");
-        // Paraphrases should be nearer than an unrelated domain (semantic sanity,
-        // not a hard threshold):
         let sim_a_b = crate::embed::cosine(&a, &b);
         let sim_a_far = crate::embed::cosine(&a, &far);
         assert!(
