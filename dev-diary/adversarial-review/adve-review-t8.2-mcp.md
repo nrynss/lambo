@@ -2,10 +2,11 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: R1 REMEDIATED — awaiting re-review                      ║
-║  Verdict: REQUEST CHANGES (R1)                                   ║
-║  Findings: 3 P1 / 6 P2 / 7 P3                                    ║
-║  Opened: 2026-08-14 · Remediated: 2026-08-14 (see R1 remediation)║
+║  STATUS: R3 (independent) — REQUEST CHANGES, remediation pending ║
+║  Verdict: REQUEST CHANGES (R3)                                   ║
+║  R1 findings: 3 P1 / 6 P2 / 7 P3 (all remediated)               ║
+║  R3 new: 1 P1 / 3 P2 / 4 P3 + 2 residuals upgraded + test gaps  ║
+║  Opened: 2026-08-14 · R3: 2026-08-14 (three independent agents) ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -1071,3 +1072,288 @@ T8.2 is done for the purposes of proceeding to T8.3. **Because this round was no
 independent, an adversarial spot-check of T82-2 (HTTP + SSE shutdown) and the
 remediation's untested weak spots is worth one agent's budget before P9 ships**,
 if cost allows. That gap is recorded here rather than papered over.
+
+---
+
+## R3 — Independent adversarial round (2026-08-14)
+
+R2 closed itself as **CLEAN but non-independent**, explicitly requesting "an
+adversarial spot-check of T82-2 (HTTP + SSE shutdown) and the remediation's
+untested weak spots" before P9. This round is that spot-check, run as **three
+independent Opus agents** against `phase/p8-surface @ 0e77f01`:
+
+1. **Live reproduction** — T82-2 with a real MCP session + real SSE stream; the
+   R2-a/R2-b/R2-c residuals; durability checked against **SQLite rows on disk**,
+   not log markers.
+2. **Fresh-eyes surface review** — the seven-tool wire surface, briefed on
+   T82-1..T82-16 / R2-a..c for exclusion, hunting only NEW findings.
+3. **Mutation audit** — 8 lifecycle mutations in an isolated worktree, measuring
+   what the test suite actually pins.
+
+The three converge on one theme: **T8.2 is well-hardened against the *string*
+attacks R1 found and essentially unhardened against *cardinality* and *lifecycle
+wiring* — and every place the live agent found broken is exactly the untested
+wiring the mutation agent flagged.**
+
+### Verdict summary
+
+| Item | R2 said | R3 found |
+|---|---|---|
+| T82-2 (HTTP+SSE shutdown) | fixed, not independently reproduced | **CONFIRMED FIXED** — real session, real SSE, `rc=0` at 5.0 s grace under SIGINT+SIGTERM, rows physically in SQLite |
+| R2-a (pre-handshake signal) | P3, "narrow" | **STILL BROKEN, upgrade to P2** — stdio window is **unbounded** (open until client sends `initialize`), hard-kill, session row genuinely lost |
+| R2-b (`close()` unbounded) | carried, benign | **STILL BROKEN, understated** — no timeout at `serve.rs:189`; **repeat SIGINT/SIGTERM swallowed after the first** (new, demonstrated) so a hung close is SIGKILL-only, discarding the tail |
+| R2-c (`shutdown_background` / `spawn_blocking`) | safe today | **CONFIRMED safe** — none in `src/`+`tests/`; `sqlx-sqlite` uses `std::thread` not the blocking pool; call-site comment still missing |
+
+### R3 new findings
+
+**N1 (P1) — `lambo_record_action` has no cap on array length; defeats the T82-1/T82-2 durability guarantee from ordinary tool args.**
+`src/mcp/server.rs:143-155` / `:626-641` / `:649`. Every other constant caps a
+count or size (`MAX_CONCEPTS_PER_DERIVE=64`, `MAX_CONTENT_BYTES`); `produces` /
+`modifies` / `depends_on` are uncapped — the T82-6 string-vs-count asymmetry one
+axis over. Superlinear: 2k entries -> 0.1 s, 20k -> 8.8 s, 50k -> **116.8 s**
+(payload <1 MB, every string legal). `Memory::record_action` is **synchronous** on
+a Tokio worker with no `spawn_blocking`; 12 concurrent 6k-entry calls (~1 MB total,
+one stdio conn) starve every worker so `shutdown_signal()` / the grace timer are
+**unpollable** — measured `STILL RUNNING 300 s after SIGTERM`. `mem.close()` never
+runs; SIGKILL loses the tail. Reachable unauthenticated over HTTP (3 MB body approx
+300k entries). Also inflates `close()` cost (8k entries -> 34.8 s inside close).
+**Fix:** `MAX_ACTION_TARGETS` on `produces+modifies+depends_on`, and run sync
+`record_action` under `spawn_blocking`.
+
+**N2 (P2, PLAUSIBLE — verify on a live cluster) — control characters (including NUL, ` `) poison the Cockroach write-behind queue permanently.**
+`server.rs:548-556` / `:615-641` validate emptiness + byte length only. A NUL
+survives end-to-end (demonstrated: `lambo_derive` content with an embedded NUL ->
+`isError:false`, echoed back by `lambo_recall`). Cockroach `STRING` rejects it
+(`store/cockroach.rs:1294`); `classify_code` (`store/error.rs:100-116`) maps the
+resulting SQLSTATE to `Other`, and `is_retryable()` (`types/mod.rs:578`) returns
+`true` for `Other`, so `flush.rs:490-498` **retains** rather than dead-letters —
+retries forever, session `degraded`, nothing durable again. **Fix:** reject
+control characters other than `\n`/`\t` at the MCP layer.
+
+**N3 (P2) — embedder endpoint URL crosses the MCP boundary into model-facing text.**
+`memory.rs:1064-1069` -> `server.rs:507` -> `attach_warnings` `:245-255`. When the
+embedder is down, the model receives the configured internal host, port and path
+verbatim inside the warning. Topology leak (reqwest strips userinfo, not
+host/port/path). Damning asymmetry: `contain_panic` (`:265-266`) refuses to let
+panic payloads cross "because a payload can interpolate anything, including a DSN"
+— the ordinary warning path does exactly that. **Fix:** redact URLs/detail from
+warnings; log detail, return a class.
+
+**N4 (P2) — `tool_err` forwards raw `LamboError`/`StoreError` strings to the client.**
+`server.rs:213-215`. Internal spec section numbers and invariant wording are
+model-facing today; with a SQL store this channel carries driver text (SQLite
+paths, Cockroach host/db). Runtime twin of T82-10 (which only fixed startup).
+**Fix:** redaction policy consistent with `contain_panic`.
+
+**N5 (P3) — `node_id` skips `check_size`, contradicting its own doc.**
+`MAX_CONTENT_BYTES` (`:60-68`) claims "every client-supplied string"; `reserve_impl`
+(`:690`) parses a 1 MB `node_id` before any size refusal. Harmless today, falsifies
+the stated invariant.
+
+**N6 (P3) — recall's config-derived defaults are not clamped to MCP maxima.**
+`server.rs:478-491` computes `top_k = unwrap_or(cfg.default_top_k)` then enforces
+`1..=100`; `config.rs:186` permits `default_top_k` to 2048 and doesn't bound
+`default_traversal_depth` against `MAX_TRAVERSAL_DEPTH=5`. A legal config makes
+every default-`top_k` recall fail blaming the client. Inert only while T82-12 is
+deferred; arms the day that closes.
+
+**N7 (P3) — pipelined `derive`->`recall` has no read-your-writes ordering.**
+Observed: recall (id 3) returned before derive (id 2), empty, against a graph
+without the write. Correct MCP (independent tasks), but `get_info` instructions
+(`:1137-1145`) tell the model to write-then-recall without stating ordering is the
+client's responsibility. **Fix:** one sentence in the instructions.
+
+**N8 (P3) — `resolve_focus` lowercases the whole graph per `lambo_inspect`.**
+`server.rs:976-984`, `c.content.to_lowercase()` per concept under the read lock.
+O(total-content) allocation storm; combined with N1's ability to create 50k
+concepts in one call, any client can trigger it repeatedly.
+
+### Mutation audit — 6 of 8 lifecycle mutations survive undetected
+
+| # | Mutation | Outcome |
+|---|---|---|
+| M1 | Delete stdio signal handling (regress T82-1) | **NONE SURVIVED** |
+| M2a | Unbounded HTTP graceful shutdown | **CAUGHT** (`http_shutdown_is_bounded_even_with_a_request_in_flight`) |
+| M2b | `SHUTDOWN_GRACE` 5 s -> 3600 s | **NONE SURVIVED** |
+| M3 | `close()` never runs in `serve()` — tail dropped | **NONE SURVIVED** |
+| M4 | Abort event pump before `close()` (regress T82-17) | **NONE SURVIVED** |
+| M5 | Remove `biased;` from the select | **NONE SURVIVED** (10 runs) |
+| M6 | Never call `cancel()` | **CAUGHT** |
+| M7 | stdio `Exit::Forced` reported as error | **NONE SURVIVED** (HTTP twin *is* pinned — asymmetric) |
+| M8 | `shutdown_signal()` never fires | **NONE SURVIVED** |
+
+`run_until_shutdown` (the combinator) and `serve_http_bounded` are genuinely
+well-tested (real listener, real socket). **Neither production call site nor the
+`serve()` composition is pinned at all** — `SHUTDOWN_GRACE`, `shutdown_signal()`,
+and the cancel token are all injected by untested code, and the tests substitute
+their own values for all three. No integration test spawns the `lambo` binary; the
+`#[cfg(unix)]` SIGTERM branch has never executed.
+
+**Blocking test gaps before P9:**
+1. Pin that `serve()` calls `Memory::close()` on every exit path (kills M3/M1/M8).
+   Extract `serve_with(mem, transport_fut, shutdown_fut)` and assert tail flushed
+   after signal/finish/error with an in-memory `Memory`.
+2. One real subprocess SIGTERM test (kills M1/M8/M2b + covers the `#[cfg(unix)]`
+   branch and `main.rs` `shutdown_background`): spawn `lambo serve`, write a record
+   frame, `kill(pid, SIGTERM)`, reopen the store, assert the row is durable. The
+   evidence harness half-exists in `dev-diary/evidence/t8.2-mcp-client/`.
+3. One-line `SHUTDOWN_GRACE` sanity assert (kills M2b): `>= 1 s && <= 30 s`.
+
+### Evidence-methodology defect
+
+`Memory session closed (tail flushed)` (`memory.rs:1433`) is **absent** in the two
+SSE-open cases — the 1 s periodic flush drains the tail during the 5 s grace, so
+`close()` hits the `tail.is_empty()` shortcut (`memory.rs:1414-1417`) and logs
+nothing. The only reliable "close ran" marker is `serve: session closed, tail
+durable` (`serve.rs:199`). The evidence README should pin that marker or re-runs
+will show **false negatives on exactly the two P1 cases**.
+
+### R3 disposition
+
+**REQUEST CHANGES.** T82-2 survives adversarial reproduction cleanly. Remediation
+scope for R3: N1 (P1, blocking), the R2-a->P2 pre-handshake race and R2-b close()
+timeout + signal re-arm, N2–N4 boundary-leak/poisoning, N5–N8 as they fit, and the
+three blocking test gaps. N2 to be confirmed against a live Cockroach cluster
+before P9.
+
+### R4 plan (verification of the R3 remediation)
+
+The next round verifies the `task/t8.2-r3-remediation` branch and adds a
+**model-driven MCP leg** that R2 never had. A local rig now exists for it (see
+memory `local-lfm2-mcp-test-rig`): LiquidAI **LFM2.5-230M-Q8_0** served by
+llama.cpp on `127.0.0.1:8080`, driven by **Pi** as a real MCP client over stdio
+(`pi-mcp-adapter`, `.mcp.json`). R3 already used it to close the "model-driven
+tool call NOT verified" gap — a 230M model called `lambo_stats {"agent_id":
+"pi-agent"}` end-to-end and got a real non-error result; its malformed earlier
+attempts (missing/empty `agent_id`) were rejected by lambo's own validation on the
+live model path. R4 should reuse this rig to exercise the remediated surface with a
+real model, not just hand-crafted JSON-RPC frames — in particular the N1 cap
+(does a model-issued oversized `record_action` get the honest refusal?) and the
+N2–N4 boundary redactions (does anything internal reach the model's context?).
+Reliable Pi config for a tiny model: `"settings":{"toolPrefix":"none"}` plus a
+`-t <lambo-tools>,mcp` allowlist so extension tools don't hijack it.
+
+---
+
+## R4 — Independent verification of the R3 remediation (2026-08-14)
+
+**Branch:** `task/t8.2-r3-remediation` @ `8d5fdb5` (5 commits over `0e77f01`).
+**Method:** independent worktree; live reproduction on the shipped binary (real MCP
+wire, `os.setsid` for true signal dispositions, SQLite store for on-disk durability
+checks) + a mutation pass on every fix (revert → does a test fail?). Tree left clean.
+
+### Verdict: REQUEST CHANGES — no P1; one P2 + several P3s.
+
+The three heavy items are **genuinely fixed and each reproduced on the binary**: N1's
+worker-starvation hang is gone (process always exits, even at 400 pipelined at-cap
+`record_action` calls with a mid-burst SIGTERM); R2-a's pre-handshake signal now runs
+`close()` with a durable session row on both stdio and http; R2-b's 10s `CLOSE_GRACE`
+bound fires and a 2nd signal force-exits in ~4ms. Gates all green (594 passed / 0 failed
+/ 3 ignored; the store-sqlite subprocess durability test passes).
+
+### P2 (blocking) — R2-b's "a restart will re-flush the tail" is FALSE
+
+`close_bounded`'s abandon-path log line and the `CLOSE_GRACE` doc-comment both tell the
+operator the abandoned tail *"was returned to the log and a restart will re-flush it."*
+Verified by restart that this is untrue: after a shutdown-time burst left 10075/16250
+concepts durable and close() was abandoned on a non-empty tail, a clean restart on the
+same store stayed at **10075** — the tail was permanently lost. The write-behind log
+lives only in the in-memory `Graph` (`src/graph/mod.rs`); there is **no on-disk WAL**, and
+`close_bounded` abandons then the process *exits* without retrying. The within-process
+retry the unit test pins (`close_bounds_a_hanging_store_and_keeps_the_tail`) is never
+exercised by the serve path. The ERROR line honestly says "not durable" but the appended
+recoverability claim misleads. **Fix:** correct the message + doc; optionally attempt one
+final bounded `store.flush(&batch)` before giving up (guard its own timeout — if close
+hung on an unreachable store, a naive final flush hangs too).
+
+### P3 — test-pinning gaps (verified by mutation)
+
+- **N1 `spawn_blocking` is not test-pinned.** Reverting it to a direct inline call keeps
+  all 588 lib tests + the durability test green. Bisecting shows the load-bearing
+  anti-hang protection is actually R2-b's `CLOSE_GRACE` bound; `spawn_blocking` is
+  defense-in-depth. Add a starvation regression test or document it as such.
+- **R2-a serve-level wiring is not test-pinned.** Unwiring the arming in `serve_stdio`
+  (back to a bare `.serve(stdio()).await`) reproduces the *exact* old bug (`rc=-15`,
+  session row durable=0) yet every test still passes — the fix is pinned only at the
+  `setup_or_shutdown` helper in isolation. Add a subprocess pre-handshake-signal test
+  (mirror `serve_sigterm_durability.rs`, signal before `initialize`, assert rc=0 + row).
+
+### P3 — other surviving issues
+
+- **Aggregate shutdown budget is unbounded.** `SHUTDOWN_GRACE`(5s) + rmcp drain +
+  `CLOSE_GRACE`(10s) reached ~12–13s live and can approach ~15s+. `the_grace_windows_are_sane`
+  checks each window `<30s` but never the **sum**, which can exceed a 10–15s supervisor
+  SIGKILL timeout. Bound or assert the sum.
+- **N8 deferral rationale is inaccurate.** The TODO justifies itself as a "human-triggered"
+  path, but MCP tools are agent-triggered and loopable; with N1 capping per-call but
+  nothing capping call *count* (rate-limit deferred to T82-16), a client can build a large
+  graph then trigger the O(total-content) `to_lowercase` in `resolve_focus` repeatedly.
+  Not a blocker (not driven live); fix the wording and track with T82-16.
+- **P3 nits:** `concept_type` enum deserialize error echoes the raw control byte back to
+  the model (violates the "never echo the raw byte" intent on that one path);
+  `redact_urls` only redacts space-delimited `://` tokens (no current warning path emits a
+  bare `host:port`, so latent, not live).
+
+### Regression sweep — CLEAN
+
+Unknown-field rejection (top-level, nested, `_meta`) intact; F18 golden allowlist passing
+and no new wire-input field added (so no new clock leak); foreign-agent reserve/release
+still fail-closed; `git diff 0e77f01 8d5fdb5 -- src/ | grep '^-.*assert'` empty (no
+assertion weakened).
+
+### Honest gaps (not reproduced)
+
+- N3 recall embed-failure warning with a live internal URL needs `VECTOR_SEARCH`, which
+  only CockroachStore has — memory/sqlite never contact the query embedder, so the shipped
+  stores are clean but the Cockroach warning path is code-read + unit-test only.
+- N8 large-graph DoS assessed statically, not driven live.
+
+### R5 remediation scope
+
+Close the P2 (message/doc + optional bounded final flush) and the two test-pinning P3s
+(they are the silent-regression risk on the agent surface); fix the aggregate-budget bound,
+the N8 rationale, and the two nits as they fit. Then R5 re-review.
+
+### R5 remediation disposition (2026-08-14, branch `task/t8.2-r3-remediation`)
+
+Each R4 finding, with the commit that closes it:
+
+- **P2 — "restart will re-flush the tail" is FALSE — FIXED** (`de05904`). Corrected both
+  abandon-path log lines (CLOSE_GRACE timeout + second-signal) and the final-flush-failed
+  line, plus the `CLOSE_GRACE`/`close_bounded` doc-comments, to state the truth: no on-disk
+  WAL, so an abandoned close on the serve path loses the tail permanently on exit.
+  **Optional final flush: deliberately SKIPPED** — `close()` can hang in its step-0 writers
+  gate (parked on an unbounded embedder), so a retry would hang the same way and need its
+  own timeout, which fights the aggregate-budget bound below. A truthful message is the
+  lower-risk fix (R4's own guidance).
+- **P3 — N1 `spawn_blocking` not test-pinned — FIXED via code comment** (`f10a96d`). A
+  deterministic starvation test would be timing-flaky; per R4 it is defense-in-depth and
+  `CLOSE_GRACE` is load-bearing. Documented as such at the call site so it is not deleted
+  in the belief a test guards it.
+- **P3 — R2-a serve-level wiring not test-pinned — FIXED with a new test** (`4f61c99`).
+  Added `tests/serve_pre_handshake_durability.rs`: pre-`initialize` SIGTERM on a store-sqlite
+  session, asserts rc=0 + durable session row. Verified it FAILS (rc=-15, no row) against the
+  unwired arming and passes against the fix.
+- **P3 — aggregate shutdown budget unbounded — FIXED** (`bccc015`). Added documented
+  `SHUTDOWN_BUDGET` (15s) and pinned `SHUTDOWN_GRACE + CLOSE_GRACE <= SHUTDOWN_BUDGET` two
+  ways: a compile-time `const _` guard (fails the build) + the `the_grace_windows_are_sane`
+  assertion. Chose assert-and-document over lowering the tuned constants (zero runtime risk);
+  rmcp's drain is inside `SHUTDOWN_GRACE`, so 15s is the true cap.
+- **P3 — N8 rationale wording — FIXED** (`6c54e22`). resolve_focus TODO no longer claims a
+  "human-triggered" path; states the real reason (fiddly allocation-free Unicode case-fold)
+  and tracks it with T82-16.
+- **P3 nit — `concept_type` variant error echoes the raw byte — DEFERRED (not interceptable),
+  documented** (`6c54e22`). The unknown-variant error is built inside rmcp's `Parameters<T>`
+  extractor before any `LamboServer` code runs; sanitising it means hand-rolling deserialize
+  across all seven tools. Noted on `WireConceptType`; revisit if rmcp adds an extraction-error
+  hook.
+- **P3 nit — `redact_urls` misses bare `host:port` — DEFERRED (latent), documented**
+  (`6c54e22`). No live warning path emits a schemeless endpoint, and a colon matcher would
+  over-redact ordinary text (`ratio 3:4`, `line 42:10`). Documented the scope; redact at
+  source if a warning ever emits `host:port`.
+
+Gates after R5: `fmt` clean; `clippy --all-targets` and
+`clippy --all-targets --features store-cockroach,store-memory,fixtures` clean (`-D warnings`);
+`cargo test` 588 passed / 0 failed / 1 ignored; `serve_sigterm_durability` and the new
+`serve_pre_handshake_durability` both pass under `--features store-sqlite`. No existing test or
+assertion weakened (`git diff … -- src tests | grep '^-.*assert'` shows only additions).
