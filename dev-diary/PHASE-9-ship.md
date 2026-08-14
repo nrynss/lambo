@@ -15,9 +15,9 @@ Nothing here is optional except where marked; the checklist *is* the phase.
 
 ### T9.1 — README & repo hygiene
 ```yaml
-requires:   T8.1
+requires:   T8.1; soft T8.8   # links into the reference docs T8.8 produces
 fixture-ok: n/a
-owns:       README.md, docs/
+owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
 status:     not-started
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
@@ -26,6 +26,10 @@ and AWS services used, written out (that written identification is itself a deli
 credit to the v0.6.0 design doc for honesty (spec §12.4 note); MIT license visible in the
 GitHub About sidebar (add the license file mapping if GitHub doesn't auto-detect). Repo
 public.
+
+**Boundary with T8.8:** this is the getting-started / onboarding path. The per-surface
+**reference** (MCP tools, CLI verbs, `Memory` API, config keys, end-to-end) lives in
+`docs/reference/` and is owned by **T8.8** — link into it, do not restate it here.
 
 **Level B (required in README):**
 

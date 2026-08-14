@@ -580,6 +580,58 @@ either fixed or closed with a dated accepted-rationale in the review file.
 
 ---
 
+### T8.8 — Documentation of the P8 surfaces (MCP · CLI · API · end-to-end)
+```yaml
+requires:   T8.2, T8.3, T8.6, T8.7   # documents their FINAL behavior; soft: T8.1 (API), T8.4/T8.5 (flows)
+fixture-ok: n/a
+owns:       docs/reference/  (mcp.md, cli.md, api.md, config.md, end-to-end.md)
+appends-to: rustdoc on public items across src/ (doc-comments only; safe — T8.8 runs last
+            in the serial queue, nothing else is editing these files concurrently)
+status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
+```
+Created 2026-08-14: everything P8 ships is a **user-facing surface** and needs proper
+documentation, written against what was actually built (not the spec's aspirations) and
+kept honest by the review loop. This is the **reference** layer.
+
+**Boundary with P9 T9.1 (to prevent T8.5-style drift):** T8.8 is the *reference* — the
+complete, precise description of each surface. T9.1 is the *README / getting-started* — the
+cold-reader clone→provision→serve→demo path — and it **links into** T8.8 rather than
+duplicating it. T9.2 owns the architecture diagram. If a doc is "how do I run the demo,"
+it's T9.1; if it's "what does this tool/flag/method do," it's T8.8.
+
+**Contents:**
+
+- **`mcp.md` — MCP tool reference.** All seven tools (`derive`, `recall`, `record_action`,
+  `reserve`, `inspect`, `stats`, `saints`): purpose, argument schema, the `MAX_*` caps and
+  validation rules, the error taxonomy the client sees, and a real wire example
+  (request+response JSON) per tool. State the stdio vs streamable-HTTP transports, the
+  loopback-default / auth-on-non-loopback rule (T8.7), and that it is a session *writer*.
+- **`cli.md` — CLI reference.** Every subcommand — read verbs and the write verbs at MCP
+  parity — with flags, exit codes, and worked examples. Document the single-writer/lease
+  behavior explicitly: a CLI write acquires the T8.6 lease and **fails closed naming the
+  holder** if a `serve` owns the session. Show the swarm idiom (one deterministic
+  `lambo derive …` per small agent) as the intended high-throughput pattern.
+- **`api.md` + rustdoc — library/API reference.** The public `Memory` API (`build`,
+  `derive`, `recall`, `record_action`, `reserve`/`release`, `canonical_memories`, `close`)
+  and the Level B adapter traits (`GraphStore`, `Embedder`) with the feature→registry→`dyn
+  Trait` resolution. Ensure public items carry accurate rustdoc; `cargo doc` builds clean.
+- **`config.md` — configuration & deployment reference.** `lambo.toml` keys + the env
+  override rules (Level B), the feature flags (`store-*`, `embed-*`, `demo`), `provision`,
+  and the T8.7 HTTP auth / rate-limit / session-cap knobs. Never instruct mixing embedder
+  models mid-session without re-embed.
+- **`end-to-end.md` — how it composes.** Serve a session; drive it via MCP *and* CLI;
+  the single-writer discipline across processes; readers vs the writer; the swarm topology
+  (one writer + many CLI agents, canonization dedup, `reserve` coordination). One runnable
+  walkthrough a reader can follow verbatim.
+
+**Done when:** each surface built in P8 has a reference page that a reader can act on
+without reading the source; every documented command/flag/tool/method actually exists and
+behaves as described (spot-checked against the binary, not the spec); `cargo doc` builds
+with no warnings; and T9.1's README links into `docs/reference/` instead of restating it.
+
+---
+
 ## Exit criteria
 
 - [ ] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist
@@ -604,6 +656,9 @@ either fixed or closed with a dated accepted-rationale in the review file.
       requests, enforces a documented rate limit + concurrent-session cap (tested);
       T82-16 remainder + R5-verify residuals #1/#2/#3 each fixed or closed with a dated
       accepted-rationale
+- [ ] **T8.8 reference docs** exist for every P8 surface (MCP tools, CLI read+write verbs,
+      `Memory`/adapter API, config, end-to-end); every documented command/flag/tool/method
+      verified against the binary; `cargo doc` builds warning-free
 - [ ] Every task reached a CLEAN review verdict; all review files closed in
       `dev-diary/adversarial-review/`
 
