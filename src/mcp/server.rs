@@ -51,6 +51,12 @@ const MAX_TRAVERSAL_DEPTH: usize = 5;
 const MAX_MAX_TOKENS: usize = 100_000;
 /// Upper bound on concepts in a single `lambo_derive` call.
 const MAX_CONCEPTS_PER_DERIVE: usize = 64;
+/// Upper bound on the combined `produces` + `modifies` + `depends_on` target
+/// count in a single `lambo_record_action` call (N1). Mirrors
+/// [`MAX_CONCEPTS_PER_DERIVE`]: `record_action` fans each target out into a
+/// concept and an edge under the graph write lock, so an unbounded list is the
+/// same single-process stall vector `lambo_derive` was already guarded against.
+const MAX_ACTION_TARGETS: usize = 64;
 /// Upper bound on `lambo_reserve` TTL — a soft lock (spec §11), not a lease.
 const MAX_RESERVE_TTL_SECS: u64 = 3600;
 /// Upper bound on `lambo_inspect` depth.
@@ -623,9 +629,21 @@ impl LamboServer {
         if let Err(e) = check_size("action", &p.action) {
             return e;
         }
-        let produces: Vec<&str> = p.produces.iter().flatten().map(String::as_str).collect();
-        let modifies: Vec<&str> = p.modifies.iter().flatten().map(String::as_str).collect();
-        let depends_on: Vec<&str> = p.depends_on.iter().flatten().map(String::as_str).collect();
+        let produces: Vec<String> = p.produces.unwrap_or_default();
+        let modifies: Vec<String> = p.modifies.unwrap_or_default();
+        let depends_on: Vec<String> = p.depends_on.unwrap_or_default();
+        // N1: cap the combined fan-out. Without this bound one client could hand
+        // `record_action` an arbitrarily long target list and hold the single
+        // process's graph write lock for as long as it takes to fan every entry
+        // out into a concept and an edge — the stall vector `lambo_derive` is
+        // already guarded against, on the tool that had no guard.
+        let total = produces.len() + modifies.len() + depends_on.len();
+        if total > MAX_ACTION_TARGETS {
+            return bad_param(format!(
+                "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
+                 entries ({total} given)"
+            ));
+        }
         if produces
             .iter()
             .chain(&modifies)
@@ -640,15 +658,48 @@ impl LamboServer {
             }
         }
 
-        let action = Action {
-            action: p.action.as_str(),
-            produces: &produces,
-            modifies: &modifies,
-            depends_on: &depends_on,
-        };
-        let outcome = match self.mem.record_action(&action) {
-            Ok(o) => o,
-            Err(e) => return tool_err("lambo_record_action", e),
+        // N1: `Memory::record_action` is synchronous and takes the graph write
+        // lock for its whole body. Called inline it occupies a Tokio *worker*
+        // thread until it returns, so a burst of large calls can starve the
+        // runtime of workers — including the one that would run `Memory::close`
+        // on SIGTERM. `spawn_blocking` moves the work to the blocking pool
+        // (`Memory` is `Arc`-shared and already `Send + Sync`, as the HTTP
+        // factory and the event pump rely on), keeping the worker threads free
+        // for the shutdown path.
+        let mem = Arc::clone(&self.mem);
+        let action_owned = p.action.clone();
+        let record = tokio::task::spawn_blocking(move || {
+            let produces: Vec<&str> = produces.iter().map(String::as_str).collect();
+            let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
+            let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+            let action = Action {
+                action: action_owned.as_str(),
+                produces: &produces,
+                modifies: &modifies,
+                depends_on: &depends_on,
+            };
+            mem.record_action(&action)
+        })
+        .await;
+        let outcome = match record {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return tool_err("lambo_record_action", e),
+            Err(join) => {
+                // The blocking task panicked. `spawn_blocking` surfaces that as a
+                // `JoinError` rather than unwinding into this task, so the outer
+                // `contain_panic` never sees it — contain it here to the same
+                // policy: log the detail, return a class to the client.
+                tracing::error!(
+                    tool = "lambo_record_action",
+                    error = %join,
+                    "mcp: record_action task failed — contained and reported as a tool error"
+                );
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "lambo_record_action: internal error (the failure was logged \
+                     server-side); the call may not have been recorded"
+                        .to_string(),
+                )]);
+            }
         };
 
         let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
@@ -1551,6 +1602,61 @@ mod tests {
         let st = stats.structured_content.unwrap();
         assert_eq!(st["session"], "mcp-roundtrip");
         assert!(st["node_count"].as_u64().unwrap() > 0);
+        s.mem.close().await.expect("close");
+    }
+
+    /// **N1 pinned.** `lambo_record_action` refuses a target list whose combined
+    /// `produces` + `modifies` + `depends_on` count exceeds `MAX_ACTION_TARGETS`,
+    /// and accepts one exactly at the cap — so the bound is a real cap, not an
+    /// off-by-one that never trips.
+    #[tokio::test]
+    async fn record_action_caps_the_combined_target_count() {
+        let s = server("mcp-action-cap").await;
+
+        // One over the cap, split across all three lists, must be refused.
+        let produces: Vec<String> = (0..MAX_ACTION_TARGETS).map(|i| format!("p{i}")).collect();
+        let over = call(
+            &s,
+            "lambo_record_action",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "action": "touch everything",
+                "produces": produces,
+                "modifies": ["m0"],
+            }),
+        )
+        .await;
+        assert_eq!(
+            over.is_error,
+            Some(true),
+            "a target list over the cap must be refused: {over:?}"
+        );
+        let text = match &over.content[0] {
+            ContentBlock::Text(t) => t.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(
+            text.contains(&MAX_ACTION_TARGETS.to_string()),
+            "the refusal must name the cap, got: {text}"
+        );
+
+        // Exactly at the cap is accepted.
+        let at_cap: Vec<String> = (0..MAX_ACTION_TARGETS).map(|i| format!("q{i}")).collect();
+        let ok = call(
+            &s,
+            "lambo_record_action",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "action": "touch exactly the cap",
+                "produces": at_cap,
+            }),
+        )
+        .await;
+        assert_eq!(
+            ok.is_error,
+            Some(false),
+            "a target list exactly at the cap must be accepted: {ok:?}"
+        );
         s.mem.close().await.expect("close");
     }
 
