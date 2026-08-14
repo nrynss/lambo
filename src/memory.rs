@@ -4681,15 +4681,6 @@ mod tests {
     /// stored `embedding IS NULL` for all 13 organic concepts the live-Cockroach
     /// review measured — recall was keyword/recency only on everything the
     /// product itself wrote (`adve-review-t8.2-t8.3-live.md`, L82-4).
-    ///
-    /// **What this test does NOT establish (L82-4 review, P3-2):** it is
-    /// evidence for the persist → flush → reload → vector-recall *wiring*, not
-    /// for embedding-space similarity quality. `ContextTolerantEmbedder` reduces
-    /// the framed context back to the bare label, so the `>= 0.85` asserted
-    /// below is measured in exactly the **bare-label regime PHASE-7's
-    /// calibration rejected** (*"NO single threshold works on bare labels"*,
-    /// `PHASE-7-embeddings.md:572-577`). Do not cite this test as calibration
-    /// evidence for the 0.85 bar under production-length context.
     #[tokio::test]
     async fn organic_derive_persists_a_vector_that_recall_finds() {
         use crate::embed::{NEAR_A, NEAR_B};

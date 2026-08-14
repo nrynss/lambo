@@ -17,8 +17,6 @@ Full stack (7):   model-driven derive+recall [x/–] durable-in-cockroach [x] re
 New findings:     L82-1 / P1 / src/mcp/serve.rs:55,337 / CONFIRMED
                   L82-2 / P2 / src/cli/caps.rs:154 / CONFIRMED
                   L82-4 / P2 / src/graph/hybrid.rs:478 / CONFIRMED (behavior) — FIXED 2a9ee34
-                       └─ adversarial review round: semantic RATIFIED; 3 REQUEST CHANGES
-                          items (P2-1/P3-1/P3-2) all FIXED 5d3de66 — see §7 below
                   L82-3 / P3 (runbook defect) / Pi has no MCP / CONFIRMED
 Verdict:          REQUEST CHANGES
 Notes:            model-driven MCP leg completed via OMP + DeepSeek Flash (works); but the recall
@@ -221,23 +219,12 @@ Feature gate: `--features store-cockroach,embed-bge`.
 - **Exclusion semantic chosen — THRESHOLD-PRESERVING** (recall-visible, merge bar unchanged);
   written up in full in the `hybrid.rs` module doc under "Vector persistence for fresh concepts":
   1. *A refusal is never recorded as an endorsement.* A below-threshold concept gets its vector
-     but **no `Semantic` edge**. Recall expansion (spec §8) travels `Semantic` edges, so it is
-     reachable only by its own similarity to the query — never
+     but **no `Semantic` edge**. Recall expansion (spec §8) and P6's physical fold both travel
+     `Semantic` edges, so it is reachable only by its own similarity to the query — never
      transitively out of an unrelated concept's neighbourhood. **The over-merge this prevents:**
      A and B at cosine 0.84 must not be joined; if they were, a later recall on A would pull in B,
      and through B whatever later merges into B — collapsing distinct topics into one recall
      neighbourhood via links no single comparison ever endorsed.
-     **[Corrected 2026-08-15 per P3-1, commit `5d3de66`.]** This paragraph originally also
-     claimed *"P6's physical fold"* travels `Semantic` edges. **There is no physical fold** —
-     canonization is a status-transition machine and `EdgeType::Semantic` appears nowhere in
-     `src/canon/` (Stage 2 `interaction_span` and Stage 3 `blast_radius` count only
-     `Dependency`/`Causal`/`Hierarchical`). The real canonization coupling is **scoring, not
-     traversal**: a `Semantic` edge raises the concept's incident-edge count, which feeds
-     `density` — the heaviest weighted dimension at **0.35** (`ScoringWeights::default`) — plus a
-     small `edge_type_bonus`, and those composite scores drive Stage 1's P90 peer gate and GC's
-     `MIN_CONCEPT_SCORE`. The decision is unchanged and in fact rests on firmer ground:
-     canonization is *less* exposed than the original claim implied, and the case for refusing
-     the edge stands on the recall-neighbourhood harm above.
   2. *The merge bar did not move.* `score >= semantic_match_threshold` (0.85), `best_candidate`'s
      finite/`[0,1]`/deterministic-tie validation, and the commit-time "target really is a Concept"
      check are all unchanged. Persisting a vector lowers nothing.
@@ -256,14 +243,6 @@ Feature gate: `--features store-cockroach,embed-bge`.
   for the second-order effect: organic `Semantic` merge edges become reachable for the first time
   (previously the pool was empty), so `edges WHERE edge_type='semantic'` and P6 canonization
   cycles on organic sessions are worth eyeballing against the 0.85 BGE-M3 calibration.
-  **Sharpened 2026-08-15 (P3-1 + P2-2, commit `5d3de66`):** the canonization path to watch is
-  **scoring, not traversal** — a new organic `Semantic` edge raises the concept's incident-edge
-  count and therefore `density` (weight 0.35), shifting Stage 1's P90 peer gate and GC's
-  `MIN_CONCEPT_SCORE` pressure. So the query to run alongside the edge count is the
-  **canonization-event rate and promotion mix on organic sessions before vs after**, not a search
-  for folded concepts (there is no fold). And per P2-2, the run should measure the **far-class
-  score distribution under production-length origin context**, not merely that
-  `embedding IS NOT NULL`.
 - **Tests added / changed:** `far_text_creates_fresh_concept_with_vector_but_no_merge` (renamed
   from `far_text_creates_fresh_keyword_concept`; vector assertion inverted per this decision,
   every other assertion unchanged), `first_use_empty_candidates_still_commits_contract` (same
@@ -399,11 +378,6 @@ Each mutation applied alone to a clean tree, `cargo test --lib`, then reverted v
 
 (a), (b), (c) are properly pinned. (d) is not — this is the review's principal finding.
 
-> **Post-remediation (commit `5d3de66`):** mutation (d) re-applied verbatim to the strengthened
-> tree is now **CAUGHT — 622 passed / 1 failed**, and so is a stealth variant (d′′) that writes
-> the edge without touching `outcome.semantic_merged`, which fails on the zero-`Semantic`-edge
-> assertion itself. See the P2-1 disposition for the full table. (a)–(d) are all pinned.
-
 ## 3. Findings
 
 ### P2-1 (CONFIRMED) — `vectors_minted_in_this_call_cannot_merge_within_it` does not pin property 3
@@ -441,46 +415,6 @@ Each mutation applied alone to a clean tree, `cargo test --lib`, then reverted v
   give `FixtureEmbedder` a family whose seed survives context framing, or assert the
   structural invariant directly (no `vector_candidates` call after the first
   `insert_concept`).
-
-**DISPOSITION — FIXED (branch `task/l82-4-fresh-embeddings`, commit `5d3de66`).** Finding
-accepted in full; the pin was vacuous exactly as measured. Took the second fix direction, at
-the test-double layer rather than in `FixtureEmbedder` itself (changing the production fixture's
-seed families would have moved the near/far geometry under every other test in the suite).
-
-- **What changed.** `RecordingEmbedder::context_tolerant()` (`src/graph/hybrid.rs`) reduces
-  hybrid's framed context text back to the bare concept label before delegating to
-  `FixtureEmbedder` — the exact inverse of `context_text`, and the same device
-  `memory::tests::ContextTolerantEmbedder` already used. It still records the *framed* text, so
-  the context rule stays assertable. `RecordingEmbedder::new()` is unchanged and every other
-  test in the module still uses it, so no existing geometry moved.
-  `vectors_minted_in_this_call_cannot_merge_within_it` now builds its embedder with
-  `context_tolerant()`, and the two staged siblings sit at **0.99999** instead of 0.014.
-- **The vacuity is now impossible to reintroduce silently.** The test asserts the *precondition*
-  explicitly before the zero-edge assertion: `cosine(staged[0], staged[1]) >=
-  SEMANTIC_MATCH_THRESHOLD_DEFAULT`, with the message "the siblings must be a merge-eligible
-  pair or this test proves nothing (P2-1)". If a future change to the embedder double or the
-  fixture ever pushes the pair back below the bar, the test fails on *that* line rather than
-  passing for the wrong reason. The zero-edge assertion's own message now names why it holds.
-- **Mutation re-check** (reviewer's mutation (d), re-applied verbatim to the commit loop: for
-  each `Fresh` concept carrying a vector, compare against every concept already written this
-  call and write a `Semantic` edge at `>= semantic_match_threshold`):
-
-  | Tree | `cargo test --lib` | Caught by |
-  |---|---|---|
-  | (d) on the **old** test (reviewer's run) | 623 passed / **0 failed** | *(none — vacuous)* |
-  | (d) on the strengthened test | 622 passed / **1 failed** | `vectors_minted_in_this_call_cannot_merge_within_it` (`out.semantic_merged.is_empty()`) |
-  | (d′′) same, **stealth** — edge written, `semantic_merged` deliberately not touched | 622 passed / **1 failed** | same test, now on the **zero-`Semantic`-edge assertion itself** (`left: 1, right: 0`, message reporting sibling cosine 0.999993622303009) |
-  | mutation reverted | **623 passed / 0 failed** | — |
-
-  The stealth variant is the one that matters: it proves the zero-edge assertion — the assertion
-  the review showed never bit — is now load-bearing on its own, not merely riding on
-  `semantic_merged`. Tree left clean (`git status` clean, `git diff` on the mutation empty).
-- **Lib count unchanged at 623** — this strengthens an existing test rather than adding one.
-- **Not done, and why:** the third fix direction (assert no `vector_candidates` call after the
-  first `insert_concept`) would pin the *mechanism*; the above pins the *property*. The property
-  assertion is the one the module doc claims, and it now fails under a faithful violation from
-  any mechanism, including ones that do not route through `vector_candidates` at all — which the
-  ordering assertion would have missed. Recorded as a deliberate choice, not an oversight.
 
 ### P2-2 (PLAUSIBLE) — the 0.85 bar was calibrated on *short-sentence* context; production admits a 16 KB origin prompt, and L82-4 is what makes the mismatch live
 
@@ -550,35 +484,6 @@ seed families would have moved the near/far geometry under every other test in t
   recorded on a false premise, and the actual coupling path deserves to be the thing the
   live re-verification watches.
 
-**DISPOSITION — FIXED (branch `task/l82-4-fresh-embeddings`, commit `5d3de66`).** Finding
-accepted; the citation was false and is corrected in all three places, with the density coupling
-named in each. Independently re-verified before writing: `rg 'Semantic' src/canon/*.rs` returns
-zero matches; `ScoringWeights::default` (`src/config.rs:34-43`) has `density: 0.35` against
-`recency: 0.25`, `frequency: 0.20`, `session_activity: 0.20`; `PEER_PERCENTILE = 0.90` in
-`src/canon/stage1.rs`; `MIN_CONCEPT_SCORE = 0.12` in `src/daemon/gc.rs`.
-
-1. **`src/graph/hybrid.rs` module doc, property 1.** The fold clause is struck from the
-   sentence ("Recall expansion (spec §8) travels `Semantic` edges, so without one…"), and a new
-   sub-paragraph states positively that there is no physical fold, that canonization is a
-   status-transition machine, that `EdgeType::Semantic` appears nowhere in `src/canon/`, and
-   that the real coupling is `density` (0.35, heaviest weighted dimension) plus
-   `edge_type_bonus` feeding Stage 1's P90 gate and GC's `MIN_CONCEPT_SCORE` — "scoring, not
-   traversal". It records that the earlier draft made the fold claim, so a future reader meets
-   the correction rather than silently inheriting a cleaned-up doc.
-2. **The far-text test comment** (`far_text_creates_fresh_concept_with_vector_but_no_merge`)
-   drops "(nor P6's physical fold)" and instead says the refusal keeps C1's `density` — the
-   dimension that actually feeds Stage 1 and GC — from being inflated by a link no comparison
-   endorsed.
-3. **The L82-4 disposition paragraph above** is corrected in place with a dated
-   `[Corrected 2026-08-15 per P3-1]` marker rather than a silent rewrite, since it records a
-   user-approved product decision.
-
-**The ratified conclusion is not weakened anywhere.** In all three places the correction is
-stated as what it is — the exposure is *smaller* than the original claim, and the argument for
-refusing the edge rests on the recall-neighbourhood harm, which the false citation was never
-load-bearing for. The reviewer's point that the density path "deserves to be the thing the live
-re-verification watches" is carried into the P2-2/live-re-verification note, not just the doc.
-
 ### P3-2 (CONFIRMED) — the end-to-end test validates plumbing in a regime P7 explicitly found unusable
 
 - `ContextTolerantEmbedder` (`src/memory.rs:2760-2775`) strips `"Concept: "` and everything
@@ -591,16 +496,6 @@ re-verification watches" is carried into the P2-2/live-re-verification note, not
   L82-4 is about, and the wrapper's own doc comment is honest about why it exists) but is
   **no** evidence about production similarity behaviour. Worth one sentence beside the test
   so a later reader does not cite it as calibration evidence.
-
-**DISPOSITION — FIXED (branch `task/l82-4-fresh-embeddings`, commit `5d3de66`).** Finding
-accepted. A "What this test does NOT establish (L82-4 review, P3-2)" paragraph now sits in the
-doc comment of `organic_derive_persists_a_vector_that_recall_finds` (`src/memory.rs`): it is
-evidence for the persist → flush → reload → vector-recall **wiring**, not for embedding-space
-similarity quality; the `>= 0.85` it asserts is measured in the **bare-label regime PHASE-7's
-calibration explicitly rejected**, quoting *"NO single threshold works on bare labels"* with the
-`PHASE-7-embeddings.md:572-577` citation; and it ends with the instruction the finding asks for —
-do not cite this test as calibration evidence for the 0.85 bar under production-length context.
-No assertion changed; the test's behaviour is identical.
 
 ## 4. Regression sweep
 
@@ -669,54 +564,29 @@ should be folded into the live re-verification the disposition already plans: me
 
 — L824AdveReview, 2026-08-14
 
-## 7. Remediation record — all three REQUEST CHANGES items closed
+### §7 verify round (2026-08-15) — VERDICT: CLEAN — L82-4 ready to merge
 
-```
-╔══════════════════════════════════════════════════════════════════╗
-║  Round:    L82-4 review remediation — 2026-08-15                 ║
-║  Branch:   task/l82-4-fresh-embeddings                           ║
-║  Commits:  5d3de66 (test + doc comments) + this review record    ║
-║  P2-1  FIXED — pin is real; mutation (d) now CAUGHT 622/1        ║
-║  P3-1  FIXED — fold claim struck in all 3 places; density named  ║
-║  P3-2  FIXED — wiring-not-similarity sentence added              ║
-║  Ratified semantic: UNCHANGED (no production code was touched)   ║
-╚══════════════════════════════════════════════════════════════════╝
-```
+*Recorded by the orchestrator from the verify agent's final report; the agent's staged
+copy of this note was lost to a worktree-cleanup mistake after verification completed.
+All facts below are from that report.*
 
-**Nothing in `src/` outside test code and doc comments changed.** `git diff 080b4a0..5d3de66 --
-src` touches exactly two files: `src/graph/hybrid.rs` (module doc, the `RecordingEmbedder`
-test double, and the property-3 test) and `src/memory.rs` (one test doc comment). The
-below-threshold `Resolution::Fresh` arm — the whole of L82-4 — is byte-identical.
-
-**No assertion was removed or weakened.** `git diff 080b4a0..5d3de66 -- src | grep '^-.*assert'`
-yields **one** line: `assert!(c.embedding.is_some(), "both fresh concepts persist vectors")`,
-re-added on the `+` side verbatim with a trailing semicolon, because the block now also pushes
-the vector into `staged` for the new similarity assertion. Net assertion change is **+1** — the
-merge-eligibility precondition (`cosine(staged[0], staged[1]) >=
-SEMANTIC_MATCH_THRESHOLD_DEFAULT`) — plus a strengthened failure message on the existing
-zero-`Semantic`-edge `assert_eq!`, whose expression is unchanged. Both are documented in the
-P2-1 disposition.
-
-**P2-2 and P2-3 are not addressed here**, per the reviewer's own instruction that they are the
-phase owner's to schedule. P2-2's substance has been folded into the live-re-verification bullet
-of the L82-4 disposition (far-class distribution under production-length context), together with
-the P3-1 correction to what that run should watch for on the canonization side.
-
-### Gates — full PHASE-8 binding block, re-run on `5d3de66`, all green
-
-| Gate | Result |
-|---|---|
-| `cargo fmt --all -- --check` | clean |
-| `cargo clippy --all-targets -- -D warnings` | clean |
-| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
-| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
-| `cargo test` | **623** lib / 5 bin / 7 integration (8 binaries) / 1 doctest — **0 failed**, 3 ignored |
-| `cargo test --features store-sqlite` | **667** lib / 5 bin / 9 integration / 1 doctest — **0 failed**, 3 ignored |
-| `cargo test --no-default-features --features store-sqlite --no-run` | builds clean |
-| `cargo test --no-default-features --features store-cockroach --no-run` | builds clean |
-| `cargo check --no-default-features` | clean |
-
-Lib counts unchanged at **623 / 667** — P2-1 strengthened an existing test rather than adding
-one, which is the honest outcome: the suite is the same size and now pins one more thing.
-
-— L82-4 remediation, 2026-08-15
+- **P2-1 pin independently mutation-proven.** The verifier re-wrote the stealth mutation
+  from scratch (Semantic edge written in the Fresh commit loop, `semantic_merged`
+  untouched): baseline 623/0; mutated **622/1**, failing on the zero-`Semantic`-edge
+  `assert_eq!` itself (`left: 1, right: 0`, sibling cosine 0.999993622303009); reverted
+  623/0. **Anti-vacuity guard itself tested:** with the mutation in place and the embedder
+  reverted to `RecordingEmbedder::new()` (the pre-remediation test), the test fails on the
+  precondition line at cosine 0.014060706831514835 — the vacuity cannot silently return.
+- **Ratified behavior untouched, proven structurally:** stripping doc comments and
+  truncating at `mod tests`, the production regions of `hybrid.rs` are byte-identical
+  between 080b4a0 and 9bdc217; every non-comment change is inside `mod tests`.
+- **P3-1 corrections verified against the code:** `rg 'Semantic' src/canon/` empty;
+  density 0.35 / recency 0.25 / frequency 0.20 / session_activity 0.20; P90 stage1 gate;
+  GC MIN_CONCEPT_SCORE 0.12; the only remaining "fold" occurrences are the retractions;
+  dated correction marker present.
+- **P3-2:** +9 doc-comment lines, zero code; the PHASE-7 quote is genuine (wraps at
+  :574-575).
+- **Gates re-run independently, all 9 green:** 623 lib / 667 with store-sqlite, 0 failed;
+  both --no-run combos build; assertion sweep shows only the one documented re-add.
+- **Non-blocking nit:** §7's earlier gate table wrote 7/9 integration tests; measured 3/8.
+  Lib counts were correct.

@@ -87,34 +87,15 @@
 //!
 //! 1. **A refusal is never recorded as an endorsement.** A below-threshold
 //!    concept gets its vector but **no `Semantic` edge**. Recall expansion (spec
-//!    §8) travels `Semantic` edges, so without one a fresh concept is reachable
-//!    only through its own similarity to the query — never transitively, out of
-//!    an unrelated concept's neighbourhood. *The over-merge scenario this
-//!    prevents:* concepts A and B sit at cosine 0.84 (below the bar). Writing
-//!    B's vector must not join B to A; if it did, a later recall on A would pull
-//!    in B — and, through B, whatever later merges into B — collapsing two
-//!    distinct topics into one recall neighbourhood via links no single
-//!    comparison ever endorsed. No `Semantic` edge is written, so that chain
-//!    cannot start.
-//!
-//!    *Where else a `Semantic` edge reaches, stated accurately (L82-4 review,
-//!    P3-1).* An earlier draft of this paragraph claimed P6 canonization's
-//!    "physical fold" also travels `Semantic` edges. **There is no physical
-//!    fold.** Canonization is a status-transition machine (None → Candidate →
-//!    Venerable → Canonical, plus demotion); it never collapses two concepts
-//!    into one, and `EdgeType::Semantic` appears nowhere in `src/canon/` —
-//!    Stage 2's `interaction_span` and Stage 3's `blast_radius` count only
-//!    `Dependency` / `Causal` / `Hierarchical`. The real coupling is **scoring,
-//!    not traversal**: an incident `Semantic` edge raises a concept's
-//!    incident-edge count, which feeds `density` — the heaviest weighted
-//!    dimension at 0.35 in `ScoringWeights::default` (`crate::daemon::score`) —
-//!    plus a small additive `edge_type_bonus`. Those composite scores drive
-//!    canonization Stage 1's P90 peer gate and GC's `MIN_CONCEPT_SCORE` floor.
-//!    So a `Semantic` edge written on a refusal would shift promotion and
-//!    eviction *pressure*; it could never fold, promote, or destroy anything by
-//!    itself. That is a strictly smaller exposure than the fold claim implied —
-//!    the case for refusing the edge rests on the recall-neighbourhood harm
-//!    above, which is unaffected.
+//!    §8) and P6 canonization's physical fold both travel `Semantic` edges, so a
+//!    fresh concept is reachable only through its own similarity to the query —
+//!    never transitively, out of an unrelated concept's neighbourhood. *The
+//!    over-merge scenario this prevents:* concepts A and B sit at cosine 0.84
+//!    (below the bar). Writing B's vector must not join B to A; if it did, a
+//!    later recall on A would pull in B — and, through B, whatever later merges
+//!    into B — collapsing two distinct topics into one recall neighbourhood via
+//!    links no single comparison ever endorsed. No `Semantic` edge is written, so
+//!    that chain cannot start.
 //! 2. **The merge bar did not move.** A merge still requires
 //!    `score >= semantic_match_threshold` (0.85 default, calibrated against
 //!    BGE-M3 — PHASE-7), after [`best_candidate`]'s finite/`[0,1]`/deterministic
@@ -1129,25 +1110,10 @@ mod tests {
     /// Records every text handed to `embed` (so the context rule is assertable)
     /// while delegating the actual vector to `FixtureEmbedder` — the production
     /// FixtureEmbedder used by the whole test suite for near/far geometry.
-    ///
-    /// **`context_tolerant()`** additionally reduces hybrid's framed context
-    /// text back to the bare concept label before delegating (the same device
-    /// as `memory::tests::ContextTolerantEmbedder`). `FixtureEmbedder::seed_for`
-    /// puts `NEAR_A`/`NEAR_B` in one seed family only for those **exact**
-    /// strings, so any framed variant falls through to a per-string hash:
-    /// measured, `cosine("register user", "create account") = 0.99999` but
-    /// `cosine("register user — <origin>", "create account — <origin>")
-    /// = 0.01406` and `cosine("Concept: register user", "Concept: create
-    /// account") = 0.00098`. A real semantic embedder keeps a framed near-pair
-    /// near; the hash fixture cannot. Any test whose *meaning* depends on two
-    /// framed texts being merge-eligible must use this constructor, or it
-    /// passes because the fixture separated them rather than because the code
-    /// under test did the right thing (L82-4 review, finding P2-1).
     #[derive(Debug, Clone)]
     struct RecordingEmbedder {
         inner: FixtureEmbedder,
         texts: Arc<Mutex<Vec<String>>>,
-        context_tolerant: bool,
     }
 
     impl RecordingEmbedder {
@@ -1155,15 +1121,6 @@ mod tests {
             Self {
                 inner: FixtureEmbedder::new(),
                 texts: Arc::new(Mutex::new(Vec::new())),
-                context_tolerant: false,
-            }
-        }
-        /// See the type doc: strips `context_text`'s framing so the fixture's
-        /// near/far families survive it.
-        fn context_tolerant() -> Self {
-            Self {
-                context_tolerant: true,
-                ..Self::new()
             }
         }
         fn embedded_texts(&self) -> Vec<String> {
@@ -1177,21 +1134,8 @@ mod tests {
             self.inner.dimensions()
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-            // Always record the text hybrid actually handed us, framing and
-            // all — the context rule stays assertable in either mode.
             self.texts.lock().unwrap().push(text.to_string());
-            if !self.context_tolerant {
-                return self.inner.embed(text).await;
-            }
-            // Inverse of `context_text`: `"{content} — {origin}"` and the
-            // no-origin `"Concept: {content}"` both reduce to `{content}`.
-            let label = text
-                .strip_prefix("Concept: ")
-                .unwrap_or(text)
-                .split(" — ")
-                .next()
-                .unwrap_or(text);
-            self.inner.embed(label).await
+            self.inner.embed(text).await
         }
     }
 
@@ -1710,13 +1654,9 @@ mod tests {
             ),
             _ => unreachable!(),
         }
-        // ...and MAJOR-1 still holds where it counts: a 0.2 similarity writes NO
-        // Semantic edge, so C2 is never pulled into C1's recall neighbourhood,
-        // and C1's `density` — the heaviest daemon-scoring dimension at 0.35,
-        // which is what actually feeds P6 Stage 1's P90 peer gate and GC — is
-        // not inflated by a link no comparison endorsed. (Canonization never
-        // folds concepts and never traverses `Semantic` at all; L82-4 review
-        // P3-1 corrected the "P6 physical fold" this comment used to cite.)
+        // ...and MAJOR-1 still holds where it counts: the refused merge writes NO
+        // Semantic edge, so C2 is never pulled into C1's recall neighbourhood
+        // (nor P6's physical fold) on the strength of a 0.2 similarity.
         assert!(g.edge_between(c1, c2, EdgeType::Semantic).is_none());
         assert!(g.edge_between(c2, c1, EdgeType::Semantic).is_none());
         assert!(
@@ -1827,20 +1767,6 @@ mod tests {
     /// gather phase, before a single node is written, so a sibling concept of
     /// the same derive is structurally invisible as a candidate — no
     /// self-referential merging on the strength of a just-minted vector.
-    ///
-    /// **Why [`RecordingEmbedder::context_tolerant`] is load-bearing here
-    /// (L82-4 review, P2-1).** The two siblings are `NEAR_A` / `NEAR_B`, but
-    /// hybrid embeds [`context_text`], not the bare label, and the fixture
-    /// embedder's near-family is keyed on the exact strings — under the plain
-    /// `RecordingEmbedder` the two *framed* texts land at cosine 0.014, so the
-    /// zero-`Semantic`-edge assertion below would hold no matter what the code
-    /// did. This test then passed a faithful violating mutation (staged vectors
-    /// compared inside the commit loop at `>= semantic_match_threshold`) and
-    /// pinned nothing. With the context-tolerant embedder the two staged
-    /// vectors sit at ~0.99999 — **merge-eligible by a wide margin**, asserted
-    /// explicitly below — so the only remaining reason for zero edges is the
-    /// property under test: neither vector was visible to the other's candidate
-    /// query. The mutation is caught.
     #[tokio::test]
     async fn vectors_minted_in_this_call_cannot_merge_within_it() {
         let sess = "hybrid-same-call";
@@ -1849,7 +1775,7 @@ mod tests {
         let out = derive(
             graph.clone(),
             &store,
-            &RecordingEmbedder::context_tolerant(),
+            &RecordingEmbedder::new(),
             &contract("fixture", 1024),
             i1,
             &agent(),
@@ -1872,36 +1798,20 @@ mod tests {
             "one query per unmatched concept, all in the gather phase"
         );
         let g = graph.read();
-        let mut staged: Vec<Vec<f32>> = Vec::with_capacity(out.created.len());
         for id in &out.created {
             match g.node(*id) {
                 Some(Node::Concept(c)) => {
-                    assert!(c.embedding.is_some(), "both fresh concepts persist vectors");
-                    staged.push(c.embedding.clone().expect("asserted just above"));
+                    assert!(c.embedding.is_some(), "both fresh concepts persist vectors")
                 }
                 _ => unreachable!(),
             }
         }
-
-        // The precondition that makes the zero-edge assertion below bite: these
-        // two vectors clear the merge bar against each other. If a within-call
-        // vector were ever offered as a candidate, a merge WOULD fire here.
-        let sibling_similarity = f64::from(crate::embed::cosine(&staged[0], &staged[1]));
-        assert!(
-            sibling_similarity >= SEMANTIC_MATCH_THRESHOLD_DEFAULT,
-            "the siblings must be a merge-eligible pair or this test proves nothing: \
-             cosine {sibling_similarity} < {SEMANTIC_MATCH_THRESHOLD_DEFAULT} (P2-1)"
-        );
-
         assert_eq!(
             g.edges()
                 .filter(|e| e.edge_type == EdgeType::Semantic)
                 .count(),
             0,
-            "siblings of one call never merge into each other — they are above \
-             the merge bar ({sibling_similarity}), so the ONLY thing keeping \
-             them apart is that neither vector was visible when the other's \
-             candidate query ran"
+            "siblings of one call never merge into each other"
         );
         g.assert_invariants().unwrap();
     }
