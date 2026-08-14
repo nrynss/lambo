@@ -1777,6 +1777,51 @@ impl Memory {
         }
     }
 
+    /// Release the single-writer lease after a `close()` that was **abandoned**
+    /// (L82-1).
+    ///
+    /// `close()` releases on its own success paths, and deliberately does not on
+    /// a failed final flush — that failure keeps the lease for a retried close
+    /// and lets it lapse at TTL if none comes. Neither covers the case the live
+    /// review hit: `serve` bounds `close()` with a deadline, and a close that
+    /// blows the deadline is *dropped*, so it never reaches either path. The
+    /// process then exits with the lease row still present, and the session is
+    /// wedged for the rest of the TTL — a second, avoidable failure stacked on
+    /// top of the lost tail.
+    ///
+    /// Releasing here is sound because the release is not a durability claim.
+    /// It says "this process is gone", which is true — `serve` calls this
+    /// immediately before exiting. The tail is lost either way; keeping the
+    /// lease does not make it less lost, it only makes the next writer wait 45 s
+    /// to find that out.
+    ///
+    /// **Except when this handle was fenced.** A lost lease belongs to another
+    /// writer, and `release_lease` is holder-scoped precisely so a straggler
+    /// cannot evict it — but skipping the call entirely also skips the log line
+    /// that would confuse an operator reading it. `close()`'s fenced branch has
+    /// the same rule and the same reason.
+    ///
+    /// Best-effort by construction: [`release_lease_once`] already downgrades a
+    /// store error to a warning, and the caller bounds this with its own
+    /// deadline.
+    ///
+    /// [`release_lease_once`]: Self::release_lease_once
+    pub async fn release_lease_after_abandoned_close(&self) {
+        if self.lease_lost() {
+            tracing::debug!(
+                session = %self.session,
+                "not releasing the single-writer lease after an abandoned close: this handle was \
+                 fenced, so the lease belongs to another writer"
+            );
+            return;
+        }
+        // The heartbeat must not outlive the release and re-acquire what we just
+        // gave up. `close()` aborts it first thing, but an abandoned close may
+        // have been dropped before reaching that line.
+        self.abort_heartbeat();
+        self.release_lease_once().await;
+    }
+
     /// The one place `close()` latches success and gives up its registry slot.
     ///
     /// Both success paths — the empty-log shortcut and a completed step-4 flush
@@ -2361,6 +2406,334 @@ mod tests {
         async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
             self.inner.record_canonization(event).await
         }
+    }
+
+    /// How a store charges for a flush (L82-1).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum CostModel {
+        /// What both SQL adapters did before L82-1: one statement, and so one
+        /// network round-trip, per mutation in the batch.
+        PerMutation,
+        /// What they do now: one statement per planned [`FlushStep`].
+        PerPlannedStatement,
+    }
+
+    /// A store that charges network latency for a flush, so a test can ask
+    /// whether a tail drains inside `close()`'s window (L82-1).
+    ///
+    /// The `+ 2` on every count is `BEGIN` and `COMMIT`, which both adapters pay
+    /// once per flush regardless of the batch.
+    struct RoundTripStore {
+        inner: Arc<dyn GraphStore>,
+        model: CostModel,
+        /// Per-statement round-trip. The live cluster (CockroachDB serverless,
+        /// GCP asia-south1) measured 10–30 ms.
+        rtt: Duration,
+        round_trips: AtomicUsize,
+        released: AtomicUsize,
+    }
+
+    impl RoundTripStore {
+        fn new(inner: Arc<dyn GraphStore>, model: CostModel, rtt: Duration) -> Self {
+            Self {
+                inner,
+                model,
+                rtt,
+                round_trips: AtomicUsize::new(0),
+                released: AtomicUsize::new(0),
+            }
+        }
+
+        fn round_trips(&self) -> usize {
+            self.round_trips.load(Ordering::SeqCst)
+        }
+
+        fn releases(&self) -> usize {
+            self.released.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for RoundTripStore {
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            let statements = match self.model {
+                CostModel::PerMutation => batch.mutations.len(),
+                CostModel::PerPlannedStatement => crate::store::batch::planned_statements(
+                    &batch.mutations,
+                    crate::store::batch::BulkLimits {
+                        interactions: 1,
+                        concepts: 256,
+                        edges: 512,
+                    },
+                ),
+            } + 2;
+            self.round_trips.fetch_add(statements, Ordering::SeqCst);
+            tokio::time::sleep(self.rtt * u32::try_from(statements).unwrap()).await;
+            self.inner.flush(batch).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+        ) -> Result<(), StoreError> {
+            self.released.fetch_add(1, Ordering::SeqCst);
+            self.inner.release_lease(session, holder).await
+        }
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+    }
+
+    /// Four `record_action` calls at the 64-target fan-out cap — the live L82-1
+    /// repro's burst — left un-flushed in the log.
+    async fn at_cap_burst(mem: &Memory) {
+        for call in 0..4 {
+            let produces: Vec<String> = (0..32).map(|n| format!("artifact {call}-{n}")).collect();
+            let depends_on: Vec<String> =
+                (0..32).map(|n| format!("dependency {call}-{n}")).collect();
+            let produces_refs: Vec<&str> = produces.iter().map(String::as_str).collect();
+            let depends_refs: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+            mem.record_action(&Action {
+                action: &format!("burst action {call}"),
+                produces: &produces_refs,
+                modifies: &[],
+                depends_on: &depends_refs,
+            })
+            .expect("at-cap record_action");
+        }
+    }
+
+    /// **L82-1, end to end.** A burst left un-flushed at SIGTERM must drain
+    /// inside `close()`'s window against a store that charges a real cluster's
+    /// per-statement latency.
+    ///
+    /// Both halves run so the test *shows* the finding as well as the fix. With
+    /// the pre-L82-1 cost model — one round-trip per mutation, which is what
+    /// both adapters' `for m in &batch.mutations` loop bought — the close blows
+    /// `CLOSE_FLUSH_GRACE` exactly as the live run did. With the planned-
+    /// statement model it finishes in a fraction of it.
+    ///
+    /// The cost model is `store::batch`'s own plan, so this test pins the
+    /// *arithmetic*, not the adapters' use of it: `store::batch`'s tests pin
+    /// that the plan is small, and `cockroach::sql_shape_is_a_multi_row_upsert`
+    /// pins that one planned step really is one statement. The three together
+    /// are what close the loop — no local test can reach a cluster.
+    ///
+    /// Time is paused, so the sleeps are simulated and the test is instant.
+    #[tokio::test(start_paused = true)]
+    async fn an_at_cap_burst_drains_within_the_close_window() {
+        let rtt = Duration::from_millis(30);
+
+        // The regression, reproduced: per-mutation round-trips cannot drain.
+        let slow = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerMutation,
+            rtt,
+        ));
+        let mem = memory_on(slow.clone(), "l82-1-per-mutation").await;
+        at_cap_burst(&mem).await;
+        let undrained = mem.stats().log_depth;
+        assert!(
+            undrained >= 700,
+            "the burst must leave a realistic tail, got {undrained}"
+        );
+        assert!(
+            tokio::time::timeout(crate::mcp::serve::CLOSE_FLUSH_GRACE, mem.close())
+                .await
+                .is_err(),
+            "per-mutation round-trips must NOT fit the close window — if this stops timing out \
+             the cost model no longer reflects what the pre-L82-1 adapters did, and the other \
+             half of this test proves nothing"
+        );
+
+        // The fix: the same tail, planned into statements.
+        let fast = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerPlannedStatement,
+            rtt,
+        ));
+        let mem = memory_on(fast.clone(), "l82-1-planned").await;
+        at_cap_burst(&mem).await;
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(crate::mcp::serve::CLOSE_FLUSH_GRACE, mem.close())
+            .await
+            .expect("close must fit the grace window")
+            .expect("close must succeed");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the tail drained in {elapsed:?}; it must be a handful of round-trips, not a \
+             close call against the window"
+        );
+        assert!(
+            fast.round_trips() < 40,
+            "the whole session cost {} round-trips — the burst must plan into statements, not \
+             rows (L82-1)",
+            fast.round_trips()
+        );
+    }
+
+    /// **L82-1, the second failure.** `serve` bounds `close()` and *drops* it on
+    /// timeout, so the release on close's success path never runs — the live run
+    /// exited with a stale lease row and wedged the session for the whole
+    /// `LEASE_TTL` on top of losing the tail.
+    ///
+    /// Releasing is honest here: it asserts this process is gone, which it is.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_close_still_releases_the_lease() {
+        let store = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerMutation,
+            Duration::from_millis(30),
+        ));
+        let mem = memory_on(store.clone(), "l82-1-stale-lease").await;
+        at_cap_burst(&mem).await;
+
+        assert!(
+            tokio::time::timeout(crate::mcp::serve::CLOSE_FLUSH_GRACE, mem.close())
+                .await
+                .is_err(),
+            "this test needs the close to be abandoned"
+        );
+        assert_eq!(
+            store.releases(),
+            0,
+            "an abandoned close cannot have released on its own — that is the bug"
+        );
+
+        mem.release_lease_after_abandoned_close().await;
+        assert_eq!(
+            store.releases(),
+            1,
+            "the lease must be released on the way out even though the tail was lost"
+        );
+
+        // Idempotent: `serve` may reach this after a close that already
+        // released, and a second holder-scoped DELETE is a wasted round-trip at
+        // best and a race at worst.
+        mem.release_lease_after_abandoned_close().await;
+        assert_eq!(store.releases(), 1, "the release must happen at most once");
+    }
+
+    /// **L82-1, the wiring.** The two halves above are the pieces; this is
+    /// `serve`'s actual shutdown path putting them together.
+    ///
+    /// It drives `close_bounded_until` — the real body of the bounded close,
+    /// with only the re-armed signal substituted (`shutdown_signal()` installs
+    /// process-wide SIGINT/SIGTERM handlers, which a test must not do to the
+    /// whole binary). A slow store makes the close blow its window, and the
+    /// lease must be gone anyway.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_close_releases_the_lease_through_serve() {
+        let store = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerMutation,
+            Duration::from_millis(30),
+        ));
+        let mem = memory_on(store.clone(), "l82-1-serve-wiring").await;
+        at_cap_burst(&mem).await;
+
+        let err = crate::mcp::serve::close_bounded_until(&mem, std::future::pending())
+            .await
+            .expect_err("the close must be abandoned for this test to mean anything");
+        assert!(
+            err.to_string().contains("not durable"),
+            "the error must still say the tail was lost: {err}"
+        );
+        assert_eq!(
+            store.releases(),
+            1,
+            "serve must release the lease on the abandoned-close path — leaving it stale wedges \
+             the session for the whole LEASE_TTL (L82-1)"
+        );
+    }
+
+    /// The happy path must not gain a second release: `close()` already handed
+    /// the lease off, and a redundant holder-scoped DELETE is a wasted
+    /// round-trip on the way out.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_that_finishes_releases_exactly_once_through_serve() {
+        let store = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerPlannedStatement,
+            Duration::from_millis(30),
+        ));
+        let mem = memory_on(store.clone(), "l82-1-serve-happy").await;
+        at_cap_burst(&mem).await;
+
+        crate::mcp::serve::close_bounded_until(&mem, std::future::pending())
+            .await
+            .expect("the burst must drain inside the window now");
+        assert_eq!(store.releases(), 1, "released once, by close() itself");
+    }
+
+    /// A fenced handle must NOT release: the lease belongs to whoever took the
+    /// session over, and `close()`'s own fenced branch has the same rule.
+    #[tokio::test(start_paused = true)]
+    async fn a_fenced_handle_does_not_release_on_an_abandoned_close() {
+        let store = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerPlannedStatement,
+            Duration::from_millis(1),
+        ));
+        let mem = memory_on(store.clone(), "l82-1-fenced").await;
+        mem.simulate_lease_loss();
+
+        mem.release_lease_after_abandoned_close().await;
+        assert_eq!(
+            store.releases(),
+            0,
+            "a fenced handle must not evict the writer that took the session over"
+        );
     }
 
     /// How [`AdverseStore::flush`] misbehaves — the two failure modes the

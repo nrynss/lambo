@@ -52,7 +52,51 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// caller that stays alive and calls `close()` again; `serve` does not.) Larger
 /// than [`SHUTDOWN_GRACE`] because by the time close runs the transport is
 /// already down and this is the last thing standing between the process and exit.
+///
+/// This is the budget for the **whole** close phase, split between the flush
+/// attempt ([`CLOSE_FLUSH_GRACE`]) and the lease release that follows an
+/// abandoned one ([`LEASE_RELEASE_GRACE`]).
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
+
+/// What [`Memory::close`] itself gets — [`CLOSE_GRACE`] minus the slice reserved
+/// for [`LEASE_RELEASE_GRACE`].
+///
+/// The live review (L82-1) found that a close which blows its deadline is
+/// *dropped*, so the lease release inside it never runs and the session stays
+/// wedged for the full `LEASE_TTL`. Fixing that needs a window to release in,
+/// and that window is carved **out of** `CLOSE_GRACE` rather than added on top:
+/// [`SHUTDOWN_BUDGET`] is a number operators have already sized their
+/// supervisor's SIGKILL timeout against, and a durability bug is not a reason to
+/// quietly move it.
+///
+/// The two seconds this costs the flush are affordable because the same finding
+/// was fixed at the root: [`crate::store::batch`] turned a flush from one
+/// network round-trip per mutation into one per few hundred rows, so the
+/// 784-mutation tail that could not drain in 10 s now plans into single-digit
+/// statements.
+///
+/// `pub(crate)` so the burst-drain regression test in `memory` can assert
+/// against the real budget instead of a copy of the number.
+pub(crate) const CLOSE_FLUSH_GRACE: Duration = Duration::from_secs(8);
+
+/// Bound on the best-effort lease release that follows an abandoned `close()`
+/// (L82-1).
+///
+/// One `DELETE ... WHERE session_id = $1 AND holder = $2` against a cluster the
+/// flush was just talking to. Two seconds is several round-trips' worth; if it
+/// does not land in that, the row lapses at TTL exactly as it did before this
+/// existed, and the process still exits.
+const LEASE_RELEASE_GRACE: Duration = Duration::from_secs(2);
+
+/// Build-time invariant: the close phase's two halves add up to its budget.
+///
+/// An edit that grows either without shrinking the other — or that grows
+/// [`CLOSE_GRACE`] expecting the flush to receive it — fails the build.
+const _: () = assert!(
+    CLOSE_FLUSH_GRACE.as_secs() + LEASE_RELEASE_GRACE.as_secs() == CLOSE_GRACE.as_secs(),
+    "CLOSE_FLUSH_GRACE + LEASE_RELEASE_GRACE must be exactly CLOSE_GRACE — the close phase is \
+     those two steps in series and nothing else, and SHUTDOWN_BUDGET is sized on CLOSE_GRACE",
+);
 
 /// Documented worst-case wall-clock a clean shutdown can take, end to end (R4).
 ///
@@ -317,29 +361,61 @@ async fn run_and_close(
 /// there is no on-disk WAL, the abandoned tail is LOST — the in-memory log dies
 /// with the process. The messages below say exactly that; they must not promise a
 /// restart will recover it (R4/P2 — a prior wording did, and it was false).
+///
+/// ## The lease is released even when the tail is lost (L82-1)
+///
+/// Abandoning `close()` drops it mid-flight, so the release on its own success
+/// path never runs. The live review watched exactly that: SIGTERM under an
+/// at-cap burst timed the close out and left a **stale lease row**, wedging the
+/// session for the whole `LEASE_TTL` on top of losing the tail. Two failures for
+/// one cause, and the second one is not inherent — the release is a statement
+/// about this process being gone, not a claim that anything was written.
+///
+/// So both abandon paths below run [`Memory::release_lease_after_abandoned_close`]
+/// under [`LEASE_RELEASE_GRACE`] before returning. It cannot rescue the tail and
+/// does not pretend to: the returned error is unchanged, and a release that
+/// itself times out leaves the row to lapse at TTL, which is where this started.
 async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
-    let close = mem.close();
-    tokio::pin!(close);
-    tokio::select! {
+    close_bounded_until(mem, shutdown_signal()).await
+}
+
+/// [`close_bounded`] with the re-armed signal passed in.
+///
+/// `shutdown_signal()` registers process-wide SIGINT/SIGTERM handlers, which a
+/// unit test must not do to the whole test binary. Taking the future as an
+/// argument lets `memory`'s tests drive the real body with
+/// `std::future::pending()` — see `an_abandoned_close_releases_the_lease_through_serve`.
+pub(crate) async fn close_bounded_until(
+    mem: &Memory,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), LamboError> {
+    // Scoped so the abandoned `close()` future is *dropped* before the release
+    // below: it holds `close_state` and the writers' write guard, and its
+    // documented cancellation behaviour (returning the drained tail to the front
+    // of the log, latching no success) should run before anything else does.
+    let outcome = {
+        let close = mem.close();
+        tokio::pin!(close);
+        tokio::select! {
         // Bias toward the close itself: if it is already done, take that answer
         // rather than a signal delivered in the same poll.
         biased;
-        r = tokio::time::timeout(CLOSE_GRACE, &mut close) => match r {
+        r = tokio::time::timeout(CLOSE_FLUSH_GRACE, &mut close) => match r {
             Ok(r) => r,
             Err(_) => {
                 tracing::error!(
-                    grace_secs = CLOSE_GRACE.as_secs(),
+                    grace_secs = CLOSE_FLUSH_GRACE.as_secs(),
                     "lambo serve: close() did not finish within the grace window — abandoning \
                      it and exiting; the un-flushed tail is LOST (the write-behind log is \
                      in-memory only, there is no on-disk WAL, and a restart will NOT recover it)"
                 );
                 Err(LamboError::Config(format!(
                     "close timed out after {}s; tail lost on exit, not durable",
-                    CLOSE_GRACE.as_secs()
+                    CLOSE_FLUSH_GRACE.as_secs()
                 )))
             }
         },
-        () = shutdown_signal() => {
+        () = shutdown => {
             tracing::warn!(
                 "lambo serve: a second shutdown signal arrived during close — abandoning it \
                  and exiting; the un-flushed tail is LOST (in-memory write-behind log, no \
@@ -350,6 +426,35 @@ async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
                     .into(),
             ))
         }
+        }
+    };
+
+    if outcome.is_err() {
+        release_lease_bounded(mem).await;
+    }
+    outcome
+}
+
+/// Best-effort lease release on the way out of an abandoned close (L82-1).
+///
+/// Bounded so a store that is *why* the close hung cannot hang the exit too. A
+/// timeout is logged, not returned: the caller's error is already the honest
+/// account of what went wrong, and "we also could not tidy the lease" does not
+/// change what an operator must do.
+async fn release_lease_bounded(mem: &Memory) {
+    if tokio::time::timeout(
+        LEASE_RELEASE_GRACE,
+        mem.release_lease_after_abandoned_close(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            grace_secs = LEASE_RELEASE_GRACE.as_secs(),
+            "lambo serve: could not release the single-writer lease within its window after an \
+             abandoned close; the row will lapse at LEASE_TTL instead, and until then this \
+             session refuses new writers"
+        );
     }
 }
 
@@ -684,6 +789,21 @@ mod tests {
             "LEASE_TTL ({}s) must exceed SHUTDOWN_BUDGET ({}s)",
             lease::LEASE_TTL.as_secs(),
             SHUTDOWN_BUDGET.as_secs(),
+        );
+        // L82-1: the lease-release window is carved OUT of the close budget,
+        // not added to it, so the operator-facing SHUTDOWN_BUDGET is unchanged.
+        assert_eq!(
+            CLOSE_FLUSH_GRACE + LEASE_RELEASE_GRACE,
+            CLOSE_GRACE,
+            "the close phase is the flush attempt then the lease release, and nothing else"
+        );
+        assert!(
+            !LEASE_RELEASE_GRACE.is_zero(),
+            "a zero release window makes the abandoned-close release a no-op"
+        );
+        assert!(
+            CLOSE_FLUSH_GRACE > LEASE_RELEASE_GRACE,
+            "the flush keeps the bulk of the close budget; the release is one statement"
         );
     }
 
