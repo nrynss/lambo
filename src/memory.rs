@@ -303,13 +303,19 @@ fn unregister_session(session: &SessionId, agent: &AgentId) {
 ///
 /// A refresh that comes back [`LeaseOutcome::Held`] means this handle **lost**
 /// the session — its lease expired (a store outage starved the heartbeat past
-/// the TTL) and another writer took over. That is logged loudly but not acted
-/// on here: the two writers are now diverging, and the honest recovery is an
-/// operator's, not a silent self-destruct that could drop this handle's tail.
+/// the TTL) and another writer took over. On that transition the heartbeat
+/// latches the shared `fence` (T86-2): the owning [`Memory`] then refuses every
+/// further write and its write-behind flush loop stops and drops its pending
+/// tail, so the two writers can no longer flush divergent graphs into one
+/// session. The loss is still logged loudly and the fenced handle does not
+/// self-destruct — the operator reconciles — but it is now a loud, *safe* stop
+/// rather than silent split-brain corruption. Setting the fence is idempotent,
+/// so the heartbeat may keep beating after it without changing anything.
 fn spawn_lease_heartbeat(
     store: Arc<dyn GraphStore>,
     session: SessionId,
     holder: LeaseHolder,
+    fence: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LEASE_HEARTBEAT_INTERVAL);
@@ -320,13 +326,17 @@ fn spawn_lease_heartbeat(
             match store.refresh_lease(&session, &holder, LEASE_TTL).await {
                 Ok(LeaseOutcome::Acquired(_)) => {}
                 Ok(LeaseOutcome::Held { current, .. }) => {
+                    // T86-2: fence the writer. From here every write is refused
+                    // and the flush loop stops overwriting the new holder's rows.
+                    fence.store(true, Ordering::Release);
                     tracing::error!(
                         session = %session,
                         holder = %holder,
                         new_holder = %current.holder,
                         "single-writer lease LOST: this handle's lease expired (heartbeat starved \
-                         past the TTL) and {} took the session. The two writers are now diverging \
-                         — an operator must reconcile.",
+                         past the TTL) and {} took the session. This handle is now FENCED — further \
+                         writes are refused and its tail will NOT be flushed; an operator must \
+                         reconcile.",
                         current.holder
                     );
                 }
@@ -527,6 +537,12 @@ impl MemoryBuilder {
         // CONC-3: subscribe BEFORE spawn or the warm-up condition set is lost.
         let startup_events = daemon.events();
 
+        // Single-writer-lease fence (T86-2): shared by the flush loop and the
+        // lease heartbeat. Latched `true` the instant the heartbeat detects the
+        // lease was lost; from then the flush loop stops (and drops its tail)
+        // and the write gate refuses. Created before both consumers.
+        let lease_lost = Arc::new(AtomicBool::new(false));
+
         let flush = FlushTask::new(
             graph.clone(),
             store.clone(),
@@ -536,7 +552,8 @@ impl MemoryBuilder {
                 retries: config.backend_flush_retries,
                 log_max: config.backend_log_max,
             },
-        );
+        )
+        .with_fence(lease_lost.clone());
         let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config);
 
         // Single-writer lease (spec §2.2, T8.6) — the store-enforced gate. Taken
@@ -578,8 +595,12 @@ impl MemoryBuilder {
         let canon_handle = canon.spawn();
         // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
         // keeps the session and a crashed one's lease lapses (T8.6).
-        let heartbeat_handle =
-            spawn_lease_heartbeat(store.clone(), session.clone(), lease_holder.clone());
+        let heartbeat_handle = spawn_lease_heartbeat(
+            store.clone(),
+            session.clone(),
+            lease_holder.clone(),
+            lease_lost.clone(),
+        );
 
         tracing::info!(
             session = %session,
@@ -618,6 +639,7 @@ impl MemoryBuilder {
             registered: AtomicBool::new(true),
             lease_holder,
             lease_released: AtomicBool::new(false),
+            lease_lost,
         })
     }
 }
@@ -782,6 +804,16 @@ pub struct Memory {
     /// `Drop` cannot `await` the store anyway); it only aborts the heartbeat so
     /// the lease is actually free to lapse.
     lease_released: AtomicBool,
+    /// **Single-writer-lease fence** (T86-2). Latched `true` by the heartbeat
+    /// the instant it observes the lease was LOST — this handle's lease expired
+    /// (a store outage starved the beat past the TTL) and another writer took
+    /// the session. Once set, the write gate ([`Memory::begin_write`] /
+    /// [`Memory::begin_write_sync`]) refuses every mutation, the write-behind
+    /// flush loop stops and drops its tail (`FlushTask::with_fence`), and
+    /// [`Memory::close`] refuses to flush or release. It turns the split-brain
+    /// where two writers flush divergent graphs into one session into a loud,
+    /// safe stop. Shared (`Arc`) with the heartbeat and the flush task.
+    lease_lost: Arc<AtomicBool>,
 }
 
 impl Memory {
@@ -1443,6 +1475,31 @@ impl Memory {
         // touches neither the graph nor the tail, so no custody/join is needed.
         self.abort_heartbeat();
 
+        // T86-2: a fenced handle lost its lease — another writer owns the
+        // session now. The final flush this close would otherwise do is exactly
+        // the split-brain write the lease exists to prevent, so refuse it: stop
+        // the tasks, DROP the tail (it dies with this handle as it would on a
+        // crash), and do NOT release the lease (it is not ours to release). Fail
+        // closed with the honest refusal rather than a lying `Ok` over a tail we
+        // may never make durable. `succeeded` stays false; a retried close hits
+        // this same branch (the handles are already reaped) and errors again.
+        if self.lease_lost() {
+            for slot in [&self.canon_handle, &self.daemon_handle, &self.flush_handle] {
+                if let Some(handle) = slot.lock().take() {
+                    handle.abort();
+                }
+            }
+            let undrained = self.graph.read().log_len();
+            tracing::error!(
+                session = %self.session,
+                mutations = undrained,
+                "close: this handle lost its single-writer lease; refusing to flush the tail \
+                 ({undrained} mutations discarded) and NOT releasing the lease — another writer \
+                 owns the session"
+            );
+            return Err(self.lease_lost_error());
+        }
+
         // ...and the two mutation producers off, before the drain. Every
         // handle travels in a `HandleCustody` guard: cancelled on a join, this
         // future must hand the handle back to its slot rather than detach a
@@ -1715,8 +1772,40 @@ impl Memory {
         Ok(())
     }
 
+    /// Test hook (T86-2): latch the lease-lost fence exactly as
+    /// [`spawn_lease_heartbeat`] does when a refresh comes back
+    /// [`LeaseOutcome::Held`]. The real heartbeat only fires on its
+    /// [`LEASE_HEARTBEAT_INTERVAL`] (15s), so a test drives the fence directly
+    /// after arranging a real store-level takeover.
+    #[cfg(test)]
+    fn simulate_lease_loss(&self) {
+        self.lease_lost.store(true, Ordering::Release);
+    }
+
     fn closed_error(&self) -> LamboError {
         LamboError::Config(format!("session {} is closed", self.session))
+    }
+
+    /// `true` once the heartbeat latched a lost lease (T86-2).
+    fn lease_lost(&self) -> bool {
+        self.lease_lost.load(Ordering::Acquire)
+    }
+
+    /// The honest refusal a fenced handle returns (T86-2): another writer owns
+    /// the session now, so this process is no longer the writer and refuses to
+    /// touch the graph. A `Conflict`, the same class as the build-time
+    /// single-writer refusal.
+    fn lease_lost_error(&self) -> LamboError {
+        LamboError::Conflict(format!(
+            "session {} lost its single-writer lease: this process's lease expired (the store was \
+             unreachable past the {}s TTL) and another writer took the session. This handle is no \
+             longer the writer and refuses further writes — its tail will not be flushed. Spec \
+             §2.2 is one writer per session; an operator must reconcile and, if needed, force a \
+             takeover: {}",
+            self.session,
+            LEASE_TTL.as_secs(),
+            crate::store::lease::OPERATOR_OVERRIDE,
+        ))
     }
 
     /// Enter the writers gate from an **async** method (T81-1).
@@ -1733,8 +1822,16 @@ impl Memory {
     /// `closed`, the write is refused and never touched the graph.
     async fn begin_write(&self) -> Result<AsyncRwLockReadGuard<'_, ()>, LamboError> {
         self.ensure_open()?;
+        // T86-2: a fenced handle (lost its lease) refuses before it touches the
+        // gate — the strongest refusal, checked first.
+        if self.lease_lost() {
+            return Err(self.lease_lost_error());
+        }
         let permit = self.writers.read().await;
         self.ensure_open()?;
+        if self.lease_lost() {
+            return Err(self.lease_lost_error());
+        }
         Ok(permit)
     }
 
@@ -1762,8 +1859,15 @@ impl Memory {
     /// blind-spot class as T81-4's `biased;`.
     fn begin_write_sync(&self) -> Result<AsyncRwLockReadGuard<'_, ()>, LamboError> {
         self.ensure_open()?;
+        // T86-2: fenced handles refuse before touching the gate (see `begin_write`).
+        if self.lease_lost() {
+            return Err(self.lease_lost_error());
+        }
         let permit = self.writers.try_read().map_err(|_| self.closed_error())?;
         self.ensure_open()?;
+        if self.lease_lost() {
+            return Err(self.lease_lost_error());
+        }
         Ok(permit)
     }
 }
@@ -2653,6 +2757,114 @@ mod tests {
         first.close().await.unwrap();
         let second = memory_on(store, "leased").await;
         second.close().await.unwrap();
+    }
+
+    /// T86-2: a holder that LOSES its lease is FENCED. After the store starves
+    /// its heartbeat past the TTL and another writer takes over, this handle must
+    /// refuse every further write and must NOT flush or release — otherwise the
+    /// two writers flush divergent graphs into one session (the exact split-brain
+    /// the lease prevents). Simulates the outage-plus-takeover the heartbeat sees.
+    #[tokio::test]
+    async fn a_lost_lease_fences_the_writer_and_stops_the_flush() {
+        let store = Arc::new(MemoryStore::new());
+        let session = SessionId::new("fenced");
+        let first = Memory::builder()
+            .session("fenced")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone() as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect("build");
+
+        // A tail exists but nothing is durable yet (hour-long flush interval).
+        first
+            .derive(&[("before loss", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        assert!(
+            store.load_session(&session).await.is_err(),
+            "nothing flushed yet"
+        );
+
+        // Store outage past the TTL, then a DIFFERENT holder takes the session
+        // over — exactly what the heartbeat's next refresh observes as `Held`.
+        store.force_expire_lease(&session);
+        let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
+        let outcome = store
+            .acquire_lease(&session, &taker, LEASE_TTL)
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_acquired(),
+            "agent-b takes over the expired lease"
+        );
+
+        // The heartbeat would latch the fence on its next tick; drive it directly.
+        first.simulate_lease_loss();
+
+        // 1. Every further write is refused with the honest lease-lost message.
+        let derive_err = first
+            .derive(&[("after loss", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .expect_err("a fenced handle must refuse derive");
+        let msg = derive_err.to_string();
+        assert!(msg.contains("lost its single-writer lease"), "{msg}");
+        assert!(msg.contains("no longer the writer"), "{msg}");
+
+        let action_err = first
+            .record_action(&Action {
+                action: "write after loss",
+                produces: &["x"],
+                modifies: &[],
+                depends_on: &[],
+            })
+            .expect_err("a fenced handle must refuse record_action");
+        assert!(action_err
+            .to_string()
+            .contains("lost its single-writer lease"));
+
+        let reserve_err = first
+            .reserve(NodeId::new(), Duration::from_secs(60))
+            .expect_err("a fenced handle must refuse reserve");
+        assert!(reserve_err
+            .to_string()
+            .contains("lost its single-writer lease"));
+
+        // 2. close() refuses to flush (no overwrite) and does not release.
+        let close_err = first
+            .close()
+            .await
+            .expect_err("a fenced close must not flush or release");
+        assert!(close_err
+            .to_string()
+            .contains("lost its single-writer lease"));
+
+        // No flush ever landed: the store has no concepts from `first`.
+        assert!(
+            store.load_session(&session).await.is_err(),
+            "a fenced handle must never persist its tail — the new holder owns the session"
+        );
+
+        // The takeover holder still owns the lease: the fenced close did NOT
+        // release it (a stale release would evict the new writer). A third,
+        // distinct holder is therefore refused.
+        let third = store
+            .acquire_lease(
+                &session,
+                &LeaseHolder::for_this_process(&AgentId::new("agent-c")),
+                LEASE_TTL,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !third.is_acquired(),
+            "agent-b's lease is intact — the fenced handle must not release it"
+        );
+
+        drop(first);
     }
 
     /// T8.6: exactly one holder and one honest refusal, in-process — the memory

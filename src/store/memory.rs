@@ -286,6 +286,17 @@ impl MemoryStore {
             .map_err(|e| StoreError::Backend(format!("age duration out of range: {e}")))?;
         Ok(now - d)
     }
+
+    /// Test hook (T86-2): force a session's lease to have already expired, so a
+    /// different holder's next `acquire_lease` takes it over — the store-side of
+    /// simulating a lost lease (a heartbeat starved past the TTL). No production
+    /// path expires a lease by hand; the operator override is a DELETE.
+    #[cfg(test)]
+    pub(crate) fn force_expire_lease(&self, session: &SessionId) {
+        if let Some(row) = self.leases.write().get_mut(&session.0) {
+            row.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+    }
 }
 
 #[async_trait]
