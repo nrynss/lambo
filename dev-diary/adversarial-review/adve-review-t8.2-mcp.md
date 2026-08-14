@@ -1232,3 +1232,84 @@ real model, not just hand-crafted JSON-RPC frames — in particular the N1 cap
 N2–N4 boundary redactions (does anything internal reach the model's context?).
 Reliable Pi config for a tiny model: `"settings":{"toolPrefix":"none"}` plus a
 `-t <lambo-tools>,mcp` allowlist so extension tools don't hijack it.
+
+---
+
+## R4 — Independent verification of the R3 remediation (2026-08-14)
+
+**Branch:** `task/t8.2-r3-remediation` @ `8d5fdb5` (5 commits over `0e77f01`).
+**Method:** independent worktree; live reproduction on the shipped binary (real MCP
+wire, `os.setsid` for true signal dispositions, SQLite store for on-disk durability
+checks) + a mutation pass on every fix (revert → does a test fail?). Tree left clean.
+
+### Verdict: REQUEST CHANGES — no P1; one P2 + several P3s.
+
+The three heavy items are **genuinely fixed and each reproduced on the binary**: N1's
+worker-starvation hang is gone (process always exits, even at 400 pipelined at-cap
+`record_action` calls with a mid-burst SIGTERM); R2-a's pre-handshake signal now runs
+`close()` with a durable session row on both stdio and http; R2-b's 10s `CLOSE_GRACE`
+bound fires and a 2nd signal force-exits in ~4ms. Gates all green (594 passed / 0 failed
+/ 3 ignored; the store-sqlite subprocess durability test passes).
+
+### P2 (blocking) — R2-b's "a restart will re-flush the tail" is FALSE
+
+`close_bounded`'s abandon-path log line and the `CLOSE_GRACE` doc-comment both tell the
+operator the abandoned tail *"was returned to the log and a restart will re-flush it."*
+Verified by restart that this is untrue: after a shutdown-time burst left 10075/16250
+concepts durable and close() was abandoned on a non-empty tail, a clean restart on the
+same store stayed at **10075** — the tail was permanently lost. The write-behind log
+lives only in the in-memory `Graph` (`src/graph/mod.rs`); there is **no on-disk WAL**, and
+`close_bounded` abandons then the process *exits* without retrying. The within-process
+retry the unit test pins (`close_bounds_a_hanging_store_and_keeps_the_tail`) is never
+exercised by the serve path. The ERROR line honestly says "not durable" but the appended
+recoverability claim misleads. **Fix:** correct the message + doc; optionally attempt one
+final bounded `store.flush(&batch)` before giving up (guard its own timeout — if close
+hung on an unreachable store, a naive final flush hangs too).
+
+### P3 — test-pinning gaps (verified by mutation)
+
+- **N1 `spawn_blocking` is not test-pinned.** Reverting it to a direct inline call keeps
+  all 588 lib tests + the durability test green. Bisecting shows the load-bearing
+  anti-hang protection is actually R2-b's `CLOSE_GRACE` bound; `spawn_blocking` is
+  defense-in-depth. Add a starvation regression test or document it as such.
+- **R2-a serve-level wiring is not test-pinned.** Unwiring the arming in `serve_stdio`
+  (back to a bare `.serve(stdio()).await`) reproduces the *exact* old bug (`rc=-15`,
+  session row durable=0) yet every test still passes — the fix is pinned only at the
+  `setup_or_shutdown` helper in isolation. Add a subprocess pre-handshake-signal test
+  (mirror `serve_sigterm_durability.rs`, signal before `initialize`, assert rc=0 + row).
+
+### P3 — other surviving issues
+
+- **Aggregate shutdown budget is unbounded.** `SHUTDOWN_GRACE`(5s) + rmcp drain +
+  `CLOSE_GRACE`(10s) reached ~12–13s live and can approach ~15s+. `the_grace_windows_are_sane`
+  checks each window `<30s` but never the **sum**, which can exceed a 10–15s supervisor
+  SIGKILL timeout. Bound or assert the sum.
+- **N8 deferral rationale is inaccurate.** The TODO justifies itself as a "human-triggered"
+  path, but MCP tools are agent-triggered and loopable; with N1 capping per-call but
+  nothing capping call *count* (rate-limit deferred to T82-16), a client can build a large
+  graph then trigger the O(total-content) `to_lowercase` in `resolve_focus` repeatedly.
+  Not a blocker (not driven live); fix the wording and track with T82-16.
+- **P3 nits:** `concept_type` enum deserialize error echoes the raw control byte back to
+  the model (violates the "never echo the raw byte" intent on that one path);
+  `redact_urls` only redacts space-delimited `://` tokens (no current warning path emits a
+  bare `host:port`, so latent, not live).
+
+### Regression sweep — CLEAN
+
+Unknown-field rejection (top-level, nested, `_meta`) intact; F18 golden allowlist passing
+and no new wire-input field added (so no new clock leak); foreign-agent reserve/release
+still fail-closed; `git diff 0e77f01 8d5fdb5 -- src/ | grep '^-.*assert'` empty (no
+assertion weakened).
+
+### Honest gaps (not reproduced)
+
+- N3 recall embed-failure warning with a live internal URL needs `VECTOR_SEARCH`, which
+  only CockroachStore has — memory/sqlite never contact the query embedder, so the shipped
+  stores are clean but the Cockroach warning path is code-read + unit-test only.
+- N8 large-graph DoS assessed statically, not driven live.
+
+### R5 remediation scope
+
+Close the P2 (message/doc + optional bounded final flush) and the two test-pinning P3s
+(they are the silent-regression risk on the agent surface); fix the aggregate-budget bound,
+the N8 rationale, and the two nits as they fit. Then R5 re-review.
