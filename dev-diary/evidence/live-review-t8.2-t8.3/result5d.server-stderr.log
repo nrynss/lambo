@@ -1,0 +1,4 @@
+2026-08-14T14:53:39.499125Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=live-mcp-5d3 agent=a existing=true match_strategy=Hybrid embedder=bge_m3 dim=1024
+2026-08-14T14:53:39.499227Z  INFO lambo::mcp::serve: lambo serve: session attached session=live-mcp-5d3 agent=a transport=Stdio
+2026-08-14T14:53:39.501928Z  INFO lambo::mcp::serve: mcp stdio: client disconnected reason=Closed
+2026-08-14T14:53:39.582605Z  INFO lambo::mcp::serve: lambo serve: session closed, tail durable

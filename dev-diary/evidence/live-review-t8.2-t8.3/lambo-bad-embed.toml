@@ -1,0 +1,8 @@
+[store]
+kind = "cockroach"
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:59999"
+model = "bge-m3-FP16"

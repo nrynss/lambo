@@ -1,5 +1,30 @@
 # Live-CockroachDB review runbook — T8.2 (MCP) + T8.3 (CLI)
 
+> **Outcome (2026-08-14, cluster `nrynss`, commit `b45c102`):** `REQUEST CHANGES` — see the full
+> record in `dev-diary/adversarial-review/adve-review-t8.2-t8.3-live.md` and the scripts/evidence
+> in `dev-diary/evidence/live-review-t8.2-t8.3/`.
+
+```text
+Gates:            fmt [x] clippy [x] default-suite [x] live --ignored [x] vector-proof [x]
+Lease (4):        cross-process refuse [x] release-on-close [x] crash-expiry [x] fencing-window [x]
+MCP (5):          durable [x] N2-control-chars [~] N1-cap+starvation [~] N3/N4-leak [x/–] shutdown-durable [x]
+CLI (6):          readers-lease-free [x] write-lease-fail-closed [x] CLI<->MCP-differential [x]
+Full stack (7):   model-driven derive+recall [x/–] durable-in-cockroach [x] real-BGE-recall [–]
+New findings:     L82-1 / P1 / src/mcp/serve.rs:55,337 / CONFIRMED
+                  L82-2 / P2 / src/cli/caps.rs:154 / CONFIRMED
+                  L82-4 / P2 / src/graph/hybrid.rs:478 / CONFIRMED (behavior)
+                  L82-3 / P3 (runbook defect) / Pi has no MCP / CONFIRMED
+Verdict:          REQUEST CHANGES
+Notes:            model-driven MCP leg done via OMP + DeepSeek Flash (works); recall NEVER used
+                  real BGE — derive surface stores no embeddings (L82-4); N4 not fault-injected;
+                  one ad-hoc "edge target not found" did not reproduce.
+```
+
+`[~]` partially passed (5b U+202E accepted = L82-2; 5c SIGTERM discards tail = L82-1).
+`[–]` not reproducible as scripted (7b/7c blocked by Pi having no MCP client).
+
+---
+
 A step-by-step review you run on a machine with real CockroachDB access. It exercises the
 MCP server and the CLI against a live cluster, with real BGE-M3 embeddings over llama.cpp,
 and a model-driven end-to-end via a Pi agent running LFM2.5-230M. It is written to poke the

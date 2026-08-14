@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "toolPrefix": "none"
+  },
+  "mcpServers": {
+    "lambo": {
+      "command": "/home/nryn/work/lambo/target/debug/lambo",
+      "args": [
+        "--config",
+        "/tmp/pi-lambo-project/lambo.cockroach.toml",
+        "serve",
+        "--session",
+        "pi-live",
+        "--agent",
+        "pi-agent",
+        "--transport",
+        "stdio"
+      ],
+      "lifecycle": "eager",
+      "directTools": true
+    }
+  }
+}
