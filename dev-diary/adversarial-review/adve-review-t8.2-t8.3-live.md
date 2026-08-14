@@ -312,8 +312,14 @@ dedupe; chunking; every mutation covered exactly once). `sql_shape_is_a_multi_ro
 asserts the *generated* PostgreSQL — 48 placeholders for 3 rows, a `::VECTOR` cast on each
 row's embedding placeholder, exactly one `ON CONFLICT` — because that text is the half no
 local test can put in front of a cluster. Two SQLite tests execute the dedupe and the chunking
-against a real SQL engine, and both were verified to **fail** when the first-canonization rule
-is broken. Five tests in `memory`, including a burst-drain contrast that reproduces the
+against a real SQL engine. ~~Both were verified to **fail** when the first-canonization rule
+is broken.~~ **Corrected 2026-08-15 (R1-3, this record): only one of the two is a pin on that
+rule.** Breaking `dedupe_concepts` to plain last-wins fails
+`a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay`;
+`a_batch_larger_than_the_chunk_limit_round_trips_whole` **passes**, and correctly should — it
+carries no canonization assertion and exists to pin the chunk split, not the dedupe rule. The
+original sentence claimed two pins where the code has one. Five tests in `memory`, including a
+burst-drain contrast that reproduces the
 timeout under the old per-mutation cost model and passes under the new one, and the lease
 release driven through `serve`'s real bounded-close body.
 
@@ -342,7 +348,11 @@ Two deliberate exceptions, both documented at the table:
   and several Indic scripts and are the glue in emoji ZWJ sequences; refusing them would reject
   legitimate concept text. Neither can reorder or conceal a visible character — they only join
   or separate adjacent glyphs — so the threat model (bidi spoofing, invisible smuggling) is
-  still fully covered.
+  ~~still fully covered~~. **Corrected 2026-08-15 (R1-2, `5b2e15e`): "fully covered" was
+  false in two independent ways** — the joiners fork canonical keys (concealment is not the
+  only threat), and the table's *Cf* scope missed every invisible codepoint outside that
+  category. Both are addressed in the R2 section below; the allowance itself survives, now
+  paired with a strip in the canonicalizer that makes it safe.
 * **Arabic number-formatting signs** (`U+0600–U+0605`, `U+06DD`, `U+070F`, `U+0890–U+0891`,
   `U+08E2`) are Cf but are ordinary Arabic text with no direction or concealment capability.
   `U+061C` ARABIC LETTER MARK *is* refused — it is a bidi control.
@@ -721,3 +731,261 @@ checks and three adversarial probes (generated-SQL dump, interaction-reupsert
 FK, ZWJ / non-Cf gap) were applied transiently and reverted with
 `git checkout`; the tree was verified clean after each. No file outside this
 document was left modified.
+
+---
+
+# R2 remediation (2026-08-15)
+
+Remediation agent, branch `task/live-l82-remediation` (off `47d7400`). Scope: the
+six R1 findings. The reviewer's R1 text above is untouched except at the two points
+R1-2 and R1-3 asked to be corrected, where the original wording is struck through in
+place rather than rewritten.
+
+**Disposition summary: 6 of 6 addressed — 5 FIXED, 1 CORRECTED (doc-only).**
+
+| # | P | Disposition |
+|---|---|---|
+| R1-1 | P2 | **FIXED** — `635b272`; dedupe keeps the last occurrence's values at the **first** occurrence's position, for all three buckets |
+| R1-2 | P2 | **FIXED** — `5b2e15e`; one `INVISIBLE_RANGES` table, refused at the surface and stripped from canonical keys |
+| R1-3 | P3 | **CORRECTED** — this record; the "two SQLite pins" sentence is struck through and replaced above |
+| R1-4 | P3 | **FIXED** — `635b272`; shared column constants + `const _: () = assert!()` per adapter per bucket |
+| R1-5 | P3 | **FIXED** — `635b272`; `CanonizationTransition` added to the barrier test (5 of 5) |
+| R1-6 | P3 | **CONFIRMED then FIXED** — `635b272`; it is a *regression*, not merely an undocumented precondition |
+
+## R1-1 — the fix, and why it is uniform
+
+The reviewer's diagnosis is exact and the repro reproduced first try. `dedupe_last`
+kept each key at the position of its **last** occurrence, which *relocates* a row
+past everything between its first and last appearance;
+`interactions.previous_id REFERENCES interactions(id)` is a self FK, so
+`[i1, i2(prev=i1), i1]` emitted `i2` before the row it references.
+
+`dedupe_last_at_first_position` keeps the last occurrence's **values** at the first
+occurrence's **position**. The reason first-position is right is not "it happens to
+avoid this FK" — it is that row-by-row replay *inserts* a key the first time it
+appears and `DO UPDATE`s it thereafter, so first-occurrence order **is** the order
+in which rows come into existence under the model the whole planner is defined
+against. Emitting there preserves reference-before-use wherever replay had it.
+
+Values-last is unchanged and still matches replay. Taking the FK-bearing column
+from the last occurrence is safe because `Graph::insert_interaction`
+(`src/graph/graph.rs:350-362`) rejects a re-upsert that would move an interaction
+within the temporal chain, so `previous_id` is invariant across occurrences of one
+id — the choice of occurrence cannot change which row is referenced.
+
+**On concepts and edges — a deliberate departure from the suggested direction.**
+The review says "Concepts must keep the current last-position semantics". They do
+not have to. Checked against the DDL: `concepts` carries no intra-table FK
+(`origin_interaction` points at `interactions`, and `Buckets::drain_into` drains
+that bucket first — `migrations/cockroach/001_init.sql:40`), and `edges` carries no
+`REFERENCES` on `source`/`target` at all (`:141-151`). So for both tables position
+is unobservable and the rule is a no-op in effect. It is applied uniformly anyway,
+because the bug class is "relocation past a row that can reference you", and a
+uniform rule means no future column added to `concepts` or `edges` can reintroduce
+it via an arm that kept the relocating spelling. The one thing that genuinely must
+not move is the concept **canonization** rule (values-first for those three
+columns), and that is untouched —
+`a_repeated_concept_collapses_last_wins_but_keeps_the_first_canonization` still
+passes unmodified.
+
+Also checked and unchanged: the `edges` natural-key dedupe still emits `winner`
+first in `edges_dedupe_on_the_natural_key_not_the_id` (the last occurrence of the
+`Causal` key precedes the `Dependency` row either way), so the assertion is the same
+assertion with a corrected comment.
+
+**Test proof.** Four new tests, verified to fail before and pass after by restoring
+the relocating spelling transiently:
+
+| Test | Under the old rule |
+|---|---|
+| `batch::a_repeated_interaction_keeps_its_first_position` | FAILED — order `[i2, i1]` |
+| `batch::dedupe_never_moves_a_row_later_in_the_plan` | FAILED — last-seen order |
+| `batch::seed_rows_collapse_repeats_like_the_flush_path` | FAILED — last-seen order |
+| `sqlite::a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it` | FAILED — **`Constraint("787")`**, i.e. `SQLITE_CONSTRAINT_FOREIGNKEY` |
+
+The SQLite test is the reviewer's reproduction end to end against a real engine with
+`PRAGMA foreign_keys = ON`, and it carries the adjacent-repeat control **first** so
+the control still executes when the repro fails — which is what makes the pair
+evidence about *relocation* rather than about duplicates. Under the old rule the
+control passes and only the non-adjacent case fails, exactly as the reviewer
+measured.
+
+## R1-2 — the design choice: strip *and* reject, from one table
+
+The two holes have different natures, so the fix has two rules — but **one table**,
+because two copies of "what is invisible" would drift.
+
+`src/graph/canonical.rs` now owns `INVISIBLE_RANGES`: "codepoints that render as
+nothing, or as an empty cell". Two consumers, opposite policies:
+
+* **`normalize_tokens` STRIPS the whole table**, joiners included, before NFC. The
+  canonical key becomes invariant under every codepoint a reviewer cannot see, so
+  text that renders identically always produces one key. This closes (a)
+  structurally rather than by enumerating attackers' choices.
+* **`caps::check_size` REFUSES the whole table except `TEXT_REQUIRED_INVISIBLE`** —
+  `U+200C`/`U+200D`, the variation selectors, and `U+034F` CGJ. This closes (b).
+
+The two compose into the property that matters: *whatever may be stored cannot
+affect a key, and whatever could affect a key cannot be stored.*
+
+**Why strip rather than reject, for the joiners.** The original Persian/Indic/emoji
+rationale is correct — rejecting `U+200D` rejects legitimate concept text, and
+`👨‍👩‍👧` is not an attack. What made the allowance indefensible was not the
+allowance, it was that the key could see the character. Once the key cannot, the
+attack disappears and the legitimate text survives. Rejecting would have been the
+cheaper edit and the worse product decision.
+
+**Why the exception list grew beyond the two joiners.** `U+FE0F`
+VARIATION SELECTOR-16 forks a key exactly as `U+200D` does, and was accepted before
+this change (it is category *Mn*, so it was never in the *Cf* table and R1-2(b) did
+not list it either). Fixing only the reviewer's examples would have left an
+identical hole one round from being found. Variation selectors and CGJ were
+therefore added to the **strip** set; their acceptance is unchanged.
+
+**Cost of the (b) rejections, stated plainly.** Refusing `U+115F`/`U+1160`/`U+3164`/
+`U+FFA0` costs archaic Hangul jamo-filler sequences; refusing `U+2800` costs braille
+written with explicit blank cells; refusing `U+17B4`/`U+17B5` costs Khmer text using
+codepoints Unicode itself discourages. All are outside what a concept's content is
+for, and the alternative is leaving `U+3164` — the codepoint most used in the wild
+for invisible smuggling — accepted.
+
+**Migration story — honest version.** The change is **forward-only and
+non-breaking**, not retroactive.
+
+* A concept row written before this change whose `content` carries a joiner keeps
+  its *unstripped* `canonical_key`. Recomputing from the same content now yields a
+  different string, so canonicalization will not match that row.
+* That is not a regression: those rows were *already* unmatchable — being
+  unmergeable is precisely what R1-2(a) reported. They stay the orphans they were.
+* No error path is opened. The stripped key is a different string from the stored
+  unstripped one, so it cannot collide with it under the partial unique index
+  `concepts_key_non_obs_idx`; and `Graph::insert_concept`'s in-RAM uniqueness rule
+  sees the same two distinct strings.
+* Every other codepoint in the table has been refused at the surface since
+  `b8c0871` (the *Cf* pass) or is refused as of `5b2e15e` (the blanks), so the only
+  data that can carry one is content written before those commits.
+* Data at risk in practice: local SQLite test databases and the demo Cockroach
+  cluster. Repairing them would mean a backfill that recomputes `canonical_key` for
+  every row — deliberately **not** done here, because a backfill can converge two
+  existing rows onto one key and would then violate `concepts_key_non_obs_idx`
+  mid-migration. That is a separate, schema-aware task, not a rider on a validator
+  fix.
+
+**Test proof**, verified to fail before by two transient mutations:
+
+| Mutation | Result |
+|---|---|
+| strip removed from `normalize_tokens` | `canonical::invisible_characters_cannot_fork_a_canonical_key`, `canonical::a_composition_blocker_cannot_fork_a_key` and `caps::characters_this_surface_allows_cannot_fork_a_canonical_key` all FAILED |
+| the five non-*Cf* blank ranges removed from the table | `caps::invisible_format_characters_are_refused_by_codepoint` FAILED |
+
+Coverage: the reviewer's exact key-forking repro across 11 codepoints plus step-5
+matching against a real `Graph`; a CGJ composition-blocker case (which is why the
+strip runs *before* NFC, not after); a table ordering/disjointness invariant and a
+proof that the exception list is a strict subset of the strip set; seven new
+refusal cases for the non-*Cf* blanks in `caps`; three more over the wire on the MCP
+N2 test (`U+3164`, `U+FFA0`, `U+2800` through `lambo_derive`).
+
+Unchanged and re-verified: `fixture_canonicalization_cases_all_pass` and
+`nfc_leaves_every_pinned_canonicalization_case_unchanged` — the pinned cases table
+is ASCII, which contains none of these codepoints, so no pinned key moved.
+
+## R1-3 — corrected
+
+Correct as reported. The remediation record's "Tests" paragraph is struck through
+above and replaced with the accurate claim: breaking `dedupe_concepts` to plain
+last-wins fails `a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay`
+only. `a_batch_larger_than_the_chunk_limit_round_trips_whole` passes, and should —
+it carries no canonization assertion and pins the chunk split, not the dedupe rule.
+One pin, not two.
+
+## R1-4 — machine-checked ceilings
+
+`INTERACTION_COLUMNS` / `CONCEPT_COLUMNS` / `EDGE_COLUMNS` (6 / 16 / 9) now live in
+`store::batch`, so both adapters divide the same numbers into their own backend
+limit, and each adapter carries three `const _: () = assert!(rows * cols <= limit)`
+next to its `BULK_LIMITS` — against `SQLITE_MAX_VARIABLE_NUMBER = 999` and
+`PG_MAX_BIND_PARAMETERS = 65535`. The reviewer's example is now a build failure:
+`concepts: 70` gives `70 × 16 = 1120 > 999` and does not compile.
+
+The other half of the drift was that the column counts themselves were literals in
+the shape test. `upsert_placeholder_shapes_match_structs` now asserts the
+*generated* SQL against the same constants the asserts divide by, so adding a column
+to a statement without revisiting the limits fails that test rather than silently
+widening a chunk.
+
+## R1-5 — fifth barrier variant
+
+`CanonizationTransition` added to `every_non_upsert_variant_is_a_barrier`; 5 of 5.
+Correct-by-construction via the catch-all arm, as the reviewer says, but it is the
+one barrier the concept dedupe rule depends on — first-occurrence canonization is
+only sound because a demote between two upserts of one concept cannot be collapsed
+across — so it earns an executable statement rather than a comment.
+
+## R1-6 — investigated: CONFIRMED, and it is a regression
+
+Marked PLAUSIBLE; it is real, and stronger than the finding claims. The reviewer's
+reasoning about `Graph::snapshot` is right — `interactions` comes out in temporal
+chain order (`graph.rs:252-259`, FK-safe), `concepts` from a map keyed by id and
+`edges` from a map keyed by id with a natural-key index enforcing one edge per
+`(source, target, edge_type)`, so a snapshot built by the graph is duplicate-free by
+construction. `Graph::from_snapshot` (`graph.rs:200-206`) additionally *rejects* a
+snapshot carrying duplicate natural-key edges.
+
+What makes it more than a documentation gap: `seed` is a public method taking an
+arbitrary `&GraphSnapshot`, and the path it replaced was a row-at-a-time loop that
+**last-wins'd** a repeated row. Feeding the same input to a multi-row statement now
+fails it outright. So the bulk-write change silently narrowed what `seed` accepts —
+a regression introduced by the L82-1 remediation itself, not a pre-existing
+precondition.
+
+Fixed rather than documented: `seed_concept_rows` / `seed_edge_rows` run the
+snapshot through the same dedupe a flush uses (concepts: ordinary columns last,
+canonization first; edges: the natural key), so the seed path once again does what
+the loop it replaced did. Validation stays where it belongs — `Graph::from_snapshot`
+is the tier that rejects a malformed snapshot; the store's job is to persist.
+
+## Gates
+
+Full binding block, all nine green, counts exact.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **647** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --features store-sqlite` | **694** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
+640 → 647 lib (+7) and 686 → 694 (+8; the extra one is the SQLite FK repro).
+Zero `#[test]` / `#[tokio::test]` attributes removed; +8 added.
+
+The removed-assertion sweep over `src` and `tests` since `47d7400` returns **four
+lines, all 1:1 replacements in the same test, none weakened**:
+
+| Removed | Replaced by | Why |
+|---|---|---|
+| `assert_eq!(rows[0].id, winner, "last write wins, in the last position")` | the same assertion, message `"…at the first occurrence's position"` | R1-1 changed where the row is emitted, not what survives. The assertion is byte-identical apart from the message and a rustfmt reflow; the `winner` edge is first under both rules (`batch.rs`, `edges_dedupe_on_the_natural_key_not_the_id`) |
+| `assert_eq!(placeholder_max(interaction_upsert_query(&[&i]).sql()), 6)` | `… , INTERACTION_COLUMNS` | R1-4. Same value, now the *same symbol* the bind-parameter const-assert divides by |
+| `assert_eq!(placeholder_max(&concept_sql_for(1)), 16)` | `… , CONCEPT_COLUMNS` | as above |
+| `assert_eq!(placeholder_max(edge_upsert_query(&[&e]).sql()), 9)` | `… , EDGE_COLUMNS` | as above |
+
+The last three are strengthenings, not cosmetic renames: with literals, a column
+added to a statement *and* to the test would leave the ceiling arithmetic silently
+stale; against the shared constants the same edit either fails this test or moves
+the number the `const _: () = assert!()` uses.
+
+## Live-cluster re-verification list — unchanged, plus one
+
+The reviewer's six items all still stand. R1-1 adds a seventh that only a cluster
+can settle, and it is cheap to fold into item 2:
+
+7. **The interaction self-FK under CockroachDB specifically.** The fix is verified
+   against SQLite, where FK enforcement is per-statement with
+   `PRAGMA foreign_keys = ON`. CockroachDB checks foreign keys differently, so the
+   *old* code may or may not have failed there — the fix is correct either way, but
+   "Cockroach would also have dead-lettered" is asserted from the docs, not
+   measured. Any conformance run over `flush` exercises the new ordering regardless.
