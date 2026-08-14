@@ -523,6 +523,51 @@ benchmark that feeds it.
 
 ---
 
+### T8.7 — MCP surface hardening (the non-demo remainder of T8.2)
+```yaml
+requires:   T8.2 (CLEAN)
+fixture-ok: yes
+owns:       src/mcp/server.rs, src/mcp/serve.rs (hardening only — no new tools)
+appends-to: src/main.rs (serve flags for auth/rate-limit config, if any)
+status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
+```
+Created 2026-08-14: collects everything the T8.2 review deferred that is **not** demo-app
+work (it was loosely parked at "T8.5/P9" — T8.5 is the demo page and does no hardening, so
+that pointer was drift). This is the security/robustness half of the agent-facing surface.
+
+**Contents:**
+
+- **T82-16 remainder** (the half not fixed in T8.2): the HTTP transport is
+  **unauthenticated, unrate-limited, and mints an MCP session per connection unboundedly**
+  (`LocalSessionManager`). Add: a bearer/token gate on the HTTP transport (loopback-only
+  stays the default; auth is required the moment `--bind` is non-loopback), a request
+  **rate limit**, a request-size limit if not already bounded, and a **cap on concurrent
+  MCP sessions** with honest refusal past it. This is the precondition for exposing the
+  surface to a real swarm.
+- **R5-verify residual #3 — `resolve_focus` O(total-content) `to_lowercase`**
+  (`src/mcp/server.rs`, the `lambo_inspect` fuzzy leg). Only a real amplification vector
+  *with* the missing rate limit, which is why it lands here alongside it. Fix the
+  allocation (allocation-free, Unicode-correct case-fold) **or** rely on the rate limit +
+  a graph-size guard — decide during the task.
+- **R5-verify residual #1 — `concept_type` variant-error echoes an escaped control byte.**
+  Not interceptable at the lambo layer today (the error is built inside rmcp's
+  `Parameters<T>` extractor). Track here; fix if rmcp exposes an extraction-error hook,
+  else document as accepted with a dated rationale.
+- **R5-verify residual #2 — `redact_urls` misses a bare `host:port`.** Latent (no live
+  emitter). Harden `redact_urls` to redact-at-source, or confirm no schemeless-endpoint
+  warning path exists and close it as won't-fix with reasoning.
+
+**Explicitly NOT here:** anything the demo page renders (that is T8.5); provisioning
+(T8.3's `provision`); the swarm *benchmark* (P9 T9.6).
+
+**Done when:** the HTTP transport refuses unauthenticated non-loopback requests, enforces a
+documented rate limit and concurrent-session cap (each with a test), residual #3 is fixed
+or provably defused by the rate limit + a graph-size guard, and residuals #1/#2 are each
+either fixed or closed with a dated accepted-rationale in the review file.
+
+---
+
 ## Exit criteria
 
 - [ ] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist
@@ -543,6 +588,10 @@ benchmark that feeds it.
       text) crosses the wire. Runs on the MBP; evidence into `dev-diary/evidence/`. This is
       the correctness half; the P9 T9.6 benchmark is the scale half.
 - [ ] Demo app reachable and honest (renders real recall output, not canned text)
+- [ ] **T8.7 surface hardening:** HTTP transport refuses unauthenticated non-loopback
+      requests, enforces a documented rate limit + concurrent-session cap (tested);
+      T82-16 remainder + R5-verify residuals #1/#2/#3 each fixed or closed with a dated
+      accepted-rationale
 - [ ] Every task reached a CLEAN review verdict; all review files closed in
       `dev-diary/adversarial-review/`
 

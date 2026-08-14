@@ -1351,15 +1351,21 @@ Every R5 disposition verified, not rubber-stamped:
 `cargo test` 588 passed / 0 failed / 1 ignored · `serve_sigterm_durability` 1 passed ·
 `serve_pre_handshake_durability` 1 passed.
 
-### Accepted residuals (non-blocking, tracked)
+### Accepted residuals (non-blocking) — all tracked to **T8.7** (MCP surface hardening)
+
+Retarget note (2026-08-14): T82-16's remainder and these residuals were loosely deferred
+to "T8.5/P9". T8.5 is the demo page and does no hardening, so that pointer was drift. They
+now have a dedicated home — **T8.7 — MCP surface hardening** (PHASE-8-surface.md) — which
+carries T82-16's auth/rate-limit/session-cap plus all three residuals below.
 
 1. `concept_type` variant-error echoes an escaped control byte — not interceptable without
    hand-rolling deserialize across all seven tools (error is built inside rmcp's
-   `Parameters<T>` extractor). Revisit if rmcp adds an extraction-error hook.
+   `Parameters<T>` extractor). → T8.7; fix if rmcp adds an extraction-error hook, else
+   close with a dated accepted-rationale.
 2. `redact_urls` misses a bare `host:port` — latent (no live warning path emits a
-   schemeless endpoint); a colon matcher would over-redact ordinary text.
-3. N8 `resolve_focus` per-call `to_lowercase` cost — deferred with the rate-limit work
-   (T82-16); rationale now accurate.
+   schemeless endpoint); a colon matcher would over-redact ordinary text. → T8.7.
+3. N8 `resolve_focus` per-call `to_lowercase` cost — only a real vector *with* the missing
+   rate limit, so it lands with T82-16's rate-limit work in **T8.7**.
 
 ### Disposition
 
