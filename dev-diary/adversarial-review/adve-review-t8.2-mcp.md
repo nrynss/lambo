@@ -920,3 +920,154 @@ is empty. Files touched: `src/mcp/serve.rs`, `src/mcp/server.rs`, `src/main.rs`,
 `dev-diary/evidence/t8.2-mcp-client/README.md`,
 `dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl` (new),
 `dev-diary/PHASE-8-surface.md`, and this file.
+
+---
+
+## R2 — verify (2026-08-14)
+
+> **⚠ CONFLICT OF INTEREST — READ THIS FIRST.** This round was performed by the
+> **orchestrator**, not by an independent review agent. The orchestrator committed
+> the R1 remediation (`f465fd1`) and had already re-run parts of its P1 evidence
+> before this round began. Three independent R2 agents were launched and none
+> completed (two died on API cost limits, one was cancelled). The user then
+> directed the orchestrator to verify and push.
+>
+> Treat this as **self-verification with the reviewer's hands on the evidence**,
+> not as an adversarial round. Everything below is reproducible from the commands
+> given; nothing rests on assertion. Where something was NOT verified, it is
+> listed as such rather than assumed.
+
+**Verdict: CLEAN (non-independent) — with 3 residuals recorded and 1 item unverified.**
+T8.2's three P1s are fixed; two were reproduced first-hand here, the third only
+partially (see "Not verified"). No new P1 was found.
+
+### Gates (re-run on the clean tree at `f465fd1`)
+
+- `cargo fmt --all -- --check` — clean.
+- `cargo test` — **580 lib** + 2 bin + 5 integration + 1 doc, **0 failed**, 3 ignored.
+  The R1 remediation report claimed 581; **580 is correct** — it reruns stably
+  across repeated invocations. Baseline before T8.2 was 562, so +18, no removals.
+- `cargo clippy --all-targets -- -D warnings` and the same with
+  `--features store-cockroach,store-memory,fixtures` — both clean.
+- `cargo check --no-default-features` — clean.
+- `git diff f465fd1~1 f465fd1 | grep '^-.*assert'` — **empty**; no assertion was
+  deleted to make anything pass.
+
+### T82-1 — stdio signals: FIXED, verified first-hand
+
+Post-handshake (`initialize` + `notifications/initialized`, then signal):
+
+```
+SIGINT   rc=0  exited_in=0.00s  "session closed" logged: yes
+SIGTERM  rc=0  exited_in=0.00s  "session closed" logged: yes
+```
+(R1 measured `rc=-2` / `rc=-15` with no close.)
+
+**Methodology note that matters:** an initial attempt signalled the process
+*before* the handshake and appeared to show the fix had failed. It had not — the
+test was wrong. See the residual below, which that mistake surfaced.
+
+### Shutdown durability — the R2 open question — ANSWERED: genuinely durable
+
+R1 left open whether the tail is truly durable at shutdown or merely *logged* as
+closed, and whether the remediation's `runtime.shutdown_background()` could
+abandon work. Settled with a real durable store:
+
+1. `sqlite3 durab.db < migrations/sqlite/001_init.sql`
+2. `LAMBO_STORE=sqlite LAMBO_SQLITE_PATH=durab.db lambo serve --session durab --transport stdio`
+3. handshake → `lambo_derive` two concepts → **SIGTERM immediately** (no time for
+   the periodic flush to run on its own)
+4. result: `rc=0`, log `Memory session closed (tail flushed) mutations=7`, and
+
+```
+SELECT content FROM concepts WHERE session_id='durab';
+  durability probe alpha
+  durability probe beta
+```
+
+The rows are **physically in SQLite**. `shutdown_background()` does not abandon
+durable work, because `close()` is awaited before it runs. This is the strongest
+single piece of evidence in the round: the COH-6 "final flush" guarantee now
+holds end-to-end through a real signal, which was fiction at R1.
+
+### T82-3 — foreign `agent_id`: FIXED, no bypass found in 8 variants
+
+Owner reserve succeeds (`isError=false`). Every foreign form is refused on BOTH
+reserve and release, with the refusal in the **text** content:
+
+```
+exact foreign (agent-b)  reserve isError=true   release isError=true
+upper (AGENT-A)          reserve isError=true   release isError=true
+surrounding whitespace   reserve isError=true   release isError=true
+empty string             reserve isError=true   release isError=true   ("agent_id must be a non-empty string")
+very long (5000 chars)   reserve isError=true   release isError=true
+cyrillic look-alike      reserve isError=true   release isError=true
+zero-width injection     reserve isError=true   release isError=true
+trailing space           reserve isError=true   release isError=true
+```
+
+A foreign release leaves the owner's lock intact (confirmed by re-inspecting the
+reserved node). No normalization/canonicalization bypass found.
+
+### T82-4 — F18 guard: FIXED, and both halves are load-bearing
+
+Mutations applied to the **nested** `WireConcept`, then reverted (tree verified
+clean afterwards):
+
+```
+nested created_at  -> 2 of 2 guard tests FAIL   (recursive walker AND allowlist)
+nested ts          -> 1 of 2 FAIL               (denylist passes it; allowlist catches)
+nested as_of       -> 1 of 2 FAIL               (denylist passes it; allowlist catches)
+```
+
+This confirms R1's prediction precisely: the name denylist alone would have
+missed `ts`/`as_of`/`client_clock_ms`, so the golden allowlist is the necessary
+half, not a nicety. The R1 defect (guard walked only top-level properties) is
+genuinely closed.
+
+### T82-8 — evidence honesty: FIXED
+
+`stdio-all-seven-tools.jsonl` independently parsed: **15 `tools/call` requests,
+15 results, 7 distinct tools**, with request AND response frames. The overclaim
+("all seven driven end-to-end" when the transcript held four) is corrected in
+both places it appeared, struck through rather than quietly reworded. The
+"model-driven call NOT verified" disclosure remains accurate and is not
+overstated anywhere.
+
+### NOT VERIFIED in this round (honest gaps)
+
+1. **T82-2 (HTTP + open SSE) not independently reproduced.** An attempt to hold a
+   raw SSE stream open got `HTTP/1.1 400 Bad Request` — no real stream was
+   established, so the subsequent clean `rc=0` exit proves nothing about the
+   blocking case. **This round relies on the R1 remediation's own demonstration**
+   (`rc=0` after 5.02s, i.e. the `SHUTDOWN_GRACE` window doing its job). The code
+   path is shared with stdio (`run_until_shutdown`), which raises confidence, but
+   this specific P1 has not been adversarially reproduced by a second party.
+2. The remediation's remaining self-flagged weak spots beyond the two settled
+   here (no `spawn_blocking` in `src/`; `parking_lot` does not poison) were not
+   each independently probed.
+3. The two deferrals (T82-12 → T8.4, auth/rate-limit half of T82-16 → T8.5/P9)
+   were read and judged reasonable on their stated reasoning, not stress-tested.
+
+### Residuals carried (none blocking)
+
+- **R2-a (new, P3): a signal arriving BEFORE the MCP handshake completes still
+  kills the process without `close()` running**, and `Memory` is already attached
+  by then (a clean run flushes `mutations=1` at that stage). Narrow — it requires
+  a signal in the window between session attach and `initialize` — but real. The
+  fix shape is to install the shutdown race before handing off to the transport.
+- **R2-b (carried from R1 remediation): `close()` is still unbounded.** If it
+  hangs, the process hangs, and the shutdown path is already spent. Bounded in
+  practice by the task-level timeout ladder; a hard cap is a design decision, not
+  an oversight.
+- **R2-c (carried): `shutdown_background()` abandons blocking tasks by design.**
+  Safe today — verified there is no `spawn_blocking` anywhere in `src/` — but it
+  becomes a data-loss path the moment durability work moves onto one. Worth a
+  comment at the call site so a future author cannot walk into it.
+
+### Recommendation
+
+T8.2 is done for the purposes of proceeding to T8.3. **Because this round was not
+independent, an adversarial spot-check of T82-2 (HTTP + SSE shutdown) and the
+remediation's untested weak spots is worth one agent's budget before P9 ships**,
+if cost allows. That gap is recorded here rather than papered over.
