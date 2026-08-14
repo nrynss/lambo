@@ -215,9 +215,53 @@ impl std::fmt::Debug for LamboServer {
     }
 }
 
-/// Render a `Memory` failure as a caller-visible tool error.
+/// A short, detail-free class for a `Memory` failure (N4).
+///
+/// The full error can interpolate a DSN, a store URL, a file path or a driver
+/// message — none of which the model needs and any of which is worth keeping
+/// out of a model-facing string. Return the class; the detail is logged.
+fn err_class(err: &LamboError) -> &'static str {
+    match err {
+        LamboError::Store(_) => "store error",
+        LamboError::Embed(_) => "embedding error",
+        LamboError::Config(_) => "configuration error",
+        LamboError::Conflict(_) => "conflict",
+        LamboError::Other(_) => "internal error",
+    }
+}
+
+/// Render a `Memory` failure as a caller-visible tool error (N4).
+///
+/// Matches the [`contain_panic`] policy: the full detail goes to the log, the
+/// client gets a class and a pointer to the log — never the raw error, which
+/// can carry a store URL or driver message.
 fn tool_err(what: &str, err: LamboError) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("{what}: {err}"))])
+    tracing::error!(
+        tool = what,
+        error = %err,
+        "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
+    );
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{what}: {} (the detail was logged server-side)",
+        err_class(&err)
+    ))])
+}
+
+/// Replace any whitespace-delimited token that looks like a URL with a
+/// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
+/// not carry it into a model-facing string. Idempotent — a redacted token has
+/// no `://` left to match.
+fn redact_urls(s: &str) -> String {
+    s.split(' ')
+        .map(|tok| {
+            if tok.contains("://") {
+                "<redacted-url>"
+            } else {
+                tok
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Reject a parameter the server will not act on.
@@ -269,14 +313,19 @@ fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
 /// nobody. They are now a second text block. `content[0]` is deliberately left
 /// alone: for `lambo_recall` it is the T5.3 context block verbatim, and that is
 /// the artifact the calling agent reads.
+///
+/// URLs are redacted from the model-facing text (N3): a degradation warning can
+/// surface a store or embedder endpoint, which the model does not need. The raw
+/// warning is logged for the operator.
 fn attach_warnings(out: &mut CallToolResult, warnings: &[String]) {
     if warnings.is_empty() {
         return;
     }
     let mut text = String::from("warnings:");
     for w in warnings {
+        tracing::debug!(warning = %w, "mcp: warning attached to a result (raw, pre-redaction)");
         text.push_str("\n- ");
-        text.push_str(w);
+        text.push_str(&redact_urls(w));
     }
     out.content.push(ContentBlock::text(text));
 }
@@ -530,8 +579,13 @@ impl LamboServer {
         // These include `Memory::recall`'s embed-failure degradation warning —
         // the signal that a recall dropped its vector leg and returned
         // keyword-only hits. `attach_warnings` is what puts it where the model
-        // can see it (R1/T82-9).
-        warnings.extend(result.warnings.iter().cloned());
+        // can see it (R1/T82-9). Redact URLs as they enter the vec (N3) so both
+        // the text content and the structured `warnings` are clean; the raw
+        // detail is logged for the operator.
+        for w in &result.warnings {
+            tracing::debug!(warning = %w, "mcp: recall degradation warning (raw, pre-redaction)");
+        }
+        warnings.extend(result.warnings.iter().map(|w| redact_urls(w)));
 
         let hits: Vec<_> = result
             .hits
@@ -2042,6 +2096,39 @@ mod tests {
             "a refused oversized write must not have reached the graph"
         );
         s.mem.close().await.expect("close");
+    }
+
+    /// **N3/N4 pinned.** Model-facing errors and warnings carry a class or a
+    /// redaction, never a raw store URL or driver message.
+    #[test]
+    fn urls_and_raw_error_detail_are_kept_out_of_model_facing_text() {
+        // N4: the tool error is a class plus a log pointer, not the raw error
+        // (which here carries a DSN).
+        let err = tool_err(
+            "lambo_recall",
+            LamboError::Store(crate::types::StoreError::Backend(
+                "connect postgres://user:pw@db.internal:26257/lambo failed".into(),
+            )),
+        );
+        let text = text_of(&err);
+        assert!(text.contains("store error"), "must name the class: {text}");
+        assert!(
+            !text.contains("postgres://") && !text.contains("db.internal"),
+            "the raw error / endpoint must not reach the client: {text}"
+        );
+
+        // N3: a warning that surfaced an endpoint is redacted.
+        let redacted = redact_urls("embedder http://embed.internal:8080/v1 is down; keyword-only");
+        assert!(
+            !redacted.contains("http://") && !redacted.contains("embed.internal"),
+            "the URL must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<redacted-url>") && redacted.contains("keyword-only"),
+            "redaction keeps the rest of the message: {redacted}"
+        );
+        // Idempotent.
+        assert_eq!(redact_urls(&redacted), redacted);
     }
 
     /// **N2 pinned.** A NUL (or any C0 control other than tab/newline) in a
