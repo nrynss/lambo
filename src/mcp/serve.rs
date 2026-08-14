@@ -902,5 +902,51 @@ mod tests {
             // The whole point: the error path still closed the session.
             assert_closed(&m, "err path");
         }
+
+        /// **T8.6 release-on-close, tied into the lifecycle seam.** A serve
+        /// process acquires the single-writer lease on start; a clean exit
+        /// through `run_and_close` must **release** it (hand off), not leave it
+        /// to expire at the TTL. Proven by a fresh writer — a *different* holder
+        /// on the same store — attaching immediately after the close.
+        #[tokio::test]
+        async fn a_clean_close_releases_the_lease() {
+            let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+            let contract = EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            };
+            let first = Arc::new(
+                Memory::builder()
+                    .session("serve-lease-release")
+                    .agent("agent-a")
+                    .flush_interval(Duration::from_secs(3_600))
+                    .store(store.clone())
+                    .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                    .embedding_contract(contract.clone())
+                    .build()
+                    .await
+                    .expect("build A"),
+            );
+
+            let pump = tokio::spawn(std::future::pending::<()>());
+            let out = run_and_close(first.clone(), async { Ok(()) }, pump).await;
+            assert!(out.is_ok(), "clean close: {out:?}");
+            assert_closed(&first, "release path");
+
+            // The lease was released, so a *different* writer attaches at once
+            // (a still-held lease would refuse this with a Conflict).
+            let second = Memory::builder()
+                .session("serve-lease-release")
+                .agent("agent-b")
+                .flush_interval(Duration::from_secs(3_600))
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(contract)
+                .build()
+                .await
+                .expect("a clean close must release the lease so a new writer can attach");
+            second.close().await.expect("close B");
+        }
     }
 }

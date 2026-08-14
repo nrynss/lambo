@@ -2745,6 +2745,95 @@ mod conformance {
         CockroachStore::new(cfg(dsn.to_string())).unwrap()
     }
 
+    /// T8.6 (live): the store-enforced single-writer lease across two **separate
+    /// pools** (the cross-process shape — each pool is an independent set of
+    /// connections, exactly what two processes have). One acquires, the other is
+    /// refused fail-closed and told the holder; after a release the second wins;
+    /// an unreleased lease is reclaimable only after its TTL.
+    ///
+    /// `#[ignore]`d like every live cockroach test, so a run without
+    /// `LAMBO_COCKROACH_DSN` reports it as ignored, never a skip-as-green. Run:
+    /// `cargo test --features store-cockroach,fixtures -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn single_writer_lease_is_enforced_across_pools() {
+        let Some(dsn) = dsn_or_skip("single_writer_lease_is_enforced_across_pools") else {
+            return;
+        };
+        use crate::store::lease::{LeaseHolder, LeaseOutcome};
+
+        let store_a = new_store(&dsn);
+        store_a.init_schema().await.expect("init_schema");
+        let store_b = new_store(&dsn);
+
+        // Unique session per run so a shared cluster never cross-contaminates.
+        let sid = SessionId::from(format!("t8.6-lease-{}", Uuid::new_v4()));
+        let a = LeaseHolder {
+            agent: AgentId::new("proc-a"),
+            pid: 111,
+            host: "host-a".into(),
+        };
+        let b = LeaseHolder {
+            agent: AgentId::new("proc-b"),
+            pid: 222,
+            host: "host-b".into(),
+        };
+        let ttl = Duration::from_secs(30);
+
+        // Clean any leftover row from a previous aborted run.
+        let _ = store_a.release_lease(&sid, &a).await;
+
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A acquire")
+            .is_acquired());
+
+        match store_b.acquire_lease(&sid, &b, ttl).await.expect("B acquire") {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("the second pool must be refused, got {other:?}"),
+        }
+
+        // Refresh keeps acquired_at.
+        let LeaseOutcome::Acquired(first) = store_a.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh");
+        };
+        let LeaseOutcome::Acquired(refreshed) =
+            store_a.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh 2");
+        };
+        assert_eq!(first.acquired_at, refreshed.acquired_at);
+
+        // Release → B takes it.
+        store_a.release_lease(&sid, &a).await.expect("A release");
+        assert!(store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B re-acquire")
+            .is_acquired());
+
+        // Expiry-after-crash: B holds a short-TTL lease and never releases; A is
+        // refused before the TTL and reclaims after it.
+        let short = Duration::from_secs(2);
+        store_b.release_lease(&sid, &b).await.ok();
+        store_b.acquire_lease(&sid, &b, short).await.expect("B short");
+        assert!(matches!(
+            store_a.acquire_lease(&sid, &a, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A reclaim after expiry")
+            .is_acquired());
+
+        // Cleanup.
+        store_a.release_lease(&sid, &a).await.ok();
+    }
+
     /// T7.4: prove the ANN accuracy dial actually reaches the server **through
     /// sqlx**, not merely that it parses.
     ///

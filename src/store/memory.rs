@@ -668,6 +668,117 @@ mod tests {
     use chrono::TimeZone;
     use std::sync::Arc;
 
+    fn holder(agent: &str, pid: u32) -> LeaseHolder {
+        LeaseHolder {
+            agent: AgentId::new(agent),
+            pid,
+            host: "test-host".into(),
+        }
+    }
+
+    /// T8.6: one holder acquires; a *different* holder is refused (fail closed)
+    /// with the current holder + age; a holder-scoped release frees the session.
+    #[tokio::test]
+    async fn lease_grants_one_holder_and_refuses_another() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("leased");
+        let a = holder("agent-a", 100);
+        let b = holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        assert!(store.acquire_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+
+        // A distinct, live holder is refused, and told who holds it.
+        match store.acquire_lease(&sid, &b, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("expected Held, got {other:?}"),
+        }
+
+        // A's own re-acquire (heartbeat) still succeeds.
+        assert!(store.refresh_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+
+        // Release by A frees it; B can now take it.
+        store.release_lease(&sid, &a).await.unwrap();
+        assert!(store.acquire_lease(&sid, &b, ttl).await.unwrap().is_acquired());
+    }
+
+    /// T8.6: a stale release (holder no longer owns the row) must not evict the
+    /// current holder.
+    #[tokio::test]
+    async fn a_stale_release_does_not_evict_the_new_holder() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("leased");
+        let a = holder("agent-a", 100);
+        let b = holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        store.acquire_lease(&sid, &a, ttl).await.unwrap();
+        store.release_lease(&sid, &a).await.unwrap();
+        store.acquire_lease(&sid, &b, ttl).await.unwrap();
+
+        // A's late/duplicate release names A, but B holds the row now — no-op.
+        store.release_lease(&sid, &a).await.unwrap();
+        match store.acquire_lease(&sid, &a, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, b.token()),
+            other => panic!("B's lease must survive A's stale release, got {other:?}"),
+        }
+    }
+
+    /// T8.6: expiry-after-crash. A holder that never releases (a crash) blocks a
+    /// second writer *before* the TTL and is reclaimable *after* it.
+    #[tokio::test]
+    async fn an_unreleased_lease_expires_and_is_reacquirable() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("crashed");
+        let dead = holder("agent-dead", 1);
+        let live = holder("agent-live", 2);
+        let ttl = Duration::from_millis(80);
+
+        // The "crashed" holder acquires and never releases.
+        store.acquire_lease(&sid, &dead, ttl).await.unwrap();
+
+        // Before the TTL: refused.
+        assert!(matches!(
+            store.acquire_lease(&sid, &live, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+
+        // After the TTL: the expired lease is reclaimable.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(store
+            .acquire_lease(&sid, &live, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+    }
+
+    /// T8.6: a heartbeat refresh keeps the original `acquired_at` (so "age"
+    /// measures how long this holder has held it, not time since last beat).
+    #[tokio::test]
+    async fn refresh_preserves_the_original_acquired_at() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("beat");
+        let a = holder("agent-a", 100);
+        let ttl = Duration::from_secs(30);
+
+        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap() else {
+            panic!("first acquire must succeed");
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let LeaseOutcome::Acquired(second) = store.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("refresh must succeed");
+        };
+        assert_eq!(
+            first.acquired_at, second.acquired_at,
+            "acquired_at is stable across a holder's own refreshes"
+        );
+        assert!(
+            second.expires_at > first.expires_at,
+            "the refresh extends the expiry"
+        );
+    }
+
     fn sample_session() -> (SessionId, NodeId, NodeId, NodeId) {
         let sid = SessionId::from("test-sess");
         let i1 = NodeId::new();
