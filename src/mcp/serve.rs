@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +33,19 @@ use crate::types::{DaemonEvent, LamboError};
 /// lost — the exact durability failure the signal handling exists to prevent.
 /// A dropped connection is recoverable; a dropped write-behind tail is not.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Hard bound on the final [`Memory::close`] (R2-b).
+///
+/// `close()` is otherwise unbounded: a store that hangs on the final flush would
+/// hang the process with the shutdown path already spent, which is exactly the
+/// durability-vs-liveness trade the grace windows above exist to resolve.
+/// Bounding it is safe — dropping the `close()` future returns the drained tail
+/// to the front of the graph log (see `Memory::close`'s *Cancellation* section),
+/// leaves the session closed to writers, and latches no success, so a
+/// supervisor's restart re-flushes exactly that tail. Larger than
+/// [`SHUTDOWN_GRACE`] because by the time close runs the transport is already
+/// down and this is the last thing standing between the process and exit.
+const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
 /// Which transport `lambo serve` should listen on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +171,12 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
 /// signal path is the same on each: cancel, wait up to [`SHUTDOWN_GRACE`], then
 /// drop the transport and close regardless. A client that will not let go
 /// cannot hold the tail hostage.
+///
+/// The shutdown signal is armed **before** the transport handoff (R2-a): a
+/// single, continuously-live registration threads through the pre-handshake
+/// window (the stdio handshake, the HTTP `bind`) and the transport itself, so a
+/// signal in *any* of those still reaches [`Memory::close`] instead of hitting
+/// the default disposition and killing the process with the tail un-flushed.
 pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
     let mem = Arc::new(build_memory(&opts, backends).await?);
 
@@ -175,18 +195,40 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         "lambo serve: session attached"
     );
 
-    let outcome = match opts.transport {
-        Transport::Stdio => serve_stdio(mem.clone()).await,
-        Transport::Http => serve_http(mem.clone(), &opts).await,
+    // One signal registration for the whole life of the transport — armed here,
+    // before the handoff, so the pre-handshake window is covered (R2-a). A
+    // fresh registration in `close_bounded` re-arms it for the close phase.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    let transport = async {
+        match opts.transport {
+            Transport::Stdio => serve_stdio(mem.clone(), shutdown.as_mut()).await,
+            Transport::Http => serve_http(mem.clone(), &opts, shutdown.as_mut()).await,
+        }
     };
 
-    // Close on every path, including the error one.
-    //
-    // The event pump is aborted *after* `close()` (R1/T82-17): canonization and
-    // conflict events emitted during the final drain are exactly what an
-    // operator debugging a failed close wants on stderr, and aborting first
-    // threw them away.
-    let closed = mem.close().await;
+    run_and_close(mem.clone(), transport, event_pump).await
+}
+
+/// Run the transport future, then close the session — **on every exit path**.
+///
+/// Split out from [`serve`] so the "close always runs" guarantee is testable
+/// without a real socket or handshake: the guarantee lives here, not tangled
+/// with transport construction. Whatever the transport returns — clean
+/// disconnect, forced-close `Ok`, or a transport `Err` — [`Memory::close`] runs
+/// afterward, bounded by [`close_bounded`].
+///
+/// The event pump is aborted *after* `close()` (R1/T82-17): canonization and
+/// conflict events emitted during the final drain are exactly what an operator
+/// debugging a failed close wants on stderr, and aborting first threw them away.
+async fn run_and_close(
+    mem: Arc<Memory>,
+    transport: impl Future<Output = Result<(), LamboError>>,
+    event_pump: tokio::task::JoinHandle<()>,
+) -> Result<(), LamboError> {
+    let outcome = transport.await;
+    let closed = close_bounded(&mem).await;
     event_pump.abort();
 
     match (outcome, closed) {
@@ -199,6 +241,67 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             tracing::info!("lambo serve: session closed, tail durable");
             Ok(())
         }
+    }
+}
+
+/// [`Memory::close`], bounded two ways (R2-b).
+///
+/// A [`CLOSE_GRACE`] deadline caps a store that hangs on the final flush, and a
+/// **re-armed** shutdown signal lets an operator who sees the close stall press
+/// Ctrl-C a second time to force the exit rather than have it swallowed. Either
+/// path abandons the `close()` future, which is safe: the drained tail returns
+/// to the front of the graph log, the session stays closed to writers, and no
+/// success is latched — so the returned `Err` is honest ("tail kept, not
+/// durable") and a restart re-flushes exactly that tail.
+async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
+    let close = mem.close();
+    tokio::pin!(close);
+    tokio::select! {
+        // Bias toward the close itself: if it is already done, take that answer
+        // rather than a signal delivered in the same poll.
+        biased;
+        r = tokio::time::timeout(CLOSE_GRACE, &mut close) => match r {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::error!(
+                    grace_secs = CLOSE_GRACE.as_secs(),
+                    "lambo serve: close() did not finish within the grace window — abandoning \
+                     it; the tail was returned to the log and a restart will re-flush it"
+                );
+                Err(LamboError::Config(format!(
+                    "close timed out after {}s; tail kept, not durable",
+                    CLOSE_GRACE.as_secs()
+                )))
+            }
+        },
+        () = shutdown_signal() => {
+            tracing::warn!(
+                "lambo serve: a second shutdown signal arrived during close — abandoning it; \
+                 the tail was returned to the log and a restart will re-flush it"
+            );
+            Err(LamboError::Config(
+                "close interrupted by a second shutdown signal; tail kept, not durable".into(),
+            ))
+        }
+    }
+}
+
+/// Run a setup step (the stdio handshake, the HTTP `bind`) but bail the moment
+/// the shutdown signal fires first (R2-a).
+///
+/// Before this, a signal that landed in the pre-handshake window — after the
+/// session is attached (a clean run already has `mutations=1` to flush at that
+/// point) but before the transport's own signal handling is live — hit the
+/// default disposition and killed the process with `close()` un-run. `None`
+/// means the signal won: the caller returns so `serve` still reaches close.
+async fn setup_or_shutdown<T>(
+    setup: impl Future<Output = T>,
+    shutdown: impl Future<Output = ()>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        v = setup => Some(v),
+        () = shutdown => None,
     }
 }
 
@@ -272,11 +375,23 @@ async fn run_until_shutdown<T>(
 /// `Memory::close` runs either way. Before R1/T82-1 this awaited only the
 /// service, and the default signal disposition killed the process outright with
 /// the tail still in the log.
-async fn serve_stdio(mem: Arc<Memory>) -> Result<(), LamboError> {
-    let service = LamboServer::new(mem)
-        .serve(stdio())
-        .await
-        .map_err(|e| LamboError::Config(format!("mcp stdio: {e}")))?;
+async fn serve_stdio(
+    mem: Arc<Memory>,
+    mut shutdown: Pin<&mut impl Future<Output = ()>>,
+) -> Result<(), LamboError> {
+    // Race the handshake against the shutdown signal (R2-a). `shutdown.as_mut()`
+    // reborrows, so the same registration is still live for the transport race
+    // below if the handshake wins.
+    let service =
+        match setup_or_shutdown(LamboServer::new(mem).serve(stdio()), shutdown.as_mut()).await {
+            Some(r) => r.map_err(|e| LamboError::Config(format!("mcp stdio: {e}")))?,
+            None => {
+                tracing::info!(
+                "mcp stdio: shutdown signal during handshake — closing the session without serving"
+            );
+                return Ok(());
+            }
+        };
 
     // Taken before `waiting()` consumes the service — it is the only handle
     // left once the service is inside the future.
@@ -284,7 +399,7 @@ async fn serve_stdio(mem: Arc<Memory>) -> Result<(), LamboError> {
     match run_until_shutdown(
         service.waiting(),
         move || cancel_token.cancel(),
-        shutdown_signal(),
+        shutdown,
         SHUTDOWN_GRACE,
     )
     .await
@@ -309,7 +424,11 @@ async fn serve_stdio(mem: Arc<Memory>) -> Result<(), LamboError> {
 ///
 /// The service factory clones an `Arc<Memory>` per request — it never builds a
 /// second [`Memory`].
-async fn serve_http(mem: Arc<Memory>, opts: &ServeOptions) -> Result<(), LamboError> {
+async fn serve_http(
+    mem: Arc<Memory>,
+    opts: &ServeOptions,
+    mut shutdown: Pin<&mut impl Future<Output = ()>>,
+) -> Result<(), LamboError> {
     let factory_mem = mem.clone();
     let service = StreamableHttpService::new(
         move || Ok(LamboServer::new(factory_mem.clone())),
@@ -325,12 +444,21 @@ async fn serve_http(mem: Arc<Memory>, opts: &ServeOptions) -> Result<(), LamboEr
 
     let app = axum::Router::new().nest_service("/mcp", service);
     let addr = SocketAddr::new(opts.bind, opts.port);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| LamboError::Config(format!("mcp http: bind {addr}: {e}")))?;
+    // Race `bind` against the shutdown signal too (R2-a): the ~5 ms bind window
+    // is small but non-zero, and a signal in it must still reach `close()`.
+    let listener =
+        match setup_or_shutdown(tokio::net::TcpListener::bind(addr), shutdown.as_mut()).await {
+            Some(r) => r.map_err(|e| LamboError::Config(format!("mcp http: bind {addr}: {e}")))?,
+            None => {
+                tracing::info!(
+                    "mcp http: shutdown signal before bind — closing the session without serving"
+                );
+                return Ok(());
+            }
+        };
     tracing::info!(%addr, "mcp http: listening on /mcp");
 
-    serve_http_bounded(listener, app, shutdown_signal(), SHUTDOWN_GRACE).await
+    serve_http_bounded(listener, app, shutdown, SHUTDOWN_GRACE).await
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).
@@ -418,6 +546,52 @@ mod tests {
         assert_eq!(o.transport, Transport::Stdio);
         assert_eq!(o.port, 7700);
         assert!(o.bind.is_loopback());
+    }
+
+    /// **Test-gap (c).** The grace windows are sane bounds, not accidents: both
+    /// are non-zero (a zero window would force-drop instantly, defeating the
+    /// point) and short enough that a supervisor's kill escalation (commonly
+    /// ~30 s) never beats them, and `CLOSE_GRACE` — the last thing before exit —
+    /// is at least as generous as the transport window.
+    #[test]
+    fn the_grace_windows_are_sane() {
+        assert!(
+            !SHUTDOWN_GRACE.is_zero(),
+            "a zero transport grace force-drops instantly"
+        );
+        assert!(
+            !CLOSE_GRACE.is_zero(),
+            "a zero close grace never lets the flush finish"
+        );
+        assert!(
+            SHUTDOWN_GRACE < Duration::from_secs(30),
+            "must beat SIGKILL escalation"
+        );
+        assert!(
+            CLOSE_GRACE < Duration::from_secs(30),
+            "must beat SIGKILL escalation"
+        );
+        assert!(
+            CLOSE_GRACE >= SHUTDOWN_GRACE,
+            "the final close gets at least the transport window"
+        );
+    }
+
+    /// **R2-a pinned, mechanism level.** A setup step that beats the signal is
+    /// kept; a signal that fires before setup finishes bails with `None`, which
+    /// is the caller's cue to skip serving and go straight to `close()`.
+    #[tokio::test]
+    async fn setup_or_shutdown_prefers_setup_but_bails_on_an_early_signal() {
+        // Setup wins: the signal is `pending`, so the value comes through.
+        assert_eq!(
+            setup_or_shutdown(async { 5u32 }, std::future::pending::<()>()).await,
+            Some(5)
+        );
+        // Signal wins: setup never finishes, so the caller is told to bail.
+        assert_eq!(
+            setup_or_shutdown(std::future::pending::<u32>(), async {}).await,
+            None
+        );
     }
 
     /// A transport that ends on its own is never cancelled and never waits on
@@ -569,5 +743,77 @@ mod tests {
             !out.contains("lambo provision"),
             "an unrelated failure must not be relabelled as a provisioning problem: {out}"
         );
+    }
+
+    /// **Test-gap (a) pinned.** `run_and_close` is the seam that guarantees
+    /// [`Memory::close`] runs on *every* transport exit path. This drives it
+    /// with a transport that returns `Ok` and one that returns `Err`, and after
+    /// each asserts the session is genuinely closed — a synchronous write is now
+    /// refused — so a future edit that skips the close on one branch fails here
+    /// rather than in production as a silently-dropped tail.
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    mod close_runs {
+        use super::*;
+        use crate::embed::{Embedder, FixtureEmbedder};
+        use crate::graph::action::Action;
+        use crate::memory::Memory;
+        use crate::store::{GraphStore, MemoryStore};
+        use crate::types::EmbeddingContract;
+
+        async fn mem(session: &str) -> Arc<Memory> {
+            let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+            let m = Memory::builder()
+                .session(session)
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                })
+                .build()
+                .await
+                .expect("build");
+            Arc::new(m)
+        }
+
+        fn assert_closed(m: &Memory, ctx: &str) {
+            let action = Action {
+                action: "post-close write",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            };
+            assert!(
+                m.record_action(&action).is_err(),
+                "{ctx}: the session must be closed to writers after run_and_close"
+            );
+        }
+
+        #[tokio::test]
+        async fn close_runs_when_the_transport_returns_ok() {
+            let m = mem("serve-close-ok").await;
+            let pump = tokio::spawn(std::future::pending::<()>());
+            let out = run_and_close(m.clone(), async { Ok(()) }, pump).await;
+            assert!(out.is_ok(), "clean transport exit closes cleanly: {out:?}");
+            assert_closed(&m, "ok path");
+        }
+
+        #[tokio::test]
+        async fn close_runs_even_when_the_transport_errors() {
+            let m = mem("serve-close-err").await;
+            let pump = tokio::spawn(std::future::pending::<()>());
+            let out = run_and_close(
+                m.clone(),
+                async { Err(LamboError::Config("transport blew up".into())) },
+                pump,
+            )
+            .await;
+            assert!(out.is_err(), "the transport error is surfaced: {out:?}");
+            // The whole point: the error path still closed the session.
+            assert_closed(&m, "err path");
+        }
     }
 }
