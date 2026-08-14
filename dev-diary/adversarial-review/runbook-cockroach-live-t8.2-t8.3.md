@@ -312,7 +312,16 @@ If the UD quant is not where expected, fall back to
 Register `lfm2.5-230m` at `http://127.0.0.1:8081/v1` as a `local` provider in Pi
 (`~/.pi/agent/models.json`), contextWindow 32768.
 
-### 7b. Point Pi at the Cockroach-backed Lambo server
+### 7b. Point an MCP-capable agent at the Cockroach-backed Lambo server
+
+**L82-3 correction (2026-08-14):** stock Pi has **no MCP support** — a bare install ignores
+`.mcp.json` entirely. Two working options, both proven:
+
+- Install the MCP extension first: `pi install npm:pi-mcp-adapter`, restart Pi. This is the
+  configuration the dev-machine evidence used (Pi 0.84.x + pi-mcp-adapter drove all seven
+  lambo tools).
+- Or use **OMP** (Oh My Pi), which is an MCP client out of the box — the 2026-08-14 live run
+  drove `lambo_derive → lambo_recall → lambo_stats` with it via DeepSeek Flash.
 
 Create a project `.mcp.json`. Use `toolPrefix: none` and a `-t` allowlist so the small model
 sees only Lambo's tools (a 230M model is easily hijacked by other extensions' tools).
