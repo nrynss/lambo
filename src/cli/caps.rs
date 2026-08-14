@@ -129,19 +129,88 @@ pub fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usiz
     clamped
 }
 
+/// Invisible-formatting codepoints refused by [`check_size`] (L82-2).
+///
+/// `char::is_control()` covers **only** C0 (`U+0000–U+001F`) and C1
+/// (`U+007F–U+009F`). Unicode general category *Cf* — bidi overrides, the
+/// zero-width family, the BOM, the deprecated format controls and the TAGS
+/// block — sails straight past it, which is how a `U+202E` RIGHT-TO-LEFT
+/// OVERRIDE reached a live `concepts.content` column in the T8.2/T8.3 review.
+/// These characters render as nothing, so a recall context block containing one
+/// looks innocuous to a human reviewer while reordering or hiding what the
+/// model actually reads: a prompt-injection and spoofing vector, not a
+/// cosmetic defect.
+///
+/// The table is category *Cf* as of Unicode 16, plus the whole `U+E0000–U+E007F`
+/// TAGS block (its unassigned holes included — a superset costs nothing and
+/// survives future assignments), with **two deliberate exceptions**:
+///
+/// * `U+200C` ZERO WIDTH NON-JOINER and `U+200D` ZERO WIDTH JOINER are
+///   **allowed**. They are orthographically required in Persian and several
+///   Indic scripts and are the glue in emoji ZWJ sequences (`👨‍👩‍👧`), so
+///   refusing them would reject legitimate concept text. Neither can reorder or
+///   conceal visible characters — they only join or separate adjacent glyphs —
+///   so the threat this table exists for is still fully covered.
+///
+/// Arabic number-formatting signs (`U+0600–U+0605`, `U+06DD`, `U+070F`,
+/// `U+0890–U+0891`, `U+08E2`) are also *Cf* but are deliberately **not** listed:
+/// they prefix digits in ordinary Arabic text and carry no direction or
+/// concealment capability. `U+061C` ARABIC LETTER MARK *is* listed — it is a
+/// bidi control.
+const DISALLOWED_FORMAT_RANGES: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),   // SOFT HYPHEN
+    ('\u{061C}', '\u{061C}'),   // ARABIC LETTER MARK (bidi)
+    ('\u{180E}', '\u{180E}'),   // MONGOLIAN VOWEL SEPARATOR
+    ('\u{200B}', '\u{200B}'),   // ZERO WIDTH SPACE (200C/200D deliberately skipped)
+    ('\u{200E}', '\u{200F}'),   // LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    ('\u{202A}', '\u{202E}'),   // LRE, RLE, PDF, LRO, RLO — the U+202E family
+    ('\u{2060}', '\u{2064}'),   // WORD JOINER, invisible operators
+    ('\u{2066}', '\u{206F}'),   // isolates (LRI/RLI/FSI/PDI) + deprecated format controls
+    ('\u{FEFF}', '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE / BOM
+    ('\u{FFF9}', '\u{FFFB}'),   // interlinear annotation
+    ('\u{110BD}', '\u{110BD}'), // KAITHI NUMBER SIGN
+    ('\u{110CD}', '\u{110CD}'), // KAITHI NUMBER SIGN ABOVE
+    ('\u{13430}', '\u{1343F}'), // Egyptian Hieroglyph format controls
+    ('\u{1BCA0}', '\u{1BCA3}'), // shorthand format controls
+    ('\u{1D173}', '\u{1D17A}'), // musical format controls
+    ('\u{E0000}', '\u{E007F}'), // TAGS block — invisible ASCII smuggling
+];
+
+/// Is `c` an invisible formatting character refused by [`check_size`]?
+///
+/// See [`DISALLOWED_FORMAT_RANGES`] for the table and the two exceptions.
+fn is_disallowed_format(c: char) -> bool {
+    DISALLOWED_FORMAT_RANGES
+        .iter()
+        .any(|&(lo, hi)| c >= lo && c <= hi)
+}
+
 /// Validate one client string before it reaches the store: refuse it if it is
-/// over [`MAX_CONTENT_BYTES`] **or** carries a control character other than
-/// tab/newline.
+/// over [`MAX_CONTENT_BYTES`], carries a control character other than
+/// tab/newline, **or** carries an invisible formatting character
+/// ([`DISALLOWED_FORMAT_RANGES`]).
 ///
-/// The size cap is the single-process fairness guard. The control-character
-/// check is a data-hygiene one: a NUL or other C0 control ends up verbatim in a
-/// concept's `content`, its canonical key, and every downstream rendering,
-/// where it can corrupt terminals, truncate at the NUL, or smuggle ANSI
-/// escapes. Tab and newline are the only controls a legitimate multi-line
-/// concept needs, so everything else is refused here rather than sanitised
-/// silently.
+/// The size cap is the single-process fairness guard. The character checks are
+/// data-hygiene and anti-injection ones:
 ///
-/// Names the offending codepoint; never echoes the raw byte.
+/// * a NUL or other C0/C1 control ends up verbatim in a concept's `content`,
+///   its canonical key, and every downstream rendering, where it can corrupt
+///   terminals, truncate at the NUL, or smuggle ANSI escapes. Tab and newline
+///   are the only controls a legitimate multi-line concept needs;
+/// * a bidi override or zero-width character is *invisible*, so it survives
+///   human review of a recall context block while changing what the model
+///   reads (L82-2).
+///
+/// Both are refused here rather than sanitised silently — a validator that
+/// rewrites content would make the stored concept differ from what the caller
+/// acknowledged writing.
+///
+/// Names the offending codepoint; never echoes the raw byte. The two messages
+/// are deliberately distinct and each states only what it actually enforces:
+/// the control message may say "tab and newline are the only ones allowed"
+/// because for *control* characters that is exactly true, while the format
+/// message does not, because the joiners are allowed (R: the pre-L82-2 wording
+/// claimed the stronger contract for both and the check delivered neither).
 pub fn check_size(field: &str, value: &str) -> Result<(), String> {
     if value.len() > MAX_CONTENT_BYTES {
         return Err(format!(
@@ -154,8 +223,17 @@ pub fn check_size(field: &str, value: &str) -> Result<(), String> {
         .find(|c| c.is_control() && *c != '\n' && *c != '\t')
     {
         return Err(format!(
-            "{field} contains a disallowed control character (U+{:04X}); only tab and newline \
-             are allowed",
+            "{field} contains a disallowed control character (U+{:04X}); tab and newline are the \
+             only control characters allowed",
+            c as u32
+        ));
+    }
+    if let Some(c) = value.chars().find(|c| is_disallowed_format(*c)) {
+        return Err(format!(
+            "{field} contains a disallowed invisible formatting character (U+{:04X}); bidi \
+             overrides, zero-width characters, the BOM and tag characters are refused because \
+             they are invisible in review but not to the model (zero-width joiner and \
+             non-joiner are allowed)",
             c as u32
         ));
     }
@@ -218,6 +296,75 @@ mod tests {
     fn tab_and_newline_are_allowed() {
         check_size("query", "ok\tline\nnext").unwrap();
         check_size("query", "A".repeat(MAX_CONTENT_BYTES).as_str()).unwrap();
+    }
+
+    /// **L82-2.** `char::is_control()` is C0/C1 only, so the pre-fix validator
+    /// let every category-*Cf* codepoint through — a live `lambo_derive` with a
+    /// `U+202E` returned `isError:false` and the byte landed in
+    /// `concepts.content`. Each case here is one of those, by class.
+    #[test]
+    fn invisible_format_characters_are_refused_by_codepoint() {
+        for (label, bad, codepoint) in [
+            ("rtl override", "amount: 100\u{202E}DSU 5", "U+202E"),
+            ("lrm", "a\u{200E}b", "U+200E"),
+            ("first-strong isolate", "a\u{2066}b", "U+2066"),
+            ("pop directional isolate", "a\u{2069}b", "U+2069"),
+            ("zero width space", "pass\u{200B}word", "U+200B"),
+            ("word joiner", "a\u{2060}b", "U+2060"),
+            ("bom", "\u{FEFF}leading", "U+FEFF"),
+            ("soft hyphen", "so\u{00AD}ft", "U+00AD"),
+            ("tag latin small a", "a\u{E0061}b", "U+E0061"),
+            ("language tag", "a\u{E0001}b", "U+E0001"),
+        ] {
+            let err = check_size("concept.content", bad).unwrap_err();
+            assert!(
+                err.contains(codepoint),
+                "{label}: must name the codepoint {codepoint}, got: {err}"
+            );
+            assert!(
+                !err.chars().any(is_disallowed_format),
+                "{label}: must not echo the raw invisible character back: {err}"
+            );
+            assert!(
+                err.contains("invisible formatting character"),
+                "{label}: must name the class, got: {err}"
+            );
+        }
+    }
+
+    /// The two documented exceptions. ZWNJ/ZWJ carry orthographic meaning in
+    /// Persian and Indic scripts and glue emoji sequences together; refusing
+    /// them would reject legitimate concept text, and neither can reorder or
+    /// conceal a visible character. Arabic number signs are *Cf* but are
+    /// ordinary text, not a direction or concealment control.
+    #[test]
+    fn joiners_and_arabic_number_signs_are_still_allowed() {
+        check_size("concept.content", "\u{200C}").unwrap();
+        check_size(
+            "concept.content",
+            "family: \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+        )
+        .unwrap();
+        check_size("concept.content", "\u{0600}12").unwrap();
+        // Plain multilingual text and emoji are untouched.
+        check_size("concept.content", "درخواست — 请求 — request 🚀").unwrap();
+    }
+
+    /// The control-character message must not claim a contract the check does
+    /// not enforce, and the format message must not claim the joiners are
+    /// refused (L82-2: the pre-fix single message overstated both).
+    #[test]
+    fn refusal_messages_match_what_is_enforced() {
+        let control = check_size("query", "a\u{0}b").unwrap_err();
+        assert!(
+            control.contains("only control characters allowed"),
+            "control message must scope its claim to control characters: {control}"
+        );
+        let format = check_size("query", "a\u{202E}b").unwrap_err();
+        assert!(
+            format.contains("zero-width joiner and non-joiner are allowed"),
+            "format message must name its exceptions: {format}"
+        );
     }
 
     #[test]
