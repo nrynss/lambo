@@ -2,8 +2,9 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN (R1)                                               ║
+║  STATUS: OPEN (R1 remediated — awaiting re-review)               ║
 ║  Verdict: REQUEST CHANGES — 1 P1 + 3 P2 + 7 P3                   ║
+║  Remediation: all 11 findings FIXED (2026-08-14); no deferrals   ║
 ║  Central claims tested: readers never take the lease (HOLDS);    ║
 ║    writers are exactly one and always release (HOLDS);           ║
 ║    one construction site (HOLDS); shared validators (HOLDS);      ║
@@ -67,6 +68,12 @@ integration counts do not — see **T83-8**.
 
 ### T83-1 (P1) — An inverted `--parent-of` mapping survives the entire suite; the `Hierarchical` edge direction is asserted nowhere — CONFIRMED (mutation)
 
+**Disposition (R1 remediation): FIXED.** Pin:
+`cli::tests::parent_of_writes_hierarchical_edge_parent_to_child` — after
+`derive::run --parent-of CHILD:PARENT`, `edge_between(parent, child, Hierarchical)`
+(parent = right of colon). An inverted map in `derive::run` fails this test.
+Shipped direction unchanged.
+
 The shipped direction is **correct**. `parse_parent_of` returns `(parent, child)` from
 `CHILD:PARENT` (`src/cli/derive.rs:22-31`), `derive::run` pushes that tuple and maps it
 `(p, c)` into `ParentOf::from_pairs` (`src/cli/derive.rs:78-81`), and `graph::derive` writes
@@ -109,6 +116,11 @@ closes it.
 
 ### T83-2 (P2) — `--parent-of` splits on the FIRST colon while `--concept` splits on the LAST, so a colon-bearing concept content silently creates two wrong concepts and a wrong edge — CONFIRMED (read)
 
+**Disposition (R1 remediation): FIXED.** `parse_parent_of` refuses more than one
+colon with a usage error naming the ambiguity. Flag help says so. Not `rsplit_once`.
+Pin: `derive::tests::parent_of_with_more_than_one_colon_is_usage_naming_ambiguity`
+(`--parent-of "foo:bar:parent"` fails).
+
 ```22:31:src/cli/derive.rs
 pub(crate) fn parse_parent_of(raw: &str) -> Result<(String, String), CliError> {
     match raw.split_once(':') {
@@ -134,6 +146,11 @@ containing more than one colon with a usage error naming the ambiguity, and to s
 flag help.
 
 ### T83-3 (P2) — The F18 CLI guard inspects only clap arg *ids*, never `get_long()`, so a literal `--occurred-at` flag passes — CONFIRMED (mutation)
+
+**Disposition (R1 remediation): FIXED.** `f18_no_cli_flag_accepts_a_client_timestamp`
+now walks `get_id()`, `get_long()`, and `get_all_aliases()`, and matches banned
+tokens as substrings. A `#[arg(long = "occurred-at")]` mutant fails. Shipped flags
+stay F18-clean.
 
 ```578:586:src/main.rs
         fn walk(cmd: &clap::Command) {
@@ -177,6 +194,12 @@ guard is weak.
 
 ### T83-4 (P2) — "Readers never `Daemon::spawn()` (spawn = GC = writer)" is entirely unpinned — CONFIRMED (mutation)
 
+**Disposition (R1 remediation): FIXED.** Pin:
+`cli::tests::reader_recall_does_not_spawn_gc_or_mutate_epoch` — production
+`recall.rs` must not contain `.spawn()` / `Daemon::spawn`; after a reader
+`recall`, graph epoch and canonization statuses are unchanged. Adding
+`daemon.spawn()` in `recall.rs` fails this test.
+
 The code is right, and the reason is documented in two places
 (`src/cli/recall.rs:71-73`, module docs at `src/cli/recall.rs:1-5`). But adding the spawn back:
 
@@ -196,6 +219,11 @@ and canonization statuses are unchanged, or assert `daemon.events()` produced no
 
 ### T83-5 (P3) — No tracing subscriber is ever installed on the CLI path, so every `tracing::warn!` a CLI command emits is discarded — CONFIRMED (read)
 
+**Disposition (R1 remediation): FIXED.** Embed-failure and daemon `RecallResult.warnings`
+are prepended as `⚑` lines on recall stdout (`render_recall_text`). Tracing is still
+not installed for every CLI invocation. Pin:
+`cli::tests::recall_prints_skipped_vector_leg_when_embed_fails`.
+
 `lambo::mcp::init_tracing()` is called **only** in the `Serve` arm (`src/main.rs:339`).
 `run_async` (`src/main.rs:276-300`) installs nothing, so for all nine other subcommands
 `tracing` events are no-ops. Two warnings are lost that an operator needs:
@@ -213,6 +241,12 @@ vector leg in the returned text (the surface already carries `⚑` warning lines
 initialising tracing for every CLI invocation.
 
 ### T83-6 (P3) — `provision` walks cwd and every ancestor to `/` looking for `scripts/provision.sh` and executes it with `bash`, with no repo-root marker — CONFIRMED (read)
+
+**Disposition (R1 remediation): FIXED.** Require a Cargo.toml whose `[package] name`
+is `lambo` beside `scripts/provision.sh`; bound the walk at 16 ancestors; echo the
+resolved path on stderr before `bash`. Pins:
+`provision::marker_tests::cargo_toml_marker_requires_package_name_lambo`,
+`provision::marker_tests::provision_script_without_lambo_marker_is_ignored`.
 
 ```59:71:src/cli/provision.rs
 fn find_provision_script() -> Option<PathBuf> {
@@ -250,6 +284,11 @@ applies to MCP warnings and is not required here.
 
 ### T83-7 (P3) — Readers resolve a full `ResolvedBackends`, constructing an embedder that `saints` / `stats` / `inspect` never use — CONFIRMED (read)
 
+**Disposition (R1 remediation): FIXED.** `needs_embedder()` is false for `saints` /
+`stats` / `inspect` / `provision`; those three take `Resolved::StoreOnly` and
+`run(&dyn GraphStore, …)` like provision. No `Resolved` redesign. Pin:
+`tests::saints_stats_inspect_provision_resolve_store_only`.
+
 `needs_embedder()` excludes only `Provision` (`src/main.rs:238-240`), so `saints`, `stats` and
 `inspect` all take the `Resolved::Full` path and build an embedder none of them touch — only
 `recall` embeds, and then only under `Capabilities::VECTOR_SEARCH`.
@@ -266,6 +305,10 @@ Fix is a third `Resolved` variant (or reusing `StoreOnly`) for the three non-emb
 Slightly more than a one-liner, hence P3 rather than P2.
 
 ### T83-8 (P3) — The Handoff Log's `store-sqlite` integration test count is understated, and the two feature sets are counted by different conventions — CONFIRMED (re-run)
+
+**Disposition (R1 remediation): FIXED.** T8.3 task-agent Handoff Log now uses one
+convention: default **3 integration + 1 doctest**, sqlite **8 integration + 1
+doctest** (not 7).
 
 Claimed (`dev-diary/PHASE-8-surface.md`, T8.3 Handoff Log): "**613 lib + 4 bin + 4
 integration** passing, 3 ignored" and "**657 lib + 4 bin + 7 integration** passing, 3 ignored".
@@ -286,6 +329,10 @@ handoff whose two headline lines use different counting rules is not a baseline 
 can diff against. lib, bin and ignored counts are exact.
 
 ### T83-9 (P3) — The lease-release property is pinned only indirectly, via a 20-second timeout whose failure message never mentions the lease — CONFIRMED (mutation)
+
+**Disposition (R1 remediation): FIXED.** After the no-serve derive,
+`tests/cli_write_lease.rs` asserts a second writer derive succeeds — the lease was
+released — with a failure message that names the property.
 
 Good news first: the property **is** pinned (see Verified holds). Skipping `close()` on the
 success path is caught. But this is how it is caught:
@@ -308,6 +355,12 @@ names it.
 
 ### T83-10 (P3) — `reserve`'s success text prints an `until <timestamp>` that is void microseconds later — CONFIRMED (read); escalation of self-flag 1
 
+**Disposition (R1 remediation): FIXED.** Success text (and clap help) say the
+reservation ends when this process exits. The TTL/`expires_at` is labelled as the
+value that would apply inside a long-lived writer such as `serve`, not a CLI hold.
+Pin: sqlite `provision_then_every_subcommand_against_sqlite` asserts
+`this process exits` and not `lost on restart`.
+
 ```56:63:src/cli/reserve.rs
             let summary = format!(
                 "reserved {} until {} for agent '{}'\n\
@@ -328,6 +381,11 @@ the `until` timestamp or label it as the TTL that *would* have applied inside a 
 writer such as `serve`. Text-only change.
 
 ### T83-11 (P3) — The copied `canonical_memories` scan has no differential guard, so CLI `saints` and MCP `lambo_saints` can silently disagree — CONFIRMED (read); escalation of self-flag 3
+
+**Disposition (R1 remediation): FIXED.** Pin:
+`cli::saints::parity::canonical_memories_from_graph_agrees_with_memory` —
+`canonical_memories_from_graph` equals `Memory::canonical_memories` on one shared
+graph.
 
 `cli::saints::canonical_memories_from_graph` (`src/cli/saints.rs:41-62`) reimplements
 `Memory::canonical_memories` — same Canonical filter, same blast-radius-desc / `created_at` /
@@ -552,3 +610,21 @@ input syntax silently writes wrong data.
 
 No finding requires re-litigating T8.1, T8.2 or T8.6. Nothing in `src/mcp/server.rs` needs to
 change — the extract is clean.
+
+---
+
+## R1 remediation (2026-08-14) — all 11 FIXED, none deferred
+
+| Id | Disposition | How | Pin |
+|---|---|---|---|
+| T83-1 | **FIXED** | Direction unchanged; assert Hierarchical parent→child after CLI derive | `cli::tests::parent_of_writes_hierarchical_edge_parent_to_child` |
+| T83-2 | **FIXED** | Refuse >1 colon; usage names ambiguity; help updated; not `rsplit_once` | `derive::tests::parent_of_with_more_than_one_colon_is_usage_naming_ambiguity` |
+| T83-3 | **FIXED** | F18 walks id + long + aliases; substring match | `tests::f18_no_cli_flag_accepts_a_client_timestamp` |
+| T83-4 | **FIXED** | No `.spawn()` in production recall.rs; epoch/status snapshot after reader recall | `cli::tests::reader_recall_does_not_spawn_gc_or_mutate_epoch` |
+| T83-5 | **FIXED** | Skipped vector leg / daemon warnings printed as `⚑` lines | `cli::tests::recall_prints_skipped_vector_leg_when_embed_fails` |
+| T83-6 | **FIXED** | `lambo` Cargo.toml marker; walk bounded at 16; path echoed | `provision::marker_tests::*` |
+| T83-7 | **FIXED** | saints/stats/inspect use `resolve_store_only` via `needs_embedder()` | `tests::saints_stats_inspect_provision_resolve_store_only` |
+| T83-8 | **FIXED** | Handoff: 3+1 doctest default, 8+1 sqlite | `dev-diary/PHASE-8-surface.md` T8.3 task-agent entry |
+| T83-9 | **FIXED** | Second writer derive after no-serve success names lease-release | `tests/cli_write_lease.rs` |
+| T83-10 | **FIXED** | Ends when this process exits; TTL relabelled | sqlite reserve assertions |
+| T83-11 | **FIXED** | CLI scan == `Memory::canonical_memories` on one graph | `cli::saints::parity::canonical_memories_from_graph_agrees_with_memory` |

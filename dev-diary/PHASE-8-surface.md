@@ -368,7 +368,7 @@ owns:       src/cli/mod.rs,
             src/cli/derive.rs, src/cli/record_action.rs, src/cli/reserve.rs
 not-owned:  src/cli/demo.rs (T8.4), src/cli/serve_web.rs (T8.5)   # collision fixed 2026-08-13
 appends-to: src/main.rs (dispatch arms + own flags only; T8.2 is primary owner)
-status:     task-complete (awaiting adve-review)
+status:     remediating:r1
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 **Read verbs (spec §6.2, reader processes):** `recall --session --query --top-k`,
@@ -1237,15 +1237,17 @@ clean; `cargo clippy --all-targets --features store-sqlite -- -D warnings` clean
 `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings`
 clean; `cargo check --no-default-features` clean.
 
-**`cargo test`:** **613 lib + 4 bin + 4 integration passing, 3 ignored** (1 lib
+**`cargo test`:** **613 lib + 4 bin + 3 integration + 1 doctest passing, 3 ignored** (1 lib
 `embed::bge_m3::tests::live_smoke_against_llama_server`, 2 integration live-calibration).
 Baseline on this branch was ~598 lib — **+15 lib**, no regressions, nothing removed.
+(Same counting convention as sqlite: lib / bin / integration / doctest named separately.
+The earlier "4 integration" folded the doctest in; T83-8 unifies the two lines.)
 
-**`cargo test --features store-sqlite`:** **657 lib + 4 bin + 7 integration passing, 3
-ignored**. Baseline ~641 lib — **+16 lib** (the extra one is
+**`cargo test --features store-sqlite`:** **657 lib + 4 bin + 8 integration + 1 doctest
+passing, 3 ignored**. Baseline ~641 lib — **+16 lib** (the extra one is
 `cli::sqlite_tests::provision_then_every_subcommand_against_sqlite`). New integration:
 `tests/cli_provision_sqlite.rs`, `tests/cli_write_lease.rs`. Existing serve lease /
-durability tests still green.
+durability tests still green. (R1 measured 8 integration + 1 doctest, not 7.)
 
 **Ignored honesty:** live cockroach `saints`/`stats`
 (`cli::saints::live::saints_and_stats_against_live_cockroach`) is `#[ignore = "live:
@@ -1339,3 +1341,35 @@ names the codepoint, never echoes the raw byte), and `clamp_cfg_default`. MCP wr
    `recall --session --query --top-k`. Added so CLI can match MCP knobs without a second
    pass. A reviewer who wants the yaml-minimal flag set can drop them; defaults still
    come from `Config::default()` when omitted.
+
+### T8.3 — R1 remediation (remediation agent, 2026-08-14)
+
+Fixes every R1 finding in `dev-diary/adversarial-review/adve-review-t8.3-cli.md`
+(T83-1 through T83-11). No deferrals. `src/mcp/server.rs` untouched. T8.8/T8.9 markdown
+left alone except this append, the T8.3 yaml `status: remediating:r1`, and the T83-8
+count correction in the task-agent entry above.
+
+| Id | What changed |
+|---|---|
+| T83-1 | `cli::tests::parent_of_writes_hierarchical_edge_parent_to_child` asserts `edge_between(parent, child, Hierarchical)` after `derive::run`. Shipped direction unchanged. |
+| T83-2 | `--parent-of` with more than one colon is `CliError::Usage` naming the ambiguity. Flag help updated. Not `rsplit_once`. |
+| T83-3 | F18 walk covers `get_id()`, `get_long()`, `get_all_aliases()`; banned tokens match as substrings. |
+| T83-4 | After reader `recall`, epoch and canonization statuses are unchanged; production `recall.rs` must not contain `.spawn()`. |
+| T83-5 | Embed-failure / daemon warnings prepend `⚑` lines onto recall stdout (tracing is not installed on the CLI path). |
+| T83-6 | Cockroach `provision` requires a `[package] name = "lambo"` Cargo.toml beside `scripts/provision.sh`, bounds the walk at 16 ancestors, echos the resolved path. |
+| T83-7 | `saints` / `stats` / `inspect` take `Resolved::StoreOnly` (`needs_embedder()` false); they no longer construct an embedder. |
+| T83-8 | Task-agent Handoff counts unified: 3 integration + 1 doctest (default), 8 integration + 1 doctest (sqlite). |
+| T83-9 | After the no-serve derive, a second writer derive must succeed — names the lease-release property. |
+| T83-10 | `reserve` success text: the reservation ends when this process exits, not "on restart" / `until <timestamp>`. |
+| T83-11 | `cli::saints::parity::canonical_memories_from_graph_agrees_with_memory`. |
+
+**Gates (this round):** `cargo fmt --all -- --check` clean; both clippy `-D warnings`
+lines exit 0.
+
+**`cargo test`:** **620 lib + 5 bin + 3 integration + 1 doctest passing, 3 ignored**
+(R1 baseline 613 lib + 4 bin + 3 integration + 1 doctest — **+7 lib, +1 bin**, no
+regressions).
+
+**`cargo test --features store-sqlite`:** **664 lib + 5 bin + 8 integration + 1
+doctest passing, 3 ignored** (R1 baseline 657 lib + 4 bin + 8 integration + 1
+doctest — **+7 lib, +1 bin**).

@@ -118,8 +118,10 @@ mod tests {
 
     /// `Arc<MemoryStore>` as a `GraphStore` so sequential CLI commands can
     /// share one in-RAM store the way two process invocations share a file.
+    /// The second field overrides advertised capabilities (T83-5: claim
+    /// `VECTOR_SEARCH` while the inner store has none).
     #[derive(Clone)]
-    struct SharedMemory(Arc<MemoryStore>);
+    struct SharedMemory(Arc<MemoryStore>, Capabilities);
 
     #[async_trait]
     impl GraphStore for SharedMemory {
@@ -127,7 +129,7 @@ mod tests {
             self.0.init_schema().await
         }
         fn capabilities(&self) -> Capabilities {
-            self.0.capabilities()
+            self.1
         }
         fn vector_dimensions(&self) -> Option<usize> {
             self.0.vector_dimensions()
@@ -202,7 +204,7 @@ mod tests {
 
     fn backends_on(store: Arc<MemoryStore>) -> ResolvedBackends {
         ResolvedBackends {
-            store: Box::new(SharedMemory(store)),
+            store: Box::new(SharedMemory(store, Capabilities::empty())),
             embedder: Box::new(FixtureEmbedder::new()),
             store_cfg: StoreConfig {
                 kind: StoreKind::Memory,
@@ -412,6 +414,194 @@ mod tests {
         assert!(check_size("content", &big).is_err());
         assert_eq!(MAX_CONTENT_BYTES, crate::cli::caps::MAX_CONTENT_BYTES);
     }
+
+    #[tokio::test]
+    async fn parent_of_writes_hierarchical_edge_parent_to_child() {
+        let store = Arc::new(MemoryStore::new());
+        crate::cli::derive::run(
+            backends_on(store.clone()),
+            crate::cli::derive::Args {
+                session: "t83-parent-of".into(),
+                agent: "agent-a".into(),
+                content: "user schema".into(),
+                kind: ConceptKind::Entity,
+                parent_of: vec!["auth middleware:user schema".into()],
+                concept: vec!["auth middleware:entity".into()],
+            },
+        )
+        .await
+        .expect("derive");
+
+        let loaded =
+            load_reader_graph(&SharedMemory(store, Capabilities::empty()), "t83-parent-of")
+                .await
+                .expect("load");
+        let g = loaded.graph.read();
+        let parent = g
+            .concepts()
+            .find(|c| c.content == "user schema")
+            .map(|c| c.id)
+            .expect("parent");
+        let child = g
+            .concepts()
+            .find(|c| c.content == "auth middleware")
+            .map(|c| c.id)
+            .expect("child");
+        assert!(
+            g.edge_between(parent, child, crate::types::EdgeType::Hierarchical)
+                .is_some(),
+            "Hierarchical edge must run parent → child (right of colon → left of --parent-of)"
+        );
+        assert!(
+            g.edge_between(child, parent, crate::types::EdgeType::Hierarchical)
+                .is_none(),
+            "an inverted parent_of map must fail this test"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_recall_does_not_spawn_gc_or_mutate_epoch() {
+        let src = include_str!("recall.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            !prod.contains(".spawn()") && !prod.contains("Daemon::spawn"),
+            "readers never spawn GC (spawn = writer); adding daemon.spawn() in recall.rs must fail this test"
+        );
+
+        let store = Arc::new(MemoryStore::new());
+        crate::cli::derive::run(
+            backends_on(store.clone()),
+            crate::cli::derive::Args {
+                session: "t83-no-gc".into(),
+                agent: "agent-a".into(),
+                content: "user schema".into(),
+                kind: ConceptKind::Entity,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .expect("derive");
+
+        let before = load_reader_graph(
+            &SharedMemory(store.clone(), Capabilities::empty()),
+            "t83-no-gc",
+        )
+        .await
+        .expect("load before");
+        let epoch_before = before.graph.read().epoch();
+        let statuses_before: Vec<_> = {
+            let g = before.graph.read();
+            let mut v: Vec<_> = g
+                .concepts()
+                .map(|c| (c.id, c.canonization_status))
+                .collect();
+            v.sort_by_key(|(id, _)| id.0);
+            v
+        };
+
+        crate::cli::recall::run(
+            &backends_on(store.clone()),
+            "t83-no-gc",
+            "user schema",
+            Some(5),
+            Some(500),
+            Some(2),
+        )
+        .await
+        .expect("recall");
+
+        let after = load_reader_graph(&SharedMemory(store, Capabilities::empty()), "t83-no-gc")
+            .await
+            .expect("load after");
+        let epoch_after = after.graph.read().epoch();
+        let statuses_after: Vec<_> = {
+            let g = after.graph.read();
+            let mut v: Vec<_> = g
+                .concepts()
+                .map(|c| (c.id, c.canonization_status))
+                .collect();
+            v.sort_by_key(|(id, _)| id.0);
+            v
+        };
+        assert_eq!(
+            epoch_after, epoch_before,
+            "reader recall must not mutate graph epoch"
+        );
+        assert_eq!(
+            statuses_after, statuses_before,
+            "reader recall must not mutate canonization statuses"
+        );
+    }
+
+    struct FailingEmbedder;
+
+    #[async_trait]
+    impl crate::embed::Embedder for FailingEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Err(crate::embed::EmbedError::Unavailable("down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_prints_skipped_vector_leg_when_embed_fails() {
+        let store = Arc::new(MemoryStore::new());
+        crate::cli::derive::run(
+            backends_on(store.clone()),
+            crate::cli::derive::Args {
+                session: "t83-vector-skip".into(),
+                agent: "agent-a".into(),
+                content: "user schema".into(),
+                kind: ConceptKind::Entity,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .expect("derive");
+
+        let backends = ResolvedBackends {
+            store: Box::new(SharedMemory(store, Capabilities::VECTOR_SEARCH)),
+            embedder: Box::new(FailingEmbedder),
+            store_cfg: StoreConfig {
+                kind: StoreKind::Memory,
+                dsn: None,
+                path: None,
+            },
+            embedder_cfg: EmbedderConfig {
+                kind: EmbedderKind::Fixture,
+                dim: 1024,
+                llama_url: None,
+                llama_model: None,
+            },
+            embedding: EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            },
+        };
+        let out = crate::cli::recall::run(
+            &backends,
+            "t83-vector-skip",
+            "user schema",
+            Some(5),
+            Some(500),
+            Some(2),
+        )
+        .await
+        .expect("recall");
+        assert!(
+            out.contains("vector leg skipped"),
+            "operator must see the skipped vector leg: {out}"
+        );
+        assert!(
+            out.contains("query embedding failed"),
+            "operator must see the embed failure: {out}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "store-sqlite", feature = "embed-fixture"))]
@@ -525,17 +715,22 @@ mod sqlite_tests {
         .expect("recall");
         assert!(ctx.contains("user schema"), "{ctx}");
 
-        let saints = crate::cli::saints::run(&resolve_clean(&cfg), session)
+        let saints = crate::cli::saints::run(resolve_clean(&cfg).store.as_ref(), session)
             .await
             .expect("saints");
         assert!(saints.contains(session), "{saints}");
 
-        let view = crate::cli::inspect::run(&resolve_clean(&cfg), session, "user schema", 2)
-            .await
-            .expect("inspect");
+        let view = crate::cli::inspect::run(
+            resolve_clean(&cfg).store.as_ref(),
+            session,
+            "user schema",
+            2,
+        )
+        .await
+        .expect("inspect");
         assert!(view.contains("user schema"), "{view}");
 
-        let stats = crate::cli::stats::run(&resolve_clean(&cfg), session)
+        let stats = crate::cli::stats::run(resolve_clean(&cfg).store.as_ref(), session)
             .await
             .expect("stats");
         assert!(stats.contains("nodes="), "{stats}");
@@ -569,6 +764,14 @@ mod sqlite_tests {
         .await
         .expect("reserve");
         assert!(reserved.contains("advisory"), "{reserved}");
+        assert!(
+            reserved.contains("this process exits"),
+            "reserve must say the lock ends when the process exits: {reserved}"
+        );
+        assert!(
+            !reserved.contains("lost on restart"),
+            "must not blame restart for a lock that is already gone: {reserved}"
+        );
 
         // Reservations are RAM-local (S5) and die with close(), so a second
         // CLI invocation cannot release what the first reserved. The command

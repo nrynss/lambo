@@ -7,15 +7,15 @@ use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::load_reader_graph;
 use crate::memory::CanonicalMemory;
 use crate::recall::format;
-use crate::resolve::ResolvedBackends;
+use crate::store::GraphStore;
 use crate::types::CanonizationStatus;
 
 /// List the session's canonical memories.
-pub async fn run(backends: &ResolvedBackends, session: &str) -> Result<String, CliError> {
+pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliError> {
     require_nonempty("session", session)?;
     check_size_cli("session", session)?;
 
-    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    let loaded = load_reader_graph(store, session).await?;
     let saints = canonical_memories_from_graph(&loaded.graph.read());
 
     let mut text = format!(
@@ -125,7 +125,7 @@ mod live {
             let _g = crate::test_util::env_lock();
             resolve_from_config_path(Some(&cfg)).expect("resolve for read")
         };
-        let saints = run(&backends, &session)
+        let saints = run(backends.store.as_ref(), &session)
             .await
             .expect("saints against live cluster");
         assert!(
@@ -133,7 +133,7 @@ mod live {
             "saints must name the session: {saints}"
         );
 
-        let stats = crate::cli::stats::run(&backends, &session)
+        let stats = crate::cli::stats::run(backends.store.as_ref(), &session)
             .await
             .expect("stats against live cluster");
         assert!(stats.contains("nodes="), "{stats}");
@@ -143,5 +143,89 @@ mod live {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+mod parity {
+    use super::*;
+    use crate::embed::FixtureEmbedder;
+    use crate::graph::derive::ParentOf;
+    use crate::store::GraphStore;
+    use crate::types::{
+        CanonizationEvent, CanonizationStatus, ConceptType, EmbeddingContract, NodeId, SessionId,
+    };
+    use crate::{Memory, MemoryStore};
+    use chrono::Utc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn canonical_memories_from_graph_agrees_with_memory() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = Memory::builder()
+            .session("t83-saints-parity")
+            .agent("agent-a")
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn crate::embed::Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .flush_interval(Duration::from_secs(3_600))
+            .build()
+            .await
+            .expect("memory");
+
+        mem.derive(
+            &[
+                ("user schema", ConceptType::Entity),
+                ("auth middleware", ConceptType::Entity),
+            ],
+            &ParentOf::none(),
+        )
+        .await
+        .expect("derive");
+
+        let target = {
+            let g = mem.graph().read();
+            let found = g
+                .concepts()
+                .find(|c| c.content == "user schema")
+                .map(|c| c.id);
+            found.expect("user schema")
+        };
+        for (from, to) in [
+            (CanonizationStatus::None, CanonizationStatus::Candidate),
+            (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+            (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+        ] {
+            let event = CanonizationEvent {
+                id: NodeId::new(),
+                session_id: SessionId::new("t83-saints-parity"),
+                node_id: target,
+                from_status: from,
+                to_status: to,
+                blast_radius: Some(0),
+                occurred_at: Utc::now(),
+                last_demotion_time: None,
+            };
+            mem.graph()
+                .write()
+                .apply_canonization_transition(event)
+                .expect("transition");
+        }
+
+        let from_memory = mem.canonical_memories();
+        let from_cli = canonical_memories_from_graph(&mem.graph().read());
+        assert_eq!(
+            from_cli, from_memory,
+            "cli::saints scan must agree with Memory::canonical_memories on a shared graph"
+        );
+        assert_eq!(from_cli.len(), 1);
+        assert_eq!(from_cli[0].content, "user schema");
+
+        mem.close().await.expect("close");
     }
 }

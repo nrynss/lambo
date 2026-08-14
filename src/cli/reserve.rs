@@ -1,8 +1,9 @@
 //! `lambo reserve` / `lambo release` — lease-held thin adapters over
 //! [`Memory::reserve`] / [`Memory::release`].
 //!
-//! Reservations are advisory and RAM-local (pinned contract S5); they do not
-//! survive a restart. Said in help and on success, matching MCP.
+//! Reservations are advisory and RAM-local (pinned contract S5). On the CLI
+//! they end when this process exits (`close_writer` is the next line), not
+//! at a printed `until` instant and not "on restart".
 
 use std::time::Duration;
 
@@ -55,11 +56,14 @@ pub async fn reserve(backends: ResolvedBackends, args: ReserveArgs) -> Result<St
     let out = match mem.reserve(node_id, Duration::from_secs(ttl_secs)) {
         Ok(reservation) => {
             let summary = format!(
-                "reserved {} until {} for agent '{}'\n\
-                 reservations are advisory and RAM-local: they are lost on restart",
+                "reserved {} for agent '{}'\n\
+                 reservations are advisory and RAM-local: this reservation ends when \
+                 this process exits (now). The TTL that would apply inside a long-lived \
+                 writer such as serve is {}s (expires_at {} is not a CLI hold)",
                 node_id.0,
+                reservation.agent_id.0,
+                ttl_secs,
                 reservation.expires_at.to_rfc3339(),
-                reservation.agent_id.0
             );
             Ok(summary)
         }

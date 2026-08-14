@@ -136,12 +136,12 @@ enum Commands {
             help = "The first concept's type: entity, logic, constraint, resource, or observation."
         )]
         kind: ConceptKind,
-        /// Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf.
+        /// Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf. Exactly one colon; extra colons are refused as ambiguous.
         #[arg(
             long = "parent-of",
             value_name = "CHILD:PARENT",
             action = ArgAction::Append,
-            help = "Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf."
+            help = "Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf. Exactly one colon; extra colons are refused as ambiguous."
         )]
         parent_of: Vec<String>,
         /// Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive.
@@ -177,7 +177,7 @@ enum Commands {
         #[arg(long = "depends-on", action = ArgAction::Append, help = "Things this action depends on (Dependency edges). Repeatable.")]
         depends_on: Vec<String>,
     },
-    /// Take a soft lock on a memory node before editing it. Reservations are advisory, do not survive a restart.
+    /// Take a soft lock on a memory node before editing it. On the CLI the reservation ends when this process exits; it is not durable.
     Reserve {
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
@@ -194,14 +194,14 @@ enum Commands {
             help = "Node to reserve, as a UUID string (from recall or inspect)."
         )]
         node: String,
-        /// Soft-lock lifetime in seconds (default 30, max 3600). Reservations are advisory and lost on restart.
+        /// Soft-lock lifetime in seconds (default 30, max 3600). On the CLI the reservation still ends when this process exits.
         #[arg(
             long = "ttl-seconds",
-            help = "Soft-lock lifetime in seconds (default 30, max 3600). Reservations are advisory and lost on restart."
+            help = "Soft-lock lifetime in seconds (default 30, max 3600). On the CLI the reservation still ends when this process exits."
         )]
         ttl_seconds: Option<u64>,
     },
-    /// Release a soft lock previously taken with reserve. Reservations are advisory, do not survive a restart.
+    /// Release a soft lock previously taken with reserve. On the CLI a prior reserve already ended when that process exited.
     Release {
         /// Session this process writes (acquires the single-writer lease).
         #[arg(
@@ -236,7 +236,10 @@ impl Commands {
     }
 
     fn needs_embedder(&self) -> bool {
-        !matches!(self, Self::Provision)
+        !matches!(
+            self,
+            Self::Provision | Self::Saints { .. } | Self::Inspect { .. } | Self::Stats { .. }
+        )
     }
 }
 
@@ -407,8 +410,8 @@ fn main() -> ExitCode {
                 traversal_depth,
             ),
         ),
-        (Commands::Saints { session }, Resolved::Full(backends)) => {
-            run_async("saints", lambo::cli::saints::run(&backends, &session))
+        (Commands::Saints { session }, Resolved::StoreOnly { store, .. }) => {
+            run_async("saints", lambo::cli::saints::run(store.as_ref(), &session))
         }
         (
             Commands::Inspect {
@@ -416,13 +419,13 @@ fn main() -> ExitCode {
                 focus,
                 depth,
             },
-            Resolved::Full(backends),
+            Resolved::StoreOnly { store, .. },
         ) => run_async(
             "inspect",
-            lambo::cli::inspect::run(&backends, &session, &focus, depth),
+            lambo::cli::inspect::run(store.as_ref(), &session, &focus, depth),
         ),
-        (Commands::Stats { session }, Resolved::Full(backends)) => {
-            run_async("stats", lambo::cli::stats::run(&backends, &session))
+        (Commands::Stats { session }, Resolved::StoreOnly { store, .. }) => {
+            run_async("stats", lambo::cli::stats::run(store.as_ref(), &session))
         }
         (Commands::Provision, Resolved::StoreOnly { store, kind }) => {
             run_async("provision", lambo::cli::provision::run(store, kind))
@@ -575,20 +578,72 @@ mod tests {
             "occurred_at",
             "logical_time",
         ];
+        fn normalize(raw: &str) -> String {
+            raw.to_lowercase().replace('-', "_")
+        }
+        fn looks_banned(raw: &str) -> Option<&'static str> {
+            let n = normalize(raw);
+            BANNED.iter().copied().find(|b| n.contains(b))
+        }
         fn walk(cmd: &clap::Command) {
             for arg in cmd.get_arguments() {
-                let id = arg.get_id().as_str().to_lowercase();
-                let id = id.replace('-', "_");
-                assert!(
-                    !BANNED.contains(&id.as_str()),
-                    "F18: CLI flag '{id}' looks like a client timestamp"
-                );
+                let mut tokens = vec![arg.get_id().as_str().to_string()];
+                if let Some(long) = arg.get_long() {
+                    tokens.push(long.to_string());
+                }
+                if let Some(aliases) = arg.get_all_aliases() {
+                    for alias in aliases {
+                        tokens.push(alias.to_string());
+                    }
+                }
+                for token in &tokens {
+                    if let Some(hit) = looks_banned(token) {
+                        panic!(
+                            "F18: CLI flag '{token}' contains banned client-timestamp token '{hit}'"
+                        );
+                    }
+                }
             }
             for sub in cmd.get_subcommands() {
                 walk(sub);
             }
         }
         walk(&Cli::command());
+    }
+
+    #[test]
+    fn saints_stats_inspect_provision_resolve_store_only() {
+        let saints = Cli::try_parse_from(["lambo", "saints", "--session", "s"]).unwrap();
+        assert!(
+            !saints.command.unwrap().needs_embedder(),
+            "saints must not construct an embedder"
+        );
+        let stats = Cli::try_parse_from(["lambo", "stats", "--session", "s"]).unwrap();
+        assert!(
+            !stats.command.unwrap().needs_embedder(),
+            "stats must not construct an embedder"
+        );
+        let inspect = Cli::try_parse_from([
+            "lambo",
+            "inspect",
+            "--session",
+            "s",
+            "--focus",
+            "user schema",
+        ])
+        .unwrap();
+        assert!(
+            !inspect.command.unwrap().needs_embedder(),
+            "inspect must not construct an embedder"
+        );
+        let provision = Cli::try_parse_from(["lambo", "provision"]).unwrap();
+        assert!(!provision.command.unwrap().needs_embedder());
+        let recall =
+            Cli::try_parse_from(["lambo", "recall", "--session", "s", "--query", "q"]).unwrap();
+        assert!(
+            recall.command.unwrap().needs_embedder(),
+            "recall still embeds when the store claims VECTOR_SEARCH"
+        );
     }
 
     #[test]

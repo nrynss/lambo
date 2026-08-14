@@ -6,15 +6,15 @@
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::load_reader_graph;
-use crate::resolve::ResolvedBackends;
+use crate::store::GraphStore;
 use crate::types::CanonizationStatus;
 
 /// Session health from the durable snapshot.
-pub async fn run(backends: &ResolvedBackends, session: &str) -> Result<String, CliError> {
+pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliError> {
     require_nonempty("session", session)?;
     check_size_cli("session", session)?;
 
-    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    let loaded = load_reader_graph(store, session).await?;
     let g = loaded.graph.read();
     let concept_count = g.concepts().count();
     let canonical_count = g

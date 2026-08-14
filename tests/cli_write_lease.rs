@@ -134,6 +134,18 @@ fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
         String::from_utf8_lossy(&free.stderr)
     );
 
+    // Property: a successful CLI write always releases the session lease.
+    // Named here so a leaked close() fails in milliseconds with this message,
+    // not 20s later as a JSON-RPC handshake timeout.
+    let again = derive_cmd(&cfg, "agent-lease-release-probe")
+        .output()
+        .expect("second derive after lease release");
+    assert!(
+        again.status.success(),
+        "lease must be released after the first derive so a second writer can acquire; stderr=\n{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+
     // Serve holds the session.
     let mut a: Child = serve_cmd(&cfg, "agent-a")
         .stdin(Stdio::piped())

@@ -72,6 +72,7 @@ pub async fn run(
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
     let daemon = Daemon::from_config(loaded.graph, &cfg).with_index(loaded.index);
 
+    let mut extra_warnings = Vec::new();
     let embedding = if backends
         .store
         .capabilities()
@@ -80,10 +81,9 @@ pub async fn run(
         match backends.embedder.embed(query).await {
             Ok(vector) => Some(vector),
             Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "recall: query embedding failed; vector leg skipped"
-                );
+                extra_warnings.push(format!(
+                    "recall: query embedding failed ({err}); vector leg skipped"
+                ));
                 None
             }
         }
@@ -108,5 +108,32 @@ pub async fn run(
             &mut cache,
         )
         .await;
-    Ok(result.context)
+    Ok(render_recall_text(result, extra_warnings))
+}
+
+/// Print daemon / embed warnings the operator can see. `tracing::warn!` is a
+/// no-op on the CLI path (no subscriber), so skipped vector legs must land in
+/// the returned text — same `⚑` channel the context block already uses.
+fn render_recall_text(result: crate::types::RecallResult, extra_warnings: Vec<String>) -> String {
+    let mut header = String::new();
+    for w in extra_warnings.iter().chain(result.warnings.iter()) {
+        if result.context.contains(w.as_str()) {
+            continue;
+        }
+        if w.contains('⚑') {
+            header.push_str(w);
+        } else {
+            header.push('⚑');
+            header.push(' ');
+            header.push_str(w);
+        }
+        header.push('\n');
+    }
+    if header.is_empty() {
+        result.context
+    } else if result.context.is_empty() {
+        header
+    } else {
+        format!("{header}{}", result.context)
+    }
 }

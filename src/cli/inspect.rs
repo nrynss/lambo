@@ -14,7 +14,7 @@ use super::caps::{
 use super::load_reader_graph;
 use crate::graph::Graph;
 use crate::recall::format;
-use crate::resolve::ResolvedBackends;
+use crate::store::GraphStore;
 use crate::types::{CanonizationStatus, EdgeType, Node, NodeId};
 
 /// A concept `inspect` could have meant.
@@ -215,7 +215,7 @@ pub(crate) fn render_neighbourhood(
 
 /// Inspect the neighbourhood around `focus` (lease-free reader).
 pub async fn run(
-    backends: &ResolvedBackends,
+    store: &dyn GraphStore,
     session: &str,
     focus: &str,
     depth: usize,
@@ -230,7 +230,7 @@ pub async fn run(
         )));
     }
 
-    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    let loaded = load_reader_graph(store, session).await?;
     let g = loaded.graph.read();
     match resolve_focus(&g, focus.trim()) {
         Focus::Exact(id) => {

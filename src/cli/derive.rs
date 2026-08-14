@@ -19,7 +19,18 @@ pub struct Args {
 }
 
 /// `--parent-of CHILD:PARENT` → `(parent, child)` for [`ParentOf::from_pairs`].
+///
+/// Exactly one colon. Both sides are free text, so a second colon is ambiguous
+/// (do **not** `rsplit_once` — that would silently invent the wrong pair).
 pub(crate) fn parse_parent_of(raw: &str) -> Result<(String, String), CliError> {
+    let colons = raw.as_bytes().iter().filter(|b| **b == b':').count();
+    if colons > 1 {
+        return Err(CliError::Usage(
+            "--parent-of is CHILD:PARENT with exactly one colon; extra colons are ambiguous \
+             because both sides are free text (unlike --concept, where KIND is a closed token)"
+                .into(),
+        ));
+    }
     match raw.split_once(':') {
         Some((child, parent)) if !child.trim().is_empty() && !parent.trim().is_empty() => {
             Ok((parent.to_string(), child.to_string()))
@@ -123,5 +134,23 @@ mod tests {
             parse_parent_of("nocolon"),
             Err(CliError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn parent_of_with_more_than_one_colon_is_usage_naming_ambiguity() {
+        let err = parse_parent_of("foo:bar:parent").unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "must refuse, not split on the first colon: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "usage error must name the ambiguity: {msg}"
+        );
+        assert!(
+            msg.contains("exactly one colon"),
+            "usage error must state the one-colon rule: {msg}"
+        );
     }
 }
