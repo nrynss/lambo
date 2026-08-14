@@ -247,6 +247,26 @@ fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     ))])
 }
 
+/// Clamp a config-derived default into the MCP-enforced range (N6).
+///
+/// A session config can set a `default_top_k` (etc.) wider than the MCP maximum;
+/// a client that omits the knob would then inherit a value the surface refuses.
+/// Clamp it into `lo..=hi` and log when that changes it, so the request
+/// succeeds with a legible bound rather than failing on a value the client never
+/// sent.
+fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usize {
+    let clamped = value.clamp(lo, hi);
+    if clamped != value {
+        tracing::warn!(
+            config_key = name,
+            configured = value,
+            clamped_to = clamped,
+            "mcp: session config default is outside the MCP bound — using the clamped value"
+        );
+    }
+    clamped
+}
+
 /// Replace any whitespace-delimited token that looks like a URL with a
 /// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
 /// not carry it into a model-facing string. Idempotent — a redacted token has
@@ -551,9 +571,35 @@ impl LamboServer {
             return e;
         }
         let cfg = self.mem.config();
-        let top_k = p.top_k.unwrap_or(cfg.default_top_k);
-        let max_tokens = p.max_tokens.unwrap_or(cfg.default_max_tokens);
-        let traversal_depth = p.traversal_depth.unwrap_or(cfg.default_traversal_depth);
+        // N6: when the client omits a knob it inherits the session config's
+        // default, which is not bound by the MCP maxima. A config wider than the
+        // MCP cap (e.g. `default_top_k` above `MAX_TOP_K`) would otherwise make
+        // the tool refuse a request that named nothing wrong. Clamp the
+        // config-derived default into range with a logged warning; an *explicit*
+        // out-of-range value from the client is still a client error and is
+        // rejected below.
+        let top_k = match p.top_k {
+            Some(v) => v,
+            None => clamp_cfg_default("default_top_k", cfg.default_top_k, 1, MAX_TOP_K),
+        };
+        let max_tokens = match p.max_tokens {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_max_tokens",
+                cfg.default_max_tokens,
+                1,
+                MAX_MAX_TOKENS,
+            ),
+        };
+        let traversal_depth = match p.traversal_depth {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_traversal_depth",
+                cfg.default_traversal_depth,
+                0,
+                MAX_TRAVERSAL_DEPTH,
+            ),
+        };
         if top_k == 0 || top_k > MAX_TOP_K {
             return bad_param(format!("top_k must be in 1..={MAX_TOP_K}"));
         }
@@ -1105,6 +1151,14 @@ fn resolve_focus(g: &crate::graph::Graph, focus: &str) -> Focus {
     }
 
     let needle = focus.to_lowercase();
+    // N8 (deferred, intentional): this allocates a lowercased `String` per
+    // concept. An allocation-free case-insensitive substring search that matches
+    // `to_lowercase`'s full Unicode case-folding (not just ASCII) is fiddly and
+    // easy to get subtly wrong — a worse failure than the O(n) allocation on a
+    // read-only, human-triggered path. Only the fuzzy leg reaches here, and only
+    // when the exact leg found nothing. Revisit if `lambo_inspect` ever becomes
+    // hot: a memchr-based ASCII fast path with a Unicode fallback would keep the
+    // allocation off the common case without changing match semantics.
     let mut fuzzy: Vec<FocusCandidate> = g
         .concepts()
         .filter(|c| c.content.to_lowercase().contains(&needle))
@@ -1271,7 +1325,10 @@ impl ServerHandler for LamboServer {
                  lambo_record_action to write what you learned and did, lambo_reserve \
                  before editing a shared concept, and lambo_inspect / lambo_saints / \
                  lambo_stats to look around. Every tool takes your agent_id. Never send \
-                 a timestamp: the server stamps them.",
+                 a timestamp: the server stamps them. Ordering is yours to manage: a \
+                 read sees a write only after that write's own tool call has returned, \
+                 so sequence a lambo_derive/lambo_record_action before the \
+                 lambo_recall/lambo_inspect meant to see it.",
             self.mem.session().0
         ));
         info
@@ -2437,6 +2494,33 @@ mod tests {
             instructions.contains("Never send a timestamp"),
             "instructions should tell the model not to send timestamps (F18)"
         );
+        assert!(
+            instructions.contains("Ordering is yours to manage"),
+            "instructions should tell the model that write-then-read ordering is its \
+             responsibility (N7)"
+        );
         s.mem.close().await.expect("close");
+    }
+
+    /// **N6 pinned.** A config default outside the MCP bound is clamped into
+    /// range rather than making the tool refuse a request that named nothing —
+    /// while an explicit out-of-range value from the client is still rejected.
+    #[test]
+    fn a_config_default_over_the_mcp_bound_is_clamped_not_fatal() {
+        assert_eq!(
+            clamp_cfg_default("default_top_k", MAX_TOP_K + 500, 1, MAX_TOP_K),
+            MAX_TOP_K,
+            "a config default above the cap is clamped to the cap"
+        );
+        assert_eq!(
+            clamp_cfg_default("default_top_k", 0, 1, MAX_TOP_K),
+            1,
+            "a zero config default is clamped up to the floor"
+        );
+        assert_eq!(
+            clamp_cfg_default("default_top_k", 7, 1, MAX_TOP_K),
+            7,
+            "an in-range config default is left untouched"
+        );
     }
 }
