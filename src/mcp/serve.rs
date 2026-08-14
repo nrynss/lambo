@@ -39,12 +39,18 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// `close()` is otherwise unbounded: a store that hangs on the final flush would
 /// hang the process with the shutdown path already spent, which is exactly the
 /// durability-vs-liveness trade the grace windows above exist to resolve.
-/// Bounding it is safe — dropping the `close()` future returns the drained tail
-/// to the front of the graph log (see `Memory::close`'s *Cancellation* section),
-/// leaves the session closed to writers, and latches no success, so a
-/// supervisor's restart re-flushes exactly that tail. Larger than
-/// [`SHUTDOWN_GRACE`] because by the time close runs the transport is already
-/// down and this is the last thing standing between the process and exit.
+/// Bounding it is safe *for liveness* — dropping the `close()` future returns
+/// the drained tail to the front of the graph log (see `Memory::close`'s
+/// *Cancellation* section), leaves the session closed to writers, and latches no
+/// success, so the process can exit instead of wedging. It is **not** safe for
+/// durability: that "returned to the log" is the *in-memory* write-behind log
+/// (`src/graph/mod.rs`), and there is **no on-disk WAL**. On the serve path an
+/// abandoned close is immediately followed by process exit, so the un-flushed
+/// tail dies with the process — it is LOST, not recoverable on restart. (The
+/// within-process retry semantics `Memory::close` documents apply only to a
+/// caller that stays alive and calls `close()` again; `serve` does not.) Larger
+/// than [`SHUTDOWN_GRACE`] because by the time close runs the transport is
+/// already down and this is the last thing standing between the process and exit.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
 /// Which transport `lambo serve` should listen on.
@@ -234,7 +240,7 @@ async fn run_and_close(
     match (outcome, closed) {
         (Err(e), _) => Err(e),
         (Ok(()), Err(e)) => {
-            tracing::error!(error = %e, "lambo serve: final flush failed — tail kept, not durable");
+            tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
             Err(e)
         }
         (Ok(()), Ok(())) => {
@@ -249,10 +255,14 @@ async fn run_and_close(
 /// A [`CLOSE_GRACE`] deadline caps a store that hangs on the final flush, and a
 /// **re-armed** shutdown signal lets an operator who sees the close stall press
 /// Ctrl-C a second time to force the exit rather than have it swallowed. Either
-/// path abandons the `close()` future, which is safe: the drained tail returns
-/// to the front of the graph log, the session stays closed to writers, and no
-/// success is latched — so the returned `Err` is honest ("tail kept, not
-/// durable") and a restart re-flushes exactly that tail.
+/// path abandons the `close()` future, which is safe *for liveness*: the drained
+/// tail returns to the front of the (in-memory) graph log, the session stays
+/// closed to writers, and no success is latched — so the returned `Err` is honest.
+///
+/// It is **not** durable. Because `serve` exits right after abandoning close and
+/// there is no on-disk WAL, the abandoned tail is LOST — the in-memory log dies
+/// with the process. The messages below say exactly that; they must not promise a
+/// restart will recover it (R4/P2 — a prior wording did, and it was false).
 async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
     let close = mem.close();
     tokio::pin!(close);
@@ -266,21 +276,24 @@ async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
                 tracing::error!(
                     grace_secs = CLOSE_GRACE.as_secs(),
                     "lambo serve: close() did not finish within the grace window — abandoning \
-                     it; the tail was returned to the log and a restart will re-flush it"
+                     it and exiting; the un-flushed tail is LOST (the write-behind log is \
+                     in-memory only, there is no on-disk WAL, and a restart will NOT recover it)"
                 );
                 Err(LamboError::Config(format!(
-                    "close timed out after {}s; tail kept, not durable",
+                    "close timed out after {}s; tail lost on exit, not durable",
                     CLOSE_GRACE.as_secs()
                 )))
             }
         },
         () = shutdown_signal() => {
             tracing::warn!(
-                "lambo serve: a second shutdown signal arrived during close — abandoning it; \
-                 the tail was returned to the log and a restart will re-flush it"
+                "lambo serve: a second shutdown signal arrived during close — abandoning it \
+                 and exiting; the un-flushed tail is LOST (in-memory write-behind log, no \
+                 on-disk WAL, not recoverable on restart)"
             );
             Err(LamboError::Config(
-                "close interrupted by a second shutdown signal; tail kept, not durable".into(),
+                "close interrupted by a second shutdown signal; tail lost on exit, not durable"
+                    .into(),
             ))
         }
     }
