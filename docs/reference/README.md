@@ -1,18 +1,14 @@
-# Lambo reference documentation
+# Lambo documentation
 
-Per-surface reference for Lambo. Written against the shipped binary, not the
-spec. (T8.8 — the README/getting-started onboarding lives separately in T9.1 and
-links here.)
+Lambo is agentic graph memory for multi-agent work. It runs as an MCP server that stores what your agents learn, recalls relevant memory, and coordinates edits, with a background process that promotes concepts to canonical facts as they earn it.
 
-| Page | Surface | Status |
-|---|---|---|
-| [mcp.md](mcp.md) | The seven MCP tools — args, caps, errors, transports | ✅ complete (T8.2) |
-| [api.md](api.md) | `Memory` API, `GraphStore`/`Embedder` adapters, the lease | ✅ complete (T8.1/T8.6) |
-| [config.md](config.md) | `lambo.toml`, features, provisioning | ✅ complete (T8.7 HTTP hardening pending) |
-| [cli.md](cli.md) | CLI read + write verbs | ⏳ pending T8.3 |
-| [end-to-end.md](end-to-end.md) | How the pieces compose | ◑ serve+MCP done; CLI/demo pending T8.3/T8.4 |
+## Start here
 
-> Coverage note: this set documents the surfaces frozen so far (T8.1 `Memory`,
-> T8.2 MCP, T8.6 lease). The CLI and the full end-to-end walkthrough complete
-> once T8.3/T8.4 land; T8.8's verification pass (help-text ↔ reference
-> consistency, `cargo doc` warning-free) runs after those tasks.
+| Page | What it covers |
+|---|---|
+| [Installation](installation.md) | Build Lambo, choose features, and run it the first time. |
+| [MCP tools](mcp.md) | The seven tools your agents call, with arguments and limits. |
+| [Command line](cli.md) | The same operations from the terminal. |
+| [Configuration](config.md) | The `lambo.toml` keys, features, and provisioning. |
+| [Library API](api.md) | The Rust API for embedding Lambo in a program. |
+| [End to end](end-to-end.md) | How the parts fit together, including running a swarm. |

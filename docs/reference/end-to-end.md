@@ -1,51 +1,34 @@
-# End-to-end: how the pieces compose
+# End to end
 
-> Partial: the `serve` + MCP path below is shippable today. The CLI walkthrough
-> and the two-agent demo depend on T8.3 / T8.4 and are marked pending.
+This page shows how the parts fit together, from serving a session to driving it with agents.
 
 ## The model
 
-- A session has **exactly one writer** — a `lambo serve` process holding the
-  T8.6 lease. Readers (CLI read verbs, the CockroachDB MCP server) go straight to
-  the store and never open a writer.
-- Writes flow through one `Memory`: RAM graph → write-behind log → periodic flush
-  to the durable store. Durability is bounded by `backend_flush_interval`, not
-  immediate; `lambo_stats` reports the current lag.
-- Canonization runs in the background, promoting eligible concepts to Canonical
-  ("saints") through the audited transition path.
+A session has exactly one writer, which is a `lambo serve` process that holds the session's lease. Readers, such as dashboards or the CockroachDB managed MCP server, query the store directly and never open a writer.
 
-## Serve a session and drive it over MCP (shippable today)
+Writes flow through one in-memory graph. They land in a write-behind log and flush to the durable store on an interval, so durability is eventual, not immediate. Call `lambo_stats` to see the current lag.
 
-1. **Provision** the durable store (once): `scripts/provision.sh` (creates the
-   graph schema + the `session_leases` table).
-2. **Serve** as the single writer:
+Canonization runs in the background. It promotes concepts to canonical facts when they earn it from structural evidence, not when an agent declares them important.
+
+## Serve a session and drive it over MCP
+
+1. Provision the durable store once with `scripts/provision.sh`. You can skip this if you use the in-memory store.
+2. Start the writer.
+
    ```bash
-   lambo serve --config lambo.toml --session demo --agent agent-a --transport stdio
+   lambo serve --config lambo.toml --session demo --agent agent-a
    ```
-   (or `--transport http` on loopback — see the T8.7 caveat in [config.md](config.md)).
-3. **Drive it** from any MCP client. The agent's loop:
-   `lambo_recall` (load prior memory) → act → `lambo_derive` /
-   `lambo_record_action` (write what it learned/did) → `lambo_reserve` before
-   editing a shared concept. See [mcp.md](mcp.md).
-4. **Shutdown** (SIGINT/SIGTERM or clean disconnect) flushes the tail durably and
-   releases the lease.
 
-A second `lambo serve` on the same session is **refused** (lease held) — it does
-not become a silent second writer.
+   Add `--transport http` to serve over HTTP on localhost instead of stdio.
+3. Connect your agents as MCP clients. A typical agent loop calls `lambo_recall` to load prior memory, acts, then calls `lambo_derive` and `lambo_record_action` to write what it learned and did. It calls `lambo_reserve` before editing a shared concept.
+4. Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes the pending tail and releases the lease.
 
-## The swarm topology (why the CLI matters — pending T8.3)
+A second `lambo serve` on the same session is refused while the first holds the lease, so it never becomes a silent second writer.
 
-One `serve` writer per session; many small agents each shell out a single
-deterministic `lambo derive …` / `lambo record-action …` line (zero tool-schema
-tokens in their context). Canonization collapses the duplicate observations many
-agents produce into single canonical nodes; `lambo reserve` coordinates edits so
-two agents don't clobber the same concept. This is documented fully once T8.3
-lands the write verbs.
+## Run a swarm
 
-## Two-agent demo (pending T8.4)
+Run one `lambo serve` writer for the session, then have many small agents each write with a single command line call, such as `lambo derive`. Canonization collapses the duplicate observations that many agents produce into single canonical facts. `lambo reserve` keeps two agents from editing the same concept at once.
 
-The scripted spec §13 scenario — Agent A derives, canonization fills, Agent B
-recalls with the blast-radius ⚑ warning and does *not* make the breaking change —
-will be documented here when T8.4 lands, with the demo app view (T8.5).
+Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context.
 
-See also: [mcp.md](mcp.md), [cli.md](cli.md), [api.md](api.md), [config.md](config.md).
+See [Installation](installation.md), [MCP tools](mcp.md), [Command line](cli.md), [Library API](api.md), and [Configuration](config.md).

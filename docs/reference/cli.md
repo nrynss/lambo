@@ -1,27 +1,30 @@
-# CLI reference
+# Command line
 
-> **Status: pending T8.3.** The CLI read verbs and the write verbs (at MCP
-> parity, lease-held) are being built under T8.3. This page is a placeholder so
-> the reference set is complete; it will be filled against the shipped binary
-> when T8.3 lands. Until then, `lambo <cmd> --help` is authoritative.
+Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
 
-Planned surface (spec §6.2 + the T8.3 write-parity decision):
+The command line is in active development. Run `lambo <command> --help` for the current, authoritative flags on your build. The verbs and their arguments are described below.
 
-**Read verbs** (reader processes — never open a writer on an owned session):
-- `lambo recall --session --query --top-k`
-- `lambo saints --session`
-- `lambo inspect --session --focus --depth`
-- `lambo stats --session`
-- `lambo provision` (wraps `scripts/provision.sh`)
+## Read commands
 
-**Write verbs** (acquire the T8.6 lease; fail closed naming the holder if a
-`serve` owns the session) — argument semantics mirror the MCP tools 1:1
-([mcp.md](mcp.md)), same caps and validation:
-- `lambo derive --session --agent --content --kind [--parent-of CHILD:PARENT ...]`
-- `lambo record-action --session --agent --action [--produces N ...] [--modifies N ...] [--depends-on N ...]`
-- `lambo reserve --session --agent --node` / `lambo release --session --agent --node`
+Read commands query the store directly and never open a writer, so they are safe to run against a session another process owns.
 
-The CLI is intended as the **primary agent surface for the swarm case**
-(deterministic, zero tool-schema tokens); MCP is the compatibility surface. For
-verb semantics, caps, and error behavior today, see [mcp.md](mcp.md) — the two
-surfaces are thin adapters over the same `Memory` ([api.md](api.md)).
+| Command | What it does |
+|---|---|
+| `lambo recall --session <id> --query <text> --top-k <n>` | Recall the context block for a query. |
+| `lambo saints --session <id>` | List the session's canonical memories. |
+| `lambo inspect --session <id> --focus <text> --depth <n>` | Inspect the neighbourhood around a concept. |
+| `lambo stats --session <id>` | Report session health. |
+| `lambo provision` | Apply the durable store schema. |
+
+## Write commands
+
+Write commands acquire the session's writer lease. If a `lambo serve` process already owns the session, the write is refused and the command tells you who holds it, so a command line write never becomes a silent second writer. The arguments match the MCP tools, including the same limits.
+
+| Command | What it does |
+|---|---|
+| `lambo derive --session <id> --agent <id> --content <text> --kind <type>` | Store a concept. Repeat `--parent-of child:parent` for hierarchy links. |
+| `lambo record-action --session <id> --agent <id> --action <text>` | Record an action. Repeat `--produces`, `--modifies`, and `--depends-on` for targets. |
+| `lambo reserve --session <id> --agent <id> --node <uuid>` | Take a soft lock on a node. |
+| `lambo release --session <id> --agent <id> --node <uuid>` | Release a soft lock. |
+
+For the meaning of each argument, the value limits, and the concept types, see [MCP tools](mcp.md). Both surfaces run the same underlying operations. See [Library API](api.md) for the type they share.

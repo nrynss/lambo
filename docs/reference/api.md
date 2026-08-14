@@ -1,96 +1,83 @@
-# Library / API reference
+# Library API
 
-Both surfaces — MCP tools and CLI verbs — are thin adapters over one type:
-`Memory`. This page documents the public library API (T8.1), the Level B adapter
-traits, and the single-writer lease (T8.6).
+Both surfaces, the MCP tools and the command line verbs, are thin wrappers over one type, `Memory`. If you embed Lambo in a Rust program, this is the type you work with. For full signatures, run `cargo doc --open`.
 
-> Verified against `src/memory.rs`, `src/store/mod.rs`, `src/embed/mod.rs`,
-> `src/store/lease.rs`. For full signatures, `cargo doc --open`.
+## Memory
 
-## `Memory`
+`Memory` holds the in-memory graph together with its background workers, which handle write-behind flushing and canonization. Exactly one `Memory` writes a given session. See [The single-writer lease](#the-single-writer-lease).
 
-The RAM-tier graph plus its write-behind daemon, flush task, and canonization
-task. Exactly one `Memory` writes a given session (see [Lease](#single-writer-lease)).
+### Build a Memory
 
-### Construction — `MemoryBuilder`
+Use the builder. Prefer `backends`, which supplies the store, embedder, and their compatibility in one value, because it is the single place backends are constructed.
 
 ```rust
 let mem = Memory::builder()
     .session("my-session")
     .agent("agent-a")
-    .backends(resolved)          // preferred: one ResolvedBackends (store + embedder + contract)
+    .backends(resolved)
     .build()
     .await?;
 ```
 
-Builder setters: `session`, `agent`, `store`, `embedder`, `embedding_contract`,
-`backends`, `match_strategy`, `flush_interval`, `scoring_weights`, `config`.
-Prefer `.backends(ResolvedBackends)` over wiring `store`/`embedder` separately —
-it is the single construction site (Level B) and avoids double-construction.
+The builder accepts `session`, `agent`, `store`, `embedder`, `embedding_contract`, `backends`, `match_strategy`, `flush_interval`, `scoring_weights`, and `config`.
 
-`build().await` acquires the writer lease (fails closed if held), runs the
-startup load, and spawns the daemon + flush + canonization tasks.
+`build().await` acquires the writer lease, fails if another process holds it, runs the startup load, and starts the background workers.
 
-### Accessors
-`session()`, `agent()`, `config()`, `embedding_contract()`, `graph()`, `index()`, `store()`.
+### Read the session
 
-### Writes
-| Method | Purpose |
+The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `index`, and `store` return the current state.
+
+### Write
+
+| Method | What it does |
 |---|---|
-| `derive(...)` (async) | Derive concepts from an interaction (spec §7). |
-| `record_action(&Action)` | Record an action → a Resource concept + Causal/Dependency edges. |
-| `demote(chunk, group)` | Demote a chunk. |
-| `retract(target, DryRun)` (async) | Retract a concept; `DryRun` returns an `ImpactReport` without mutating. |
-| `reserve(node, ttl)` / `release(node)` | Advisory soft lock (RAM-local). |
-| `set_root_goal(&[...])`, `declare_synonym(src, canon)` | Session bootstrap. |
+| `derive` | Derives concepts from an interaction. |
+| `record_action` | Records an action as a concept plus its causal and dependency edges. |
+| `demote` | Demotes a chunk. |
+| `retract` | Retracts a concept. Pass a dry-run flag to get an impact report without mutating. |
+| `reserve` and `release` | Take or release an advisory soft lock. |
+| `set_root_goal` and `declare_synonym` | Set up the session. |
 
-### Reads
-| Method | Returns |
+### Read
+
+| Method | What it returns |
 |---|---|
-| `recall(RecallQuery)` (async) | `RecallResult` — the context block. |
-| `canonical_memories()` | `Vec<CanonicalMemory>` — the "saints". |
-| `stats()` | `MemoryStats` — flush lag, log depth, counts, degraded. |
-| `events()` | `broadcast::Receiver<DaemonEvent>` — live event feed. |
+| `recall` | The context block for a query. |
+| `canonical_memories` | The session's canonical memories. |
+| `stats` | Flush lag, log depth, counts, and degraded state. |
+| `events` | A live feed of background events. |
 
-### Shutdown
-`close().await` — flushes the write-behind tail and releases the lease. Bounded
-by `CLOSE_GRACE`; on a hung dependency it abandons the tail (which is then lost —
-there is no on-disk WAL) rather than hang forever, and says so honestly.
+### Shut down
 
-## Level B adapter traits
+`close().await` flushes the pending write-behind tail and releases the lease. It is time-bounded. If a dependency hangs, it stops rather than waiting forever, and it reports honestly that the un-flushed tail was not saved. There is no on-disk write-ahead log, so an abandoned tail is lost, not replayed on restart.
 
-Backends are selected by cargo feature → registry → `dyn Trait`. See
-[config.md](config.md#features) for the feature flags.
+## Backends
 
-### `GraphStore` (`src/store/mod.rs`)
-Durable graph persistence. Key methods: `init_schema`, `flush(&MutationBatch)`,
-`load_session(&SessionId)`, `keyword_candidates`, `vector_candidates`,
-`blast_radius`, `interaction_span`, `record_canonization`, plus the lease methods
-below. Implementations: `MemoryStore` (`store-memory`), `SqliteStore`
-(`store-sqlite`), `CockroachStore` (`store-cockroach`).
+Backends are chosen by Cargo feature and configuration, not loaded as plugins. See [Configuration](config.md) for the feature flags.
 
-### `Embedder` (`src/embed/mod.rs`)
+### The GraphStore trait
+
+`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, and canonization records, plus the lease methods below.
+
+### The Embedder trait
+
 ```rust
 pub trait Embedder: Send + Sync {
     fn dimensions(&self) -> usize;
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
 }
 ```
-Implementations: `FixtureEmbedder` (`embed-fixture`), `BgeM3LlamaCppEmbedder`
-(`embed-bge`), Bedrock Titan (`embed-bedrock`, authorization-gated).
 
-## Single-writer lease
+The implementations are the fixture embedder, BGE-M3 over `llama-server`, and Amazon Titan through Bedrock.
 
-Spec §2.2 single-writer is **store-enforced** (T8.6). A per-session lease row
-carries the holder (agent + pid + host), acquired-at, and a TTL.
+## The single-writer lease
 
-- `GraphStore::acquire_lease` / `refresh_lease` / `release_lease`.
-- Acquire is atomic per backend (`INSERT ... ON CONFLICT ... WHERE (expired OR mine) RETURNING`).
-- `Memory::build()` acquires or fails closed naming the current holder; `close()` releases; a heartbeat (interval = TTL/3) keeps a live holder and lets a crashed one expire.
-- **Fence:** if the heartbeat observes the lease was taken over, the writer is latched closed — further writes and the flush are refused, and pending is dropped rather than overwrite the new holder.
-- **Known bound:** the fence trips on *detection*, not at the instant of loss — an old holder may write for up to ~one heartbeat interval + one flush cycle after a legitimate TTL expiry. Tracked as [nrynss/lambo#1](https://github.com/nrynss/lambo/issues/1) (store-side fencing tokens).
+A session has exactly one writer. Lambo enforces this in the store with a per-session lease that records the current holder and a time-to-live.
 
-TTL 45s, heartbeat 15s, and `LEASE_TTL > SHUTDOWN_BUDGET` (15s) is a compile-time
-assertion so a graceful shutdown releases rather than expires.
+- `build()` acquires the lease or fails, naming the process that holds it. `close()` releases it.
+- A heartbeat keeps a live holder's lease fresh and lets a crashed holder's lease expire.
+- If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder.
 
-See also: [mcp.md](mcp.md), [config.md](config.md).
+There is one known limitation. The fence trips when the holder's heartbeat notices the loss, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
+
+See [MCP tools](mcp.md) and [Configuration](config.md).
