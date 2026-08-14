@@ -48,7 +48,8 @@
 //!   relative order is preserved wherever it is observable.
 //! * **Within a bucket, submission order is preserved**, and duplicates are
 //!   collapsed to the value row-by-row replay would have left (see
-//!   [`ConceptRow`] for the one subtle case).
+//!   [`ConceptRow`] for the one subtle case) **at the position row-by-row replay
+//!   would have first written them** (see [`dedupe_last_at_first_position`]).
 //!
 //! Duplicate collapsing is not an optimisation, it is **required**: PostgreSQL
 //! and CockroachDB both reject a multi-row `INSERT … ON CONFLICT DO UPDATE`
@@ -63,11 +64,25 @@ use crate::types::{
     CanonizationStatus, Concept, Edge, EdgeType, Interaction, Mutation, Node, NodeId,
 };
 
+/// Columns bound per row of each multi-row upsert, i.e. bind parameters per row.
+///
+/// Both adapters emit twin-shaped statements, so one definition serves both and
+/// the per-adapter bind-parameter const-asserts (R1-4) cannot drift from the
+/// column lists they are meant to bound. `cockroach::upsert_placeholder_shapes_match_structs`
+/// pins them against the real generated SQL.
+pub const INTERACTION_COLUMNS: usize = 6;
+/// See [`INTERACTION_COLUMNS`]. Includes `embedding` and `chunk_group_id`.
+pub const CONCEPT_COLUMNS: usize = 16;
+/// See [`INTERACTION_COLUMNS`].
+pub const EDGE_COLUMNS: usize = 9;
+
 /// Rows per multi-row statement, per table.
 ///
 /// Each adapter picks its own: the ceiling is the backend's bind-parameter
-/// limit divided by the column count, and the floor is "large enough that a
-/// realistic burst is a handful of statements".
+/// limit divided by the column count ([`CONCEPT_COLUMNS`] and friends), and the
+/// floor is "large enough that a realistic burst is a handful of statements".
+/// Every adapter must `const _: () = assert!(rows * columns <= limit)` for each
+/// bucket — see the asserts next to each `BULK_LIMITS` (R1-4).
 #[derive(Clone, Copy, Debug)]
 pub struct BulkLimits {
     /// Rows per `interactions` statement.
@@ -131,6 +146,9 @@ impl CanonizationColumns {
 /// row-by-row replay produces. (When the row already exists, both the INSERT's
 /// canonization values and the choice made here are discarded by `DO UPDATE`, so
 /// the two are trivially equivalent there.)
+///
+/// It is emitted at the **first** occurrence's position, for a reason unrelated
+/// to either half — see [`dedupe_last_at_first_position`] (R1-1).
 #[derive(Clone, Copy, Debug)]
 pub struct ConceptRow<'a> {
     /// Every column except the three below comes from here (last occurrence).
@@ -198,7 +216,8 @@ impl<'a> Buckets<'a> {
     /// Emit every open bucket, FK order first (`interactions` before
     /// `concepts`), and reset. Empty buckets emit nothing.
     fn drain_into(&mut self, steps: &mut Vec<FlushStep<'a>>, limits: BulkLimits) {
-        let interactions = dedupe_last(std::mem::take(&mut self.interactions), |i| i.id);
+        let interactions =
+            dedupe_last_at_first_position(std::mem::take(&mut self.interactions), |i| i.id);
         for chunk in chunks(interactions, limits.interactions) {
             steps.push(FlushStep::Interactions(chunk));
         }
@@ -211,7 +230,7 @@ impl<'a> Buckets<'a> {
         // Natural-key conflict target, matching `UPSERT_EDGE_SQL`'s
         // `ON CONFLICT (source, target, edge_type)` — deduplicating by `id`
         // would leave two rows colliding on the real target.
-        let edges = dedupe_last(std::mem::take(&mut self.edges), |e| {
+        let edges = dedupe_last_at_first_position(std::mem::take(&mut self.edges), |e| {
             (e.source, e.target, e.edge_type)
         });
         for chunk in chunks(edges, limits.edges) {
@@ -234,42 +253,114 @@ fn chunks<T>(items: Vec<T>, limit: usize) -> Vec<Vec<T>> {
     out
 }
 
-/// Keep the last occurrence of each key, at the position of that last
-/// occurrence — the row-by-row "last write wins" outcome, in replay order.
-fn dedupe_last<T, K: Eq + std::hash::Hash>(items: Vec<T>, key: impl Fn(&T) -> K) -> Vec<T> {
+/// Collapse repeats of `key`: **last occurrence's values, first occurrence's
+/// position**.
+///
+/// # Why the position is the first one (R1-1)
+///
+/// The obvious spelling — keep the last occurrence where it stands — is wrong,
+/// and was a live defect. It *relocates* a row past everything between its first
+/// and last occurrence, and `interactions.previous_id REFERENCES
+/// interactions(id)` is a **self** foreign key, so a batch's interactions can
+/// reference each other:
+///
+/// ```text
+/// submitted: [ i1(prev=None), i2(prev=i1), i1(prev=None) ]
+/// last-position dedupe emits: [ i2(prev=i1), i1 ]   <- i2 references a row
+///                                                      that does not exist yet
+/// ```
+///
+/// With `BULK_LIMITS.interactions == 1` each interaction is its own statement
+/// and both engines check foreign keys at end-of-statement, so `i2` fails
+/// immediately: `SQLITE_CONSTRAINT_FOREIGNKEY` (787) on SQLite, an equivalent FK
+/// violation on CockroachDB. `StoreError::Constraint` is classified **terminal**
+/// (`super::error`), so the flush loop dead-letters the *whole batch* — bounded
+/// data loss, the same class of failure L82-1 was raised for.
+///
+/// First-occurrence position is exactly what row-by-row replay does: replay
+/// *inserts* each key the first time it appears and `DO UPDATE`s it thereafter,
+/// so the order in which rows come into existence is first-occurrence order.
+/// Emitting there preserves reference-before-use for free.
+///
+/// The *values* still come from the last occurrence, because every column of the
+/// three upsert statements except a concept's canonization triple is in the
+/// `DO UPDATE SET` list, and the last write to those wins under replay too. For
+/// `interactions` the FK-bearing column is `previous_id`, and the graph tier
+/// forbids a re-upsert from moving an interaction within the temporal chain
+/// (`Graph::insert_interaction`, "would move it within the chain"), so
+/// `previous_id` is invariant across occurrences of one id and the choice of
+/// occurrence cannot change which row is referenced.
+///
+/// The rule is applied to **all three** buckets rather than only to
+/// `interactions`. `concepts` and `edges` have no intra-table constraint that
+/// position could break today (`concepts.origin_interaction` points at the
+/// *interactions* bucket, which is drained first; `edges` carries no
+/// `REFERENCES` at all — DDL at `migrations/cockroach/001_init.sql:29,40,141`),
+/// so for them this is a no-op in effect. It is uniform anyway so that no future
+/// column can reintroduce the bug by being added to a table whose planner arm
+/// happened to keep the relocating spelling.
+fn dedupe_last_at_first_position<T, K: Eq + std::hash::Hash + Clone>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
     let mut last: HashMap<K, usize> = HashMap::with_capacity(items.len());
+    let mut first_seen: Vec<K> = Vec::with_capacity(items.len());
     for (i, it) in items.iter().enumerate() {
-        last.insert(key(it), i);
+        let k = key(it);
+        if last.insert(k.clone(), i).is_none() {
+            first_seen.push(k);
+        }
     }
-    items
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    first_seen
         .into_iter()
-        .enumerate()
-        .filter(|(i, it)| last[&key(it)] == *i)
-        .map(|(_, it)| it)
+        .map(|k| {
+            slots[last[&k]]
+                .take()
+                .expect("one surviving row per key, taken once")
+        })
         .collect()
 }
 
-/// [`dedupe_last`] by concept id, keeping the **first** occurrence's
-/// canonization columns. See [`ConceptRow`] for why the two halves differ.
+/// [`dedupe_last_at_first_position`] by concept id, keeping the **first**
+/// occurrence's canonization columns. See [`ConceptRow`] for why the two halves
+/// differ.
 fn dedupe_concepts(items: Vec<&Concept>) -> Vec<ConceptRow<'_>> {
     let mut first_canonization: HashMap<NodeId, CanonizationColumns> =
         HashMap::with_capacity(items.len());
-    let mut last: HashMap<NodeId, usize> = HashMap::with_capacity(items.len());
-    for (i, c) in items.iter().enumerate() {
+    for c in &items {
         first_canonization
             .entry(c.id)
             .or_insert_with(|| CanonizationColumns::of(c));
-        last.insert(c.id, i);
     }
-    items
+    dedupe_last_at_first_position(items, |c| c.id)
         .into_iter()
-        .enumerate()
-        .filter(|(i, c)| last[&c.id] == *i)
-        .map(|(_, c)| ConceptRow {
+        .map(|c| ConceptRow {
             concept: c,
             canonization: first_canonization[&c.id],
         })
         .collect()
+}
+
+/// Seed-path rows for `concepts`, deduplicated exactly as a flush is (R1-6).
+///
+/// `GraphStore::seed` takes an arbitrary [`crate::types::GraphSnapshot`]. One
+/// built by `Graph::snapshot` has distinct ids by construction (the graph keys
+/// its nodes by id), but the type does not *promise* that, and the pre-L82-1
+/// seed path was a row-at-a-time loop that simply last-wins'd a repeat. Feeding
+/// a repeat straight into a multi-row statement instead fails it outright
+/// ("cannot affect row a second time"), so the bulk seed path must dedupe to
+/// keep the behaviour it replaced.
+pub fn seed_concept_rows(concepts: &[Concept]) -> Vec<ConceptRow<'_>> {
+    dedupe_concepts(concepts.iter().collect())
+}
+
+/// Seed-path rows for `edges`, deduplicated on the natural key the SQL conflicts
+/// on. See [`seed_concept_rows`] for why the seed path dedupes at all (R1-6).
+pub fn seed_edge_rows(edges: &[Edge]) -> Vec<&Edge> {
+    dedupe_last_at_first_position(edges.iter().collect(), |e| {
+        (e.source, e.target, e.edge_type)
+    })
 }
 
 /// Distinct session ids a batch writes into, in first-seen order.
@@ -542,6 +633,14 @@ mod tests {
 
     /// Each barrier variant really is one. A concept upsert on either side of
     /// each must land in a different statement.
+    ///
+    /// All **five** non-upsert variants of `Mutation` are listed (R1-5). The
+    /// catch-all `barrier =>` arm in [`plan_flush`] makes this correct by
+    /// construction, but `CanonizationTransition` is the barrier the concept
+    /// dedupe rule leans on — the first-occurrence-canonization choice in
+    /// [`ConceptRow`] is only sound because a demote between two upserts of one
+    /// concept cannot be collapsed across — so it is the one that most needs an
+    /// executable statement of the property rather than a comment.
     #[test]
     fn every_non_upsert_variant_is_a_barrier() {
         let iid = NodeId::new();
@@ -556,6 +655,18 @@ mod tests {
             Mutation::SetEmbedding {
                 session_id: sid(),
                 embedding: None,
+            },
+            Mutation::CanonizationTransition {
+                event: CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: sid(),
+                    node_id: cid,
+                    from_status: CanonizationStatus::None,
+                    to_status: CanonizationStatus::Candidate,
+                    blast_radius: Some(1),
+                    last_demotion_time: None,
+                    occurred_at: ts(1),
+                },
             },
         ] {
             let mutations = vec![
@@ -648,8 +759,94 @@ mod tests {
             panic!("expected one edges step, got {steps:?}");
         };
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].id, winner, "last write wins, in the last position");
+        assert_eq!(
+            rows[0].id, winner,
+            "last write wins, at the first occurrence's position"
+        );
         assert_eq!(rows[1].edge_type, EdgeType::Dependency);
+    }
+
+    /// **R1-1, the pin.** A repeated interaction must not be relocated past a
+    /// later interaction that chains onto it.
+    ///
+    /// `interactions.previous_id REFERENCES interactions(id)` is a self FK, so
+    /// emitting `i1` *after* `i2(prev=i1)` makes `i2`'s statement fail its FK
+    /// check, and `Constraint` is terminal — the whole batch is dead-lettered.
+    /// The equivalent SQLite round trip is
+    /// `sqlite::a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it`,
+    /// which fails with `SQLITE_CONSTRAINT_FOREIGNKEY` if this rule regresses.
+    #[test]
+    fn a_repeated_interaction_keeps_its_first_position() {
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        let mut late = interaction(i1, None);
+        late.prompt_text = Some("re-upserted".into());
+        let mutations = vec![
+            Mutation::UpsertNode {
+                node: Node::Interaction(interaction(i1, None)),
+            },
+            Mutation::UpsertNode {
+                node: Node::Interaction(interaction(i2, Some(i1))),
+            },
+            Mutation::UpsertNode {
+                node: Node::Interaction(late),
+            },
+        ];
+        // `interactions: 1`, so each surviving row is its own statement.
+        let steps = plan_flush(&mutations, LIMITS);
+        let order: Vec<NodeId> = steps
+            .iter()
+            .flat_map(|s| match s {
+                FlushStep::Interactions(rows) => rows.iter().map(|i| i.id).collect::<Vec<_>>(),
+                other => panic!("expected interactions, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![i1, i2],
+            "the repeat must collapse at i1's FIRST position — re-emitting i1 after i2 breaks \
+             `previous_id REFERENCES interactions(id)` and dead-letters the batch (R1-1)"
+        );
+        let [FlushStep::Interactions(first), ..] = steps.as_slice() else {
+            panic!("expected an interactions step, got {steps:?}");
+        };
+        assert_eq!(
+            first[0].prompt_text.as_deref(),
+            Some("re-upserted"),
+            "position is the first occurrence's, but the VALUES are still the last one's — \
+             that is what row-by-row replay leaves durable"
+        );
+    }
+
+    /// The same rule, one level up: relocation must not move a row past *any*
+    /// later row, whichever bucket. A concept repeated on both sides of a run
+    /// keeps its first slot, so a plan's row order is always first-seen order.
+    #[test]
+    fn dedupe_never_moves_a_row_later_in_the_plan() {
+        let iid = NodeId::new();
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let mutations = vec![
+            Mutation::UpsertNode {
+                node: Node::Concept(concept(a, iid, "a")),
+            },
+            Mutation::UpsertNode {
+                node: Node::Concept(concept(b, iid, "b")),
+            },
+            Mutation::UpsertNode {
+                node: Node::Concept(concept(a, iid, "a again")),
+            },
+        ];
+        let steps = plan_flush(&mutations, LIMITS);
+        let [FlushStep::Concepts(rows)] = steps.as_slice() else {
+            panic!("expected one concepts step, got {steps:?}");
+        };
+        assert_eq!(
+            rows.iter().map(|r| r.concept.id).collect::<Vec<_>>(),
+            vec![a, b],
+            "first-seen order, not last-seen"
+        );
+        assert_eq!(rows[0].concept.content, "a again", "values still last-wins");
     }
 
     /// Chunking is what keeps a statement inside the backend's bind-parameter
@@ -722,6 +919,50 @@ mod tests {
     #[test]
     fn an_empty_batch_plans_no_statements() {
         assert!(plan_flush(&[], LIMITS).is_empty());
+    }
+
+    /// **R1-6.** The seed path feeds an arbitrary caller-built snapshot into the
+    /// same multi-row statements, which reject colliding input rows outright.
+    /// The row-at-a-time loop this replaced last-wins'd them, so the seed helpers
+    /// must collapse repeats the same way a flush does.
+    #[test]
+    fn seed_rows_collapse_repeats_like_the_flush_path() {
+        let iid = NodeId::new();
+        let cid = NodeId::new();
+        let mut born = concept(cid, iid, "early");
+        born.canonization_status = CanonizationStatus::Canonical;
+        born.blast_radius = Some(4);
+        let mut later = concept(cid, iid, "late");
+        later.gc_survived = 2;
+        let other = concept(NodeId::new(), iid, "other");
+        let other_id = other.id;
+        let snapshot_concepts = [born, other, later];
+        let rows = seed_concept_rows(&snapshot_concepts);
+        assert_eq!(rows.len(), 2, "the repeated id must collapse");
+        assert_eq!(rows[0].concept.id, cid, "first-seen order");
+        assert_eq!(rows[0].concept.content, "late", "ordinary columns last-win");
+        assert_eq!(
+            rows[0].canonization.status,
+            CanonizationStatus::Canonical,
+            "canonization columns come from the first occurrence, as in a flush"
+        );
+        assert_eq!(rows[1].concept.id, other_id);
+
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let winner = NodeId::new();
+        let snapshot_edges = [
+            edge(NodeId::new(), a, b, EdgeType::Causal),
+            edge(NodeId::new(), a, b, EdgeType::Dependency),
+            edge(winner, a, b, EdgeType::Causal),
+        ];
+        let edges = seed_edge_rows(&snapshot_edges);
+        assert_eq!(edges.len(), 2, "the repeated natural key must collapse");
+        assert_eq!(
+            edges[0].id, winner,
+            "last write wins, at the first position"
+        );
+        assert_eq!(edges[1].edge_type, EdgeType::Dependency);
     }
 
     #[test]

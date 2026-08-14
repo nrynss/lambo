@@ -104,7 +104,10 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
-use super::batch::{batch_session_ids, plan_flush, BulkLimits, ConceptRow, FlushStep};
+use super::batch::{
+    batch_session_ids, plan_flush, seed_concept_rows, seed_edge_rows, BulkLimits, ConceptRow,
+    FlushStep, CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
@@ -145,6 +148,27 @@ const BULK_LIMITS: BulkLimits = BulkLimits {
     concepts: 256,
     edges: 512,
 };
+
+/// PostgreSQL's wire-protocol ceiling on bind parameters per statement, which
+/// CockroachDB inherits by speaking the same protocol.
+const PG_MAX_BIND_PARAMETERS: usize = 65535;
+
+// R1-4: the ceiling arithmetic above is prose, and prose does not fail a build.
+// A column added to `concepts` without revisiting the row limit would push a
+// chunk over the wire limit and only be discovered against a real server; these
+// turn it into a compile error.
+const _: () = assert!(
+    BULK_LIMITS.interactions * INTERACTION_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "interactions chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.concepts * CONCEPT_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "concepts chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.edges * EDGE_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "edges chunk exceeds the PostgreSQL bind-parameter limit"
+);
 
 // ---------------------------------------------------------------------------
 // vector_candidates — global fetch sizing (DECISION D1)
@@ -1223,13 +1247,14 @@ impl CockroachStore {
             for i in &snapshot.interactions {
                 bulk_upsert_interactions(&mut *tx, &[i]).await?;
             }
-            for chunk in snapshot.concepts.chunks(BULK_LIMITS.concepts) {
-                let rows: Vec<ConceptRow<'_>> = chunk.iter().map(ConceptRow::new).collect();
-                bulk_upsert_concepts(&mut *tx, &rows).await?;
+            // Deduplicated first (R1-6): a multi-row statement rejects colliding
+            // input rows outright, where the row-at-a-time seed this replaced
+            // simply last-wins'd them.
+            for chunk in seed_concept_rows(&snapshot.concepts).chunks(BULK_LIMITS.concepts) {
+                bulk_upsert_concepts(&mut *tx, chunk).await?;
             }
-            for chunk in snapshot.edges.chunks(BULK_LIMITS.edges) {
-                let rows: Vec<&Edge> = chunk.iter().collect();
-                bulk_upsert_edges(&mut *tx, &rows).await?;
+            for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
+                bulk_upsert_edges(&mut *tx, chunk).await?;
             }
             for s in &snapshot.synonyms {
                 sqlx::query(UPSERT_SYNONYM_SQL)
@@ -2549,10 +2574,21 @@ mod tests {
         // the old fixed-placeholder statements had.
         let iid = NodeId::new();
         let i = test_interaction(iid);
-        assert_eq!(placeholder_max(interaction_upsert_query(&[&i]).sql()), 6);
-        assert_eq!(placeholder_max(&concept_sql_for(1)), 16);
+        // Asserted against the shared column constants, not bare literals: those
+        // constants are what the per-adapter bind-parameter const-asserts divide
+        // the backend limit by (R1-4), so a column added to a statement without
+        // updating them must fail here rather than silently widen a chunk past
+        // the limit.
+        assert_eq!(
+            placeholder_max(interaction_upsert_query(&[&i]).sql()),
+            INTERACTION_COLUMNS
+        );
+        assert_eq!(placeholder_max(&concept_sql_for(1)), CONCEPT_COLUMNS);
         let e = test_edge(iid, iid, EdgeType::Derives);
-        assert_eq!(placeholder_max(edge_upsert_query(&[&e]).sql()), 9);
+        assert_eq!(
+            placeholder_max(edge_upsert_query(&[&e]).sql()),
+            EDGE_COLUMNS
+        );
         // STORE-1: the full-snapshot upsert now carries the embedding contract
         // (kind/model/dim) alongside root_goal/created_at/closed_at.
         assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 7);

@@ -149,7 +149,10 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::batch::{plan_flush, BulkLimits, ConceptRow, FlushStep};
+use super::batch::{
+    plan_flush, seed_concept_rows, seed_edge_rows, BulkLimits, ConceptRow, FlushStep,
+    CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};
@@ -175,6 +178,27 @@ const BULK_LIMITS: BulkLimits = BulkLimits {
     concepts: 60,
     edges: 100,
 };
+
+/// The conservative `SQLITE_MAX_VARIABLE_NUMBER` the limits above are sized
+/// against. Pre-3.32 builds ship this; 3.32+ ship 32766.
+const SQLITE_MAX_VARIABLE_NUMBER: usize = 999;
+
+// R1-4: the arithmetic in the doc comment above is prose, and prose does not
+// fail a build. Raising `concepts` to 70 (70 × 16 = 1120) passes the whole local
+// suite against a modern bundled SQLite and only breaks on an old one, in
+// production. These turn that into a compile error.
+const _: () = assert!(
+    BULK_LIMITS.interactions * INTERACTION_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "interactions chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
+const _: () = assert!(
+    BULK_LIMITS.concepts * CONCEPT_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "concepts chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
+const _: () = assert!(
+    BULK_LIMITS.edges * EDGE_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "edges chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
 
 const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 
@@ -403,13 +427,14 @@ impl SqliteStore {
         for i in &snapshot.interactions {
             upsert_interactions(&mut *tx, &[i]).await?;
         }
-        for chunk in snapshot.concepts.chunks(BULK_LIMITS.concepts) {
-            let rows: Vec<ConceptRow<'_>> = chunk.iter().map(ConceptRow::new).collect();
-            upsert_concepts(&mut *tx, &rows).await?;
+        // Deduplicated first (R1-6): a multi-row statement rejects colliding
+        // input rows outright, where the row-at-a-time seed this replaced simply
+        // last-wins'd them.
+        for chunk in seed_concept_rows(&snapshot.concepts).chunks(BULK_LIMITS.concepts) {
+            upsert_concepts(&mut *tx, chunk).await?;
         }
-        for chunk in snapshot.edges.chunks(BULK_LIMITS.edges) {
-            let rows: Vec<&Edge> = chunk.iter().collect();
-            upsert_edges(&mut *tx, &rows).await?;
+        for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
+            upsert_edges(&mut *tx, chunk).await?;
         }
         for s in &snapshot.synonyms {
             sqlx::query(
@@ -3533,6 +3558,84 @@ mod tests {
         );
         assert_eq!(row.blast_radius, Some(9));
         assert_eq!(row.last_demotion_time, Some(ts));
+    }
+
+    /// **R1-1, the pin — against a real SQL engine with foreign keys on.**
+    ///
+    /// `interactions.previous_id REFERENCES interactions(id)` is a *self* FK.
+    /// A planner that collapses a repeated interaction at its LAST position
+    /// re-emits `i1` after `i2(prev=i1)`; with `BULK_LIMITS.interactions == 1`
+    /// each is its own statement, SQLite checks the FK at end-of-statement, and
+    /// `i2` fails with `SQLITE_CONSTRAINT_FOREIGNKEY` (787). `Constraint` is
+    /// terminal, so the flush loop dead-letters the whole batch — the same loss
+    /// class L82-1 was raised for.
+    ///
+    /// The second half is the control the reviewer used to prove *relocation* is
+    /// the cause and not the duplicate: with the repeat adjacent, nothing moves
+    /// past `i2`, and even the broken planner returns `Ok`.
+    #[tokio::test]
+    async fn a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+
+        // CONTROL FIRST, so that it still executes when the assertion below
+        // fails: the same duplicate, adjacent. Nothing is relocated past i2
+        // under either rule, so this passes with or without the fix — which is
+        // what makes the second half evidence about *relocation* specifically
+        // rather than about duplicates.
+        let sid = SessionId::from("r1-1-adjacent-control");
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i2, Some(i1), ts),
+                ],
+            })
+            .await
+            .expect("the adjacent-repeat control must always pass");
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().interactions.len(),
+            2
+        );
+
+        // Non-adjacent re-upsert: i1, then i2 chaining onto i1, then i1 again.
+        // `Graph::insert_interaction` permits a re-upsert that does not move the
+        // interaction within the temporal chain, so `previous_id` is the same on
+        // both occurrences.
+        let sid = SessionId::from("r1-1-self-fk");
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i2, Some(i1), ts),
+                    plant_interaction(&sid, i1, None, ts),
+                ],
+            })
+            .await
+            .expect(
+                "the repeated interaction must not be relocated past the row that references \
+                 it — a self-FK violation here dead-letters the whole batch (R1-1)",
+            );
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.interactions.len(), 2, "one row per id");
+        let chained = snap
+            .interactions
+            .iter()
+            .find(|i| i.id == i2)
+            .expect("i2 must be durable");
+        assert_eq!(
+            chained.previous_id,
+            Some(i1),
+            "the chain must survive the collapse"
+        );
     }
 
     /// **L82-1.** A batch far larger than the per-statement row limit must
