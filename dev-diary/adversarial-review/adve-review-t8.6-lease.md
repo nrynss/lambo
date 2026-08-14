@@ -2,7 +2,7 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: R2 REMEDIATED — all 6 findings fixed/documented          ║
+║  STATUS: R2-VERIFY CLEAN — remediation re-reviewed, T8.6 done     ║
 ║  Verdict: central safety property HOLDS; 3 P2 + 3 P3 findings    ║
 ║  Central claim tested: "can two writers ever hold the lease on   ║
 ║    one session at the same time?"  → NO (80/80 cross-process     ║
@@ -388,3 +388,122 @@ store-cockroach,store-memory,fixtures` clean · same `--features store-sqlite` c
 `cargo test --features store-sqlite` **643 lib passed / 1 ignored** (+2 over 641; all
 integration incl. `serve_single_writer_lease` green). No existing test weakened or deleted
 (`grep '^-.*assert'` over the remediation diff is empty for pre-existing asserts).
+
+---
+
+## R2-verify — independent re-review of the 6 remediation commits (2026-08-14)
+
+**Re-reviewer scope:** verify the remediation genuinely closes T86-1..T86-6 and try to BREAK the
+fence, on `task/t8.6-lease` @ `ed2821c` (6 commits `d162814 f40f415 04bc8d0 29b2b12 b4f1a6b
+ed2821c` over review commit `b0c164c`). Method: source read of every fix; a **fence
+mutation-kill** (neuter the fence, confirm the new tests fail); the cheap regression greps; and a
+feature-gated compile of the Cockroach path. Per re-review budget the slow cross-process/sqlite
+integration suites and the 80-trial hammer were **not** re-run — the review's baseline stands and
+was not disturbed. Tree left clean at `ed2821c`.
+
+**VERDICT: CLEAN** — T8.6 done. The fence genuinely converts the unbounded lost-lease split-brain
+into a bounded, loud, safe stop; the two new tests pin it (mutation-confirmed); the acquire-before-
+load reorder, the Cockroach `tx_retry` wrap, and the winner-liveness test are all correct. One
+inherent residual (the detection-latency window, below) is now documented plainly; it is not a
+defect in the fix and not within T8.6's scope to eliminate.
+
+### Per-finding disposition (re-verified)
+
+- **T86-2 (fence) — VERIFIED, mutation-confirmed.** All four write entry points route through the
+  gate that now checks the fence: `derive`/`retract` via `begin_write` (`memory.rs:939,1087`),
+  `record_action`/`reserve` via `begin_write_sync` (`:990,1183`); the gate checks the fence both
+  *before* and *after* taking the writers permit (`:1868-1876, 1904-1912`); the flush loop checks
+  at the top of every iteration and **drops** pending (`flush.rs:388-398`); `close()` refuses to
+  flush or release when fenced (`memory.rs:1527-1548`). Baseline: `a_lost_lease_fences_the_writer
+  _and_stops_the_flush` + `a_fenced_loop_stops_flushing_and_drops_pending` **pass in 0.02s (no
+  hang, no deadlock)**. **Mutation-kill:** neutering both fence predicates (`lease_lost() && false`
+  in `memory.rs`, `fenced() … && false` in `flush.rs`) makes the memory test **FAIL** (a fenced
+  `derive` now wrongly succeeds) and the flush test **hang** (the loop never breaks) — the fix is
+  load-bearing and pinned. The store-level test does a *real* takeover (force-expire → agent-b
+  acquires → fence) and asserts A can no longer derive/record_action/reserve/close, that nothing
+  A produced ever lands in the store, and that agent-b's lease stays intact. No lock is held across
+  an `await` in any fence path (the graph `parking_lot` guard is a per-statement temporary; the
+  fence is an `AtomicBool`), so there is no deadlock.
+
+- **T86-1 (acquire before load) — VERIFIED (read).** `build()` now acquires the lease at step 0
+  (`memory.rs:536-559`) *before* `load_session_async` (`:562`); the acquire is a single atomic
+  `INSERT … ON CONFLICT … RETURNING` that absorbs contention via `busy_timeout` and yields a clean
+  `Held`, so a losing racer is refused with the named message before it ever opens the load's
+  `BEGIN IMMEDIATE` — the `database is locked` leak is structurally removed. A build step that
+  fails after the acquire leaves the lease held-till-TTL; this is documented in-code and is the
+  same crash-shaped expiry a mid-startup crash gives (acceptable). Cross-process 20-trial repro
+  not re-run (budget); the reorder is logically dispositive.
+
+- **T86-3 (Cockroach `tx_retry`) — VERIFIED, compiles.** `acquire_or_refresh_lease`'s body is
+  wrapped in `tx_retry(|| async move { … })` (`cockroach.rs:1281`), structurally identical to the
+  four sibling contended writes (`:1170,1553,1697,1995`) — same Copy-handle pre-binding
+  (`pool: &PgPool`, `&str`, `f64`) so the `FnMut` body re-runs cleanly per retry. The inner
+  `for 0..3` vanished-row loop is unchanged. **Compiles clippy-clean** under
+  `--features store-cockroach,store-memory,fixtures -D warnings` (20.4s, exit 0). No live cluster —
+  40001 replay behaviour reasoned, not observed (unchanged from R1).
+
+- **T86-6 (winner-liveness) — VERIFIED (read).** The cross-process test now drives
+  `notifications/initialized` + `tools/list` over A's transport *after* B is refused and requires
+  a `"result"` (A serving through contention), asserts A exits 0 on graceful SIGTERM, and
+  reacquires the lease with a fresh writer (A really released). A mutation making *both* processes
+  fail is caught: A would never serve, so the `tools/list` result assertion fails. Not re-run
+  (cross-process, expensive); the assertion structure is dispositive.
+
+- **T86-4 / T86-5 (documented residuals) — accepted.** T86-4: the serve window is genuinely
+  closed — `SHUTDOWN_BUDGET`(15s) `< LEASE_TTL`(45s) is pinned by a `const _` assertion and serve
+  is the only in-repo production `close()` caller; the non-serve caller contract is documented on
+  `Memory::close`. Honest and acceptable. T86-5: leaked-handle wedge has no cheap store-side guard
+  (a leaked refresh is indistinguishable from a healthy one); operator-override escape documented.
+  Acceptable deferral.
+
+### Substantive residual surfaced — the detection-latency split-brain window (inherent, now documented)
+
+The fence stops writes **once the heartbeat observes the loss**, not at the instant the lease is
+lost. Between a new holder B legitimately acquiring (only possible after A's `LEASE_TTL`=45s
+expiry) and A's fence tripping, A can still write:
+
+- **Detection latency:** A's fence is latched on its next `refresh_lease` that returns `Held` —
+  up to `LEASE_HEARTBEAT_INTERVAL` (**15s**) after the store becomes reachable again. Until then
+  `begin_write` is **not** fenced, so A accepts writes and its flush loop persists them normally,
+  overlapping B's rows.
+- **In-flight flush cycle:** a `cycle()` already executing `store.flush` when the fence is set
+  runs to completion — the fence is checked only at the top of the loop, not before the store call
+  inside `cycle`. The worst-case bound is `FLUSH_ATTEMPT_TIMEOUT` (**30s**), **not** the
+  `POLL_QUANTUM` (100ms) the `flush.rs:386` comment claims — that 100ms is the latency to the next
+  fence *check*, not to the completion of a store write already in flight. (Minor code-comment
+  imprecision; worth correcting but not blocking.)
+
+So the worst-case window in which A's write can land *after* B's takeover is ≈ 15s (detection) +
+one in-flight flush cycle (≤30s). **Ruling: this is an inherent, bounded residual of lease-fencing
+without store-side monotonic fencing tokens** (the classic fencing-token gap: a slow/paused old
+holder can always write during the detection gap unless the store itself rejects a stale token on
+every write). The remediation does exactly what it claims — it converts the previously **unbounded**
+"lost lease keeps writing forever" into a **bounded** stop, and it drops nothing a crash would not
+have dropped. The core safety property ("exactly one holder *acquires*") is untouched: this window
+is about an old holder's in-flight writes during detection, not about two processes both winning
+the acquire. Eliminating it requires a store-checked monotonic fencing token on every write — a
+larger design change beyond T8.6's scope. **Recommended follow-up (not a T8.6 blocker):** track a
+fencing-token task for the multi-writer/swarm use case, where the 45s-outage precondition is more
+likely to be hit and the overlap window matters most.
+
+### Gates (re-verified independently, clean tree @ `ed2821c`)
+
+- `cargo fmt --all -- --check` — **clean** (exit 0).
+- `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` —
+  **clean** (exit 0, 20.4s), covering the T86-3 Cockroach path.
+- `cargo test --lib` (fence tests, baseline) — **2 passed / 0 failed** in 0.02s; under the fence
+  mutation, **both fail** (kill confirmed), then reverted.
+- Regression greps over `b0c164c..ed2821c`: `grep '^-.*assert'` over `src tests` **empty** (no
+  assertion weakened); `grep -iE '^\+.*(field|serde|rename)'` over `src` **empty** (no wire-visible
+  lease field added — F18 golden set untouched).
+- Not re-run per budget (established in R1, baseline undisturbed): the full `--features
+  store-sqlite` integration suite, the cross-process `serve_single_writer_lease` test, the T8.2
+  shutdown lifecycle tests, and the 80-trial hammer. The default clippy `-D warnings` and the
+  `store-sqlite` clippy were likewise taken as established in R1 (not independently re-run this
+  round).
+
+**Note for the record:** the orchestrator's mid-review "the fence introduced a deadlock" inference
+was a misread of two unrelated hangs (cargo blocked on a build-directory lock under disk pressure;
+and the *deliberately mutated* flush test whose loop can no longer break) and was retracted. There
+is no lock-across-await and no deadlock in the shipped fence paths; the un-mutated tests pass in
+0.02s.
