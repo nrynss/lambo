@@ -1362,6 +1362,36 @@ impl Memory {
     /// background tasks are stopped and every mutating method is refused, so a
     /// retry re-attempts exactly the same tail rather than a growing one.
     ///
+    /// ## Bounding this against the lease — caller's contract (T86-4)
+    ///
+    /// `close()` aborts the lease heartbeat **first** (right after latching
+    /// `closed`), because the success paths below release the lease explicitly
+    /// and it must not keep being refreshed underneath that release. From that
+    /// moment the lease is no longer refreshed, so it stays valid only for its
+    /// **remaining TTL** — at worst one [`LEASE_HEARTBEAT_INTERVAL`] short of a
+    /// full [`LEASE_TTL`] (≈30s) if the last beat landed just before close.
+    ///
+    /// This method is otherwise **unbounded**: the step-2 flush-task join and the
+    /// step-4 final flush each have their own internal timeout ladders, but their
+    /// composition has no single wall-clock cap. A `close()` whose final flush
+    /// runs longer than that remaining validity therefore lets the lease
+    /// **expire while this handle is still flushing its tail**, which can admit a
+    /// second writer mid-flush — the exact window the lease exists to close.
+    ///
+    /// **The `serve` path avoids this by bounding `close()` below the TTL.**
+    /// [`crate::mcp::serve`] caps its close at `CLOSE_GRACE` (10s) inside a
+    /// `SHUTDOWN_BUDGET` (15s), and a build-time assertion pins
+    /// `LEASE_TTL (45s) > SHUTDOWN_BUDGET`, so the lease is provably still valid
+    /// when `release` lands. **A direct library caller gets no such bound** and
+    /// **MUST** cap `close()` — e.g. under [`tokio::time::timeout`] — below the
+    /// lease's remaining validity, exactly as `serve` does, if two processes may
+    /// contend on the session. (Reordering the heartbeat to keep refreshing
+    /// across the flush was considered and rejected: it entangles the heartbeat's
+    /// lost-lease fence with the mid-close release/flush ordering, and this
+    /// close body's ordering is load-bearing for the R2-1/R3-1 cancellation and
+    /// custody invariants above. Bounding at the call site is the smaller-risk
+    /// contract, and in-repo `serve` is the only production caller.)
+    ///
     /// ## Cancellation
     ///
     /// **Dropping this future never destroys the tail** (R2-1). A caller that

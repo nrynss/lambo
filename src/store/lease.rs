@@ -28,6 +28,16 @@
 //!   one from the store's side. The operator override is to clear the row by
 //!   hand; see [`OPERATOR_OVERRIDE`].
 //!
+//!   **A leaked handle is the same shape (T86-5, accepted residual).** The
+//!   "a dropped/crashed holder's lease lapses at the TTL" guarantee depends on
+//!   `Memory`'s `Drop` actually running — that is what aborts the heartbeat. A
+//!   handle kept alive by an `Arc` cycle or `std::mem::forget` never drops, so
+//!   its heartbeat refreshes every [`LEASE_HEARTBEAT_INTERVAL`] for the whole
+//!   process lifetime and the session stays wedged well past one TTL. This is an
+//!   abnormal-leak edge, not a normal path, and there is no cheap store-side
+//!   guard (a live refresh is a live refresh); the escape is the same
+//!   [`OPERATOR_OVERRIDE`] DELETE that clears any wedged-but-heartbeating holder.
+//!
 //! ## Clock discipline (spec §6.4 / P6 review F18)
 //!
 //! Lease timestamps are **never** a client argument. `acquire`/`refresh` take a
