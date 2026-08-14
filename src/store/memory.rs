@@ -12,11 +12,32 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore};
 use crate::types::{
     CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
     NodeId, Scored, SessionId, StoreError,
 };
+
+/// One session's lease row (T8.6). In-process analogue of the sqlite/cockroach
+/// `session_leases` table: two `Memory` handles sharing this store contend on
+/// the same map entry, so the same-process collision is now *enforced*, not
+/// only logged. Keyed per store instance (not process-global): two separate
+/// `MemoryStore`s model two separate databases and must not see each other.
+#[derive(Clone)]
+struct LeaseRow {
+    holder: String,
+    acquired_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+fn row_info(row: &LeaseRow) -> LeaseInfo {
+    LeaseInfo {
+        holder: row.holder.clone(),
+        acquired_at: row.acquired_at,
+        expires_at: row.expires_at,
+    }
+}
 
 #[derive(Default)]
 struct SessionData {
@@ -51,6 +72,9 @@ impl SessionData {
 #[derive(Default)]
 pub struct MemoryStore {
     inner: RwLock<HashMap<String, SessionData>>,
+    /// Single-writer leases (T8.6), keyed by session id. Separate from `inner`
+    /// so lease contention never touches the graph data lock.
+    leases: RwLock<HashMap<String, LeaseRow>>,
 }
 
 impl MemoryStore {
@@ -272,6 +296,82 @@ impl GraphStore for MemoryStore {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::empty()
+    }
+
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        // In-process clock (this IS the store) and one map lock held for the
+        // whole decision — the same atomicity the SQL backends get from a single
+        // `INSERT ... ON CONFLICT`: no reader can observe a half-applied steal.
+        let now = Utc::now();
+        let expires_at = now
+            + chrono::Duration::from_std(ttl)
+                .map_err(|e| StoreError::Backend(format!("lease ttl out of range: {e}")))?;
+        let token = holder.token();
+        let mut leases = self.leases.write();
+        match leases.get(&session.0) {
+            // A live lease held by someone else — refuse, fail closed.
+            Some(row) if row.expires_at > now && row.holder != token => {
+                let age = (now - row.acquired_at).to_std().unwrap_or(Duration::ZERO);
+                Ok(LeaseOutcome::Held {
+                    current: row_info(row),
+                    age,
+                })
+            }
+            // Our own lease — refresh, keeping the original acquisition time.
+            Some(row) if row.holder == token => {
+                let acquired_at = row.acquired_at;
+                let updated = LeaseRow {
+                    holder: token,
+                    acquired_at,
+                    expires_at,
+                };
+                let info = row_info(&updated);
+                leases.insert(session.0.clone(), updated);
+                Ok(LeaseOutcome::Acquired(info))
+            }
+            // Fresh or expired — take it.
+            _ => {
+                let fresh = LeaseRow {
+                    holder: token,
+                    acquired_at: now,
+                    expires_at,
+                };
+                let info = row_info(&fresh);
+                leases.insert(session.0.clone(), fresh);
+                Ok(LeaseOutcome::Acquired(info))
+            }
+        }
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        // Identical atomic upsert; the acquire arm for "our own lease" is the
+        // heartbeat path.
+        self.acquire_lease(session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        let token = holder.token();
+        let mut leases = self.leases.write();
+        // Holder-scoped: only clear the row if it is still ours, so a stale
+        // release cannot evict a writer who took over after our lease lapsed.
+        if leases.get(&session.0).map(|r| &r.holder) == Some(&token) {
+            leases.remove(&session.0);
+        }
+        Ok(())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
