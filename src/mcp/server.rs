@@ -51,6 +51,12 @@ const MAX_TRAVERSAL_DEPTH: usize = 5;
 const MAX_MAX_TOKENS: usize = 100_000;
 /// Upper bound on concepts in a single `lambo_derive` call.
 const MAX_CONCEPTS_PER_DERIVE: usize = 64;
+/// Upper bound on the combined `produces` + `modifies` + `depends_on` target
+/// count in a single `lambo_record_action` call (N1). Mirrors
+/// [`MAX_CONCEPTS_PER_DERIVE`]: `record_action` fans each target out into a
+/// concept and an edge under the graph write lock, so an unbounded list is the
+/// same single-process stall vector `lambo_derive` was already guarded against.
+const MAX_ACTION_TARGETS: usize = 64;
 /// Upper bound on `lambo_reserve` TTL — a soft lock (spec §11), not a lease.
 const MAX_RESERVE_TTL_SECS: u64 = 3600;
 /// Upper bound on `lambo_inspect` depth.
@@ -76,6 +82,18 @@ const MAX_INSPECT_CANDIDATES: usize = 10;
 /// Concept type as it crosses the wire. Mirrors [`ConceptType`] rather than
 /// deriving `JsonSchema` on the core type, so the MCP schema is owned here and
 /// a core rename cannot silently change a published tool schema.
+///
+/// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
+/// variant \`…\`` error, which repeats the caller's decoded string — potentially
+/// a decoded control char such as `U+0001` — back to the model, unlike
+/// [`check_size`], which names control codepoints instead of echoing them. This
+/// is **not** interceptable at our layer: every tool takes its params through
+/// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
+/// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
+/// Sanitising it would mean abandoning `Parameters<T>` for a hand-rolled
+/// deserialize in all seven tools — a large, error-prone change for a field whose
+/// only reachable "byte" is an escaped control char in an enum slot. Left as-is;
+/// revisit if rmcp grows an extraction-error hook.
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireConceptType {
@@ -209,9 +227,82 @@ impl std::fmt::Debug for LamboServer {
     }
 }
 
-/// Render a `Memory` failure as a caller-visible tool error.
+/// A short, detail-free class for a `Memory` failure (N4).
+///
+/// The full error can interpolate a DSN, a store URL, a file path or a driver
+/// message — none of which the model needs and any of which is worth keeping
+/// out of a model-facing string. Return the class; the detail is logged.
+fn err_class(err: &LamboError) -> &'static str {
+    match err {
+        LamboError::Store(_) => "store error",
+        LamboError::Embed(_) => "embedding error",
+        LamboError::Config(_) => "configuration error",
+        LamboError::Conflict(_) => "conflict",
+        LamboError::Other(_) => "internal error",
+    }
+}
+
+/// Render a `Memory` failure as a caller-visible tool error (N4).
+///
+/// Matches the [`contain_panic`] policy: the full detail goes to the log, the
+/// client gets a class and a pointer to the log — never the raw error, which
+/// can carry a store URL or driver message.
 fn tool_err(what: &str, err: LamboError) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("{what}: {err}"))])
+    tracing::error!(
+        tool = what,
+        error = %err,
+        "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
+    );
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{what}: {} (the detail was logged server-side)",
+        err_class(&err)
+    ))])
+}
+
+/// Clamp a config-derived default into the MCP-enforced range (N6).
+///
+/// A session config can set a `default_top_k` (etc.) wider than the MCP maximum;
+/// a client that omits the knob would then inherit a value the surface refuses.
+/// Clamp it into `lo..=hi` and log when that changes it, so the request
+/// succeeds with a legible bound rather than failing on a value the client never
+/// sent.
+fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usize {
+    let clamped = value.clamp(lo, hi);
+    if clamped != value {
+        tracing::warn!(
+            config_key = name,
+            configured = value,
+            clamped_to = clamped,
+            "mcp: session config default is outside the MCP bound — using the clamped value"
+        );
+    }
+    clamped
+}
+
+/// Replace any whitespace-delimited token that looks like a URL with a
+/// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
+/// not carry it into a model-facing string. Idempotent — a redacted token has
+/// no `://` left to match.
+///
+/// Scope (R4 nit): this matches only `scheme://…` tokens, not a bare
+/// `host:port`. That is deliberate, not an oversight — no current warning path
+/// emits a schemeless `host:port` (every endpoint the store/embedder logs is a
+/// full URL), and a `host:port` matcher trained on a colon would over-redact
+/// ordinary warning text (`ratio 3:4`, `line 42:10`, SQLSTATE-style codes),
+/// corrupting the very message it is meant to keep readable. If a future warning
+/// starts emitting bare `host:port`, redact it at that source (where the shape is
+/// known) rather than widening this heuristic.
+fn redact_urls(s: &str) -> String {
+    s.split(' ')
+        .map(|tok| {
+            if tok.contains("://") {
+                "<redacted-url>"
+            } else {
+                tok
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Reject a parameter the server will not act on.
@@ -223,12 +314,33 @@ fn bad_param(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
-/// Refuse any client string over [`MAX_CONTENT_BYTES`] (R1/T82-6).
+/// Validate one client string before it reaches the store: refuse it if it is
+/// over [`MAX_CONTENT_BYTES`] (R1/T82-6) **or** carries a control character
+/// other than tab/newline (N2).
+///
+/// The size cap is the single-process fairness guard. The control-character
+/// check is a data-hygiene one: a NUL or other C0 control ends up verbatim in a
+/// concept's `content`, its canonical key, and every downstream rendering (the
+/// T5.3 context block, `lambo_inspect` output, log lines), where it can corrupt
+/// terminals, truncate at the NUL, or smuggle ANSI escapes. Tab and newline are
+/// the only controls a legitimate multi-line concept needs, so everything else
+/// is refused here rather than sanitised silently.
 fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
     if value.len() > MAX_CONTENT_BYTES {
         return Err(bad_param(format!(
             "{field} exceeds {MAX_CONTENT_BYTES} bytes ({} given)",
             value.len()
+        )));
+    }
+    if let Some(c) = value
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        // Name the offending codepoint, never echo the raw byte back.
+        return Err(bad_param(format!(
+            "{field} contains a disallowed control character (U+{:04X}); only tab and newline \
+             are allowed",
+            c as u32
         )));
     }
     Ok(())
@@ -242,14 +354,19 @@ fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
 /// nobody. They are now a second text block. `content[0]` is deliberately left
 /// alone: for `lambo_recall` it is the T5.3 context block verbatim, and that is
 /// the artifact the calling agent reads.
+///
+/// URLs are redacted from the model-facing text (N3): a degradation warning can
+/// surface a store or embedder endpoint, which the model does not need. The raw
+/// warning is logged for the operator.
 fn attach_warnings(out: &mut CallToolResult, warnings: &[String]) {
     if warnings.is_empty() {
         return;
     }
     let mut text = String::from("warnings:");
     for w in warnings {
+        tracing::debug!(warning = %w, "mcp: warning attached to a result (raw, pre-redaction)");
         text.push_str("\n- ");
-        text.push_str(w);
+        text.push_str(&redact_urls(w));
     }
     out.content.push(ContentBlock::text(text));
 }
@@ -475,9 +592,35 @@ impl LamboServer {
             return e;
         }
         let cfg = self.mem.config();
-        let top_k = p.top_k.unwrap_or(cfg.default_top_k);
-        let max_tokens = p.max_tokens.unwrap_or(cfg.default_max_tokens);
-        let traversal_depth = p.traversal_depth.unwrap_or(cfg.default_traversal_depth);
+        // N6: when the client omits a knob it inherits the session config's
+        // default, which is not bound by the MCP maxima. A config wider than the
+        // MCP cap (e.g. `default_top_k` above `MAX_TOP_K`) would otherwise make
+        // the tool refuse a request that named nothing wrong. Clamp the
+        // config-derived default into range with a logged warning; an *explicit*
+        // out-of-range value from the client is still a client error and is
+        // rejected below.
+        let top_k = match p.top_k {
+            Some(v) => v,
+            None => clamp_cfg_default("default_top_k", cfg.default_top_k, 1, MAX_TOP_K),
+        };
+        let max_tokens = match p.max_tokens {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_max_tokens",
+                cfg.default_max_tokens,
+                1,
+                MAX_MAX_TOKENS,
+            ),
+        };
+        let traversal_depth = match p.traversal_depth {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_traversal_depth",
+                cfg.default_traversal_depth,
+                0,
+                MAX_TRAVERSAL_DEPTH,
+            ),
+        };
         if top_k == 0 || top_k > MAX_TOP_K {
             return bad_param(format!("top_k must be in 1..={MAX_TOP_K}"));
         }
@@ -503,8 +646,13 @@ impl LamboServer {
         // These include `Memory::recall`'s embed-failure degradation warning —
         // the signal that a recall dropped its vector leg and returned
         // keyword-only hits. `attach_warnings` is what puts it where the model
-        // can see it (R1/T82-9).
-        warnings.extend(result.warnings.iter().cloned());
+        // can see it (R1/T82-9). Redact URLs as they enter the vec (N3) so both
+        // the text content and the structured `warnings` are clean; the raw
+        // detail is logged for the operator.
+        for w in &result.warnings {
+            tracing::debug!(warning = %w, "mcp: recall degradation warning (raw, pre-redaction)");
+        }
+        warnings.extend(result.warnings.iter().map(|w| redact_urls(w)));
 
         let hits: Vec<_> = result
             .hits
@@ -623,9 +771,21 @@ impl LamboServer {
         if let Err(e) = check_size("action", &p.action) {
             return e;
         }
-        let produces: Vec<&str> = p.produces.iter().flatten().map(String::as_str).collect();
-        let modifies: Vec<&str> = p.modifies.iter().flatten().map(String::as_str).collect();
-        let depends_on: Vec<&str> = p.depends_on.iter().flatten().map(String::as_str).collect();
+        let produces: Vec<String> = p.produces.unwrap_or_default();
+        let modifies: Vec<String> = p.modifies.unwrap_or_default();
+        let depends_on: Vec<String> = p.depends_on.unwrap_or_default();
+        // N1: cap the combined fan-out. Without this bound one client could hand
+        // `record_action` an arbitrarily long target list and hold the single
+        // process's graph write lock for as long as it takes to fan every entry
+        // out into a concept and an edge — the stall vector `lambo_derive` is
+        // already guarded against, on the tool that had no guard.
+        let total = produces.len() + modifies.len() + depends_on.len();
+        if total > MAX_ACTION_TARGETS {
+            return bad_param(format!(
+                "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
+                 entries ({total} given)"
+            ));
+        }
         if produces
             .iter()
             .chain(&modifies)
@@ -640,15 +800,58 @@ impl LamboServer {
             }
         }
 
-        let action = Action {
-            action: p.action.as_str(),
-            produces: &produces,
-            modifies: &modifies,
-            depends_on: &depends_on,
-        };
-        let outcome = match self.mem.record_action(&action) {
-            Ok(o) => o,
-            Err(e) => return tool_err("lambo_record_action", e),
+        // N1: `Memory::record_action` is synchronous and takes the graph write
+        // lock for its whole body. Called inline it occupies a Tokio *worker*
+        // thread until it returns, so a burst of large calls can starve the
+        // runtime of workers — including the one that would run `Memory::close`
+        // on SIGTERM. `spawn_blocking` moves the work to the blocking pool
+        // (`Memory` is `Arc`-shared and already `Send + Sync`, as the HTTP
+        // factory and the event pump rely on), keeping the worker threads free
+        // for the shutdown path.
+        //
+        // Defense-in-depth, NOT load-bearing — and deliberately not test-pinned
+        // (R4). Reverting this to a direct inline `mem.record_action(&action)`
+        // keeps every test green: the load-bearing anti-hang guarantee is
+        // `serve`'s `CLOSE_GRACE` bound (src/mcp/serve.rs), which force-exits a
+        // stalled shutdown regardless of worker starvation. A regression test
+        // here would have to *provoke* starvation, which is inherently timing-
+        // dependent and flaky, so we pin the bound instead of the offload. Keep
+        // this offload anyway: it turns a worst-case hang-until-`CLOSE_GRACE`
+        // into no stall at all. Do not delete it thinking a test will catch you.
+        let mem = Arc::clone(&self.mem);
+        let action_owned = p.action.clone();
+        let record = tokio::task::spawn_blocking(move || {
+            let produces: Vec<&str> = produces.iter().map(String::as_str).collect();
+            let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
+            let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+            let action = Action {
+                action: action_owned.as_str(),
+                produces: &produces,
+                modifies: &modifies,
+                depends_on: &depends_on,
+            };
+            mem.record_action(&action)
+        })
+        .await;
+        let outcome = match record {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => return tool_err("lambo_record_action", e),
+            Err(join) => {
+                // The blocking task panicked. `spawn_blocking` surfaces that as a
+                // `JoinError` rather than unwinding into this task, so the outer
+                // `contain_panic` never sees it — contain it here to the same
+                // policy: log the detail, return a class to the client.
+                tracing::error!(
+                    tool = "lambo_record_action",
+                    error = %join,
+                    "mcp: record_action task failed — contained and reported as a tool error"
+                );
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "lambo_record_action: internal error (the failure was logged \
+                     server-side); the call may not have been recorded"
+                        .to_string(),
+                )]);
+            }
         };
 
         let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
@@ -685,6 +888,11 @@ impl LamboServer {
                 "take a soft lock"
             },
         ) {
+            return e;
+        }
+        // N5: node_id is a client string too — size- and control-checked before
+        // it is parsed, so the same uniform guard covers every field.
+        if let Err(e) = check_size("node_id", &p.node_id) {
             return e;
         }
         let node_id = match uuid::Uuid::parse_str(p.node_id.trim()) {
@@ -974,6 +1182,18 @@ fn resolve_focus(g: &crate::graph::Graph, focus: &str) -> Focus {
     }
 
     let needle = focus.to_lowercase();
+    // N8 (deferred, intentional): this allocates a lowercased `String` per
+    // concept, and the fuzzy leg's cost is O(total graph content) per call. This
+    // is *not* deferred because the path is rare or human-driven — `lambo_inspect`
+    // is an agent-facing MCP tool, so a client can loop it, and N1 caps per-call
+    // fan-out but nothing here caps call *count* (rate-limiting is T82-16's job).
+    // It is deferred because the fix is fiddly: an allocation-free
+    // case-insensitive substring search that matches `to_lowercase`'s full Unicode
+    // case-folding (not just ASCII) is easy to get subtly wrong, and getting the
+    // match semantics wrong is a worse failure than the allocation. Tracked with
+    // the rate-limit work (T82-16); a memchr-based ASCII fast path with a Unicode
+    // fallback would keep the allocation off the common case without changing
+    // semantics. Only the fuzzy leg reaches here, and only when exact found nothing.
     let mut fuzzy: Vec<FocusCandidate> = g
         .concepts()
         .filter(|c| c.content.to_lowercase().contains(&needle))
@@ -1140,7 +1360,10 @@ impl ServerHandler for LamboServer {
                  lambo_record_action to write what you learned and did, lambo_reserve \
                  before editing a shared concept, and lambo_inspect / lambo_saints / \
                  lambo_stats to look around. Every tool takes your agent_id. Never send \
-                 a timestamp: the server stamps them.",
+                 a timestamp: the server stamps them. Ordering is yours to manage: a \
+                 read sees a write only after that write's own tool call has returned, \
+                 so sequence a lambo_derive/lambo_record_action before the \
+                 lambo_recall/lambo_inspect meant to see it.",
             self.mem.session().0
         ));
         info
@@ -1554,6 +1777,61 @@ mod tests {
         s.mem.close().await.expect("close");
     }
 
+    /// **N1 pinned.** `lambo_record_action` refuses a target list whose combined
+    /// `produces` + `modifies` + `depends_on` count exceeds `MAX_ACTION_TARGETS`,
+    /// and accepts one exactly at the cap — so the bound is a real cap, not an
+    /// off-by-one that never trips.
+    #[tokio::test]
+    async fn record_action_caps_the_combined_target_count() {
+        let s = server("mcp-action-cap").await;
+
+        // One over the cap, split across all three lists, must be refused.
+        let produces: Vec<String> = (0..MAX_ACTION_TARGETS).map(|i| format!("p{i}")).collect();
+        let over = call(
+            &s,
+            "lambo_record_action",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "action": "touch everything",
+                "produces": produces,
+                "modifies": ["m0"],
+            }),
+        )
+        .await;
+        assert_eq!(
+            over.is_error,
+            Some(true),
+            "a target list over the cap must be refused: {over:?}"
+        );
+        let text = match &over.content[0] {
+            ContentBlock::Text(t) => t.text.clone(),
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(
+            text.contains(&MAX_ACTION_TARGETS.to_string()),
+            "the refusal must name the cap, got: {text}"
+        );
+
+        // Exactly at the cap is accepted.
+        let at_cap: Vec<String> = (0..MAX_ACTION_TARGETS).map(|i| format!("q{i}")).collect();
+        let ok = call(
+            &s,
+            "lambo_record_action",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "action": "touch exactly the cap",
+                "produces": at_cap,
+            }),
+        )
+        .await;
+        assert_eq!(
+            ok.is_error,
+            Some(false),
+            "a target list exactly at the cap must be accepted: {ok:?}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
     #[tokio::test]
     async fn inspect_finds_a_concept_and_reports_a_miss() {
         let s = server("mcp-inspect").await;
@@ -1912,6 +2190,105 @@ mod tests {
         s.mem.close().await.expect("close");
     }
 
+    /// **N3/N4 pinned.** Model-facing errors and warnings carry a class or a
+    /// redaction, never a raw store URL or driver message.
+    #[test]
+    fn urls_and_raw_error_detail_are_kept_out_of_model_facing_text() {
+        // N4: the tool error is a class plus a log pointer, not the raw error
+        // (which here carries a DSN).
+        let err = tool_err(
+            "lambo_recall",
+            LamboError::Store(crate::types::StoreError::Backend(
+                "connect postgres://user:pw@db.internal:26257/lambo failed".into(),
+            )),
+        );
+        let text = text_of(&err);
+        assert!(text.contains("store error"), "must name the class: {text}");
+        assert!(
+            !text.contains("postgres://") && !text.contains("db.internal"),
+            "the raw error / endpoint must not reach the client: {text}"
+        );
+
+        // N3: a warning that surfaced an endpoint is redacted.
+        let redacted = redact_urls("embedder http://embed.internal:8080/v1 is down; keyword-only");
+        assert!(
+            !redacted.contains("http://") && !redacted.contains("embed.internal"),
+            "the URL must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<redacted-url>") && redacted.contains("keyword-only"),
+            "redaction keeps the rest of the message: {redacted}"
+        );
+        // Idempotent.
+        assert_eq!(redact_urls(&redacted), redacted);
+    }
+
+    /// **N2 pinned.** A NUL (or any C0 control other than tab/newline) in a
+    /// client string is refused at the MCP boundary, so it can never reach a
+    /// concept's content, its canonical key, or a rendered context block — while
+    /// a genuinely multi-line concept (tab + newline) is still accepted.
+    #[tokio::test]
+    async fn control_characters_are_refused_but_tab_and_newline_are_allowed() {
+        let s = server("mcp-control-chars").await;
+        for (label, bad) in [
+            ("nul", "user\u{0}schema"),
+            ("bell", "user\u{7}schema"),
+            ("escape", "user\u{1b}[31mschema"),
+        ] {
+            let out = call(
+                &s,
+                "lambo_derive",
+                serde_json::json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": bad, "concept_type": "entity"}]
+                }),
+            )
+            .await;
+            assert_eq!(
+                out.is_error,
+                Some(true),
+                "{label}: a control character must be refused"
+            );
+            assert!(
+                text_of(&out).contains("control character"),
+                "{label}: the refusal must name the reason, got {}",
+                text_of(&out)
+            );
+        }
+
+        // Tab and newline are legitimate in a multi-line concept.
+        let ok = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "line one\n\tline two", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        assert_eq!(
+            ok.is_error,
+            Some(false),
+            "tab and newline must still be accepted: {ok:?}"
+        );
+
+        // None of the refused writes touched the graph — only the valid one did.
+        let stats = call(
+            &s,
+            "lambo_stats",
+            serde_json::json!({"agent_id": "agent-a"}),
+        )
+        .await;
+        assert_eq!(
+            stats.structured_content.unwrap()["concept_count"]
+                .as_u64()
+                .unwrap(),
+            1,
+            "only the tab/newline concept should have reached the graph"
+        );
+        s.mem.close().await.expect("close");
+    }
+
     /// **R1/T82-7 pinned.** An ambiguous focus is refused with the candidates
     /// named, rather than resolved to an arbitrary one of them whose `node_id`
     /// then flows into `lambo_reserve` and into edits.
@@ -2152,6 +2529,33 @@ mod tests {
             instructions.contains("Never send a timestamp"),
             "instructions should tell the model not to send timestamps (F18)"
         );
+        assert!(
+            instructions.contains("Ordering is yours to manage"),
+            "instructions should tell the model that write-then-read ordering is its \
+             responsibility (N7)"
+        );
         s.mem.close().await.expect("close");
+    }
+
+    /// **N6 pinned.** A config default outside the MCP bound is clamped into
+    /// range rather than making the tool refuse a request that named nothing —
+    /// while an explicit out-of-range value from the client is still rejected.
+    #[test]
+    fn a_config_default_over_the_mcp_bound_is_clamped_not_fatal() {
+        assert_eq!(
+            clamp_cfg_default("default_top_k", MAX_TOP_K + 500, 1, MAX_TOP_K),
+            MAX_TOP_K,
+            "a config default above the cap is clamped to the cap"
+        );
+        assert_eq!(
+            clamp_cfg_default("default_top_k", 0, 1, MAX_TOP_K),
+            1,
+            "a zero config default is clamped up to the floor"
+        );
+        assert_eq!(
+            clamp_cfg_default("default_top_k", 7, 1, MAX_TOP_K),
+            7,
+            "an in-range config default is left untouched"
+        );
     }
 }
