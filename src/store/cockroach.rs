@@ -1267,48 +1267,64 @@ impl CockroachStore {
         let pool = self.pool().await?;
         let token = holder.token();
         let ttl_secs = ttl.as_secs_f64();
-        for _ in 0..3 {
-            let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(ACQUIRE_SQL)
-                .bind(&session.0)
-                .bind(&token)
-                .bind(ttl_secs)
+        // T86-3: wrap the acquire in `tx_retry`, exactly like every other
+        // contended write in this file. sqlx does not auto-retry a SQLSTATE 40001
+        // `RETRY_SERIALIZABLE` abort, which `map_write_err` maps to a retryable
+        // `StoreError::Backend`; without this wrapper a genuine cross-node acquire
+        // conflict surfaced as an opaque `Backend` error (→ `LamboError::Store`)
+        // instead of transparently replaying — diverging from the SQLite backend
+        // (which absorbs contention via `busy_timeout`) and from the rest of
+        // `cockroach.rs`. The inner `for 0..3` still handles the orthogonal
+        // vanished-row case (empty RETURNING then empty read-back).
+        let session_id = &session.0;
+        let token_ref = token.as_str();
+        tx_retry(|| async move {
+            for _ in 0..3 {
+                let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> =
+                    sqlx::query_as(ACQUIRE_SQL)
+                        .bind(session_id)
+                        .bind(token_ref)
+                        .bind(ttl_secs)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
+                if let Some((holder, acquired_at, expires_at)) = won {
+                    return Ok(LeaseOutcome::Acquired(LeaseInfo {
+                        holder,
+                        acquired_at,
+                        expires_at,
+                    }));
+                }
+                let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+                    "SELECT holder, acquired_at, expires_at FROM session_leases \
+                     WHERE session_id = $1",
+                )
+                .bind(session_id)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
-            if let Some((holder, acquired_at, expires_at)) = won {
-                return Ok(LeaseOutcome::Acquired(LeaseInfo {
-                    holder,
-                    acquired_at,
-                    expires_at,
-                }));
-            }
-            let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-                "SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = $1",
-            )
-            .bind(&session.0)
-            .fetch_optional(pool)
-            .await
-            .map_err(backend)?;
-            match current {
-                Some((holder, acquired_at, expires_at)) => {
-                    let age = (Utc::now() - acquired_at)
-                        .to_std()
-                        .unwrap_or(Duration::ZERO);
-                    return Ok(LeaseOutcome::Held {
-                        current: LeaseInfo {
-                            holder,
-                            acquired_at,
-                            expires_at,
-                        },
-                        age,
-                    });
+                .map_err(backend)?;
+                match current {
+                    Some((holder, acquired_at, expires_at)) => {
+                        let age = (Utc::now() - acquired_at)
+                            .to_std()
+                            .unwrap_or(Duration::ZERO);
+                        return Ok(LeaseOutcome::Held {
+                            current: LeaseInfo {
+                                holder,
+                                acquired_at,
+                                expires_at,
+                            },
+                            age,
+                        });
+                    }
+                    None => continue,
                 }
-                None => continue,
             }
-        }
-        Err(StoreError::Backend(
-            "acquire lease: contended row kept changing under us (retries exhausted)".into(),
-        ))
+            Err(StoreError::Backend(
+                "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+            ))
+        })
+        .await
     }
 
     /// Return whether vector candidates are trusted for this session. Missing
