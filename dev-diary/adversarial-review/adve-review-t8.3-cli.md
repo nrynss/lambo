@@ -14,8 +14,8 @@
 ║    writers are exactly one and always release (HOLDS);           ║
 ║    one construction site (HOLDS); no lock across await (HOLDS);  ║
 ║    MCP untouched by the remediation (HOLDS)                      ║
-║  R1 reviewed: 593ff73 · R2 reviewed: 4093f53                     ║
-║  (src/ + tests/ byte-identical to 4093f53 at review end)         ║
+║  R1 reviewed: 8088cd8 · R2 reviewed: fffe847                     ║
+║  (src/ + tests/ byte-identical to fffe847 at review end)         ║
 ║  Opened: 2026-08-14 · R2 verified: 2026-08-14                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
@@ -23,7 +23,7 @@
 **Task:** T8.3 — CLI subcommands, read + write parity with the MCP surface
 (`dev-diary/PHASE-8-surface.md` §T8.3 + Handoff Log `### T8.3 — CLI subcommands (task agent,
 2026-08-14)`; spec §6.2, §2.2).
-**Implementing commit:** `593ff73` — `feat(P8): T8.3 CLI read+write parity with the MCP surface`.
+**Implementing commit:** `8088cd8` — `feat(P8): T8.3 CLI read+write parity with the MCP surface`.
 **Scope:** `src/cli/**` (`mod.rs`, `caps.rs`, `derive.rs`, `inspect.rs`, `provision.rs`,
 `recall.rs`, `record_action.rs`, `reserve.rs`, `saints.rs`, `stats.rs`), `src/main.rs`
 (appends-to), `src/mcp/server.rs` (necessary shared extract), `tests/cli_write_lease.rs`,
@@ -34,15 +34,15 @@ properties and the seven implementor self-flags; independent re-run of all five 
 **five source mutations** to measure what the suite actually pins (inverted `parent_of`;
 divergent CLI derive content; `close()` skipped on the success path via `mem::forget`;
 `Daemon::spawn()` added to reader recall; a reader taking the lease directly); a
-**disguised-timestamp clap flag** to test the F18 guard; a `git diff 593ff73^..593ff73` of
+**disguised-timestamp clap flag** to test the F18 guard; a `git diff 8088cd8^..8088cd8` of
 `src/mcp/server.rs` and `src/main.rs` to bound the extract and the append-only rule; and a
 hexdump of clap's invalid-`--kind` error to test the byte-echo posture.
 
 **Tree state.** All five mutations were reverted by path
-(`git restore --source=593ff73 -- <file>`); `src/` and `tests/` are byte-identical to `593ff73`
+(`git restore --source=8088cd8 -- <file>`); `src/` and `tests/` are byte-identical to `8088cd8`
 and all gates re-verified green afterwards. During the review another agent committed
 `7984a31 docs(T8.9): …`, which moved HEAD but touches **only** `dev-diary/PHASE-8-surface.md`
-(`git diff 593ff73 HEAD -- src/ tests/` is empty), so every finding below is against the exact
+(`git diff 8088cd8 HEAD -- src/ tests/` is empty), so every finding below is against the exact
 reviewed code. Per instruction, that markdown was left untouched. The only file this review
 writes is this one.
 
@@ -431,7 +431,7 @@ a constraint.
    beyond comparing sorted `hit_contents`, it independently asserts three known needles appear
    in **both** context blocks (`src/cli/mod.rs:359-364`), so an empty-vs-empty pass is
    impossible. Property 6 holds for concept/action content.
-6. **The MCP extract is behaviour-preserving.** `git diff 593ff73^..593ff73 -- src/mcp/server.rs`
+6. **The MCP extract is behaviour-preserving.** `git diff 8088cd8^..8088cd8 -- src/mcp/server.rs`
    is a pure move: `MAX_*`, `check_size`, `clamp_cfg_default`, `Focus`, `FocusCandidate`,
    `resolve_focus`, `render_neighbourhood` deleted and imported from `cli::caps` / `cli::inspect`;
    three `*_impl` methods widened to `pub(crate)`; the local `check_size` kept as a thin
@@ -629,11 +629,11 @@ change — the extract is clean.
 
 ## R2 verify (2026-08-14) — REQUEST CHANGES: 10 of 11 hold, T83-11 is incomplete
 
-**Re-reviewed commit:** `4093f53` — `fix(P8): T8.3 R1 remediation — all 11 findings`
+**Re-reviewed commit:** `fffe847` — `fix(P8): T8.3 R1 remediation — all 11 findings`
 (12 files, +685/−63; `src/mcp/server.rs` **not** in the commit at all).
 
 **Method.** Every R1 disposition was re-attacked, not read. Nine source mutations were
-applied to `4093f53` and reverted by path (`git restore --source=4093f53 -- <file>`); each
+applied to `fffe847` and reverted by path (`git restore --source=fffe847 -- <file>`); each
 was required to fail the pin the remediation claims. Four properties were additionally
 driven **end-to-end through the shipped binary** (`cargo build --features
 store-sqlite,embed-fixture`) against a scratch sqlite store, because a unit test that calls
@@ -641,7 +641,7 @@ store-sqlite,embed-fixture`) against a scratch sqlite store, because a unit test
 operator actually sees on stdout. All five gates were re-run independently on the clean
 tree afterwards.
 
-**Tree state.** `git diff 4093f53 -- src/ tests/` is **empty** at review end — `src/` and
+**Tree state.** `git diff fffe847 -- src/ tests/` is **empty** at review end — `src/` and
 `tests/` are byte-identical to the remediation commit. Every mutation (including one
 temporary edit to a *test* body, used to isolate which half of the T83-4 pin bites) was
 reverted. The only files this section writes are this review file and, per brief, nothing
@@ -903,7 +903,7 @@ I looked specifically for the three the brief named.
    83→88). The T83-2 colon check and every other new validator run *before* `open_writer`,
    so a rejected input never takes the lease. `close_writer`'s both-failed and
    close-failed-after-success branches are unchanged.
-3. **MCP behaviour is untouched.** `src/mcp/server.rs` is not in `4093f53` at all. The
+3. **MCP behaviour is untouched.** `src/mcp/server.rs` is not in `fffe847` at all. The
    changed reader signatures (`saints::run` / `stats::run` / `inspect::run` now take
    `&dyn GraphStore`) are not on any MCP path — MCP imports `resolve_focus` /
    `render_neighbourhood` / `caps::*`, not `run`. MCP still routes warnings into a second
