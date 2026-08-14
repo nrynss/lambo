@@ -178,43 +178,60 @@ mod parity {
             .await
             .expect("memory");
 
+        // Three concepts with DISTINCT blast radii, plus a tie, so the saints
+        // ordering (blast_radius desc, then created_at, then id) is genuinely
+        // exercised. "user schema" parents two children (blast_radius 2);
+        // "auth middleware" and "config loader" parent one each (blast_radius 1,
+        // a tie broken by created_at / id). The children stay non-canonical, so
+        // only the three parents appear in saints. Hierarchical edges are the
+        // structural edges blast_radii counts, and a child's sole structural
+        // source is its parent, so each parent's blast_radius is its child count.
         mem.derive(
             &[
                 ("user schema", ConceptType::Entity),
                 ("auth middleware", ConceptType::Entity),
+                ("config loader", ConceptType::Entity),
             ],
-            &ParentOf::none(),
+            &ParentOf::from_pairs(&[
+                ("user schema", "users table"),
+                ("user schema", "sessions table"),
+                ("auth middleware", "jwt validator"),
+                ("config loader", "env parser"),
+            ]),
         )
         .await
         .expect("derive");
 
-        let target = {
-            let g = mem.graph().read();
-            let found = g
-                .concepts()
-                .find(|c| c.content == "user schema")
-                .map(|c| c.id);
-            found.expect("user schema")
-        };
-        for (from, to) in [
-            (CanonizationStatus::None, CanonizationStatus::Candidate),
-            (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
-            (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
-        ] {
-            let event = CanonizationEvent {
-                id: NodeId::new(),
-                session_id: SessionId::new("t83-saints-parity"),
-                node_id: target,
-                from_status: from,
-                to_status: to,
-                blast_radius: Some(0),
-                occurred_at: Utc::now(),
-                last_demotion_time: None,
-            };
+        let id_of = |content: &str| {
             mem.graph()
-                .write()
-                .apply_canonization_transition(event)
-                .expect("transition");
+                .read()
+                .concepts()
+                .find(|c| c.content == content)
+                .map(|c| c.id)
+                .unwrap_or_else(|| panic!("{content}"))
+        };
+        for content in ["user schema", "auth middleware", "config loader"] {
+            let target = id_of(content);
+            for (from, to) in [
+                (CanonizationStatus::None, CanonizationStatus::Candidate),
+                (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+                (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+            ] {
+                let event = CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: SessionId::new("t83-saints-parity"),
+                    node_id: target,
+                    from_status: from,
+                    to_status: to,
+                    blast_radius: Some(0),
+                    occurred_at: Utc::now(),
+                    last_demotion_time: None,
+                };
+                mem.graph()
+                    .write()
+                    .apply_canonization_transition(event)
+                    .expect("transition");
+            }
         }
 
         let from_memory = mem.canonical_memories();
@@ -223,8 +240,19 @@ mod parity {
             from_cli, from_memory,
             "cli::saints scan must agree with Memory::canonical_memories on a shared graph"
         );
-        assert_eq!(from_cli.len(), 1);
+        assert!(
+            from_cli.len() >= 3,
+            "need >=3 canonical rows to pin the ordering, got {}",
+            from_cli.len()
+        );
+        // The highest blast radius sorts first. A reversed comparator sinks it,
+        // so this is what pins the sort order (T83-12).
         assert_eq!(from_cli[0].content, "user schema");
+        assert_eq!(from_cli[0].blast_radius, 2);
+        // The remaining two are the tie, both blast_radius 1, ordered by the
+        // created_at / id tiebreakers.
+        assert_eq!(from_cli[1].blast_radius, 1);
+        assert_eq!(from_cli[2].blast_radius, 1);
 
         mem.close().await.expect("close");
     }

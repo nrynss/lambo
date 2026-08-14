@@ -2,8 +2,8 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN (R2 verified — one P3 remains, T83-12)             ║
-║  Verdict: REQUEST CHANGES — 0 P1 / 0 P2 / 1 P3 (new: T83-12)     ║
+║  STATUS: CLEAN — T83-12 fixed and mutation-verified (R3)         ║
+║  Verdict: CLEAN — R1 11 findings + R2 T83-12 all closed          ║
 ║  R1: 11 findings (1 P1 + 3 P2 + 7 P3) — all claimed FIXED        ║
 ║  R2: 10 of 11 genuinely fixed and re-attacked by mutation;       ║
 ║    T83-11's pin catches filter drift but NOT sort-order drift    ║
@@ -989,3 +989,31 @@ assertion is the right assertion; it is starved of data.
 `dev-diary/PHASE-8-surface.md` T8.3 `status:` is left at **`remediating:r1`**. Nothing in
 `src/mcp/server.rs`, T8.1, T8.2 or T8.6 needs to change. T83-12 is a single test-fixture
 edit inside `owns`.
+
+---
+
+## R3 — T83-12 remediation & verify (2026-08-14) — CLEAN
+
+**Fix (test-only, inside `owns`):** `cli::saints::parity::canonical_memories_from_graph_agrees_with_memory`
+now canonizes **three** concepts with **distinct blast radii plus a tie**, so the ordering
+(`blast_radius` desc, then `created_at`, then `id`) is actually exercised:
+
+- `user schema` parents two children (`users table`, `sessions table`) → blast_radius 2.
+- `auth middleware` parents one (`jwt validator`) → blast_radius 1.
+- `config loader` parents one (`env parser`) → blast_radius 1 (the tie).
+
+Children are Hierarchical-only dependents, so each parent's blast_radius equals its child
+count. The assertion adds `from_cli.len() >= 3`, `from_cli[0]` is `user schema` at
+blast_radius 2, and the two tied rows are both blast_radius 1.
+
+**Mutation-verified (M5 re-run):** reversing the primary comparator
+(`b.blast_radius.cmp(&a.blast_radius)` → `a.cmp(&b)`) now **FAILS** the test — `user schema`
+(blast_radius 2) sorts last in `from_cli` while `from_memory` keeps it first, so
+`from_cli != from_memory`. Reverted; the correct comparator is restored.
+
+**Gates:** `cargo fmt` clean · `cargo clippy --all-targets -D warnings` clean · `cargo test`
+620 lib passed · `cargo test --features store-sqlite` 664 lib + all integration passed
+(incl. `cli_write_lease`, `cli_provision_sqlite`).
+
+T83-12 was the only open finding. All R1 findings (1 P1 / 3 P2 / 7 P3) and the R2 residual
+are closed. **T8.3 is CLEAN.**

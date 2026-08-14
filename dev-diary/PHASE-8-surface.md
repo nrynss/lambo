@@ -429,7 +429,7 @@ owns:       src/store/lease.rs; lease columns/DDL in src/store/{memory,sqlite,co
             scripts/provision.sh (schema addition)
 appends-to: src/memory.rs (build acquires/refreshes lease), src/mcp/serve.rs (holder
             identity + release on close), src/store/mod.rs (trait method)
-status:     task-complete (awaiting adve-review) — 2026-08-14, branch task/t8.6-lease
+status:     CLEAN — 2026-08-14 (R1 11 findings + R2/R3 T83-12 all closed, mutation-verified)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Decided 2026-08-14: promote spec §2.2 single-writer from advisory (the process-local
