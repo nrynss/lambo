@@ -664,9 +664,18 @@ consumed as a Cargo dependency, not distributed as an executable. So a release i
 
 **Decisions this task must make and record:**
 
-- **Release feature profile.** Which features the published binary ships with. Candidate:
-  the `demo`/ship profile (`store-memory,store-cockroach,embed-bge,embed-fixture,fixtures`)
-  so a downloaded binary can serve, or a leaner default. State it.
+- **Release feature profile — and how one binary carries all adapters.** Adapters are on a
+  *different axis* than the surfaces: selected by Cargo feature at **compile time** and by
+  `lambo.toml` at **runtime**. One binary contains *every* adapter it was compiled with (not
+  one-per-binary), and the config's `[store] kind` / `[embedder] kind` pick which to use at
+  runtime. So the published binary should be built with the **full adapter feature set** (the
+  `demo`/ship profile: `store-memory,store-cockroach,store-sqlite,embed-bge,embed-fixture`,
+  and `embed-bedrock` only if the account is authorized), and a user switches stores by
+  editing config, not by downloading a different binary. State the exact shipped feature list
+  and note the one caveat: the adapter code is compiled in, but its backing service must be
+  reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach). Building *without*
+  some adapters is only for a leaner binary or to drop a heavy/gated dep, never a distribution
+  requirement.
 - **Target platforms.** At minimum macOS arm64 + x86_64 and Linux x86_64. Decide on Linux
   arm64 and Windows.
 - **Versioning.** Adopt semver, set `[package] version`, tag `v0.1.0`. Match the version the
