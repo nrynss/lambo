@@ -787,6 +787,16 @@ impl LamboServer {
         // (`Memory` is `Arc`-shared and already `Send + Sync`, as the HTTP
         // factory and the event pump rely on), keeping the worker threads free
         // for the shutdown path.
+        //
+        // Defense-in-depth, NOT load-bearing — and deliberately not test-pinned
+        // (R4). Reverting this to a direct inline `mem.record_action(&action)`
+        // keeps every test green: the load-bearing anti-hang guarantee is
+        // `serve`'s `CLOSE_GRACE` bound (src/mcp/serve.rs), which force-exits a
+        // stalled shutdown regardless of worker starvation. A regression test
+        // here would have to *provoke* starvation, which is inherently timing-
+        // dependent and flaky, so we pin the bound instead of the offload. Keep
+        // this offload anyway: it turns a worst-case hang-until-`CLOSE_GRACE`
+        // into no stall at all. Do not delete it thinking a test will catch you.
         let mem = Arc::clone(&self.mem);
         let action_owned = p.action.clone();
         let record = tokio::task::spawn_blocking(move || {
