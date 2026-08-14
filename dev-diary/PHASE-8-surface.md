@@ -87,7 +87,8 @@ The original phase doc had three tasks claiming overlapping paths, which violate
 | Path | Owner |
 |---|---|
 | `src/cli/mod.rs` | T8.3 (module decls; later tasks append their `pub mod` line only) |
-| `src/cli/recall.rs`, `saints.rs`, `inspect.rs`, `stats.rs`, `provision.rs` | T8.3 |
+| `src/cli/recall.rs`, `saints.rs`, `inspect.rs`, `stats.rs`, `provision.rs` (read verbs) | T8.3 |
+| `src/cli/derive.rs`, `record_action.rs`, `reserve.rs` (write verbs, lease-held) | T8.3 |
 | `src/cli/demo.rs` | **T8.4** — not T8.3 |
 | `src/cli/serve_web.rs` | **T8.5** — not T8.3 |
 
@@ -355,47 +356,58 @@ real client returns the T5.3 context block. Config + resolve proven in `dev-diar
 
 ---
 
-### T8.3 — CLI subcommands
+### T8.3 — CLI subcommands (read + write parity)
 ```yaml
-requires:   T8.1
+requires:   T8.1, T8.6      # T8.6 lease must land first — write verbs acquire it
 fixture-ok: yes
-owns:       src/cli/mod.rs, src/cli/recall.rs, src/cli/saints.rs, src/cli/inspect.rs,
-            src/cli/stats.rs, src/cli/provision.rs
+owns:       src/cli/mod.rs,
+            # read verbs (reader processes):
+            src/cli/recall.rs, src/cli/saints.rs, src/cli/inspect.rs, src/cli/stats.rs,
+            src/cli/provision.rs,
+            # write verbs (lease-holding writers, decided 2026-08-14):
+            src/cli/derive.rs, src/cli/record_action.rs, src/cli/reserve.rs
 not-owned:  src/cli/demo.rs (T8.4), src/cli/serve_web.rs (T8.5)   # collision fixed 2026-08-13
 appends-to: src/main.rs (dispatch arms + own flags only; T8.2 is primary owner)
 status:     not-started
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
-Spec §6.2: `recall --session --query --top-k`, `saints --session`,
-`inspect --session --focus --depth`, `stats --session`, `provision` (wraps
-`scripts/provision.sh`). `demo --scenario rest-api` belongs to **T8.4**, not here.
-Global/shared `--config` where a store is needed. Read-only commands go straight to the
-store as reader processes (spec §2.2) — they must not spin up a writer against a session
-another process owns.
+**Read verbs (spec §6.2, reader processes):** `recall --session --query --top-k`,
+`saints --session`, `inspect --session --focus --depth`, `stats --session`, `provision`
+(wraps `scripts/provision.sh`). `demo --scenario rest-api` belongs to **T8.4**, not here.
+Read-only commands go straight to the store as reader processes (spec §2.2) — they must not
+spin up a writer against a session another process owns.
 
-**Write verbs (decided 2026-08-14 — NOT a stretch item).** T8.3 also ships
-`derive`, `record-action`, and `reserve`/`release` as CLI subcommands at feature parity
-with the MCP tools. Rationale: measured agent behavior — MCP burns context on tool schemas
-and meanders over tool choice, while a CLI invocation is one deterministic line; for small
-local models (the swarm story) the CLI is the *primary* agent surface and MCP the
-compatibility surface. Requirements:
+**Write verbs (mirror the MCP tools 1:1, lease-held):**
+- `derive --session --agent --content --kind [--parent-of CHILD:PARENT ...]`
+- `record-action --session --agent --action [--produces N ...] [--modifies N ...] [--depends-on N ...]`
+- `reserve --session --agent --node` and `release --session --agent --node`
+
+Same argument names, same `MAX_*` caps, same control-char / size validation as the MCP
+surface (share the validators — do not re-implement them). Global/shared `--config` where a
+store is needed.
+
+**Why write verbs are first-class (decided 2026-08-14 — NOT a stretch).** Measured agent
+behavior: MCP burns context on tool schemas and meanders over tool choice, while a CLI
+invocation is one deterministic line. For small local models (the swarm story) the CLI is
+the *primary* agent surface and MCP the compatibility surface. Non-negotiables:
 
 - **Single-writer is enforced by the T8.6 writer lease** — a CLI write acquires the
   session lease, writes through the same `Memory` API the MCP tools use, releases. If the
   lease is held (a `serve` owns the session), the CLI write **fails closed with an honest
-  error naming the holder** — it must never become a silent second writer.
+  error naming the holder** — it must never become a silent second writer. This is why
+  T8.6 is a hard `requires`.
 - **Both surfaces are thin adapters over one `Memory`** — no graph logic in either
-  `src/cli/*` or `src/mcp/server.rs`. This is the parity that counts.
-- **Differential test:** the same op driven via CLI and via MCP yields identical results
-  (same session state, same recall output). This test is part of T8.3's Done bar.
-
-`requires` therefore becomes: T8.1, **T8.6** (lease must land first).
+  `src/cli/*` or `src/mcp/server.rs`, and the arg validators (caps, control-char, size)
+  are shared, not duplicated. This is the parity that counts.
+- **Differential test (in the Done bar):** the same op driven via CLI and via MCP yields
+  identical results — same session state, same recall output.
 
 `saints` consumes `Memory::canonical_memories` from T8.1 — if it is missing, stop and fix
 T8.1 rather than reimplementing the scan here.
 
 **Level B:** reader CLIs use `build_store` from resolved config (sqlite or cockroach under
-the matching feature). Do not open a second writer.
+the matching feature). Read verbs never open a writer; write verbs open exactly one via the
+lease.
 
 **Done when:** each subcommand runs against a SQLite session (`--features store-sqlite`);
 `saints` and `stats` also verified against the live cluster (`store-cockroach`); write
