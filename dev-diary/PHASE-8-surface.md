@@ -401,6 +401,10 @@ the *primary* agent surface and MCP the compatibility surface. Non-negotiables:
   are shared, not duplicated. This is the parity that counts.
 - **Differential test (in the Done bar):** the same op driven via CLI and via MCP yields
   identical results — same session state, same recall output.
+- **Help text is authored here.** Every subcommand and flag carries clap help
+  (`about`/`long_about` + per-arg help), phrased to match the corresponding MCP tool and
+  argument descriptions so the two surfaces read consistently. A subcommand without help
+  text is not done. (T8.8 later *verifies* this; it does not write it.)
 
 `saints` consumes `Memory::canonical_memories` from T8.1 — if it is missing, stop and fix
 T8.1 rather than reimplementing the scan here.
@@ -599,6 +603,14 @@ complete, precise description of each surface. T9.1 is the *README / getting-sta
 cold-reader clone→provision→serve→demo path — and it **links into** T8.8 rather than
 duplicating it. T9.2 owns the architecture diagram. If a doc is "how do I run the demo,"
 it's T9.1; if it's "what does this tool/flag/method do," it's T8.8.
+
+**Boundary with the surfaces' own help text:** the inline help text — CLI `--help`
+(clap `about`/per-arg help, authored in T8.3) and the MCP tool/argument descriptions +
+`get_info` instructions (authored in T8.2) — is **NOT** written here. T8.8 *verifies* it:
+every tool/subcommand/flag has help text, it is accurate against the binary, and it does
+not contradict the reference pages (which are the expanded form of the same truth). Report
+any missing or stale help text as a finding for the owning task, don't silently paper over
+it in the reference.
 
 **Contents:**
 
