@@ -246,18 +246,20 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let events = mem.events();
     let event_pump = tokio::spawn(log_events(events));
 
+    // One signal registration for the whole life of the transport — armed
+    // BEFORE the attach log below, and registration is eager (see
+    // `shutdown_signal`), so from the moment "session attached" is visible a
+    // signal can no longer hit the default disposition (R2-a). A fresh
+    // registration in `close_bounded` re-arms it for the close phase.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     tracing::info!(
         session = %opts.session,
         agent = %opts.agent,
         transport = ?opts.transport,
         "lambo serve: session attached"
     );
-
-    // One signal registration for the whole life of the transport — armed here,
-    // before the handoff, so the pre-handshake window is covered (R2-a). A
-    // fresh registration in `close_bounded` re-arms it for the close phase.
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
 
     let transport = async {
         match opts.transport {
@@ -569,28 +571,49 @@ async fn serve_http_bounded(
 }
 
 /// Ctrl-C (and SIGTERM on unix), so `close()` still runs.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+///
+/// Registration is EAGER: the handlers are installed when this function is
+/// *called*, not when the returned future is first polled. An `async fn` body
+/// runs on first poll, which left a window between the "session attached" log
+/// and the transport's first poll of this future where a signal still had the
+/// default disposition — a SIGTERM in that window killed the process outright
+/// (R2-a; observed as a CI-only failure of the pre-handshake durability test
+/// on a loaded runner). `tokio::signal::unix::signal()` registers with the
+/// runtime immediately and buffers a signal that arrives before `recv()` is
+/// polled, so calling this before the attach log closes the window for good.
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => {
-                    ctrl_c.await;
-                    return;
+        use tokio::signal::unix::{signal, SignalKind};
+        // Register both handlers NOW. Errors (exotic platforms, exhausted
+        // signal slots) degrade to the lazy ctrl_c path rather than failing.
+        let int = signal(SignalKind::interrupt());
+        let term = signal(SignalKind::terminate());
+        async move {
+            match (int, term) {
+                (Ok(mut int), Ok(mut term)) => {
+                    tokio::select! {
+                        _ = int.recv() => {}
+                        _ = term.recv() => {}
+                    }
                 }
-            };
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = term.recv() => {}
+                (Ok(mut int), Err(_)) => {
+                    let _ = int.recv().await;
+                }
+                (Err(_), Ok(mut term)) => {
+                    let _ = term.recv().await;
+                }
+                (Err(_), Err(_)) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await;
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

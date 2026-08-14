@@ -33,7 +33,11 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
 
-#[cfg(test)]
+// Gate matches the tests module below (not bare `test`): under
+// `--no-default-features --features store-sqlite|store-cockroach` the tests
+// module is compiled out and a bare `#[cfg(test)]` import becomes an
+// unused-import error under `-D warnings` (CI feature-matrix).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 use crate::cli::caps::MAX_CONTENT_BYTES;
 use crate::cli::caps::{
     check_size as validate_size, clamp_cfg_default, MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE,

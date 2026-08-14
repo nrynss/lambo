@@ -1819,7 +1819,12 @@ impl Memory {
     /// [`LeaseOutcome::Held`]. The real heartbeat only fires on its
     /// [`LEASE_HEARTBEAT_INTERVAL`] (15s), so a test drives the fence directly
     /// after arranging a real store-level takeover.
-    #[cfg(test)]
+    ///
+    /// Gate matches the sole caller's tests module (not bare `test`): under
+    /// `--no-default-features` feature combos that module is compiled out and
+    /// a bare `#[cfg(test)]` method becomes a dead-code error under
+    /// `-D warnings` (CI feature-matrix).
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     fn simulate_lease_loss(&self) {
         self.lease_lost.store(true, Ordering::Release);
     }
