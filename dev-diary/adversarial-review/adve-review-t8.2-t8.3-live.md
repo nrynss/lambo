@@ -16,7 +16,7 @@ CLI (6):          readers-lease-free [x] write-lease-fail-closed [x] CLI<->MCP-d
 Full stack (7):   model-driven derive+recall [x/–] durable-in-cockroach [x] real-BGE-recall [–]
 New findings:     L82-1 / P1 / src/mcp/serve.rs:55,337 / CONFIRMED
                   L82-2 / P2 / src/cli/caps.rs:154 / CONFIRMED
-                  L82-4 / P2 / src/graph/hybrid.rs:478 / CONFIRMED (behavior)
+                  L82-4 / P2 / src/graph/hybrid.rs:478 / CONFIRMED (behavior) — FIXED 2a9ee34
                   L82-3 / P3 (runbook defect) / Pi has no MCP / CONFIRMED
 Verdict:          REQUEST CHANGES
 Notes:            model-driven MCP leg completed via OMP + DeepSeek Flash (works); but the recall
@@ -201,6 +201,65 @@ Feature gate: `--features store-cockroach,embed-bge`.
   (e.g., store the fresh concept's embedding but exclude it from being a merge *source*, or revisit
   the threshold semantics). If keyword-only-until-merged/seeded is intentional, the reference docs
   and this runbook must stop claiming organic `derive` produces vector-recallable memories.
+
+**DISPOSITION — FIXED (branch `task/l82-4-fresh-embeddings`, commit `2a9ee34`).**
+
+- **Decision taken (user-approved 2026-08-14):** freshly-derived concepts SHALL persist their
+  embedding, so organically-derived data becomes vector-recallable — without loosening the
+  precision-bias / anti-over-merge law (MAJOR-1).
+- **What changed:** exactly one arm. `src/graph/hybrid.rs`, the below-threshold
+  `Resolution::Fresh` (the `hybrid.rs:478-486` this finding cites) now commits
+  `embedding: Some(vec)` instead of `None`. Every arm where **no vector exists** is untouched and
+  still writes `None` — capability absent, embed failure, embed timeout, a store that refuses
+  `vector_candidates` after advertising the capability, and the invalid non-Concept merge target
+  (P7 MINOR-2). A vector is never invented. **No store change was required:**
+  `Mutation::UpsertNode` already carries the whole `Concept` and every adapter's concept upsert
+  already binds `embedding` (Cockroach `UPSERT_CONCEPT_SQL` `$15::VECTOR`), which is why the fix
+  is 2 files and 0 migrations.
+- **Exclusion semantic chosen — THRESHOLD-PRESERVING** (recall-visible, merge bar unchanged);
+  written up in full in the `hybrid.rs` module doc under "Vector persistence for fresh concepts":
+  1. *A refusal is never recorded as an endorsement.* A below-threshold concept gets its vector
+     but **no `Semantic` edge**. Recall expansion (spec §8) and P6's physical fold both travel
+     `Semantic` edges, so it is reachable only by its own similarity to the query — never
+     transitively out of an unrelated concept's neighbourhood. **The over-merge this prevents:**
+     A and B at cosine 0.84 must not be joined; if they were, a later recall on A would pull in B,
+     and through B whatever later merges into B — collapsing distinct topics into one recall
+     neighbourhood via links no single comparison ever endorsed.
+  2. *The merge bar did not move.* `score >= semantic_match_threshold` (0.85), `best_candidate`'s
+     finite/`[0,1]`/deterministic-tie validation, and the commit-time "target really is a Concept"
+     check are all unchanged. Persisting a vector lowers nothing.
+  3. *A vector minted in a call cannot drive a merge inside that call* — candidates come from the
+     store, which cannot see that call's staged, un-flushed writes.
+- **Deliberately NOT claimed (the honest residue):** once flushed, a fresh vector **is** a legal
+  merge *target* for a later derive. `vector_candidates` is one query over
+  `embedding IS NOT NULL` and cannot tell the merge leg from the recall leg apart, so a strict
+  target-exclusion would need durable per-vector provenance (a new `concepts` column + migration
+  in every adapter) and — because after this change *every* organic concept is fresh-persisted —
+  it would exclude every organic concept and leave the merge leg permanently inert. That is a
+  larger product change than this finding asks for. The threshold, not the vector's provenance,
+  is the precision instrument.
+- **Live re-verification needed:** `SELECT (embedding IS NOT NULL) FROM concepts` on a NEW organic
+  session must now be true (the pre-existing 13 rows stay NULL — this is not a backfill). Watch
+  for the second-order effect: organic `Semantic` merge edges become reachable for the first time
+  (previously the pool was empty), so `edges WHERE edge_type='semantic'` and P6 canonization
+  cycles on organic sessions are worth eyeballing against the 0.85 BGE-M3 calibration.
+- **Tests added / changed:** `far_text_creates_fresh_concept_with_vector_but_no_merge` (renamed
+  from `far_text_creates_fresh_keyword_concept`; vector assertion inverted per this decision,
+  every other assertion unchanged), `first_use_empty_candidates_still_commits_contract` (same
+  inversion + a new zero-Semantic-edge assertion), `persisted_fresh_vector_does_not_lower_the_merge_bar`,
+  `vectors_minted_in_this_call_cannot_merge_within_it`, and
+  `memory::tests::organic_derive_persists_a_vector_that_recall_finds` — derive → flush → reload →
+  recall end to end against a vector-capable store double doing exact cosine over persisted
+  vectors, asserting both the durable `embedding IS NOT NULL` and that the vector leg returned the
+  organic concept at `>= 0.85` for a keyword-disjoint query.
+- **Docs:** `docs/reference/end-to-end.mdx` and `mcp.mdx` were checked and mention neither
+  embeddings nor vector recall, so there was no false claim to correct and none was added.
+- **F18:** no wire schema or output field changed; `f18_tool_schemas_match_the_golden_property_set`
+  and `f18_no_tool_schema_accepts_a_client_timestamp` pass unchanged.
+- **Gates:** full PHASE-8 binding block green — `fmt`, all three `clippy` variants, `cargo test`
+  (623 lib / 5 bin / 8 integration / 1 doctest, 0 failed), `cargo test --features store-sqlite`
+  (667 lib, 0 failed), both `--no-default-features … --no-run` rows, and
+  `cargo check --no-default-features`.
 
 ### L82-3 (P3, CONFIRMED — runbook defect, not a Lambo code defect) — §7b/§7c assume Pi has MCP
 
