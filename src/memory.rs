@@ -512,9 +512,53 @@ impl MemoryBuilder {
         }
         let config = config;
 
+        // (0) Single-writer lease (spec §2.2, T8.6) — the store-enforced gate,
+        // taken BEFORE the startup load (T86-1). Claiming the session first means
+        // a losing racer gets the honest, named refusal below rather than an
+        // opaque `database is locked`: the load path opens a `BEGIN IMMEDIATE`
+        // write transaction, so two simultaneous `serve` startups used to contend
+        // on the SQLite write lock during the load — before either reached the
+        // lease — and the loser died on the lock, never producing the designed
+        // "held by <holder>, run this override" message. Nothing in the load
+        // depends on the lease and nothing in the acquire depends on the load, so
+        // the order is free to fix.
+        //
+        // **Acquiring the lease says NOTHING about durability.** If the previous
+        // holder crashed, its lease expired but its write-behind tail died with
+        // it (in-RAM log, no WAL) — this is exactly why the `load_session_async`
+        // below runs unconditionally and replays whatever WAS made durable. The
+        // lease is a concurrency gate, not a completeness guarantee; the startup
+        // load is what makes the new holder correct.
+        //
+        // A build step after this point that fails (a broken load, a model-mix
+        // refusal) leaves the lease held with no heartbeat, so it lapses at the
+        // TTL — the same crash-shaped expiry a mid-startup crash would produce.
+        let lease_holder = LeaseHolder::for_this_process(&agent);
+        match store
+            .acquire_lease(&session, &lease_holder, LEASE_TTL)
+            .await
+            .map_err(LamboError::Store)?
+        {
+            LeaseOutcome::Acquired(_) => {}
+            LeaseOutcome::Held { current, age } => {
+                // Fail closed, naming the current holder and its age (spec §2.2).
+                return Err(LamboError::Conflict(format!(
+                    "session {session} is already held by another writer ({}) — it acquired the \
+                     single-writer lease {}s ago and is still refreshing it. Spec §2.2 is one \
+                     writer per session; refusing to open a second. If that holder is wedged, an \
+                     operator can force a takeover: {}",
+                    current.holder,
+                    age.as_secs(),
+                    crate::store::lease::OPERATOR_OVERRIDE,
+                )));
+            }
+        }
+
         // (1) Startup load (spec §2.5). The async core, not the sync wrapper:
         // `store::load::load_session` parks a worker thread and joins it, which
-        // would block a runtime worker from inside this async fn.
+        // would block a runtime worker from inside this async fn. The lease is
+        // already ours (step 0), so this load is the winner replaying durable
+        // state — never a loser contending on the store's write lock.
         let loaded = load_session_async(store.as_ref(), &session).await?;
         let existing = !loaded.graph.is_empty();
         let mut graph = loaded.graph;
@@ -555,38 +599,6 @@ impl MemoryBuilder {
         )
         .with_fence(lease_lost.clone());
         let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config);
-
-        // Single-writer lease (spec §2.2, T8.6) — the store-enforced gate. Taken
-        // here, as the last fallible step before the (infallible) task spawns, so
-        // a refusal spawns nothing and leaks nothing. `for_this_process` stamps
-        // pid + host from the OS; the agent is this handle's identity.
-        //
-        // **Acquiring the lease says NOTHING about durability.** If the previous
-        // holder crashed, its lease expired but its write-behind tail died with
-        // it (in-RAM log, no WAL) — this is exactly why the `load_session_async`
-        // above runs unconditionally and replays whatever WAS made durable. The
-        // lease is a concurrency gate, not a completeness guarantee; the startup
-        // load is what makes the new holder correct.
-        let lease_holder = LeaseHolder::for_this_process(&agent);
-        match store
-            .acquire_lease(&session, &lease_holder, LEASE_TTL)
-            .await
-            .map_err(LamboError::Store)?
-        {
-            LeaseOutcome::Acquired(_) => {}
-            LeaseOutcome::Held { current, age } => {
-                // Fail closed, naming the current holder and its age (spec §2.2).
-                return Err(LamboError::Conflict(format!(
-                    "session {session} is already held by another writer ({}) — it acquired the \
-                     single-writer lease {}s ago and is still refreshing it. Spec §2.2 is one \
-                     writer per session; refusing to open a second. If that holder is wedged, an \
-                     operator can force a takeover: {}",
-                    current.holder,
-                    age.as_secs(),
-                    crate::store::lease::OPERATOR_OVERRIDE,
-                )));
-            }
-        }
 
         // Each `spawn` panics if called twice — each is called exactly once,
         // here, and nowhere else in this type.
