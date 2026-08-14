@@ -82,6 +82,18 @@ const MAX_INSPECT_CANDIDATES: usize = 10;
 /// Concept type as it crosses the wire. Mirrors [`ConceptType`] rather than
 /// deriving `JsonSchema` on the core type, so the MCP schema is owned here and
 /// a core rename cannot silently change a published tool schema.
+///
+/// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
+/// variant \`…\`` error, which repeats the caller's decoded string — potentially
+/// a decoded control char such as `U+0001` — back to the model, unlike
+/// [`check_size`], which names control codepoints instead of echoing them. This
+/// is **not** interceptable at our layer: every tool takes its params through
+/// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
+/// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
+/// Sanitising it would mean abandoning `Parameters<T>` for a hand-rolled
+/// deserialize in all seven tools — a large, error-prone change for a field whose
+/// only reachable "byte" is an escaped control char in an enum slot. Left as-is;
+/// revisit if rmcp grows an extraction-error hook.
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireConceptType {
@@ -271,6 +283,15 @@ fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usize {
 /// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
 /// not carry it into a model-facing string. Idempotent — a redacted token has
 /// no `://` left to match.
+///
+/// Scope (R4 nit): this matches only `scheme://…` tokens, not a bare
+/// `host:port`. That is deliberate, not an oversight — no current warning path
+/// emits a schemeless `host:port` (every endpoint the store/embedder logs is a
+/// full URL), and a `host:port` matcher trained on a colon would over-redact
+/// ordinary warning text (`ratio 3:4`, `line 42:10`, SQLSTATE-style codes),
+/// corrupting the very message it is meant to keep readable. If a future warning
+/// starts emitting bare `host:port`, redact it at that source (where the shape is
+/// known) rather than widening this heuristic.
 fn redact_urls(s: &str) -> String {
     s.split(' ')
         .map(|tok| {
@@ -1162,13 +1183,17 @@ fn resolve_focus(g: &crate::graph::Graph, focus: &str) -> Focus {
 
     let needle = focus.to_lowercase();
     // N8 (deferred, intentional): this allocates a lowercased `String` per
-    // concept. An allocation-free case-insensitive substring search that matches
-    // `to_lowercase`'s full Unicode case-folding (not just ASCII) is fiddly and
-    // easy to get subtly wrong — a worse failure than the O(n) allocation on a
-    // read-only, human-triggered path. Only the fuzzy leg reaches here, and only
-    // when the exact leg found nothing. Revisit if `lambo_inspect` ever becomes
-    // hot: a memchr-based ASCII fast path with a Unicode fallback would keep the
-    // allocation off the common case without changing match semantics.
+    // concept, and the fuzzy leg's cost is O(total graph content) per call. This
+    // is *not* deferred because the path is rare or human-driven — `lambo_inspect`
+    // is an agent-facing MCP tool, so a client can loop it, and N1 caps per-call
+    // fan-out but nothing here caps call *count* (rate-limiting is T82-16's job).
+    // It is deferred because the fix is fiddly: an allocation-free
+    // case-insensitive substring search that matches `to_lowercase`'s full Unicode
+    // case-folding (not just ASCII) is easy to get subtly wrong, and getting the
+    // match semantics wrong is a worse failure than the allocation. Tracked with
+    // the rate-limit work (T82-16); a memchr-based ASCII fast path with a Unicode
+    // fallback would keep the allocation off the common case without changing
+    // semantics. Only the fuzzy leg reaches here, and only when exact found nothing.
     let mut fuzzy: Vec<FocusCandidate> = g
         .concepts()
         .filter(|c| c.content.to_lowercase().contains(&needle))
