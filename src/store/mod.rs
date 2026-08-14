@@ -37,6 +37,11 @@ pub(crate) mod vector;
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
+// T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
+// TTL/heartbeat constants, acquire/refresh/release outcomes.
+pub mod lease;
+
+pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 
 use async_trait::async_trait;
 use bitflags::bitflags;
@@ -164,6 +169,81 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<InteractionSpan, StoreError>;
 
     async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError>;
+
+    // -----------------------------------------------------------------------
+    // Single-writer lease (spec §2.2, T8.6)
+    // -----------------------------------------------------------------------
+
+    /// Atomically acquire the session's single-writer lease for `holder`,
+    /// valid for `ttl` (spec §2.2).
+    ///
+    /// **Atomic, fail-closed, no read-then-write race.** A backend implements
+    /// this as ONE statement/transaction — an `INSERT ... ON CONFLICT` whose
+    /// update is guarded by an expiry check — so the decision is made under the
+    /// store's own concurrency control, never by reading the row and writing it
+    /// back. The result is exactly one of:
+    ///
+    /// * [`LeaseOutcome::Acquired`] — the row was fresh, the prior lease had
+    ///   expired, or it was already ours (a refresh). It is now ours until
+    ///   `ttl` from the store's clock.
+    /// * [`LeaseOutcome::Held`] — a *live* lease is held by someone else. The
+    ///   caller must fail closed; the outcome carries the current holder and its
+    ///   age for a diagnostic.
+    ///
+    /// **Clock discipline.** `ttl` is a duration, not a timestamp: the backend
+    /// stamps `acquired_at`/`expires_at` from its own clock (spec §6.4 / F18).
+    /// A caller-supplied absolute instant must never reach a lease row.
+    ///
+    /// **Default is advisory (non-enforcing).** The provided implementation
+    /// always grants, persisting nothing — it exists so test doubles and any
+    /// store that has not implemented enforcement keep their prior behaviour
+    /// (single-writer was advisory before T8.6). The three real backends
+    /// (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it with true
+    /// enforcement. A store that grants here provides no cross-process
+    /// guarantee — the in-process `ACTIVE_SESSIONS` log is the only catch.
+    async fn acquire_lease(
+        &self,
+        _session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        let now = Utc::now();
+        Ok(LeaseOutcome::Acquired(LeaseInfo {
+            holder: holder.token(),
+            acquired_at: now,
+            expires_at: now
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0)),
+        }))
+    }
+
+    /// Heartbeat: extend our own lease by `ttl` (spec §2.2). Same atomic
+    /// upsert shape as [`Self::acquire_lease`] — a refresh is just a re-acquire
+    /// by the same holder, so a holder whose lease was stolen after expiry
+    /// learns it lost the session ([`LeaseOutcome::Held`]) instead of silently
+    /// squatting a row it no longer owns. Default is advisory (always grants).
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_lease(session, holder, ttl).await
+    }
+
+    /// Release our lease — the pair of a successful [`Self::acquire_lease`]
+    /// (spec §2.2). A graceful close **releases** rather than waiting out the
+    /// TTL, so the next writer takes over immediately.
+    ///
+    /// Idempotent and holder-scoped: it clears the row only if `holder` still
+    /// owns it, so a stale release (after our lease already expired and was
+    /// re-taken) can never evict the *new* holder. Default is a no-op.
+    async fn release_lease(
+        &self,
+        _session: &SessionId,
+        _holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 /// Durable store selector (TOML `store.kind` / `LAMBO_STORE`).

@@ -429,7 +429,7 @@ owns:       src/store/lease.rs; lease columns/DDL in src/store/{memory,sqlite,co
             scripts/provision.sh (schema addition)
 appends-to: src/memory.rs (build acquires/refreshes lease), src/mcp/serve.rs (holder
             identity + release on close), src/store/mod.rs (trait method)
-status:     not-started
+status:     task-complete (awaiting adve-review) — 2026-08-14, branch task/t8.6-lease
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Decided 2026-08-14: promote spec §2.2 single-writer from advisory (the process-local
@@ -1038,3 +1038,139 @@ aged session.
    store outage at exit leaves the tail undurable with only a log line.
 7. **`lambo_reserve` carries a `release` boolean rather than being two tools**, to keep the
    published set at exactly the seven names spec §6.2 lists. It is a mild API smell.
+
+---
+
+### T8.6 — Single-writer lease (store-enforced §2.2) (task agent, 2026-08-14)
+
+**Gates:** `cargo fmt --all -- --check` clean; `cargo clippy --all-targets -- -D warnings`
+clean; `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -D
+warnings` clean; `cargo clippy --all-targets --features store-sqlite -D warnings` clean;
+`cargo test` **598 lib passing, 1 ignored** (baseline ~588 → +10, no regressions, nothing
+removed); `cargo test --features store-sqlite` **641 lib + the two serve subprocess
+integration tests passing, 1 ignored**. The one ignored lib test is the live cockroach lease
+test (`#[ignore]`d without `LAMBO_COCKROACH_DSN`, matching the existing convention).
+
+#### What exists now
+
+- **`src/store/lease.rs`** (new, owned) — `LeaseHolder` (agent + pid + host; `token()` =
+  `agent@host#pid`), `LeaseInfo` (holder token + `acquired_at` + `expires_at`), `LeaseOutcome`
+  (`Acquired` | `Held { current, age }`), `LEASE_TTL = 45s`, `LEASE_HEARTBEAT_INTERVAL = 15s`,
+  and `OPERATOR_OVERRIDE` (the DELETE string).
+- **`GraphStore` trait** (`src/store/mod.rs`) — three new methods `acquire_lease` /
+  `refresh_lease` / `release_lease`, each with an **advisory default** (always-grants,
+  persists nothing) so the ~15 test-double impls keep their prior behaviour untouched. The
+  three real backends override with enforcement.
+- **`MemoryStore`** — a per-instance keyed lease map (`RwLock<HashMap<String, LeaseRow>>`),
+  one map lock held for the whole decision (the in-RAM analogue of the SQL atomic upsert).
+  Makes the same-*store* collision enforced, not just logged.
+- **`SqliteStore` / `CockroachStore`** — a `session_leases` table (added to both migration
+  files and applied automatically by `provision.sh`'s splitter). Acquire/refresh is ONE
+  statement: `INSERT ... ON CONFLICT DO UPDATE SET ... WHERE (expired OR mine) RETURNING`.
+  A returned row that is ours ⇒ `Acquired`; an empty RETURNING ⇒ the guard was false ⇒ read
+  the row back and report `Held` (bounded retry if it was released in the gap). Release is a
+  holder-scoped DELETE.
+- **`Memory::build`** acquires the lease as the **last fallible step** before the (infallible)
+  task spawns, so a refusal spawns and leaks nothing. It fails closed with `LamboError::Conflict`
+  naming the current holder, its age, and the operator override. A heartbeat task refreshes at
+  TTL/3. **`Memory::close`** releases on the **success** paths only (a graceful close hands off;
+  a failed close keeps the lease for a retry and lets it lapse at TTL). **`Drop`** aborts the
+  heartbeat so a leaked handle's lease actually lapses — it does *not* release (Drop cannot
+  `await`, and a dropped-without-close handle is the crash-shaped path where expiry is correct).
+- **`src/mcp/serve.rs`** — a build-time `assert!(LEASE_TTL > SHUTDOWN_BUDGET)` (and a matching
+  runtime assertion in `the_grace_windows_are_sane`), plus doc on how the lease rides the exit
+  paths. No new code was needed for release-on-exit: `serve` already calls `close()` on every
+  exit path, and `close()` now releases.
+
+#### Files touched outside `owns`
+
+| File | Change | Authorization |
+|---|---|---|
+| `src/store/mod.rs` | trait methods + `pub mod lease` + re-exports | `appends-to` (trait method) |
+| `src/memory.rs` | build acquires/heartbeats, close/Drop release/abort | `appends-to` |
+| `src/mcp/serve.rs` | TTL-vs-budget assertion + doc + release-on-close test | `appends-to` (holder identity + release) |
+| `tests/serve_single_writer_lease.rs` | new subprocess test | test for the owned feature |
+
+#### Key decisions (and why)
+
+- **TTL 45s, heartbeat 15s (= TTL/3).** `SHUTDOWN_BUDGET` is 15s (5s transport + 10s final
+  flush). The TTL must outlast the whole graceful-shutdown budget so a slow-but-graceful close
+  *releases* rather than *expires* mid-flush (which would admit a second writer while the first
+  is still flushing). 45s is 3× the budget; a `const _` assertion in `serve.rs` pins the
+  relationship. Heartbeat at a third means two consecutive missed refreshes are survivable
+  while a genuine crash still lapses within one TTL.
+- **Holder = agent + pid + host, no per-handle nonce.** The reported identity is what an
+  operator sees. Same-process **same-agent** double-open produces an identical token, so a
+  second acquire looks like a refresh and is *not* caught by the lease — deliberately delegated
+  to the retained `ACTIVE_SESSIONS` advisory log (kept as the cheap same-process catch). The
+  lease's real job is cross-process / cross-host, where pid or host differ.
+- **Clock discipline / F18.** `acquire`/`refresh` take a TTL **duration**, never an absolute
+  timestamp. Each backend stamps `acquired_at`/`expires_at` from its own clock (Cockroach
+  `now()`, SQLite `strftime(...,'now')`, Memory `Utc::now()`). No wire-visible lease field
+  exists, so the F18 golden-allowlist guard is untouched (verified: `cargo test` green,
+  including the `f18_*` tests).
+- **Crash-expiry ≠ tail drained.** A comment in `build()` and the lease module pins that
+  acquiring a lease says nothing about durability: the previous holder's tail died with it, so
+  the new holder still goes through the unconditional `load_session_async` replay. The lease is
+  a concurrency gate, not a completeness guarantee.
+- **Advisory default on the trait, not a per-impl port.** There are ~15 `GraphStore` impls
+  (mostly test doubles). A permissive default keeps them all compiling and behaving exactly as
+  before; only the three real backends enforce. This is why the T8.6 change adds no churn to
+  `flush.rs` / `canon` / `hybrid` test stores.
+
+#### The one existing test I changed (not weakened)
+
+`a_second_handle_on_one_session_is_reported_loudly` (T81-8) previously built a **second
+handle on a shared store** and asserted it *succeeded* ("reported, not refused"). That is
+exactly the behaviour T8.6 promotes to a refusal, so the old setup is now impossible. I
+**retargeted** it to two *separate* stores on one logical session — the post-T8.6 domain the
+advisory log still owns (the per-store lease cannot see across store handles / processes; the
+process-global registry can). Every assertion is preserved (loud log, both agent ids, release
+on drop); coverage is not reduced. The shared-store refusal it used to (accidentally) not
+cover is now a **new** test, `a_second_writer_sharing_a_store_is_refused_by_the_lease`.
+
+#### Tests → property
+
+| Test | Property | Kind |
+|---|---|---|
+| `store::memory::tests::lease_grants_one_holder_and_refuses_another` | acquire / Held / refresh / release | in-process (memory) |
+| `…::a_stale_release_does_not_evict_the_new_holder` | holder-scoped release | in-process |
+| `…::an_unreleased_lease_expires_and_is_reacquirable` | expiry-after-crash (before/after TTL) | in-process |
+| `…::refresh_preserves_the_original_acquired_at` | heartbeat keeps acquired_at | in-process |
+| `memory::tests::a_second_writer_sharing_a_store_is_refused_by_the_lease` | shared-store refusal + release-on-close | in-process (Memory) |
+| `memory::tests::one_store_two_builds_yield_one_holder_and_one_refusal` | one holder / one refusal | in-process (Memory) |
+| `store::sqlite::tests::lease_lifecycle_on_one_connection` | acquire/Held/refresh/release | in-process (sqlite) |
+| `…::an_unreleased_lease_expires_on_sqlite` | expiry-after-crash | in-process (sqlite) |
+| `…::two_connections_on_one_file_serialize_on_the_lease` | cross-connection serialize | in-process, shared file |
+| `tests/serve_single_writer_lease.rs` | **cross-process** one-holder/one-refusal | **subprocess**, gated `store-sqlite` |
+| `mcp::serve::…::a_clean_close_releases_the_lease` | release-on-close via lifecycle seam | in-process |
+| `store::cockroach::conformance::single_writer_lease_is_enforced_across_pools` | cross-pool enforce + expiry | live, `#[ignore]`d (needs `LAMBO_COCKROACH_DSN`) |
+
+#### What the adversarial reviewer should probe
+
+1. **Release-before-durable window on a *failed* close.** A close that fails keeps the lease
+   and stops the heartbeat, so the lease then lapses at TTL even though the owner still holds
+   the handle and might retry `close()`. If the retry comes after the TTL, another writer could
+   have taken over in between — the retry still flushes (it doesn't re-acquire), and the new
+   writer replayed from durable state, but the two could briefly coexist. Documented as an
+   accepted edge; a reviewer may argue the heartbeat should keep beating until a *successful*
+   close instead.
+2. **SQLite fractional-second TTLs.** Acquire formats the TTL as a `strftime` modifier
+   (`+{as_secs_f64} seconds`). The sqlite expiry test uses a whole 1s TTL to stay clear of any
+   fractional-second rounding; a reviewer should confirm sub-second TTLs (only used if a caller
+   passes one — production is 45s) behave on the bundled SQLite version.
+3. **Held-with-empty-RETURNING retry loop.** Both SQL backends retry ≤3× when the contended
+   row vanishes between the failed upsert and the read-back. A reviewer should check the loop
+   can't spin or misreport (it returns a Backend error after exhausting retries).
+4. **Heartbeat on a lost lease keeps running.** If a refresh returns `Held` (this handle lost
+   the session after a store outage starved the beat), it logs loudly but does **not**
+   self-destruct — two writers are diverging and recovery is an operator's. A reviewer may want
+   a stronger response (e.g. latch the session closed to writers).
+5. **`Drop` does not release the lease.** Intentional (crash-shaped path; Drop can't await),
+   but it means a library caller who drops a `Memory` without `close()` holds the session for a
+   full TTL. The heartbeat is aborted in Drop so it *does* lapse — worth confirming that abort
+   is reliable even during runtime shutdown.
+6. **Cross-process test only covers the loser failing.** `serve_single_writer_lease` asserts
+   the second process exits non-zero naming the holder; it does not assert the *winner* keeps
+   serving cleanly through the contention. The live cockroach test covers cross-pool re-acquire
+   after release/expiry; the winner-liveness angle is only implicit.

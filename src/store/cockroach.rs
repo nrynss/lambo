@@ -104,6 +104,7 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
     map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, StoreConfig,
@@ -1231,6 +1232,101 @@ impl CockroachStore {
         Ok(row.is_some())
     }
 
+    /// Atomic single-writer lease acquire / refresh (T8.6).
+    ///
+    /// ONE statement — `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING`
+    /// — so two processes acquiring on the same session serialize under
+    /// Cockroach's concurrency control with no read-then-write race. The update
+    /// fires only when the current lease is expired or already ours; a refresh
+    /// keeps the original `acquired_at`. Every timestamp comes from the cluster's
+    /// `now()` (the clock two processes share) — never a caller argument (F18).
+    /// `ttl` is a duration multiplied into an INTERVAL, so no client instant is
+    /// ever stored.
+    ///
+    /// An empty RETURNING means the guard was false — a live lease is held by
+    /// someone else — so we read it back and report [`LeaseOutcome::Held`] with
+    /// the holder and its age. A row released in the gap is retried a bounded
+    /// number of times.
+    async fn acquire_or_refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        const ACQUIRE_SQL: &str = "\
+            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second')) \
+            ON CONFLICT (session_id) DO UPDATE SET \
+                holder = excluded.holder, \
+                acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                                   THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+                expires_at = excluded.expires_at \
+            WHERE session_leases.expires_at <= now() \
+               OR session_leases.holder = excluded.holder \
+            RETURNING holder, acquired_at, expires_at";
+        let pool = self.pool().await?;
+        let token = holder.token();
+        let ttl_secs = ttl.as_secs_f64();
+        // T86-3: wrap the acquire in `tx_retry`, exactly like every other
+        // contended write in this file. sqlx does not auto-retry a SQLSTATE 40001
+        // `RETRY_SERIALIZABLE` abort, which `map_write_err` maps to a retryable
+        // `StoreError::Backend`; without this wrapper a genuine cross-node acquire
+        // conflict surfaced as an opaque `Backend` error (→ `LamboError::Store`)
+        // instead of transparently replaying — diverging from the SQLite backend
+        // (which absorbs contention via `busy_timeout`) and from the rest of
+        // `cockroach.rs`. The inner `for 0..3` still handles the orthogonal
+        // vanished-row case (empty RETURNING then empty read-back).
+        let session_id = &session.0;
+        let token_ref = token.as_str();
+        tx_retry(|| async move {
+            for _ in 0..3 {
+                let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> =
+                    sqlx::query_as(ACQUIRE_SQL)
+                        .bind(session_id)
+                        .bind(token_ref)
+                        .bind(ttl_secs)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
+                if let Some((holder, acquired_at, expires_at)) = won {
+                    return Ok(LeaseOutcome::Acquired(LeaseInfo {
+                        holder,
+                        acquired_at,
+                        expires_at,
+                    }));
+                }
+                let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+                    "SELECT holder, acquired_at, expires_at FROM session_leases \
+                     WHERE session_id = $1",
+                )
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(backend)?;
+                match current {
+                    Some((holder, acquired_at, expires_at)) => {
+                        let age = (Utc::now() - acquired_at)
+                            .to_std()
+                            .unwrap_or(Duration::ZERO);
+                        return Ok(LeaseOutcome::Held {
+                            current: LeaseInfo {
+                                holder,
+                                acquired_at,
+                                expires_at,
+                            },
+                            age,
+                        });
+                    }
+                    None => continue,
+                }
+            }
+            Err(StoreError::Backend(
+                "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+            ))
+        })
+        .await
+    }
+
     /// Return whether vector candidates are trusted for this session. Missing
     /// and fully unstamped rows are safe empty-search states: hybrid first use
     /// must gather before its atomic commit emits `SetEmbedding`. Partial
@@ -1415,6 +1511,41 @@ impl GraphStore for CockroachStore {
 
     fn vector_dimensions(&self) -> Option<usize> {
         Some(self.vector_dim)
+    }
+
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        // Holder-scoped so a stale release cannot evict the writer that took
+        // over after our lease lapsed.
+        sqlx::query("DELETE FROM session_leases WHERE session_id = $1 AND holder = $2")
+            .bind(&session.0)
+            .bind(holder.token())
+            .execute(pool)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
+        Ok(())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
@@ -2630,6 +2761,101 @@ mod conformance {
     /// connection registered with a dead per-test runtime).
     fn new_store(dsn: &str) -> CockroachStore {
         CockroachStore::new(cfg(dsn.to_string())).unwrap()
+    }
+
+    /// T8.6 (live): the store-enforced single-writer lease across two **separate
+    /// pools** (the cross-process shape — each pool is an independent set of
+    /// connections, exactly what two processes have). One acquires, the other is
+    /// refused fail-closed and told the holder; after a release the second wins;
+    /// an unreleased lease is reclaimable only after its TTL.
+    ///
+    /// `#[ignore]`d like every live cockroach test, so a run without
+    /// `LAMBO_COCKROACH_DSN` reports it as ignored, never a skip-as-green. Run:
+    /// `cargo test --features store-cockroach,fixtures -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn single_writer_lease_is_enforced_across_pools() {
+        let Some(dsn) = dsn_or_skip("single_writer_lease_is_enforced_across_pools") else {
+            return;
+        };
+        use crate::store::lease::{LeaseHolder, LeaseOutcome};
+
+        let store_a = new_store(&dsn);
+        store_a.init_schema().await.expect("init_schema");
+        let store_b = new_store(&dsn);
+
+        // Unique session per run so a shared cluster never cross-contaminates.
+        let sid = SessionId::from(format!("t8.6-lease-{}", Uuid::new_v4()));
+        let a = LeaseHolder {
+            agent: AgentId::new("proc-a"),
+            pid: 111,
+            host: "host-a".into(),
+        };
+        let b = LeaseHolder {
+            agent: AgentId::new("proc-b"),
+            pid: 222,
+            host: "host-b".into(),
+        };
+        let ttl = Duration::from_secs(30);
+
+        // Clean any leftover row from a previous aborted run.
+        let _ = store_a.release_lease(&sid, &a).await;
+
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A acquire")
+            .is_acquired());
+
+        match store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B acquire")
+        {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("the second pool must be refused, got {other:?}"),
+        }
+
+        // Refresh keeps acquired_at.
+        let LeaseOutcome::Acquired(first) = store_a.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh");
+        };
+        let LeaseOutcome::Acquired(refreshed) = store_a.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh 2");
+        };
+        assert_eq!(first.acquired_at, refreshed.acquired_at);
+
+        // Release → B takes it.
+        store_a.release_lease(&sid, &a).await.expect("A release");
+        assert!(store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B re-acquire")
+            .is_acquired());
+
+        // Expiry-after-crash: B holds a short-TTL lease and never releases; A is
+        // refused before the TTL and reclaims after it.
+        let short = Duration::from_secs(2);
+        store_b.release_lease(&sid, &b).await.ok();
+        store_b
+            .acquire_lease(&sid, &b, short)
+            .await
+            .expect("B short");
+        assert!(matches!(
+            store_a.acquire_lease(&sid, &a, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A reclaim after expiry")
+            .is_acquired());
+
+        // Cleanup.
+        store_a.release_lease(&sid, &a).await.ok();
     }
 
     /// T7.4: prove the ANN accuracy dial actually reaches the server **through
