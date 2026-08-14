@@ -2606,6 +2606,175 @@ mod tests {
         }
     }
 
+    /// `MemoryStore` plus a **real** vector leg: exact cosine over the
+    /// embeddings that actually survived the write-behind flush. It is the
+    /// in-process stand-in for Cockroach's `concepts_embedding_idx` (the only
+    /// adapter that advertises `VECTOR_SEARCH`), which is what lets a default
+    /// `cargo test` assert L82-4 end to end — derive → flush → vector recall on
+    /// organically-derived data — with no live cluster. Every answer it gives
+    /// is recorded so a test can prove the vector leg *fired* rather than
+    /// inferring it from a rank.
+    struct VectorSearchStore {
+        inner: Arc<dyn GraphStore>,
+        answers: PlMutex<Vec<Vec<Scored<NodeId>>>>,
+    }
+
+    impl VectorSearchStore {
+        fn new(inner: Arc<dyn GraphStore>) -> Self {
+            Self {
+                inner,
+                answers: PlMutex::new(Vec::new()),
+            }
+        }
+
+        /// Every `vector_candidates` answer, in call order.
+        fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
+            self.answers.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl GraphStore for VectorSearchStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities() | Capabilities::VECTOR_SEARCH
+        }
+        fn vector_dimensions(&self) -> Option<usize> {
+            Some(1024)
+        }
+        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+            self.inner.flush(batch).await
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            crate::store::validate_vector_candidate_limit(limit)?;
+            // A session with nothing flushed yet is an EMPTY candidate pool, not
+            // an error — the shape Cockroach returns for an unstamped session
+            // before the first commit.
+            let snapshot = match self.inner.load_session(session).await {
+                Ok(snapshot) => snapshot,
+                Err(StoreError::SessionNotFound(_)) => {
+                    self.answers.lock().push(Vec::new());
+                    return Ok(Vec::new());
+                }
+                Err(e) => return Err(e),
+            };
+            let mut scored: Vec<Scored<NodeId>> = snapshot
+                .concepts
+                .iter()
+                .filter_map(|c| {
+                    let vector = c.embedding.as_ref()?;
+                    Some(Scored::new(
+                        c.id,
+                        f64::from(crate::embed::cosine(embedding, vector)),
+                    ))
+                })
+                .collect();
+            // Same ordering contract as the real adapter: best first, ties
+            // broken by the smaller UUID so the answer is deterministic.
+            scored.sort_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.item.0.cmp(&b.item.0))
+            });
+            scored.truncate(limit);
+            self.answers.lock().push(scored.clone());
+            Ok(scored)
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+            self.inner.record_canonization(event).await
+        }
+        async fn acquire_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+            ttl: Duration,
+        ) -> Result<LeaseOutcome, StoreError> {
+            self.inner.acquire_lease(session, holder, ttl).await
+        }
+        async fn refresh_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+            ttl: Duration,
+        ) -> Result<LeaseOutcome, StoreError> {
+            self.inner.refresh_lease(session, holder, ttl).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+        ) -> Result<(), StoreError> {
+            self.inner.release_lease(session, holder).await
+        }
+    }
+
+    /// `FixtureEmbedder` is hash-seeded per exact phrase, which cannot model the
+    /// one thing an organic vector-recall test needs: hybrid embeds a concept
+    /// **with** its origin context (`"register user — <prompt>"`, the PHASE-7
+    /// calibration rule) while recall embeds the **bare** query
+    /// (`"create account"`), and a real semantic embedder still scores those two
+    /// as near. This wrapper reduces the context framing back to the concept
+    /// label before delegating — behaviour BGE-M3 has for free and a hash
+    /// fixture cannot. Nothing else about the embedding path is altered.
+    #[derive(Debug)]
+    struct ContextTolerantEmbedder(FixtureEmbedder);
+
+    #[async_trait]
+    impl Embedder for ContextTolerantEmbedder {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            let label = text
+                .strip_prefix("Concept: ")
+                .unwrap_or(text)
+                .split(" — ")
+                .next()
+                .unwrap_or(text);
+            self.0.embed(label).await
+        }
+    }
+
     // -- build / Level B ----------------------------------------------------
 
     #[tokio::test]
@@ -4504,6 +4673,110 @@ mod tests {
         mem.close().await.unwrap();
         let snap = store.load_session(&SessionId::new("hybrid")).await.unwrap();
         assert_eq!(snap.concepts.len(), 2);
+    }
+
+    /// **L82-4 end to end.** A concept created by the ordinary derive surface
+    /// persists its embedding, the vector survives the write-behind flush and a
+    /// session reload, and recall's vector leg finds it. This is the path that
+    /// stored `embedding IS NULL` for all 13 organic concepts the live-Cockroach
+    /// review measured — recall was keyword/recency only on everything the
+    /// product itself wrote (`adve-review-t8.2-t8.3-live.md`, L82-4).
+    #[tokio::test]
+    async fn organic_derive_persists_a_vector_that_recall_finds() {
+        use crate::embed::{NEAR_A, NEAR_B};
+
+        let store = Arc::new(VectorSearchStore::new(
+            Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>
+        ));
+        let session = SessionId::new("organic-vectors");
+        let open = |store: Arc<VectorSearchStore>| async move {
+            Memory::builder()
+                .session("organic-vectors")
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .match_strategy(MatchStrategy::Hybrid)
+                .store(store as Arc<dyn GraphStore>)
+                .embedder(
+                    Arc::new(ContextTolerantEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>
+                )
+                .embedding_contract(contract("fixture", 1024))
+                .build()
+                .await
+                .expect("build")
+        };
+
+        let mem = open(store.clone()).await;
+        let out = mem
+            .derive(&[(NEAR_A, ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        assert_eq!(out.created.len(), 1);
+        let organic = out.created[0];
+        assert!(
+            out.semantic_merged.is_empty(),
+            "empty vector pool — nothing to merge with, so the concept is Fresh"
+        );
+        // close() drains the tail: the vector has to be durable, not RAM-only.
+        mem.close().await.unwrap();
+
+        // The reviewer's `SELECT embedding IS NOT NULL`, in process.
+        let snapshot = store.load_session(&session).await.unwrap();
+        let stored = snapshot
+            .concepts
+            .iter()
+            .find(|c| c.id == organic)
+            .expect("the derived concept is durable");
+        assert_eq!(
+            stored.embedding.as_ref().map(Vec::len),
+            Some(1024),
+            "an organically-derived concept persists its vector (L82-4)"
+        );
+        assert_eq!(
+            store.answers(),
+            vec![Vec::new()],
+            "the derive's own gather queried an empty pool and merged nothing"
+        );
+
+        // Reopen (proving the vector round-trips through load_session) and
+        // recall with text that shares NO token with the stored concept
+        // ("create account" vs "register user") but is near it in the embedding
+        // space — the keyword leg cannot score it, only the vector leg can.
+        let reopened = open(store.clone()).await;
+        let result = reopened
+            .recall(RecallQuery {
+                query: NEAR_B.into(),
+                top_k: 5,
+                max_tokens: 500,
+                traversal_depth: 1,
+            })
+            .await
+            .unwrap();
+
+        let answers = store.answers();
+        assert_eq!(answers.len(), 2, "recall issued exactly one vector query");
+        let scored = answers[1]
+            .iter()
+            .find(|s| s.item == organic)
+            .expect("the vector leg returned the organically-derived concept");
+        assert!(
+            scored.score >= 0.85,
+            "organic vector scored by real similarity, got {}",
+            scored.score
+        );
+        assert!(
+            result.hits.iter().any(|h| h.node_id == organic),
+            "the vector-leg candidate reaches the assembled result: {result:?}"
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("vector leg skipped")),
+            "the vector leg must not degrade here: {:?}",
+            result.warnings
+        );
+
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]
