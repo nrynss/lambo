@@ -2,11 +2,13 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: R3 (independent) — REQUEST CHANGES, remediation pending ║
-║  Verdict: REQUEST CHANGES (R3)                                   ║
-║  R1 findings: 3 P1 / 6 P2 / 7 P3 (all remediated)               ║
-║  R3 new: 1 P1 / 3 P2 / 4 P3 + 2 residuals upgraded + test gaps  ║
-║  Opened: 2026-08-14 · R3: 2026-08-14 (three independent agents) ║
+║  STATUS: CLEAN (R5-verify) — T8.2 done, ready to merge           ║
+║  Verdict: CLEAN                                                  ║
+║  Arc: R1 (3P1/6P2/7P3) → R2 → R3 (1P1/3P2/4P3, 3 agents) →      ║
+║       R4 (1P2/P3s, independent) → R5 remediation → R5-verify     ║
+║  Remediation branch: task/t8.2-r3-remediation @ 9a3cc91          ║
+║  Accepted residuals: 3 (non-blocking; see R5-verify)            ║
+║  Opened: 2026-08-14 · Closed: 2026-08-14                        ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -1313,3 +1315,55 @@ assertion weakened).
 Close the P2 (message/doc + optional bounded final flush) and the two test-pinning P3s
 (they are the silent-regression risk on the agent surface); fix the aggregate-budget bound,
 the N8 rationale, and the two nits as they fit. Then R5 re-review.
+
+---
+
+## R5-verify — focused verification of the R5 remediation (2026-08-14) — CLEAN
+
+**Branch:** `task/t8.2-r3-remediation` @ `9a3cc91` (6 R5 commits over `8d5fdb5`).
+**Method:** focused verification of each R5 disposition + regression sweep (not a fresh
+full-surface attack — R4 already did that and found no P1). Three mutation-checks to prove
+the pins/guard are real. Isolated worktree, all mutations reverted, tree clean.
+
+### Verdict: CLEAN — T8.2 done.
+
+Every R5 disposition verified, not rubber-stamped:
+
+- **P2 (false durability claim) — VERIFIED fixed.** No surviving "restart will re-flush" /
+  "recoverable on restart" text anywhere in `serve.rs`; messages + doc-comments now state
+  the tail is lost (no on-disk WAL). Final-flush skip confirmed consistent with the code:
+  `close()` step 0 takes `self.writers.write().await`, which can block on an in-flight
+  permit parked on an unbounded embedder — so close hangs *before* the terminal store
+  flush, and a retry would hang identically. Skip is the lower-risk fix.
+- **R2-a serve-wiring pin — VERIFIED real** by mutation: reverting the arming to a bare
+  `.serve(stdio()).await` makes `serve_pre_handshake_durability` FAIL (SIGTERM-killed,
+  rc=15, no durable row); restored → passes.
+- **Aggregate budget guard — VERIFIED real** by mutation: `CLOSE_GRACE` 10s→11s (sum 16>15)
+  fails the build with the compile-time `const _` assert; runtime check also sums. 15s
+  budget documented against the systemd/k8s SIGKILL contract.
+- **spawn_blocking comment** present and correct (defense-in-depth; `CLOSE_GRACE`
+  load-bearing). **N8 rationale** corrected (no "human-triggered"; tracks T82-16).
+- **Regression sweep CLEAN:** no assertion weakened (`-.*assert` diff empty), no new
+  wire-input field / clock leak, unknown-field rejection + F18 golden allowlist +
+  foreign-agent fail-closed all still pass inside the 588-green suite.
+
+**Gates:** fmt clean · clippy clean (default + `store-cockroach,store-memory,fixtures`) ·
+`cargo test` 588 passed / 0 failed / 1 ignored · `serve_sigterm_durability` 1 passed ·
+`serve_pre_handshake_durability` 1 passed.
+
+### Accepted residuals (non-blocking, tracked)
+
+1. `concept_type` variant-error echoes an escaped control byte — not interceptable without
+   hand-rolling deserialize across all seven tools (error is built inside rmcp's
+   `Parameters<T>` extractor). Revisit if rmcp adds an extraction-error hook.
+2. `redact_urls` misses a bare `host:port` — latent (no live warning path emits a
+   schemeless endpoint); a colon matcher would over-redact ordinary text.
+3. N8 `resolve_focus` per-call `to_lowercase` cost — deferred with the rate-limit work
+   (T82-16); rationale now accurate.
+
+### Disposition
+
+T8.2 exits the review loop CLEAN. Ready to merge `task/t8.2-r3-remediation` →
+`phase/p8-surface`. Next in the serial queue: **T8.6** (writer lease — appends to
+`serve.rs`, so it needs T8.2 stable first) → **T8.3** (CLI incl. write verbs behind the
+lease).
