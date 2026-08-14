@@ -373,6 +373,24 @@ Global/shared `--config` where a store is needed. Read-only commands go straight
 store as reader processes (spec §2.2) — they must not spin up a writer against a session
 another process owns.
 
+**Write verbs (decided 2026-08-14 — NOT a stretch item).** T8.3 also ships
+`derive`, `record-action`, and `reserve`/`release` as CLI subcommands at feature parity
+with the MCP tools. Rationale: measured agent behavior — MCP burns context on tool schemas
+and meanders over tool choice, while a CLI invocation is one deterministic line; for small
+local models (the swarm story) the CLI is the *primary* agent surface and MCP the
+compatibility surface. Requirements:
+
+- **Single-writer is enforced by the T8.6 writer lease** — a CLI write acquires the
+  session lease, writes through the same `Memory` API the MCP tools use, releases. If the
+  lease is held (a `serve` owns the session), the CLI write **fails closed with an honest
+  error naming the holder** — it must never become a silent second writer.
+- **Both surfaces are thin adapters over one `Memory`** — no graph logic in either
+  `src/cli/*` or `src/mcp/server.rs`. This is the parity that counts.
+- **Differential test:** the same op driven via CLI and via MCP yields identical results
+  (same session state, same recall output). This test is part of T8.3's Done bar.
+
+`requires` therefore becomes: T8.1, **T8.6** (lease must land first).
+
 `saints` consumes `Memory::canonical_memories` from T8.1 — if it is missing, stop and fix
 T8.1 rather than reimplementing the scan here.
 
@@ -380,7 +398,50 @@ T8.1 rather than reimplementing the scan here.
 the matching feature). Do not open a second writer.
 
 **Done when:** each subcommand runs against a SQLite session (`--features store-sqlite`);
-`saints` and `stats` also verified against the live cluster (`store-cockroach`).
+`saints` and `stats` also verified against the live cluster (`store-cockroach`); write
+verbs demonstrate lease acquire/refuse both ways (write succeeds with no serve running;
+fails closed naming the holder while a serve owns the session); the CLI↔MCP differential
+test passes.
+
+---
+
+### T8.6 — Single-writer lease (store-enforced §2.2)
+```yaml
+requires:   T8.2 (CLEAN — serve.rs must be stable before it takes the lease)
+fixture-ok: yes (memory store lease is in-process; sqlite/cockroach are the real targets)
+owns:       src/store/lease.rs; lease columns/DDL in src/store/{memory,sqlite,cockroach}.rs;
+            scripts/provision.sh (schema addition)
+appends-to: src/memory.rs (build acquires/refreshes lease), src/mcp/serve.rs (holder
+            identity + release on close), src/store/mod.rs (trait method)
+status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
+```
+Decided 2026-08-14: promote spec §2.2 single-writer from advisory (the process-local
+`ACTIVE_SESSIONS` ERROR log, `src/memory.rs:237-266` — which cannot see other processes)
+to **store-enforced**. A lease row per session: holder identity (agent + pid + host),
+acquired_at, TTL with heartbeat refresh. Semantics:
+
+- `Memory::build()` (writer mode) **acquires or fails closed** with an error naming the
+  current holder and its age. `Memory::close()` releases. Heartbeat refreshes at some
+  fraction of TTL; a crashed holder's lease expires rather than wedging the session.
+- Acquisition must be atomic per backend (`INSERT ... ON CONFLICT` guarded by expiry
+  check in one statement/transaction — no read-then-write race).
+- Readers never touch the lease (T8.3 read verbs stay lease-free).
+- The advisory in-process log stays — it catches the same-process case cheaply.
+- **Clock discipline:** lease timestamps come from the store's clock or the holder's
+  process clock per the existing timestamp rules — never from a client argument. The
+  F18 golden-allowlist guard must not gain wire-visible lease fields.
+
+Known risks to design against (carry into the adversarial review brief): TTL vs
+`SHUTDOWN_GRACE` interaction (a graceful close must release, not expire); a wedged-but-
+heartbeating process squatting the lease (document the operator override); crash-expiry
+window where the tail was never flushed (the lease expiring does NOT imply the log was
+drained — new holder must go through startup load, which already replays).
+
+**Done when:** two concurrent writer opens on one session — across two *processes* —
+deterministically yield one holder and one honest refusal, on memory, sqlite, and
+cockroach backends; expiry-after-crash and release-on-close each have a test; `serve`
+acquires on start and releases on every exit path (tie into the T8.2 lifecycle tests).
 
 ---
 
@@ -453,6 +514,13 @@ window onto T5.3's text and T6.4's feed, not a product. Deployment target decide
 **Done when:** a browser against `lambo serve --transport http` shows a live recall and the
 event feed updating during the demo scenario.
 
+**Optional swarm showcase (non-blocking — must NOT jeopardize the base demo above):**
+if time allows after the two-agent demo works, add a swarm view — N concurrent small
+agents (local LFM2.5-230M swarm) writing into one session, with the canonization feed
+visibly collapsing duplicates and `reserve` coordination visible. This is a video/Devpost
+asset, not a deliverable; the base demo is what the video requires. See T9.6 for the
+benchmark that feeds it.
+
 ---
 
 ## Exit criteria
@@ -463,7 +531,17 @@ event feed updating during the demo scenario.
 - [ ] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed
 - [ ] MCP flow proven from a real Claude Code config
 - [ ] MCP tools stamp `created_at` server-side (F18)
+- [ ] **T8.6 writer lease enforced cross-process** (two writer opens → one holder, one
+      honest refusal; expiry-after-crash tested) and **CLI write verbs land behind it**
+      with the CLI↔MCP differential test green
 - [ ] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured
+- [ ] **Surface holds under concurrency (T8.2 N1/N2 closure):** K concurrent clients
+      (K ≥ the CPU worker count, ~12–32 via the local LFM2.5-230M rig or a raw MCP load
+      driver) issuing a mix of valid + adversarial tool calls do **not** starve the
+      process — SIGTERM still flushes the tail (`session closed, tail durable`), oversized
+      `record_action` gets the honest cap refusal, and no internal detail (URLs/DSNs/driver
+      text) crosses the wire. Runs on the MBP; evidence into `dev-diary/evidence/`. This is
+      the correctness half; the P9 T9.6 benchmark is the scale half.
 - [ ] Demo app reachable and honest (renders real recall output, not canned text)
 - [ ] Every task reached a CLEAN review verdict; all review files closed in
       `dev-diary/adversarial-review/`
