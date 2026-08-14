@@ -236,3 +236,145 @@ Feature gate: `--features store-cockroach,embed-bge`.
 `pi.mcp.json` + `pi.lambo.cockroach.toml` (DSN redacted), and raw wire/log captures
 (`result4a.b-refusal.log`, `result5d.*`, `result6b.*`, `result6c.*`). All secrets redacted and
 re-scan confirmed clean.
+
+---
+
+# R1 remediation (2026-08-14)
+
+Remediation agent, branch `task/live-l82-remediation` (off `phase/p8-surface` @ `713a2ae`).
+The reviewer's text above is untouched; this section appends the disposition of the two
+findings this round was scoped to. **L82-3 and L82-4 are NOT addressed here** — L82-3 is the
+runbook owner's, and L82-4 needs the product decision the reviewer asked for.
+
+**Disposition summary: 2 FIXED (both scoped findings), 2 UNTOUCHED (out of scope).**
+
+| # | P | Disposition |
+|---|---|---|
+| L82-1 | P1 | **FIXED** — `060cca1`; root-caused to per-row flush, fixed by bulk writes; stale lease fixed separately. Generated PostgreSQL needs live re-verification |
+| L82-2 | P2 | **FIXED** — `b8c0871`; category-Cf + TAGS block refused in the shared validator |
+| L82-3 | P3 | **NOT THIS ROUND** — runbook defect, owner is the runbook |
+| L82-4 | P2 | **NOT THIS ROUND** — needs the product decision the finding asks for |
+
+## L82-1 — root cause, and why it was not the grace window
+
+The reviewer's suspicion was right. `CockroachStore::flush` and `SqliteStore::flush` both
+replayed a batch as
+
+```rust
+for m in &batch.mutations {
+    // one sqlx::query(..).execute(&mut *tx).await per mutation
+}
+```
+
+— one statement, sequentially awaited, inside one transaction. Against a *serverless* cluster
+that is one network round-trip per mutation, so a flush cost `mutations × RTT`. The measured
+784-mutation tail at the reviewer's 10–30 ms is **8–24 s**, which is exactly why a 10 s
+`CLOSE_GRACE` could not cover it.
+
+Raising `CLOSE_GRACE` was rejected. The tail is bounded only by how much a client writes
+between flush ticks, so *any* fixed budget loses to a large enough burst — the window would
+have moved the failure, not removed it. The per-mutation cost is what changed.
+
+**The fix (priority 1 in the brief).** New `src/store/batch.rs` plans a `MutationBatch` into
+statements: node and edge upserts are bucketed **by table** and emitted as multi-row
+`INSERT … ON CONFLICT`; every other variant stays one statement per mutation. Both adapters
+replay the plan, and the single-row upsert helpers are deleted, so each table has one SQL
+definition serving both a 1-row seed and a 256-row flush chunk.
+
+Bucketing by table rather than by adjacent run matters: `Graph::insert_concept` emits the
+concept's `UpsertNode` and its `Derives` `UpsertEdge` back to back, so a burst's log
+*alternates* node/edge one for one and a run-coalescing planner would have produced runs of
+length 1 and bought nothing. The reordering argument (disjoint tables, `edges` has no FK on
+source/target, interactions before concepts for `concepts.origin_interaction`, and every
+mutation that can observe a row is a barrier) is in the module docs.
+
+The subtle part is deduplication, which is **required** — both engines reject a multi-row
+upsert whose input rows collide on the conflict target. A collapsed concept keeps the **last**
+occurrence's ordinary columns and the **first** occurrence's canonization columns, because that
+is what row-by-row replay left durable under R2-1's INSERT-only rule; collapsing naively to the
+last row would have regressed the status of a concept born mid-progression. Edges deduplicate
+on the natural key `(source, target, edge_type)`, not on `id`, matching their conflict target.
+
+**The stale lease (priority 2 in the brief).** Separate bug, same finding. `close_bounded`
+*drops* the `close()` future on timeout, so the release on close's success paths never runs —
+which is why Result 5c saw the lease row survive. `close_bounded` now runs a bounded
+best-effort `Memory::release_lease_after_abandoned_close` on **both** abandon paths (deadline
+and second signal). A fenced handle still does not release: that lease belongs to whoever took
+the session over. The release is not a durability claim — it asserts this process is gone,
+which is true, and keeping the lease does not make the lost tail less lost.
+
+The 2 s release window is carved **out of** `CLOSE_GRACE` (now 8 s flush + 2 s release), not
+added on top, so `SHUTDOWN_BUDGET` and the documented supervisor SIGKILL contract are
+unchanged. A compile-time assert pins the split, alongside the two the brief flagged.
+
+**Tests.** 12 planner tests (the 784-mutation repro plans into ≤ 24 statements; barriers;
+dedupe; chunking; every mutation covered exactly once). `sql_shape_is_a_multi_row_upsert`
+asserts the *generated* PostgreSQL — 48 placeholders for 3 rows, a `::VECTOR` cast on each
+row's embedding placeholder, exactly one `ON CONFLICT` — because that text is the half no
+local test can put in front of a cluster. Two SQLite tests execute the dedupe and the chunking
+against a real SQL engine, and both were verified to **fail** when the first-canonization rule
+is broken. Five tests in `memory`, including a burst-drain contrast that reproduces the
+timeout under the old per-mutation cost model and passes under the new one, and the lease
+release driven through `serve`'s real bounded-close body.
+
+**Needs live re-verification on the cluster** (cannot be reached from this machine):
+
+1. `cargo test --features store-cockroach,embed-bge -- --ignored` — the conformance suite is
+   the flush→load round-trip over the rewritten statements.
+2. Result 5c's repro: four at-cap `lambo_record_action` calls then SIGTERM. Expect
+   `session closed, tail durable`, rc 0, concepts/edges durable, `session_leases` row gone.
+3. The stale-lease half specifically: force a close timeout (e.g. an unreachable cluster mid
+   shutdown) and confirm the lease row is released or, failing that, the new
+   "will lapse at LEASE_TTL instead" warning appears.
+
+## L82-2 — what is refused now
+
+`check_size` (the shared CLI+MCP validator) keeps its C0/C1 control check and adds
+`DISALLOWED_FORMAT_RANGES`: Unicode general category **Cf** as of Unicode 16, plus the whole
+`U+E0000–U+E007F` TAGS block (unassigned holes included — a superset costs nothing and survives
+future assignments). Concretely: `U+00AD`, `U+061C`, `U+180E`, `U+200B`, `U+200E–U+200F`,
+`U+202A–U+202E`, `U+2060–U+2064`, `U+2066–U+206F`, `U+FEFF`, `U+FFF9–U+FFFB`, `U+110BD`,
+`U+110CD`, `U+13430–U+1343F`, `U+1BCA0–U+1BCA3`, `U+1D173–U+1D17A`, `U+E0000–U+E007F`.
+
+Two deliberate exceptions, both documented at the table:
+
+* **`U+200C` ZWNJ and `U+200D` ZWJ are allowed.** They are orthographically required in Persian
+  and several Indic scripts and are the glue in emoji ZWJ sequences; refusing them would reject
+  legitimate concept text. Neither can reorder or conceal a visible character — they only join
+  or separate adjacent glyphs — so the threat model (bidi spoofing, invisible smuggling) is
+  still fully covered.
+* **Arabic number-formatting signs** (`U+0600–U+0605`, `U+06DD`, `U+070F`, `U+0890–U+0891`,
+  `U+08E2`) are Cf but are ordinary Arabic text with no direction or concealment capability.
+  `U+061C` ARABIC LETTER MARK *is* refused — it is a bidi control.
+
+The overstating single message is split in two, each claiming only what its own check enforces:
+the control message may say "tab and newline are the only control characters allowed" because
+for *control* characters that is now exactly true; the format message names its own exceptions
+instead. Tab and newline remain allowed.
+
+Tests: three unit cases in `caps` (ten refused codepoints by class, the allowances, and
+message-vs-check agreement) and five new over-the-wire cases on the existing MCP N2 test —
+`U+202E`, `U+200B`, `U+2066`, `U+FEFF` and a TAGS character now return `isError:true` through
+`lambo_derive`, which is the live repro pinned at the boundary it escaped through.
+
+**Live re-verification:** re-run Result 5b's `U+202E` probe; expect `isError:true` and
+`SELECT count(*) FROM concepts WHERE content LIKE '%'||chr(8238)||'%'` = 0 for the session.
+
+## Gates
+
+Full binding block from `dev-diary/PHASE-8-surface.md`, all green:
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | 640 lib + 5 bin + integration, 0 failed, 1 ignored |
+| `cargo test --features store-sqlite` | 686 lib + 5 bin + integration, 0 failed, 1 ignored |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
++23 tests, **0 removed**, no existing test weakened (verified: the diff against
+`phase/p8-surface` removes no `#[test]` / `#[tokio::test]` attribute).
