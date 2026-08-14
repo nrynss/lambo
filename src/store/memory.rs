@@ -686,7 +686,11 @@ mod tests {
         let b = holder("agent-b", 200);
         let ttl = Duration::from_secs(30);
 
-        assert!(store.acquire_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+        assert!(store
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
 
         // A distinct, live holder is refused, and told who holds it.
         match store.acquire_lease(&sid, &b, ttl).await.unwrap() {
@@ -695,11 +699,19 @@ mod tests {
         }
 
         // A's own re-acquire (heartbeat) still succeeds.
-        assert!(store.refresh_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+        assert!(store
+            .refresh_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
 
         // Release by A frees it; B can now take it.
         store.release_lease(&sid, &a).await.unwrap();
-        assert!(store.acquire_lease(&sid, &b, ttl).await.unwrap().is_acquired());
+        assert!(store
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
     }
 
     /// T8.6: a stale release (holder no longer owns the row) must not evict the
@@ -761,7 +773,8 @@ mod tests {
         let a = holder("agent-a", 100);
         let ttl = Duration::from_secs(30);
 
-        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap() else {
+        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
             panic!("first acquire must succeed");
         };
         tokio::time::sleep(Duration::from_millis(20)).await;

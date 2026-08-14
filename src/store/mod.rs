@@ -212,8 +212,7 @@ pub trait GraphStore: Send + Sync {
             holder: holder.token(),
             acquired_at: now,
             expires_at: now
-                + chrono::Duration::from_std(ttl)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(0)),
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0)),
         }))
     }
 

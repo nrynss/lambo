@@ -1291,7 +1291,9 @@ impl CockroachStore {
             .map_err(backend)?;
             match current {
                 Some((holder, acquired_at, expires_at)) => {
-                    let age = (Utc::now() - acquired_at).to_std().unwrap_or(Duration::ZERO);
+                    let age = (Utc::now() - acquired_at)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO);
                     return Ok(LeaseOutcome::Held {
                         current: LeaseInfo {
                             holder,
@@ -2789,7 +2791,11 @@ mod conformance {
             .expect("A acquire")
             .is_acquired());
 
-        match store_b.acquire_lease(&sid, &b, ttl).await.expect("B acquire") {
+        match store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B acquire")
+        {
             LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
             other => panic!("the second pool must be refused, got {other:?}"),
         }
@@ -2799,8 +2805,7 @@ mod conformance {
         else {
             panic!("A refresh");
         };
-        let LeaseOutcome::Acquired(refreshed) =
-            store_a.refresh_lease(&sid, &a, ttl).await.unwrap()
+        let LeaseOutcome::Acquired(refreshed) = store_a.refresh_lease(&sid, &a, ttl).await.unwrap()
         else {
             panic!("A refresh 2");
         };
@@ -2818,7 +2823,10 @@ mod conformance {
         // refused before the TTL and reclaims after it.
         let short = Duration::from_secs(2);
         store_b.release_lease(&sid, &b).await.ok();
-        store_b.acquire_lease(&sid, &b, short).await.expect("B short");
+        store_b
+            .acquire_lease(&sid, &b, short)
+            .await
+            .expect("B short");
         assert!(matches!(
             store_a.acquire_lease(&sid, &a, ttl).await.unwrap(),
             LeaseOutcome::Held { .. }

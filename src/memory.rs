@@ -578,7 +578,8 @@ impl MemoryBuilder {
         let canon_handle = canon.spawn();
         // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
         // keeps the session and a crashed one's lease lapses (T8.6).
-        let heartbeat_handle = spawn_lease_heartbeat(store.clone(), session.clone(), lease_holder.clone());
+        let heartbeat_handle =
+            spawn_lease_heartbeat(store.clone(), session.clone(), lease_holder.clone());
 
         tracing::info!(
             session = %session,

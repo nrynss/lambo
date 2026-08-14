@@ -985,12 +985,13 @@ async fn acquire_or_refresh(
             return Ok(LeaseOutcome::Acquired(lease_info_from_text(row)?));
         }
         // Guard was false — someone else holds a live lease. Read it back.
-        let current: Option<(String, String, String)> =
-            sqlx::query_as("SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = ?1")
-                .bind(&session.0)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| db_err("read current lease", e))?;
+        let current: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = ?1",
+        )
+        .bind(&session.0)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| db_err("read current lease", e))?;
         match current {
             Some(row) => {
                 let info = lease_info_from_text(row)?;
@@ -3813,13 +3814,18 @@ mod tests {
         let b = lease_holder("agent-b", 200);
         let ttl = Duration::from_secs(30);
 
-        assert!(store.acquire_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+        assert!(store
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
         match store.acquire_lease(&sid, &b, ttl).await.unwrap() {
             LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
             other => panic!("expected Held, got {other:?}"),
         }
         // Refresh keeps acquired_at.
-        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap() else {
+        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
             panic!("A refresh must succeed");
         };
         let LeaseOutcome::Acquired(refreshed) = store.refresh_lease(&sid, &a, ttl).await.unwrap()
@@ -3829,7 +3835,11 @@ mod tests {
         assert_eq!(first.acquired_at, refreshed.acquired_at);
 
         store.release_lease(&sid, &a).await.unwrap();
-        assert!(store.acquire_lease(&sid, &b, ttl).await.unwrap().is_acquired());
+        assert!(store
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
     }
 
     /// T8.6: expiry-after-crash on sqlite — an unreleased lease blocks before the
@@ -3873,13 +3883,21 @@ mod tests {
         store_a.init_schema().await.unwrap();
         let store_b = SqliteStore::connect(&path).unwrap();
 
-        assert!(store_a.acquire_lease(&sid, &a, ttl).await.unwrap().is_acquired());
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
         match store_b.acquire_lease(&sid, &b, ttl).await.unwrap() {
             LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
             other => panic!("the second connection must be refused, got {other:?}"),
         }
         store_a.release_lease(&sid, &a).await.unwrap();
-        assert!(store_b.acquire_lease(&sid, &b, ttl).await.unwrap().is_acquired());
+        assert!(store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
 
         drop(store_a);
         drop(store_b);

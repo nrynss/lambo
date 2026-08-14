@@ -84,8 +84,7 @@ pub const LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// confirmed the current holder is not making progress and I am forcing a
 /// takeover." The new writer still replays from durable state, so the wedged
 /// holder's un-flushed tail is lost exactly as it would be on any crash.
-pub const OPERATOR_OVERRIDE: &str =
-    "DELETE FROM session_leases WHERE session_id = '<session>';";
+pub const OPERATOR_OVERRIDE: &str = "DELETE FROM session_leases WHERE session_id = '<session>';";
 
 /// Who holds a session lease — agent id + process id + host.
 ///
