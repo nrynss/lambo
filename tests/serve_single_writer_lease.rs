@@ -170,10 +170,58 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
         "B's failure must name the current holder (agent-a); stderr was:\n{b_stderr}"
     );
 
-    // Tear A down.
+    // T86-6: the WINNER must still be live and holding through the contention —
+    // not merely "B was refused". Drive one more request over A's transport
+    // AFTER B's refusal: a regression that made *both* processes fail (e.g. a
+    // broken acquire that never grants) would let B be refused while A is dead,
+    // and only this liveness probe catches it. `initialized` first, then a
+    // `tools/list` whose response proves A is serving post-contention.
+    write_frame(
+        &mut a_stdin,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    write_frame(
+        &mut a_stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+    );
+    let list = read_response(&rx, 2);
+    assert!(
+        list.contains("\"result\""),
+        "A must keep serving through the contention (winner is live/holding); got: {list}"
+    );
+
+    // ...and A shuts down cleanly on SIGTERM: a clean close releases the lease
+    // (spec §2.2 handoff) and the process exits 0. A non-zero exit here would
+    // mean the winner did not hand off cleanly.
     sigterm(a_pid);
-    let _ = a.wait();
+    let a_status = a.wait().expect("wait A");
     drop(a_stdin);
     let _ = reader.join();
+    assert!(
+        a_status.success(),
+        "the winner must exit cleanly after a graceful SIGTERM close (releasing its lease); \
+         got {a_status:?}"
+    );
+
+    // The lease is released, so a fresh writer on the same file + session now
+    // acquires it — the winner really did hand off, not just exit.
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("connect after A exit");
+        let holder =
+            lambo::store::lease::LeaseHolder::for_this_process(&lambo::AgentId::new("agent-after"));
+        let outcome = store
+            .acquire_lease(
+                &lambo::SessionId::new(SESSION),
+                &holder,
+                Duration::from_secs(45),
+            )
+            .await
+            .expect("acquire after winner released");
+        assert!(
+            outcome.is_acquired(),
+            "the winner's clean close must have released the lease; a new writer got {outcome:?}"
+        );
+    });
+
     let _ = std::fs::remove_dir_all(&dir);
 }
