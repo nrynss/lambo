@@ -295,3 +295,271 @@ Feature gate: `--features store-cockroach,embed-bge`.
 `pi.mcp.json` + `pi.lambo.cockroach.toml` (DSN redacted), and raw wire/log captures
 (`result4a.b-refusal.log`, `result5d.*`, `result6b.*`, `result6c.*`). All secrets redacted and
 re-scan confirmed clean.
+
+---
+
+# L82-4 review round — ratification of the fresh-vector merge semantic
+
+```
+╔══════════════════════════════════════════════════════════════════╗
+║  Scope:    L82-4 remediation only — 2a9ee34 + 080b4a0 on 713a2ae ║
+║            (src/graph/hybrid.rs, src/memory.rs, this record)     ║
+║  Reviewer: L824AdveReview (adversarial; findings only, no fixes) ║
+║  Ruling:   SEMANTIC RATIFIED — threshold-preserving is SOUND     ║
+║  Verdict:  REQUEST CHANGES (test-strength + doc-accuracy;        ║
+║            no change to the ratified product decision)           ║
+╚══════════════════════════════════════════════════════════════════╝
+```
+
+Out of scope by instruction (concurrent work on another branch): `src/mcp/serve.rs`,
+`src/store/flush.rs`, `src/store/cockroach.rs`, `src/cli/caps.rs`.
+
+## 1. RULING ON THE MERGE-TARGET SEMANTIC — **RATIFY threshold-preserving**
+
+The strict reading (exclude fresh vectors as merge *targets*) is **refuted**; no third
+semantic is required. Five independent reasons, in descending weight:
+
+1. **A "merge" does not collapse identity, so the word overstates the risk.**
+   `Resolution::HybridMerge` (`src/graph/hybrid.rs:689-753`) creates a **new, distinct**
+   concept node and writes **one decaying `Semantic` edge** to the target. Nothing is
+   absorbed: no node is deleted, no canonical key is aliased, no content is rewritten,
+   `matched` is deliberately not touched (P7 MINOR-3). The worst case reachable through
+   this leg is therefore *recall-neighbourhood adjacency*, never "two topics became one
+   record". Every over-merge scenario has to be re-read with that ceiling in mind.
+2. **Provenance is not a quality signal — the 2026-08-12 law rested on a conflation.**
+   The original MAJOR-1 remediation (`PHASE-7-embeddings.md:138-143`) justified writing
+   `None` as: *"a 'far' concept would have retained a vector and become a future vector
+   candidate — the exact over-merge the precision bias prevents."* Being a **candidate**
+   is not an over-merge; a second, independent `>= 0.85` judgment is still required before
+   anything is written. A concept that scored 0.83 against some *unrelated* neighbour on
+   the day it was created carries no evidence that *its own* vector is untrustworthy. The
+   threshold is the precision instrument, exactly as the module doc now argues.
+3. **The strict reading has a measured cost and no reachable benefit.** Because every
+   organic concept takes the below-threshold arm, `embedding: None` kept the candidate
+   pool permanently empty, so the semantic-merge leg was **dead code on organic data** —
+   the 0-of-13 measurement in this very record. A law whose only observable effect is to
+   disable the feature it guards is not a law worth preserving.
+4. **The transitive chain is real, newly reachable, and bounded.** A—C at 0.86 and C—D at
+   0.86 admits cos(A,D) ≈ 0.48 (arccos 0.86 ≈ 30.7°, doubled), and recall at
+   `traversal_depth >= 2` will pull D into A's neighbourhood. This genuinely could not
+   happen before (empty pool). It is nonetheless contained: `Semantic` is the **last**
+   priority in recall expansion (`src/recall/expand.rs:63`), expansion is depth-bounded,
+   `Semantic` decays and is GC-eligible (`src/daemon/gc.rs:462`), and — see finding P3-1 —
+   canonization's Stage 2/Stage 3 gates exclude `Semantic` **entirely**. Chain drift costs
+   recall precision at depth; it cannot promote, fold, or destroy anything.
+5. **The no-`Semantic`-edge-on-refusal guarantee is airtight in every arm.** Verified by
+   reading all five `Fresh` constructions plus the merge arm: capability-absent
+   (`hybrid.rs:465`), embed timeout (`:490`), embed error (`:503`), store capability-miss
+   after a successful embed (`:571`), below-threshold (`:554`), and the non-Concept target
+   degrade (`:700-712`, still `embedding: None`, still no edge). Only the below-threshold
+   arm changed; `Fresh` structurally has no target, so it cannot emit a `Semantic` edge.
+   Mutation (b) below confirms two tests fire the moment a refusal endorses an edge.
+
+**Conclusion:** the honest residue the implementer flagged (a flushed fresh vector is a
+legal merge *target*) is the correct place to land. Strict target-exclusion would need
+per-vector provenance in every adapter **and** would re-inert the merge leg permanently,
+buying a guarantee that reason 2 shows was never load-bearing. Ratified.
+
+**What actually deserves attention is the threshold's calibration basis, not the
+provenance rule — see P2-2.**
+
+## 2. Mutation-check of the new pins
+
+Each mutation applied alone to a clean tree, `cargo test --lib`, then reverted via
+`git checkout`. Tree left clean.
+
+| # | Mutation | Result | Caught by |
+|---|---|---|---|
+| a | below-threshold arm back to `embedding: None` | **CAUGHT** — 618 passed / **5 failed** | `organic_derive_persists_a_vector_that_recall_finds`, `far_text_creates_fresh_concept_with_vector_but_no_merge`, `first_use_empty_candidates_still_commits_contract`, `persisted_fresh_vector_does_not_lower_the_merge_bar`, `vectors_minted_in_this_call_cannot_merge_within_it` |
+| b | refusal emits a `Semantic` edge to the best **sub**-threshold hit | **CAUGHT** — 621 passed / **2 failed** | `far_text_creates_fresh_concept_with_vector_but_no_merge`, `persisted_fresh_vector_does_not_lower_the_merge_bar` |
+| c | `best_candidate` threshold filter bypassed (`>= 0.0`) | **CAUGHT** — 621 passed / **2 failed** | `far_text_creates_fresh_concept_with_vector_but_no_merge`, **`persisted_fresh_vector_does_not_lower_the_merge_bar`** (as predicted) |
+| d | staged vectors visible within the call (commit-loop sibling merge at `>= semantic_match_threshold`) | **NOT CAUGHT — 623 passed, 0 failed** | *(none)* — see P2-1 |
+| d′ | same, but unconditional (`>= 0.0`) | CAUGHT — 1 failed | `vectors_minted_in_this_call_cannot_merge_within_it` |
+
+(a), (b), (c) are properly pinned. (d) is not — this is the review's principal finding.
+
+## 3. Findings
+
+### P2-1 (CONFIRMED) — `vectors_minted_in_this_call_cannot_merge_within_it` does not pin property 3
+
+- **Where:** `src/graph/hybrid.rs:1771` (test), asserting `0` `Semantic` edges between two
+  brand-new siblings of one derive call.
+- **Evidence:** mutation (d) added an explicit within-call merge to the commit loop — for
+  each `Fresh` concept carrying a vector, compare against every concept already written
+  this call and write a `Semantic` edge at `>= semantic_match_threshold`. That is precisely
+  the behaviour property 3 forbids. **All 623 tests passed.** Re-running the identical
+  mutation with the bar dropped to `>= 0.0` (d′) *did* fail the test, isolating the cause.
+- **Root cause (measured):** the test's two siblings are `NEAR_A` / `NEAR_B`, but hybrid
+  embeds `context_text` (`hybrid.rs:226-231`), not the bare label, and
+  `FixtureEmbedder::seed_for` (`src/embed/fixture.rs:69-80`) only maps the **exact** strings
+  `"register user"` / `"create account"` into one seed family — any framed variant falls
+  through to a per-string hash. Measured with a scratch probe (since reverted):
+
+  ```
+  bare   cosine("register user",                          "create account")                          = 0.99999
+  framed cosine("register user — two new ideas in one turn","create account — two new ideas in one turn") = 0.01406
+  prefixed cosine("Concept: register user",               "Concept: create account")                 = 0.00098
+  ```
+
+  The two staged siblings sit at **0.014**, so the zero-edge assertion holds for a reason
+  unrelated to within-call visibility. It is vacuous.
+- **Why it matters:** the module doc states each of the three properties is "pinned by a
+  test", and the disposition above lists this test as the pin for property 3. It is not.
+  The test's only load-bearing assertion is `store.vector_calls() == 2`, which counts
+  queries but does not establish that they preceded the writes. Property 3 is true today
+  by construction (all `vector_candidates` calls are issued in the gather phase, before
+  the write lock is taken) — but it is unguarded, so a future refactor that moves the
+  candidate query into the commit loop would ship silently.
+- **Fix direction:** either drive the sibling case through a store double that returns the
+  *other* sibling's id (making the assertion about visibility rather than similarity), or
+  give `FixtureEmbedder` a family whose seed survives context framing, or assert the
+  structural invariant directly (no `vector_candidates` call after the first
+  `insert_concept`).
+
+### P2-2 (PLAUSIBLE) — the 0.85 bar was calibrated on *short-sentence* context; production admits a 16 KB origin prompt, and L82-4 is what makes the mismatch live
+
+- **Where:** `src/graph/hybrid.rs:226-231` (`context_text` = `"{content} — {origin}"`),
+  `MAX_HYBRID_CONTEXT_BYTES = 16 * 1024` (`:153`).
+- **The calibration actually on file** (`PHASE-7-embeddings.md:572-583`): bare labels do
+  **not** separate (near `[0.567, 0.868]` vs far `[0.429, 0.855]`, overlapping); with
+  concepts *"inside short sentences"* near = `[0.867, 0.931]` and far = `[0.750, 0.825]`,
+  and 0.85 sits in that gap. Note the far-class **ceiling is already 0.825** — the whole
+  safety margin is 0.042 wide, and it was measured on short sentences.
+- **What production does instead:** concatenates a 2-3 word concept label with the entire
+  interaction prompt, up to 16 KB. As the origin text grows, it dominates the embedded
+  string, and cosine increasingly measures *prompt overlap* rather than concept relatedness.
+- **Concrete scenario.** Interaction 1 prompt: *"fix the checkout flow — the payment gateway
+  times out and the receipt emails aren't sending."* → derive yields `payment gateway
+  timeout` and `receipt email delivery`. Both persist vectors; property 3 correctly keeps
+  them from merging **within** the call. Interaction 2 prompt is a near-identical follow-up
+  → derive yields `gateway retry budget`, whose embedded context is ~the same text as both
+  stored vectors. `best_candidate` takes the max over the pool and can write a `Semantic`
+  edge to `receipt email delivery` — an unrelated topic — on the strength of shared
+  conversational framing. Pre-L82-4 this could not fire (empty pool).
+- **Confidence / why PLAUSIBLE not CONFIRMED:** the geometry argument is sound but the
+  magnitude is BGE-M3-specific and unmeasured. I could not measure it here: the only local
+  endpoint (`127.0.0.1:8080`) serves LFM2.5-230M, completion-only — `/v1/embeddings`
+  returns `501 "This server does not support embeddings"`. `FixtureEmbedder` is hash-seeded
+  and models no semantics at all.
+- **Fix direction (smaller than provenance columns):** bound the origin context used for
+  the *merge* comparison (first N bytes / first sentence) so the label is not drowned, or
+  re-calibrate on realistic context lengths. This is the natural home for the disposition's
+  already-scheduled live re-verification — it should measure the **far-class distribution
+  under production-length context**, not just that `embedding IS NOT NULL`.
+
+### P2-3 (PLAUSIBLE) — L82-4 materially increases flush-path cost, aggravating the still-open L82-1
+
+- Every organic concept now carries 1024 × f32 (~4 KB) through the in-memory mutation log
+  and into `UPSERT_CONCEPT_SQL`'s `$15::VECTOR`. More importantly,
+  `concepts_embedding_idx` is a **partial** vector index `WHERE embedding IS NOT NULL`
+  (T7.4), so before this change **no organic row ever entered the vector index**; now every
+  one does, paying C-SPANN insert cost per row on the flush path.
+- L82-1 (P1, open) measured 784 mutations failing to drain inside the 10 s `CLOSE_GRACE`
+  with all-`NULL` embeddings. This change strictly increases the per-concept cost of that
+  same drain.
+- The disposition's "live re-verification needed" paragraph anticipates the `Semantic`-edge
+  second-order effect but not this one. Flagged as an interaction only — L82-1's files are
+  out of my review scope.
+
+### P3-1 (CONFIRMED) — the load-bearing safety argument cites a mechanism that does not exist
+
+- **Where:** `src/graph/hybrid.rs:90` — *"Recall expansion (spec §8) and P6 canonization's
+  physical fold both travel `Semantic` edges"*; repeated at `hybrid.rs:1659` (*"nor P6's
+  physical fold"*) and in the disposition above.
+- **There is no physical fold.** `grep -ci 'merge|fold|collapse'` over `src/canon/stage1.rs`,
+  `stage2.rs`, `stage3.rs`, `eval.rs`, `task.rs`, `mod.rs` returns **0** for every file, and
+  `EdgeType::Semantic` appears nowhere in `src/canon/`. Canonization is a status-transition
+  machine (None → Candidate → Venerable → Canonical + demotion, `eval.rs:558-...`). It never
+  folds concepts. Its structural gates explicitly exclude `Semantic`: Stage 3 `blast_radius`
+  counts only `{Dependency, Causal, Hierarchical}` (`src/store/memory.rs:551-555`;
+  `BLAST_RADIUS_SQL`, `src/store/cockroach.rs:439`), and Stage 2 `interaction_span` likewise.
+- **The real coupling is missed.** A `Semantic` edge *does* reach canonization — through
+  scoring, not traversal. It increments the concept's incident-edge count, which feeds
+  **`density`, the heaviest weighted dimension at 0.35** (`src/daemon/score.rs:29-30`), plus
+  `edge_type_bonus` +0.01 (`score.rs:66`). Those composite scores drive Stage 1's P90 peer
+  gate (`src/canon/stage1.rs:56-85`) and GC's `MIN_CONCEPT_SCORE`. So newly-reachable
+  organic `Semantic` edges shift promotion and GC pressure — via density, not edge-walking.
+- **Effect on the ruling: none.** The truth is *more* favourable than the claim (canonization
+  is even less exposed than argued). But a user-approved product decision should not be
+  recorded on a false premise, and the actual coupling path deserves to be the thing the
+  live re-verification watches.
+
+### P3-2 (CONFIRMED) — the end-to-end test validates plumbing in a regime P7 explicitly found unusable
+
+- `ContextTolerantEmbedder` (`src/memory.rs:2760-2775`) strips `"Concept: "` and everything
+  after `" — "`, reducing the text to the bare label so `FixtureEmbedder`'s family seed
+  applies. That is the **bare-label** regime PHASE-7 measured and rejected: *"Bare
+  concept-name embedding does NOT separate the classes… NO single threshold works on bare
+  labels"* (`PHASE-7-embeddings.md:572-577`).
+- `organic_derive_persists_a_vector_that_recall_finds` (`src/memory.rs:4685`) is therefore
+  strong evidence for **persist → flush → reload → vector-recall wiring** (which is what
+  L82-4 is about, and the wrapper's own doc comment is honest about why it exists) but is
+  **no** evidence about production similarity behaviour. Worth one sentence beside the test
+  so a later reader does not cite it as calibration evidence.
+
+## 4. Regression sweep
+
+- **`None` arms intact.** All five no-vector arms still write `embedding: None` and return
+  `Ok`: capability-absent (`hybrid.rs:465`, byte-identical to `MatchStrategy::Canonical`,
+  pinned by `no_capability_is_byte_identical_to_canonical:1820`), embed timeout (`:490`),
+  embed error (`:503`, pinned by `embed_failure_degrades_to_fresh_concept:1943` which also
+  asserts the contract stamp stays `None` — P7 MINOR-2 preserved), store capability-miss
+  after a successful embed (`:571`), non-Concept merge target (`:700-712`, pinned by
+  `hybrid_refused_merge_target_is_keyword_only:2216`). A vector is never invented.
+- **Assertion removals.** `git diff 713a2ae..080b4a0 -- src | grep '^-.*assert'` yields
+  **exactly 2** lines, and both are the documented L82-4 inversions — the `is_none()` in
+  `first_use_empty_candidates_still_commits_contract` (replaced by a *stronger*
+  `is_some_and(len == 1024)` **plus a new** zero-`Semantic`-edge assertion) and the
+  `con.embedding.is_none()` in the renamed far-text test (replaced by
+  `assert_eq!(…, Some(1024))`, every other assertion retained). No silent weakening.
+- **F18 goldens.** `f18_tool_schemas_match_the_golden_property_set` and
+  `f18_no_tool_schema_accepts_a_client_timestamp` both pass.
+- **No wire-visible embedding.** `RecallHit` (`src/types/mod.rs:482-489`) has no embedding
+  field; MCP and `lambo inspect` build responses from explicit `json!` literals, never by
+  serializing `Concept`. **Latent note (not a finding on this branch):** `Concept` derives
+  `Serialize` with `pub embedding: Option<Vec<f32>>` and **no** `skip_serializing_if`
+  (`types/mod.rs:219-220`), so any future path that serializes a whole `Concept` would now
+  emit 1024 floats per concept where it previously emitted `null`. Nothing does today.
+- **Blast radius / capability scope.** Only Cockroach advertises `VECTOR_SEARCH`
+  (`cockroach.rs:1508`); `MemoryStore` and SQLite return `Capabilities::empty()`, so in
+  production L82-4 changes behaviour on Cockroach sessions only — consistent with the
+  disposition. SQLite persists `Concept.embedding` for round-trip parity but never queries it.
+
+## 5. Gates — full PHASE-8 binding block, all green
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **623** lib / 5 bin / 3 integration (8 binaries, 2 ignored) / 1 doctest — **0 failed**, 1 ignored |
+| `cargo test --features store-sqlite` | **667** lib / 5 bin / 8 integration / 1 doctest — **0 failed**, 1 ignored |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds clean |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds clean |
+| `cargo check --no-default-features` | clean |
+
+Counts match the disposition's claim exactly (623 / 667).
+
+## 6. Verdict
+
+**The product decision is RATIFIED.** Threshold-preserving is the sound semantic; the strict
+target-exclusion reading is refuted on the merits (reason 2), not merely on cost. No finding
+below asks for the semantic to change.
+
+**REQUEST CHANGES** on three items, none of which touch the ratified behaviour:
+
+1. **P2-1** — property 3 is unpinned; the test that claims to pin it passes under a faithful
+   violating mutation. Fix the test (or the claim).
+2. **P3-1** — the recorded safety argument cites a canonization "physical fold" that does not
+   exist, and misses the real density/score coupling. Correct the module doc, the far-text
+   test comment, and the disposition paragraph above.
+3. **P3-2** — one sentence beside the E2E test noting it proves wiring, not similarity.
+
+**P2-2** (calibration basis vs 16 KB production context) and **P2-3** (flush cost vs the open
+L82-1) are for the phase owner to schedule, not for this branch to fix. P2-2 in particular
+should be folded into the live re-verification the disposition already plans: measure the
+**far-class score distribution under production-length context**, not merely that
+`embedding IS NOT NULL`.
+
+— L824AdveReview, 2026-08-14
