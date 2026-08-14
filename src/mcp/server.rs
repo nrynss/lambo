@@ -1962,6 +1962,11 @@ mod tests {
             ("first-strong isolate", "user\u{2066}schema"),
             ("bom", "\u{FEFF}user schema"),
             ("tag character", "user\u{E0073}schema"),
+            // R1-2(b): invisible but not category Cf, so the first L82-2 pass
+            // let all of these through the wire.
+            ("hangul filler", "user\u{3164}schema"),
+            ("halfwidth hangul filler", "user\u{FFA0}schema"),
+            ("braille pattern blank", "user\u{2800}schema"),
         ] {
             let out = call(
                 &s,

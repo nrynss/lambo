@@ -7,6 +7,7 @@
 
 use clap::ValueEnum;
 
+use crate::graph::canonical::{is_invisible, is_text_required_invisible};
 use crate::types::ConceptType;
 
 /// Upper bound on `top_k` a client may ask for. Recall assembles and renders
@@ -129,66 +130,34 @@ pub fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usiz
     clamped
 }
 
-/// Invisible-formatting codepoints refused by [`check_size`] (L82-2).
+/// Is `c` an invisible character refused by [`check_size`] (L82-2 / R1-2)?
 ///
 /// `char::is_control()` covers **only** C0 (`U+0000–U+001F`) and C1
-/// (`U+007F–U+009F`). Unicode general category *Cf* — bidi overrides, the
-/// zero-width family, the BOM, the deprecated format controls and the TAGS
-/// block — sails straight past it, which is how a `U+202E` RIGHT-TO-LEFT
-/// OVERRIDE reached a live `concepts.content` column in the T8.2/T8.3 review.
-/// These characters render as nothing, so a recall context block containing one
-/// looks innocuous to a human reviewer while reordering or hiding what the
-/// model actually reads: a prompt-injection and spoofing vector, not a
-/// cosmetic defect.
+/// (`U+007F–U+009F`). Every invisible codepoint above that — bidi overrides, the
+/// zero-width family, the BOM, the TAGS block, and the blank-rendering fillers —
+/// sails straight past it, which is how a `U+202E` RIGHT-TO-LEFT OVERRIDE
+/// reached a live `concepts.content` column in the T8.2/T8.3 review. Such a
+/// character renders as nothing, so a recall context block containing one looks
+/// innocuous to a human reviewer while reordering or hiding what the model
+/// actually reads: a prompt-injection and spoofing vector, not a cosmetic
+/// defect.
 ///
-/// The table is category *Cf* as of Unicode 16, plus the whole `U+E0000–U+E007F`
-/// TAGS block (its unassigned holes included — a superset costs nothing and
-/// survives future assignments), with **two deliberate exceptions**:
-///
-/// * `U+200C` ZERO WIDTH NON-JOINER and `U+200D` ZERO WIDTH JOINER are
-///   **allowed**. They are orthographically required in Persian and several
-///   Indic scripts and are the glue in emoji ZWJ sequences (`👨‍👩‍👧`), so
-///   refusing them would reject legitimate concept text. Neither can reorder or
-///   conceal visible characters — they only join or separate adjacent glyphs —
-///   so the threat this table exists for is still fully covered.
-///
-/// Arabic number-formatting signs (`U+0600–U+0605`, `U+06DD`, `U+070F`,
-/// `U+0890–U+0891`, `U+08E2`) are also *Cf* but are deliberately **not** listed:
-/// they prefix digits in ordinary Arabic text and carry no direction or
-/// concealment capability. `U+061C` ARABIC LETTER MARK *is* listed — it is a
-/// bidi control.
-const DISALLOWED_FORMAT_RANGES: &[(char, char)] = &[
-    ('\u{00AD}', '\u{00AD}'),   // SOFT HYPHEN
-    ('\u{061C}', '\u{061C}'),   // ARABIC LETTER MARK (bidi)
-    ('\u{180E}', '\u{180E}'),   // MONGOLIAN VOWEL SEPARATOR
-    ('\u{200B}', '\u{200B}'),   // ZERO WIDTH SPACE (200C/200D deliberately skipped)
-    ('\u{200E}', '\u{200F}'),   // LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
-    ('\u{202A}', '\u{202E}'),   // LRE, RLE, PDF, LRO, RLO — the U+202E family
-    ('\u{2060}', '\u{2064}'),   // WORD JOINER, invisible operators
-    ('\u{2066}', '\u{206F}'),   // isolates (LRI/RLI/FSI/PDI) + deprecated format controls
-    ('\u{FEFF}', '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE / BOM
-    ('\u{FFF9}', '\u{FFFB}'),   // interlinear annotation
-    ('\u{110BD}', '\u{110BD}'), // KAITHI NUMBER SIGN
-    ('\u{110CD}', '\u{110CD}'), // KAITHI NUMBER SIGN ABOVE
-    ('\u{13430}', '\u{1343F}'), // Egyptian Hieroglyph format controls
-    ('\u{1BCA0}', '\u{1BCA3}'), // shorthand format controls
-    ('\u{1D173}', '\u{1D17A}'), // musical format controls
-    ('\u{E0000}', '\u{E007F}'), // TAGS block — invisible ASCII smuggling
-];
-
-/// Is `c` an invisible formatting character refused by [`check_size`]?
-///
-/// See [`DISALLOWED_FORMAT_RANGES`] for the table and the two exceptions.
+/// The table lives in [`crate::graph::canonical::INVISIBLE_RANGES`], next to the
+/// tokenizer that strips it, because the surface rule and the canonical-key rule
+/// are two halves of one policy and a second copy here would drift (R1-2). This
+/// surface refuses everything in it except
+/// [`crate::graph::canonical::TEXT_REQUIRED_INVISIBLE`] — the joiners, the
+/// variation selectors and the combining grapheme joiner, which legitimate
+/// Persian, Indic and emoji text needs. Those stay in `content` and are erased
+/// from `canonical_key`, so allowing them cannot fork one concept into two.
 fn is_disallowed_format(c: char) -> bool {
-    DISALLOWED_FORMAT_RANGES
-        .iter()
-        .any(|&(lo, hi)| c >= lo && c <= hi)
+    is_invisible(c) && !is_text_required_invisible(c)
 }
 
 /// Validate one client string before it reaches the store: refuse it if it is
 /// over [`MAX_CONTENT_BYTES`], carries a control character other than
-/// tab/newline, **or** carries an invisible formatting character
-/// ([`DISALLOWED_FORMAT_RANGES`]).
+/// tab/newline, **or** carries an invisible character (see
+/// [`is_disallowed_format`]).
 ///
 /// The size cap is the single-process fairness guard. The character checks are
 /// data-hygiene and anti-injection ones:
@@ -197,9 +166,9 @@ fn is_disallowed_format(c: char) -> bool {
 ///   its canonical key, and every downstream rendering, where it can corrupt
 ///   terminals, truncate at the NUL, or smuggle ANSI escapes. Tab and newline
 ///   are the only controls a legitimate multi-line concept needs;
-/// * a bidi override or zero-width character is *invisible*, so it survives
-///   human review of a recall context block while changing what the model
-///   reads (L82-2).
+/// * a bidi override, zero-width or blank-rendering character is *invisible*, so
+///   it survives human review of a recall context block while changing what the
+///   model reads (L82-2).
 ///
 /// Both are refused here rather than sanitised silently — a validator that
 /// rewrites content would make the stored concept differ from what the caller
@@ -208,9 +177,17 @@ fn is_disallowed_format(c: char) -> bool {
 /// Names the offending codepoint; never echoes the raw byte. The two messages
 /// are deliberately distinct and each states only what it actually enforces:
 /// the control message may say "tab and newline are the only ones allowed"
-/// because for *control* characters that is exactly true, while the format
-/// message does not, because the joiners are allowed (R: the pre-L82-2 wording
-/// claimed the stronger contract for both and the check delivered neither).
+/// because for *control* characters that is exactly true, while the invisible
+/// message does not, because the joiners and variation selectors are allowed
+/// (R: the pre-L82-2 wording claimed the stronger contract for both and the
+/// check delivered neither).
+///
+/// This function is **only half** of the invisible-character policy (R1-2). It
+/// decides what may be *stored*; [`crate::graph::canonical::normalize_tokens`]
+/// decides what may reach a *canonical key*, and strips the whole table
+/// including the exceptions. Neither is sufficient alone: refusing everything
+/// would reject legitimate Persian, Indic and emoji text, and stripping alone
+/// would leave a `U+202E` sitting in `content` where a reviewer cannot see it.
 pub fn check_size(field: &str, value: &str) -> Result<(), String> {
     if value.len() > MAX_CONTENT_BYTES {
         return Err(format!(
@@ -231,9 +208,9 @@ pub fn check_size(field: &str, value: &str) -> Result<(), String> {
     if let Some(c) = value.chars().find(|c| is_disallowed_format(*c)) {
         return Err(format!(
             "{field} contains a disallowed invisible formatting character (U+{:04X}); bidi \
-             overrides, zero-width characters, the BOM and tag characters are refused because \
-             they are invisible in review but not to the model (zero-width joiner and \
-             non-joiner are allowed)",
+             overrides, zero-width characters, blank fillers, the BOM and tag characters are \
+             refused because they are invisible in review but not to the model (zero-width \
+             joiner and non-joiner are allowed, and are stripped from canonical keys)",
             c as u32
         ));
     }
@@ -315,6 +292,17 @@ mod tests {
             ("soft hyphen", "so\u{00AD}ft", "U+00AD"),
             ("tag latin small a", "a\u{E0061}b", "U+E0061"),
             ("language tag", "a\u{E0001}b", "U+E0001"),
+            // R1-2(b): invisible but NOT category Cf, so the first L82-2 pass
+            // missed all of them. U+3164 is the codepoint most used in the wild
+            // for invisible smuggling — it is a *letter* as far as Unicode is
+            // concerned, and paints nothing.
+            ("hangul filler", "a\u{3164}b", "U+3164"),
+            ("halfwidth hangul filler", "a\u{FFA0}b", "U+FFA0"),
+            ("hangul choseong filler", "a\u{115F}b", "U+115F"),
+            ("hangul jungseong filler", "a\u{1160}b", "U+1160"),
+            ("braille pattern blank", "a\u{2800}b", "U+2800"),
+            ("khmer vowel inherent aq", "a\u{17B4}b", "U+17B4"),
+            ("khmer vowel inherent aa", "a\u{17B5}b", "U+17B5"),
         ] {
             let err = check_size("concept.content", bad).unwrap_err();
             assert!(
@@ -332,9 +320,10 @@ mod tests {
         }
     }
 
-    /// The two documented exceptions. ZWNJ/ZWJ carry orthographic meaning in
-    /// Persian and Indic scripts and glue emoji sequences together; refusing
-    /// them would reject legitimate concept text, and neither can reorder or
+    /// The documented exceptions. ZWNJ/ZWJ carry orthographic meaning in Persian
+    /// and Indic scripts and glue emoji sequences together, variation selectors
+    /// choose a glyph form, and CGJ separates grapheme clusters; refusing any of
+    /// them would reject legitimate concept text, and none can reorder or
     /// conceal a visible character. Arabic number signs are *Cf* but are
     /// ordinary text, not a direction or concealment control.
     #[test]
@@ -346,8 +335,43 @@ mod tests {
         )
         .unwrap();
         check_size("concept.content", "\u{0600}12").unwrap();
+        // VS16 is what makes a dingbat render as an emoji.
+        check_size("concept.content", "love \u{2764}\u{FE0F}").unwrap();
+        check_size("concept.content", "ideograph \u{845B}\u{E0100}").unwrap();
+        check_size("concept.content", "a\u{034F}b").unwrap();
         // Plain multilingual text and emoji are untouched.
         check_size("concept.content", "درخواست — 请求 — request 🚀").unwrap();
+    }
+
+    /// **R1-2(a).** Allowing the joiners is only safe because the canonical key
+    /// cannot see them. Two strings that render identically must be accepted
+    /// *and* collapse to one key — otherwise a caller can mint a second concept
+    /// that looks like the first and can never be merged with it.
+    ///
+    /// This is the half of the policy that lives in
+    /// [`crate::graph::canonical::normalize_tokens`]; it is asserted here too
+    /// because the surface's decision to accept these characters is only
+    /// defensible in combination with it.
+    #[test]
+    fn characters_this_surface_allows_cannot_fork_a_canonical_key() {
+        use crate::graph::canonical::canonical_key;
+        let plain = "billing retries change";
+        for spoof in [
+            "billing\u{200D} retries change",
+            "billing\u{200C} retries change",
+            "billing\u{FE0F} retries change",
+            "billing\u{034F} retries change",
+            "billing\u{E0100} retries change",
+        ] {
+            check_size("concept.content", spoof)
+                .unwrap_or_else(|e| panic!("{spoof:?} must still be accepted: {e}"));
+            assert_eq!(
+                canonical_key(spoof, |_| None),
+                canonical_key(plain, |_| None),
+                "an accepted invisible character must not fork the key of text that renders \
+                 identically ({spoof:?})"
+            );
+        }
     }
 
     /// The control-character message must not claim a contract the check does
