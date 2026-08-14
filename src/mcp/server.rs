@@ -33,47 +33,19 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
 
+#[cfg(test)]
+use crate::cli::caps::MAX_CONTENT_BYTES;
+use crate::cli::caps::{
+    check_size as validate_size, clamp_cfg_default, MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE,
+    MAX_INSPECT_CANDIDATES, MAX_INSPECT_DEPTH, MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K,
+    MAX_TRAVERSAL_DEPTH,
+};
+use crate::cli::inspect::{render_neighbourhood, resolve_focus, Focus};
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::memory::Memory;
-use crate::recall::format;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
-use crate::types::{ConceptType, EdgeType, LamboError, NodeId, RecallQuery};
-
-/// Upper bound on `top_k` a client may ask for. Recall assembles and renders
-/// every hit, so an unbounded `top_k` from one client is a cheap way to stall
-/// the single process every other client shares.
-const MAX_TOP_K: usize = 100;
-/// Upper bound on `traversal_depth` (spec §8 phase 2 is a BFS — depth is an
-/// exponent, not a linear cost).
-const MAX_TRAVERSAL_DEPTH: usize = 5;
-/// Upper bound on `max_tokens` for one context block.
-const MAX_MAX_TOKENS: usize = 100_000;
-/// Upper bound on concepts in a single `lambo_derive` call.
-const MAX_CONCEPTS_PER_DERIVE: usize = 64;
-/// Upper bound on the combined `produces` + `modifies` + `depends_on` target
-/// count in a single `lambo_record_action` call (N1). Mirrors
-/// [`MAX_CONCEPTS_PER_DERIVE`]: `record_action` fans each target out into a
-/// concept and an edge under the graph write lock, so an unbounded list is the
-/// same single-process stall vector `lambo_derive` was already guarded against.
-const MAX_ACTION_TARGETS: usize = 64;
-/// Upper bound on `lambo_reserve` TTL — a soft lock (spec §11), not a lease.
-const MAX_RESERVE_TTL_SECS: u64 = 3600;
-/// Upper bound on `lambo_inspect` depth.
-const MAX_INSPECT_DEPTH: usize = 5;
-/// Cap on neighbours rendered per `lambo_inspect` frontier level.
-const MAX_INSPECT_NODES: usize = 200;
-/// Upper bound on **every** client-supplied string this surface accepts.
-///
-/// Sized to match `graph::hybrid::MAX_HYBRID_CONTEXT_BYTES` so the MCP layer
-/// refuses before the graph does, and applied uniformly (R1/T82-6): before this,
-/// `lambo_derive` was bounded only as a side effect of the hybrid path's own
-/// check while `lambo_record_action` and `lambo_recall`'s `query` took input of
-/// any size, so one client could grow the process every other client shares
-/// through the tool that happened to have no guard.
-const MAX_CONTENT_BYTES: usize = 16_384;
-/// Candidate concepts listed when `lambo_inspect`'s focus is ambiguous.
-const MAX_INSPECT_CANDIDATES: usize = 10;
+use crate::types::{ConceptType, LamboError, NodeId, RecallQuery};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -86,7 +58,7 @@ const MAX_INSPECT_CANDIDATES: usize = 10;
 /// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
 /// variant \`…\`` error, which repeats the caller's decoded string — potentially
 /// a decoded control char such as `U+0001` — back to the model, unlike
-/// [`check_size`], which names control codepoints instead of echoing them. This
+/// [`validate_size`], which names control codepoints instead of echoing them. This
 /// is **not** interceptable at our layer: every tool takes its params through
 /// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
 /// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
@@ -259,26 +231,6 @@ fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     ))])
 }
 
-/// Clamp a config-derived default into the MCP-enforced range (N6).
-///
-/// A session config can set a `default_top_k` (etc.) wider than the MCP maximum;
-/// a client that omits the knob would then inherit a value the surface refuses.
-/// Clamp it into `lo..=hi` and log when that changes it, so the request
-/// succeeds with a legible bound rather than failing on a value the client never
-/// sent.
-fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usize {
-    let clamped = value.clamp(lo, hi);
-    if clamped != value {
-        tracing::warn!(
-            config_key = name,
-            configured = value,
-            clamped_to = clamped,
-            "mcp: session config default is outside the MCP bound — using the clamped value"
-        );
-    }
-    clamped
-}
-
 /// Replace any whitespace-delimited token that looks like a URL with a
 /// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
 /// not carry it into a model-facing string. Idempotent — a redacted token has
@@ -314,36 +266,10 @@ fn bad_param(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
-/// Validate one client string before it reaches the store: refuse it if it is
-/// over [`MAX_CONTENT_BYTES`] (R1/T82-6) **or** carries a control character
-/// other than tab/newline (N2).
-///
-/// The size cap is the single-process fairness guard. The control-character
-/// check is a data-hygiene one: a NUL or other C0 control ends up verbatim in a
-/// concept's `content`, its canonical key, and every downstream rendering (the
-/// T5.3 context block, `lambo_inspect` output, log lines), where it can corrupt
-/// terminals, truncate at the NUL, or smuggle ANSI escapes. Tab and newline are
-/// the only controls a legitimate multi-line concept needs, so everything else
-/// is refused here rather than sanitised silently.
+/// Shared [`validate_size`] mapped into a tool-level error. The check itself
+/// lives in [`crate::cli::caps`] so CLI and MCP cannot drift.
 fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
-    if value.len() > MAX_CONTENT_BYTES {
-        return Err(bad_param(format!(
-            "{field} exceeds {MAX_CONTENT_BYTES} bytes ({} given)",
-            value.len()
-        )));
-    }
-    if let Some(c) = value
-        .chars()
-        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
-    {
-        // Name the offending codepoint, never echo the raw byte back.
-        return Err(bad_param(format!(
-            "{field} contains a disallowed control character (U+{:04X}); only tab and newline \
-             are allowed",
-            c as u32
-        )));
-    }
-    Ok(())
+    validate_size(field, value).map_err(bad_param)
 }
 
 /// Attach warnings to a result **where the model will actually read them**.
@@ -580,7 +506,7 @@ impl LamboServer {
 /// and `lambo_recall` refuse. That is deliberate: an operator inspecting why a
 /// close failed still needs `lambo_stats` to answer.
 impl LamboServer {
-    async fn recall_impl(&self, p: RecallParams) -> CallToolResult {
+    pub(crate) async fn recall_impl(&self, p: RecallParams) -> CallToolResult {
         let mut warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -680,7 +606,7 @@ impl LamboServer {
         out
     }
 
-    async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
+    pub(crate) async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -760,7 +686,7 @@ impl LamboServer {
         out
     }
 
-    async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
+    pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
         let warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
@@ -1126,219 +1052,6 @@ impl LamboServer {
         }));
         out
     }
-}
-
-/// A concept `lambo_inspect` could have meant.
-#[derive(Clone, Debug)]
-struct FocusCandidate {
-    id: NodeId,
-    content: String,
-}
-
-/// How `lambo_inspect` resolved (or refused to resolve) its `focus`.
-#[derive(Debug)]
-enum Focus {
-    /// A node UUID, or an exact (case-insensitive) content match.
-    Exact(NodeId),
-    /// Exactly one substring match — usable, but the caller is told.
-    Fuzzy { id: NodeId, content: String },
-    /// Several substring matches; the caller must disambiguate.
-    Ambiguous(Vec<FocusCandidate>),
-    /// Nothing matched.
-    Missing,
-}
-
-/// Resolve `lambo_inspect`'s focus **deterministically** (R1/T82-7).
-///
-/// `Graph::concepts()` iterates a `HashMap`, so the previous `.find(..)` over
-/// it picked an arbitrary match — arbitrary across runs *and* within one run,
-/// since a `HashMap` reshuffles on resize. An `inspect` for "auth" could return
-/// a different concept each time, with nothing in the response saying a fuzzy
-/// match had happened, and that `node_id` then flowed into `lambo_reserve` and
-/// into edits. Every leg here collects and sorts by a total order, and the
-/// ambiguous case refuses instead of guessing.
-fn resolve_focus(g: &crate::graph::Graph, focus: &str) -> Focus {
-    if let Some(id) = uuid::Uuid::parse_str(focus)
-        .ok()
-        .map(NodeId)
-        .filter(|id| g.node(*id).is_some())
-    {
-        return Focus::Exact(id);
-    }
-
-    let mut exact: Vec<FocusCandidate> = g
-        .concepts()
-        .filter(|c| c.content.eq_ignore_ascii_case(focus))
-        .map(|c| FocusCandidate {
-            id: c.id,
-            content: c.content.clone(),
-        })
-        .collect();
-    if !exact.is_empty() {
-        // Case-insensitive duplicates are the same concept to the caller, so
-        // there is nothing to disambiguate — just pick one *stably*.
-        exact.sort_by(|a, b| a.content.cmp(&b.content).then(a.id.0.cmp(&b.id.0)));
-        return Focus::Exact(exact[0].id);
-    }
-
-    let needle = focus.to_lowercase();
-    // N8 (deferred, intentional): this allocates a lowercased `String` per
-    // concept, and the fuzzy leg's cost is O(total graph content) per call. This
-    // is *not* deferred because the path is rare or human-driven — `lambo_inspect`
-    // is an agent-facing MCP tool, so a client can loop it, and N1 caps per-call
-    // fan-out but nothing here caps call *count* (rate-limiting is T82-16's job).
-    // It is deferred because the fix is fiddly: an allocation-free
-    // case-insensitive substring search that matches `to_lowercase`'s full Unicode
-    // case-folding (not just ASCII) is easy to get subtly wrong, and getting the
-    // match semantics wrong is a worse failure than the allocation. Tracked with
-    // the rate-limit work (T82-16); a memchr-based ASCII fast path with a Unicode
-    // fallback would keep the allocation off the common case without changing
-    // semantics. Only the fuzzy leg reaches here, and only when exact found nothing.
-    let mut fuzzy: Vec<FocusCandidate> = g
-        .concepts()
-        .filter(|c| c.content.to_lowercase().contains(&needle))
-        .map(|c| FocusCandidate {
-            id: c.id,
-            content: c.content.clone(),
-        })
-        .collect();
-    if fuzzy.is_empty() {
-        return Focus::Missing;
-    }
-    // Shortest content first: the least-padded match is the closest to what was
-    // asked for. Content then id break ties, so the order is total.
-    fuzzy.sort_by(|a, b| {
-        a.content
-            .len()
-            .cmp(&b.content.len())
-            .then_with(|| a.content.cmp(&b.content))
-            .then_with(|| a.id.0.cmp(&b.id.0))
-    });
-    if fuzzy.len() == 1 {
-        let c = fuzzy.remove(0);
-        Focus::Fuzzy {
-            id: c.id,
-            content: c.content,
-        }
-    } else {
-        Focus::Ambiguous(fuzzy)
-    }
-}
-
-/// Render a BFS neighbourhood around `target`. Caller holds the graph read
-/// lock; this function never awaits (spec §6.4).
-fn render_neighbourhood(
-    g: &crate::graph::Graph,
-    target: NodeId,
-    depth: usize,
-) -> (String, serde_json::Value) {
-    use std::collections::{HashMap, HashSet};
-
-    let radii = format::blast_radii(g);
-    let label = |id: NodeId| -> String {
-        match g.node(id) {
-            Some(crate::types::Node::Concept(c)) => {
-                let canon = match c.canonization_status {
-                    crate::types::CanonizationStatus::Canonical => ", canonical",
-                    crate::types::CanonizationStatus::Venerable => ", venerable",
-                    crate::types::CanonizationStatus::Candidate => ", candidate",
-                    crate::types::CanonizationStatus::None => "",
-                };
-                format!("{} [{:?}{}]", c.content, c.concept_type, canon)
-            }
-            Some(crate::types::Node::Interaction(i)) => {
-                format!("<interaction {}>", i.id.0)
-            }
-            None => format!("<missing {}>", id.0),
-        }
-    };
-
-    let mut text = String::new();
-    text.push_str(&format!("focus: {}\n", label(target)));
-    if let Some(r) = radii.get(&target) {
-        text.push_str(&format!("blast radius: {r}\n"));
-        if *r > 0 {
-            text.push_str(&format!("{}\n", format::blast_radius_warning(*r)));
-        }
-    }
-    if let Some(res) = g.reservation(target) {
-        text.push_str(&format!("{}\n", format::reservation_warning(res)));
-    }
-
-    let mut seen: HashSet<NodeId> = HashSet::new();
-    seen.insert(target);
-    let mut frontier = vec![target];
-    let mut levels: Vec<serde_json::Value> = Vec::new();
-    let mut budget = MAX_INSPECT_NODES;
-
-    for hop in 1..=depth {
-        let mut next = Vec::new();
-        let mut rows: Vec<serde_json::Value> = Vec::new();
-        let mut by_type: HashMap<EdgeType, Vec<String>> = HashMap::new();
-        for &node in &frontier {
-            for edge in g.incident_edges(node) {
-                let other = if edge.source == node {
-                    edge.target
-                } else {
-                    edge.source
-                };
-                // Budget first, `seen` second (R1/T82-15): marking a node seen
-                // and *then* discovering the budget is spent permanently
-                // excludes a neighbour that was never rendered. The `break`
-                // only leaves the edge loop, so the outer frontier loop went on
-                // burning one neighbour per remaining node.
-                if budget == 0 {
-                    break;
-                }
-                if !seen.insert(other) {
-                    continue;
-                }
-                budget -= 1;
-                let dir = if edge.source == node { "->" } else { "<-" };
-                by_type
-                    .entry(edge.edge_type)
-                    .or_default()
-                    .push(format!("{dir} {}", label(other)));
-                rows.push(json!({
-                    "node_id": other.0.to_string(),
-                    "label": label(other),
-                    "edge_type": format!("{:?}", edge.edge_type),
-                    "direction": dir,
-                    "weight": edge.weight,
-                }));
-                next.push(other);
-            }
-        }
-        if rows.is_empty() {
-            break;
-        }
-        text.push_str(&format!("\nhop {hop}:\n"));
-        let mut kinds: Vec<_> = by_type.into_iter().collect();
-        kinds.sort_by_key(|(k, _)| format!("{k:?}"));
-        for (kind, mut entries) in kinds {
-            entries.sort();
-            text.push_str(&format!("  {kind:?}\n"));
-            for e in entries {
-                text.push_str(&format!("    {e}\n"));
-            }
-        }
-        levels.push(json!({ "hop": hop, "neighbours": rows }));
-        frontier = next;
-        if budget == 0 {
-            text.push_str(&format!(
-                "\n(truncated at {MAX_INSPECT_NODES} neighbours)\n"
-            ));
-            break;
-        }
-    }
-
-    let structured = json!({
-        "node_id": target.0.to_string(),
-        "label": label(target),
-        "blast_radius": radii.get(&target).copied().unwrap_or(0),
-        "levels": levels,
-    });
-    (text, structured)
 }
 
 // `router = self.tool_router` on purpose: the macro's default is

@@ -368,7 +368,7 @@ owns:       src/cli/mod.rs,
             src/cli/derive.rs, src/cli/record_action.rs, src/cli/reserve.rs
 not-owned:  src/cli/demo.rs (T8.4), src/cli/serve_web.rs (T8.5)   # collision fixed 2026-08-13
 appends-to: src/main.rs (dispatch arms + own flags only; T8.2 is primary owner)
-status:     not-started
+status:     task-complete (awaiting adve-review)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 **Read verbs (spec §6.2, reader processes):** `recall --session --query --top-k`,
@@ -641,6 +641,52 @@ it in the reference.
 without reading the source; every documented command/flag/tool/method actually exists and
 behaves as described (spot-checked against the binary, not the spec); `cargo doc` builds
 with no warnings; and T9.1's README links into `docs/reference/` instead of restating it.
+
+---
+
+### T8.9 — Release process & binary distribution
+```yaml
+requires:   T8.2, T8.3, T8.6 (the shippable surfaces); soft: T8.8 (install docs)
+fixture-ok: n/a
+owns:       .github/workflows/release.yml, scripts/install.sh (if built),
+            release notes template, Cargo.toml [package] version/metadata
+appends-to: docs/reference/installation.md (prebuilt-binary install path)
+status:     not-started
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
+```
+Created 2026-08-14. How Lambo gets from source to a user's machine.
+
+**Binary shape (decided 2026-08-14):** **one `lambo` binary**, not three. It carries both
+runtime surfaces — the MCP server (`lambo serve`) and the CLI verbs (`lambo recall`,
+`lambo derive`, …). The third surface, the **API, is the library crate** (`src/lib.rs`),
+consumed as a Cargo dependency, not distributed as an executable. So a release is: one
+`lambo` binary built per target platform, plus (optionally) the published library crate.
+
+**Decisions this task must make and record:**
+
+- **Release feature profile.** Which features the published binary ships with. Candidate:
+  the `demo`/ship profile (`store-memory,store-cockroach,embed-bge,embed-fixture,fixtures`)
+  so a downloaded binary can serve, or a leaner default. State it.
+- **Target platforms.** At minimum macOS arm64 + x86_64 and Linux x86_64. Decide on Linux
+  arm64 and Windows.
+- **Versioning.** Adopt semver, set `[package] version`, tag `v0.1.0`. Match the version the
+  binary reports (`lambo --version`).
+- **Distribution channel.** GitHub Releases with a prebuilt binary per platform (checksums
+  included), plus the build-from-source path already in `installation.md`. Decide whether to
+  also support `cargo install --git` and/or a `curl | sh` install script.
+- **Release automation.** A GitHub Actions workflow that, on a version tag, builds each
+  target and attaches the artifacts to the release. Keep it reproducible.
+- **Library crate.** Decide whether the API crate is published (crates.io) or repo-only for
+  v0.1.
+
+**Boundary:** the *getting-started* prose (build from source, first run, connecting an MCP
+client) is T8.8's `installation.md`. T8.9 adds the *prebuilt-binary* install path to that
+page and owns the release machinery. The Devpost/README ship checklist stays in P9 (T9.1,
+T9.5).
+
+**Done when:** a tagged release produces a downloadable `lambo` binary for each target
+platform with checksums, `lambo --version` matches the tag, and a user can install from the
+release (not only build from source) and run `lambo serve` on a clean machine.
 
 ---
 
@@ -1174,3 +1220,113 @@ cover is now a **new** test, `a_second_writer_sharing_a_store_is_refused_by_the_
    the second process exits non-zero naming the holder; it does not assert the *winner* keeps
    serving cleanly through the contention. The live cockroach test covers cross-pool re-acquire
    after release/expiry; the winner-liveness angle is only implicit.
+
+### T8.3 — CLI subcommands (task agent, 2026-08-14)
+
+**Gates:** `cargo fmt --all -- --check` clean; `cargo clippy --all-targets -- -D warnings`
+clean; `cargo clippy --all-targets --features store-sqlite -- -D warnings` clean;
+`cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings`
+clean; `cargo check --no-default-features` clean.
+
+**`cargo test`:** **613 lib + 4 bin + 4 integration passing, 3 ignored** (1 lib
+`embed::bge_m3::tests::live_smoke_against_llama_server`, 2 integration live-calibration).
+Baseline on this branch was ~598 lib — **+15 lib**, no regressions, nothing removed.
+
+**`cargo test --features store-sqlite`:** **657 lib + 4 bin + 7 integration passing, 3
+ignored**. Baseline ~641 lib — **+16 lib** (the extra one is
+`cli::sqlite_tests::provision_then_every_subcommand_against_sqlite`). New integration:
+`tests/cli_provision_sqlite.rs`, `tests/cli_write_lease.rs`. Existing serve lease /
+durability tests still green.
+
+**Ignored honesty:** live cockroach `saints`/`stats`
+(`cli::saints::live::saints_and_stats_against_live_cockroach`) is `#[ignore = "live:
+requires LAMBO_COCKROACH_DSN"]` and only compiled under `store-cockroach`. It was **not
+run** in this environment (no DSN). Default `cargo test` does not require a cluster.
+
+#### Files touched outside `owns`
+
+| File | Change | Authorization |
+|---|---|---|
+| `src/main.rs` | dispatch arms + write variants + help/F18 tests + `Resolved::StoreOnly { store, kind }` so provision keeps the store | `appends-to` (dispatch + own flags + clap help). Serve lifecycle **untouched**. Demo stays a stub. |
+| `src/mcp/server.rs` | `MAX_*` / `check_size` / `clamp_cfg_default` / `resolve_focus` / `render_neighbourhood` now imported from `cli::caps` / `cli::inspect`. `derive_impl` / `record_action_impl` / `recall_impl` made `pub(crate)` for the differential test. **No tool behaviour, schemas, or error classes changed.** | necessary shared-file extract |
+| `tests/cli_provision_sqlite.rs` | subprocess: `lambo provision` on a fresh sqlite file then recall/derive | standing additive |
+| `tests/cli_write_lease.rs` | subprocess: derive succeeds with no serve; fails closed naming the holder while serve owns the session; readers still succeed | standing additive |
+| `src/lib.rs` | **not touched** — `pub mod cli;` already existed | — |
+| `Cargo.toml` / `Cargo.lock` | **not touched** — no new dep | — |
+
+#### Reader vs writer construction (do not re-derive)
+
+- **Readers** (`recall`, `saints`, `inspect`, `stats`): `store::load::load_session_async`
+  (async core, never the sync wrapper). Wrap `graph`/`index` in `Arc<parking_lot::RwLock<_>>`.
+  `recall` builds `Daemon::from_config(graph, &Config::default()).with_index(index)` and
+  **does not spawn** (spawn would run GC = writer). Embed the query only if
+  `store.capabilities().contains(VECTOR_SEARCH)`. Print `RecallResult.context`.
+  **Never call `Memory::build()`.** Never touch the lease.
+- **Writers** (`derive`, `record-action`, `reserve`, `release`): exactly one
+  `Memory::builder().session().agent().backends(backends).build().await`, the op, then
+  `close().await`. `LamboError::Conflict` is printed as-is (names holder, age,
+  `OPERATOR_OVERRIDE`) and exits 1. A failed `close` is printed and exits 1. Always
+  `runtime.shutdown_background()` afterwards (Memory spawns tasks).
+- **`provision`:** `resolve_store_only` path (no embedder). Kind is read from a second
+  `LamboFile::load_resolved` (file parse only — the store is still constructed once).
+
+#### Provision sqlite vs cockroach split
+
+- `store.kind = sqlite` → `GraphStore::init_schema().await` on the resolved store
+  (idempotent). This is T82-10's missing half: `lambo provision --config sqlite.toml` on a
+  fresh file then `recall`/`derive` works (`tests/cli_provision_sqlite.rs`).
+- `store.kind = cockroach` → `bash scripts/provision.sh` (walk cwd + parents). Fail closed
+  if the script is missing or non-zero. DSN is **not** a CLI flag.
+- `store.kind = memory` → success, "needs no schema". Proven:
+  `cli::provision::tests::provision_memory_store_succeeds_without_sql`.
+
+#### Where validators live now
+
+`src/cli/caps.rs` owns every `MAX_*` constant, `check_size` (returns `Result<(), String>`,
+names the codepoint, never echoes the raw byte), and `clamp_cfg_default`. MCP wraps
+`check_size` into a tool error; CLI maps it to exit 2 (`CliError::Usage`).
+`resolve_focus` / `render_neighbourhood` / `Focus` live in `src/cli/inspect.rs`
+(`pub(crate)`); MCP imports them. There is one implementation — MCP and CLI cannot drift.
+
+#### What the next agent must not re-derive
+
+- `Memory::build()` **is** the writer lease. Readers must not call it. T8.3 did not add a
+  reader mode on `Memory`.
+- `--parent-of CHILD:PARENT` is child-left, parent-right. MCP `WireParentOf` is
+  `{parent, child}` — map parent=right, child=left into `ParentOf::from_pairs`.
+- `--concept CONTENT:KIND` splits on the **last** colon (kind is a closed token).
+- CLI `--agent` **does** bind `Memory` at `build()`, so unlike MCP's per-call `agent_id`
+  gap, a CLI write is attributed to that flag. Sequential CLI writers with different
+  `--agent` are different `AgentId`s; they still serialize on the T8.6 lease.
+- `lambo reserve` then process-exit **drops the reservation** (RAM-local, S5). A later
+  `lambo release` cannot see it and fails with `not found: no reservation`. That is
+  honest, not a bug in `release`. MCP reserve lasts because serve keeps one `Memory` alive.
+- Help-walk test skips `demo` (T8.4 owns `--scenario` help). Serve flags were already
+  documented by T8.2.
+- Provision's `Resolved::StoreOnly` now **carries the store**. The old `let _store =
+  resolve_store_only(...)` discard is gone.
+
+#### Weak spots I am flagging myself
+
+1. **CLI `reserve` cannot outlive the command.** Close drops RAM-local reservations, so
+   the success path is "reserved for the lifetime of this process, which is about to
+   exit". The command still exists for MCP parity and prints the advisory warning. A
+   reviewer may want reserve/release to share a long-lived writer — that would violate
+   "open, op, close" and is not T8.3's to invent.
+2. **Reader `recall` uses `Config::default()` knobs**, same as `lambo serve` today
+   (T82-12 is not ours). A `lambo.toml` `default_top_k` does not reach the reader daemon.
+3. **`canonical_memories` scan is copied** from `Memory::canonical_memories` into
+   `cli::saints::canonical_memories_from_graph`. T8.3 cannot change `memory.rs`. If the
+   sort order ever changes, both copies must move together.
+4. **Live cockroach saints/stats not executed here.** The test exists, is `#[ignore]`d,
+   and needs `LAMBO_COCKROACH_DSN` + `--features store-cockroach -- --ignored`.
+5. **Provision does two `LamboFile::load_resolved` calls** (kind + `resolve_store_only`).
+   One store construction. Changing `resolve_store_only` to return kind was out of owns
+   (`src/resolve.rs`).
+6. **Differential compares hit *texts*, not scores.** MCP recall runs against a live
+   spawned daemon; CLI recall does not spawn. Scores / seconds-ago can differ; concept
+   texts, types, and action strings are the parity that counts.
+7. **`--max-tokens` / `--traversal-depth` on `recall`** are extra vs the phase yaml's
+   `recall --session --query --top-k`. Added so CLI can match MCP knobs without a second
+   pass. A reviewer who wants the yaml-minimal flag set can drop them; defaults still
+   come from `Config::default()` when omitted.
