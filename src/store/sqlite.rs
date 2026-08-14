@@ -149,6 +149,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};
 use crate::types::{
@@ -505,6 +506,40 @@ impl GraphStore for SqliteStore {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::empty()
+    }
+
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        acquire_or_refresh(self.pool(), session, holder, ttl).await
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        acquire_or_refresh(self.pool(), session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        // Holder-scoped: only our own row (a stale release after our lease was
+        // stolen must not evict the new holder).
+        sqlx::query("DELETE FROM session_leases WHERE session_id = ?1 AND holder = ?2")
+            .bind(&session.0)
+            .bind(holder.token())
+            .execute(self.pool())
+            .await
+            .map_err(|e| db_err("release lease", e))?;
+        Ok(())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
@@ -898,6 +933,88 @@ impl GraphStore for SqliteStore {
 
 fn db_err(context: &str, e: sqlx::Error) -> StoreError {
     StoreError::Backend(format!("{context}: {e}"))
+}
+
+/// Atomic single-writer lease acquire / refresh (T8.6).
+///
+/// ONE statement — `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING` —
+/// so the decision is made under SQLite's write lock with no read-then-write
+/// race. The update fires only when the existing lease is expired or is already
+/// ours; on a refresh we keep the original `acquired_at`. All timestamps come
+/// from SQLite's own `strftime(...,'now')` — never a caller argument (F18).
+///
+/// * A returned row whose holder is ours ⇒ [`LeaseOutcome::Acquired`] (fresh
+///   insert, expired steal, or our refresh).
+/// * An empty RETURNING ⇒ the guard was false: a live lease is held by someone
+///   else. We read it back to report the holder + age ([`LeaseOutcome::Held`]).
+///   If the row vanished in between (released concurrently) we retry a bounded
+///   number of times.
+async fn acquire_or_refresh(
+    pool: &SqlitePool,
+    session: &SessionId,
+    holder: &LeaseHolder,
+    ttl: Duration,
+) -> Result<LeaseOutcome, StoreError> {
+    // Fractional seconds keep sub-second TTLs (tests) honest; whole seconds for
+    // the production 45s. Bound as a strftime modifier, e.g. "+45 seconds".
+    let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
+    let token = holder.token();
+    const ACQUIRE_SQL: &str = "\
+        INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+        VALUES (?1, ?2, \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now'), \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now', ?3)) \
+        ON CONFLICT (session_id) DO UPDATE SET \
+            holder = excluded.holder, \
+            acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                               THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+            expires_at = excluded.expires_at \
+        WHERE session_leases.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+           OR session_leases.holder = excluded.holder \
+        RETURNING holder, acquired_at, expires_at";
+
+    for _ in 0..3 {
+        let won: Option<(String, String, String)> = sqlx::query_as(ACQUIRE_SQL)
+            .bind(&session.0)
+            .bind(&token)
+            .bind(&ttl_modifier)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| db_err("acquire lease", e))?;
+        if let Some(row) = won {
+            return Ok(LeaseOutcome::Acquired(lease_info_from_text(row)?));
+        }
+        // Guard was false — someone else holds a live lease. Read it back.
+        let current: Option<(String, String, String)> =
+            sqlx::query_as("SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = ?1")
+                .bind(&session.0)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| db_err("read current lease", e))?;
+        match current {
+            Some(row) => {
+                let info = lease_info_from_text(row)?;
+                let age = (Utc::now() - info.acquired_at)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                return Ok(LeaseOutcome::Held { current: info, age });
+            }
+            // Released between our upsert and this read: retry the acquire.
+            None => continue,
+        }
+    }
+    Err(StoreError::Backend(
+        "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+    ))
+}
+
+fn lease_info_from_text(row: (String, String, String)) -> Result<LeaseInfo, StoreError> {
+    let (holder, acquired_at, expires_at) = row;
+    Ok(LeaseInfo {
+        holder,
+        acquired_at: text_to_ts(&acquired_at)?,
+        expires_at: text_to_ts(&expires_at)?,
+    })
 }
 
 /// Idempotent post-T3.1 column convergence: SQLite has no

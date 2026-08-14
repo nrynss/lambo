@@ -187,3 +187,20 @@ CREATE TABLE IF NOT EXISTS reservations (
     expires_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (session_id, node_id)
 );
+
+-- Single-writer lease (spec §2.2, T8.6): one row per session enforcing one
+-- writer across processes and hosts. holder = 'agent@host#pid'; acquired_at /
+-- expires_at are stamped from the CLUSTER clock (now()) — never a client
+-- argument (F18) — which is the authority two processes actually share. The
+-- adapter's acquire is a single INSERT ... ON CONFLICT DO UPDATE guarded by an
+-- expiry check, so concurrent acquirers serialize with no read-then-write race.
+-- A live holder's row has expires_at > now(); an expired row lingers until the
+-- next acquire steals it. Operator override — force a takeover from a
+-- wedged-but-still-heartbeating holder (no auto-preemption by design):
+--   DELETE FROM session_leases WHERE session_id = '<session>';
+CREATE TABLE IF NOT EXISTS session_leases (
+    session_id  STRING PRIMARY KEY,
+    holder      STRING NOT NULL,
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);

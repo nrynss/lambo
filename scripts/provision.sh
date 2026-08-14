@@ -32,6 +32,17 @@ if [[ ! -f "$MIGRATION" ]]; then
   exit 1
 fi
 
+# Schema surface applied from $MIGRATION (single source of truth; the splitter
+# below routes each CREATE to BASE_SQL). Tables: sessions, interactions,
+# concepts, edges, synonyms, canonization_events, reservations, and — since
+# T8.6 — session_leases (the store-enforced single-writer lease, spec §2.2).
+#
+# Operator override for a wedged-but-still-heartbeating writer that will not let
+# go of a session (T8.6 documents this manual escape; there is no auto-preempt):
+#   DELETE FROM session_leases WHERE session_id = '<session>';
+# The next writer's acquire then wins; it replays from durable state, so the
+# wedged holder's un-flushed tail is lost exactly as on any crash.
+
 run_sql() {
   local sql="$1"
   if command -v docker >/dev/null 2>&1; then

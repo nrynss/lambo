@@ -104,6 +104,7 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
     map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, StoreConfig,
@@ -1231,6 +1232,83 @@ impl CockroachStore {
         Ok(row.is_some())
     }
 
+    /// Atomic single-writer lease acquire / refresh (T8.6).
+    ///
+    /// ONE statement — `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING`
+    /// — so two processes acquiring on the same session serialize under
+    /// Cockroach's concurrency control with no read-then-write race. The update
+    /// fires only when the current lease is expired or already ours; a refresh
+    /// keeps the original `acquired_at`. Every timestamp comes from the cluster's
+    /// `now()` (the clock two processes share) — never a caller argument (F18).
+    /// `ttl` is a duration multiplied into an INTERVAL, so no client instant is
+    /// ever stored.
+    ///
+    /// An empty RETURNING means the guard was false — a live lease is held by
+    /// someone else — so we read it back and report [`LeaseOutcome::Held`] with
+    /// the holder and its age. A row released in the gap is retried a bounded
+    /// number of times.
+    async fn acquire_or_refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        const ACQUIRE_SQL: &str = "\
+            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second')) \
+            ON CONFLICT (session_id) DO UPDATE SET \
+                holder = excluded.holder, \
+                acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                                   THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+                expires_at = excluded.expires_at \
+            WHERE session_leases.expires_at <= now() \
+               OR session_leases.holder = excluded.holder \
+            RETURNING holder, acquired_at, expires_at";
+        let pool = self.pool().await?;
+        let token = holder.token();
+        let ttl_secs = ttl.as_secs_f64();
+        for _ in 0..3 {
+            let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(ACQUIRE_SQL)
+                .bind(&session.0)
+                .bind(&token)
+                .bind(ttl_secs)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
+            if let Some((holder, acquired_at, expires_at)) = won {
+                return Ok(LeaseOutcome::Acquired(LeaseInfo {
+                    holder,
+                    acquired_at,
+                    expires_at,
+                }));
+            }
+            let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+                "SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = $1",
+            )
+            .bind(&session.0)
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?;
+            match current {
+                Some((holder, acquired_at, expires_at)) => {
+                    let age = (Utc::now() - acquired_at).to_std().unwrap_or(Duration::ZERO);
+                    return Ok(LeaseOutcome::Held {
+                        current: LeaseInfo {
+                            holder,
+                            acquired_at,
+                            expires_at,
+                        },
+                        age,
+                    });
+                }
+                None => continue,
+            }
+        }
+        Err(StoreError::Backend(
+            "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+        ))
+    }
+
     /// Return whether vector candidates are trusted for this session. Missing
     /// and fully unstamped rows are safe empty-search states: hybrid first use
     /// must gather before its atomic commit emits `SetEmbedding`. Partial
@@ -1415,6 +1493,41 @@ impl GraphStore for CockroachStore {
 
     fn vector_dimensions(&self) -> Option<usize> {
         Some(self.vector_dim)
+    }
+
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        // Holder-scoped so a stale release cannot evict the writer that took
+        // over after our lease lapsed.
+        sqlx::query("DELETE FROM session_leases WHERE session_id = $1 AND holder = $2")
+            .bind(&session.0)
+            .bind(holder.token())
+            .execute(pool)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
+        Ok(())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {

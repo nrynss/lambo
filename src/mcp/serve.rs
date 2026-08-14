@@ -20,6 +20,7 @@ use rmcp::ServiceExt;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::{resolve_from_config_path, ResolvedBackends};
+use crate::store::lease;
 use crate::types::{DaemonEvent, LamboError};
 
 /// How long a transport gets to wind itself down after the shutdown signal
@@ -76,6 +77,23 @@ const _: () = assert!(
     SHUTDOWN_GRACE.as_secs() + CLOSE_GRACE.as_secs() <= SHUTDOWN_BUDGET.as_secs(),
     "SHUTDOWN_GRACE + CLOSE_GRACE exceeds SHUTDOWN_BUDGET — a supervisor's SIGKILL timeout \
      is sized against the budget; lower a window or justify raising the budget",
+);
+
+/// Build-time invariant: the single-writer lease TTL comfortably outlasts the
+/// whole shutdown budget (T8.6).
+///
+/// `Memory::close` releases the lease on a graceful shutdown, but the release
+/// only lands after the transport has wound down and the final flush has run —
+/// up to [`SHUTDOWN_BUDGET`] later. If the TTL were not larger than that budget,
+/// a slow-but-graceful close could let the lease **expire mid-shutdown**, briefly
+/// admitting a second writer while the first is still flushing its tail — the
+/// exact hazard the lease exists to prevent. `LEASE_TTL` (45s) is 3× the budget;
+/// this pins the relationship so a later bump to either window cannot silently
+/// invert it.
+const _: () = assert!(
+    lease::LEASE_TTL.as_secs() > SHUTDOWN_BUDGET.as_secs(),
+    "LEASE_TTL must exceed SHUTDOWN_BUDGET so a slow-but-graceful close releases the lease \
+     rather than letting it expire mid-shutdown (T8.6)",
 );
 
 /// Which transport `lambo serve` should listen on.
@@ -197,6 +215,15 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
 /// SIGINT/SIGTERM, or a transport error — because the tail is only durable once
 /// it has run. Its error is surfaced: an `Err` from `close()` means the tail is
 /// *not* durable and was kept (T8.1 semantics).
+///
+/// **The single-writer lease (T8.6) rides the same exit paths.** `build_memory`
+/// acquired the lease as this process attached (failing closed here if another
+/// writer holds it — see [`build_memory`]); a successful `close()` **releases**
+/// it so the next writer takes over at once. On the one exit that abandons
+/// `close()` — the [`close_bounded`] timeout or a second signal — the lease is
+/// *not* released and instead lapses at [`lease::LEASE_TTL`], exactly as it would
+/// on a crash. That is why the TTL is sized to outlast [`SHUTDOWN_BUDGET`]: a
+/// graceful-but-slow close still holds a valid lease at the moment it releases.
 ///
 /// Both transports route their shutdown through [`run_until_shutdown`], so the
 /// signal path is the same on each: cancel, wait up to [`SHUTDOWN_GRACE`], then
@@ -624,6 +651,15 @@ mod tests {
              a supervisor's SIGKILL timeout is sized against SHUTDOWN_BUDGET",
             SHUTDOWN_GRACE.as_secs(),
             CLOSE_GRACE.as_secs(),
+            SHUTDOWN_BUDGET.as_secs(),
+        );
+        // T8.6: the lease TTL must outlast the whole shutdown budget, so a
+        // graceful close releases the lease rather than letting it expire while
+        // the final flush is still running.
+        assert!(
+            lease::LEASE_TTL > SHUTDOWN_BUDGET,
+            "LEASE_TTL ({}s) must exceed SHUTDOWN_BUDGET ({}s)",
+            lease::LEASE_TTL.as_secs(),
             SHUTDOWN_BUDGET.as_secs(),
         );
     }
