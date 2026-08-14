@@ -43,6 +43,7 @@ Cargo features select which stores and embedders are compiled in. The `demo` pro
 | `store-cockroach` | CockroachDB store, for a hosted cluster. |
 | `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
 | `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
+| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
 
 One binary contains every adapter it was compiled with, and you choose which store and embedder to use at runtime through `lambo.toml`. You switch stores by editing config, not by downloading a different binary. For example, to build with SQLite and BGE embeddings only:
 
@@ -115,8 +116,9 @@ Then set the embedder in `lambo.toml`.
 
 ```toml
 [embedder]
-kind = "bge"
+kind = "bge_m3"
 dim = 1024
+url = "http://127.0.0.1:8080"
 ```
 
 <Warning>
