@@ -267,17 +267,22 @@ server, which is backed by Cockroach and real BGE-M3 embeddings.
 
 ### 7a. Two llama-server instances
 
-BGE-M3 is Lambo's embedder; LFM2.5-230M is the Pi driver. Run them on different ports.
+BGE-M3 is Lambo's embedder; **LFM2.5-230M UD-Q8_K_XL** (the Unsloth Dynamic quant,
+already downloaded on this machine under `~/.unsloth`) is the Pi driver. Run them on
+different ports.
 
 ```bash
 # BGE-M3 embedder for Lambo (port 8080; matches LAMBO_LLAMA_EMBED_URL)
-hf download <bge-m3-gguf-repo> <bge-m3.gguf>
 llama-server -m path/to/bge-m3.gguf --embedding --port 8080
 
-# LFM2.5-230M driver for Pi (port 8081)
-hf download LiquidAI/LFM2.5-230M-GGUF LFM2.5-230M-Q8_0.gguf
-llama-server -m path/to/LFM2.5-230M-Q8_0.gguf --jinja -c 32768 --port 8081 -a lfm2.5-230m
+# LFM2.5-230M UD-Q8_K_XL driver for Pi (port 8081) — locate it in ~/.unsloth
+MODEL=$(find ~/.unsloth -iname '*LFM2.5-230M*UD-Q8_K_XL*.gguf' | head -1); echo "$MODEL"
+llama-server -m "$MODEL" --jinja -c 32768 --port 8081 -a lfm2.5-230m
 ```
+
+If the UD quant is not where expected, fall back to
+`hf download unsloth/LFM2.5-230M-GGUF` (UD-Q8_K_XL file) or the plain
+`LiquidAI/LFM2.5-230M-GGUF` Q8_0.
 
 Register `lfm2.5-230m` at `http://127.0.0.1:8081/v1` as a `local` provider in Pi
 (`~/.pi/agent/models.json`), contextWindow 32768.

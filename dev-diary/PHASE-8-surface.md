@@ -29,6 +29,28 @@ integration bugs here are the ones that sink the demo.
 One branch for the whole phase: **`phase/p8-surface`**, cut from `main`. No task worktrees,
 no task branches. Merge `phase/p8-surface → main` when the phase exit criteria are met.
 
+### Gates (binding — every agent, every step, no exceptions)
+
+Run ALL of these before claiming done. This list matches CI's feature matrix — the two
+`--no-default-features` rows were missing from agents' local runs on 2026-08-14 and the
+resulting unused-import/dead-code `-D warnings` failures reached CI (run 31791918843).
+Do not restate a subset in a handoff entry; run the block.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings
+cargo clippy --all-targets --features store-sqlite -- -D warnings
+cargo test
+cargo test --features store-sqlite
+cargo test --no-default-features --features store-sqlite --no-run     # CI: sqlite-minimal
+cargo test --no-default-features --features store-cockroach --no-run  # CI: cockroach row
+cargo check --no-default-features                                     # CI: minimal row
+```
+
+Anything `#[cfg(test)]`-gated whose only users live behind feature-gated test modules must
+carry the SAME feature gate as its users, or the minimal rows fail on dead code.
+
 ### The loop, per task
 
 Each task runs this cycle. **Every step is a separate agent invocation, and there is a hard
