@@ -229,12 +229,33 @@ fn bad_param(msg: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
-/// Refuse any client string over [`MAX_CONTENT_BYTES`] (R1/T82-6).
+/// Validate one client string before it reaches the store: refuse it if it is
+/// over [`MAX_CONTENT_BYTES`] (R1/T82-6) **or** carries a control character
+/// other than tab/newline (N2).
+///
+/// The size cap is the single-process fairness guard. The control-character
+/// check is a data-hygiene one: a NUL or other C0 control ends up verbatim in a
+/// concept's `content`, its canonical key, and every downstream rendering (the
+/// T5.3 context block, `lambo_inspect` output, log lines), where it can corrupt
+/// terminals, truncate at the NUL, or smuggle ANSI escapes. Tab and newline are
+/// the only controls a legitimate multi-line concept needs, so everything else
+/// is refused here rather than sanitised silently.
 fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
     if value.len() > MAX_CONTENT_BYTES {
         return Err(bad_param(format!(
             "{field} exceeds {MAX_CONTENT_BYTES} bytes ({} given)",
             value.len()
+        )));
+    }
+    if let Some(c) = value
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        // Name the offending codepoint, never echo the raw byte back.
+        return Err(bad_param(format!(
+            "{field} contains a disallowed control character (U+{:04X}); only tab and newline \
+             are allowed",
+            c as u32
         )));
     }
     Ok(())
@@ -736,6 +757,11 @@ impl LamboServer {
                 "take a soft lock"
             },
         ) {
+            return e;
+        }
+        // N5: node_id is a client string too — size- and control-checked before
+        // it is parsed, so the same uniform guard covers every field.
+        if let Err(e) = check_size("node_id", &p.node_id) {
             return e;
         }
         let node_id = match uuid::Uuid::parse_str(p.node_id.trim()) {
@@ -2014,6 +2040,72 @@ mod tests {
                 .unwrap(),
             0,
             "a refused oversized write must not have reached the graph"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **N2 pinned.** A NUL (or any C0 control other than tab/newline) in a
+    /// client string is refused at the MCP boundary, so it can never reach a
+    /// concept's content, its canonical key, or a rendered context block — while
+    /// a genuinely multi-line concept (tab + newline) is still accepted.
+    #[tokio::test]
+    async fn control_characters_are_refused_but_tab_and_newline_are_allowed() {
+        let s = server("mcp-control-chars").await;
+        for (label, bad) in [
+            ("nul", "user\u{0}schema"),
+            ("bell", "user\u{7}schema"),
+            ("escape", "user\u{1b}[31mschema"),
+        ] {
+            let out = call(
+                &s,
+                "lambo_derive",
+                serde_json::json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": bad, "concept_type": "entity"}]
+                }),
+            )
+            .await;
+            assert_eq!(
+                out.is_error,
+                Some(true),
+                "{label}: a control character must be refused"
+            );
+            assert!(
+                text_of(&out).contains("control character"),
+                "{label}: the refusal must name the reason, got {}",
+                text_of(&out)
+            );
+        }
+
+        // Tab and newline are legitimate in a multi-line concept.
+        let ok = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "line one\n\tline two", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        assert_eq!(
+            ok.is_error,
+            Some(false),
+            "tab and newline must still be accepted: {ok:?}"
+        );
+
+        // None of the refused writes touched the graph — only the valid one did.
+        let stats = call(
+            &s,
+            "lambo_stats",
+            serde_json::json!({"agent_id": "agent-a"}),
+        )
+        .await;
+        assert_eq!(
+            stats.structured_content.unwrap()["concept_count"]
+                .as_u64()
+                .unwrap(),
+            1,
+            "only the tab/newline concept should have reached the graph"
         );
         s.mem.close().await.expect("close");
     }
