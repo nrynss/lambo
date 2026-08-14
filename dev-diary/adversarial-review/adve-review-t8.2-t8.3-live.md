@@ -378,3 +378,346 @@ Full binding block from `dev-diary/PHASE-8-surface.md`, all green:
 
 +23 tests, **0 removed**, no existing test weakened (verified: the diff against
 `phase/p8-surface` removes no `#[test]` / `#[tokio::test]` attribute).
+
+---
+
+# R1 adversarial review of the remediation (2026-08-15)
+
+Adversarial review agent, branch `task/live-l82-remediation` @ `5040486`
+(`b8c0871` + `060cca1` + `5040486` on `713a2ae`). Scope: the L82-1 / L82-2
+remediation only. `src/graph/hybrid.rs` is another agent's branch and was not
+reviewed. Findings only — no code was changed; every mutation below was
+reverted and the tree left clean.
+
+## Verdict
+
+```text
+Adversarial review of R1 — L82-1 + L82-2 — 2026-08-15, commit 5040486
+Gates (9/9):      fmt [x] clippy x3 [x] test 640 [x] test-sqlite 686 [x]
+                  no-default x2 --no-run [x] check --no-default-features [x]
+Bulk-write:       dedupe-column-equivalence [x] generated-SQL [x] tx-semantics [x]
+                  barriers [x] placeholder-limits [x] ordering [PARTIAL - R1-1]
+Mutation checks:  (a) dedupe [x, 1 of 2 as claimed] (b) per-row flush [x]
+                  (c) lease release [x] (d) caps Cf [x]
+Close split:      8+2 const-assert [x] SHUTDOWN_BUDGET 15 [x] fenced [x] bounded [x]
+                  R5 subprocess durability tests [x]
+Regression:       +23/0 tests [x] 7 removed asserts all replaced 1:1 [x] F18 [x]
+                  no orphaned single-row caller [x]
+New findings:     R1-1 / P2 / src/store/batch.rs:239 / CONFIRMED (latent)
+                  R1-2 / P2 / src/cli/caps.rs:148 / CONFIRMED
+                  R1-3 / P3 / remediation record, R1 "Tests" para / CONFIRMED
+                  R1-4 / P3 / src/store/sqlite.rs:173 / CONFIRMED
+                  R1-5 / P3 / src/store/batch.rs:546 / CONFIRMED
+                  R1-6 / P3 / src/store/cockroach.rs:1226 / PLAUSIBLE
+Verdict:          REQUEST CHANGES (R1-1 and R1-2; the rest are follow-ups)
+```
+
+The core of the fix is sound. The dedupe rule is exactly right, the generated
+SQL is byte-identical to the statement that has been running live, transaction
+and error-classification semantics are untouched, and all four claimed pins
+genuinely fail when broken. Two findings warrant changes before this is
+declared closed.
+
+---
+
+## What was verified locally
+
+### Bulk-write correctness
+
+**Dedupe column equivalence — exact.** The claim "last occurrence's ordinary
+columns + first occurrence's canonization columns == row-by-row replay" was
+checked against `git show 713a2ae:src/store/cockroach.rs`. The old
+`UPSERT_CONCEPT_SQL` (713a2ae:247) has the identical 16-column INSERT list and
+the identical 12-column `DO UPDATE SET` list — `id` plus exactly the three
+canonization columns are excluded. Both cases hold:
+
+* *Row absent.* Row-by-row inserts occurrence 1 (canonization included), then
+  `DO UPDATE`s every other column from 2..N. Durable = ordinary from N,
+  canonization from 1. The planner emits exactly that.
+* *Row present.* Every occurrence takes `DO UPDATE`, canonization untouched.
+  The planner's single row also takes `DO UPDATE`, so its chosen canonization
+  values are discarded. Both leave the DB's existing canonization.
+
+Note `created_at` **is** in the `DO UPDATE SET` list, so it is a last-wins
+ordinary column in both models — no divergence there.
+
+The interleaved-transition scenarios in the brief are all covered by the
+barrier rule: `CanonizationTransition` is a barrier, so a demote between two
+upserts of the same concept cannot be collapsed across. An edge re-reinforced
+across a chunk or barrier boundary is two sequential statements, last-wins —
+identical to row-by-row.
+
+**Generated SQL — inspected, not just asserted.** I built and printed the real
+statement (transient test in `cockroach.rs`, reverted). For 3 concept rows:
+
+```sql
+INSERT INTO concepts ( id, session_id, ..., embedding, chunk_group_id )
+VALUES ($1, ..., $15::VECTOR, $16), ($17, ..., $31::VECTOR, $32),
+       ($33, ..., $47::VECTOR, $48)
+ON CONFLICT (id) DO UPDATE SET session_id = EXCLUDED.session_id, ...
+```
+
+This is byte-for-byte the old single-row statement with the VALUES tuple
+repeated. Column lists, `DO UPDATE SET` lists, conflict targets (`(id)` for
+concepts and interactions, `(source, target, edge_type)` for edges) and the
+`::VECTOR` cast position are all unchanged from the form already proven live.
+Bind types are equivalent (`&String`→`&str`, `Option<String>`→`Option<&str>`).
+So the "only a cluster can catch this" surface is much smaller than the
+remediation record implies — see the live list below for what genuinely remains.
+
+**Ordering barriers — structurally exhaustive.** `Mutation` has exactly 7
+variants (`src/types/mod.rs:302-336`). `plan_flush` buckets the three upsert
+shapes and routes *everything else* through a catch-all `barrier =>` arm
+(`batch.rs:180`), so all five observing variants are barriers and any future
+variant defaults to barrier — fail-safe, not fail-open.
+
+**Interactions-before-concepts — enforced, not assumed.** `Buckets::drain_into`
+(`batch.rs:200-219`) drains interactions, then concepts, then edges,
+unconditionally. The DDL backs every reordering claim I checked:
+`migrations/cockroach/001_init.sql:40` (`concepts.origin_interaction
+REFERENCES interactions(id)`), `:29` (`previous_id REFERENCES
+interactions(id)` — the self-FK that justifies `interactions: 1`), `:141-151`
+(`edges` has **no** REFERENCES on `source`/`target`, and does carry
+`UNIQUE (source, target, edge_type)` — a legal `ON CONFLICT` target).
+
+**Placeholder limits — correct for both engines, with margin.**
+Cockroach (`cockroach.rs:143`): concepts 256 x 16 = 4096, edges 512 x 9 = 4608,
+both far under PostgreSQL's 65535.
+SQLite (`sqlite.rs:173`): concepts 60 x 16 = 960, edges 100 x 9 = 900, both
+under the **conservative 999** rather than the 32766 a modern build ships.
+That is the right call. The chunking split is exercised at `3 x limit + 7`
+(`sqlite.rs:3551`). See R1-4 for the gap.
+
+**Transaction semantics — unchanged.** `flush` (`cockroach.rs:1785`) is still
+one `pool.begin()` → all steps → one `commit()`, inside the same `tx_retry`
+wrapper, with the same `map_write_err` closures per statement kind. Retain vs
+dead-letter classification is untouched (`src/store/error.rs`): Constraint is
+terminal/dead-lettered, transients retry.
+
+### The 8s + 2s close split
+
+Compile-time assert pins `CLOSE_FLUSH_GRACE + LEASE_RELEASE_GRACE ==
+CLOSE_GRACE` (`serve.rs:95`). `SHUTDOWN_BUDGET` is unchanged at 15s and its
+own assert still holds (`serve.rs:120`), as does `LEASE_TTL > SHUTDOWN_BUDGET`
+(`serve.rs:137`). The release is genuinely bounded — `tokio::time::timeout`
+around an await-cancellable sqlx DELETE (`serve.rs:444`), and a timeout only
+warns. The fenced-handle rule survives: `release_lease_after_abandoned_close`
+returns early on `lease_lost()` (`memory.rs:1810`) and aborts the heartbeat
+before releasing so it cannot re-acquire what it just gave up.
+
+Both R5-era subprocess tests pass under `--features store-sqlite`:
+`a_sigterm_flushes_the_recorded_action_to_the_durable_store` and
+`a_pre_handshake_sigterm_still_flushes_the_session_row`.
+
+*Observation (not a finding):* `close_bounded_until` releases on
+`outcome.is_err()`, i.e. on **any** close error, not only the two abandon paths
+the doc names. The behaviour is a safe superset; the doc is narrower than the code.
+
+### Mutation checks — all four confirmed
+
+| # | Mutation | Result |
+|---|---|---|
+| (a) | `dedupe_concepts` keeps LAST canonization | `batch::a_repeated_concept_collapses_last_wins_but_keeps_the_first_canonization` FAILED; `sqlite::a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay` FAILED. **`a_batch_larger_than_the_chunk_limit_round_trips_whole` PASSED** — see R1-3 |
+| (b) | `plan_flush` degenerated to one `Single` per mutation | `memory::an_at_cap_burst_drains_within_the_close_window` FAILED with `close must fit the grace window: Elapsed(())` — the exact L82-1 symptom |
+| (c) | abandoned-close release skipped | `memory::an_abandoned_close_releases_the_lease_through_serve` FAILED. The other two lease tests correctly still pass (they drive `Memory` directly, not serve's body) |
+| (d) | `is_disallowed_format` returns false | `caps::invisible_format_characters_are_refused_by_codepoint`, `caps::refusal_messages_match_what_is_enforced` and the over-the-wire `mcp::server::control_characters_are_refused_but_tab_and_newline_are_allowed` all FAILED |
+
+### L82-2 over the wire
+
+The MCP N2 test (`src/mcp/server.rs:1954`) drives `U+202E`, `U+200B`, `U+2066`,
+`U+FEFF` and `U+E0073` (TAGS) through `lambo_derive` and requires
+`isError:true`, that the refusal names the class, and that it does **not** echo
+the payload. The TAGS block is covered both in the table (`caps.rs:176`, whole
+`U+E0000–U+E007F` including unassigned holes) and over the wire. The two split
+messages are each scoped correctly: the control message says "tab and newline
+are the only control characters allowed" (true *for control characters*), and
+the format message names its own joiner exception rather than claiming the
+stronger contract.
+
+### Regression sweep
+
+`git diff 713a2ae..HEAD -- src tests | grep '^-.*assert'` → 7 removals, all in
+`upsert_placeholder_shapes_match_structs`, and every one has a 1:1
+QueryBuilder-based replacement in the same test (`cockroach.rs:2551-2578`):
+placeholder counts 6/16/9, `$15::VECTOR`, `embedding = EXCLUDED.embedding`,
+`chunk_group_id = EXCLUDED.chunk_group_id`, `ON CONFLICT (source, target,
+edge_type)`. Zero `#[test]` / `#[tokio::test]` removed, 23 added — the +23/0
+claim is exact. `f18_no_tool_schema_accepts_a_client_timestamp` passes. The six
+deleted single-row helpers orphaned nothing: the seed paths
+(`cockroach.rs:1223-1232`, `sqlite.rs:403-413`) now chunk through the same bulk
+helpers, interactions before concepts, using `ConceptRow::new`.
+
+### Gates — all nine green, counts exact
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **640** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --features store-sqlite` | **686** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
+---
+
+## Findings
+
+### R1-1 (P2, CONFIRMED — latent) — the planner relocates a repeated interaction past a row that chains onto it, breaking the self-FK and dead-lettering the batch
+
+* **Where:** `src/store/batch.rs:239-250` (`dedupe_last` keeps each key **at the
+  position of its last occurrence**) combined with `batch.rs:200-204` (the
+  interactions bucket drains through it) and `BULK_LIMITS.interactions = 1`
+  (`cockroach.rs:144`, `sqlite.rs:174`).
+* **Repro (executed on SQLite, transient test, reverted):** one batch of
+  `[Upsert(i1, prev=None), Upsert(i2, prev=i1), Upsert(i1, prev=None)]` →
+  `Err(Constraint("787"))`, i.e. `SQLITE_CONSTRAINT_FOREIGNKEY`. A control with
+  the repeat adjacent (`[i1, i1, i2(prev=i1)]`), where dedupe does not relocate
+  anything past `i2`, returns `Ok(())`. So the relocation is the cause, not the
+  duplicate.
+* **Why row-by-row was fine:** the old loop
+  (`713a2ae:src/store/cockroach.rs:1584`) replayed in strict submission order,
+  so `i1` was inserted before `i2` referenced it. `dedupe_last` drops the first
+  `i1` and re-emits it *after* `i2`. With `interactions: 1` each interaction is
+  its own statement and both engines check FKs at end-of-statement, so `i2`
+  fails immediately. Ironically a multi-row interactions statement would have
+  absorbed this — the row-at-a-time choice made for safety is what exposes it.
+* **Blast radius:** `Constraint` is classified terminal, so the flush loop
+  **dead-letters the whole batch** (`src/store/error.rs:7-11`) rather than
+  retrying. That is bounded data loss, the same class of failure L82-1 was
+  raised for.
+* **Reachability:** `Graph::insert_interaction` explicitly *permits* re-upsert
+  of an existing interaction (`src/graph/graph.rs:355-383` rejects only a
+  changed `previous_id`), so this is a supported graph-tier API. But every
+  production caller goes through `Memory::begin_interaction`
+  (`memory.rs:1691`), which always mints `NodeId::new()`. So it is **not
+  reachable from the current MCP/CLI surfaces** — latent, guarded only by an
+  accident of the caller. Hence P2, not P1.
+* **Suggested direction:** dedupe interactions keeping the last occurrence's
+  *values* at the **first** occurrence's *position*. For a table whose columns
+  are all in `DO UPDATE SET`, position does not affect the durable values, so
+  this is both correct and FK-safe. Concepts must keep the current
+  last-position semantics; interactions have no such constraint because they
+  are drained as a block before anything that could observe them.
+
+### R1-2 (P2, CONFIRMED) — the L82-2 completeness claim is overstated in two independent ways
+
+The fix genuinely closes the reported hole (`U+202E` is now refused over the
+wire). The problem is the claim at `src/cli/caps.rs:148-153` that, with
+ZWNJ/ZWJ allowed, "the threat this table exists for is still fully covered".
+
+**(a) ZWJ/ZWNJ produce visually identical text with distinct canonical keys.**
+Probed directly (transient test in `graph/canonical.rs`, reverted):
+
+```text
+canonical_key("billing retries change")          = "bill chang retri"
+canonical_key("billing\u{200D} retries change")  = "billing\u{200d} chang retri"
+check_size(..) on both                            = Ok(())
+```
+
+`normalize_tokens` applies NFC (`canonical.rs:97`), which by design preserves
+ZWJ/ZWNJ, and splits only on `-`, `_` and whitespace — so the joiner stays
+inside the token, defeats the stemmer, and yields an unrelated key. Two
+concepts that render identically in a recall context block therefore become two
+distinct nodes that canonization can never merge, and the partial unique index
+`concepts_key_non_obs_idx` does not see a collision. The doc's own framing
+("invisible in review but not to the model") describes this exactly; it is a
+duplicate/shadow-concept spoofing vector, not a concealment one. Whether it is
+accepted is a decision that has not been made explicitly — right now the doc
+asserts it away.
+
+**(b) Invisible characters outside category Cf are not covered at all.**
+All six of these pass `check_size` (same transient probe):
+
+```text
+U+3164 HANGUL FILLER            -> Ok(())
+U+FFA0 HALFWIDTH HANGUL FILLER  -> Ok(())
+U+115F HANGUL CHOSEONG FILLER   -> Ok(())
+U+1160 HANGUL JUNGSEONG FILLER  -> Ok(())
+U+2800 BRAILLE PATTERN BLANK    -> Ok(())
+U+17B4 KHMER VOWEL INHERENT AQ  -> Ok(())
+```
+
+`U+3164` in particular is the canonical real-world invisible-smuggling
+codepoint. The table is scoped to Cf and is honest about that scope, but "fully
+covered" is not true of the threat model as stated.
+
+* **Suggested direction:** (i) keep ZWJ/ZWNJ allowed in `content` — the
+  Persian/Indic/emoji rationale is correct — but strip Default_Ignorable code
+  points in `normalize_tokens` so the *key* is spoof-resistant while the stored
+  text stays lossless; (ii) either extend the table to Default_Ignorable rather
+  than Cf, or soften the "fully covered" wording to name the residual class.
+
+### R1-3 (P3, CONFIRMED) — the remediation record overstates the SQLite mutation check
+
+The R1 record's "Tests" paragraph says: *"Two SQLite tests execute the dedupe
+and the chunking against a real SQL engine, and both were verified to fail when
+the first-canonization rule is broken."* Breaking the rule (`dedupe_concepts` →
+last-wins) makes `a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay`
+fail, but `a_batch_larger_than_the_chunk_limit_round_trips_whole` **passes** —
+it contains no canonization-status assertion, and correctly should not fail.
+Only one of the two is a pin on that rule. The claim should be corrected.
+
+### R1-4 (P3, CONFIRMED) — the bind-parameter ceilings are prose-only
+
+`sqlite.rs:166-172` and `cockroach.rs:129-134` document 999 / 65535 and the
+arithmetic that keeps the limits under them, but nothing machine-checks it.
+Raising `BULK_LIMITS.concepts` to 70 (70 x 16 = 1120 > 999) would pass the whole
+local suite, because the bundled SQLite is >= 3.32 with a 32766 cap, and would
+only fail against an older build. A `const _: () = assert!(concepts * 16 <=
+999)` per adapter costs nothing and turns the reasoning into a build failure.
+
+### R1-5 (P3, CONFIRMED) — one barrier variant is not covered by the barrier test
+
+`every_non_upsert_variant_is_a_barrier` (`batch.rs:546`) iterates `DeleteNode`,
+`DeleteEdge`, `SetRootGoal`, `SetEmbedding` — four of the five.
+`CanonizationTransition` is missing. The catch-all arm makes it correct by
+construction, so this is test completeness rather than a defect, but it is the
+one barrier whose ordering carries the R2-1 canonization semantics the dedupe
+rule depends on.
+
+### R1-6 (P3, PLAUSIBLE) — the seed path does not deduplicate
+
+`cockroach.rs:1226-1232` and `sqlite.rs:406-413` chunk `snapshot.concepts` /
+`snapshot.edges` straight into the multi-row helpers with no dedupe. For a
+snapshot built from `Graph`'s keyed collections the rows are distinct by
+construction, so this is fine today. But a snapshot carrying two concepts with
+the same id, or two edges sharing `(source, target, edge_type)`, would now fail
+the whole statement ("cannot affect row a second time") where row-by-row replay
+succeeded. Worth either a comment stating the precondition or a debug assert.
+
+---
+
+## Live-cluster re-verification list
+
+Reduced from the remediation record's list, because the generated SQL turned
+out to be the proven single-row statement with a repeated VALUES tuple. What
+genuinely cannot be settled from this machine:
+
+1. **CockroachDB accepts a multi-row `VALUES` carrying a per-row `::VECTOR`
+   cast.** The cast spelling and position are unchanged from the form already
+   running live, but multi-row x VECTOR has never been put in front of the
+   cluster. This is the single highest-value live check.
+2. `cargo test --features store-cockroach,embed-bge -- --ignored` — the
+   conformance suite is the flush→load round trip over the rewritten statements.
+3. Result 5c's repro: four at-cap `lambo_record_action` calls, then SIGTERM.
+   Expect `session closed, tail durable`, rc 0, concepts/edges durable,
+   `session_leases` row gone.
+4. The stale-lease half specifically: force a close timeout (unreachable cluster
+   mid-shutdown) and confirm the lease row is released, or that the new
+   "will lapse at LEASE_TTL instead" warning appears.
+5. Result 5b's `U+202E` probe: expect `isError:true` and
+   `SELECT count(*) FROM concepts WHERE content LIKE '%'||chr(8238)||'%'` = 0.
+6. Multi-row upsert behaviour against the **partial** unique index
+   `concepts_key_non_obs_idx` under a real demote progression — reasoned safe
+   here (row-by-row hits the same index the same way) but never executed.
+
+## Method note
+
+Everything above was run on `5040486` in a detached worktree. Four mutation
+checks and three adversarial probes (generated-SQL dump, interaction-reupsert
+FK, ZWJ / non-Cf gap) were applied transiently and reverted with
+`git checkout`; the tree was verified clean after each. No file outside this
+document was left modified.
