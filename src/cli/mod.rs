@@ -6,6 +6,7 @@
 //! a `cli` → `mcp` cycle.
 
 pub mod caps;
+pub mod demo;
 pub mod derive;
 pub mod inspect;
 pub mod provision;
