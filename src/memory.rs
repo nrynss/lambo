@@ -88,6 +88,7 @@ use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::flush::{
     panic_message, CatchUnwindPoll, FlushParams, FlushTask, FLUSH_ATTEMPT_TIMEOUT,
 };
+use crate::store::lease::{LeaseHolder, LeaseOutcome, LEASE_HEARTBEAT_INTERVAL, LEASE_TTL};
 use crate::store::load::load_session_async;
 use crate::store::{Capabilities, GraphStore};
 use crate::types::{
@@ -293,6 +294,57 @@ fn unregister_session(session: &SessionId, agent: &AgentId) {
     }
 }
 
+/// Spawn the single-writer lease heartbeat (T8.6).
+///
+/// Refreshes the lease every [`LEASE_HEARTBEAT_INTERVAL`] (a third of the TTL),
+/// so a live holder keeps the session and a crashed one's lease lapses within
+/// one full TTL. The first tick is consumed immediately, so the first *refresh*
+/// lands one interval after acquisition, not at once.
+///
+/// A refresh that comes back [`LeaseOutcome::Held`] means this handle **lost**
+/// the session — its lease expired (a store outage starved the heartbeat past
+/// the TTL) and another writer took over. That is logged loudly but not acted
+/// on here: the two writers are now diverging, and the honest recovery is an
+/// operator's, not a silent self-destruct that could drop this handle's tail.
+fn spawn_lease_heartbeat(
+    store: Arc<dyn GraphStore>,
+    session: SessionId,
+    holder: LeaseHolder,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(LEASE_HEARTBEAT_INTERVAL);
+        // Skip the immediate first tick: refresh after one interval, not now.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match store.refresh_lease(&session, &holder, LEASE_TTL).await {
+                Ok(LeaseOutcome::Acquired(_)) => {}
+                Ok(LeaseOutcome::Held { current, .. }) => {
+                    tracing::error!(
+                        session = %session,
+                        holder = %holder,
+                        new_holder = %current.holder,
+                        "single-writer lease LOST: this handle's lease expired (heartbeat starved \
+                         past the TTL) and {} took the session. The two writers are now diverging \
+                         — an operator must reconcile.",
+                        current.holder
+                    );
+                }
+                Err(err) => {
+                    // A transient store blip: log and keep beating. The lease has
+                    // TTL slack for two missed refreshes before it can lapse.
+                    tracing::warn!(
+                        session = %session,
+                        holder = %holder,
+                        error = %err,
+                        "single-writer lease heartbeat refresh failed; will retry next interval"
+                    );
+                }
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -487,11 +539,46 @@ impl MemoryBuilder {
         );
         let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config);
 
+        // Single-writer lease (spec §2.2, T8.6) — the store-enforced gate. Taken
+        // here, as the last fallible step before the (infallible) task spawns, so
+        // a refusal spawns nothing and leaks nothing. `for_this_process` stamps
+        // pid + host from the OS; the agent is this handle's identity.
+        //
+        // **Acquiring the lease says NOTHING about durability.** If the previous
+        // holder crashed, its lease expired but its write-behind tail died with
+        // it (in-RAM log, no WAL) — this is exactly why the `load_session_async`
+        // above runs unconditionally and replays whatever WAS made durable. The
+        // lease is a concurrency gate, not a completeness guarantee; the startup
+        // load is what makes the new holder correct.
+        let lease_holder = LeaseHolder::for_this_process(&agent);
+        match store
+            .acquire_lease(&session, &lease_holder, LEASE_TTL)
+            .await
+            .map_err(LamboError::Store)?
+        {
+            LeaseOutcome::Acquired(_) => {}
+            LeaseOutcome::Held { current, age } => {
+                // Fail closed, naming the current holder and its age (spec §2.2).
+                return Err(LamboError::Conflict(format!(
+                    "session {session} is already held by another writer ({}) — it acquired the \
+                     single-writer lease {}s ago and is still refreshing it. Spec §2.2 is one \
+                     writer per session; refusing to open a second. If that holder is wedged, an \
+                     operator can force a takeover: {}",
+                    current.holder,
+                    age.as_secs(),
+                    crate::store::lease::OPERATOR_OVERRIDE,
+                )));
+            }
+        }
+
         // Each `spawn` panics if called twice — each is called exactly once,
         // here, and nowhere else in this type.
         let daemon_handle = daemon.spawn();
         let flush_handle = flush.spawn();
         let canon_handle = canon.spawn();
+        // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
+        // keeps the session and a crashed one's lease lapses (T8.6).
+        let heartbeat_handle = spawn_lease_heartbeat(store.clone(), session.clone(), lease_holder.clone());
 
         tracing::info!(
             session = %session,
@@ -521,12 +608,15 @@ impl MemoryBuilder {
             daemon_handle: PlMutex::new(Some(daemon_handle)),
             flush_handle: PlMutex::new(Some(flush_handle)),
             canon_handle: PlMutex::new(Some(canon_handle)),
+            heartbeat_handle: PlMutex::new(Some(heartbeat_handle)),
             startup_events: PlMutex::new(Some(startup_events)),
             recall_cache: tokio::sync::Mutex::new(RecallCache::new()),
             writers: AsyncRwLock::new(()),
             close_state: tokio::sync::Mutex::new(false),
             closed: AtomicBool::new(false),
             registered: AtomicBool::new(true),
+            lease_holder,
+            lease_released: AtomicBool::new(false),
         })
     }
 }
@@ -640,6 +730,12 @@ pub struct Memory {
     daemon_handle: PlMutex<Option<JoinHandle<()>>>,
     flush_handle: PlMutex<Option<JoinHandle<()>>>,
     canon_handle: PlMutex<Option<JoinHandle<()>>>,
+    /// The single-writer lease heartbeat (T8.6). Aborted by `close()` before the
+    /// lease is released, and by `Drop` so a leaked handle stops squatting the
+    /// lease (its row then lapses at TTL rather than being kept alive forever).
+    /// Unlike the three producers it never touches the graph or the tail, so a
+    /// bare `abort()` is enough — no [`HandleCustody`] reap is needed.
+    heartbeat_handle: PlMutex<Option<JoinHandle<()>>>,
     /// The receiver subscribed before `Daemon::spawn`; handed to the first
     /// [`Memory::events`] caller so the warm-up condition set is not lost.
     startup_events: PlMutex<Option<broadcast::Receiver<DaemonEvent>>>,
@@ -674,6 +770,17 @@ pub struct Memory {
     /// does not release a second time and take a *different* handle's slot with
     /// it — the registry keys on session + agent id, which a re-attach reuses.
     registered: AtomicBool,
+    /// This handle's single-writer lease identity (agent + pid + host), reused
+    /// by the heartbeat and by release (T8.6).
+    lease_holder: LeaseHolder,
+    /// `true` once this handle has released its lease. A **successful** `close()`
+    /// releases (a graceful close hands off rather than waiting out the TTL); a
+    /// failed close keeps the lease for a retry and lets it lapse at TTL if none
+    /// comes. `Drop` never releases — a handle dropped without a clean close is
+    /// the crash-shaped path, where expiry is the correct release mechanism (and
+    /// `Drop` cannot `await` the store anyway); it only aborts the heartbeat so
+    /// the lease is actually free to lapse.
+    lease_released: AtomicBool,
 }
 
 impl Memory {
@@ -1329,6 +1436,12 @@ impl Memory {
         self.closed.store(true, Ordering::Release);
         let _quiesced = self.writers.write().await;
 
+        // Stop the lease heartbeat before anything else in the shutdown: from
+        // here the lease is released explicitly on the success paths below, so
+        // it must not keep being refreshed. Aborting is synchronous and the task
+        // touches neither the graph nor the tail, so no custody/join is needed.
+        self.abort_heartbeat();
+
         // ...and the two mutation producers off, before the drain. Every
         // handle travels in a `HandleCustody` guard: cancelled on a join, this
         // future must hand the handle back to its slot rather than detach a
@@ -1412,6 +1525,9 @@ impl Memory {
         }
 
         if tail.is_empty() {
+            // Graceful close: hand off the lease now rather than waiting out the
+            // TTL, so the next writer takes the session immediately (T8.6).
+            self.release_lease_once().await;
             self.latch_success(&mut succeeded);
             return Ok(());
         }
@@ -1432,6 +1548,11 @@ impl Memory {
                     session = %self.session,
                     "Memory session closed (tail flushed)"
                 );
+                // Tail is durable: release the lease so the handoff is clean
+                // (T8.6). A failed flush (the `Err` arm below) deliberately does
+                // NOT release — it keeps the lease for a retry and lets it lapse
+                // at TTL if none comes.
+                self.release_lease_once().await;
                 self.latch_success(&mut succeeded);
                 Ok(())
             }
@@ -1514,6 +1635,45 @@ impl Memory {
     fn unregister_once(&self) {
         if self.registered.swap(false, Ordering::AcqRel) {
             unregister_session(&self.session, &self.agent);
+        }
+    }
+
+    /// Abort the lease heartbeat, if it is still running (T8.6). Synchronous, so
+    /// both `close()` and `Drop` can call it. Idempotent — the second caller
+    /// finds the slot already `None`.
+    fn abort_heartbeat(&self) {
+        if let Some(handle) = self.heartbeat_handle.lock().take() {
+            handle.abort();
+        }
+    }
+
+    /// Release this handle's single-writer lease, at most once (T8.6).
+    ///
+    /// Called only from the **success** paths of `close()`: a graceful close
+    /// hands the session off immediately rather than waiting out the TTL. Guarded
+    /// by `lease_released` so a retried `close()` does not release twice — the
+    /// release is holder-scoped in the store anyway, but the flag also skips a
+    /// redundant round-trip. `Drop` deliberately does not call this (see the
+    /// field docs): a handle abandoned without a clean close lets its lease lapse
+    /// at TTL, the crash-shaped path.
+    async fn release_lease_once(&self) {
+        if self.lease_released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(err) = self
+            .store
+            .release_lease(&self.session, &self.lease_holder)
+            .await
+        {
+            // Non-fatal: the lease lapses at TTL even if the explicit release
+            // could not reach the store. A failed release must not turn a
+            // durable close into an error.
+            tracing::warn!(
+                session = %self.session,
+                holder = %self.lease_holder,
+                error = %err,
+                "could not release the single-writer lease on close; it will lapse at TTL instead"
+            );
         }
     }
 
@@ -1647,6 +1807,12 @@ impl Drop for Memory {
     fn drop(&mut self) {
         // No-op if a successful `close()` already released the slot (R2-4).
         self.unregister_once();
+        // Stop the lease heartbeat so a leaked handle stops refreshing — its
+        // lease then lapses at TTL and the session becomes takeable (T8.6). The
+        // lease itself is NOT released here: `Drop` cannot `await` the store, and
+        // a handle dropped without a clean close is the crash-shaped path where
+        // expiry is the right release. A successful `close()` already released it.
+        self.abort_heartbeat();
         let mut leaked = false;
         for handle in [&self.daemon_handle, &self.flush_handle, &self.canon_handle] {
             if let Some(handle) = handle.lock().take() {
@@ -2391,16 +2557,29 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// T81-8: two same-process handles on one session are not refused (spec
-    /// §2.2 assigns that to deployment) but they are **reported**, loudly and
-    /// with both agent ids, and the registration is released when the handle
-    /// drops — including a handle that was never closed.
+    /// T81-8, retargeted for T8.6: the in-process `ACTIVE_SESSIONS` advisory
+    /// still reports a second same-process handle loudly, with both agent ids,
+    /// and releases the registration on drop — including a handle that was never
+    /// closed.
+    ///
+    /// **Two separate stores on one logical session, on purpose.** Post-T8.6 the
+    /// store lease *refuses* a second writer that shares a store (see
+    /// `a_second_writer_sharing_a_store_is_refused_by_the_lease`). The advisory
+    /// log's remaining domain is the collision the per-store lease cannot see:
+    /// two writers that opened *different* store handles onto the same session
+    /// (different `MemoryStore` instances here; different processes/hosts in
+    /// production). Each acquires its own store's free lease, so both builds
+    /// succeed — and the process-global registry is the only thing that catches
+    /// them. That is exactly why the advisory log is kept, not replaced.
     #[tokio::test]
     async fn a_second_handle_on_one_session_is_reported_loudly() {
         let (logs, _guard) = capture_logs(tracing::Level::ERROR);
 
-        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
-        let first = memory_on(store.clone(), "one-writer").await;
+        // Distinct stores: the per-store lease cannot see across them, so this
+        // isolates the process-global advisory (which can).
+        let store_a: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store_b: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let first = memory_on(store_a, "one-writer").await;
         assert_eq!(live_handles("one-writer"), 1);
         assert!(
             !logs.contains("SecondSessionWriter"),
@@ -2411,7 +2590,7 @@ mod tests {
             .session("one-writer")
             .agent("agent-b")
             .flush_interval(Duration::from_secs(3_600))
-            .store(store)
+            .store(store_b)
             .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
             .embedding_contract(contract("fixture", 1024))
             .build()
@@ -2438,6 +2617,79 @@ mod tests {
         // Dropped without close(): the registration is still released.
         drop(second);
         assert_eq!(live_handles("one-writer"), 0);
+    }
+
+    /// T8.6: a second writer that **shares a store** with the first is now
+    /// refused by the store-enforced single-writer lease — the promotion from
+    /// advisory to enforced. The refusal names the current holder and its age,
+    /// and points at the operator override.
+    #[tokio::test]
+    async fn a_second_writer_sharing_a_store_is_refused_by_the_lease() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let first = memory_on(store.clone(), "leased").await;
+
+        // Same store, same session, different agent → distinct holder token →
+        // the live lease is held by `first`, so this build fails closed.
+        let err = Memory::builder()
+            .session("leased")
+            .agent("agent-b")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect_err("a second writer on a shared store must be refused by the lease");
+        let msg = err.to_string();
+        assert!(msg.contains("single-writer"), "{msg}");
+        assert!(msg.contains("agent-a"), "names the current holder: {msg}");
+        assert!(
+            msg.contains("session_leases"),
+            "points at the operator override: {msg}"
+        );
+
+        // After a clean close the lease is released, so a new writer attaches.
+        first.close().await.unwrap();
+        let second = memory_on(store, "leased").await;
+        second.close().await.unwrap();
+    }
+
+    /// T8.6: exactly one holder and one honest refusal, in-process — the memory
+    /// backend's cross-"process" analogue done as two `build`s on one store.
+    #[tokio::test]
+    async fn one_store_two_builds_yield_one_holder_and_one_refusal() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+
+        let a = Memory::builder()
+            .session("dup")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await;
+        let b = Memory::builder()
+            .session("dup")
+            .agent("agent-b")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await;
+
+        // Exactly one wins.
+        assert!(
+            a.is_ok() ^ b.is_ok(),
+            "exactly one of the two builds must acquire the lease"
+        );
+        if let Ok(m) = a {
+            m.close().await.unwrap();
+        }
+        if let Ok(m) = b {
+            m.close().await.unwrap();
+        }
     }
 
     /// R2-4: close-then-reattach in one process — the MCP server's ordinary
