@@ -613,7 +613,15 @@ fixture-ok: n/a
 owns:       docs/reference/  (mcp.md, cli.md, api.md, config.md, end-to-end.md)
 appends-to: rustdoc on public items across src/ (doc-comments only; safe — T8.8 runs last
             in the serial queue, nothing else is editing these files concurrently)
-status:     not-started
+status:     docs-verification pass done — 2026-08-15 (branch task/t8.8-docs, docs/reference/ only).
+            All five reference pages verified against the 34c9959 binary and rewritten where
+            they disagreed with it. PENDING: (a) rustdoc + help-text fixes — 53 cargo doc
+            warnings and 11 help-text findings recorded in dev-diary/notes/t8.8-surface-audit.md,
+            deferred to a post-L82-merge src/ pass because task/live-l82-remediation and
+            task/l82-4-fresh-embeddings hold the affected files; (b) the L82 delta itself
+            (control-char ranges, organic vector recall, bulk flush) — markers left at the top
+            of mcp.mdx, cli.mdx, end-to-end.mdx; (c) T8.7-dependent config sections (HTTP auth,
+            rate limit, session cap) — config.mdx documents the current no-auth state.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14: everything P8 ships is a **user-facing surface** and needs proper
