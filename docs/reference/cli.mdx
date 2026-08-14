@@ -1,8 +1,13 @@
-# Command line
+---
+title: "Command line"
+description: "Read and write session memory from the terminal"
+---
 
 Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
 
-The command line is in active development. Run `lambo <command> --help` for the current, authoritative flags on your build. The verbs and their arguments are described below.
+<Note>
+The command line is in active development. Run `lambo <command> --help` for the current, authoritative flags on your build.
+</Note>
 
 ## Read commands
 
@@ -27,4 +32,4 @@ Write commands acquire the session's writer lease. If a `lambo serve` process al
 | `lambo reserve --session <id> --agent <id> --node <uuid>` | Take a soft lock on a node. |
 | `lambo release --session <id> --agent <id> --node <uuid>` | Release a soft lock. |
 
-For the meaning of each argument, the value limits, and the concept types, see [MCP tools](mcp.md). Both surfaces run the same underlying operations. See [Library API](api.md) for the type they share.
+For the meaning of each argument, the value limits, and the concept types, see [MCP tools](/mcp). Both surfaces run the same underlying operations. See [Library API](/api) for the type they share.

@@ -1,4 +1,7 @@
-# End to end
+---
+title: "End to end"
+description: "How the parts fit together, from serving a session to running a swarm"
+---
 
 This page shows how the parts fit together, from serving a session to driving it with agents.
 
@@ -12,18 +15,27 @@ Canonization runs in the background. It promotes concepts to canonical facts whe
 
 ## Serve a session and drive it over MCP
 
-1. Provision the durable store once with `scripts/provision.sh`. You can skip this if you use the in-memory store.
-2. Start the writer.
+<Steps>
+  <Step title="Provision the store">
+    Run `scripts/provision.sh` once. You can skip this if you use the in-memory store.
+  </Step>
+  <Step title="Start the writer">
+    ```bash
+    lambo serve --config lambo.toml --session demo --agent agent-a
+    ```
+    Add `--transport http` to serve over HTTP on localhost instead of stdio.
+  </Step>
+  <Step title="Connect your agents">
+    A typical agent loop calls `lambo_recall` to load prior memory, acts, then calls `lambo_derive` and `lambo_record_action` to write what it learned and did. It calls `lambo_reserve` before editing a shared concept.
+  </Step>
+  <Step title="Stop the server">
+    Stop with `Ctrl-C` or a clean disconnect. Lambo flushes the pending tail and releases the lease.
+  </Step>
+</Steps>
 
-   ```bash
-   lambo serve --config lambo.toml --session demo --agent agent-a
-   ```
-
-   Add `--transport http` to serve over HTTP on localhost instead of stdio.
-3. Connect your agents as MCP clients. A typical agent loop calls `lambo_recall` to load prior memory, acts, then calls `lambo_derive` and `lambo_record_action` to write what it learned and did. It calls `lambo_reserve` before editing a shared concept.
-4. Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes the pending tail and releases the lease.
-
+<Note>
 A second `lambo serve` on the same session is refused while the first holds the lease, so it never becomes a silent second writer.
+</Note>
 
 ## Run a swarm
 
@@ -31,4 +43,4 @@ Run one `lambo serve` writer for the session, then have many small agents each w
 
 Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context.
 
-See [Installation](installation.md), [MCP tools](mcp.md), [Command line](cli.md), [Library API](api.md), and [Configuration](config.md).
+See [Installation](/installation), [MCP tools](/mcp), [Command line](/cli), [Library API](/api), and [Configuration](/config).

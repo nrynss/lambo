@@ -1,4 +1,7 @@
-# MCP tools
+---
+title: "MCP tools"
+description: "The seven tools your agents call, with arguments and limits"
+---
 
 Lambo is agentic graph memory. It runs as an MCP server that exposes seven tools your agent can call to store what it learns, recall relevant prior memory, and coordinate edits. A running `lambo serve --session <id>` process is the single writer for that session, and your agents connect to it as MCP clients.
 
@@ -9,13 +12,19 @@ Lambo serves over stdio by default, and over HTTP when you ask for it.
 | Transport | Command | Notes |
 |---|---|---|
 | stdio | `lambo serve --session demo` | The default. Works with any MCP client through the standard `mcpServers` configuration. |
-| HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. The HTTP endpoint has no authentication yet, so keep it on localhost. |
+| HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. |
+
+<Warning>
+The HTTP endpoint has no authentication yet. Keep it on localhost.
+</Warning>
 
 ## What every tool expects
 
 Every tool takes an `agent_id`, which is the identity of the agent making the call.
 
+<Note>
 Do not send timestamps. Lambo stamps all times itself, and no tool accepts a timestamp argument.
+</Note>
 
 Any string you send is limited to 16 KB, and it may not contain control characters other than tab and newline. Lambo rejects anything larger or malformed with a clear message.
 
@@ -70,7 +79,9 @@ Take a soft lock on a memory node before you edit it, so two agents do not edit 
 | `ttl_seconds` | integer | No | Up to 3600. |
 | `release` | boolean | No | Release instead of reserve. |
 
+<Note>
 Reservations are advisory and live in memory only, so they do not survive a server restart. After a restart, the absence of a reservation does not guarantee that nobody else is working on the node.
+</Note>
 
 ### lambo_inspect
 
@@ -109,4 +120,4 @@ When your client connects, the server describes itself to the model:
 | Reservation TTL | 3600 seconds |
 | Nodes returned by `lambo_inspect` | 200 |
 
-See [Command line](cli.md) for the same operations from the terminal, and [Library API](api.md) for the underlying Rust library.
+See [Command line](/cli) for the same operations from the terminal, and [Library API](/api) for the underlying Rust library.

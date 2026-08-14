@@ -1,4 +1,7 @@
-# Configuration
+---
+title: "Configuration"
+description: "The lambo.toml keys, features, and provisioning"
+---
 
 Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. An environment variable always wins over the file for any key it sets.
 
@@ -11,7 +14,7 @@ The `[store]` section selects where the graph is persisted.
 kind = "memory"
 ```
 
-Set `kind` to `memory`, `sqlite`, or `cockroach`. The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup with a clear message. See [Installation](installation.md) for the matching features.
+Set `kind` to `memory`, `sqlite`, or `cockroach`. The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup with a clear message. See [Installation](/installation) for the matching features.
 
 ## Embedder
 
@@ -23,7 +26,11 @@ kind = "fixture"
 dim = 1024
 ```
 
-Set `kind` to `fixture`, `bge`, or `bedrock`. Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable.
+Set `kind` to `fixture`, `bge`, or `bedrock`.
+
+<Warning>
+Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable.
+</Warning>
 
 ## Tunables
 
@@ -41,7 +48,11 @@ You can override the defaults for scoring, recall, flushing, and canonization. T
 
 ## HTTP transport
 
-The HTTP transport binds to `127.0.0.1` by default. It has no authentication, no rate limiting, and no cap on the number of sessions it creates. Keep it on localhost. Do not expose it to a network until authentication is added.
+The HTTP transport binds to `127.0.0.1` by default.
+
+<Warning>
+The HTTP transport has no authentication, no rate limiting, and no cap on the number of sessions it creates. Keep it on localhost. Do not expose it to a network until authentication is added.
+</Warning>
 
 ## Provisioning a durable store
 
@@ -53,4 +64,4 @@ Before you serve against SQLite or CockroachDB, create the schema with the provi
 
 Set `LAMBO_COCKROACH_DSN` in a `.env` file first for CockroachDB. Run `./scripts/provision.sh --check` to verify the schema without applying it.
 
-See [Installation](installation.md) and [Library API](api.md).
+See [Installation](/installation) and [Library API](/api).

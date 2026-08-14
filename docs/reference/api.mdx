@@ -1,4 +1,7 @@
-# Library API
+---
+title: "Library API"
+description: "The Rust API for embedding Lambo in a program"
+---
 
 Both surfaces, the MCP tools and the command line verbs, are thin wrappers over one type, `Memory`. If you embed Lambo in a Rust program, this is the type you work with. For full signatures, run `cargo doc --open`.
 
@@ -49,11 +52,15 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 
 ### Shut down
 
-`close().await` flushes the pending write-behind tail and releases the lease. It is time-bounded. If a dependency hangs, it stops rather than waiting forever, and it reports honestly that the un-flushed tail was not saved. There is no on-disk write-ahead log, so an abandoned tail is lost, not replayed on restart.
+`close().await` flushes the pending write-behind tail and releases the lease. It is time-bounded. If a dependency hangs, it stops rather than waiting forever, and it reports honestly that the un-flushed tail was not saved.
+
+<Warning>
+There is no on-disk write-ahead log, so an abandoned tail is lost, not replayed on restart.
+</Warning>
 
 ## Backends
 
-Backends are chosen by Cargo feature and configuration, not loaded as plugins. See [Configuration](config.md) for the feature flags.
+Backends are chosen by Cargo feature and configuration, not loaded as plugins. See [Configuration](/config) for the feature flags.
 
 ### The GraphStore trait
 
@@ -78,6 +85,8 @@ A session has exactly one writer. Lambo enforces this in the store with a per-se
 - A heartbeat keeps a live holder's lease fresh and lets a crashed holder's lease expire.
 - If a holder's lease is taken over, that holder is fenced. Its further writes are refused and its pending writes are dropped, so it cannot overwrite the new holder.
 
+<Note>
 There is one known limitation. The fence trips when the holder's heartbeat notices the loss, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
+</Note>
 
-See [MCP tools](mcp.md) and [Configuration](config.md).
+See [MCP tools](/mcp) and [Configuration](/config).
