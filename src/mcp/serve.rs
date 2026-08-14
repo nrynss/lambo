@@ -53,6 +53,31 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// already down and this is the last thing standing between the process and exit.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 
+/// Documented worst-case wall-clock a clean shutdown can take, end to end (R4).
+///
+/// The shutdown is two bounded phases in series: the transport winds down within
+/// [`SHUTDOWN_GRACE`] (rmcp's own graceful drain happens *inside* that window —
+/// `run_until_shutdown` gives the whole transport, drain included, exactly
+/// `SHUTDOWN_GRACE` after cancel), then the final flush runs within
+/// [`CLOSE_GRACE`]. The only work outside these two is `event_pump.abort()` and
+/// process teardown, both effectively instant. So the true aggregate cap is
+/// `SHUTDOWN_GRACE + CLOSE_GRACE`, and this is the number an operator must budget
+/// for: a supervisor's SIGKILL escalation (systemd `TimeoutStopSec`, Kubernetes
+/// `terminationGracePeriodSeconds` — default 30 s) must exceed it, or the final
+/// flush is cut off and the tail is lost. The compile-time guard just below (and
+/// `the_grace_windows_are_sane`) pins the sum to this budget so a later bump to
+/// either window cannot silently push the aggregate past what a supervisor allows.
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(15);
+
+/// Build-time invariant: the end-to-end shutdown cost fits [`SHUTDOWN_BUDGET`].
+/// A future edit that pushes `SHUTDOWN_GRACE + CLOSE_GRACE` over the budget fails
+/// the build, not just the test (`Duration::as_secs` is `const`).
+const _: () = assert!(
+    SHUTDOWN_GRACE.as_secs() + CLOSE_GRACE.as_secs() <= SHUTDOWN_BUDGET.as_secs(),
+    "SHUTDOWN_GRACE + CLOSE_GRACE exceeds SHUTDOWN_BUDGET — a supervisor's SIGKILL timeout \
+     is sized against the budget; lower a window or justify raising the budget",
+);
+
 /// Which transport `lambo serve` should listen on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
@@ -566,6 +591,11 @@ mod tests {
     /// point) and short enough that a supervisor's kill escalation (commonly
     /// ~30 s) never beats them, and `CLOSE_GRACE` — the last thing before exit —
     /// is at least as generous as the transport window.
+    ///
+    /// It also pins the **aggregate** (R4): `SHUTDOWN_GRACE + CLOSE_GRACE` is the
+    /// whole end-to-end shutdown cost and must stay within [`SHUTDOWN_BUDGET`],
+    /// the number an operator sizes their SIGKILL timeout against. Checking each
+    /// window alone let the sum drift past a tight supervisor window unnoticed.
     #[test]
     fn the_grace_windows_are_sane() {
         assert!(
@@ -587,6 +617,14 @@ mod tests {
         assert!(
             CLOSE_GRACE >= SHUTDOWN_GRACE,
             "the final close gets at least the transport window"
+        );
+        assert!(
+            SHUTDOWN_GRACE + CLOSE_GRACE <= SHUTDOWN_BUDGET,
+            "the end-to-end shutdown cost ({}s + {}s) must fit the documented budget ({}s) — \
+             a supervisor's SIGKILL timeout is sized against SHUTDOWN_BUDGET",
+            SHUTDOWN_GRACE.as_secs(),
+            CLOSE_GRACE.as_secs(),
+            SHUTDOWN_BUDGET.as_secs(),
         );
     }
 
