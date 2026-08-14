@@ -2,25 +2,21 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN (R1 remediated — awaiting re-review)               ║
-║  Verdict: REQUEST CHANGES — 1 P1 + 3 P2 + 7 P3                   ║
-║  Remediation: all 11 findings FIXED (2026-08-14); no deferrals   ║
-║  Central claims tested: readers never take the lease (HOLDS);    ║
+║  STATUS: OPEN (R2 verified — one P3 remains, T83-12)             ║
+║  Verdict: REQUEST CHANGES — 0 P1 / 0 P2 / 1 P3 (new: T83-12)     ║
+║  R1: 11 findings (1 P1 + 3 P2 + 7 P3) — all claimed FIXED        ║
+║  R2: 10 of 11 genuinely fixed and re-attacked by mutation;       ║
+║    T83-11's pin catches filter drift but NOT sort-order drift    ║
+║    (a fully reversed comparator survives the whole suite)        ║
+║  New: T83-12 (P3) — saints parity fixture has one canonical      ║
+║    row, so the ordering half of T83-11 is still unpinned         ║
+║  Central claims re-tested: readers never take the lease (HOLDS); ║
 ║    writers are exactly one and always release (HOLDS);           ║
-║    one construction site (HOLDS); shared validators (HOLDS);      ║
-║    MCP extract behaviour-preserving (HOLDS)                      ║
-║  P1: 1 → T83-1 an inverted `--parent-of` survives the whole      ║
-║        suite; hierarchy direction is asserted nowhere            ║
-║  P2: 3 → T83-2 `--parent-of` first-colon vs `--concept`          ║
-║        last-colon silently writes wrong concepts; T83-3 the F18  ║
-║        CLI guard reads only clap arg *ids*; T83-4 "readers never ║
-║        spawn GC" is entirely unpinned                            ║
-║  P3: 7 → tracing never initialised on the CLI path; provision    ║
-║        ancestor-walk exec; readers build an unused embedder;     ║
-║        Handoff integration count; indirect lease pin; reserve    ║
-║        success text; saints scan drift unpinned                  ║
-║  Reviewed: 593ff73 (src/ + tests/ byte-identical at review end)  ║
-║  Opened: 2026-08-14                                              ║
+║    one construction site (HOLDS); no lock across await (HOLDS);  ║
+║    MCP untouched by the remediation (HOLDS)                      ║
+║  R1 reviewed: 593ff73 · R2 reviewed: 4093f53                     ║
+║  (src/ + tests/ byte-identical to 4093f53 at review end)         ║
+║  Opened: 2026-08-14 · R2 verified: 2026-08-14                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
@@ -628,3 +624,368 @@ change — the extract is clean.
 | T83-9 | **FIXED** | Second writer derive after no-serve success names lease-release | `tests/cli_write_lease.rs` |
 | T83-10 | **FIXED** | Ends when this process exits; TTL relabelled | sqlite reserve assertions |
 | T83-11 | **FIXED** | CLI scan == `Memory::canonical_memories` on one graph | `cli::saints::parity::canonical_memories_from_graph_agrees_with_memory` |
+
+---
+
+## R2 verify (2026-08-14) — REQUEST CHANGES: 10 of 11 hold, T83-11 is incomplete
+
+**Re-reviewed commit:** `4093f53` — `fix(P8): T8.3 R1 remediation — all 11 findings`
+(12 files, +685/−63; `src/mcp/server.rs` **not** in the commit at all).
+
+**Method.** Every R1 disposition was re-attacked, not read. Nine source mutations were
+applied to `4093f53` and reverted by path (`git restore --source=4093f53 -- <file>`); each
+was required to fail the pin the remediation claims. Four properties were additionally
+driven **end-to-end through the shipped binary** (`cargo build --features
+store-sqlite,embed-fixture`) against a scratch sqlite store, because a unit test that calls
+`cli::*::run` directly cannot prove the `main.rs` dispatch, the exit code, or what the
+operator actually sees on stdout. All five gates were re-run independently on the clean
+tree afterwards.
+
+**Tree state.** `git diff 4093f53 -- src/ tests/` is **empty** at review end — `src/` and
+`tests/` are byte-identical to the remediation commit. Every mutation (including one
+temporary edit to a *test* body, used to isolate which half of the T83-4 pin bites) was
+reverted. The only files this section writes are this review file and, per brief, nothing
+else; `dev-diary/PHASE-8-surface.md` T8.3 `status:` is **left at `remediating:r1`** because
+the verdict is REQUEST CHANGES. No other agent's markdown was touched.
+
+### Gates — re-run independently on the byte-identical clean tree
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy --all-targets -- -D warnings` | **exit 0** |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | **exit 0** |
+| `cargo test` | **620 lib + 5 bin + 3 integration + 1 doctest**, 3 ignored |
+| `cargo test --features store-sqlite` | **664 lib + 5 bin + 8 integration + 1 doctest**, 3 ignored |
+
+Both lines match the remediation's Handoff claim **exactly** (620/5 default, 664/5 sqlite),
+under the single counting convention T83-8 introduced. Integration breakdown, default:
+`p2_integration` 2, `rebuild_session` 1. Sqlite adds `cli_provision_sqlite` 1,
+`cli_write_lease` 1, `serve_pre_handshake_durability` 1, `serve_sigterm_durability` 1,
+`serve_single_writer_lease` 1 → 8. Ignored (3): 1 lib `embed::bge_m3` live smoke + 2
+`live_calibration`. **T83-8 is closed** — the handoff is now a baseline the next agent can
+diff against.
+
+### Finding-by-finding re-attack
+
+| Id | R1 sev | R2 verdict | Evidence |
+|---|---|---|---|
+| T83-1 | P1 | **FIXED** | Inverted map fails exactly one test |
+| T83-2 | P2 | **FIXED** | Unit + shipped binary: exit 2; single colon still writes |
+| T83-3 | P2 | **FIXED** | `long` mutant *and* `alias` mutant both fail; substring match proven |
+| T83-4 | P2 | **FIXED** (caveat) | `daemon.spawn()` fails the pin; behavioural half is inert — see below |
+| T83-5 | P3 | **FIXED** | Warning reaches printed text; also fixes a silent-empty-output case |
+| T83-6 | P3 | **FIXED** | Unmarked script refused; walk bounded; real repo still resolves |
+| T83-7 | P3 | **FIXED** | Demonstrated end-to-end: readers answer under a hard-failing embedder |
+| T83-8 | P3 | **FIXED** | Counts match my independent re-run exactly |
+| T83-9 | P3 | **FIXED** | Fails in **1.17 s** with a message naming the lease |
+| T83-10 | P3 | **FIXED** | Mutation fails; text read off the shipped binary |
+| T83-11 | P3 | **INCOMPLETE** | Catches filter drift, **misses sort-order drift** → **T83-12** |
+
+**T83-1 — closed.** Re-applying the exact R1 mutation
+(`.map(|(p, c)| (c.as_str(), p.as_str()))` in `src/cli/derive.rs`) now fails
+`cli::tests::parent_of_writes_hierarchical_edge_parent_to_child` and nothing else
+(663 passed, 1 failed). The pin asserts **both** directions —
+`edge_between(parent, child, Hierarchical).is_some()` *and*
+`edge_between(child, parent, …).is_none()` — so it bites on an inversion rather than on a
+missing edge. It asserts on the resulting graph, not on the tuple, so it also catches a
+direction flip introduced downstream in `graph::derive`. The shipped direction was
+independently confirmed through the binary: after
+`--parent-of "auth middleware:user schema"`, `lambo inspect --focus "user schema"` renders
+`Hierarchical -> auth middleware`, i.e. parent → child. The P1 is genuinely retired.
+
+**T83-2 — closed, and it fails before the lease.** Through the shipped binary:
+
+```
+$ lambo --config ok.toml derive … --parent-of "foo:bar:parent"
+lambo derive: --parent-of is CHILD:PARENT with exactly one colon; extra colons are
+ambiguous because both sides are free text (unlike --concept, where KIND is a closed token)
+→ exit 2
+$ lambo --config ok.toml derive … --parent-of "auth middleware:user schema"
+derived 1 concept(s): 2 created, 1 matched existing            → exit 0
+```
+
+Exit 2 is the usage class, the message names the ambiguity *and* the asymmetry with
+`--concept`, and `rsplit_once` was not used. Worth recording explicitly: the colon check
+sits in the validation loop at `src/cli/derive.rs:79-85`, which is **before**
+`open_writer` at line 87 — so a rejected `--parent-of` never acquires the writer lease.
+`concept_splits_on_last_colon` still passes, so colon-bearing `--concept` content remains
+legal; the two flags are now honestly asymmetric rather than silently so.
+
+**T83-3 — closed, and stronger than asked.** Two mutants, both caught:
+
+```
+#[arg(long = "occurred-at", …)] stamp: Option<String>
+→ F18: CLI flag 'occurred-at' contains banned client-timestamp token 'occurred_at'
+
+#[arg(long = "parent-of", alias = "created-at-utc", …)]
+→ F18: CLI flag 'created-at-utc' contains banned client-timestamp token 'created_at'
+```
+
+The first is the exact R1 mutant that previously passed; the second proves the
+`get_all_aliases()` leg and the substring match together (`created-at-utc` is not equal to
+any banned token). `BANNED` also gained `time` and `createdat`. The shipped flag set stays
+clean under the widened guard — no false positive on `--ttl-seconds`, `--max-tokens`,
+`--traversal-depth`, `--transport`. The walk still recurses into subcommands and still
+covers root-level globals such as `--config`. This is the CLI twin of T82-4 and it now
+matches it.
+
+**T83-4 — the property is pinned, but by the source-text assertion alone.** Adding
+`let _gc = daemon.spawn();` after `Daemon::from_config(...)` in `src/cli/recall.rs` fails
+the test with the intended message, so the brief's requirement is met. I then isolated
+which half does the work: with the text assertion neutered (`true || …`) and the spawn
+still present, `reader_recall_does_not_spawn_gc_or_mutate_epoch` **passes**. The
+epoch/canonization-status half compares snapshots re-loaded *from the store*, and a
+reader-side GC mutates only the in-RAM graph — a CLI reader never flushes — so that half is
+unobservable for this mutation.
+
+I am recording this as a caveat, not a new finding, for two reasons. The property R1 named
+("readers never `Daemon::spawn()`") is genuinely guarded, and `recall` is the only reader
+that constructs a `Daemon` at all, so scoping the text assertion to `recall.rs` is the right
+scope. And the behavioural half is not dead in general: it would catch the more dangerous
+regression — a reader that *persists* GC output — because that would change the reloaded
+snapshot. The disposition text above nonetheless reads as if both halves bite on a spawn;
+the next agent should know only one does.
+
+**T83-5 — closed, and it fixes more than the finding asked.** Reverting the push to
+`tracing::warn!` fails `cli::tests::recall_prints_skipped_vector_leg_when_embed_fails`
+with `operator must see the skipped vector leg: user schema [Entity] (score 0.29)` — i.e.
+the assertion is on real recall output with a real context block, not on an empty string,
+so the pin is not vacuous. `main.rs` prints the returned `String` via `emit_stdout`, so the
+`⚑` line genuinely reaches the operator's stdout.
+
+Two things the remediation got right beyond the brief. `render_recall_text` skips a warning
+already present in `result.context` (`format::render_block` renders per-hit warnings into
+the block), so the shared `⚑` channel is not double-printed and the CLI↔MCP differential
+does not drift. And `Daemon::recall`'s two early returns — vector-candidate-limit violation
+and a caller/graph session mismatch (`src/daemon/mod.rs:339-358`) — return an **empty**
+`context` with the explanation only in `warnings`; before this change `lambo recall` printed
+a blank line in both cases. It now prints the reason. That was a latent silent-failure the
+R1 review did not spot.
+
+Tracing is still not installed for CLI invocations, so `caps::clamp_cfg_default`'s
+"config default outside the surface bound" notice remains dropped. R1 explicitly preferred
+surfacing the recall degradation over initialising a subscriber, so this is the accepted
+shape of the fix, not a shortfall.
+
+**T83-6 — closed as prescribed.** `provision::marker_tests` prove the three cases R1 asked
+for: a `scripts/provision.sh` with no `Cargo.toml` beside it is refused, one beside a
+`name = "not-lambo"` package is refused, and only the `name = "lambo"` marker selects it.
+The walk is bounded — `find_provision_script_from(nested, 1)` misses a marker three levels
+up and `(nested, 3)` finds it — and `PROVISION_WALK_MAX = 16` caps the real call.
+`cargo_toml_package_name_is_lambo` reads only the `[package]` section, so a
+`lambo = "1"` line under `[dependencies]` is not a marker (asserted), and `[workspace.package]`
+does not match the `"[package]"` split needle. The resolved path is echoed to stderr before
+`bash` runs. No regression for the legitimate path: this repo's `Cargo.toml` is
+`name = "lambo"` and `scripts/provision.sh` exists, so a real `lambo provision` still
+resolves. Residual, unchanged and out of scope: an attacker who can plant *both* a script
+and a `lambo`-named `Cargo.toml` in a writable ancestor is still served — but that is a far
+narrower vector than the original any-`scripts/provision.sh`-to-`/` walk, and it is exactly
+the mitigation R1 specified.
+
+**T83-7 — closed, and demonstrated end-to-end.** The committed pin
+(`saints_stats_inspect_provision_resolve_store_only`) only asserts `needs_embedder()`, which
+is one inference away from the property. Flipping `Saints` back into the embedder set fails
+it, so the pin bites. I then proved the property itself against the shipped binary, using an
+embedder config that hard-fails `build_embedder` (`kind = "bedrock"`, feature not compiled):
+
+```
+lambo --config bedrock.toml saints  --session s1  → "0 canonical memories in session 's1'"
+lambo --config bedrock.toml stats   --session s1  → "nodes=3 edges=3 concepts=2 …"
+lambo --config bedrock.toml inspect --session s1  → focus block rendered
+lambo --config bedrock.toml recall  --session s1
+  → lambo recall: failed to build backends: config: embedder unavailable: embedder kind
+    `bedrock` is not compiled into this binary; rebuild with `--features embed-bedrock`
+```
+
+This is precisely the "`lambo stats` — a lease-free read of durable counts — fails on an
+embedder it would never have called" defect R1 described, and it is gone: the three
+non-embedding readers answer, and only the verb that genuinely needs an embedder fails
+closed with an honest message. Note also that a dispatch/resolution mismatch cannot hide —
+`tests/cli_write_lease.rs` drives `saints`, `stats`, `recall` and `inspect` as real
+subprocesses and requires exit 0, so a `Resolved` arm left on `Full` would land in the
+`_ => "internal resolve mismatch"` fallback and fail that test.
+
+**T83-9 — closed, and the 20 s is gone.** With `close_writer` short-circuited via
+`std::mem::forget(mem)` on the success path, `tests/cli_write_lease.rs` now fails in
+**1.17 s** at the new assertion:
+
+```
+panicked at tests/cli_write_lease.rs:143:5:
+lease must be released after the first derive so a second writer can acquire; stderr=
+lambo derive: conflict: session t8.3-cli-lease is already held by another writer
+(agent-free@…) — it acquired the single-writer lease 0s ago …
+```
+
+The message names the property, and the captured stderr names the holder. Compare R1's
+`no JSON-RPC frame with id 1 within 20s`. This is the single largest legibility improvement
+in the remediation.
+
+**T83-10 — closed.** Restoring the old text fails
+`cli::sqlite_tests::provision_then_every_subcommand_against_sqlite` on the explicit
+assertion. Read off the shipped binary with `--ttl-seconds 3600`:
+
+```
+reserved f2d9374a-… for agent 'a1'
+reservations are advisory and RAM-local: this reservation ends when this process exits
+(now). The TTL that would apply inside a long-lived writer such as serve is 3600s
+(expires_at 2026-08-14T11:05:45+00:00 is not a CLI hold)
+```
+
+No bare `until <timestamp>`, no "lost on restart", and the `expires_at` is present but
+explicitly disclaimed as not a CLI hold — which is the relabelling R1 asked for rather than
+a deletion. Clap help on `reserve` / `release` / `--ttl-seconds` was updated to match, so
+the message and the help no longer disagree.
+
+### T83-12 (P3) — the `saints` parity pin catches a dropped filter but not a reversed sort, which is the drift T83-11 was written about — CONFIRMED (mutation)
+
+**New finding. Escalated from T83-11's incomplete remediation.**
+
+`cli::saints::parity::canonical_memories_from_graph_agrees_with_memory` derives two
+concepts and canonizes **one** of them, then asserts `from_cli == from_memory` and
+`from_cli.len() == 1`. With a single canonical row, ordering is unobservable.
+
+Mutation — fully reverse every key of the comparator in
+`cli::saints::canonical_memories_from_graph` (`src/cli/saints.rs:55-60`):
+
+```rust
+out.sort_by(|a, b| {
+    a.blast_radius                      // was b.cmp(&a) — blast-radius DESC
+        .cmp(&b.blast_radius)
+        .then(b.created_at.cmp(&a.created_at))
+        .then(b.node_id.0.cmp(&a.node_id.0))
+});
+```
+
+Result — the entire suite stays green:
+
+```
+cargo test --features store-sqlite
+test result: ok. 664 passed; 0 failed; 1 ignored     (lib)
+… all 8 integration tests ok
+```
+
+The control does work on the other half: replacing the Canonical filter with
+`!= CanonizationStatus::Venerable` fails the parity test immediately. So the remediation
+bought the filter guard and not the ordering guard.
+
+This matters because ordering is the half T83-11 actually named — "would pass with the
+ordering reversed or the Canonical filter dropped" — and it is the half the implementor's
+own self-flag 3 is about ("if the sort order ever changes, both copies must move
+together"). `saints` output order is what an operator reads as priority; a silently
+reversed blast-radius sort puts the least load-bearing memory first and the CLI would
+disagree with MCP `lambo_saints` with no test saying so.
+
+**Fix is one fixture change, not a new test.** Canonize **at least three** concepts in
+`parity::canonical_memories_from_graph_agrees_with_memory` with distinct blast radii (and,
+ideally, two sharing a radius so the `created_at` / `node_id` tiebreakers are exercised
+too), then keep the existing `assert_eq!(from_cli, from_memory)`. `Vec` equality is
+order-sensitive, so the assertion already has the strength — it is only starved of data.
+Add an explicit `assert!(from_cli.len() >= 3)` so a future edit cannot quietly starve it
+again.
+
+**Severity P3.** Same class as T83-11: a missing guard on correct code. The shipped sort
+order is right, and `canonical_memories_from_graph` still mirrors
+`Memory::canonical_memories` line for line today. No user-visible defect exists.
+
+### Regressions introduced by the remediation — none found
+
+I looked specifically for the three the brief named.
+
+1. **No graph lock is held across an `.await`.** Every guard in `src/cli/**` is still
+   synchronous and scoped: `stats.rs:18` across `format!`; `inspect.rs:234` across
+   `resolve_focus` + `render_neighbourhood` (both sync); `saints.rs:19` a temporary guard
+   inside one call expression. `render_recall_text` takes an owned `RecallResult` and holds
+   no guard at all. The new tests take guards only in synchronous blocks.
+2. **No lease leak, and no new early return between open and close.** All four write verbs
+   still call `close_writer` unconditionally with **no `?` between `open_writer` and
+   `close_writer`** (`derive.rs` 87→110, `record_action.rs` 44→63, `reserve.rs` 55→72 and
+   83→88). The T83-2 colon check and every other new validator run *before* `open_writer`,
+   so a rejected input never takes the lease. `close_writer`'s both-failed and
+   close-failed-after-success branches are unchanged.
+3. **MCP behaviour is untouched.** `src/mcp/server.rs` is not in `4093f53` at all. The
+   changed reader signatures (`saints::run` / `stats::run` / `inspect::run` now take
+   `&dyn GraphStore`) are not on any MCP path — MCP imports `resolve_focus` /
+   `render_neighbourhood` / `caps::*`, not `run`. MCP still routes warnings into a second
+   content block via `attach_warnings`; the CLI's new `⚑` prepend is CLI-only and is
+   suppressed when the context already carries the warning, so the two surfaces neither
+   double-print nor diverge. `cli_mcp_differential_derive_record_recall` passes unchanged.
+
+One deliberate behaviour change worth flagging for T8.4/T8.5: `needs_embedder()` now takes
+`saints` / `stats` / `inspect` down the `resolve_store_only` path, which skips the
+embedder/store vector-dimension compatibility check that `resolve_from_config_path`
+performs. That is correct — those verbs never touch a vector — but a future reader verb
+that *does* embed must be added to `needs_embedder()`, or it will silently skip the
+compatibility gate. The `_ => "internal resolve mismatch"` fallback makes a mismatched pair
+loud rather than silent, and `cli_write_lease` exercises it.
+
+### Mutation scorecard (9 source mutations + 1 temporary test-body probe, all reverted)
+
+| # | Mutation | File | Caught? | By |
+|---|---|---|---|---|
+| M1 | `parent_of` ends swapped | `src/cli/derive.rs` | **YES** | `cli::tests::parent_of_writes_hierarchical_edge_parent_to_child` |
+| M2a | `#[arg(long = "occurred-at")] stamp` | `src/main.rs` | **YES** | `f18_no_cli_flag_accepts_a_client_timestamp` |
+| M2b | `alias = "created-at-utc"` on `--parent-of` | `src/main.rs` | **YES** | same (alias + substring leg) |
+| M3 | `daemon.spawn()` in reader recall | `src/cli/recall.rs` | **YES** | `reader_recall_does_not_spawn_gc_or_mutate_epoch` (text half) |
+| M3′ | M3 + text assertion neutered | `src/cli/mod.rs` (test) | **NO** | epoch/status half is inert here — caveat under T83-4 |
+| M4 | embed-failure warning back to `tracing::warn!` | `src/cli/recall.rs` | **YES** | `recall_prints_skipped_vector_leg_when_embed_fails` |
+| M5 | `canonical_memories_from_graph` sort fully reversed | `src/cli/saints.rs` | **NO** | — → **T83-12 (P3)** |
+| M5′ | Canonical filter replaced with `!= Venerable` | `src/cli/saints.rs` | **YES** | `saints::parity::canonical_memories_from_graph_agrees_with_memory` |
+| M6 | `close()` skipped on success (`mem::forget`) | `src/cli/mod.rs` | **YES** | `cli_write_lease` — **1.17 s**, message names the lease |
+| M7 | `reserve` success text reverted to `until …` / "restart" | `src/cli/reserve.rs` | **YES** | `provision_then_every_subcommand_against_sqlite` |
+| M8 | `saints` back into `needs_embedder()` | `src/main.rs` | **YES** | `saints_stats_inspect_provision_resolve_store_only` |
+
+Eight of nine source mutations are caught. The three R1 survivors (M1, M2a, M3) are all
+closed. The one survivor is M5 → T83-12.
+
+### Honest gaps in this R2 verify
+
+- **Cockroach was again never exercised.** No `LAMBO_COCKROACH_DSN`, no cluster. T83-6 is
+  verified at the resolver level (`find_provision_script_from` unit tests + the real repo
+  resolving) but the cockroach `provision` arm itself, the `#[ignore]`d live
+  `saints`/`stats`, and CLI lease behaviour against cockroach remain read-only conclusions.
+- **`--features store-cockroach,store-memory,fixtures` and `cargo check
+  --no-default-features`** are claimed clean in the Handoff Log; I ran only the five gates
+  the brief listed. Not disputed, not re-verified.
+- **T83-5 was demonstrated only through the in-process `FailingEmbedder` + a store that
+  claims `VECTOR_SEARCH`,** not through the shipped binary — no available store/embedder
+  pair produces a live embed failure under `VECTOR_SEARCH`. The unit test is honest (real
+  context block, real warning) and `emit_stdout` printing the returned string is read from
+  `main.rs`, so the operator-visible half is inference from two verified pieces rather than
+  one observation.
+- **T8.4 `demo`, T8.5 `serve_web`, and HTTP transport remain out of scope.**
+
+### Disposition — REQUEST CHANGES (one P3)
+
+The remediation is substantially real work, not paper. The P1 and all three P2s are closed
+by mutations that previously survived and now fail, and two of them are closed *better*
+than R1 asked: the F18 guard catches an alias mutant as well as a `long` mutant, and the
+lease-release pin turned a 20-second transport-flake-looking timeout into a 1.17-second
+failure that names the property. T83-7 and T83-2 were re-proved end-to-end through the
+shipped binary rather than accepted from a unit test. T83-5 additionally closed a
+silent-empty-output path nobody had noticed. No regression was found in the three places
+the remediation could plausibly have caused one — lock across await, lease leak, MCP
+behaviour — and `src/mcp/server.rs` was not touched at all.
+
+The single blocker is that **T83-11's remediation does not pin the thing T83-11 was about.**
+A fully reversed comparator in `canonical_memories_from_graph` survives all 664 lib tests
+and all 8 integration tests, because the parity fixture canonizes exactly one node. The
+assertion is the right assertion; it is starved of data.
+
+**Must fix before T8.3 is `done`:**
+
+- **T83-12** — canonize at least three concepts with distinct blast radii (plus one tie, to
+  exercise the `created_at` / `node_id` tiebreakers) in
+  `cli::saints::parity::canonical_memories_from_graph_agrees_with_memory`, and assert
+  `from_cli.len() >= 3`. Verify by re-running M5: a reversed comparator must fail.
+
+**Should carry forward as a note, not a fix (no action required for `done`):**
+
+- **T83-4** — the pin is carried by the source-text assertion on `recall.rs`; the
+  epoch/status half does not bite on an in-RAM-only spawn. It does bite on a reader that
+  persists GC output, which is the worse regression. The disposition wording above should
+  not be read as claiming two independent guards.
+
+`dev-diary/PHASE-8-surface.md` T8.3 `status:` is left at **`remediating:r1`**. Nothing in
+`src/mcp/server.rs`, T8.1, T8.2 or T8.6 needs to change. T83-12 is a single test-fixture
+edit inside `owns`.
