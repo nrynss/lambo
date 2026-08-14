@@ -484,7 +484,7 @@ is about an old holder's in-flight writes during detection, not about two proces
 the acquire. Eliminating it requires a store-checked monotonic fencing token on every write — a
 larger design change beyond T8.6's scope. **Recommended follow-up (not a T8.6 blocker):** track a
 fencing-token task for the multi-writer/swarm use case, where the 45s-outage precondition is more
-likely to be hit and the overlap window matters most.
+likely to be hit and the overlap window matters most. **Tracked: nrynss/lambo#1.**
 
 ### Gates (re-verified independently, clean tree @ `ed2821c`)
 
