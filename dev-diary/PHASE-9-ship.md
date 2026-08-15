@@ -288,4 +288,5 @@ The AWS half of that same deliverable is written but currently reads "none", per
 | Apache-2.0 license | TRUE — corrected this round |
 | Bedrock adapter | **FALSE, removed** — no implementation exists |
 | Prebuilt binaries | **NOT YET TRUE** — no release published, see blocker above |
+| MCP client interop | TRUE and **broader than first documented** — Claude Code 2.1.226 (handshake + all seven tools over stdio), **OMP v17.3.4 + DeepSeek Flash driving `derive`/`recall`/`stats` autonomously against live Cockroach**, and Pi 0.84.1 once `pi-mcp-adapter` is installed. The model-driven leg is OMP's; Claude Code's own evidence marks it NOT VERIFIED. Docs originally named only Claude Code and understated this. |
 | Managed MCP server | **UNEVIDENCED** — console-side setup recorded DONE 2026-08-13, but the split-screen `canonization_events` query was never rehearsed and no screenshot reached `dev-diary/evidence/`. It is one of the **two required** §12.1 tools, so the README asserts it while nothing in the repo backs it. Either capture the evidence during the T9.3 recording or soften the claim. |

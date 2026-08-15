@@ -96,6 +96,8 @@ Most MCP clients, such as Claude Code and Cursor, read an `mcpServers` configura
 
 The `--config` flag comes before `serve`, because it is a global flag. The `serve` flags come after. The client launches this process and talks to it over stdio, so you do not start `lambo serve` yourself when you use a client this way.
 
+Real clients drive this, not only unit tests. Claude Code completes the handshake and lists all seven tools over stdio. OMP, the Oh My Pi harness, is an MCP client out of the box. A DeepSeek Flash model running under OMP autonomously called derive, recall, and stats against a live CockroachDB session. Pi needs its MCP adapter installed first, after which it drives all seven tools.
+
 To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
 
 <Warning>

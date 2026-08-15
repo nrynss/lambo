@@ -27,6 +27,10 @@ Any number of readers query the store directly and see eventually consistent sta
 Dashboards and the CockroachDB managed MCP server work this way. Readers never write.
 Multi-writer coordination stays out of scope for v0.1.
 
+Real agents drive this. Claude Code connects over stdio and lists all seven tools, and a
+DeepSeek Flash model running under OMP autonomously called derive, recall, and stats
+against a live CockroachDB session.
+
 ## Install and run
 
 Lambo ships as one binary carrying every adapter. You install it, then write a `lambo.toml`
@@ -131,7 +135,7 @@ flowchart LR
 | Tool | How Lambo uses it |
 |---|---|
 | **Distributed vector indexing** | `concepts.embedding VECTOR(1024)` with a vector index, powering semantic concept merging. The vectors live beside the graph they describe rather than in a separate retrieval sidecar. |
-| **Cloud managed MCP server** | Connected read-only to Claude Code to inspect a live session. Querying `canonization_events` shows concepts earning status, and `edges` traces provenance. |
+| **Cloud managed MCP server** | Connected read-only to inspect a live session from an agent client. Querying `canonization_events` shows concepts earning status, and `edges` traces provenance. |
 | **ccloud CLI** | Cluster creation and DSN capture, following [`dev-diary/notes/spike-runbook.md`](dev-diary/notes/spike-runbook.md). [`scripts/provision.sh`](scripts/provision.sh) then applies the schema idempotently. |
 
 ## AWS services used
