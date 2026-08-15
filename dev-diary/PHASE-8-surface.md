@@ -1489,10 +1489,12 @@ window is 30s, so a laptop that sleeps mid-run invalidates that run; noted in
 the runbook's failure table.
 
 **Gates (full binding block, all green):** `cargo fmt --all -- --check` clean;
-all three clippy `-D warnings` lines exit 0; `cargo test` **639 lib + 5 bin + 11
-integration + 1 doctest passing, 3 ignored**; `cargo test --features
-store-sqlite` **683 lib + 5 bin + 17 integration + 1 doctest passing, 3
-ignored**; `cargo test --no-default-features --features store-sqlite --no-run`
+all three clippy `-D warnings` lines exit 0; `cargo test` **639 lib + 5 bin + 5
+integration + 1 doctest passing, 3 ignored** (T8.3 baseline 620 lib + 5 bin + 3
+integration — **+19 lib, +2 integration**); `cargo test --features store-sqlite`
+**683 lib + 5 bin + 11 integration + 1 doctest passing, 3 ignored** (baseline
+664 lib + 5 bin + 8 integration — **+19 lib, +3 integration**); no regressions.
+`cargo test --no-default-features --features store-sqlite --no-run`
 and `--features store-cockroach --no-run` both build; `cargo check
 --no-default-features` clean. `demo.rs` is not feature-gated — it uses only core
 APIs and compiles on every row of the matrix.
