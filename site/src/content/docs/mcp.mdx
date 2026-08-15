@@ -2,6 +2,8 @@
 title: "MCP tools"
 description: "The seven tools your agents call, with arguments and limits"
 ---
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
 
 Lambo is agentic graph memory. It runs as an MCP server that exposes seven tools your agent can call to store what it learns, recall relevant prior memory, and coordinate edits. A running `lambo serve --session <id>` process is the single writer for that session, and your agents connect to it as MCP clients.
 

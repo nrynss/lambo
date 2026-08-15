@@ -2,6 +2,8 @@
 title: "Configuration"
 description: "The lambo.toml keys, features, and provisioning"
 ---
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
 
 Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. An environment variable always wins over the file for any key it sets.
 

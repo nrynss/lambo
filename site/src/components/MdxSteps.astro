@@ -1,0 +1,9 @@
+---
+// A numbered list of steps. Reuses Starlight's <Steps> styling by supplying
+// its expected single <ol> wrapper around the <Step> children.
+import { Steps } from '@astrojs/starlight/components';
+---
+
+<Steps>
+  <ol><slot /></ol>
+</Steps>

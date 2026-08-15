@@ -1,0 +1,67 @@
+---
+// Renders a Mermaid diagram client-side at runtime.
+// Pass the diagram source as the `code` prop.
+interface Props {
+  code: string;
+}
+
+const { code } = Astro.props;
+const id = `mermaid-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<div class="mermaid-shell" data-mermaid-shell={id}>
+  <pre class="mermaid" id={id}>{code}</pre>
+</div>
+
+<style>
+  .mermaid-shell {
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 1rem;
+    border-radius: 0.5rem;
+  }
+  .mermaid-shell :global(svg) {
+    max-width: 100%;
+    height: auto;
+  }
+</style>
+
+<script>
+  import mermaid from 'mermaid';
+
+  let busy = false;
+
+  async function render() {
+    if (busy) return;
+    busy = true;
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'base',
+      securityLevel: 'strict',
+      flowchart: { useMaxWidth: true },
+    });
+
+    const els = Array.from(document.querySelectorAll('pre.mermaid:not([data-done])'));
+    for (const el of els) {
+      el.dataset.done = 'true';
+      const source = el.textContent ?? '';
+      const target = el.parentElement;
+      if (!target) continue;
+      try {
+        // Mount the svg element, then ask mermaid to upgrade the raw tags.
+        target.innerHTML = '<div class="mermaid-rendered"></div>';
+        const { svg } = await mermaid.render(undefined, source);
+        const box = target.querySelector('.mermaid-rendered');
+        if (box) box.innerHTML = svg;
+      } catch (err) {
+        el.style.display = 'block';
+        el.textContent = `Diagram failed to render: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+
+    busy = false;
+  }
+
+  document.addEventListener('astro:page-load', render);
+</script>
