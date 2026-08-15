@@ -14,6 +14,45 @@ The default build has no other requirements, because it uses an in-memory store 
 - A durable store. Use SQLite for a local file, or CockroachDB for a hosted cluster.
 - A real embedder. Lambo uses BGE-M3 served by a local `llama-server`.
 
+## Install a prebuilt binary
+
+Prebuilt binaries are the primary install path. Each release carries one `lambo`
+binary per platform plus a SHA-256 checksum file. Releases are published for
+Linux x86_64, Linux arm64, macOS arm64, macOS x86_64, and Windows x86_64, with
+the full adapter feature set compiled in.
+
+Install the latest release on macOS or Linux with the install script:
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
+```
+
+The script downloads the right binary for your OS and architecture, verifies its
+SHA-256 checksum against the published checksum, and installs it to
+`~/.local/bin`. To pin a specific version or choose the install directory:
+
+```bash
+LAMBO_VERSION=0.1.0 LAMBO_INSTALL_DIR=/usr/local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
+```
+
+Confirm the install with `lambo --version`.
+
+On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file
+from the release page instead. You can also install from source with cargo:
+
+```bash
+cargo install --git https://github.com/nrynss/lambo.git
+```
+
+This compiles the master branch, so it may be newer than the latest tag. Use the
+prebuilt binary to get exactly the tested, checksummed release.
+
+Each release binary carries every adapter it was compiled with, so you switch
+stores by editing `lambo.toml`, not by downloading a different binary. The
+runtime caveat is that the adapter code is compiled in, but its backing service
+must be reachable (a `llama-server` for BGE, a cluster for Cockroach).
+
 ## Build
 
 <Steps>

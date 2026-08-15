@@ -68,6 +68,11 @@ embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
 fixtures = ["store-memory"]
+# Ship profile (T8.9): the FULL adapter set carried by released prebuilt
+# binaries. One `lambo` binary holds every adapter; `[store] kind` /
+# `[embedder] kind` pick one at runtime. `embed-bedrock` is deliberately
+# omitted until the account is AUTHORIZED (notes/bedrock-authorization-blocker.md).
+ship = ["store-memory", "store-cockroach", "store-sqlite", "embed-bge", "embed-fixture"]
 
 # Convenience: hackathon / ship profile (store adapters as they land).
 demo = ["store-memory", "store-cockroach", "embed-bge", "embed-fixture", "fixtures"]
