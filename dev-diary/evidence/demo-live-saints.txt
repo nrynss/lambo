@@ -1,2 +1,2 @@
-1 canonical memory in session 'demo-rest-api-b145dc80-2fa3-4073-9dd0-a4a43d2a50f6'
-  user schema [Entity, canonical]  blast_radius=9  accesses=0  since 2026-08-15T09:28:25.329194+00:00
+1 canonical memory in session 'demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2'
+  user schema [Entity, canonical]  blast_radius=9  accesses=0  since 2026-08-15T09:37:00.127709+00:00
