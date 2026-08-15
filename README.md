@@ -154,6 +154,6 @@ GitHub Pages from `main`.
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Lambo v0.1 was written during the hackathon submission period. It draws on a prior v0.6.0
-design document by the same author, credited here for honesty. No code from that document
-was incorporated.
+Lambo was written during the hackathon submission period. It draws on a prior design
+document by the same author, credited here for honesty. No code from that document was
+incorporated.
