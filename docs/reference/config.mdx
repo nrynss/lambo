@@ -47,6 +47,8 @@ unknown field `default_top_k`, expected `store` or `embedder`
 
 `kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb`, `postgres`, and `pg` for `cockroach`, and `sqlite3` for `sqlite`.
 
+The in-memory store is scoped to one process. Many agents can share it through a single `lambo serve`, because they all talk to that one process. Nothing outside that process can read it, and it does not survive a restart. Use `sqlite` or `cockroach` when a separate command line process has to see the same session.
+
 The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
 
 ## Embedder

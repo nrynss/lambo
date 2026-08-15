@@ -43,12 +43,19 @@ The config file picks the store and the embedder at runtime. This one needs no e
 
 ```toml lambo.toml
 [store]
-kind = "memory"
+kind = "sqlite"
+path = "./lambo.db"
 
 [embedder]
 kind = "fixture"
 dim = 1024
 ```
+
+SQLite is a local file, so this still needs no external service, and it survives a restart. Create the schema once with `lambo --config lambo.toml provision`.
+
+<Warning>
+The in-memory store lives inside one process. It is ideal for a single `lambo serve` that many agents connect to, because they all share that one process's graph. It does not survive that process exiting, and a separate command line process cannot read it. Choose `sqlite` or `cockroach` whenever more than one process is involved.
+</Warning>
 
 Every key has an environment variable override. See [Configuration](/lambo/config/) for the full set.
 
@@ -66,9 +73,16 @@ Start a server in one terminal and read from it in another.
     lambo serve --config lambo.toml --session demo --agent agent-a
     ```
   </Step>
-  <Step title="Recall from another terminal">
+  <Step title="Write a concept from another terminal">
     ```bash
-    lambo --config lambo.toml recall --session demo --query "user schema"
+    lambo --config lambo.toml derive --session other --agent agent-b \
+      --content "user schema" --kind entity
+    ```
+    Use a second session name, because the server already holds the writer lease on `demo`.
+  </Step>
+  <Step title="Read it back">
+    ```bash
+    lambo --config lambo.toml recall --session other --query "user schema"
     ```
     Recall is a read, so it works whether or not a server holds the session.
   </Step>

@@ -17,15 +17,28 @@ The script picks the binary for your platform, verifies its SHA-256 checksum, an
 
 ## Configure a quick session
 
-Create a `lambo.toml` that selects the in-memory store and the fixture embedder. This file is how you choose backends. The binary already carries all of them.
+Create a `lambo.toml` that selects a local SQLite file and the fixture embedder. This file is how you choose backends. The binary already carries all of them.
 
 ```toml lambo.toml
 [store]
-kind = "memory"
+kind = "sqlite"
+path = "./lambo.db"
 
 [embedder]
 kind = "fixture"
 dim = 1024
+```
+
+SQLite rather than the in-memory store, because each command below runs as its own process. The in-memory store lives inside one process and is gone when that process exits, so a write from one command would not be visible to the next.
+
+Create the schema once.
+
+```bash
+lambo --config lambo.toml provision
+```
+
+```
+sqlite schema provisioned (init_schema, idempotent)
 ```
 
 ## Write memory
@@ -45,6 +58,10 @@ Read the concept back with recall. Recall is a read, so it works whether or not 
 
 ```bash
 lambo --config lambo.toml recall --session demo --query "user schema"
+```
+
+```
+user schema [Entity] (score 0.29)
 ```
 
 The recall returns the matching concept with its type and score.

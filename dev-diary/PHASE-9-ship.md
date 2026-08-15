@@ -220,6 +220,38 @@ Consequences the next agent must respect:
   (`demo.rs:1219/1091/1039`) into `src/test_util.rs`. T9.6's swarm benchmark will want that
   fixed-point protocol. No user-visible effect, so it can wait.
 
+#### The getting-started path was broken, and why nobody caught it
+
+**The in-memory store is scoped to one process, and no page said so.** That single
+undocumented fact broke the quickstart end to end:
+
+```
+$ lambo --config lambo.toml derive --session demo --agent agent-a --content "user schema" --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+$ lambo --config lambo.toml recall --session demo --query "user schema"
+                                     # empty. exit 0.
+```
+
+Each CLI verb is its own process, so with `kind = "memory"` the derive dies with the
+process that made it and the next process starts from an empty graph. The page promised
+"the recall returns the matching concept with its type and score". It returned nothing, and
+exit code 0 made it look like a silent product failure rather than a config mistake.
+
+This predates T9.1 — the original quickstart had the same memory-store flow. The binary-first
+rewrite kept it. It survived because every automated test drives one process, and because
+`lambo demo` genuinely does work on the memory store (one process, start to finish), so the
+store looked fine everywhere anyone was looking.
+
+**Fixed:** quickstart and both installation copies now use `kind = "sqlite"` with a
+`provision` step, and carry the real captured output (`user schema [Entity] (score 0.29)`).
+The installation first-run also stopped recalling from a session the server holds, which
+would have hit the writer lease. Both `config` pages now state the per-process scoping
+directly.
+
+**Rule for anyone writing docs here:** if a documented sequence spans more than one `lambo`
+invocation, it needs `sqlite` or `cockroach`. `memory` is only correct inside a single
+process, which means one `serve` with agents attached to it, or `lambo demo`.
+
 #### BLOCKER — the documented install path does not exist yet
 
 `gh release list` is **empty** and `git tag -l` is **empty**. No release, no tag. So today:
@@ -289,4 +321,10 @@ The AWS half of that same deliverable is written but currently reads "none", per
 | Bedrock adapter | **FALSE, removed** — no implementation exists |
 | Prebuilt binaries | **NOT YET TRUE** — no release published, see blocker above |
 | MCP client interop | TRUE and **broader than first documented** — Claude Code 2.1.226 (handshake + all seven tools over stdio), **OMP v17.3.4 + DeepSeek Flash driving `derive`/`recall`/`stats` autonomously against live Cockroach**, and Pi 0.84.1 once `pi-mcp-adapter` is installed. The model-driven leg is OMP's; Claude Code's own evidence marks it NOT VERIFIED. Docs originally named only Claude Code and understated this. |
+| Demo golden numbers | TRUE on a durable store — re-ran against SQLite: 12 interactions, 27 concepts, blast radius 9, score 2.27, identical to the memory-store run. Cockroach untested (no DSN here). |
+| Quickstart write-then-read | **WAS BROKEN, FIXED** — see below |
+| CLI verbs and flags | TRUE — every subcommand and flag the docs name exists in the binary |
+| Release matrix and asset names | TRUE — 5 targets, `lambo-<version>-<name>[.exe]` + `.sha256`, matching the docs |
+| Ports 7700 / 7710 | TRUE — clap defaults |
+| serve-web is read-only | TRUE and **test-enforced** — `serve_web.rs:1535` greps its own production source for `Memory::builder`, `open_writer`, `acquire_lease`, `.spawn()` |
 | Managed MCP server | **UNEVIDENCED** — console-side setup recorded DONE 2026-08-13, but the split-screen `canonization_events` query was never rehearsed and no screenshot reached `dev-diary/evidence/`. It is one of the **two required** §12.1 tools, so the README asserts it while nothing in the repo backs it. Either capture the evidence during the T9.3 recording or soften the claim. |
