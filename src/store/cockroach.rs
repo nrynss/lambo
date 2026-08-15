@@ -104,6 +104,10 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
+use super::batch::{
+    batch_session_ids, plan_flush, seed_concept_rows, seed_edge_rows, BulkLimits, ConceptRow,
+    FlushStep, CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
@@ -122,6 +126,49 @@ const INIT_SQL: &str = include_str!("../../migrations/cockroach/001_init.sql");
 /// Pool size is deliberately small: Lambo is single-writer per session (spec §2.4) and
 /// the demo runs one process.
 const MAX_POOL_CONNECTIONS: u32 = 4;
+
+/// Rows per multi-row upsert statement (L82-1).
+///
+/// The hard ceiling is PostgreSQL's wire-protocol limit of 65535 bind
+/// parameters per statement: 16 columns caps `concepts` at 4095 rows and 9
+/// columns caps `edges` at 7281. These sit an order of magnitude below that —
+/// enough that the live finding's 784-mutation tail plans into single-digit
+/// statements, while keeping any one statement small enough that CockroachDB
+/// plans it without trouble and a retry re-sends little.
+///
+/// **`interactions` is deliberately 1.** `interactions.previous_id REFERENCES
+/// interactions(id)` is a *self* foreign key, and a batch's interactions form a
+/// chain. Both engines check foreign keys at end-of-statement, so a multi-row
+/// insert of a chain should be fine — but "should be" is not a thing this can
+/// verify from a machine with no cluster, and the payoff is nil: a burst carries
+/// one interaction per client call (four in the live repro) against hundreds of
+/// concepts and edges. Row-at-a-time here costs nothing and assumes nothing.
+const BULK_LIMITS: BulkLimits = BulkLimits {
+    interactions: 1,
+    concepts: 256,
+    edges: 512,
+};
+
+/// PostgreSQL's wire-protocol ceiling on bind parameters per statement, which
+/// CockroachDB inherits by speaking the same protocol.
+const PG_MAX_BIND_PARAMETERS: usize = 65535;
+
+// R1-4: the ceiling arithmetic above is prose, and prose does not fail a build.
+// A column added to `concepts` without revisiting the row limit would push a
+// chunk over the wire limit and only be discovered against a real server; these
+// turn it into a compile error.
+const _: () = assert!(
+    BULK_LIMITS.interactions * INTERACTION_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "interactions chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.concepts * CONCEPT_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "concepts chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.edges * EDGE_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "edges chunk exceeds the PostgreSQL bind-parameter limit"
+);
 
 // ---------------------------------------------------------------------------
 // vector_candidates — global fetch sizing (DECISION D1)
@@ -219,10 +266,17 @@ ON CONFLICT (session_id) DO UPDATE SET
     embedding_dim = EXCLUDED.embedding_dim
 "#;
 
-const UPSERT_INTERACTION_SQL: &str = r#"
+/// Upserts are issued as **multi-row** statements (L82-1), so each is built as
+/// `PREFIX` + a `VALUES` list of however many rows the plan put in the chunk +
+/// `ON CONFLICT`. Splitting the statement in two named halves is what lets one
+/// definition serve a 1-row seed and a 256-row flush chunk without the two
+/// drifting apart. `sqlx::QueryBuilder` numbers the placeholders.
+const INSERT_INTERACTION_PREFIX_SQL: &str = r#"
 INSERT INTO interactions (
     id, session_id, agent_id, prompt_text, previous_id, created_at
-) VALUES ($1, $2, $3, $4, $5, $6)
+) "#;
+
+const ON_CONFLICT_INTERACTION_SQL: &str = r#"
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     agent_id = EXCLUDED.agent_id,
@@ -244,13 +298,15 @@ ON CONFLICT (id) DO UPDATE SET
 /// overwrite the hop's effect from `EXCLUDED`, and the transition replaying
 /// behind it in the same batch is a no-op by design (its audit row is already
 /// recorded), so nothing repairs it. Full rationale on `Mutation::UpsertNode`.
-const UPSERT_CONCEPT_SQL: &str = r#"
+const INSERT_CONCEPT_PREFIX_SQL: &str = r#"
 INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
     gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
     chunk_group_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::VECTOR, $16)
+) "#;
+
+const ON_CONFLICT_CONCEPT_SQL: &str = r#"
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     content = EXCLUDED.content,
@@ -272,11 +328,13 @@ ON CONFLICT (id) DO UPDATE SET
 /// counts creation as the first write, `reinforcements = 1`; we store its values, never
 /// the DDL default 0). Updating `id` on conflict mirrors MemoryStore's whole-record
 /// replace; the graph never reuses an id with a different natural key.
-const UPSERT_EDGE_SQL: &str = r#"
+const INSERT_EDGE_PREFIX_SQL: &str = r#"
 INSERT INTO edges (
     id, session_id, source, target, edge_type, weight, reinforcements,
     created_at, last_reinforced
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+) "#;
+
+const ON_CONFLICT_EDGE_SQL: &str = r#"
 ON CONFLICT (source, target, edge_type) DO UPDATE SET
     id = EXCLUDED.id,
     session_id = EXCLUDED.session_id,
@@ -1183,14 +1241,20 @@ impl CockroachStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
+            // Interactions before concepts (`concepts.origin_interaction`
+            // REFERENCES interactions(id)); each chunked the same way a flush
+            // is, so the seed path exercises the same statements (L82-1).
             for i in &snapshot.interactions {
-                upsert_interaction(&mut *tx, i).await?;
+                bulk_upsert_interactions(&mut *tx, &[i]).await?;
             }
-            for c in &snapshot.concepts {
-                upsert_concept(&mut *tx, c).await?;
+            // Deduplicated first (R1-6): a multi-row statement rejects colliding
+            // input rows outright, where the row-at-a-time seed this replaced
+            // simply last-wins'd them.
+            for chunk in seed_concept_rows(&snapshot.concepts).chunks(BULK_LIMITS.concepts) {
+                bulk_upsert_concepts(&mut *tx, chunk).await?;
             }
-            for e in &snapshot.edges {
-                upsert_edge(&mut *tx, e).await?;
+            for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
+                bulk_upsert_edges(&mut *tx, chunk).await?;
             }
             for s in &snapshot.synonyms {
                 sqlx::query(UPSERT_SYNONYM_SQL)
@@ -1362,65 +1426,260 @@ impl CockroachStore {
 
 // --- statement helpers (shared by flush and seed) ---
 
-async fn upsert_interaction(
+/// Multi-row upsert of one planned [`FlushStep::Interactions`] chunk (L82-1).
+///
+/// `rows` is already deduplicated on `id` and capped at
+/// [`BULK_LIMITS`]`.interactions`.
+async fn bulk_upsert_interactions(
     tx: &mut sqlx::PgConnection,
-    i: &Interaction,
+    rows: &[&Interaction],
 ) -> Result<(), StoreError> {
-    sqlx::query(UPSERT_INTERACTION_SQL)
-        .bind(i.id.0)
-        .bind(&i.session_id.0)
-        .bind(&i.agent_id.0)
-        .bind(&i.prompt_text)
-        .bind(i.previous_id.map(|n| n.0))
-        .bind(i.created_at)
+    if rows.is_empty() {
+        return Ok(());
+    }
+    interaction_upsert_query(rows)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
     Ok(())
 }
 
-async fn upsert_concept(tx: &mut sqlx::PgConnection, c: &Concept) -> Result<(), StoreError> {
-    let embedding = match &c.embedding {
-        Some(v) => Some(encode_vector(v)?),
-        None => None,
-    };
-    sqlx::query(UPSERT_CONCEPT_SQL)
-        .bind(c.id.0)
-        .bind(&c.session_id.0)
-        .bind(&c.content)
-        .bind(&c.canonical_key)
-        .bind(concept_type_sql(c.concept_type))
-        .bind(c.origin_interaction.0)
-        .bind(&c.origin_agent.0)
-        .bind(c.created_at)
-        .bind(c.access_count)
-        .bind(c.last_accessed)
-        .bind(c.gc_survived)
-        .bind(canonization_status_sql(c.canonization_status))
-        .bind(c.blast_radius)
-        .bind(c.last_demotion_time)
-        .bind(embedding)
-        .bind(c.chunk_group_id.clone())
+/// The statement [`bulk_upsert_interactions`] runs, built but not executed.
+///
+/// Separate from the execution so the generated SQL — the one part of this
+/// change no local test can reach through a cluster — is inspectable by
+/// `sql_shape_is_a_multi_row_upsert`.
+fn interaction_upsert_query<'a>(
+    rows: &'a [&'a Interaction],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_INTERACTION_PREFIX_SQL);
+    qb.push_values(rows.iter(), |mut b, i| {
+        b.push_bind(i.id.0)
+            .push_bind(i.session_id.0.as_str())
+            .push_bind(i.agent_id.0.as_str())
+            .push_bind(i.prompt_text.as_deref())
+            .push_bind(i.previous_id.map(|n| n.0))
+            .push_bind(i.created_at);
+    });
+    qb.push(ON_CONFLICT_INTERACTION_SQL);
+    qb
+}
+
+/// Multi-row upsert of one planned [`FlushStep::Concepts`] chunk (L82-1).
+///
+/// Each row's three canonization columns come from its
+/// [`ConceptRow::canonization`], **not** from `row.concept` — see [`ConceptRow`]
+/// for why a deduplicated row splits them.
+///
+/// Vectors are encoded up front because `push_values`' closure cannot fail.
+async fn bulk_upsert_concepts(
+    tx: &mut sqlx::PgConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut embeddings: Vec<Option<String>> = Vec::with_capacity(rows.len());
+    for r in rows {
+        embeddings.push(match &r.concept.embedding {
+            Some(v) => Some(encode_vector(v)?),
+            None => None,
+        });
+    }
+
+    concept_upsert_query(rows, &embeddings)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
     Ok(())
 }
 
-async fn upsert_edge(tx: &mut sqlx::PgConnection, e: &Edge) -> Result<(), StoreError> {
-    sqlx::query(UPSERT_EDGE_SQL)
-        .bind(e.id.0)
-        .bind(&e.session_id.0)
-        .bind(e.source.0)
-        .bind(e.target.0)
-        .bind(edge_type_sql(e.edge_type))
-        .bind(e.weight)
-        .bind(e.reinforcements)
-        .bind(e.created_at)
-        .bind(e.last_reinforced)
+/// The statement [`bulk_upsert_concepts`] runs, built but not executed.
+fn concept_upsert_query<'a>(
+    rows: &'a [ConceptRow<'a>],
+    embeddings: &'a [Option<String>],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_CONCEPT_PREFIX_SQL);
+    qb.push_values(
+        rows.iter().zip(embeddings.iter()),
+        |mut b, (r, embedding)| {
+            let c = r.concept;
+            b.push_bind(c.id.0)
+                .push_bind(c.session_id.0.as_str())
+                .push_bind(c.content.as_str())
+                .push_bind(c.canonical_key.as_str())
+                .push_bind(concept_type_sql(c.concept_type))
+                .push_bind(c.origin_interaction.0)
+                .push_bind(c.origin_agent.0.as_str())
+                .push_bind(c.created_at)
+                .push_bind(c.access_count)
+                .push_bind(c.last_accessed)
+                .push_bind(c.gc_survived)
+                .push_bind(canonization_status_sql(r.canonization.status))
+                .push_bind(r.canonization.blast_radius)
+                .push_bind(r.canonization.last_demotion_time)
+                .push_bind(embedding.as_deref())
+                // The column is `VECTOR(n)` and the value travels as a text
+                // literal, so the cast is part of the value expression — it must
+                // ride with this placeholder, not with the separator.
+                .push_unseparated("::VECTOR")
+                .push_bind(c.chunk_group_id.as_deref());
+        },
+    );
+    qb.push(ON_CONFLICT_CONCEPT_SQL);
+    qb
+}
+
+/// Multi-row upsert of one planned [`FlushStep::Edges`] chunk (L82-1).
+///
+/// `rows` is already deduplicated on the **natural** key
+/// `(source, target, edge_type)` — the conflict target below — because two rows
+/// colliding there in one statement is an error, not a last-write-wins.
+async fn bulk_upsert_edges(tx: &mut sqlx::PgConnection, rows: &[&Edge]) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    edge_upsert_query(rows)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
+    Ok(())
+}
+
+/// The statement [`bulk_upsert_edges`] runs, built but not executed.
+fn edge_upsert_query<'a>(rows: &'a [&'a Edge]) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_EDGE_PREFIX_SQL);
+    qb.push_values(rows.iter(), |mut b, e| {
+        b.push_bind(e.id.0)
+            .push_bind(e.session_id.0.as_str())
+            .push_bind(e.source.0)
+            .push_bind(e.target.0)
+            .push_bind(edge_type_sql(e.edge_type))
+            .push_bind(e.weight)
+            .push_bind(e.reinforcements)
+            .push_bind(e.created_at)
+            .push_bind(e.last_reinforced);
+    });
+    qb.push(ON_CONFLICT_EDGE_SQL);
+    qb
+}
+
+/// Apply one planned [`FlushStep`].
+async fn apply_step(tx: &mut sqlx::PgConnection, step: &FlushStep<'_>) -> Result<(), StoreError> {
+    match step {
+        FlushStep::Interactions(rows) => bulk_upsert_interactions(&mut *tx, rows).await,
+        FlushStep::Concepts(rows) => bulk_upsert_concepts(&mut *tx, rows).await,
+        FlushStep::Edges(rows) => bulk_upsert_edges(&mut *tx, rows).await,
+        FlushStep::Single(m) => apply_single(&mut *tx, m).await,
+    }
+}
+
+/// Apply one mutation the planner could not bulk — a deletion, a canonization
+/// transition, or a session-column write.
+///
+/// Every one of these can *observe* a row an upsert may have written, which is
+/// exactly why [`plan_flush`] emits them alone and in place (see
+/// `store::batch`). The upsert arms are unreachable for the same reason, but
+/// they are handled rather than `unreachable!()`d: a planner change must not be
+/// able to turn into a panic inside a flush.
+async fn apply_single(tx: &mut sqlx::PgConnection, m: &Mutation) -> Result<(), StoreError> {
+    match m {
+        Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        } => bulk_upsert_interactions(&mut *tx, &[i]).await?,
+        Mutation::UpsertNode {
+            node: Node::Concept(c),
+        } => bulk_upsert_concepts(&mut *tx, &[ConceptRow::new(c)]).await?,
+        Mutation::UpsertEdge { edge } => bulk_upsert_edges(&mut *tx, &[edge]).await?,
+        Mutation::DeleteNode { id } => {
+            // Explicit incident-edge cleanup: edges carry no FK on source/target
+            // (spec §4); delete the node row from both node tables (interaction
+            // deletes are unreachable under the graph contract — see module doc).
+            sqlx::query(DELETE_NODE_EDGES_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node edges: {m}")))?;
+            sqlx::query(DELETE_NODE_CONCEPTS_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node concepts: {m}")))?;
+            sqlx::query(DELETE_NODE_INTERACTIONS_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node interactions: {m}")))?;
+        }
+        Mutation::DeleteEdge { id } => {
+            sqlx::query(DELETE_EDGE_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
+        }
+        Mutation::CanonizationTransition { event } => {
+            apply_canonization(&mut *tx, event).await?;
+        }
+        Mutation::SetRootGoal { session_id, goal } => {
+            let encoded = goal
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
+            let res = sqlx::query(SET_ROOT_GOAL_SQL)
+                .bind(session_id.as_str())
+                .bind(encoded.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
+            if res.rows_affected() == 0 {
+                return Err(StoreError::NotFound(format!(
+                    "sessions row for {session_id} while setting root_goal"
+                )));
+            }
+        }
+        Mutation::SetEmbedding {
+            session_id,
+            embedding,
+        } => {
+            if embedding.is_some() {
+                sqlx::query(QUARANTINE_LEGACY_EMBEDDINGS_SQL)
+                    .bind(session_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        map_write_err(e, |m| format!("quarantine legacy embeddings: {m}"))
+                    })?;
+            }
+            let res = sqlx::query(SET_EMBEDDING_SQL)
+                .bind(session_id.as_str())
+                .bind(embedding.as_ref().map(|e| e.kind.as_str()))
+                .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
+                .bind(
+                    embedding
+                        .as_ref()
+                        .map(|e| i64::try_from(e.dim))
+                        .transpose()
+                        .map_err(|_| {
+                            StoreError::Invariant(format!(
+                                "embedding dimension does not fit i64 for {session_id}"
+                            ))
+                        })?,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
+            if res.rows_affected() == 0 {
+                return Err(StoreError::NotFound(format!(
+                    "sessions row for {session_id} while setting embedding"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1558,21 +1817,7 @@ impl GraphStore for CockroachStore {
             // Ensure a sessions row for every session the batch writes into — the DDL
             // enforces `REFERENCES sessions(session_id)` on interactions/concepts, and the
             // graph tier creates sessions implicitly (MemoryStore::ensure_session parity).
-            let mut sids: Vec<String> = Vec::new();
-            for m in &batch.mutations {
-                let sid = match m {
-                    Mutation::UpsertNode { node } => node.session_id().as_str(),
-                    Mutation::UpsertEdge { edge } => edge.session_id.as_str(),
-                    Mutation::CanonizationTransition { event } => event.session_id.as_str(),
-                    Mutation::SetRootGoal { session_id, .. } => session_id.as_str(),
-                    Mutation::SetEmbedding { session_id, .. } => session_id.as_str(),
-                    Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
-                };
-                if !sids.iter().any(|s| s == sid) {
-                    sids.push(sid.to_string());
-                }
-            }
-            for sid in &sids {
+            for sid in batch_session_ids(&batch.mutations) {
                 sqlx::query(UPSERT_SESSION_ROW_SQL)
                     .bind(sid)
                     .execute(&mut *tx)
@@ -1580,106 +1825,17 @@ impl GraphStore for CockroachStore {
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             }
 
-            // Replay in submission order — see module doc (T2.1 M2: MUST NOT re-sort).
-            for m in &batch.mutations {
-                match m {
-                    Mutation::UpsertNode { node } => match node {
-                        Node::Interaction(i) => upsert_interaction(&mut *tx, i).await?,
-                        Node::Concept(c) => upsert_concept(&mut *tx, c).await?,
-                    },
-                    Mutation::UpsertEdge { edge } => upsert_edge(&mut *tx, edge).await?,
-                    Mutation::DeleteNode { id } => {
-                        // Explicit incident-edge cleanup: edges carry no FK on source/target
-                        // (spec §4); delete the node row from both node tables (interaction
-                        // deletes are unreachable under the graph contract — see module doc).
-                        sqlx::query(DELETE_NODE_EDGES_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("delete node edges: {m}")))?;
-                        sqlx::query(DELETE_NODE_CONCEPTS_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| {
-                                map_write_err(e, |m| format!("delete node concepts: {m}"))
-                            })?;
-                        sqlx::query(DELETE_NODE_INTERACTIONS_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| {
-                                map_write_err(e, |m| format!("delete node interactions: {m}"))
-                            })?;
-                    }
-                    Mutation::DeleteEdge { id } => {
-                        sqlx::query(DELETE_EDGE_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
-                    }
-                    Mutation::CanonizationTransition { event } => {
-                        apply_canonization(&mut *tx, event).await?;
-                    }
-                    Mutation::SetRootGoal { session_id, goal } => {
-                        let encoded = goal
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
-                        let res = sqlx::query(SET_ROOT_GOAL_SQL)
-                            .bind(session_id.as_str())
-                            .bind(encoded.as_deref())
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
-                        if res.rows_affected() == 0 {
-                            return Err(StoreError::NotFound(format!(
-                                "sessions row for {session_id} while setting root_goal"
-                            )));
-                        }
-                    }
-                    Mutation::SetEmbedding {
-                        session_id,
-                        embedding,
-                    } => {
-                        if embedding.is_some() {
-                            sqlx::query(QUARANTINE_LEGACY_EMBEDDINGS_SQL)
-                                .bind(session_id.as_str())
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(|e| {
-                                    map_write_err(e, |m| {
-                                        format!("quarantine legacy embeddings: {m}")
-                                    })
-                                })?;
-                        }
-                        let res = sqlx::query(SET_EMBEDDING_SQL)
-                            .bind(session_id.as_str())
-                            .bind(embedding.as_ref().map(|e| e.kind.as_str()))
-                            .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
-                            .bind(
-                                embedding
-                                    .as_ref()
-                                    .map(|e| i64::try_from(e.dim))
-                                    .transpose()
-                                    .map_err(|_| {
-                                        StoreError::Invariant(format!(
-                                            "embedding dimension does not fit i64 for {session_id}"
-                                        ))
-                                    })?,
-                            )
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
-                        if res.rows_affected() == 0 {
-                            return Err(StoreError::NotFound(format!(
-                                "sessions row for {session_id} while setting embedding"
-                            )));
-                        }
-                    }
-                }
+            // Replay the batch as planned statements rather than one statement
+            // per mutation (L82-1). Order is still the batch's own — see
+            // `store::batch` for why bucketing upserts by table preserves it,
+            // and why every mutation that could *observe* a row is a barrier.
+            //
+            // This is the fix for the live finding: against a serverless
+            // cluster the old loop cost one network round-trip per mutation, so
+            // a 784-mutation shutdown tail could not drain inside `close()`'s
+            // 10 s grace window and was discarded.
+            for step in plan_flush(&batch.mutations, BULK_LIMITS) {
+                apply_step(&mut *tx, &step).await?;
             }
             tx.commit()
                 .await
@@ -2017,6 +2173,58 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn sql_test_ts() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_752_000_000, 0).unwrap()
+    }
+
+    /// Minimal rows for the SQL-shape tests. Only the *shape* of the generated
+    /// statement is under test, so the values are arbitrary.
+    fn test_interaction(id: NodeId) -> Interaction {
+        Interaction {
+            id,
+            session_id: SessionId::from("sql-shape"),
+            agent_id: crate::types::AgentId::from("agent-a"),
+            prompt_text: Some("p".into()),
+            previous_id: None,
+            created_at: sql_test_ts(),
+        }
+    }
+
+    fn test_concept(origin: NodeId, content: &str) -> Concept {
+        Concept {
+            id: NodeId::new(),
+            session_id: SessionId::from("sql-shape"),
+            content: content.into(),
+            canonical_key: content.into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: crate::types::AgentId::from("agent-a"),
+            created_at: sql_test_ts(),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            chunk_group_id: None,
+        }
+    }
+
+    fn test_edge(source: NodeId, target: NodeId, edge_type: EdgeType) -> Edge {
+        Edge {
+            id: NodeId::new(),
+            session_id: SessionId::from("sql-shape"),
+            source,
+            target,
+            edge_type,
+            weight: 0.5,
+            reinforcements: 1,
+            created_at: sql_test_ts(),
+            last_reinforced: sql_test_ts(),
+        }
+    }
+
     /// T7.4: the ANN accuracy dial parses and fails closed. A tuning knob that
     /// is silently ignored on a typo is worse than no knob — the operator
     /// believes accuracy was raised when it was not.
@@ -2343,13 +2551,44 @@ mod tests {
         max
     }
 
+    /// Build the concept upsert for `n` rows and hand back its SQL text.
+    fn concept_sql_for(n: usize) -> String {
+        let iid = NodeId::new();
+        let concepts: Vec<Concept> = (0..n)
+            .map(|k| {
+                let mut c = test_concept(iid, &format!("c{k}"));
+                c.embedding = Some(vec![0.5; 4]);
+                c
+            })
+            .collect();
+        let rows: Vec<ConceptRow<'_>> = concepts.iter().map(ConceptRow::new).collect();
+        let embeddings: Vec<Option<String>> = vec![Some("[0.5,0.5,0.5,0.5]".into()); n];
+        concept_upsert_query(&rows, &embeddings).sql().to_string()
+    }
+
     #[test]
     fn upsert_placeholder_shapes_match_structs() {
         // Snapshot->row mapping shapes: every struct column has exactly one placeholder
-        // and the column counts match the INSERT column lists.
-        assert_eq!(placeholder_max(UPSERT_INTERACTION_SQL), 6);
-        assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 16);
-        assert_eq!(placeholder_max(UPSERT_EDGE_SQL), 9);
+        // and the column counts match the INSERT column lists. Upserts are built
+        // per-call by `QueryBuilder` now (L82-1), so a single row is the shape
+        // the old fixed-placeholder statements had.
+        let iid = NodeId::new();
+        let i = test_interaction(iid);
+        // Asserted against the shared column constants, not bare literals: those
+        // constants are what the per-adapter bind-parameter const-asserts divide
+        // the backend limit by (R1-4), so a column added to a statement without
+        // updating them must fail here rather than silently widen a chunk past
+        // the limit.
+        assert_eq!(
+            placeholder_max(interaction_upsert_query(&[&i]).sql()),
+            INTERACTION_COLUMNS
+        );
+        assert_eq!(placeholder_max(&concept_sql_for(1)), CONCEPT_COLUMNS);
+        let e = test_edge(iid, iid, EdgeType::Derives);
+        assert_eq!(
+            placeholder_max(edge_upsert_query(&[&e]).sql()),
+            EDGE_COLUMNS
+        );
         // STORE-1: the full-snapshot upsert now carries the embedding contract
         // (kind/model/dim) alongside root_goal/created_at/closed_at.
         assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 7);
@@ -2364,11 +2603,59 @@ mod tests {
         assert!(INSERT_CANONIZATION_EVENT_SQL.contains("last_demotion_time"));
         // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is the
         // 16th, nullable, and included in the conflict UPDATE.
-        assert!(UPSERT_CONCEPT_SQL.contains("$15::VECTOR"));
-        assert!(UPSERT_CONCEPT_SQL.contains("embedding = EXCLUDED.embedding"));
-        assert!(UPSERT_CONCEPT_SQL.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
+        let concept_sql = concept_sql_for(1);
+        assert!(concept_sql.contains("$15::VECTOR"), "{concept_sql}");
+        assert!(concept_sql.contains("embedding = EXCLUDED.embedding"));
+        assert!(concept_sql.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
         // Edge conflict targets the natural key; id is replaceable on conflict.
-        assert!(UPSERT_EDGE_SQL.contains("ON CONFLICT (source, target, edge_type)"));
+        assert!(edge_upsert_query(&[&e])
+            .sql()
+            .contains("ON CONFLICT (source, target, edge_type)"));
+    }
+
+    /// **L82-1.** The flush issues one *multi-row* statement per planned chunk,
+    /// and the generated SQL is the half of that change no test on this machine
+    /// can put in front of a cluster — so it is asserted directly.
+    ///
+    /// Three rows must produce 48 placeholders in three `VALUES` tuples, carry
+    /// the `::VECTOR` cast on *each* row's embedding placeholder (the cast is
+    /// part of the value expression, not the statement), and end in exactly one
+    /// `ON CONFLICT` clause.
+    #[test]
+    fn sql_shape_is_a_multi_row_upsert() {
+        let sql = concept_sql_for(3);
+        assert_eq!(
+            placeholder_max(&sql),
+            48,
+            "3 rows x 16 columns, numbered across the whole statement: {sql}"
+        );
+        for n in [15, 31, 47] {
+            assert!(
+                sql.contains(&format!("${n}::VECTOR")),
+                "every row's embedding placeholder needs its own cast, missing ${n}: {sql}"
+            );
+        }
+        assert_eq!(
+            sql.matches("ON CONFLICT").count(),
+            1,
+            "the conflict clause is appended once, after the whole VALUES list: {sql}"
+        );
+        assert_eq!(
+            sql.matches("INSERT INTO concepts").count(),
+            1,
+            "one statement, not three: {sql}"
+        );
+
+        // Edges keep the natural-key conflict target across rows.
+        let a = NodeId::new();
+        let edges = [
+            test_edge(a, NodeId::new(), EdgeType::Causal),
+            test_edge(a, NodeId::new(), EdgeType::Dependency),
+        ];
+        let refs: Vec<&Edge> = edges.iter().collect();
+        let edge_sql = edge_upsert_query(&refs).sql().to_string();
+        assert_eq!(placeholder_max(&edge_sql), 18, "2 rows x 9 columns");
+        assert_eq!(edge_sql.matches("ON CONFLICT").count(), 1);
     }
 
     /// R2-1 (no live cluster: SQL text is the contract). The three
@@ -2378,9 +2665,16 @@ mod tests {
     /// back out of the row (or erase a demotion cooldown). `gc_survived`,
     /// which shares the same appenders, must still be updated: the property
     /// is column ownership, not a blanket skip.
+    ///
+    /// The multi-row rewrite (L82-1) is exactly where this could have been lost,
+    /// so the assertion runs against the generated statement rather than a
+    /// constant — and `store::batch` carries the matching property for the
+    /// *values*: a deduplicated row takes its canonization columns from the
+    /// first occurrence, which is what row-by-row replay left in the row.
     #[test]
     fn concept_upsert_does_not_write_the_canonization_columns_on_conflict() {
-        let (insert, on_conflict) = UPSERT_CONCEPT_SQL
+        let sql = concept_sql_for(2);
+        let (insert, on_conflict) = sql
             .split_once("ON CONFLICT")
             .expect("the concept upsert has a conflict clause");
         for col in ["canonization_status", "blast_radius", "last_demotion_time"] {
@@ -2394,7 +2688,7 @@ mod tests {
             );
         }
         assert!(
-            UPSERT_CONCEPT_SQL.contains("gc_survived = EXCLUDED.gc_survived"),
+            sql.contains("gc_survived = EXCLUDED.gc_survived"),
             "the upsert's own columns must still update on conflict"
         );
         // The canonization path is that single writer.

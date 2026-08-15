@@ -1944,6 +1944,12 @@ mod tests {
     /// client string is refused at the MCP boundary, so it can never reach a
     /// concept's content, its canonical key, or a rendered context block — while
     /// a genuinely multi-line concept (tab + newline) is still accepted.
+    ///
+    /// **L82-2 extends this over the wire.** The live review drove a `U+202E`
+    /// through this exact tool call and got `isError:false` with the byte
+    /// durable in Cockroach; the bidi/zero-width/tag cases below are that
+    /// repro, pinned at the MCP boundary rather than only in the validator's
+    /// own unit tests.
     #[tokio::test]
     async fn control_characters_are_refused_but_tab_and_newline_are_allowed() {
         let s = server("mcp-control-chars").await;
@@ -1951,6 +1957,16 @@ mod tests {
             ("nul", "user\u{0}schema"),
             ("bell", "user\u{7}schema"),
             ("escape", "user\u{1b}[31mschema"),
+            ("rtl override", "user\u{202E}schema"),
+            ("zero width space", "user\u{200B}schema"),
+            ("first-strong isolate", "user\u{2066}schema"),
+            ("bom", "\u{FEFF}user schema"),
+            ("tag character", "user\u{E0073}schema"),
+            // R1-2(b): invisible but not category Cf, so the first L82-2 pass
+            // let all of these through the wire.
+            ("hangul filler", "user\u{3164}schema"),
+            ("halfwidth hangul filler", "user\u{FFA0}schema"),
+            ("braille pattern blank", "user\u{2800}schema"),
         ] {
             let out = call(
                 &s,
@@ -1964,12 +1980,16 @@ mod tests {
             assert_eq!(
                 out.is_error,
                 Some(true),
-                "{label}: a control character must be refused"
+                "{label}: a control or invisible formatting character must be refused"
+            );
+            let text = text_of(&out);
+            assert!(
+                text.contains("control character") || text.contains("invisible formatting"),
+                "{label}: the refusal must name the reason, got {text}"
             );
             assert!(
-                text_of(&out).contains("control character"),
-                "{label}: the refusal must name the reason, got {}",
-                text_of(&out)
+                !text.contains(bad),
+                "{label}: the refusal must not echo the payload back, got {text}"
             );
         }
 

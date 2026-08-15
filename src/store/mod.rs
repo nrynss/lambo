@@ -33,6 +33,10 @@ pub(crate) use error::map_write_err;
 #[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
 pub(crate) mod vector;
 
+// L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
+// (it only reads `Mutation`), so it compiles and is tested under every feature
+// row, including the `--no-default-features` minimal ones.
+pub mod batch;
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
