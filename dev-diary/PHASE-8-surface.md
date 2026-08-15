@@ -735,7 +735,10 @@ fixture-ok: n/a
 owns:       .github/workflows/release.yml, scripts/install.sh (if built),
             release notes template, Cargo.toml [package] version/metadata
 appends-to: docs/reference/installation.md (prebuilt-binary install path)
-status:     not-started
+status:     done — 2026-08-16 (branch task/release, merged to main).
+            Implemented + adversarially reviewed CLEAN (adve-review-t8.9-release.md),
+            then a binary+toml parity gate added so every tagged build proves the
+            released binary works with a real config. See the Handoff Log entry below.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14. How Lambo gets from source to a user's machine.
@@ -2055,3 +2058,45 @@ The live CockroachDB Cloud cluster legs were exercised end-to-end. Evidence in
   fix demonstrated on Cockroach); POST `/api/pulse` -> 405 (read-only holds).
 - **T86R2-2 (P3): now CLOSED — superseded by the live-passing conformance 8/8
   above (single_writer_lease_is_enforced_across_pools passed live).**
+
+### T8.9 — release process & binary distribution (task/release, merged 2026-08-16)
+
+Implemented on branch `task/release` (off `main`), adversarially reviewed to
+CLEAN, then merged to `main`. Evidence: `adve-review-t8.9-release.md`; the live
+`cargo build --release --features ship` + `lambo --version` = `lambo 0.1.0`.
+
+- **One `lambo` binary carries every compiled adapter; the config's
+  `[store] kind` / `[embedder] kind` pick it at runtime.** New `ship` Cargo
+  feature = store-memory, store-cockroach, store-sqlite, embed-bge,
+  embed-fixture. `embed-bedrock` is EXCLUDED (AWS account not authorized —
+  bedrock-authorization-blocker.md); it stays an optional gated swap-in.
+- **Targets**: GitHub Actions matrix on a `v*` tag over 5 native runners —
+  linux-x86_64 + linux-arm64, macos-arm64 + macos-x86_64, windows-x86_64.
+  No cross/zigbuild (native runners keep it reproducible).
+- **Versioning**: semver; `0.1.0` lives only in `Cargo.toml [package] version` and
+  `lambo --version` matches. Release tags `v0.1.0`; the release job asserts
+  `GITHUB_REF_NAME == v$VERSION` so a stale tag can never publish mismatched
+  artifacts.
+- **Distribution**: GitHub Releases primary (binary per platform + SHA-256
+  checksum files), plus `scripts/install.sh` (curl | sh, checksum-verified) and
+  `cargo install --git` (documented, secondary). Library crate is repo-only for
+  v0.1 (crates.io deferred).
+- **Pipeline**: `.github/workflows/release.yml` on a `v*` tag builds each
+  target with `--features ship`, stages binaries + checksums, attaches
+  `scripts/install.sh` so `/releases/latest/download/install.sh` resolves, and
+  `gh release create --verify-tag`. All third-party actions SHA-pinned (repo
+  convention). Release notes template at `.github/release/release-notes-template.md`.
+- **Binary+TOML parity gate (2026-08-16)**: every unix build job now runs the
+  parity suite (`tests/binary_parity.rs`, from `main`) against the EXACT staged
+  `--features ship` release binary with a real toml — proving the released
+  artifact works end-to-end (demo determinism, CLI write + lease, serve-web
+  live, MCP stdio) before it can ship. A `ship`-only regression fails the
+  release build. Added install path to `docs/reference/installation.mdx`.
+
+**Review loop:** implement → review (found T8.9-P1: install.sh not published as
+a release asset, so the primary install URL 404'd; fixed by attaching it; and
+T8.9-P3: claimed `--verify-tag` absent, added) → reverify CLEAN. The parity gate
+itself went through review → remediate (REL-PARITY-1: a nested `CARGO_TARGET_DIR`
+would have tested a subset rebuild, not the ship artifact; fixed to use the same
+default dir + `--target` + `--features ship` so `CARGO_BIN_EXE_lambo` resolves to
+the exact staged binary) → reverify CLEAN.
