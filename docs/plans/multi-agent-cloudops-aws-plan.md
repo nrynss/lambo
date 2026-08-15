@@ -109,7 +109,22 @@ To satisfy the hackathon requirement for **CockroachDB Agent Skills** and make t
 
 ---
 
-## 5. Implementation Checklist
+## 5. Judge Web Portal: Agent Traceability & Audit Recording
+
+To give judges full transparency into how multi-agent collaboration works in real time, the judge portal hosted on EC2 will include an **Agent Traceability & Recording** view alongside the interactive recall engine:
+
+1. **Multi-Agent Provenance Timeline**:
+   - Live stream of all interactions, derivations, and actions broken down by agent (`network-infra-agent`, `app-data-agent`).
+   - Displays exact server-stamped timestamps, causal dependencies created, and parent-child hierarchy assignments.
+2. **Deterministic Scenario Replay & Tracing**:
+   - Ability to review the pre-recorded CloudOps scenario run vs. triggering live interactive queries.
+   - Shows the exact diff proof demonstrating identical graph convergence.
+3. **Canonization Audit Trail**:
+   - Direct visibility into the CockroachDB `canonization_events` log explaining *why* `VPC-Enterprise-Prod` earned `Canonical` status (incident degree, distinct agents, survival across GC sweeps, blast radius > 5).
+
+---
+
+## 6. Implementation Checklist
 
 ### Phase 1: Local Binary Validation (Prerequisite)
 - [ ] Run full unit and integration test suite: `cargo test --all-features`.
@@ -129,7 +144,10 @@ To satisfy the hackathon requirement for **CockroachDB Agent Skills** and make t
 - [ ] `02_app_data_agent.py`: Executes App Agent actions, queries Lambo, and links dependencies.
 - [ ] `03_crossover_protect.py`: Executes the destructive query, verifies Lambo's blast-radius warning, and renders outcome.
 
-### Phase 5: Verification & Demo Recording
-- [ ] Verify judge URL (`https://<EC2-IP-or-Domain>`) renders live `lambo serve-web` session window.
+### Phase 5: Judge Web Portal & Traceability Enhancements
+- [ ] Ensure `lambo serve-web` exposes the agent interaction timeline and canonization history for judges.
+
+### Phase 6: Verification & Demo Recording
+- [ ] Verify judge URL (`https://<EC2-IP-or-Domain>`) renders live `lambo serve-web` session window with agent traceability.
 - [ ] Verify Lambda Function URL returns live stats.
 - [ ] Record 3-minute video covering the multi-agent workflow and blast-radius protection.
