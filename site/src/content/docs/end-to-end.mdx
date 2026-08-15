@@ -23,14 +23,9 @@ Text is checked on the way in. Lambo refuses control characters other than tab a
 
 ## A walkthrough you can run
 
-This uses SQLite and the fixture embedder, so it needs no external services. Build with the SQLite store first.
+This uses SQLite and the fixture embedder, so it needs no external services. A released binary already carries both, so you only have to point the config at them. If you build from source instead, include `--features store-sqlite`.
 
 <Steps>
-  <Step title="Build">
-    ```bash
-    cargo build --features store-sqlite
-    ```
-  </Step>
   <Step title="Write the config">
     ```toml lambo.toml
     [store]

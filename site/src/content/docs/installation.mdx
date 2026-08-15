@@ -1,78 +1,76 @@
 ---
 title: "Installation"
-description: "Build Lambo from source, choose features, and run your first session"
+description: "Install the Lambo binary, write a lambo.toml, and run your first session"
 ---
 import Steps from '../../components/MdxSteps.astro';
 import Step from '../../components/MdxStep.astro';
 import Warning from '../../components/MdxWarning.astro';
 
-Lambo builds from source with Cargo. You get a single `lambo` binary that runs the server and the command line tools.
+Lambo ships as a single `lambo` binary that carries both runtime surfaces: the MCP server (`lambo serve`) and the command line verbs. You deploy it in two steps. Install the binary, then write a `lambo.toml` that says which store and which embedder to use.
 
-## Prerequisites
+That is the whole deployment model. The released binary carries every adapter. You move between the in-memory store, SQLite, and CockroachDB by editing config, never by downloading a different build.
 
-You need a stable Rust toolchain. Install it from [rustup.rs](https://rustup.rs) if you do not have it.
+## Install the binary
 
-The default build has no other requirements, because it uses an in-memory store and a built-in fixture embedder. For real use you also want:
-
-- A durable store. Use SQLite for a local file, or CockroachDB for a hosted cluster.
-- A real embedder. Lambo uses BGE-M3 served by a local `llama-server`.
-
-## Build
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, macOS x86_64, and Windows x86_64, with the full adapter feature set compiled in.
 
 <Steps>
-  <Step title="Clone and build">
+  <Step title="Run the install script">
     ```bash
-    git clone https://github.com/nrynss/lambo.git
-    cd lambo
-    cargo build --release --features demo
+    curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
     ```
-    The binary is written to `target/release/lambo`. Put it on your `PATH` or call it by that path.
+    The script detects your OS and architecture, downloads the matching binary, verifies its SHA-256 against the published checksum, and installs it to `~/.local/bin`.
   </Step>
-  <Step title="Confirm the build">
+  <Step title="Confirm the install">
     ```bash
-    lambo --help
+    lambo --version
     ```
   </Step>
 </Steps>
 
-## Choose your features
-
-Cargo features select which stores and embedders are compiled in. The `demo` profile used above includes all of them. To build a smaller binary, list only what you need.
-
-| Feature | What it adds |
-|---|---|
-| `store-memory` | In-memory store. This is the default and needs no external service. |
-| `store-sqlite` | SQLite store, backed by a local file. |
-| `store-cockroach` | CockroachDB store, for a hosted cluster. |
-| `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
-| `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
-| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
-
-One binary contains every adapter it was compiled with, and you choose which store and embedder to use at runtime through `lambo.toml`. You switch stores by editing config, not by downloading a different binary. For example, to build with SQLite and BGE embeddings only:
+To pin a version or choose the install directory:
 
 ```bash
-cargo build --release --features store-sqlite,embed-bge
+LAMBO_VERSION=0.1.0 LAMBO_INSTALL_DIR=/usr/local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
 ```
+
+On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file from the [releases page](https://github.com/nrynss/lambo/releases) and verify the checksum yourself.
+
+## Write a lambo.toml
+
+The config file picks the store and the embedder at runtime. This one needs no external services at all, because the in-memory store and the fixture embedder are both self-contained.
+
+```toml lambo.toml
+[store]
+kind = "memory"
+
+[embedder]
+kind = "fixture"
+dim = 1024
+```
+
+Every key has an environment variable override. See [Configuration](/lambo/config/) for the full set.
+
+<Warning>
+An adapter is compiled into the binary, but its backing service still has to be reachable at runtime. The `bge_m3` embedder needs a `llama-server`, and the `cockroach` store needs a cluster.
+</Warning>
 
 ## Run it the first time
 
-The fastest way to see Lambo work uses the in-memory store and the fixture embedder, so it needs no external services.
+Start a server in one terminal and read from it in another.
 
 <Steps>
-  <Step title="Create a config file">
-    ```toml lambo.toml
-    [store]
-    kind = "memory"
-
-    [embedder]
-    kind = "fixture"
-    dim = 1024
-    ```
-  </Step>
   <Step title="Start a session server">
     ```bash
     lambo serve --config lambo.toml --session demo --agent agent-a
     ```
+  </Step>
+  <Step title="Recall from another terminal">
+    ```bash
+    lambo --config lambo.toml recall --session demo --query "user schema"
+    ```
+    Recall is a read, so it works whether or not a server holds the session.
   </Step>
 </Steps>
 
@@ -130,4 +128,44 @@ Do not switch embedder models in the middle of a session without re-embedding, b
 
 ## Set up durable storage
 
-For a durable store, run `scripts/provision.sh` to create the schema before you serve. See [Configuration](/lambo/config/) for the store keys and the provisioning details.
+For a durable store, apply the schema before you serve. The repository's `scripts/provision.sh` does this for CockroachDB. Then select the store in `lambo.toml` and keep the connection string in the environment, so the secret stays out of the file.
+
+```toml
+[store]
+kind = "cockroach"
+```
+
+```bash
+export LAMBO_COCKROACH_DSN="postgresql://USER@HOST:26257/lambo?sslmode=verify-full"
+```
+
+For a local file instead, set `kind = "sqlite"` and `path = "./lambo.db"`. See [Configuration](/lambo/config/) for the store keys and the provisioning details.
+
+## Build from source
+
+You do not need this to run Lambo. Build from source when you want an unreleased change, a smaller binary, or to work on Lambo itself. You need a stable Rust toolchain from [rustup.rs](https://rustup.rs).
+
+```bash
+git clone https://github.com/nrynss/lambo.git
+cd lambo
+cargo build --release --features ship
+```
+
+Cargo writes the binary to `target/release/lambo`. The `ship` profile is what releases are built with, so the result matches a downloaded binary. You can also install straight from git, which compiles the default branch and may be newer than the latest tag:
+
+```bash
+cargo install --git https://github.com/nrynss/lambo.git
+```
+
+Cargo features select which adapters are compiled in. List fewer to get a smaller binary.
+
+| Feature | What it adds |
+|---|---|
+| `store-memory` | In-memory store. This is the default and needs no external service. |
+| `store-sqlite` | SQLite store, backed by a local file. |
+| `store-cockroach` | CockroachDB store, for a hosted cluster. |
+| `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
+| `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
+| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
+
+Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.
