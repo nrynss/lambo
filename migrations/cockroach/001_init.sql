@@ -76,10 +76,67 @@ CREATE UNIQUE INDEX IF NOT EXISTS concepts_key_non_obs_idx
 -- only uniqueness authority on (session_id, canonical_key).
 ALTER TABLE concepts DROP CONSTRAINT IF EXISTS concepts_session_id_canonical_key_key;
 
--- Vector index: may require feature.vector_index.enabled on some plans.
--- IF NOT EXISTS is supported on CockroachDB vector indexes in recent versions;
--- provision.sh also tolerates "already exists" errors.
-CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx ON concepts (embedding);
+-- Vector index (spec §12.1 — CockroachDB Distributed Vector Indexing).
+-- May require feature.vector_index.enabled on some plans.
+--
+-- T7.4 (2026-08-13): this index MUST be PARTIAL on `embedding IS NOT NULL`.
+-- The production query (`VECTOR_CANDIDATES_SQL`) carries that same predicate —
+-- it is load-bearing, because 715+ rows hold a NULL embedding and the adapter
+-- decodes `dist` as f64, so a NULL-`dist` row hard-errors the whole query the
+-- moment k exceeds the non-null count. Against a NON-partial vector index the
+-- optimizer cannot prove the predicate is implied by the index, so it plans a
+-- FULL SCAN on concepts_pkey and the §12.1 "we used the vector index" claim is
+-- false. Against this partial index the UNCHANGED query plans as
+-- `vector search` on concepts@concepts_embedding_idx. Evidence:
+-- dev-diary/evidence/20260813-130218-vector-index-predicate-finding.txt and
+-- …-131108-vector-index-camera-proof-diagnosis.txt.
+--
+-- !! UPGRADING A PRE-T7.4 CLUSTER — provision.sh handles it; read why.
+--
+-- Clusters provisioned before T7.4 carry a NON-partial index under this same
+-- canonical name, and the statement below will NOT fix them:
+-- `CREATE VECTOR INDEX IF NOT EXISTS` matches on NAME ONLY. Measured live
+-- 2026-08-13 against a legacy non-partial index: it reports `CREATE INDEX`,
+-- succeeds in ~1s, and leaves the non-partial index exactly as it was. It does
+-- not error — it silently reports success.
+--
+-- `./scripts/provision.sh` RECONCILES THIS AUTOMATICALLY (since d335130): it
+-- classifies the index as absent | partial | legacy, drops a legacy one first,
+-- and then FAILS LOUDLY if the result is not partial. No manual step is needed
+-- — just run it (the drop is ~3s, the rebuild ~85-96s):
+--
+--     ./scripts/provision.sh
+--
+-- Only if you are applying this file WITHOUT provision.sh (e.g. by hand) must
+-- you drop the legacy index yourself first:
+--
+--     DROP INDEX IF EXISTS concepts@concepts_embedding_idx;
+--
+-- WHY THE DROP IS NOT IN THIS FILE (this is deliberate, do not "fix" it by
+-- adding one): this file is not only applied by provision.sh — it is embedded
+-- verbatim as `INIT_SQL` (`include_str!`) and executed by
+-- `CockroachStore::init_schema()` on store construction, over a pool whose every
+-- connection carries a hard 20s `statement_timeout` (`STATEMENT_TIMEOUT`,
+-- src/store/cockroach.rs). `CREATE VECTOR INDEX` takes ~85-96s on the demo
+-- cluster. An unconditional `DROP INDEX` here would therefore make EVERY
+-- `init_schema()` call destroy the vector index and then time out rebuilding it,
+-- leaving the cluster with no vector index at all. Measured: it broke
+-- `conformance_suite` and `cockroach_three_hop_progression_matches_memory` with
+-- "query execution canceled due to statement timeout".
+--
+-- The invariant this file must satisfy: EVERY statement here is a no-op in
+-- steady state and completes well inside 20s. provision.sh (psql, no statement
+-- timeout) is the only thing allowed to do slow schema work. CockroachDB has no
+-- DO blocks and provision.sh's splitter rejects dollar-quoting, so a conditional
+-- "drop only if non-partial" cannot be expressed in this file at all; it belongs
+-- in the applier. See the T7.4 Handoff Log for the proposed provision.sh change.
+--
+-- A cluster that misses this upgrade fails LOUDLY and specifically, not silently:
+-- `vector_explain_camera_proof` asserts `vector search`, the canonical index name,
+-- and the absence of `FULL SCAN`.
+CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx
+    ON concepts (embedding)
+    WHERE embedding IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS edges (
     id              UUID PRIMARY KEY,
@@ -129,4 +186,32 @@ CREATE TABLE IF NOT EXISTS reservations (
     agent_id        STRING NOT NULL,
     expires_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (session_id, node_id)
+);
+
+-- Single-writer lease (spec §2.2, T8.6): one row per session enforcing one
+-- writer across processes and hosts. holder = 'agent@host#pid'; acquired_at /
+-- expires_at are stamped from the CLUSTER clock (now()) — never a client
+-- argument (F18) — which is the authority two processes actually share. The
+-- adapter's acquire is a single INSERT ... ON CONFLICT DO UPDATE guarded by an
+-- expiry check, so concurrent acquirers serialize with no read-then-write race.
+-- A live holder's row has expires_at > now(); an expired row lingers until the
+-- next acquire steals it. Operator override — force a takeover from a
+-- wedged-but-still-heartbeating holder (no auto-preemption by design):
+--   DELETE FROM session_leases WHERE session_id = '<session>';
+CREATE TABLE IF NOT EXISTS session_leases (
+    session_id  STRING PRIMARY KEY,
+    holder      STRING NOT NULL,
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+
+-- Flush stats published by the writer's FlushTask (T85-3): one row per
+-- session, upserted after each flush cycle so a reader in another process can
+-- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers
+-- READ. An absent row means "no writer has published yet" (the honest n/a).
+CREATE TABLE IF NOT EXISTS session_stats (
+    session_id   STRING PRIMARY KEY,
+    flush_lag_ms INT NOT NULL,
+    log_depth    INT NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

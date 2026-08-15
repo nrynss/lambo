@@ -1,0 +1,91 @@
+---
+title: "Lambo"
+description: "Agentic graph memory for multi-agent coding."
+template: splash
+hero:
+  title: "Lambo"
+  tagline: "Shared, self-consolidating memory for your agents."
+  actions:
+    - text: "Get started"
+      link: "/quickstart"
+
+    - text: "Read the reference"
+      link: "/mcp"
+
+---
+
+import Mermaid from '../../components/Mermaid.astro';
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<div class="badges" style="text-align: center; margin-top: 1.5rem;">
+  <img src="https://img.shields.io/github/actions/workflow/status/nrynss/lambo/ci.yml?branch=main&label=ci&logo=github" alt="CI status" height="20" />
+  <img src="https://img.shields.io/github/license/nrynss/lambo?color=%2316A34A&label=license" alt="License" height="20" />
+</div>
+
+Lambo is agentic graph memory for multi-agent work. It stores what your agents learn, recalls relevant memory on request, and coordinates edits across many small agents that never talk to each other directly.
+
+A single `lambo serve` process owns each session. Agents connect to that process and share its in-memory graph. A background daemon consolidates what they write.
+
+<Mermaid
+  code={`flowchart LR
+    subgraph Surfaces["Agent surfaces"]
+        MCP["MCP clients<br/>(agents)"]
+        CLI["Command line verbs"]
+        WEB["lambo serve-web<br/>(browser, read-only)"]
+    end
+    subgraph Writer["lambo serve (single writer)"]
+        GRAPH["In-memory graph<br/>concepts and edges"]
+        DAEMON["Background daemon"]
+        CANON["Canonization"]
+        EMB["Embedder"]
+    end
+    subgraph Durable["Durable store"]
+        DB[("memory / sqlite /<br/>cockroach")]
+    end
+    MCP --> GRAPH
+    CLI --> GRAPH
+    WEB -. "read-only" .-> DB
+    GRAPH --> EMB
+    GRAPH --> DAEMON
+    DAEMON --> CANON
+    GRAPH -. "write-behind flush" .-> DB`}
+/>
+
+## The project narrative
+
+Multi-agent coding produces a flood of observations. Each small agent sees one slice of the work, writes it down in its own words, and moves on. That memory lives in tool call history and dies when the context window closes.
+
+Lambo gives those agents a shared memory that outlives the context. It treats each session as a graph of concepts. A concept is something your agents learn, such as `user schema`, `auth middleware`, or `retry budget is 3`. Typed edges connect concepts that depend on, produce, or relate to each other.
+
+Three properties make this memory useful at scale.
+
+- **It consolidates.** Many agents write the same idea in different words. Lambo matches the duplicates, deduplicates them, and lets recall return one canonical fact instead of fifty near-identical notes.
+- **It promotes by evidence.** Importance is earned, not declared. The background daemon scores concepts from structural evidence such as peer count, blast radius, and how long edges have lived. A concept that accumulates evidence earns canonical status.
+- **It retracts safely.** Each concept carries a blast radius, so an agent knows how many things depend on what it is about to change. Coordination tools such as `lambo_reserve` and `lambo_inspect` turn that knowledge into action.
+
+Durability is write-behind and eventual. Mutations batch into a few round trips to a durable store, so a burst of writes drains quickly and the session survives restarts.
+
+## Explore
+
+Start with the quickstart or jump straight into a reference page.
+
+<CardGrid cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build Lambo from source and run your first session in about 30 seconds.
+  </Card>
+  <Card title="Demo" icon="flask" href="/demo">
+    Watch two agents build one REST API and share load-bearing memory.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Build from source, choose features, and connect an MCP client.
+  </Card>
+  <Card title="MCP tools" icon="wrench" href="/mcp">
+    The seven tools your agents call, with arguments and limits.
+  </Card>
+  <Card title="Command line" icon="terminal" href="/cli">
+    The same operations as single deterministic lines from the terminal.
+  </Card>
+  <Card title="End to end" icon="diagram-project" href="/end-to-end">
+    How the parts fit together, from serving a session to running a swarm.
+  </Card>
+</CardGrid>

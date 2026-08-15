@@ -196,9 +196,19 @@ far text creates a fresh concept; with a no-capability store, behavior is byte-i
 requires:   T3.2, T0.3
 fixture-ok: no
 owns:       (vector paths inside src/store/cockroach.rs — same owner as T3.2; claim jointly or sequence)
-status:     done   # EXPLAIN vector-search camera-proof is PENDING on the multi-region demo cluster (see handoff / vector_explain_camera_proof)
+status:     done   # camera-proof root-caused 2026-08-13: NOT a deployment issue — see T7.4
 feature:    store-cockroach
 ```
+
+> **⚠ 2026-08-13 — the "PENDING on a vector-search-favorable deployment" conclusion below
+> is WRONG and is superseded by [T7.4](#t74--camera-proof-remediation-).** The camera-proof
+> never failed for cost/deployment reasons. `vector_explain_camera_proof` asserts
+> `contains("vector search")` against `EXPLAIN (OPT, VERBOSE)`, which spells the operator
+> **`vector-search`** (hyphenated) — so the test cannot pass on any cluster, with any data,
+> behind any index. Separately, the query's own `WHERE embedding IS NOT NULL` defeats a
+> **non-partial** vector index. Full evidence:
+> `dev-diary/evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt`.
+> Read the paragraphs below as history, not as instructions.
 The T0.3 spike productionized: embedding column write in `flush()`, index-backed
 similarity query, `Capabilities::VECTOR_SEARCH` advertised. Integration tests under
 `--features store-cockroach`.
@@ -299,6 +309,135 @@ index-friendly query fetches one lookahead row; if an equal-distance group cross
 fetch boundary, the adapter switches to the exact session query ordered by distance then
 UUID. This makes equal-score results insertion-order independent. The exceptional tie or
 crowd-out path may scan the session; ordinary untied traffic retains the vector-index shape.
+
+---
+
+### T7.4 — Camera-proof remediation ★ (hackathon requirement §12.1)
+```yaml
+requires:   T7.3
+fixture-ok: no          # the whole point is a live plan
+owns:       migrations/cockroach/001_init.sql,
+            src/store/cockroach.rs (the camera-proof TEST only — not the query),
+            scripts/seed-vector-index.sh
+status:     done   # camera-proof GREEN 2026-08-13 from migration-alone provisioning
+feature:    store-cockroach
+flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
+```
+
+**Why this exists.** §12.1 names Distributed Vector Indexing as one of two required
+CockroachDB tools. The proof that we use it — `vector_explain_camera_proof` — has never
+passed. T7.3 concluded that was a cost/deployment matter and left it PENDING. That
+conclusion was wrong. Root-caused 2026-08-13; evidence at
+`dev-diary/evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt` and
+`…-130218-vector-index-predicate-finding.txt`.
+
+**Do not re-architect `VECTOR_CANDIDATES_SQL`.** That instruction from T7.3 still stands and
+this task does not need to violate it. The fix is a schema change plus a test fix.
+
+#### Finding 1 — the assertion cannot match its own EXPLAIN format
+The test runs `EXPLAIN (OPT, VERBOSE)` and asserts `text.contains("vector search")`.
+Measured live: `OPT VERBOSE` emits **`vector-search`** (hyphenated); only plain `EXPLAIN`
+emits `vector search` (spaced). The test therefore fails at the FIRST assertion
+(`cockroach.rs:3840`) **even when the plan underneath is a perfect vector search** — verified
+by running it against exactly that plan. Every historical "camera-proof still fails"
+observation is explained by this.
+
+Fix it, and pick deliberately:
+- keep `EXPLAIN (OPT, VERBOSE)` (richer artifact for the video) and assert the hyphenated
+  token, **or**
+- switch to plain `EXPLAIN` and keep the spaced token.
+Do **not** paper over it with an `||` of both spellings — that is an assertion that cannot
+fail informatively. Whichever you choose, assert the *exact* token that format produces and
+say why in a comment. Note the conformance suite already learned that a **parameterized**
+`LIMIT` can change the plan shape (T7.3 R2); if you move to plain `EXPLAIN`, re-verify the
+plan with the test's bound `$1`/`$2`, not with literals.
+
+#### Finding 2 — `WHERE embedding IS NOT NULL` defeats a NON-partial vector index
+With the predicate the plan is a full scan on `concepts_pkey`; without it, vector search.
+**Removing the predicate is not an acceptable fix:** 715 rows carry NULL embeddings and the
+adapter decodes `dist` as `f64` (`cockroach.rs:1651`), so as soon as k exceeds the non-null
+count, NULL-`dist` rows surface and `try_get::<f64>` hard-errors the entire query — worst on
+a small or fresh session, i.e. the demo's opening state.
+
+#### Finding 3 — a PARTIAL vector index fixes it with no query and no Rust change
+```sql
+CREATE VECTOR INDEX ... ON concepts (embedding) WHERE embedding IS NOT NULL;
+```
+The **unchanged** production query then plans as `vector search` on that index (verified
+live). Production SQL, DECISION D1, and the `f64` decode all stay exactly as they are.
+
+**Land it on the canonical index name.** Make `concepts_embedding_idx` *itself* partial
+rather than adding a second index: one vector index instead of two, and the test's second
+assertion (`contains("concepts_embedding_idx")`) then passes unchanged.
+
+**MIGRATION TRAP — read this before writing the DDL.** Existing clusters already have a
+NON-partial `concepts_embedding_idx`. A bare
+`CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx … WHERE …` sees the name, no-ops,
+and leaves those clusters with the non-partial index and a scan plan — a migration that
+silently does nothing on exactly the cluster that matters. The DDL must
+`DROP INDEX IF EXISTS concepts_embedding_idx` first, then create the partial one. Keep it
+idempotent and safe on a fresh install (where the DROP no-ops).
+
+#### Live cluster state — reconcile it
+`concepts_embedding_nonnull_idx` was created **live** during the diagnosis and is NOT in
+the migration. The cluster schema currently DIVERGES from
+`migrations/cockroach/001_init.sql`. Part of this task is dropping it and re-provisioning so
+live state matches the migration.
+
+The cluster was also seeded to 2833 concepts / 2118 embedded / **2004 distinct** vectors via
+`scripts/seed-vector-index.sh` (it previously held 118 embedded rows but only **4 distinct**
+vectors, because the fixtures reuse `FixtureEmbedder`'s NEAR_A/NEAR_B/FAR/NEAR_PAIR — an
+index over 4 points cannot discriminate at any table size). That seeding is necessary but
+was **not** sufficient; findings 1–3 are the substance. Decide whether the seed session stays
+for the demo or is cleaned with `--clean`, and record the decision.
+
+**Done when:**
+```bash
+LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh
+```
+passes with `vector_explain_camera_proof` green against a cluster provisioned **from the
+migration alone** (no hand-created indexes), the passing plan is captured into
+`dev-diary/evidence/`, and the §12.1 vector-indexing claim is finally honest. If any part
+proves impossible, the fallback remains the T7.3 option: formally downgrade the §12.1 claim
+and show the honest scan plan — but do that only after findings 1–3 have actually been tried.
+
+#### RESULT (2026-08-13) — DONE, no fallback needed. One design correction.
+
+Findings 1–3 were all correct and all fixed. `vector_explain_camera_proof` is GREEN; the
+whole live suite is 5/5. Evidence:
+`dev-diary/evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`.
+
+**The "MIGRATION TRAP" prescription above is WRONG and must not be reinstated.** The trap
+itself is real — measured: `CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx …
+WHERE …` against a legacy non-partial index of that name reports `CREATE INDEX`, succeeds
+in ~1s, and changes nothing (it does not even error). But the prescribed cure — put an
+unconditional `DROP INDEX IF EXISTS concepts@concepts_embedding_idx` in
+`001_init.sql` — is fatal, because that file is not only applied by `provision.sh`: it is
+embedded verbatim as `INIT_SQL` (`include_str!`) and re-executed by
+`CockroachStore::init_schema()` on store construction, over a pool whose every connection
+carries a hard 20s `statement_timeout` (`STATEMENT_TIMEOUT`, `src/store/cockroach.rs`).
+Measured on the demo cluster: `DROP INDEX` ~3s, **`CREATE VECTOR INDEX` ~85–96s.** So the
+unconditional DROP made every `init_schema()` destroy the vector index and then time out
+rebuilding it. It was tried, and it broke `conformance_suite` and
+`cockroach_three_hop_progression_matches_memory` with *"query execution canceled due to
+statement timeout"*.
+
+The invariant `001_init.sql` must satisfy is therefore: **every statement is a steady-state
+no-op that completes well inside 20s.** `provision.sh` (psql, no statement timeout) is the
+only thing permitted to do slow schema work. CockroachDB has no `DO` blocks and
+`provision.sh`'s splitter rejects dollar-quoting, so "drop only if non-partial" cannot be
+expressed in the migration at all — it belongs in the applier. Legacy-cluster upgrade is a
+documented one-time manual step in the migration header; **see the Handoff Log for the
+`provision.sh` change this still needs** (out of T7.4's `owns`).
+
+**Seed decision: REMOVED (`--clean`), and the proof does not depend on it.** Measured after
+the partial index landed, with the seed session deleted and no manual `ANALYZE` — 858
+concepts, 123 embedded, still only **4 distinct** vectors — the plan is still `vector search`
+on `concepts@concepts_embedding_idx (partial index)`. The seeding theory (that low vector
+*diversity* was cost-rejecting the index) was neither necessary nor sufficient; the partial
+index alone does it. `scripts/seed-vector-index.sh` has been re-documented accordingly and
+demoted to an optional load tool.
+
 ---
 
 ## Exit criteria
@@ -315,10 +454,15 @@ use on camera.
   - offline fixture merge: DONE (T7.2 `near_pair_merges_with_decaying_semantic_edge`, no-capability Canonical-equivalence);
     live end-to-end hybrid merge: PENDING until T8.1 Memory wires hybrid::derive against a live session (T8.4 demo).
 - [x] Degraded mode proven equivalent to Canonical strategy (T7.2 `no_capability_is_byte_identical_to_canonical`)
-- [ ] `EXPLAIN` evidence of index use committed — camera-proof PENDING on the multi-region demo cluster
-  (committed evidence shows the optimizer's scan choice, honestly labeled; run
-  `vector_explain_camera_proof` with `LAMBO_REQUIRE_VECTOR_INDEX=1` on a
-  vector-search-favorable deployment before ship — open integrator item, see T7.3 handoff)
+- [x] `EXPLAIN` evidence of index use committed — **SATISFIED by T7.4, 2026-08-13.**
+  `vector_explain_camera_proof` is GREEN against a cluster provisioned from
+  `migrations/cockroach/001_init.sql` alone, with no seed data and no hand-made indexes:
+  `• vector search / table: concepts@concepts_embedding_idx (partial index)`. Plan committed
+  at `evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`. Root cause was NOT
+  deployment: the test asserted the spaced `vector search` against `EXPLAIN (OPT, VERBOSE)`,
+  which spells it `vector-search`, and the query's `WHERE embedding IS NOT NULL` defeated a
+  NON-partial index. Making `concepts_embedding_idx` itself partial fixed the latter with no
+  query change. Diagnosis: `evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt`
 - [x] Level B: embedder registry + features fail closed for missing kinds
 
 ## Handoff Log
@@ -332,6 +476,50 @@ use on camera.
   both fixed in `src/graph/hybrid.rs` with regression tests; P3 §12.1 camera-proof left
   as an integrator/demo-time open item. See committed
   `adversarial-review/adve-review-p7-hybrid-vectors.md`.
+- **2026-08-13 (T7.4) — §12.1 vector-index camera-proof is GREEN.** No longer an
+  integrator/demo-time open item; the T7.3 "PENDING on a favorable deployment" reading was
+  wrong and is closed.
+  - **What the plan looks like now.** The UNCHANGED `VECTOR_CANDIDATES_SQL` (predicate and
+    all) plans as `top-k → lookup join concepts@concepts_pkey → vector search
+    concepts@concepts_embedding_idx (partial index)`. Two changes produced it:
+    `migrations/cockroach/001_init.sql` now creates `concepts_embedding_idx` as a PARTIAL
+    vector index `WHERE embedding IS NOT NULL` (canonical name kept, so there is exactly ONE
+    vector index), and the test switched from `EXPLAIN (OPT, VERBOSE)` to plain `EXPLAIN`.
+    No Rust production code, no SQL, and no DECISION D1 behaviour changed.
+  - **Why plain `EXPLAIN`** (deliberate, not an `||` of both spellings): plain `EXPLAIN` is
+    the format that literally emits `vector search`, and it renders in ~17 lines / 676 bytes.
+    `OPT, VERBOSE` inlines the whole 1024-element probe vector into the plan — **52,590 bytes
+    measured** — which is unusable on camera and would make an assertion failure unreadable.
+    That was the only argument for keeping it. Re-verified with the test's real bound
+    `$1`/`$2` over the extended protocol, per the T7.3 R2 parameterized-`LIMIT` lesson.
+  - **Seed session: REMOVED, and it was never the cause.** With `--clean` applied and no
+    manual `ANALYZE` (858 concepts / 123 embedded / **4 distinct** vectors) the plan is still
+    `vector search`. The partial index alone does it.
+  - **Do not re-derive / do not redo:** the operator-spelling-by-format table, the
+    predicate-vs-non-partial-index finding, the seed-diversity theory (falsified), and the
+    fact that an unconditional `DROP INDEX` in `001_init.sql` breaks the live suite. All
+    measured; see the T7.4 RESULT block above.
+  - **OPEN, out of T7.4's `owns` — `scripts/provision.sh` needs two changes.** Flagging
+    rather than reaching across:
+    1. **Legacy-cluster reconciliation.** `001_init.sql` cannot self-heal a pre-T7.4 cluster
+       (no `DO` blocks; and an unconditional DROP there breaks `init_schema()` — see the
+       RESULT block). `provision.sh` is the right home: before applying the vector index,
+       query the catalog and `DROP INDEX IF EXISTS concepts@concepts_embedding_idx` **only
+       when the existing index is non-partial**, e.g. gate on
+       `SELECT 1 FROM [SHOW CREATE TABLE concepts] WHERE create_statement LIKE
+       '%VECTOR INDEX concepts_embedding_idx%' AND create_statement NOT LIKE
+       '%concepts_embedding_idx (embedding vector_l2_ops) WHERE embedding IS NOT NULL%'`.
+       Until then the upgrade is the one-time manual `DROP INDEX` documented in the migration
+       header. A cluster that misses it fails loudly at `vector_explain_camera_proof`.
+    2. **Its fallback now creates the WRONG index — this is a live hazard.** On any vector-
+       index apply failure `provision.sh` retries with
+       `CREATE VECTOR INDEX concepts_embedding_idx ON concepts (embedding);` — **non-partial**,
+       which silently reinstates the full-scan plan. It must become the partial form. The
+       risk is not theoretical: the create takes ~85–96s on the demo cluster.
+  - **Stale comment, out of `owns`:** the doc comment on `check_vector_explain_is_global_topk`
+    (`src/store/cockroach.rs`, ~line 2780) still says the camera proof is "PENDING where the
+    optimizer scans a small table". That is now false. One-line comment fix for whoever owns
+    that test next.
 - **2026-08-13:** GPT-5.6-sol remediation hardens hybrid derive with epoch re-plan,
   commit-lock contract validation, atomic staged commits, durable `SetEmbedding`, input
   and I/O budgets, validated deterministic scores, and an exact session-scoped vector

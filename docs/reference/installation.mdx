@@ -1,0 +1,130 @@
+---
+title: "Installation"
+description: "Build Lambo from source, choose features, and run your first session"
+---
+
+Lambo builds from source with Cargo. You get a single `lambo` binary that runs the server and the command line tools.
+
+## Prerequisites
+
+You need a stable Rust toolchain. Install it from [rustup.rs](https://rustup.rs) if you do not have it.
+
+The default build has no other requirements, because it uses an in-memory store and a built-in fixture embedder. For real use you also want:
+
+- A durable store. Use SQLite for a local file, or CockroachDB for a hosted cluster.
+- A real embedder. Lambo uses BGE-M3 served by a local `llama-server`.
+
+## Build
+
+<Steps>
+  <Step title="Clone and build">
+    ```bash
+    git clone https://github.com/nrynss/lambo.git
+    cd lambo
+    cargo build --release --features demo
+    ```
+    The binary is written to `target/release/lambo`. Put it on your `PATH` or call it by that path.
+  </Step>
+  <Step title="Confirm the build">
+    ```bash
+    lambo --help
+    ```
+  </Step>
+</Steps>
+
+## Choose your features
+
+Cargo features select which stores and embedders are compiled in. The `demo` profile used above includes all of them. To build a smaller binary, list only what you need.
+
+| Feature | What it adds |
+|---|---|
+| `store-memory` | In-memory store. This is the default and needs no external service. |
+| `store-sqlite` | SQLite store, backed by a local file. |
+| `store-cockroach` | CockroachDB store, for a hosted cluster. |
+| `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
+| `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
+| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
+
+One binary contains every adapter it was compiled with, and you choose which store and embedder to use at runtime through `lambo.toml`. You switch stores by editing config, not by downloading a different binary. For example, to build with SQLite and BGE embeddings only:
+
+```bash
+cargo build --release --features store-sqlite,embed-bge
+```
+
+## Run it the first time
+
+The fastest way to see Lambo work uses the in-memory store and the fixture embedder, so it needs no external services.
+
+<Steps>
+  <Step title="Create a config file">
+    ```toml lambo.toml
+    [store]
+    kind = "memory"
+
+    [embedder]
+    kind = "fixture"
+    dim = 1024
+    ```
+  </Step>
+  <Step title="Start a session server">
+    ```bash
+    lambo serve --config lambo.toml --session demo --agent agent-a
+    ```
+  </Step>
+</Steps>
+
+Your agent can now connect over MCP. See [MCP tools](/mcp) for the tool surface, and [End to end](/end-to-end) for a full walkthrough.
+
+## Connect an MCP client
+
+Most MCP clients, such as Claude Code and Cursor, read an `mcpServers` configuration. Add Lambo as a server and let the client start it over stdio. Point `command` at your `lambo` binary and pass the `serve` arguments.
+
+```json
+{
+  "mcpServers": {
+    "lambo": {
+      "command": "/path/to/lambo",
+      "args": [
+        "--config", "/path/to/lambo.toml",
+        "serve",
+        "--session", "demo",
+        "--agent", "agent-a",
+        "--transport", "stdio"
+      ]
+    }
+  }
+}
+```
+
+The `--config` flag comes before `serve`, because it is a global flag. The `serve` flags come after. The client launches this process and talks to it over stdio, so you do not start `lambo serve` yourself when you use a client this way.
+
+To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
+
+<Warning>
+The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/config#http-transport).
+</Warning>
+
+## Set up real embeddings
+
+To use BGE-M3 embeddings, run a local `llama-server` with an embedding model and point Lambo at it.
+
+```bash
+llama-server -m path/to/bge-m3.gguf --embedding --port 8080
+```
+
+Then set the embedder in `lambo.toml`.
+
+```toml
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"
+```
+
+<Warning>
+Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable.
+</Warning>
+
+## Set up durable storage
+
+For a durable store, run `scripts/provision.sh` to create the schema before you serve. See [Configuration](/config) for the store keys and the provisioning details.

@@ -149,8 +149,17 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use super::batch::{
+    plan_flush, BulkLimits, ConceptRow, FlushStep, CONCEPT_COLUMNS, EDGE_COLUMNS,
+    INTERACTION_COLUMNS,
+};
+#[cfg(feature = "fixtures")]
+use super::batch::{seed_concept_rows, seed_edge_rows};
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
-use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};
+use super::{
+    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
+};
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
     InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
@@ -159,6 +168,42 @@ use crate::types::{
 /// Structural edge types counted by both structural queries (spec §4.1 errata:
 /// concept-to-concept `Dependency`/`Causal`/`Hierarchical` only — provenance
 /// `Derives`/`Temporal` must not un-orphan concepts).
+/// Rows per multi-row upsert statement (L82-1).
+///
+/// Chosen against SQLite's *most conservative* `SQLITE_MAX_VARIABLE_NUMBER` of
+/// 999 rather than the 32766 a modern build ships: 16 columns × 60 rows = 960
+/// and 9 × 100 = 900 both fit either way, and a statement that silently depends
+/// on how the library was compiled is not worth the extra rows. There is no
+/// network round-trip to save here — the limits exist so the shape matches
+/// Cockroach's, not to hit a latency target. `interactions` stays 1 for the
+/// same self-foreign-key reason documented on the Cockroach constant.
+const BULK_LIMITS: BulkLimits = BulkLimits {
+    interactions: 1,
+    concepts: 60,
+    edges: 100,
+};
+
+/// The conservative `SQLITE_MAX_VARIABLE_NUMBER` the limits above are sized
+/// against. Pre-3.32 builds ship this; 3.32+ ship 32766.
+const SQLITE_MAX_VARIABLE_NUMBER: usize = 999;
+
+// R1-4: the arithmetic in the doc comment above is prose, and prose does not
+// fail a build. Raising `concepts` to 70 (70 × 16 = 1120) passes the whole local
+// suite against a modern bundled SQLite and only breaks on an old one, in
+// production. These turn that into a compile error.
+const _: () = assert!(
+    BULK_LIMITS.interactions * INTERACTION_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "interactions chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
+const _: () = assert!(
+    BULK_LIMITS.concepts * CONCEPT_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "concepts chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
+const _: () = assert!(
+    BULK_LIMITS.edges * EDGE_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
+    "edges chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
+);
+
 const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 
 /// §4.1 interaction-span SQL (twin-shaped with Cockroach's
@@ -380,14 +425,20 @@ impl SqliteStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
+        // Interactions before concepts (`concepts.origin_interaction`
+        // REFERENCES interactions(id)); chunked exactly as a flush is, so the
+        // seed path runs the same statements (L82-1).
         for i in &snapshot.interactions {
-            upsert_interaction(&mut *tx, i).await?;
+            upsert_interactions(&mut *tx, &[i]).await?;
         }
-        for c in &snapshot.concepts {
-            upsert_concept(&mut *tx, c).await?;
+        // Deduplicated first (R1-6): a multi-row statement rejects colliding
+        // input rows outright, where the row-at-a-time seed this replaced simply
+        // last-wins'd them.
+        for chunk in seed_concept_rows(&snapshot.concepts).chunks(BULK_LIMITS.concepts) {
+            upsert_concepts(&mut *tx, chunk).await?;
         }
-        for e in &snapshot.edges {
-            upsert_edge(&mut *tx, e).await?;
+        for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
+            upsert_edges(&mut *tx, chunk).await?;
         }
         for s in &snapshot.synonyms {
             sqlx::query(
@@ -507,6 +558,91 @@ impl GraphStore for SqliteStore {
         Capabilities::empty()
     }
 
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        acquire_or_refresh(self.pool(), session, holder, ttl).await
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        acquire_or_refresh(self.pool(), session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        // Holder-scoped: only our own row (a stale release after our lease was
+        // stolen must not evict the new holder).
+        sqlx::query("DELETE FROM session_leases WHERE session_id = ?1 AND holder = ?2")
+            .bind(&session.0)
+            .bind(holder.token())
+            .execute(self.pool())
+            .await
+            .map_err(|e| db_err("release lease", e))?;
+        Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        // Upsert the whole row so re-publishes converge (idempotency, same
+        // contract as `flush`). Only the writer's FlushTask calls this;
+        // readers only read. `updated_at` is stamped from the store clock
+        // (strftime), matching the SQLite TIMESTAMPTZ-as-TEXT convention.
+        sqlx::query(
+            "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now')) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+               flush_lag_ms = excluded.flush_lag_ms, \
+               log_depth = excluded.log_depth, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(&session.0)
+        .bind(stats.flush_lag_ms as i64)
+        .bind(stats.log_depth as i64)
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("write flush stats", e))?;
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        let row =
+            sqlx::query("SELECT flush_lag_ms, log_depth FROM session_stats WHERE session_id = ?1")
+                .bind(&session.0)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(|e| db_err("read flush stats", e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let flush_lag_ms: i64 = row
+            .try_get("flush_lag_ms")
+            .map_err(|e| db_err("read flush stats: flush_lag_ms", e))?;
+        let log_depth: i64 = row
+            .try_get("log_depth")
+            .map_err(|e| db_err("read flush stats: log_depth", e))?;
+        Ok(Some(SessionFlushStats {
+            flush_lag_ms: u64::try_from(flush_lag_ms).unwrap_or(u64::MAX),
+            log_depth: u64::try_from(log_depth).unwrap_or(u64::MAX),
+        }))
+    }
+
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
         if batch.mutations.is_empty() {
             return Ok(());
@@ -542,36 +678,13 @@ impl GraphStore for SqliteStore {
         }
         self.ensure_sessions(&mut *tx, &sessions).await?;
 
-        for m in &batch.mutations {
-            match m {
-                Mutation::UpsertNode { node } => match node {
-                    Node::Interaction(i) => upsert_interaction(&mut *tx, i).await?,
-                    Node::Concept(c) => upsert_concept(&mut *tx, c).await?,
-                },
-                Mutation::UpsertEdge { edge } => upsert_edge(&mut *tx, edge).await?,
-                Mutation::DeleteNode { id } => {
-                    delete_node(&mut *tx, *id).await?;
-                }
-                Mutation::DeleteEdge { id } => {
-                    sqlx::query("DELETE FROM edges WHERE id = ?")
-                        .bind(id.0.to_string())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
-                }
-                Mutation::CanonizationTransition { event } => {
-                    apply_canonization_transition(&mut *tx, event).await?;
-                }
-                Mutation::SetRootGoal { session_id, goal } => {
-                    set_root_goal(&mut *tx, session_id, goal.as_ref()).await?;
-                }
-                Mutation::SetEmbedding {
-                    session_id,
-                    embedding,
-                } => {
-                    set_embedding(&mut *tx, session_id, embedding.as_ref()).await?;
-                }
-            }
+        // Same planned-statement replay as the Cockroach adapter (L82-1). There
+        // is no network here, so this is not the latency fix it is there — it is
+        // kept identical on purpose. `store::batch`'s deduplication and
+        // canonization-column rules are subtle enough that they need a real SQL
+        // engine executing them in CI, and this is the adapter that can.
+        for step in plan_flush(&batch.mutations, BULK_LIMITS) {
+            apply_step(&mut *tx, &step).await?;
         }
 
         tx.commit()
@@ -900,6 +1013,89 @@ fn db_err(context: &str, e: sqlx::Error) -> StoreError {
     StoreError::Backend(format!("{context}: {e}"))
 }
 
+/// Atomic single-writer lease acquire / refresh (T8.6).
+///
+/// ONE statement — `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING` —
+/// so the decision is made under SQLite's write lock with no read-then-write
+/// race. The update fires only when the existing lease is expired or is already
+/// ours; on a refresh we keep the original `acquired_at`. All timestamps come
+/// from SQLite's own `strftime(...,'now')` — never a caller argument (F18).
+///
+/// * A returned row whose holder is ours ⇒ [`LeaseOutcome::Acquired`] (fresh
+///   insert, expired steal, or our refresh).
+/// * An empty RETURNING ⇒ the guard was false: a live lease is held by someone
+///   else. We read it back to report the holder + age ([`LeaseOutcome::Held`]).
+///   If the row vanished in between (released concurrently) we retry a bounded
+///   number of times.
+async fn acquire_or_refresh(
+    pool: &SqlitePool,
+    session: &SessionId,
+    holder: &LeaseHolder,
+    ttl: Duration,
+) -> Result<LeaseOutcome, StoreError> {
+    // Fractional seconds keep sub-second TTLs (tests) honest; whole seconds for
+    // the production 45s. Bound as a strftime modifier, e.g. "+45 seconds".
+    let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
+    let token = holder.token();
+    const ACQUIRE_SQL: &str = "\
+        INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+        VALUES (?1, ?2, \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now'), \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now', ?3)) \
+        ON CONFLICT (session_id) DO UPDATE SET \
+            holder = excluded.holder, \
+            acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                               THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+            expires_at = excluded.expires_at \
+        WHERE session_leases.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+           OR session_leases.holder = excluded.holder \
+        RETURNING holder, acquired_at, expires_at";
+
+    for _ in 0..3 {
+        let won: Option<(String, String, String)> = sqlx::query_as(ACQUIRE_SQL)
+            .bind(&session.0)
+            .bind(&token)
+            .bind(&ttl_modifier)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| db_err("acquire lease", e))?;
+        if let Some(row) = won {
+            return Ok(LeaseOutcome::Acquired(lease_info_from_text(row)?));
+        }
+        // Guard was false — someone else holds a live lease. Read it back.
+        let current: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = ?1",
+        )
+        .bind(&session.0)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| db_err("read current lease", e))?;
+        match current {
+            Some(row) => {
+                let info = lease_info_from_text(row)?;
+                let age = (Utc::now() - info.acquired_at)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                return Ok(LeaseOutcome::Held { current: info, age });
+            }
+            // Released between our upsert and this read: retry the acquire.
+            None => continue,
+        }
+    }
+    Err(StoreError::Backend(
+        "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+    ))
+}
+
+fn lease_info_from_text(row: (String, String, String)) -> Result<LeaseInfo, StoreError> {
+    let (holder, acquired_at, expires_at) = row;
+    Ok(LeaseInfo {
+        holder,
+        acquired_at: text_to_ts(&acquired_at)?,
+        expires_at: text_to_ts(&expires_at)?,
+    })
+}
+
 /// Idempotent post-T3.1 column convergence: SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`, so check `pragma_table_info` first and ALTER
 /// only when the column is absent. Safe to call on every `init_schema` (fresh
@@ -968,33 +1164,127 @@ fn text_to_enum<T: serde::de::DeserializeOwned>(s: &str, what: &str) -> Result<T
         .map_err(|e| StoreError::Backend(format!("invalid stored {what} {s:?}: {e}")))
 }
 
-async fn upsert_interaction(
+/// Apply one planned [`FlushStep`].
+async fn apply_step(
     tx: &mut sqlx::SqliteConnection,
-    i: &Interaction,
+    step: &FlushStep<'_>,
 ) -> Result<(), StoreError> {
-    sqlx::query(
-        "INSERT INTO interactions (id, session_id, agent_id, prompt_text, previous_id, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (id) DO UPDATE SET \
+    match step {
+        FlushStep::Interactions(rows) => upsert_interactions(&mut *tx, rows).await,
+        FlushStep::Concepts(rows) => upsert_concepts(&mut *tx, rows).await,
+        FlushStep::Edges(rows) => upsert_edges(&mut *tx, rows).await,
+        FlushStep::Single(m) => apply_single(&mut *tx, m).await,
+    }
+}
+
+/// Apply one mutation the planner could not bulk. See the Cockroach adapter's
+/// `apply_single` for why the upsert arms are handled rather than
+/// `unreachable!()`d.
+async fn apply_single(tx: &mut sqlx::SqliteConnection, m: &Mutation) -> Result<(), StoreError> {
+    match m {
+        Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        } => upsert_interactions(&mut *tx, &[i]).await?,
+        Mutation::UpsertNode {
+            node: Node::Concept(c),
+        } => upsert_concepts(&mut *tx, &[ConceptRow::new(c)]).await?,
+        Mutation::UpsertEdge { edge } => upsert_edges(&mut *tx, &[edge]).await?,
+        Mutation::DeleteNode { id } => {
+            delete_node(&mut *tx, *id).await?;
+        }
+        Mutation::DeleteEdge { id } => {
+            sqlx::query("DELETE FROM edges WHERE id = ?")
+                .bind(id.0.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
+        }
+        Mutation::CanonizationTransition { event } => {
+            apply_canonization_transition(&mut *tx, event).await?;
+        }
+        Mutation::SetRootGoal { session_id, goal } => {
+            set_root_goal(&mut *tx, session_id, goal.as_ref()).await?;
+        }
+        Mutation::SetEmbedding {
+            session_id,
+            embedding,
+        } => {
+            set_embedding(&mut *tx, session_id, embedding.as_ref()).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_interactions(
+    tx: &mut sqlx::SqliteConnection,
+    rows: &[&Interaction],
+) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "INSERT INTO interactions (id, session_id, agent_id, prompt_text, previous_id, created_at) ",
+    );
+    qb.push_values(rows.iter(), |mut b, i| {
+        b.push_bind(i.id.0.to_string())
+            .push_bind(i.session_id.0.clone())
+            .push_bind(i.agent_id.0.clone())
+            .push_bind(i.prompt_text.clone())
+            .push_bind(i.previous_id.map(|id| id.0.to_string()))
+            .push_bind(ts_to_text(i.created_at));
+    });
+    qb.push(
+        " ON CONFLICT (id) DO UPDATE SET \
              session_id = excluded.session_id, \
              agent_id = excluded.agent_id, \
              prompt_text = excluded.prompt_text, \
              previous_id = excluded.previous_id, \
              created_at = excluded.created_at",
-    )
-    .bind(i.id.0.to_string())
-    .bind(&i.session_id.0)
-    .bind(&i.agent_id.0)
-    .bind(i.prompt_text.as_deref())
-    .bind(i.previous_id.map(|id| id.0.to_string()))
-    .bind(ts_to_text(i.created_at))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
+    );
+    qb.build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
     Ok(())
 }
 
-async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<(), StoreError> {
+async fn upsert_concepts(
+    tx: &mut sqlx::SqliteConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut encoded: Vec<ConceptBinds> = Vec::with_capacity(rows.len());
+    for r in rows {
+        encoded.push(concept_binds(r)?);
+    }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "INSERT INTO concepts (\
+             id, session_id, content, canonical_key, concept_type, origin_interaction, \
+             origin_agent, created_at, access_count, last_accessed, gc_survived, \
+             canonization_status, blast_radius, last_demotion_time, embedding, \
+             chunk_group_id) ",
+    );
+    qb.push_values(rows.iter().zip(encoded.iter()), |mut b, (r, enc)| {
+        let c = r.concept;
+        b.push_bind(c.id.0.to_string())
+            .push_bind(c.session_id.0.clone())
+            .push_bind(c.content.clone())
+            .push_bind(c.canonical_key.clone())
+            .push_bind(enc.concept_type.clone())
+            .push_bind(c.origin_interaction.0.to_string())
+            .push_bind(c.origin_agent.0.clone())
+            .push_bind(ts_to_text(c.created_at))
+            .push_bind(c.access_count)
+            .push_bind(c.last_accessed.map(ts_to_text))
+            .push_bind(c.gc_survived)
+            .push_bind(enc.status.clone())
+            .push_bind(r.canonization.blast_radius)
+            .push_bind(r.canonization.last_demotion_time.map(ts_to_text))
+            .push_bind(enc.embedding.clone())
+            .push_bind(c.chunk_group_id.clone());
+    });
     // Conflict target is the `id` PRIMARY KEY. The partial unique index
     // (session_id, canonical_key) WHERE concept_type <> 'Observation' is NOT a
     // valid target (bare ON CONFLICT errors); legal duplicate Observation keys
@@ -1005,26 +1295,11 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
     // in the INSERT column list (a brand-new row must carry them) but
     // deliberately **absent from the DO UPDATE SET list** — on an existing row
     // the canonization path is their only writer. Rationale on
-    // `Mutation::UpsertNode`.
-    let concept_type = enum_to_text(&c.concept_type, "concept_type")?;
-    let status = enum_to_text(&c.canonization_status, "canonization_status")?;
-    // CON-8: the embedding is written for flush→load round-trip parity. Same
-    // wire form as Cockroach's VECTOR text literal (shared store::vector codec),
-    // stored in the BLOB column; never NULL for a present vector, NULL otherwise.
-    let embedding = c
-        .embedding
-        .as_ref()
-        .map(|v| encode_vector(v))
-        .transpose()?
-        .map(|s| s.into_bytes());
-    sqlx::query(
-        "INSERT INTO concepts (\
-             id, session_id, content, canonical_key, concept_type, origin_interaction, \
-             origin_agent, created_at, access_count, last_accessed, gc_survived, \
-             canonization_status, blast_radius, last_demotion_time, embedding, \
-             chunk_group_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (id) DO UPDATE SET \
+    // `Mutation::UpsertNode`; the *values* bound above come from
+    // `ConceptRow::canonization`, not from the concept, for the deduplication
+    // reason spelled out on `store::batch::ConceptRow`.
+    qb.push(
+        " ON CONFLICT (id) DO UPDATE SET \
              session_id = excluded.session_id, \
              content = excluded.content, \
              canonical_key = excluded.canonical_key, \
@@ -1037,59 +1312,79 @@ async fn upsert_concept(tx: &mut sqlx::SqliteConnection, c: &Concept) -> Result<
              gc_survived = excluded.gc_survived, \
              embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id",
-    )
-    .bind(c.id.0.to_string())
-    .bind(&c.session_id.0)
-    .bind(&c.content)
-    .bind(&c.canonical_key)
-    .bind(concept_type)
-    .bind(c.origin_interaction.0.to_string())
-    .bind(&c.origin_agent.0)
-    .bind(ts_to_text(c.created_at))
-    .bind(c.access_count)
-    .bind(c.last_accessed.map(ts_to_text))
-    .bind(c.gc_survived)
-    .bind(status)
-    .bind(c.blast_radius)
-    .bind(c.last_demotion_time.map(ts_to_text))
-    .bind(embedding.as_deref())
-    .bind(&c.chunk_group_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
+    );
+    qb.build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
     Ok(())
 }
 
-async fn upsert_edge(tx: &mut sqlx::SqliteConnection, e: &Edge) -> Result<(), StoreError> {
-    // Natural-key preference (MemoryStore parity): the table-level
-    // UNIQUE (source, target, edge_type) autoindexes and is a legal target.
-    let edge_type = enum_to_text(&e.edge_type, "edge_type")?;
-    sqlx::query(
+async fn upsert_edges(tx: &mut sqlx::SqliteConnection, rows: &[&Edge]) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut types: Vec<String> = Vec::with_capacity(rows.len());
+    for e in rows {
+        types.push(enum_to_text(&e.edge_type, "edge_type")?);
+    }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "INSERT INTO edges (\
              id, session_id, source, target, edge_type, weight, reinforcements, \
-             created_at, last_reinforced) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT (source, target, edge_type) DO UPDATE SET \
+             created_at, last_reinforced) ",
+    );
+    qb.push_values(rows.iter().zip(types.iter()), |mut b, (e, edge_type)| {
+        b.push_bind(e.id.0.to_string())
+            .push_bind(e.session_id.0.clone())
+            .push_bind(e.source.0.to_string())
+            .push_bind(e.target.0.to_string())
+            .push_bind(edge_type.clone())
+            .push_bind(e.weight)
+            .push_bind(e.reinforcements)
+            .push_bind(ts_to_text(e.created_at))
+            .push_bind(ts_to_text(e.last_reinforced));
+    });
+    // Natural-key preference (MemoryStore parity): the table-level
+    // UNIQUE (source, target, edge_type) autoindexes and is a legal target.
+    qb.push(
+        " ON CONFLICT (source, target, edge_type) DO UPDATE SET \
              id = excluded.id, \
              session_id = excluded.session_id, \
              weight = excluded.weight, \
              reinforcements = excluded.reinforcements, \
              created_at = excluded.created_at, \
              last_reinforced = excluded.last_reinforced",
-    )
-    .bind(e.id.0.to_string())
-    .bind(&e.session_id.0)
-    .bind(e.source.0.to_string())
-    .bind(e.target.0.to_string())
-    .bind(edge_type)
-    .bind(e.weight)
-    .bind(e.reinforcements)
-    .bind(ts_to_text(e.created_at))
-    .bind(ts_to_text(e.last_reinforced))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
+    );
+    qb.build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
     Ok(())
+}
+
+/// The fallible per-row encodings, done before `push_values`' infallible closure.
+struct ConceptBinds {
+    concept_type: String,
+    status: String,
+    /// CON-8: the embedding is written for flush→load round-trip parity. Same
+    /// wire form as Cockroach's VECTOR text literal (shared store::vector
+    /// codec), stored in the BLOB column; never NULL for a present vector, NULL
+    /// otherwise.
+    embedding: Option<Vec<u8>>,
+}
+
+fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreError> {
+    Ok(ConceptBinds {
+        concept_type: enum_to_text(&r.concept.concept_type, "concept_type")?,
+        status: enum_to_text(&r.canonization.status, "canonization_status")?,
+        embedding: r
+            .concept
+            .embedding
+            .as_ref()
+            .map(|v| encode_vector(v))
+            .transpose()?
+            .map(|s| s.into_bytes()),
+    })
 }
 
 async fn delete_node(tx: &mut sqlx::SqliteConnection, id: NodeId) -> Result<(), StoreError> {
@@ -1621,6 +1916,42 @@ mod tests {
         let store = test_store();
         store.init_schema().await.unwrap();
         store.init_schema().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_stats_write_then_read_round_trips_sqlite() {
+        // T85-3: a writer publishes flush stats into the durable table; a
+        // reader (possibly another process) reads them back. Absent row =
+        // honest `None` (n/a).
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("stats-roundtrip");
+
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), None);
+
+        let stats = SessionFlushStats {
+            flush_lag_ms: 42,
+            log_depth: 7,
+        };
+        store.write_flush_stats(&sid, &stats).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(stats));
+
+        // A different session has no row → None (n/a), never fabricated 0.
+        assert_eq!(
+            store
+                .read_flush_stats(&SessionId::from("other"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Re-publish converges (idempotent upsert), the whole row is replaced.
+        let later = SessionFlushStats {
+            flush_lag_ms: 99,
+            log_depth: 1,
+        };
+        store.write_flush_stats(&sid, &later).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(later));
     }
 
     #[tokio::test]
@@ -3249,6 +3580,218 @@ mod tests {
         assert_eq!(snap.canonization_events.len(), 1, "no duplicate audit row");
     }
 
+    /// **L82-1 on a real SQL engine.** Two upserts of the same concept in ONE
+    /// batch must collapse to the durable row row-by-row replay produced.
+    ///
+    /// This is the case the multi-row rewrite could silently get wrong, and the
+    /// one no reasoning-by-inspection settles: both engines *reject* a
+    /// statement whose input rows collide on the conflict target, so the rows
+    /// must be deduplicated — and a naive "last wins" would take the second
+    /// snapshot's canonization columns, which the row-by-row `ON CONFLICT DO
+    /// UPDATE` (R2-1: canonization columns are INSERT-only) would have
+    /// discarded. `store::batch::ConceptRow` keeps the first occurrence's
+    /// canonization and the last occurrence's everything-else; this executes
+    /// that against SQLite and reads the row back.
+    #[tokio::test]
+    async fn a_repeated_concept_in_one_batch_collapses_like_row_by_row_replay() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("l82-1-dedupe");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+
+        // The concept is born mid-progression: its first appearance in the
+        // batch already carries a status, and a later appearance (a GC
+        // `bump_gc_survived` snapshot taken before the hop) does not.
+        let born = with_stale_canonization(
+            plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
+            CanonizationStatus::Canonical,
+            Some(9),
+            Some(ts),
+        );
+        let Mutation::UpsertNode {
+            node: NodeKind::Concept(mut later),
+        } = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts)
+        else {
+            unreachable!("plant_concept builds a concept upsert")
+        };
+        later.gc_survived = 4;
+        later.content = "pillar (revised)".into();
+
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    born,
+                    Mutation::UpsertNode {
+                        node: NodeKind::Concept(later),
+                    },
+                ],
+            })
+            .await
+            .expect("a batch with a repeated id must not be rejected as a duplicate conflict");
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.concepts.len(), 1, "one row, not two");
+        let row = &snap.concepts[0];
+        assert_eq!(
+            row.content, "pillar (revised)",
+            "ordinary columns: last wins"
+        );
+        assert_eq!(row.gc_survived, 4, "ordinary columns: last wins");
+        assert_eq!(
+            row.canonization_status,
+            CanonizationStatus::Canonical,
+            "the INSERT carries the FIRST occurrence's canonization columns — row-by-row \
+             replay would have inserted them and then skipped them on the DO UPDATE (R2-1)"
+        );
+        assert_eq!(row.blast_radius, Some(9));
+        assert_eq!(row.last_demotion_time, Some(ts));
+    }
+
+    /// **R1-1, the pin — against a real SQL engine with foreign keys on.**
+    ///
+    /// `interactions.previous_id REFERENCES interactions(id)` is a *self* FK.
+    /// A planner that collapses a repeated interaction at its LAST position
+    /// re-emits `i1` after `i2(prev=i1)`; with `BULK_LIMITS.interactions == 1`
+    /// each is its own statement, SQLite checks the FK at end-of-statement, and
+    /// `i2` fails with `SQLITE_CONSTRAINT_FOREIGNKEY` (787). `Constraint` is
+    /// terminal, so the flush loop dead-letters the whole batch — the same loss
+    /// class L82-1 was raised for.
+    ///
+    /// The second half is the control the reviewer used to prove *relocation* is
+    /// the cause and not the duplicate: with the repeat adjacent, nothing moves
+    /// past `i2`, and even the broken planner returns `Ok`.
+    #[tokio::test]
+    async fn a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let ts = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+
+        // CONTROL FIRST, so that it still executes when the assertion below
+        // fails: the same duplicate, adjacent. Nothing is relocated past i2
+        // under either rule, so this passes with or without the fix — which is
+        // what makes the second half evidence about *relocation* specifically
+        // rather than about duplicates.
+        let sid = SessionId::from("r1-1-adjacent-control");
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i2, Some(i1), ts),
+                ],
+            })
+            .await
+            .expect("the adjacent-repeat control must always pass");
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().interactions.len(),
+            2
+        );
+
+        // Non-adjacent re-upsert: i1, then i2 chaining onto i1, then i1 again.
+        // `Graph::insert_interaction` permits a re-upsert that does not move the
+        // interaction within the temporal chain, so `previous_id` is the same on
+        // both occurrences.
+        let sid = SessionId::from("r1-1-self-fk");
+        let i1 = NodeId::new();
+        let i2 = NodeId::new();
+        store
+            .flush(&MutationBatch {
+                mutations: vec![
+                    plant_interaction(&sid, i1, None, ts),
+                    plant_interaction(&sid, i2, Some(i1), ts),
+                    plant_interaction(&sid, i1, None, ts),
+                ],
+            })
+            .await
+            .expect(
+                "the repeated interaction must not be relocated past the row that references \
+                 it — a self-FK violation here dead-letters the whole batch (R1-1)",
+            );
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.interactions.len(), 2, "one row per id");
+        let chained = snap
+            .interactions
+            .iter()
+            .find(|i| i.id == i2)
+            .expect("i2 must be durable");
+        assert_eq!(
+            chained.previous_id,
+            Some(i1),
+            "the chain must survive the collapse"
+        );
+    }
+
+    /// **L82-1.** A batch far larger than the per-statement row limit must
+    /// round-trip whole — the chunking is what keeps a statement inside the
+    /// backend's bind-parameter cap, and an off-by-one there loses rows
+    /// silently rather than loudly.
+    #[tokio::test]
+    async fn a_batch_larger_than_the_chunk_limit_round_trips_whole() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("l82-1-chunking");
+        let i1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+        // Several chunks' worth on both buckets.
+        let concepts = BULK_LIMITS.concepts * 3 + 7;
+        let mut mutations = vec![plant_interaction(&sid, i1, None, ts)];
+        let mut ids = Vec::with_capacity(concepts);
+        for n in 0..concepts {
+            let id = NodeId::new();
+            ids.push(id);
+            mutations.push(plant_concept(
+                &sid,
+                id,
+                i1,
+                &format!("concept {n}"),
+                ConceptType::Entity,
+                ts,
+            ));
+        }
+        for n in 0..ids.len() - 1 {
+            mutations.push(Mutation::UpsertEdge {
+                edge: Edge {
+                    id: NodeId::new(),
+                    session_id: sid.clone(),
+                    source: ids[n],
+                    target: ids[n + 1],
+                    edge_type: EdgeType::Causal,
+                    weight: 1.0,
+                    reinforcements: 1,
+                    created_at: ts,
+                    last_reinforced: ts,
+                },
+            });
+        }
+        assert!(
+            concepts > BULK_LIMITS.concepts && ids.len() - 1 > BULK_LIMITS.edges,
+            "both buckets must actually span multiple statements"
+        );
+
+        store.flush(&MutationBatch { mutations }).await.unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.concepts.len(),
+            concepts,
+            "every concept must be durable"
+        );
+        assert_eq!(
+            snap.edges.len(),
+            ids.len() - 1,
+            "every edge must be durable"
+        );
+    }
+
     /// R2-1, demotion variant — the worse half. The stale snapshot carries
     /// `last_demotion_time: None` and the pre-demotion blast, so the demoted
     /// node used to reload `Canonical` with the re-promotion cooldown erased
@@ -3656,5 +4199,133 @@ mod tests {
             "file-backed tuning leaked into in-memory DB: busy_timeout={busy} ms \
              (sqlx default is 5000, file branch sets 8000)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-writer lease (T8.6)
+    // -----------------------------------------------------------------------
+
+    fn lease_holder(agent: &str, pid: u32) -> LeaseHolder {
+        LeaseHolder {
+            agent: AgentId::new(agent),
+            pid,
+            host: "test-host".into(),
+        }
+    }
+
+    /// A scratch sqlite file path this test owns; the caller removes the dir.
+    fn scratch_db() -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-lease-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lease.sqlite");
+        let s = path.to_str().unwrap().to_string();
+        (dir, s)
+    }
+
+    /// T8.6: the acquire/Held/release/expiry contract on a single connection.
+    #[tokio::test]
+    async fn lease_lifecycle_on_one_connection() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("s");
+        let a = lease_holder("agent-a", 100);
+        let b = lease_holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        assert!(store
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+        match store.acquire_lease(&sid, &b, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("expected Held, got {other:?}"),
+        }
+        // Refresh keeps acquired_at.
+        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh must succeed");
+        };
+        let LeaseOutcome::Acquired(refreshed) = store.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("refresh must succeed");
+        };
+        assert_eq!(first.acquired_at, refreshed.acquired_at);
+
+        store.release_lease(&sid, &a).await.unwrap();
+        assert!(store
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+    }
+
+    /// T8.6: expiry-after-crash on sqlite — an unreleased lease blocks before the
+    /// TTL and is reclaimable after it. Uses a 1s TTL to stay well clear of any
+    /// SQLite fractional-second rounding.
+    #[tokio::test]
+    async fn an_unreleased_lease_expires_on_sqlite() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("s");
+        let dead = lease_holder("dead", 1);
+        let live = lease_holder("live", 2);
+        let ttl = Duration::from_secs(1);
+
+        store.acquire_lease(&sid, &dead, ttl).await.unwrap();
+        assert!(matches!(
+            store.acquire_lease(&sid, &live, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        assert!(store
+            .acquire_lease(&sid, &live, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+    }
+
+    /// T8.6: **two independent connections to one DB file** — the cross-process
+    /// shape in miniature (a subprocess variant lives in
+    /// `tests/serve_single_writer_lease.rs`). One acquires, the other is refused
+    /// and told the holder; after a release the second wins.
+    #[tokio::test]
+    async fn two_connections_on_one_file_serialize_on_the_lease() {
+        let (dir, path) = scratch_db();
+        let sid = SessionId::from("shared");
+        let a = lease_holder("proc-a", 111);
+        let b = lease_holder("proc-b", 222);
+        let ttl = Duration::from_secs(30);
+
+        let store_a = SqliteStore::connect(&path).unwrap();
+        store_a.init_schema().await.unwrap();
+        let store_b = SqliteStore::connect(&path).unwrap();
+
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+        match store_b.acquire_lease(&sid, &b, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("the second connection must be refused, got {other:?}"),
+        }
+        store_a.release_lease(&sid, &a).await.unwrap();
+        assert!(store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+
+        drop(store_a);
+        drop(store_b);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,11 +12,32 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::{validate_vector_candidate_limit, Capabilities, GraphStore};
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
     CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
     NodeId, Scored, SessionId, StoreError,
 };
+
+/// One session's lease row (T8.6). In-process analogue of the sqlite/cockroach
+/// `session_leases` table: two `Memory` handles sharing this store contend on
+/// the same map entry, so the same-process collision is now *enforced*, not
+/// only logged. Keyed per store instance (not process-global): two separate
+/// `MemoryStore`s model two separate databases and must not see each other.
+#[derive(Clone)]
+struct LeaseRow {
+    holder: String,
+    acquired_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+fn row_info(row: &LeaseRow) -> LeaseInfo {
+    LeaseInfo {
+        holder: row.holder.clone(),
+        acquired_at: row.acquired_at,
+        expires_at: row.expires_at,
+    }
+}
 
 #[derive(Default)]
 struct SessionData {
@@ -51,6 +72,13 @@ impl SessionData {
 #[derive(Default)]
 pub struct MemoryStore {
     inner: RwLock<HashMap<String, SessionData>>,
+    /// Single-writer leases (T8.6), keyed by session id. Separate from `inner`
+    /// so lease contention never touches the graph data lock.
+    leases: RwLock<HashMap<String, LeaseRow>>,
+    /// Flush stats published by the writer's FlushTask (T85-3), keyed by
+    /// session id. Separate lock so publish/read contention never touches the
+    /// graph data or lease locks.
+    flush_stats: RwLock<HashMap<String, SessionFlushStats>>,
 }
 
 impl MemoryStore {
@@ -262,6 +290,17 @@ impl MemoryStore {
             .map_err(|e| StoreError::Backend(format!("age duration out of range: {e}")))?;
         Ok(now - d)
     }
+
+    /// Test hook (T86-2): force a session's lease to have already expired, so a
+    /// different holder's next `acquire_lease` takes it over — the store-side of
+    /// simulating a lost lease (a heartbeat starved past the TTL). No production
+    /// path expires a lease by hand; the operator override is a DELETE.
+    #[cfg(test)]
+    pub(crate) fn force_expire_lease(&self, session: &SessionId) {
+        if let Some(row) = self.leases.write().get_mut(&session.0) {
+            row.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        }
+    }
 }
 
 #[async_trait]
@@ -272,6 +311,100 @@ impl GraphStore for MemoryStore {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::empty()
+    }
+
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        // In-process clock (this IS the store) and one map lock held for the
+        // whole decision — the same atomicity the SQL backends get from a single
+        // `INSERT ... ON CONFLICT`: no reader can observe a half-applied steal.
+        let now = Utc::now();
+        let expires_at = now
+            + chrono::Duration::from_std(ttl)
+                .map_err(|e| StoreError::Backend(format!("lease ttl out of range: {e}")))?;
+        let token = holder.token();
+        let mut leases = self.leases.write();
+        match leases.get(&session.0) {
+            // A live lease held by someone else — refuse, fail closed.
+            Some(row) if row.expires_at > now && row.holder != token => {
+                let age = (now - row.acquired_at).to_std().unwrap_or(Duration::ZERO);
+                Ok(LeaseOutcome::Held {
+                    current: row_info(row),
+                    age,
+                })
+            }
+            // Our own lease — refresh, keeping the original acquisition time.
+            Some(row) if row.holder == token => {
+                let acquired_at = row.acquired_at;
+                let updated = LeaseRow {
+                    holder: token,
+                    acquired_at,
+                    expires_at,
+                };
+                let info = row_info(&updated);
+                leases.insert(session.0.clone(), updated);
+                Ok(LeaseOutcome::Acquired(info))
+            }
+            // Fresh or expired — take it.
+            _ => {
+                let fresh = LeaseRow {
+                    holder: token,
+                    acquired_at: now,
+                    expires_at,
+                };
+                let info = row_info(&fresh);
+                leases.insert(session.0.clone(), fresh);
+                Ok(LeaseOutcome::Acquired(info))
+            }
+        }
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        // Identical atomic upsert; the acquire arm for "our own lease" is the
+        // heartbeat path.
+        self.acquire_lease(session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        let token = holder.token();
+        let mut leases = self.leases.write();
+        // Holder-scoped: only clear the row if it is still ours, so a stale
+        // release cannot evict a writer who took over after our lease lapsed.
+        if leases.get(&session.0).map(|r| &r.holder) == Some(&token) {
+            leases.remove(&session.0);
+        }
+        Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        // In-memory publish: one lock, replace the whole row. Only the
+        // writer's FlushTask calls this; readers only read.
+        self.flush_stats.write().insert(session.0.clone(), *stats);
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        Ok(self.flush_stats.read().get(&session.0).copied())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
@@ -567,6 +700,130 @@ mod tests {
     use crate::types::{AgentId, CanonizationStatus, Concept, ConceptType, Edge, Interaction};
     use chrono::TimeZone;
     use std::sync::Arc;
+
+    fn holder(agent: &str, pid: u32) -> LeaseHolder {
+        LeaseHolder {
+            agent: AgentId::new(agent),
+            pid,
+            host: "test-host".into(),
+        }
+    }
+
+    /// T8.6: one holder acquires; a *different* holder is refused (fail closed)
+    /// with the current holder + age; a holder-scoped release frees the session.
+    #[tokio::test]
+    async fn lease_grants_one_holder_and_refuses_another() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("leased");
+        let a = holder("agent-a", 100);
+        let b = holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        assert!(store
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+
+        // A distinct, live holder is refused, and told who holds it.
+        match store.acquire_lease(&sid, &b, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("expected Held, got {other:?}"),
+        }
+
+        // A's own re-acquire (heartbeat) still succeeds.
+        assert!(store
+            .refresh_lease(&sid, &a, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+
+        // Release by A frees it; B can now take it.
+        store.release_lease(&sid, &a).await.unwrap();
+        assert!(store
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+    }
+
+    /// T8.6: a stale release (holder no longer owns the row) must not evict the
+    /// current holder.
+    #[tokio::test]
+    async fn a_stale_release_does_not_evict_the_new_holder() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("leased");
+        let a = holder("agent-a", 100);
+        let b = holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        store.acquire_lease(&sid, &a, ttl).await.unwrap();
+        store.release_lease(&sid, &a).await.unwrap();
+        store.acquire_lease(&sid, &b, ttl).await.unwrap();
+
+        // A's late/duplicate release names A, but B holds the row now — no-op.
+        store.release_lease(&sid, &a).await.unwrap();
+        match store.acquire_lease(&sid, &a, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, b.token()),
+            other => panic!("B's lease must survive A's stale release, got {other:?}"),
+        }
+    }
+
+    /// T8.6: expiry-after-crash. A holder that never releases (a crash) blocks a
+    /// second writer *before* the TTL and is reclaimable *after* it.
+    #[tokio::test]
+    async fn an_unreleased_lease_expires_and_is_reacquirable() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("crashed");
+        let dead = holder("agent-dead", 1);
+        let live = holder("agent-live", 2);
+        let ttl = Duration::from_millis(80);
+
+        // The "crashed" holder acquires and never releases.
+        store.acquire_lease(&sid, &dead, ttl).await.unwrap();
+
+        // Before the TTL: refused.
+        assert!(matches!(
+            store.acquire_lease(&sid, &live, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+
+        // After the TTL: the expired lease is reclaimable.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(store
+            .acquire_lease(&sid, &live, ttl)
+            .await
+            .unwrap()
+            .is_acquired());
+    }
+
+    /// T8.6: a heartbeat refresh keeps the original `acquired_at` (so "age"
+    /// measures how long this holder has held it, not time since last beat).
+    #[tokio::test]
+    async fn refresh_preserves_the_original_acquired_at() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("beat");
+        let a = holder("agent-a", 100);
+        let ttl = Duration::from_secs(30);
+
+        let LeaseOutcome::Acquired(first) = store.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("first acquire must succeed");
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let LeaseOutcome::Acquired(second) = store.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("refresh must succeed");
+        };
+        assert_eq!(
+            first.acquired_at, second.acquired_at,
+            "acquired_at is stable across a holder's own refreshes"
+        );
+        assert!(
+            second.expires_at > first.expires_at,
+            "the refresh extends the expiry"
+        );
+    }
 
     fn sample_session() -> (SessionId, NodeId, NodeId, NodeId) {
         let sid = SessionId::from("test-sess");

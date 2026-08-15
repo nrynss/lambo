@@ -32,6 +32,17 @@ if [[ ! -f "$MIGRATION" ]]; then
   exit 1
 fi
 
+# Schema surface applied from $MIGRATION (single source of truth; the splitter
+# below routes each CREATE to BASE_SQL). Tables: sessions, interactions,
+# concepts, edges, synonyms, canonization_events, reservations, and — since
+# T8.6 — session_leases (the store-enforced single-writer lease, spec §2.2).
+#
+# Operator override for a wedged-but-still-heartbeating writer that will not let
+# go of a session (T8.6 documents this manual escape; there is no auto-preempt):
+#   DELETE FROM session_leases WHERE session_id = '<session>';
+# The next writer's acquire then wins; it replays from durable state, so the
+# wedged holder's un-flushed tail is lost exactly as on any crash.
+
 run_sql() {
   local sql="$1"
   if command -v docker >/dev/null 2>&1; then
@@ -53,6 +64,74 @@ run_sql_file() {
   else
     echo "error: need docker or psql" >&2
     exit 1
+  fi
+}
+
+# Raw single-value query (no table formatting) for state checks.
+run_sql_value() {
+  local sql="$1"
+  if command -v docker >/dev/null 2>&1; then
+    docker run --rm -i postgres:16-alpine psql "$DSN" -At -c "$sql"
+  elif command -v psql >/dev/null 2>&1; then
+    psql "$DSN" -At -c "$sql"
+  else
+    echo "error: need docker or psql" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Vector index state (T7.4) — spec §12.1 depends on this being PARTIAL.
+#
+# `concepts_embedding_idx` MUST be partial on `embedding IS NOT NULL`. Against a
+# NON-partial index the optimizer cannot prove the production query's predicate
+# is implied by the index, so it plans a FULL SCAN and the "we used CockroachDB
+# vector indexing" claim silently becomes false. Nothing errors; the plan just
+# quietly changes. That is why this script checks rather than assumes.
+#
+# This conditional logic lives HERE and not in migrations/cockroach/001_init.sql
+# on purpose: that file is embedded as INIT_SQL and re-executed by
+# CockroachStore::init_schema() over a pool with a hard 20s statement_timeout,
+# while CREATE VECTOR INDEX takes ~85-96s. Slow or destructive schema work must
+# stay in this script, which runs under psql with no such timeout. CockroachDB
+# also has no DO blocks, and the splitter above rejects dollar-quoting, so this
+# cannot be expressed in the migration at all.
+#
+# Echoes exactly one of: absent | partial | legacy
+# Matching notes (adve-review MINOR-3): the predicate is read from DDL text
+# because there is no catalog alternative — `crdb_internal` is blocked on
+# CockroachDB Cloud ("Access to crdb_internal and system is restricted") and
+# `SHOW INDEXES` exposes no partial-predicate column. So the text match is made
+# robust instead of clever:
+#   * the whole CREATE TABLE is canonicalized to ONE lowercase line with
+#     whitespace collapsed, so a predicate that wraps onto another line, or
+#     changes case, still matches;
+#   * the predicate is then looked for in a BOUNDED window immediately after
+#     this index's name, so another partial index on the same table
+#     (concepts_key_non_obs_idx has its own WHERE) cannot false-positive it.
+# Worst case if CockroachDB reformats beyond recognition: a misclassification
+# rebuilds the index once and then the final verification gate fails LOUDLY.
+# It cannot degrade into a silent full-scan cluster, which is the failure this
+# whole mechanism exists to prevent.
+vector_index_state() {
+  local create_stmt canon after
+  create_stmt="$(run_sql_value "SELECT create_statement FROM [SHOW CREATE TABLE concepts];" 2>/dev/null || true)"
+  # Lowercase + collapse all whitespace (newlines included) into single spaces.
+  canon="$(printf '%s' "${create_stmt,,}" | tr -s '[:space:]' ' ')"
+  if [[ "$canon" != *"concepts_embedding_idx"* ]]; then
+    echo "absent"
+    return
+  fi
+  # Text following this index's name, bounded so a later index's WHERE cannot
+  # be attributed to this one. The pinned shape is
+  #   vector index concepts_embedding_idx (embedding vector_l2_ops) where embedding is not null
+  # which is ~50 chars of column spec before the predicate.
+  after="${canon#*concepts_embedding_idx}"
+  after="${after:0:120}"
+  if [[ "$after" == *"where embedding is not null"* ]]; then
+    echo "partial"
+  else
+    echo "legacy"
   fi
 }
 
@@ -185,12 +264,42 @@ fi
 echo "== applying base tables/indexes from $MIGRATION =="
 run_sql_file "$BASE_SQL"
 
+# adve-review NIT-7: the vector-index apply AND its verification are both
+# guarded by `-s "$VINDEX_SQL"`, so a routing bug that produced an empty vector
+# file would skip both — silently yielding exactly the full-scan cluster this
+# script exists to prevent. Assert the routing instead of trusting it: if the
+# migration declares a vector index, the splitter must have captured one.
+if grep -Eiq '^[[:space:]]*create[[:space:]]+vector[[:space:]]+index' "$MIGRATION" && [[ ! -s "$VINDEX_SQL" ]]; then
+  echo "error: $MIGRATION declares a CREATE VECTOR INDEX but the splitter routed none." >&2
+  echo "       Refusing to continue: provisioning would skip both the index and its" >&2
+  echo "       verification, leaving a cluster that silently plans a FULL SCAN." >&2
+  exit 1
+fi
+
 if [[ -s "$VINDEX_SQL" ]]; then
+  # Upgrade a pre-T7.4 cluster. `CREATE VECTOR INDEX IF NOT EXISTS ... WHERE ...`
+  # matches on NAME ONLY: against a legacy non-partial index of the same name it
+  # reports CREATE INDEX, succeeds in ~1s, and changes NOTHING. It does not even
+  # error. So the legacy index must be dropped first, and only this script can
+  # do it (see vector_index_state above for why not the migration).
+  state="$(vector_index_state)"
+  case "$state" in
+    legacy)
+      echo "== dropping legacy NON-partial concepts_embedding_idx (one-time upgrade) =="
+      echo "   (drop ~3s, rebuild ~85-96s — do not interrupt)"
+      run_sql "DROP INDEX IF EXISTS concepts@concepts_embedding_idx;"
+      ;;
+    partial) echo "== vector index already partial — nothing to upgrade ==" ;;
+    absent)  echo "== no vector index yet — creating ==" ;;
+  esac
+
   echo "== applying vector index =="
   if ! run_sql_file "$VINDEX_SQL"; then
     echo "warning: vector index apply failed — retrying without IF NOT EXISTS" >&2
-    # fallback for older CRDB without IF NOT EXISTS on vector indexes
-    run_sql "CREATE VECTOR INDEX concepts_embedding_idx ON concepts (embedding);" 2>/dev/null \
+    # Fallback for older CRDB without IF NOT EXISTS on vector indexes.
+    # The WHERE clause is NOT optional: dropping it here would silently
+    # reinstate the FULL SCAN plan and falsify the §12.1 claim (T7.4).
+    run_sql "CREATE VECTOR INDEX concepts_embedding_idx ON concepts (embedding) WHERE embedding IS NOT NULL;" 2>/dev/null \
       || echo "warning: vector index may already exist or be unavailable" >&2
   fi
 fi
@@ -198,4 +307,20 @@ fi
 echo "== verify =="
 run_sql "SHOW tables;"
 run_sql "SHOW INDEXES FROM concepts;" || true
+
+# Fail loudly rather than hand back a cluster that plans a FULL SCAN. Without
+# this gate the failure mode is silent: everything "works", only slower, and the
+# §12.1 vector-indexing claim is quietly untrue until someone runs the camera
+# proof. Skipped when the migration ships no vector index at all.
+if [[ -s "$VINDEX_SQL" ]]; then
+  final_state="$(vector_index_state)"
+  if [[ "$final_state" != "partial" ]]; then
+    echo "error: concepts_embedding_idx is '$final_state', expected 'partial'." >&2
+    echo "       A non-partial vector index makes the planner choose a FULL SCAN," >&2
+    echo "       which silently falsifies the spec §12.1 vector-index claim." >&2
+    echo "       Fix: DROP INDEX IF EXISTS concepts@concepts_embedding_idx; then re-run." >&2
+    exit 1
+  fi
+  echo "vector index verified PARTIAL (spec §12.1 plan is vector search)."
+fi
 echo "provision complete."

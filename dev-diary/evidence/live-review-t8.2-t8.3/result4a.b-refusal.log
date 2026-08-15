@@ -1,0 +1,1 @@
+lambo serve: conflict: session live-lease is already held by another writer (agent-a@cachyos-x8664#19762) — it acquired the single-writer lease 13s ago and is still refreshing it. Spec §2.2 is one writer per session; refusing to open a second. If that holder is wedged, an operator can force a takeover: DELETE FROM session_leases WHERE session_id = '<session>';

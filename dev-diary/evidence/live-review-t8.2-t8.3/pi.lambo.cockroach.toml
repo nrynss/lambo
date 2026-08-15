@@ -1,0 +1,8 @@
+[store]
+kind = "cockroach"
+dsn = "<REDACTED-DSN>"
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"

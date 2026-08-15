@@ -53,16 +53,69 @@
 //! The merge target is surfaced in the outcome's [`DeriveOutcome::semantic_merged`]
 //! — kept separate from `matched` because a merge does not re-upsert the target
 //! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
-//! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept degraded to
-//! keyword-only (below-threshold, capability-miss, embed-failure, or an invalid
-//! non-Concept merge target — see the commit-time validation) is written with
-//! `embedding: None`: the precision bias must never persist a vector for a
-//! concept it refused to merge (MAJOR-1 / MINOR-2); likewise a failed embed
-//! never stamps the session's embedding contract (MINOR-2). At commit, each
+//! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept for which no
+//! vector was ever produced (capability-absent, embed failure/timeout, a store
+//! that refuses `vector_candidates` after advertising the capability, or an
+//! invalid non-Concept merge target — see the commit-time validation) is written
+//! with `embedding: None`; a failed embed likewise never stamps the session's
+//! embedding contract (MINOR-2). See "Vector persistence for fresh concepts"
+//! below for the one arm that changed. At commit, each
 //! content is re-canonicalized against the graph as written this call so that
 //! distinct contents collapsing onto one canonical key resolve Matched to the
 //! just-created node (mirroring sync `derive`'s within-call dedup) instead of
 //! erroring on `insert_concept`'s UNIQUE key collision (MAJOR-1).
+//!
+//! # Vector persistence for fresh concepts (L82-4 — product decision 2026-08-14)
+//!
+//! A `Fresh` concept whose embedding was **successfully computed** now keeps that
+//! vector even though no candidate cleared `semantic_match_threshold`. Until this
+//! decision the below-threshold arm wrote `embedding: None`, and because *every*
+//! organically-derived concept takes that arm, `concepts.embedding IS NULL` held
+//! for every row the product itself wrote: the live-CockroachDB review measured
+//! **0 of 13** organic concepts with a vector, so recall's vector leg could never
+//! fire on organically-derived memory — only out-of-band seeding produced
+//! vectors (`adversarial-review/adve-review-t8.2-t8.3-live.md`, finding L82-4).
+//! Persisting the vector is what makes derived memory vector-recallable. Arms
+//! where no vector exists still write `None` — a vector is never invented.
+//!
+//! ## The chosen semantic: **threshold-preserving** (recall-visible, merge bar unchanged)
+//!
+//! A persisted vector is read by [`GraphStore::vector_candidates`], which serves
+//! two callers: recall's vector leg (read-only ranking, T5.1) and this module's
+//! merge step. The precision-bias / anti-over-merge law (MAJOR-1) survives as
+//! three properties, each pinned by a test:
+//!
+//! 1. **A refusal is never recorded as an endorsement.** A below-threshold
+//!    concept gets its vector but **no `Semantic` edge**. Recall expansion (spec
+//!    §8) and P6 canonization's physical fold both travel `Semantic` edges, so a
+//!    fresh concept is reachable only through its own similarity to the query —
+//!    never transitively, out of an unrelated concept's neighbourhood. *The
+//!    over-merge scenario this prevents:* concepts A and B sit at cosine 0.84
+//!    (below the bar). Writing B's vector must not join B to A; if it did, a
+//!    later recall on A would pull in B — and, through B, whatever later merges
+//!    into B — collapsing two distinct topics into one recall neighbourhood via
+//!    links no single comparison ever endorsed. No `Semantic` edge is written, so
+//!    that chain cannot start.
+//! 2. **The merge bar did not move.** A merge still requires
+//!    `score >= semantic_match_threshold` (0.85 default, calibrated against
+//!    BGE-M3 — PHASE-7), after `best_candidate`'s finite/`[0,1]`/deterministic
+//!    tie-break validation and the commit-time "target really is a Concept"
+//!    check. Persisting a vector lowers nothing.
+//! 3. **A vector minted in this call can never drive a merge in this call.**
+//!    Candidates come from the store, which cannot see this call's staged,
+//!    not-yet-flushed writes; `*target != id` is the defence in depth.
+//!
+//! ## What is deliberately *not* claimed
+//!
+//! Once flushed, a fresh vector **is** a legal merge *target* for a later derive
+//! (`Resolution::HybridMerge { target }`). That is unavoidable here:
+//! `vector_candidates` is a single query over `embedding IS NOT NULL` and cannot
+//! tell the merge leg from the recall leg apart. A strict target-exclusion would
+//! need durable per-vector provenance (a new `concepts` column plus a migration
+//! in every adapter) and — because after this change *every* organic concept is
+//! fresh-persisted — it would exclude every organic concept and leave the merge
+//! leg permanently inert, a strictly larger product change than L82-4 asks for.
+//! The threshold, not the provenance of the vector, is the precision instrument.
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -131,7 +184,14 @@ enum Resolution {
     /// to derive's `Matched` path).
     CanonicalMatch { node: NodeId },
     /// `Unmatched` with no viable vector hit (capability absent, embed failure,
-    /// below threshold, or invalid candidate): create a fresh keyword-only concept.
+    /// below threshold, or invalid candidate): create a fresh concept and no
+    /// `Semantic` edge.
+    ///
+    /// `embedding` is `Some` exactly when a vector was actually computed for
+    /// this concept and the store can serve vectors — the below-threshold arm
+    /// (L82-4). It is `None` on every arm where no vector exists (or none can
+    /// ever be queried): a vector is never invented, and the absent-capability
+    /// path stays byte-identical to `MatchStrategy::Canonical`.
     Fresh {
         key: String,
         embedding: Option<Vec<f32>>,
@@ -475,14 +535,25 @@ pub async fn derive(
                                             score: c.score,
                                             embedding: emb,
                                         },
-                                        // Below threshold: fresh concept, keyword-only.
-                                        // Writing the vector here would let a 'far'
-                                        // concept become a future vector candidate —
-                                        // the exact over-merge the precision bias
-                                        // prevents (PHASE-7 T7.2 law, MAJOR-1).
+                                        // Below threshold: fresh concept, NO
+                                        // `Semantic` edge — the merge is refused.
+                                        // L82-4 (product decision 2026-08-14):
+                                        // the vector it just computed IS
+                                        // persisted, so organically-derived data
+                                        // becomes vector-recallable; before this,
+                                        // every organic concept stored NULL and
+                                        // recall's vector leg was dead on real
+                                        // data (0 of 13 live). The precision bias
+                                        // is preserved by the refusal itself: no
+                                        // `Semantic` edge means this concept is
+                                        // never pulled into another concept's
+                                        // recall neighbourhood, and the merge bar
+                                        // is still `>= semantic_match_threshold`.
+                                        // See the module doc, "Vector persistence
+                                        // for fresh concepts".
                                         None => Resolution::Fresh {
                                             key: key.clone(),
-                                            embedding: None,
+                                            embedding: Some(emb),
                                         },
                                     }
                                 }
@@ -496,6 +567,14 @@ pub async fn derive(
                                              keyword-only concept)"
                                         );
                                     }
+                                    // A vector exists here, but the store just
+                                    // refused to query vectors at all — so it can
+                                    // serve neither a merge nor recall's vector
+                                    // leg from it. Persisting an unqueryable
+                                    // vector buys nothing and would break the
+                                    // "capability miss == MatchStrategy::Canonical"
+                                    // promise, so this arm stays `None` (L82-4
+                                    // changes only the below-threshold arm).
                                     Resolution::Fresh {
                                         key: key.clone(),
                                         embedding: None,
@@ -618,9 +697,12 @@ pub async fn derive(
                     // must be concepts (GRAPH-2); validate the target up front and,
                     // when the store handed us a bogus non-Concept candidate, refuse
                     // the merge and degrade to a TRUE keyword-only concept
-                    // (embedding: None) — the concept must never persist a vector for
-                    // a merge it refused to make (consistent with the other
-                    // below-threshold / capability-miss / embed-failure fallbacks).
+                    // (embedding: None). L82-4 did NOT relax this arm: a store that
+                    // answers `vector_candidates` with an id that is not a concept
+                    // has an untrustworthy vector view for this call, so we decline
+                    // to add another row to it. (The below-threshold arm, where the
+                    // store behaved correctly and simply had no near neighbour, does
+                    // persist its vector — see the module doc.)
                     let can_merge = matches!(g.node(*target), Some(Node::Concept(_)));
                     let embedding = if can_merge {
                         Some(embedding.clone())
@@ -1220,10 +1302,24 @@ mod tests {
         let mut g = graph.write();
         assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
         assert_eq!(g.concepts().count(), 1);
-        // Precision-biased hybrid writes a fresh candidate keyword-only when
-        // the store has no trusted matches; the contract is still committed
-        // so later writes/searches use one known vector space.
-        assert!(g.concepts().all(|concept| concept.embedding.is_none()));
+        // L82-4 (product decision 2026-08-14): the store had no trusted match,
+        // so no merge is recorded — but the vector that was successfully
+        // computed IS persisted, which is what makes an organically-derived
+        // concept vector-recallable. This assertion used to be `is_none()`;
+        // the contract is still committed so every vector lives in one known
+        // space.
+        assert!(
+            g.concepts()
+                .all(|concept| concept.embedding.as_ref().is_some_and(|v| v.len() == 1024)),
+            "a successfully embedded fresh concept persists its vector (L82-4)"
+        );
+        assert_eq!(
+            g.edges()
+                .filter(|e| e.edge_type == EdgeType::Semantic)
+                .count(),
+            0,
+            "no candidate cleared the threshold, so no merge is endorsed"
+        );
         assert!(g.drain_log().mutations.iter().any(|mutation| matches!(
             mutation,
             crate::types::Mutation::SetEmbedding {
@@ -1494,8 +1590,15 @@ mod tests {
         graph.read().assert_invariants().unwrap();
     }
 
+    /// Below-threshold ("far") content creates a fresh concept that **keeps its
+    /// vector** (L82-4, product decision 2026-08-14) but is **not merged**: no
+    /// `Semantic` edge is written. This test was
+    /// `far_text_creates_fresh_keyword_concept` and asserted `embedding.is_none()`
+    /// under the pre-L82-4 rule; the vector assertion is inverted, every other
+    /// assertion (no Semantic edge, Derives present, invariants) is unchanged —
+    /// they are the properties that carry the precision bias forward.
     #[tokio::test]
-    async fn far_text_creates_fresh_keyword_concept() {
+    async fn far_text_creates_fresh_concept_with_vector_but_no_merge() {
         let sess = "hybrid-far";
         let (graph, i1) = graph_with_interaction(sess, 1, 0, "user signs up for the platform");
         let c1 = {
@@ -1541,23 +1644,174 @@ mod tests {
         assert!(out2.matched.is_empty());
         let c2 = out2.created[0];
         let g = graph.read();
-        // MAJOR-1: the below-threshold fresh concept must be keyword-only — a
-        // written vector here would let a 'far' concept become a vector
-        // candidate on a later hybrid derive (the exact over-merge the
-        // precision bias prevents).
+        // L82-4: the below-threshold fresh concept persists the vector it
+        // computed, so recall's vector leg can reach organically-derived data.
         match g.node(c2) {
-            Some(Node::Concept(con)) => assert!(
-                con.embedding.is_none(),
-                "below-threshold fresh concept must not carry a vector"
+            Some(Node::Concept(con)) => assert_eq!(
+                con.embedding.as_ref().map(Vec::len),
+                Some(1024),
+                "below-threshold fresh concept persists its computed vector (L82-4)"
             ),
             _ => unreachable!(),
         }
-        // No Semantic edge: keyword-only fresh concept.
+        // ...and MAJOR-1 still holds where it counts: the refused merge writes NO
+        // Semantic edge, so C2 is never pulled into C1's recall neighbourhood
+        // (nor P6's physical fold) on the strength of a 0.2 similarity.
         assert!(g.edge_between(c1, c2, EdgeType::Semantic).is_none());
         assert!(g.edge_between(c2, c1, EdgeType::Semantic).is_none());
         assert!(
             g.edge_between(i2, c2, EdgeType::Derives).is_some(),
             "derives edge present"
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    /// L82-4 exclusion semantic, pinned: **threshold-preserving**. Persisting a
+    /// fresh concept's vector must not change *when* a merge happens — the bar is
+    /// still `score >= semantic_match_threshold` and nothing else. Same target,
+    /// same session, three derives: the only variable is the candidate score.
+    #[tokio::test]
+    async fn persisted_fresh_vector_does_not_lower_the_merge_bar() {
+        let sess = "hybrid-bar";
+        let (graph, i1) = graph_with_interaction(sess, 1, 0, "billing retries a failed charge");
+
+        // Derive 1 — nothing to compare against: fresh concept, vector persisted.
+        let out1 = derive(
+            graph.clone(),
+            &SpyStore::with_vector(Vec::new()),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            i1,
+            &agent(),
+            &[("billing retry policy", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+        let c1 = out1.created[0];
+        let has_vector = |node: NodeId| match graph.read().node(node) {
+            Some(Node::Concept(c)) => c.embedding.is_some(),
+            _ => unreachable!("expected a concept"),
+        };
+        assert!(has_vector(c1), "fresh concept persists its vector (L82-4)");
+
+        // Derive 2 — the SAME persisted vector is now a candidate, but at 0.84,
+        // one hundredth under the bar: still no merge, and the new concept keeps
+        // its own vector. A stored vector is not an invitation to merge.
+        let mut i2n = interaction(2, Some(i1), 60, "the ledger reconciles a payment");
+        i2n.session_id = sid(sess);
+        let i2 = i2n.id;
+        graph.write().insert_interaction(i2n).unwrap();
+        let out2 = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![hit(c1, 0.84)]),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            i2,
+            &agent(),
+            &[("payment ledger", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out2.semantic_merged.is_empty(),
+            "0.84 < 0.85 — the bar did not move because c1 has a vector"
+        );
+        assert!(has_vector(out2.created[0]));
+        assert_eq!(
+            graph
+                .read()
+                .edges()
+                .filter(|e| e.edge_type == EdgeType::Semantic)
+                .count(),
+            0
+        );
+
+        // Derive 3 — same candidate, now exactly at the bar: the merge fires.
+        // The threshold is the whole decision procedure, before and after L82-4.
+        let mut i3n = interaction(3, Some(i2), 120, "an operator retries the charge by hand");
+        i3n.session_id = sid(sess);
+        let i3 = i3n.id;
+        graph.write().insert_interaction(i3n).unwrap();
+        let out3 = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![hit(c1, SEMANTIC_MATCH_THRESHOLD_DEFAULT)]),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            i3,
+            &agent(),
+            &[("manual charge retry", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out3.semantic_merged, vec![c1]);
+        let g = graph.read();
+        let c3 = out3.created[0];
+        assert!(g
+            .edge_between(c1, c3, EdgeType::Semantic)
+            .or_else(|| g.edge_between(c3, c1, EdgeType::Semantic))
+            .is_some());
+        g.assert_invariants().unwrap();
+    }
+
+    /// L82-4 property 3: a vector minted during a call can never drive a merge
+    /// *inside* that call. Every `vector_candidates` query is issued in the
+    /// gather phase, before a single node is written, so a sibling concept of
+    /// the same derive is structurally invisible as a candidate — no
+    /// self-referential merging on the strength of a just-minted vector.
+    #[tokio::test]
+    async fn vectors_minted_in_this_call_cannot_merge_within_it() {
+        let sess = "hybrid-same-call";
+        let (graph, i1) = graph_with_interaction(sess, 1, 0, "two new ideas in one turn");
+        let store = SpyStore::with_vector(Vec::new());
+        let out = derive(
+            graph.clone(),
+            &store,
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            i1,
+            &agent(),
+            &[
+                (NEAR_A, ConceptType::Entity),
+                (NEAR_B, ConceptType::Entity), // near A, and both are brand new
+            ],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.created.len(), 2);
+        assert!(out.semantic_merged.is_empty());
+        assert_eq!(
+            store.vector_calls(),
+            2,
+            "one query per unmatched concept, all in the gather phase"
+        );
+        let g = graph.read();
+        for id in &out.created {
+            match g.node(*id) {
+                Some(Node::Concept(c)) => {
+                    assert!(c.embedding.is_some(), "both fresh concepts persist vectors")
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            g.edges()
+                .filter(|e| e.edge_type == EdgeType::Semantic)
+                .count(),
+            0,
+            "siblings of one call never merge into each other"
         );
         g.assert_invariants().unwrap();
     }
@@ -1710,7 +1964,10 @@ mod tests {
         let g = graph.read();
         let c = out.created[0];
         assert!(g.edge_between(i1, c, EdgeType::Derives).is_some());
-        // Concept has no embedding (the embed itself failed).
+        // Concept has no embedding (the embed itself failed). L82-4 explicitly
+        // does NOT touch this arm: persistence follows a vector that exists, and
+        // a vector is never invented. The derive still returns Ok — a dead
+        // embedder degrades the write, it does not fail it.
         match g.node(c) {
             Some(Node::Concept(con)) => assert!(con.embedding.is_none()),
             _ => unreachable!(),

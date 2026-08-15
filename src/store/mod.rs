@@ -33,10 +33,19 @@ pub(crate) use error::map_write_err;
 #[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
 pub(crate) mod vector;
 
+// L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
+// (it only reads `Mutation`), so it compiles and is tested under every feature
+// row, including the `--no-default-features` minimal ones.
+pub mod batch;
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
+// T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
+// TTL/heartbeat constants, acquire/refresh/release outcomes.
+pub mod lease;
+
+pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 
 use async_trait::async_trait;
 use bitflags::bitflags;
@@ -55,6 +64,22 @@ use crate::types::{
 /// allocation, and integer narrowing at the public store/recall boundary.
 pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
 
+/// Observable flush stats published by the lease-holding writer and readable
+/// by a reader in another process (T85-3).
+///
+/// This is the durable/remote snapshot of the writer's in-memory
+/// [`crate::store::flush::FlushStats`] (lag / depth / dead-lettered), which is
+/// process-local and therefore invisible to a separate reader. A reader that
+/// sees `None` reports the honest `n/a`, never a fabricated `0`. Written ONLY
+/// by the writer's `FlushTask`; readers must never write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionFlushStats {
+    /// Milliseconds since the writer's last successful flush — the observable
+    /// durability-lag bound.
+    pub flush_lag_ms: u64,
+    /// Mutations not yet durable (in-graph log + pending batch) at publish time.
+    pub log_depth: u64,
+}
 pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
     if limit > MAX_VECTOR_CANDIDATE_LIMIT {
         return Err(StoreError::Invariant(format!(
@@ -164,6 +189,117 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<InteractionSpan, StoreError>;
 
     async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError>;
+
+    // -----------------------------------------------------------------------
+    // Single-writer lease (spec §2.2, T8.6)
+    // -----------------------------------------------------------------------
+
+    /// Atomically acquire the session's single-writer lease for `holder`,
+    /// valid for `ttl` (spec §2.2).
+    ///
+    /// **Atomic, fail-closed, no read-then-write race.** A backend implements
+    /// this as ONE statement/transaction — an `INSERT ... ON CONFLICT` whose
+    /// update is guarded by an expiry check — so the decision is made under the
+    /// store's own concurrency control, never by reading the row and writing it
+    /// back. The result is exactly one of:
+    ///
+    /// * [`LeaseOutcome::Acquired`] — the row was fresh, the prior lease had
+    ///   expired, or it was already ours (a refresh). It is now ours until
+    ///   `ttl` from the store's clock.
+    /// * [`LeaseOutcome::Held`] — a *live* lease is held by someone else. The
+    ///   caller must fail closed; the outcome carries the current holder and its
+    ///   age for a diagnostic.
+    ///
+    /// **Clock discipline.** `ttl` is a duration, not a timestamp: the backend
+    /// stamps `acquired_at`/`expires_at` from its own clock (spec §6.4 / F18).
+    /// A caller-supplied absolute instant must never reach a lease row.
+    ///
+    /// **Default is advisory (non-enforcing).** The provided implementation
+    /// always grants, persisting nothing — it exists so test doubles and any
+    /// store that has not implemented enforcement keep their prior behaviour
+    /// (single-writer was advisory before T8.6). The three real backends
+    /// (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it with true
+    /// enforcement. A store that grants here provides no cross-process
+    /// guarantee — the in-process `ACTIVE_SESSIONS` log is the only catch.
+    async fn acquire_lease(
+        &self,
+        _session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        let now = Utc::now();
+        Ok(LeaseOutcome::Acquired(LeaseInfo {
+            holder: holder.token(),
+            acquired_at: now,
+            expires_at: now
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0)),
+        }))
+    }
+
+    /// Heartbeat: extend our own lease by `ttl` (spec §2.2). Same atomic
+    /// upsert shape as [`Self::acquire_lease`] — a refresh is just a re-acquire
+    /// by the same holder, so a holder whose lease was stolen after expiry
+    /// learns it lost the session ([`LeaseOutcome::Held`]) instead of silently
+    /// squatting a row it no longer owns. Default is advisory (always grants).
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_lease(session, holder, ttl).await
+    }
+
+    /// Release our lease — the pair of a successful [`Self::acquire_lease`]
+    /// (spec §2.2). A graceful close **releases** rather than waiting out the
+    /// TTL, so the next writer takes over immediately.
+    ///
+    /// Idempotent and holder-scoped: it clears the row only if `holder` still
+    /// owns it, so a stale release (after our lease already expired and was
+    /// re-taken) can never evict the *new* holder. Default is a no-op.
+    async fn release_lease(
+        &self,
+        _session: &SessionId,
+        _holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Flush stats publication (T85-3)
+    // -----------------------------------------------------------------------
+
+    /// Persist this session's observable flush stats (T85-3).
+    ///
+    /// Called ONLY by the lease-holding writer's `FlushTask` after a flush
+    /// cycle, so a reader in another process can render real
+    /// `flush_lag_ms` / `log_depth` instead of `n/a`. A reader must never
+    /// call this. Best-effort by callers: a publish failure must not perturb
+    /// the flush path.
+    ///
+    /// **Default is a no-op** so non-target backends, test doubles, and the
+    /// advisory-default stores keep their prior behaviour; the three real
+    /// stores (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it.
+    async fn write_flush_stats(
+        &self,
+        _session: &SessionId,
+        _stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Read the session's persisted flush stats (T85-3), for a reader.
+    ///
+    /// Returns `None` when no writer has published yet, or when the store does
+    /// not support it — the honest `n/a` fallback, not a fabricated value.
+    /// Default returns `None` (no-op read) so non-target backends and test
+    /// doubles keep their prior behaviour; the three real stores override it.
+    async fn read_flush_stats(
+        &self,
+        _session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        Ok(None)
+    }
 }
 
 /// Durable store selector (TOML `store.kind` / `LAMBO_STORE`).
@@ -715,5 +851,39 @@ mod tests {
         // Empty LAMBO_STORE is unset → keep file kind.
         assert_eq!(o.kind, StoreKind::Sqlite);
         env::remove_var("LAMBO_STORE");
+    }
+    #[tokio::test]
+    #[cfg(feature = "store-memory")]
+    async fn flush_stats_write_then_read_round_trips_memory() {
+        // T85-3: a writer publishes flush stats; a reader (same store, possibly
+        // another process) reads them back. Absent = honest `None` (n/a).
+        let store = MemoryStore::new();
+        let sid = SessionId::from("stats-roundtrip");
+
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), None);
+
+        let stats = SessionFlushStats {
+            flush_lag_ms: 42,
+            log_depth: 7,
+        };
+        store.write_flush_stats(&sid, &stats).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(stats));
+
+        // A different session stays `None` (absent = n/a, never fabricated 0).
+        assert_eq!(
+            store
+                .read_flush_stats(&SessionId::from("other"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Re-publish converges (idempotent): the whole row is replaced.
+        let later = SessionFlushStats {
+            flush_lag_ms: 99,
+            log_depth: 1,
+        };
+        store.write_flush_stats(&sid, &later).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(later));
     }
 }

@@ -24,7 +24,7 @@ pub const NEAR_PAIR: (&str, &str) = (NEAR_A, NEAR_B);
 pub const DEFAULT_FIXTURE_DIM: usize = 1024;
 
 /// Public helper so downstream tests can assert the near/far contract without
-/// re-deriving thresholds (always at [`DEFAULT_FIXTURE_DIM`]).
+/// re-deriving thresholds (always at `DEFAULT_FIXTURE_DIM`).
 pub fn near_far_contract() -> (f32, f32) {
     let e = FixtureEmbedder::new();
     let near = cosine(&e.embed_sync(NEAR_PAIR.0), &e.embed_sync(NEAR_PAIR.1));

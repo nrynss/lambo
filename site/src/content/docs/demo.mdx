@@ -1,0 +1,46 @@
+---
+title: "Demo"
+description: "Run the scripted two-agent scenario and watch shared memory form."
+---
+
+`lambo demo` runs a scripted two-agent scenario. It shows how two agents build one REST API against one session, and how the shared memory consolidates into canonical facts that carry blast-radius warnings.
+
+## The scenario at a glance
+
+Two agents work one session. Agent A lays down `user schema`, `auth middleware`, and `session store`, then records the actions that depend on them. Agent B joins and works a separate feature. Agent A returns for one last edit. Agent B then asks `recall("update user schema")`.
+
+The recall answers from memory rather than from a colleague. It reports that the thing Agent B is about to change is load-bearing and was touched seconds ago.
+
+```bash
+lambo demo --scenario rest-api
+```
+
+`rest-api` is the only scenario in v0.1. The command mints a fresh session id per run, so you can run it repeatedly without polluting an existing session.
+
+## What is real
+
+The demo is not a mock. It runs the real canonization engine against the real store. The context block is the actual renderer output.
+
+The demo asserts its own claims before it reports success. It expects 12 interactions and 27 concepts, with `user schema` at blast radius 9. A run that produces a different graph fails with a diagnosis instead of quietly showing a different demo.
+
+## What to expect
+
+The run prints the interaction narration as the demo replays. It shows the three `user schema` canonization transitions as `user schema` earns canonical status from structural evidence.
+
+The final recall carries the canonical marker, the blast radius warning, and the conflict line. The demo prints the real values. Only the internal comparison masks node ids and recorded ages.
+
+## Provision a durable store first
+
+The demo takes and releases the single-writer lease across its two acts. If you want to persist the session, provision a durable store first.
+
+```bash
+lambo --config lambo.toml provision
+```
+
+The in-memory store needs no schema, so you can skip this step when you run the demo against memory.
+
+## Where to go next
+
+- Read the [End to end](/end-to-end) page for the topology this demo exercises.
+- Read the [MCP tools](/mcp) reference for the tools the server exposes.
+- Read the [Command line](/cli) reference for the verbs a swarm uses.

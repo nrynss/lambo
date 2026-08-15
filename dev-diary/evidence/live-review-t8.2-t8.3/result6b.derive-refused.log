@@ -1,0 +1,1 @@
+lambo derive: conflict: session live-cli-6b is already held by another writer (srv@cachyos-x8664#51944) — it acquired the single-writer lease 14s ago and is still refreshing it. Spec §2.2 is one writer per session; refusing to open a second. If that holder is wedged, an operator can force a takeover: DELETE FROM session_leases WHERE session_id = '<session>';

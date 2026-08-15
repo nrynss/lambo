@@ -131,6 +131,34 @@ CREATE TABLE IF NOT EXISTS reservations (
     PRIMARY KEY (session_id, node_id)
 );
 
+-- Single-writer lease (spec §2.2, T8.6): one row per session, holder =
+-- 'agent@host#pid', timestamps stamped from the store clock. The adapter's
+-- acquire is a single INSERT ... ON CONFLICT guarded by an expiry check, so two
+-- processes opening the same DB file serialize on this row. External SQL readers
+-- of a *live* holder MUST filter
+-- `WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')` — an expired row
+-- persists until the next acquire overwrites it. Operator override (force a
+-- takeover from a wedged-but-heartbeating holder):
+--   DELETE FROM session_leases WHERE session_id = '<session>';
+CREATE TABLE IF NOT EXISTS session_leases (
+    session_id  TEXT PRIMARY KEY,
+    holder      TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+);
+
+-- Flush stats published by the writer's FlushTask (T85-3): one row per
+-- session, upserted after each flush cycle so a reader in another process can
+-- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers
+-- READ. An absent row means "no writer has published yet" (the honest n/a).
+-- updated_at follows the SQLite TIMESTAMPTZ-as-TEXT convention.
+CREATE TABLE IF NOT EXISTS session_stats (
+    session_id   TEXT PRIMARY KEY,
+    flush_lag_ms INTEGER NOT NULL,
+    log_depth    INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 -- Spec §4 INDEX clauses, as separate statements (order preserved):
 CREATE INDEX IF NOT EXISTS interactions_session_created_idx ON interactions (session_id, created_at);
 CREATE INDEX IF NOT EXISTS concepts_session_status_idx ON concepts (session_id, canonization_status);

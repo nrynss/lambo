@@ -1,0 +1,242 @@
+════════════════════════════════════════════════════════════════════════
+  lambo demo — scenario rest-api   (spec §13: two agents, one REST API)
+════════════════════════════════════════════════════════════════════════
+  session      demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2   (fresh per run — P6 R3-1)
+  capabilities Capabilities(VECTOR_SEARCH)
+  agents       agent-a (builds the API) · agent-b (separate feature)
+
+  Compressed for the video — intervals only, no threshold weakened:
+    canonization_edge_min_age   60s     → 10ms
+    canonization_eval_interval  60s     → 25ms  (frozen during the build)
+    daemon_tick_interval        1s      → 5ms
+    backend_flush_interval      1s      → 5ms
+    gc_interval                 10000   → 1 mutation (spec default during the build)
+  Untouched: min_peer_count 20, gc_survived ≥ 3, strictly > P90, distinct ≥ 3,
+  coverage ≥ 0.3, blast radius > 5, conflict window 30s.
+
+── ACT I — agent-a builds the REST API (9 interactions) ────────────────
+  [ 1] derive         user schema, auth middleware, session store  → 3 created, 0 matched
+  [ 2] derive         email / password hash / user id columns  (children of user schema)  → 4 created, 6 matched
+  [ 3] record-action  write POST /users handler            depends on user schema  → 4 created, 5 edges
+  [ 4] derive         created at / role columns, users table migration  (children)  → 2 created, 7 matched
+  [ 5] record-action  write session middleware             depends on session store, user schema  → 4 created, 6 edges
+  [ 6] derive         user serializer, validation rules, fixtures  (children)  → 3 created, 6 matched
+  [ 7] record-action  add JWT verification                 depends on auth middleware, user schema  → 2 created, 5 edges
+  [ 8] record-action  write user repository                depends on user schema  → 1 created, 3 edges
+  [ 9] record-action  wire login endpoint                  depends on all three pillars  → 1 created, 10 edges
+  agent-a released the single-writer lease
+
+── ACT II — agent-b joins on a separate feature (2 interactions) ───────
+  [10] derive         rate limiter, redis backend          (agent B's own feature)  → 1 created, 2 matched
+  [11] record-action  add rate limiting middleware         depends on auth middleware, user schema  → 1 created, 7 edges
+  agent-b released the single-writer lease
+
+── ACT III — agent-a comes back for one last edit ──────────────────────
+  [12] record-action  add oauth_id to user schema          MODIFIES user schema  → 1 created, 7 edges
+  agent-a released the single-writer lease
+  graph complete: 12 interactions, 27 concepts, 'user schema' blast radius 9
+  GC headroom: closest to the eviction bar is 'write user repository' at 1.40× — nothing in this session is collectable
+
+── CANONIZATION — the engine, not the script, promotes user schema ─────
+  gc_survived floor 3 ≥ 3 — Stage 1's survival gate is open for every concept
+  cycle   0   user schema              → Candidate   (canonization_events row written)
+  cycle   1   user schema              → Venerable   (canonization_events row written)
+  cycle   2   user schema              → Canonical   (canonization_events row written)
+  no transitions for 3 consecutive cycles — the state machine is at its fixed point (5 events total)
+  agent-a released the single-writer lease
+
+── ACT IV — agent-b: recall("update user schema") ──────────────────────
+  daemon event: Conflict on 'user schema' — contesting agents: agent-a, agent-b
+
+  user schema [Entity, canonical] (score 2.27, blast radius 9)
+  ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+  Agent A wrote to it 15 seconds ago
+  High-risk modification: high-value node a30fef36-9c49-412c-8f25-2eabf8dc27b4 (Canonical, blast radius 9) modified within 30s
+  
+  add oauth_id to user schema [Resource] (score 1.50)
+  
+  user fixtures [Resource] (score 0.73)
+  
+  user serializer [Logic] (score 0.71)
+  
+  user validation rules [Constraint] (score 0.66)
+  
+  users table migration [Resource] (score 0.63)
+  
+  auth middleware [Entity] (score 0.15)
+  Agent A wrote to it 15 seconds ago
+  
+  redis backend [Entity] (score 0.13)
+  Agent B wrote to it 17 seconds ago
+  
+  handlers/login.rs [Entity] (score 0.12)
+  Agent A wrote to it 15 seconds ago
+  
+  middleware/ratelimit.rs [Entity] (score 0.11)
+  Agent A wrote to it 15 seconds ago
+  
+  middleware/session.rs [Resource] (score 0.09)
+  Agent B wrote to it 17 seconds ago
+
+  agent-b does not make the breaking change.
+
+── OUTCOME — the ×2 determinism bar ────────────────────────────────────
+  scenario            rest-api
+  interactions        12
+  concepts            27
+  edges               114
+  canonization_events 5
+    add oauth_id to user schema: None -> Candidate
+    add rate limiting middleware: None -> Candidate
+    user schema: None -> Candidate
+    user schema: Candidate -> Venerable
+    user schema: Venerable -> Canonical  (blast radius 9)
+  canonical           1
+    user schema  blast_radius=9
+  statuses
+    None       add JWT verification
+    Candidate  add oauth_id to user schema
+    Candidate  add rate limiting middleware
+    None       auth middleware
+    None       created at column
+    None       email column
+    None       handlers/login.rs
+    None       handlers/users.rs
+    None       middleware/jwt.rs
+    None       middleware/ratelimit.rs
+    None       middleware/session.rs
+    None       password hash column
+    None       rate limiter
+    None       redis backend
+    None       repo/users.rs
+    None       role column
+    None       session store
+    None       user fixtures
+    None       user id column
+    Canonical  user schema
+    None       user serializer
+    None       user validation rules
+    None       users table migration
+    None       wire login endpoint
+    None       write POST /users handler
+    None       write session middleware
+    None       write user repository
+  recall_warnings     8
+    ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+    Agent A wrote to it <n> seconds ago
+    High-risk modification: high-value node <node> (Canonical, blast radius 9) modified within 30s
+    Agent A wrote to it <n> seconds ago
+    Agent B wrote to it <n> seconds ago
+    Agent A wrote to it <n> seconds ago
+    Agent A wrote to it <n> seconds ago
+    Agent B wrote to it <n> seconds ago
+  recall_context
+    user schema [Entity, canonical] (score <s>, blast radius 9)
+    ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+    Agent A wrote to it <n> seconds ago
+    High-risk modification: high-value node <node> (Canonical, blast radius 9) modified within 30s
+    
+    add oauth_id to user schema [Resource] (score <s>)
+    
+    user fixtures [Resource] (score <s>)
+    
+    user serializer [Logic] (score <s>)
+    
+    user validation rules [Constraint] (score <s>)
+    
+    users table migration [Resource] (score <s>)
+    
+    auth middleware [Entity] (score <s>)
+    Agent A wrote to it <n> seconds ago
+    
+    redis backend [Entity] (score <s>)
+    Agent B wrote to it <n> seconds ago
+    
+    handlers/login.rs [Entity] (score <s>)
+    Agent A wrote to it <n> seconds ago
+    
+    middleware/ratelimit.rs [Entity] (score <s>)
+    Agent A wrote to it <n> seconds ago
+    
+    middleware/session.rs [Resource] (score <s>)
+    Agent B wrote to it <n> seconds ago
+
+scenario            rest-api
+interactions        12
+concepts            27
+edges               114
+canonization_events 5
+  add oauth_id to user schema: None -> Candidate
+  add rate limiting middleware: None -> Candidate
+  user schema: None -> Candidate
+  user schema: Candidate -> Venerable
+  user schema: Venerable -> Canonical  (blast radius 9)
+canonical           1
+  user schema  blast_radius=9
+statuses
+  None       add JWT verification
+  Candidate  add oauth_id to user schema
+  Candidate  add rate limiting middleware
+  None       auth middleware
+  None       created at column
+  None       email column
+  None       handlers/login.rs
+  None       handlers/users.rs
+  None       middleware/jwt.rs
+  None       middleware/ratelimit.rs
+  None       middleware/session.rs
+  None       password hash column
+  None       rate limiter
+  None       redis backend
+  None       repo/users.rs
+  None       role column
+  None       session store
+  None       user fixtures
+  None       user id column
+  Canonical  user schema
+  None       user serializer
+  None       user validation rules
+  None       users table migration
+  None       wire login endpoint
+  None       write POST /users handler
+  None       write session middleware
+  None       write user repository
+recall_warnings     8
+  ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+  Agent A wrote to it <n> seconds ago
+  High-risk modification: high-value node <node> (Canonical, blast radius 9) modified within 30s
+  Agent A wrote to it <n> seconds ago
+  Agent B wrote to it <n> seconds ago
+  Agent A wrote to it <n> seconds ago
+  Agent A wrote to it <n> seconds ago
+  Agent B wrote to it <n> seconds ago
+recall_context
+  user schema [Entity, canonical] (score <s>, blast radius 9)
+  ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+  Agent A wrote to it <n> seconds ago
+  High-risk modification: high-value node <node> (Canonical, blast radius 9) modified within 30s
+  
+  add oauth_id to user schema [Resource] (score <s>)
+  
+  user fixtures [Resource] (score <s>)
+  
+  user serializer [Logic] (score <s>)
+  
+  user validation rules [Constraint] (score <s>)
+  
+  users table migration [Resource] (score <s>)
+  
+  auth middleware [Entity] (score <s>)
+  Agent A wrote to it <n> seconds ago
+  
+  redis backend [Entity] (score <s>)
+  Agent B wrote to it <n> seconds ago
+  
+  handlers/login.rs [Entity] (score <s>)
+  Agent A wrote to it <n> seconds ago
+  
+  middleware/ratelimit.rs [Entity] (score <s>)
+  Agent A wrote to it <n> seconds ago
+  
+  middleware/session.rs [Resource] (score <s>)
+  Agent B wrote to it <n> seconds ago

@@ -1,0 +1,53 @@
+T7.3 vector-index camera-proof — root cause diagnosis
+captured: 2026-08-13T13:11:08Z
+cluster : nrynss-19495.jxf.gcp-asia-south1.cockroachlabs.cloud:26257  db=lambo
+concepts: 2833  embedded: 2118  distinct vectors: 2004
+
+FINDING 1 — the assertion can never match its own EXPLAIN format.
+  The test runs EXPLAIN (OPT, VERBOSE) and asserts text.contains("vector search").
+  Operator spelling by format, measured on this cluster:
+    EXPLAIN (OPT, VERBOSE) -> vector-search
+    plain EXPLAIN          -> vector search
+  => hyphenated under OPT VERBOSE. The spaced assertion cannot match, on ANY
+     cluster, with ANY data or index. Confirmed by running the test: it panics
+     at cockroach.rs:3840, the FIRST assertion, even with a perfect vector plan.
+
+FINDING 2 — 'WHERE embedding IS NOT NULL' defeats a NON-partial vector index.
+  Plans for the production VECTOR_CANDIDATES_SQL shape:
+    with predicate, non-partial index only -> full scan on concepts_pkey
+    predicate removed                      -> vector search on concepts_embedding_idx
+  Removing the predicate is NOT a safe fix: 715 rows have NULL embedding and the
+  adapter decodes dist as f64 (cockroach.rs:1651). Whenever k exceeds the non-null
+  count, NULL dist rows surface and try_get::<f64> hard-errors the whole query.
+
+FINDING 3 — a PARTIAL vector index fixes it with NO query and NO Rust change.
+  CREATE VECTOR INDEX ... ON concepts (embedding) WHERE embedding IS NOT NULL;
+  Plan for the UNCHANGED production query against it:
+                                     info                                     
+------------------------------------------------------------------------------
+ distribution: local
+ 
+ • top-k
+ │ estimated row count: 5
+ │ order: +dist
+ │ k: 5
+ │
+ └── • render
+     │
+     └── • lookup join
+         │ table: concepts@concepts_pkey
+         │ equality: (id) = (id)
+         │ equality cols are key
+         │
+         └── • vector search
+               table: concepts@concepts_embedding_nonnull_idx (partial index)
+               target count: 5
+(17 rows)
+
+
+CLUSTER STATE WARNING: concepts_embedding_nonnull_idx was created live during
+this diagnosis and is NOT in migrations/cockroach/001_init.sql. The cluster
+schema currently DIVERGES from the migration. A fresh provision would not
+reproduce this plan.
+
+ERROR:  column "is_visible" does not exist

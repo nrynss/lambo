@@ -3,6 +3,9 @@
 Agentic memory for multi-agent coding: a bipartite interaction/concept graph with
 write-behind durability (CockroachDB), background scoring/GC, and **canonization**
 (importance earned from structural evidence, not declared at write time).
+## Documentation
+
+The docs site lives in [site/](site/). It is an Astro + Starlight site that renders the reference pages from [docs/reference/](docs/reference/) and deploys to GitHub Pages. See [site/README.md](site/README.md) to run it locally and enable Pages.
 
 ## Deployment model (single writer)
 

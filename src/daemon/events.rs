@@ -321,7 +321,7 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
 /// Is the **session** stale at `now` (spec §9 "stale session")?
 ///
 /// The session is stale when *nothing in it* has been touched for longer than
-/// `window` — i.e. its most recent activity ([`session_last_activity`]) is
+/// `window` — i.e. its most recent activity (`session_last_activity`) is
 /// outside the window. One hit for the whole session, anchored on the concept
 /// carrying that most recent activity.
 ///

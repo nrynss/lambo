@@ -1,0 +1,177 @@
+---
+title: "End to end"
+description: "How the parts fit together, from serving a session to running a swarm"
+---
+import Steps from '../../components/MdxSteps.astro';
+import Step from '../../components/MdxStep.astro';
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
+
+This page shows how the parts fit together, from serving a session to driving it with agents.
+
+## The model
+
+A session has exactly one writer, which is a `lambo serve` process that holds the session's lease. Readers query the store directly and never open a writer.
+
+Writes flow through one in-memory graph. They land in a write-behind log and flush to the durable store on an interval, so durability is eventual, not immediate. Call `lambo_stats` on the writer to see the current lag. Each flush goes out as a few batched statements rather than one per change. A burst of writes then costs a handful of round trips instead of one per change.
+
+Canonization runs in the background. It promotes concepts to canonical facts when they earn it from structural evidence, not when an agent declares them important.
+
+Every concept written this way keeps its embedding, so memory your agents produce is recallable by meaning and not only by keyword, on a store that supports vector search. See [What recall searches](#what-recall-searches).
+
+Text is checked on the way in. Lambo refuses control characters other than tab and newline. It also refuses invisible formatting characters such as bidi overrides and zero-width spaces. Nothing a reviewer cannot see reaches the graph. See [What Lambo accepts in text](/cli#what-lambo-accepts-in-text).
+
+## A walkthrough you can run
+
+This uses SQLite and the fixture embedder, so it needs no external services. Build with the SQLite store first.
+
+<Steps>
+  <Step title="Build">
+    ```bash
+    cargo build --features store-sqlite
+    ```
+  </Step>
+  <Step title="Write the config">
+    ```toml lambo.toml
+    [store]
+    kind = "sqlite"
+    path = "./lambo.db"
+
+    [embedder]
+    kind = "fixture"
+    dim = 1024
+    ```
+  </Step>
+  <Step title="Provision the schema">
+    ```bash
+    lambo --config lambo.toml provision
+    ```
+    ```
+    sqlite schema provisioned (init_schema, idempotent)
+    ```
+    Skip this step only if you use the in-memory store.
+  </Step>
+  <Step title="Write some memory">
+    ```bash
+    lambo --config lambo.toml derive --session demo --agent agent-a \
+      --content "user schema" --kind entity \
+      --concept "auth middleware:entity" \
+      --concept "must stay backward compatible:constraint" \
+      --parent-of "auth middleware:user schema"
+
+    lambo --config lambo.toml record-action --session demo --agent agent-a \
+      --action "created migrations/003.sql" \
+      --produces "migrations/003.sql" \
+      --depends-on "user schema"
+    ```
+  </Step>
+  <Step title="Read it back">
+    ```bash
+    lambo --config lambo.toml recall --session demo --query "update user schema"
+    lambo --config lambo.toml inspect --session demo --focus "user schema"
+    lambo --config lambo.toml stats --session demo
+    ```
+  </Step>
+</Steps>
+
+## Drive the same session over MCP
+
+Start the writer, and connect an MCP client to it.
+
+```bash
+lambo --config lambo.toml serve --session demo --agent agent-a
+```
+
+Point your client at that command over stdio. See [Installation](/installation) for the `mcpServers` block.
+
+To watch the wire yourself, pipe JSON-RPC frames into the server, one per line. This handshake, tool listing, and single call is what a client does for you.
+
+```bash
+{
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0.1.0"}}}'
+  echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  sleep 1
+  echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+  sleep 1
+  echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"stdio wire check","concept_type":"entity"}]}}}'
+  sleep 1
+} | lambo --config lambo.toml serve --session wire-demo --agent agent-a
+```
+
+The `initialize` reply names the session and carries the server's instructions, `tools/list` returns the seven tools with their schemas, and the call returns the derive summary.
+
+```json
+{"content":[{"type":"text","text":"derived 1 concept(s): 1 created, 0 matched existing"}],"isError":false}
+```
+
+Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes whatever has not reached the store yet and releases the lease, even on a signal. Because a flush is batched, even a heavy burst written moments before you stop drains quickly rather than trickling out one change at a time.
+
+<Warning>
+Shutdown is time-bounded, so it gives up rather than hanging when the store is unreachable. Anything still un-flushed when it gives up is lost, because there is no on-disk journal to replay it from. Let the process finish, and do not `kill -9` a writer whose most recent writes matter to you.
+</Warning>
+
+To watch the session in a browser while the writer runs, add a read-only `lambo serve-web` window on the same store:
+
+```bash
+lambo --config lambo.toml serve-web --session demo
+```
+
+It serves on port `7710` (loopback, unauthenticated by default) and only reads. It shows live recall, the canonization feed, and durable counts. It never contends for the writer lease. See [Command line](/cli) for its flags.
+
+## What recall searches
+
+Recall has three legs: keyword matching, vector similarity, and expansion through the graph edges around what it found. The vector leg needs a store with vector search.
+
+| Store | Keyword | Vector | Graph expansion |
+|---|---|---|---|
+| CockroachDB | Yes | Yes | Yes |
+| SQLite | Yes | No | Yes |
+| In-memory | Yes | No | Yes |
+
+Concepts your agents write through `derive` and `record-action` store their embedding along with their text. On a store with vector search, that means recall finds memory the swarm wrote itself by meaning, not just memory you loaded in bulk ahead of time. This matters most for the swarm pattern below, where many agents write the same idea in different words.
+
+The walkthrough above uses SQLite, so it exercises the keyword and graph legs only. Recall still works there. You get matches on the words you use rather than on meaning, so a query sharing no vocabulary with a stored concept can miss it.
+
+## Readers and the writer
+
+While a `serve` process owns a session, the command line read verbs still work against it, because they go to the store rather than to the writer.
+
+What they cannot see is the writer's own state. A reader reports the counts and says which figures are writer-only.
+
+```
+session 'demo' (reader snapshot)
+nodes=7 edges=12 concepts=5 canonical=0
+epoch=0
+flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a
+note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; this is a reader process
+```
+
+For flush lag and write-log depth, ask the writer through the `lambo_stats` tool.
+
+## One writer, enforced across processes
+
+A second writer on the same session is refused while the first holds the lease, whether it arrives as another `serve` or as a command line write. The refusal names the holder, so you know which process to stop.
+
+```bash
+$ lambo --config lambo.toml derive --session demo --agent agent-b --content "x" --kind entity
+lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago and is still refreshing it. ...
+$ echo $?
+1
+```
+
+If a holder crashes, its lease expires and the next writer takes the session. The old holder is then fenced: its further writes are refused and its un-flushed tail is dropped rather than allowed to overwrite the new holder.
+
+## Run a swarm
+
+Run one `lambo serve` writer for the session, then have many small agents each write with a single command line call.
+
+```bash
+lambo --config lambo.toml derive --session demo --agent agent-7 \
+  --content "retry budget is 3" --kind constraint
+```
+
+Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context. Canonization collapses the duplicate observations that many agents produce into single canonical facts.
+
+For coordination, use `lambo_reserve` from the writer before editing a shared concept. A reservation taken by a one-shot command line call ends when that command exits, so the durable coordination point is the writer. See [Command line](/cli).
+
+See [Installation](/installation), [MCP tools](/mcp), [Command line](/cli), [Library API](/api), and [Configuration](/config).

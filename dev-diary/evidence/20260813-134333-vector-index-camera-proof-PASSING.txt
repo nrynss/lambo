@@ -1,0 +1,61 @@
+T7.4 vector-index camera-proof — PASSING plan
+captured: 2026-08-13T13:43:33Z
+cluster : nrynss-19495.jxf.gcp-asia-south1.cockroachlabs.cloud:26257  db=lambo
+schema  : provisioned from migrations/cockroach/001_init.sql ALONE
+          (vector index dropped first, then ./scripts/provision.sh; no hand-made indexes)
+
+== concepts table vector index (SHOW CREATE TABLE) ==
+  VECTOR INDEX concepts_embedding_idx (embedding vector_l2_ops) WHERE embedding IS NOT NULL
+
+== data population (NO seed session; --clean was applied) ==
+ concepts | embedded | distinct_vectors 
+----------+----------+------------------
+      883 |      128 |                4
+(1 row)
+
+
+== plain EXPLAIN of the UNCHANGED production VECTOR_CANDIDATES_SQL shape ==
+-- bound $1 (probe VECTOR) / $2 (LIMIT) over the extended protocol, exactly as
+-- vector_explain_camera_proof binds them (T7.3 R2: a parameterized LIMIT can
+-- change plan shape, so literals would not have proven the test green).
+
+                                 info                                 
+----------------------------------------------------------------------
+ distribution: local
+ 
+ • top-k
+ │ estimated row count: 5
+ │ order: +dist
+ │ k: 5
+ │
+ └── • render
+     │
+     └── • lookup join
+         │ table: concepts@concepts_pkey
+         │ equality: (id) = (id)
+         │ equality cols are key
+         │
+         └── • vector search
+               table: concepts@concepts_embedding_idx (partial index)
+               target count: 5
+(17 rows)
+
+
+== FINDING 1 re-measured against this schema: operator spelling by format ==
+-- Same query, same bound params, both EXPLAIN formats:
+   plain EXPLAIN           -> vector search   (spaced)
+   EXPLAIN (OPT, VERBOSE)  -> vector-search concepts@concepts_embedding_idx,vector,partial (hyphenated)
+
+   Byte size of each plan artifact for the same query:
+     plain EXPLAIN          : 676 bytes  (17 rows, readable on camera)
+     EXPLAIN (OPT, VERBOSE) : 52590 bytes  (inlines the full 1024-element probe vector)
+
+   => vector_explain_camera_proof uses plain EXPLAIN and asserts the spaced
+      token. OPT VERBOSE was rejected: its ~52KB blob is unusable as an
+      on-camera artifact and would make an assertion failure unreadable.
+
+== test result ==
+   LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh
+     test result: ok. 5 passed; 0 failed; 0 ignored (70.17s)
+     store::cockroach::conformance::vector_explain_camera_proof ... ok
+     store::cockroach::conformance::conformance_suite ... ok

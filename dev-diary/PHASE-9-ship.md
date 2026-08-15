@@ -15,9 +15,9 @@ Nothing here is optional except where marked; the checklist *is* the phase.
 
 ### T9.1 — README & repo hygiene
 ```yaml
-requires:   T8.1
+requires:   T8.1; soft T8.8   # links into the reference docs T8.8 produces
 fixture-ok: n/a
-owns:       README.md, docs/
+owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
 status:     not-started
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
@@ -26,6 +26,10 @@ and AWS services used, written out (that written identification is itself a deli
 credit to the v0.6.0 design doc for honesty (spec §12.4 note); MIT license visible in the
 GitHub About sidebar (add the license file mapping if GitHub doesn't auto-detect). Repo
 public.
+
+**Boundary with T8.8:** this is the getting-started / onboarding path. The per-surface
+**reference** (MCP tools, CLI verbs, `Memory` API, config keys, end-to-end) lives in
+`docs/reference/` and is owned by **T8.8** — link into it, do not restate it here.
 
 **Level B (required in README):**
 
@@ -88,6 +92,34 @@ binary re-running T6.x predicates via SQL, EventBridge-scheduled.
 
 **Done when:** a session with no writer gets a canonization transition from the sweep,
 logged in `canonization_events`.
+
+---
+
+### T9.6 — Swarm benchmark & showcase (optional — cut order #2, behind T9.4)
+```yaml
+requires:   T8.2 (R4 CLEAN), P8 exit "surface holds under concurrency"; soft: T8.5
+fixture-ok: yes (fixture embedder; store = memory or live)
+owns:       dev-diary/evidence/swarm/, bench/
+status:     not-started
+parallel:   yes — separate hardware, off the submission critical path
+```
+The headline "lambo beyond coding agents" evidence: a swarm of small local agents
+(LiquidAI **LFM2.5-230M** under llama.cpp/vLLM) driven concurrently against one `lambo`
+session over MCP, producing the numbers that back the swarm claim — sustained tasks/hour,
+canonization dedup rate (duplicate observations collapsed to canonical nodes), and
+`reserve` coordination (no double-work). **Target rig: the 12 GB RTX 4070 desktop** (vLLM
+or SGLang for continuous batching — check LFM2 support first), not the MBP: this test is
+throughput-bound and wants the ~16–32 concurrent headroom. Measured baseline on an 18 GB
+M3 Pro for reference: GPU knee at concurrency ~4–8, ~650 tok/s aggregate, memory a
+non-issue (~12 KB/token KV).
+
+**Non-blocking by construction.** If it succeeds it strengthens the README/video benchmark
+story and can drive the T8.5 swarm view; **if it fails it feeds diagnosis of the swarm
+claims** and is cut without touching the submission. Do NOT start while any required
+deliverable (T9.1/T9.2/T9.3/T9.5) is open.
+
+**Done when:** a concurrent LFM2.5-230M swarm runs against one session with a dedup-rate
+and tasks/hour figure captured, OR it is deliberately cut with the diagnosis logged.
 
 ---
 

@@ -1,0 +1,159 @@
+---
+title: "Configuration"
+description: "The lambo.toml keys, features, and provisioning"
+---
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
+
+Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. An environment variable always wins over the file for any key it sets.
+
+## What lambo.toml contains
+
+The file has exactly two sections, `[store]` and `[embedder]`. It chooses which compiled backends this process runs, and nothing else.
+
+```toml
+[store]
+kind = "sqlite"
+path = "./lambo.db"
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"
+```
+
+<Warning>
+Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
+</Warning>
+
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. See [Library API](/api).
+
+```
+$ lambo --config lambo.toml provision
+lambo provision: failed to resolve store: config: lambo.toml: TOML parse error at line 1, column 1
+  |
+1 | default_top_k = 5
+  | ^^^^^^^^^^^^^
+unknown field `default_top_k`, expected `store` or `embedder`
+```
+
+## Store
+
+`[store]` selects where the graph is persisted.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | string | `memory` | `memory`, `sqlite`, or `cockroach`. |
+| `path` | string | none | The SQLite file, used when `kind` is `sqlite`. |
+| `dsn` | string | none | The CockroachDB connection string, used when `kind` is `cockroach`. Prefer the environment variable so the secret stays out of the file. |
+
+`kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb`, `postgres`, and `pg` for `cockroach`, and `sqlite3` for `sqlite`.
+
+The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
+
+## Embedder
+
+`[embedder]` selects how text is turned into vectors.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | string | `bge_m3` | `bge_m3`, `bedrock`, or `fixture`. |
+| `dim` | integer | `1024` | The width you expect the embedder to emit. |
+| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
+| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
+
+`kind` also accepts `bge` and `bge-m3` for `bge_m3`, `titan` for `bedrock`, and `fake` for `fixture`.
+
+A store that persists vectors declares its own width, and Lambo refuses to start if `dim` disagrees with it.
+
+<Warning>
+Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
+</Warning>
+
+## Environment variables
+
+Every variable below overrides the matching file key. An empty value counts as unset, so an empty placeholder in a `.env` file leaves the file value alone.
+
+| Variable | Overrides |
+|---|---|
+| `LAMBO_CONFIG` | The path to `lambo.toml`. |
+| `LAMBO_STORE` | `store.kind` |
+| `LAMBO_SQLITE_PATH` | `store.path` |
+| `LAMBO_COCKROACH_DSN` | `store.dsn`. Lambo falls back to `DATABASE_URL` when this is unset. |
+| `LAMBO_EMBEDDER` | `embedder.kind` |
+| `LAMBO_EMBED_DIM` | `embedder.dim` |
+| `LAMBO_LLAMA_EMBED_URL` | `embedder.url` |
+| `LAMBO_LLAMA_MODEL` | `embedder.model` |
+
+Keep connection strings in the environment rather than in `lambo.toml`.
+
+## Features
+
+Cargo features decide which stores and embedders exist in your binary, and `lambo.toml` picks among them at runtime. Asking for a kind that was not compiled in is a startup error, not a fallback.
+
+| Feature | What it adds |
+|---|---|
+| `store-memory` | The in-memory store. |
+| `store-sqlite` | The SQLite store. |
+| `store-cockroach` | The CockroachDB store. |
+| `embed-fixture` | The deterministic fixture embedder. |
+| `embed-bge` | BGE-M3 embeddings through `llama-server`. |
+| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
+| `fixtures` | Committed fixture graphs, which also enables `store-memory`. |
+| `demo` | A convenience profile covering the memory and CockroachDB stores, both local embedders, and the fixtures. |
+
+The default build enables `store-memory`, `embed-bge`, `embed-fixture`, and `fixtures`.
+
+## HTTP transport
+
+The HTTP transport binds to `127.0.0.1` on port `7700` and serves Streamable HTTP. Change the address with `--bind` and `--port` on `lambo serve`.
+
+### Authentication
+
+On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag). When a token is configured, every request must send `Authorization: Bearer <token>`. A missing or wrong token is refused with `401`. A set-but-empty `LAMBO_AUTH_TOKEN` is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
+
+### Rate limit
+
+The HTTP transport enforces a global sustained request rate, `50` requests per second by default with a burst allowance of twice that. A request over the limit is refused with `429` and `Retry-After: 1`. Adjust it with `--rate-limit-rps`.
+
+### Concurrent sessions
+
+The HTTP transport mints one MCP session per `initialize` and refuses to exceed a ceiling of `32` concurrently live sessions by default. At the cap, a new `initialize` is refused with a `503` that tells you to close an idle session or raise `--max-sessions`.
+
+### Request body limit
+
+A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` before its body is parsed. A chunked request with no `Content-Length` keeps the per-string and per-call caps plus the rate limit as its bound.
+
+### The read-only window
+
+`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. See [Command line](/cli).
+
+## Provisioning a durable store
+
+Before you serve against SQLite or CockroachDB, create the schema.
+
+```bash
+lambo --config lambo.toml provision
+```
+
+`provision` reads the store choice from your config and does the right thing for each kind. It is idempotent, so running it again is safe, and it does not build the embedder, so it works on a machine with no embedding service. It still refuses a store kind your binary was not built with.
+
+| Store kind | What provision does |
+|---|---|
+| `memory` | Nothing. It reports that the in-memory store needs no schema. |
+| `sqlite` | Creates the schema in the file at `store.path`. |
+| `cockroach` | Runs `scripts/provision.sh`, which also reconciles the vector index. |
+
+<Note>
+Because the CockroachDB path runs the repository's script, run it from inside a checkout of Lambo. Lambo looks for `scripts/provision.sh` next to the project's `Cargo.toml`, searching the current directory and its parents, and tells you to run from the repository if it cannot find it.
+</Note>
+
+You can also run the script directly.
+
+```bash
+./scripts/provision.sh
+```
+
+Set `LAMBO_COCKROACH_DSN` in a `.env` file first, and run `./scripts/provision.sh --check` to verify the schema without applying it.
+
+See [Installation](/installation) and [Library API](/api).

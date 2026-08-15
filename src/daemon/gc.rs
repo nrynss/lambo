@@ -48,7 +48,7 @@
 //! 7. **MutationEpoch** — bumped by GC's own mutations (edge removals, node
 //!    removals, survivor upserts); `src/graph/graph.rs`'s epoch doc calls this
 //!    "redundant but harmless (any mutation already bumps the epoch)".
-//!    [`GcOutcome::epoch_before`]/[`epoch_after`] prove the bump.
+//!    [`GcOutcome::epoch_before`]/[`GcOutcome::epoch_after`] prove the bump.
 //!
 //! `max_concept_nodes` is advisory-only: over-capacity produces a warning in
 //! [`GcOutcome::warnings`]; nothing is evicted (spec §9: "Capacity is

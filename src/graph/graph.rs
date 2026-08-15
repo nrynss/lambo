@@ -589,7 +589,7 @@ impl Graph {
     /// Write-gate validation (adve-review GRAPH-4): `from_status` must equal the
     /// concept's **current** status — a fabricated audit row is rejected with a
     /// typed invariant error — and the pair must be an edge of the spec §10
-    /// state machine ([`legal_canonization_transition`]; stage skips, downgrades
+    /// state machine (`legal_canonization_transition`; stage skips, downgrades
     /// and self-loops are rejected). A demotion event additionally carries the
     /// concept's new `last_demotion_time` (COH-3, spec §10 "Demotion sets
     /// `last_demotion_time`"); non-demotion events leave that field untouched.
@@ -1061,6 +1061,37 @@ impl Graph {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
         }
+    }
+
+    /// Re-append already-drained mutations to the **front** of the log,
+    /// preserving chronological order (T8.1 shutdown drain).
+    ///
+    /// The write-behind flush task owns its `pending` buffer, so a batch it
+    /// drained but has not yet made durable — most importantly one RETAINED
+    /// after exhausted retries — is invisible to [`Graph::drain_log`]. On
+    /// shutdown the task hands that buffer back here so `Memory::close`'s
+    /// final `drain_log` can see it and flush it (COH-6). A hard
+    /// `JoinHandle::abort()` would drop it with the task.
+    ///
+    /// Front, not back: everything in `mutations` was appended to the log
+    /// **before** anything still in it, so prepending is what restores
+    /// chronological order — the `src/graph/mod.rs` "replay in order, never
+    /// re-sort" contract.
+    ///
+    /// The epoch is **not** bumped: these mutations were counted when they
+    /// were first appended, the graph state they describe is already applied,
+    /// and re-counting them would needlessly invalidate every recall cache
+    /// entry at shutdown.
+    ///
+    /// This is the only re-entry point into the log and it is deliberately
+    /// narrow: it takes mutations that this graph already produced. Feeding it
+    /// anything else would put mutations in the log that the in-RAM graph does
+    /// not reflect.
+    pub fn push_front_log(&mut self, mutations: Vec<Mutation>) {
+        if mutations.is_empty() {
+            return;
+        }
+        self.mutation_log.splice(0..0, mutations);
     }
 
     // -----------------------------------------------------------------------
@@ -2838,6 +2869,70 @@ mod tests {
             }
         }
         assert!(saw_delete);
+    }
+
+    /// The requeue half of COH-6 (T81-3): a batch the flush task hands back on
+    /// stop goes to the **front** of the log — in its original order, ahead of
+    /// everything written while it sat in the task's pending buffer — and does
+    /// not bump the epoch.
+    ///
+    /// Order is the load-bearing part. Appending instead of prepending puts an
+    /// edge upsert ahead of the `UpsertNode` for one of its endpoints, which
+    /// breaks the `src/graph/mod.rs` "replay in order, never re-sort" premise a
+    /// conforming SQL adapter relies on (it would fail the whole final
+    /// transaction, i.e. lose the tail).
+    #[test]
+    fn push_front_log_prepends_the_returned_batch_in_order() {
+        let (mut g, iid, cid) = small_graph();
+
+        // What the flush task drained and failed to persist.
+        let retained = g.drain_log().mutations;
+        assert!(retained.len() >= 2, "need a multi-mutation batch");
+        assert_eq!(g.log_len(), 0);
+
+        // Writes that landed while the batch was retained in the task.
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+        g.upsert_edge(edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5))
+            .unwrap();
+        let fresh_len = g.log_len();
+        assert!(fresh_len >= 2);
+        let epoch_before = g.epoch();
+
+        g.push_front_log(retained.clone());
+        assert_eq!(
+            g.epoch(),
+            epoch_before,
+            "requeueing re-counts nothing: the epoch must not move"
+        );
+
+        let combined = g.drain_log().mutations;
+        assert_eq!(combined.len(), retained.len() + fresh_len);
+        assert_eq!(
+            &combined[..retained.len()],
+            &retained[..],
+            "the returned batch must come FIRST, in its original order"
+        );
+
+        // The premise that ordering serves: no edge before its endpoints.
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for m in &combined {
+            match m {
+                Mutation::UpsertNode { node } => {
+                    seen.insert(node.id());
+                }
+                Mutation::UpsertEdge { edge } => {
+                    assert!(seen.contains(&edge.source), "endpoint missing: {m:?}");
+                    assert!(seen.contains(&edge.target), "endpoint missing: {m:?}");
+                }
+                _ => {}
+            }
+        }
+
+        // Empty is a no-op, not a panic.
+        g.push_front_log(Vec::new());
+        assert_eq!(g.log_len(), 0);
     }
 
     #[test]

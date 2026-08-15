@@ -12,7 +12,7 @@
 //!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
 //!   tokio clock so it tracks paused time deterministically in tests.
 //! * **Bounded attempts.** Every `store.flush` attempt is bounded by
-//!   [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung store must not wedge the
+//!   `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung store must not wedge the
 //!   loop forever — the timeout maps into the retry path like any `Err`.
 //! * **Never dropped (except dead letters).** After `retries` retries the
 //!   batch is retained in the task's pending buffer and flushes before newly
@@ -21,7 +21,7 @@
 //!   the mod.rs contract). The in-memory graph is the primary tier (spec
 //!   §2.1), so the session keeps accepting writes throughout an outage. A
 //!   retained batch that exhausted its retries waits out
-//!   [`RETAINED_BACKOFF`] before the next attempt (F3): a permanently failing
+//!   `RETAINED_BACKOFF` before the next attempt (F3): a permanently failing
 //!   store re-enters the retry sequence at most once per hold, not once per
 //!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
 //!   deterministic constraint violation is logged and dropped — never
@@ -41,14 +41,20 @@
 //! ## Timing model
 //!
 //! The task wakes on `interval` ticks (the tick-triggered flush) and, in
-//! between, polls every [`POLL_QUANTUM`] so a batch that reaches `max_batch`
+//! between, polls every `POLL_QUANTUM` so a batch that reaches `max_batch`
 //! flushes *early* — before the interval elapses (spec §2.4 "forces an early
 //! flush"). The graph is polled, not notified (there is no write channel on
-//! [`Graph`]), so [`POLL_QUANTUM`] is the granularity of the early-flush
+//! [`Graph`]), so `POLL_QUANTUM` is the granularity of the early-flush
 //! trigger and of the depth observation.
 //!
-//! There is no shutdown signal (v0.1 keeps it simple): the task runs until the
-//! runtime drops it or the returned [`tokio::task::JoinHandle`] is aborted.
+//! ## Shutdown (COH-6, T8.1)
+//!
+//! [`FlushTask::stop`] signals a graceful stop: the loop finishes its current
+//! cycle, returns its task-owned `pending` buffer to the front of the graph's
+//! mutation log, and exits — so the owner's final `drain_log` + `store.flush`
+//! (`Memory::close`) sees every not-yet-durable mutation, retained batches
+//! included. A hard [`tokio::task::JoinHandle::abort`] still works but DROPS
+//! `pending`; prefer `stop()` whenever durability matters.
 
 use parking_lot::{Mutex, RwLock};
 use std::future::Future;
@@ -59,7 +65,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::graph::Graph;
-use crate::store::GraphStore;
+use crate::store::{GraphStore, SessionFlushStats};
 use crate::types::{MutationBatch, StoreError};
 
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
@@ -70,7 +76,11 @@ const POLL_QUANTUM: Duration = Duration::from_millis(100);
 /// retry path (same as any `Err`), so the loop still retries → retains →
 /// degrades as designed. Mirrors the F2 `LOAD_SESSION_TIMEOUT` (load.rs) —
 /// same 30s value, same naming convention.
-const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// `pub(crate)`: `Memory::close`'s hand-rolled final flush (COH-6 step 4) is
+/// one more attempt against the same store and bounds itself with the same
+/// constant — one value, one behaviour to reason about (T81-2).
+pub(crate) const FLUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff base for flush retries; doubles per retry.
 const BACKOFF_BASE: Duration = Duration::from_millis(100);
 /// Cap on a single backoff sleep (retries are bounded by `FlushParams::retries`
@@ -125,6 +135,10 @@ struct Shared {
     /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
     /// violations dropped after logging). Monotonic for the task's lifetime.
     dead_lettered: AtomicU64,
+    /// Graceful-stop channel (COH-6, T8.1). [`FlushTask::stop`] latches a
+    /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
+    /// fires, re-appends `pending` to the front of the graph log and exits.
+    stop: Arc<tokio::sync::Notify>,
 }
 
 impl Shared {
@@ -137,6 +151,7 @@ impl Shared {
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
+            stop: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -160,6 +175,13 @@ pub struct FlushTask {
     store: Arc<dyn GraphStore>,
     params: FlushParams,
     shared: Arc<Shared>,
+    /// Single-writer-lease fence (T86-2). When the owning [`crate::memory::Memory`]
+    /// handle loses its lease (a store outage starved the heartbeat past the TTL
+    /// and another writer took the session), the heartbeat latches this `true`;
+    /// the loop then stops flushing and **drops** its not-yet-durable `pending`
+    /// rather than overwriting the new holder's rows. `None` for a task with no
+    /// lease (every test store, the advisory-default backends).
+    fence: Option<Arc<AtomicBool>>,
 }
 
 impl FlushTask {
@@ -170,7 +192,17 @@ impl FlushTask {
             store,
             params,
             shared: Arc::new(Shared::new()),
+            fence: None,
         }
+    }
+
+    /// Arm the single-writer-lease fence (T86-2): once `fence` is set `true` the
+    /// loop stops flushing and drops its pending buffer. `Memory::build` passes
+    /// the same `Arc<AtomicBool>` here and to the lease heartbeat, so a lost
+    /// lease fences the write-behind path without a channel between the two.
+    pub fn with_fence(mut self, fence: Arc<AtomicBool>) -> Self {
+        self.fence = Some(fence);
+        self
     }
 
     /// Spawn the interval loop and return its handle.
@@ -202,12 +234,14 @@ impl FlushTask {
         let store = self.store.clone();
         let shared = self.shared.clone();
         let params = self.params; // Copy — do not capture `self` into the 'static task
+        let fence = self.fence.clone();
         tokio::spawn(async move {
             FlushLoop {
                 graph,
                 store,
                 params,
                 shared,
+                fence,
                 pending: MutationBatch::default(),
                 retry_after: None,
             }
@@ -226,6 +260,34 @@ impl FlushTask {
     /// (`durability="none"`). Terminal for the task's lifetime.
     pub fn degraded(&self) -> bool {
         self.shared.degraded.load(Ordering::Acquire)
+    }
+
+    /// Ask the flush loop to stop gracefully (COH-6 — `Memory::close`'s
+    /// shutdown drain, T8.1). Returns immediately; the task stops later.
+    ///
+    /// This is a **signal, not a drain API**: the loop finishes its current
+    /// `FlushLoop::cycle` (any in-flight flush and its retry/backoff run to
+    /// completion — a post-retry `RETAINED_BACKOFF` hold is not waited out),
+    /// re-appends whatever is still in its task-owned `pending` buffer to the
+    /// FRONT of the graph's mutation log ([`Graph::push_front_log`]), and
+    /// exits. The caller then `.await`s the [`tokio::task::JoinHandle`] and
+    /// owns the final `drain_log` + `store.flush` itself.
+    ///
+    /// **Why not `JoinHandle::abort()`:** `pending` is task-owned, so a hard
+    /// abort drops every mutation that was drained from the log but is not yet
+    /// durable — including a batch RETAINED after exhausted retries, which is
+    /// exactly the case where losing it matters most.
+    ///
+    /// **Why [`tokio::sync::Notify`] and not an `AtomicBool` poll:** the loop's
+    /// `select!` already awaits futures, so `notified()` is a native branch
+    /// with no `POLL_QUANTUM` coupling. `Notify` also *latches* — a
+    /// `notify_one()` during an in-flight `cycle()` stores a permit, so the
+    /// stop survives until the next `select!` poll instead of being missed.
+    ///
+    /// Idempotent: a second call stores no additional permit that matters —
+    /// the loop has already broken out.
+    pub fn stop(&self) {
+        self.shared.stop.notify_one();
     }
 }
 
@@ -286,6 +348,8 @@ struct FlushLoop {
     store: Arc<dyn GraphStore>,
     params: FlushParams,
     shared: Arc<Shared>,
+    /// Single-writer-lease fence (T86-2); see [`FlushTask::with_fence`].
+    fence: Option<Arc<AtomicBool>>,
     /// Mutations not yet durable. Retained batches stay at the front; newly
     /// drained mutations are appended in chronological order — never re-sorted
     /// (mod.rs contract).
@@ -304,13 +368,80 @@ impl FlushLoop {
         // first real flush happens one interval after spawn.
         interval.tick().await;
 
+        // Cloned out of `shared` so the stop branch borrows nothing from
+        // `self` — `select!` evaluates every branch's future expression before
+        // polling, and `self.shared.stop.notified()` would conflict with the
+        // `&mut self` the `cycle` branches need.
+        let stop = self.shared.stop.clone();
+
         loop {
+            // Single-writer-lease fence (T86-2). Checked at the top of every
+            // iteration — after each `select!` branch resolves and before the
+            // next `cycle` — so once the heartbeat latches a lost lease no
+            // further flush is issued. The task-owned `pending` is **dropped**,
+            // not requeued: those mutations belong to a session this process no
+            // longer owns, and writing them (here OR handing them back for
+            // `close`'s final flush) would overwrite the new holder's rows —
+            // the exact split-brain the lease exists to prevent. A `cycle`
+            // already in flight when the fence is set runs to completion; the
+            // guarantee is "no NEW flush after the fence is observed". The
+            // exposure is one in-flight cycle — bounded by `FLUSH_ATTEMPT_TIMEOUT`
+            // (30s) plus the lease-detection interval (heartbeat), not the
+            // `POLL_QUANTUM` this comment once claimed. That residual (and the
+            // fencing-token fix) is tracked in GitHub issue #1.
+            if self.fenced() {
+                let dropped = self.pending.mutations.len();
+                self.pending.mutations.clear();
+                self.refresh_depth();
+                tracing::error!(
+                    dropped,
+                    "FlushTask fenced: single-writer lease lost; flushing stopped and {dropped} \
+                     not-yet-durable mutations were dropped rather than overwrite the new holder"
+                );
+                break;
+            }
+            // `biased;` is REQUIRED, and the stop branch must be FIRST
+            // (COH-6). An unbiased `select!` polls branches in a random start
+            // order, so a concurrently-ready `interval.tick()` could be polled
+            // first, consume-and-drop the stored stop permit, and lose the stop
+            // forever — `close()`'s `join_handle.await` would then hang. The
+            // tick IS concurrently ready whenever an in-flight flush outlasts
+            // `interval`, which is the normal slow-flush shutdown case. With
+            // `biased;` polling follows written order and a ready stop wins
+            // before the tick is ever polled.
             tokio::select! {
+                biased;
+                _ = stop.notified() => {
+                    self.requeue_pending();
+                    break;
+                }
                 _ = interval.tick() => self.cycle(true).await,
                 // Early-flush poll: catch a batch reaching max_batch before the tick.
                 _ = tokio::time::sleep(POLL_QUANTUM) => self.cycle(false).await,
             }
         }
+    }
+
+    /// Hand the task-owned `pending` buffer back to the graph log on stop
+    /// (COH-6): everything in it was drained from the log but is not durable,
+    /// so it goes back to the FRONT (chronological order preserved) where
+    /// `Memory::close`'s final `drain_log` can see and flush it.
+    ///
+    /// Not a public drain API by design — the task never flushes here; it only
+    /// returns custody. The owner does the final `store.flush` with no task
+    /// running and no graph lock held.
+    fn requeue_pending(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        if !pending.mutations.is_empty() {
+            let count = pending.mutations.len();
+            // WRITE lock only for the splice; no I/O, no await under it.
+            self.graph.write().push_front_log(pending.mutations);
+            tracing::debug!(
+                count,
+                "FlushTask stopping: returned {count} not-yet-durable mutations to the graph log"
+            );
+        }
+        self.refresh_depth();
     }
 
     /// One flush cycle: drain the graph log, then flush the pending batch when
@@ -418,11 +549,29 @@ impl FlushLoop {
                 );
             }
         }
+
+        // T85-3: publish the observable flush stats to the shared store so a
+        // reader in another process (e.g. `serve-web`) can render real
+        // `flush_lag_ms` / `log_depth` instead of `n/a`. Called after each
+        // completed cycle. Best-effort by design: publication failure must
+        // never perturb the flush path (the local stats handle is unaffected).
+        let fs = self.shared.stats();
+        let session_stats = SessionFlushStats {
+            flush_lag_ms: fs.lag.as_millis() as u64,
+            log_depth: fs.depth as u64,
+        };
+        if let Err(err) = self.store.write_flush_stats(&session, &session_stats).await {
+            tracing::trace!(
+                error = %err,
+                session = %session,
+                "failed to publish flush stats (best-effort)"
+            );
+        }
     }
 
     /// Attempt `store.flush` with exponential backoff, up to `retries` retries
     /// after the initial attempt (total attempts = `retries` + 1). Every
-    /// attempt is bounded by [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung
+    /// attempt is bounded by `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung
     /// store must not wedge the loop forever — the timeout maps into this
     /// retry path exactly like any other `Err` (retry → retain → degrade).
     /// A [`StoreError::Constraint`] (STORE-4) is deterministic and surfaces
@@ -492,6 +641,14 @@ impl FlushLoop {
         }
     }
 
+    /// `true` once the single-writer lease has been lost (T86-2). `false` for a
+    /// task with no fence armed.
+    fn fenced(&self) -> bool {
+        self.fence
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
     /// depth = pending batch + in-graph log (everything not yet durable).
     fn refresh_depth(&self) {
         let depth = self.pending.len() + self.graph.read().log_len();
@@ -504,6 +661,7 @@ mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
     use crate::store::Capabilities;
+    use crate::test_util::{capture_logs, quiet_logs};
     use crate::types::{
         AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, GraphSnapshot,
         Interaction, InteractionSpan, NodeId, Scored, SessionId,
@@ -511,8 +669,6 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
     use std::future::Future;
-    use std::io;
-    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -620,27 +776,6 @@ mod tests {
             retries,
             log_max,
         }
-    }
-
-    /// Install a thread-local default that registers tracing callsites as
-    /// `always`-interested while dropping every event.
-    ///
-    /// `tracing` caches each callsite's `Interest` process-wide at first
-    /// registration; with no default subscriber that interest is `never` and
-    /// the shared `BackendFlushFailed` warn callsite (in `cycle`) becomes
-    /// permanently disabled for *every* test — including
-    /// [`degrades_past_log_max_and_stops_flushing`], which asserts that event
-    /// through a capturing subscriber. Any flush test that can reach that warn
-    /// without its own subscriber must install this guard so the callsite can
-    /// never be poisoned. `TRACE` keeps the filter from returning `never`; the
-    /// sink writer keeps the events silent.
-    fn keep_callsites_enabled() -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        )
     }
 
     /// `GraphStore` mock: fails the first `fail_next(n)` flush calls (or
@@ -896,7 +1031,7 @@ mod tests {
     /// `GraphStore` mock: its flush HANGS (never resolves) for the first
     /// `hang_next(n)` calls, then delegates to an inner store. STORE-2
     /// harness — mirrors the F2 `HangingStore` (load.rs) for the flush path:
-    /// a hung flush must be bounded by [`FLUSH_ATTEMPT_TIMEOUT`], never wedge
+    /// a hung flush must be bounded by `FLUSH_ATTEMPT_TIMEOUT`, never wedge
     /// the loop.
     struct HungStore {
         inner: Arc<dyn GraphStore>,
@@ -1107,27 +1242,6 @@ mod tests {
         }
     }
 
-    /// Capturing writer for asserting on emitted tracing events.
-    #[derive(Clone)]
-    struct BufWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for BufWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for BufWriter {
-        type Writer = BufWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     #[tokio::test(start_paused = true)]
     async fn flushes_on_interval_tick() {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
@@ -1169,6 +1283,88 @@ mod tests {
             "lag reset after success"
         );
         assert!(!task.degraded());
+    }
+
+    /// T85-3: the writer's `FlushTask` publishes its flush stats into the
+    /// shared store after each completed flush cycle, so a reader in another
+    /// process can render real `flush_lag_ms` / `log_depth` instead of `n/a`.
+    #[tokio::test(start_paused = true)]
+    async fn writer_publishes_flush_stats_into_shared_store() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        // Nothing flushed yet → nothing published → honest `None` (n/a).
+        assert_eq!(store.read_flush_stats(&sid()).await.unwrap(), None);
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations total
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| graph.read().log_len() == 0).await;
+
+        // Interval tick flushes; the loop publishes the resulting stats.
+        tokio::time::advance(Duration::from_millis(900)).await;
+        wait_until(|| task.stats().depth == 0).await;
+
+        let published = store
+            .read_flush_stats(&sid())
+            .await
+            .unwrap()
+            .expect("writer published flush stats into the shared store");
+        assert_eq!(
+            published.log_depth, 0,
+            "depth is the in-graph log after a clean flush"
+        );
+        assert!(
+            published.flush_lag_ms < 100,
+            "lag reset just after a successful flush: {published:?}"
+        );
+
+        handle.abort();
+    }
+
+    /// T86-2: once the single-writer-lease fence is latched, the loop stops
+    /// flushing and DROPS its not-yet-durable `pending` rather than write it —
+    /// so a handle that lost its lease cannot overwrite the new holder's rows.
+    #[tokio::test(start_paused = true)]
+    async fn a_fenced_loop_stops_flushing_and_drops_pending() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let fence = Arc::new(AtomicBool::new(false));
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        )
+        .with_fence(fence.clone());
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        // Three not-yet-durable mutations sit in the graph log.
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations total
+        assert_eq!(graph.read().log_len(), 3);
+
+        // Lose the lease BEFORE any interval tick could flush.
+        fence.store(true, Ordering::Release);
+
+        // One POLL_QUANTUM later the loop wakes, drains into `pending`, then the
+        // top-of-loop fence check drops it and breaks. Drive to completion.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        handle.await.expect("fenced loop exits");
+
+        assert_eq!(task.stats().depth, 0, "pending dropped, log drained");
+        assert!(
+            store.load_session(&sid()).await.is_err(),
+            "a fenced loop must NEVER flush — the new holder owns the session now"
+        );
+        assert!(!task.degraded(), "fenced is not the same as degraded");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1281,12 +1477,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn degrades_past_log_max_and_stops_flushing() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1342,7 +1533,7 @@ mod tests {
         assert_eq!(task.stats().depth, 0);
         assert!(task.degraded());
 
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert!(out.contains("BackendFlushFailed"), "warn missing: {out}");
         assert!(out.contains("FlushDegraded"), "error missing: {out}");
         assert!(out.contains("ERROR"), "error level missing: {out}");
@@ -1351,8 +1542,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stats_depth_and_lag_across_success_and_failure() {
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1428,8 +1619,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retained_batch_and_new_drains_flush_together_in_order() {
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1478,8 +1669,8 @@ mod tests {
         // warn) on every interval tick. Attempts stay flat while the hold is
         // active; exactly one new attempt happens once it elapses.
         // This test reaches the shared BackendFlushFailed warn; keep its
-        // callsite from registering `never` (see `keep_callsites_enabled`).
-        let _callsites = keep_callsites_enabled();
+        // callsite from registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));
@@ -1542,12 +1733,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn panicking_backend_is_contained_batch_retained_then_lands() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(PanicStore::new(inner));
@@ -1602,7 +1788,7 @@ mod tests {
         );
 
         // Each caught panic logged its payload via the BackendFlushPanic warn.
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert_eq!(
             out.matches("BackendFlushPanic").count(),
             2,
@@ -1616,12 +1802,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn repeated_panics_lead_to_degrade_past_log_max() {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(PanicStore::new(inner));
@@ -1662,7 +1843,7 @@ mod tests {
         assert!(!handle.is_finished(), "degrade must not abort the loop");
 
         // Every caught panic logged BackendFlushPanic; degrade logged too.
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert_eq!(
             out.matches("BackendFlushPanic").count(),
             2,
@@ -1683,7 +1864,7 @@ mod tests {
         // retain), the session keeps working, and the loop never dies, never
         // degrades. Reaches the shared BackendFlushFailed warn; keep its
         // callsite from registering `never`.
-        let _callsites = keep_callsites_enabled();
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(HungStore::new(inner));
@@ -1764,12 +1945,7 @@ mod tests {
         // — logged and dropped (visible in stats), NOT retried, NOT retained,
         // NOT degraded. The session continues and the next batch flushes
         // fresh (no head-of-line poisoning).
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let sub = tracing_subscriber::fmt()
-            .with_writer(BufWriter(buf.clone()))
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        let _guard = tracing::subscriber::set_default(sub);
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(ConstraintStore::new(inner));
@@ -1804,7 +1980,7 @@ mod tests {
         assert_eq!(task.stats().depth, 0);
         assert!(!task.degraded());
 
-        let out = String::from_utf8(buf.lock().clone()).unwrap();
+        let out = logs.contents();
         assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
         assert!(out.contains("23505"), "constraint code missing: {out}");
     }
@@ -1814,7 +1990,7 @@ mod tests {
         // STORE-4 contrast: transient (Backend) failures keep the EXISTING
         // retain path — retried, then retained — and never touch
         // `dead_lettered`. Only constraint violations dead-letter.
-        let _callsites = keep_callsites_enabled();
+        let _callsites = quiet_logs();
 
         let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let store = Arc::new(FlakyStore::new(inner));

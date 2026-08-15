@@ -1,0 +1,18 @@
+Running live CockroachDB tests against host: nrynss-19495.jxf.gcp-asia-south1.cockroachlabs.cloud:26257
+   Compiling lambo v0.1.0 (/home/nryn/work/lambo)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.18s
+     Running unittests src/lib.rs (target/debug/deps/lambo-7e6be782f709929f)
+
+running 8 tests
+test embed::bge_m3::tests::live_smoke_against_llama_server ... ok
+test store::cockroach::conformance::vector_explain_camera_proof ... ok
+test store::cockroach::conformance::build_store_returns_working_adapter ... ok
+test store::cockroach::conformance::vector_beam_size_reaches_the_server_and_keeps_statement_timeout ... ok
+test canon::eval::tests::fixture::cockroach_three_hop_progression_matches_memory ... ok
+test cli::saints::live::saints_and_stats_against_live_cockroach ... ok
+test store::cockroach::conformance::single_writer_lease_is_enforced_across_pools ... ok
+test store::cockroach::conformance::conformance_suite has been running for over 60 seconds
+test store::cockroach::conformance::conformance_suite ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 747 filtered out; finished in 78.80s
+

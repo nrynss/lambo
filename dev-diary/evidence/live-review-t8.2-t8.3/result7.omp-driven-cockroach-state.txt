@@ -1,0 +1,13 @@
+# OMP-driven model leg (DeepSeek Flash → Lambo MCP → Cockroach)
+
+Model asked: lambo_derive (2 concepts) → lambo_recall → lambo_stats, over MCP via OMP.
+Model: deepseek-v4-flash / deepseek-v4-flash-0731 (inferx).
+
+## Cockroach durable state (session omp-live2)
+the auth middleware validates sessions|Entity|f|
+the billing service retries failed charges|Entity|f|
+
+## session embedding contract
+bge_m3||1024
+
+## NOTE: has_vec='f' everywhere -> derive surface persists NO embeddings (L82-4).

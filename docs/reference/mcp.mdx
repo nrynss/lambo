@@ -1,0 +1,248 @@
+---
+title: "MCP tools"
+description: "The seven tools your agents call, with arguments and limits"
+---
+
+Lambo is agentic graph memory. It runs as an MCP server that exposes seven tools your agent can call to store what it learns, recall relevant prior memory, and coordinate edits. A running `lambo serve --session <id>` process is the single writer for that session, and your agents connect to it as MCP clients.
+
+## Transports
+
+Lambo serves over stdio by default, and over HTTP when you ask for it.
+
+| stdio | `lambo serve --session demo` | The default. Works with any MCP client through the standard `mcpServers` configuration. |
+| HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. Change them with `--port` and `--bind`. |
+
+On loopback the HTTP transport is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`). It also applies a global rate limit, a ceiling on concurrently live sessions, and a request-body limit. See [Configuration](/config#http-transport) for the knobs.
+
+<Warning>
+The process behind the HTTP endpoint is a session writer, and it is not open to the world. Unless you bind only to loopback, configure a bearer token or `lambo serve` refuses to start, and once you do, every request must carry `Authorization: Bearer <token>`. Protect it as a writer, not as a read-only service.
+</Warning>
+
+## What every tool expects
+
+Every tool takes an `agent_id`, and every tool rejects any argument it does not define, so a typo fails rather than being ignored.
+
+<Note>
+Do not send timestamps. Lambo stamps all times itself, and no tool accepts a timestamp argument. Sending one is refused by name.
+</Note>
+
+You manage ordering. A read sees a write only after that write's tool call has returned. If you want a recall to see something you just derived, call `lambo_derive` first, wait for it to return, and then call `lambo_recall`.
+
+### What Lambo accepts in text
+
+Any string you send is limited to 16 KB. Lambo also refuses two classes of character. In both cases it names the offending codepoint and never echoes the raw byte back to you.
+
+- **Control characters.** Tab and newline are the only ones you may send. Every other control character is refused, so a stray `U+0000` or an ANSI escape sequence cannot reach stored content and corrupt whatever renders it later.
+- **Invisible formatting characters.** Lambo refuses bidi overrides such as `U+202E`, the zero-width family such as `U+200B`, blank-rendering fillers such as `U+3164`, the byte order mark, and tag characters. These paint nothing on screen, so a concept carrying one reads as innocuous to you while reading differently to a model.
+
+Invisible characters that real writing needs stay allowed. The zero-width joiner and non-joiner, the variation selectors, and the combining grapheme joiner all pass, so Persian, Indic, and emoji text goes through unchanged.
+
+<Note>
+Lambo keeps the allowed invisible characters in the content it stores, and ignores them when it decides whether two concepts are the same. Texts that look identical on screen therefore land on the same concept. Nobody can mint a hidden duplicate of an existing concept by slipping an invisible character into it.
+</Note>
+
+```json
+{"content": [{"type": "text", "text": "concept.content contains a disallowed invisible formatting character (U+202E); bidi overrides, zero-width characters, blank fillers, the BOM and tag characters are refused because they are invisible in review but not to the model (zero-width joiner and non-joiner are allowed, and are stripped from canonical keys)"}],
+ "isError": true}
+```
+
+### How agent_id is used
+
+One `lambo serve` process owns its session as one agent, which you set with `--agent`. That identity is what Lambo writes into the graph.
+
+- If your `agent_id` matches the process's agent, the call proceeds normally.
+- If it differs, the read and write tools still do the work, record it under the process's agent, and return a warning saying so. Your identity is not silently discarded, but it is also not what lands in the graph.
+- `lambo_reserve` refuses a mismatch outright, because a soft lock recorded under a different name would be a lock you do not actually hold. Nothing is reserved or released.
+
+To attribute work per agent today, run one `serve` process per agent.
+
+### Errors
+
+Errors come back as normal tool results with `isError` set to `true` and a short reason. Lambo never puts internal detail such as endpoints, connection strings, or driver messages into an error, and logs the full detail server-side instead.
+
+| What went wrong | What you see |
+|---|---|
+| A missing, unknown, or malformed argument | The parameter error naming the field, before the tool runs. |
+| A value outside its range | The bound, such as `top_k must be in 1..=100`. |
+| A string over the size cap | The field, the cap, and the size given. |
+| A string carrying a control or invisible character | The field, the offending codepoint, and which class of character was refused. |
+| A focus that matches several concepts | The candidate list with node ids, so you can name one exactly. |
+| A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
+| A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
+
+## Tools
+
+These are the seven tools your agents call.
+
+### lambo_recall
+
+Recall relevant memory for a query. This returns the Lambo context block, which is the set of memories that matter for the query, with markers for canonical facts, blast-radius warnings, and conflicts. The block is the first text content of the result, and the individual hits come back as structured content alongside it.
+
+Recall combines keyword matching with vector similarity, then expands through the graph. Which of those legs run depends on your store. Every concept your agents write through `lambo_derive` and `lambo_record_action` keeps its embedding. A store with vector search then finds memory your own agents wrote, not just memory you loaded in bulk.
+
+| Store | What recall uses |
+|---|---|
+| CockroachDB | Keyword matching and vector similarity, plus graph expansion. |
+| SQLite | Keyword matching plus graph expansion. It has no vector column. |
+| In-memory | Keyword matching plus graph expansion. |
+
+Recall still works without a vector leg. You get matches on the words you use rather than on meaning, so a query that shares no vocabulary with a stored concept may miss it.
+
+| Argument | Type | Required | Range or default |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `query` | string | Yes | Up to 16 KB. |
+| `top_k` | integer | No | `1` to `100`. Defaults to the configured value, which is `5`. |
+| `max_tokens` | integer | No | `1` to `100,000`. Defaults to the configured value, which is `500`. |
+| `traversal_depth` | integer | No | `0` to `5`. Defaults to the configured value, which is `2`. |
+
+```json
+{"name": "lambo_recall", "arguments": {"agent_id": "agent-a", "query": "stdio wire check"}}
+```
+
+```json
+{"content": [{"type": "text", "text": "stdio wire check [Entity] (score 0.86)"}],
+ "structuredContent": {"context": "stdio wire check [Entity] (score 0.86)",
+   "hits": [{"node_id": "ddbc8bc8-52ed-465b-9a2a-b0066bda51ad", "content": "stdio wire check",
+             "concept_type": "Entity", "score": 0.8565231086776713,
+             "is_canonical": false, "blast_radius": null}],
+   "warnings": []},
+ "isError": false}
+```
+
+### lambo_derive
+
+Store new concepts learned from the current interaction.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `concepts` | array of `{content, concept_type}` | Yes | Up to 64 per call. |
+| `concepts[].content` | string | Yes | Up to 16 KB. |
+| `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
+| `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. |
+
+<Warning>
+`concept_type` is lower case on the wire. Sending `Entity` is refused with "unknown variant `Entity`, expected one of `entity`, `logic`, `constraint`, `resource`, `observation`".
+</Warning>
+
+```json
+{"name": "lambo_derive", "arguments": {"agent_id": "agent-a",
+  "concepts": [{"content": "user schema", "concept_type": "entity"}],
+  "parent_of": [{"parent": "user schema", "child": "auth middleware"}]}}
+```
+
+```json
+{"content": [{"type": "text", "text": "derived 1 concept(s): 1 created, 0 matched existing"}],
+ "structuredContent": {"created": ["ddbc8bc8-52ed-465b-9a2a-b0066bda51ad"], "matched": [],
+   "summary": "derived 1 concept(s): 1 created, 0 matched existing", "warnings": []},
+ "isError": false}
+```
+
+### lambo_record_action
+
+Record something the agent did, along with what it produces, modifies, and depends on. The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `action` | string | Yes | Up to 16 KB. |
+| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. |
+
+```json
+{"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",
+  "action": "created migrations/003.sql", "produces": ["migrations/003.sql"],
+  "depends_on": ["user schema"]}}
+```
+
+```json
+{"content": [{"type": "text", "text": "recorded action 'created migrations/003.sql': 2 concept(s) created, 2 edge(s) added"}],
+ "structuredContent": {"action_node": "2ff7aecd-7627-4be5-9cde-59821ea0a590", "edges": 2, "warnings": []},
+ "isError": false}
+```
+
+### lambo_reserve
+
+Take a soft lock on a memory node before you edit it, so two agents do not edit the same concept at once. Set `release` to `true` to release the lock instead.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | Must be the agent this server runs as. A different `agent_id` is refused. |
+| `node_id` | string (UUID) | Yes | From `lambo_recall` or `lambo_inspect`. |
+| `ttl_seconds` | integer | No | `1` to `3600`. Defaults to `30`. |
+| `release` | boolean | No | Release instead of reserve. |
+
+```json
+{"name": "lambo_reserve", "arguments": {"agent_id": "agent-a",
+  "node_id": "478416c2-0000-0000-0000-000000000000", "ttl_seconds": 60}}
+```
+
+<Note>
+Reservations are advisory and live in memory only, so they do not survive a server restart. After a restart, the absence of a reservation does not guarantee that nobody else is working on the node.
+</Note>
+
+### lambo_inspect
+
+Look at the neighbourhood around a concept, including its type, whether it is canonical, its blast radius, and the edges leading out from it.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `focus` | string | Yes | Concept text or a node UUID. Up to 16 KB. |
+| `depth` | integer | No | `0` to `5`. Defaults to `2`. |
+
+Lambo resolves `focus` exactly first, then as a single substring match, and says in the result text when it resolved a substring. If the focus matches several concepts it refuses rather than guessing, and lists up to ten candidates with their node ids. The rendered neighbourhood stops after 200 neighbours and says so.
+
+```json
+{"name": "lambo_inspect", "arguments": {"agent_id": "agent-a", "focus": "user schema", "depth": 2}}
+```
+
+### lambo_saints
+
+List the session's canonical memories, which are the concepts Lambo has promoted to canonical facts. Each row carries the node id, the content, the type, the blast radius, the access count, and when it was created. This tool takes only `agent_id`.
+
+### lambo_stats
+
+Report session health: flush lag, write-behind log depth, node, edge, and concept counts, canonization progress, and whether the session is degraded. This tool takes only `agent_id`.
+
+Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
+
+## How the server introduces itself
+
+When your client connects, the server names the session and tells the model how to use it. For a session called `demo`, the instructions read:
+
+```text
+Lambo agentic graph memory for session 'demo'. Call lambo_recall before acting on a
+task to load relevant prior memory, lambo_derive and lambo_record_action to write what
+you learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
+lambo_saints / lambo_stats to look around. Every tool takes your agent_id. Never send a
+timestamp: the server stamps them. Ordering is yours to manage: a read sees a write only
+after that write's own tool call has returned, so sequence a
+lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant to see it.
+```
+
+## Limits
+
+Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
+
+| Limit | Value |
+|---|---|
+| Any single string | 16 KB |
+| `top_k` | 100 |
+| `traversal_depth` and inspect `depth` | 5 |
+| `max_tokens` | 100,000 |
+| Concepts per `lambo_derive` | 64 |
+| Targets per `lambo_record_action`, combined | 64 |
+| Reservation TTL | 3600 seconds |
+| Neighbours rendered by `lambo_inspect` | 200 |
+| Candidates listed for an ambiguous focus | 10 |
+
+Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused.
+
+<Warning>
+The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.
+</Warning>
+
+`lambo_inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
+
+See [Command line](/cli) for the same operations from the terminal, and [Library API](/api) for the underlying Rust library.

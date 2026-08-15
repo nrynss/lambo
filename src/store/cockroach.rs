@@ -85,7 +85,7 @@
 //!   `VECTOR(n)` out of the embedded `001_init.sql` (not a global constant), so
 //!   `resolve::check_vector_compatibility` can reject mismatched embedders.
 //! - **rustls DSN rewrite.** sqlx's rustls stack cannot open libpq's magic
-//!   `sslrootcert=system` path; the `.env` DSN uses it. [`dsn_for_rustls`] rewrites it
+//!   `sslrootcert=system` path; the `.env` DSN uses it. `dsn_for_rustls` rewrites it
 //!   to a real CA bundle (or downgrades `verify-full` → `require`) before pooling
 //!   (T0.3 spike, proven against the cloud cluster).
 
@@ -104,9 +104,17 @@ use uuid::Uuid;
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
+use super::batch::{
+    batch_session_ids, plan_flush, BulkLimits, ConceptRow, FlushStep, CONCEPT_COLUMNS,
+    EDGE_COLUMNS, INTERACTION_COLUMNS,
+};
+#[cfg(feature = "fixtures")]
+use super::batch::{seed_concept_rows, seed_edge_rows};
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, StoreConfig,
+    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
+    StoreConfig,
 };
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
@@ -121,6 +129,49 @@ const INIT_SQL: &str = include_str!("../../migrations/cockroach/001_init.sql");
 /// Pool size is deliberately small: Lambo is single-writer per session (spec §2.4) and
 /// the demo runs one process.
 const MAX_POOL_CONNECTIONS: u32 = 4;
+
+/// Rows per multi-row upsert statement (L82-1).
+///
+/// The hard ceiling is PostgreSQL's wire-protocol limit of 65535 bind
+/// parameters per statement: 16 columns caps `concepts` at 4095 rows and 9
+/// columns caps `edges` at 7281. These sit an order of magnitude below that —
+/// enough that the live finding's 784-mutation tail plans into single-digit
+/// statements, while keeping any one statement small enough that CockroachDB
+/// plans it without trouble and a retry re-sends little.
+///
+/// **`interactions` is deliberately 1.** `interactions.previous_id REFERENCES
+/// interactions(id)` is a *self* foreign key, and a batch's interactions form a
+/// chain. Both engines check foreign keys at end-of-statement, so a multi-row
+/// insert of a chain should be fine — but "should be" is not a thing this can
+/// verify from a machine with no cluster, and the payoff is nil: a burst carries
+/// one interaction per client call (four in the live repro) against hundreds of
+/// concepts and edges. Row-at-a-time here costs nothing and assumes nothing.
+const BULK_LIMITS: BulkLimits = BulkLimits {
+    interactions: 1,
+    concepts: 256,
+    edges: 512,
+};
+
+/// PostgreSQL's wire-protocol ceiling on bind parameters per statement, which
+/// CockroachDB inherits by speaking the same protocol.
+const PG_MAX_BIND_PARAMETERS: usize = 65535;
+
+// R1-4: the ceiling arithmetic above is prose, and prose does not fail a build.
+// A column added to `concepts` without revisiting the row limit would push a
+// chunk over the wire limit and only be discovered against a real server; these
+// turn it into a compile error.
+const _: () = assert!(
+    BULK_LIMITS.interactions * INTERACTION_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "interactions chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.concepts * CONCEPT_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "concepts chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.edges * EDGE_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "edges chunk exceeds the PostgreSQL bind-parameter limit"
+);
 
 // ---------------------------------------------------------------------------
 // vector_candidates — global fetch sizing (DECISION D1)
@@ -146,10 +197,13 @@ const MAX_POOL_CONNECTIONS: u32 = 4;
 //     exist beyond this window, so
 //     re-query with `k` doubled (cheap: index-backed top-k is O(log n + k)), up to
 //     `VECTOR_FETCH_CAP` ([`next_fetch_k`]).
-//   - Completeness bound: retry STOPS EARLY when the `k + 1` lookahead is absent —
-//     the global population is exhausted, so no further in-session
-//     candidate can exist; the result is provably complete, never a silent
-//     under-return.
+//   - Completeness bound: retry STOPS EARLY when the `k + 1` lookahead is absent.
+//     Under an EXACT scan (non-partial index) that means the global population is
+//     exhausted, so no further in-session candidate can exist. Under the PARTIAL
+//     ANN index (T7.4) `vector search` visits a bounded set of neighbourhoods, so a
+//     lookahead-absent page means the BEAM exhausted its visited neighbourhoods,
+//     not the table — a true near neighbour can be missed (see the ANN accuracy
+//     dial doc above); that miss is accepted for v0.1, not "provably complete".
 //   - Cap fallback: if the global page is still full and crowded at CAP, run an
 //     exact session-scoped query. That path may not use the global vector index,
 //     but it preserves the GraphStore completeness contract for adversarial
@@ -215,10 +269,17 @@ ON CONFLICT (session_id) DO UPDATE SET
     embedding_dim = EXCLUDED.embedding_dim
 "#;
 
-const UPSERT_INTERACTION_SQL: &str = r#"
+/// Upserts are issued as **multi-row** statements (L82-1), so each is built as
+/// `PREFIX` + a `VALUES` list of however many rows the plan put in the chunk +
+/// `ON CONFLICT`. Splitting the statement in two named halves is what lets one
+/// definition serve a 1-row seed and a 256-row flush chunk without the two
+/// drifting apart. `sqlx::QueryBuilder` numbers the placeholders.
+const INSERT_INTERACTION_PREFIX_SQL: &str = r#"
 INSERT INTO interactions (
     id, session_id, agent_id, prompt_text, previous_id, created_at
-) VALUES ($1, $2, $3, $4, $5, $6)
+) "#;
+
+const ON_CONFLICT_INTERACTION_SQL: &str = r#"
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     agent_id = EXCLUDED.agent_id,
@@ -240,13 +301,15 @@ ON CONFLICT (id) DO UPDATE SET
 /// overwrite the hop's effect from `EXCLUDED`, and the transition replaying
 /// behind it in the same batch is a no-op by design (its audit row is already
 /// recorded), so nothing repairs it. Full rationale on `Mutation::UpsertNode`.
-const UPSERT_CONCEPT_SQL: &str = r#"
+const INSERT_CONCEPT_PREFIX_SQL: &str = r#"
 INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
     gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
     chunk_group_id
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::VECTOR, $16)
+) "#;
+
+const ON_CONFLICT_CONCEPT_SQL: &str = r#"
 ON CONFLICT (id) DO UPDATE SET
     session_id = EXCLUDED.session_id,
     content = EXCLUDED.content,
@@ -268,11 +331,13 @@ ON CONFLICT (id) DO UPDATE SET
 /// counts creation as the first write, `reinforcements = 1`; we store its values, never
 /// the DDL default 0). Updating `id` on conflict mirrors MemoryStore's whole-record
 /// replace; the graph never reuses an id with a different natural key.
-const UPSERT_EDGE_SQL: &str = r#"
+const INSERT_EDGE_PREFIX_SQL: &str = r#"
 INSERT INTO edges (
     id, session_id, source, target, edge_type, weight, reinforcements,
     created_at, last_reinforced
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+) "#;
+
+const ON_CONFLICT_EDGE_SQL: &str = r#"
 ON CONFLICT (source, target, edge_type) DO UPDATE SET
     id = EXCLUDED.id,
     session_id = EXCLUDED.session_id,
@@ -560,6 +625,95 @@ const TX_RETRY_ATTEMPTS: usize = 5;
 /// under the 30s `LOAD_SESSION_TIMEOUT`.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// T7.4: accuracy dial for CockroachDB's **approximate** vector search.
+///
+/// Once `concepts_embedding_idx` is partial (spec §12.1), `vector_candidates`
+/// is served by an ANN index instead of an exact full scan: the search visits
+/// a bounded number of index neighbourhoods rather than every row, so a true
+/// near neighbour sitting in an unvisited neighbourhood can be missed. In Lambo
+/// that surfaces as a *silent* quality loss, not an error — hybrid matching
+/// fails to merge a genuine near-duplicate and writes a new concept instead,
+/// leaving the graph slightly less connected.
+///
+/// `vector_search_beam_size` is how many neighbourhoods the search visits:
+/// higher is more accurate and slower. CockroachDB's own default is 32 and the
+/// server enforces **1..=2048** (verified live 2026-08-13; out-of-range is a
+/// server-side error, not a clamp).
+///
+/// **Default 64, chosen from measurement** (adve-review MAJOR-1, 2026-08-13).
+/// Recall was measured against exact top-k on the live cluster, where exact
+/// ground truth is forced with the `concepts@concepts_pkey` hint (a FULL SCAN).
+/// Two 3,000-row datasets: uniform-random vectors, and clustered unit-norm
+/// vectors matching the geometry real embeddings actually have.
+///
+/// ```text
+/// beam:      1     2     4     8    16    32*    64    128    256
+/// recall@10 .19   .23   .32   .47   .70   .93    .96   .96    .86
+/// recall@50 .07   .13   .22   .40   .64   .94    .99   .99    .97
+///                                        *server default
+/// ```
+///
+/// Two findings drove the value:
+/// * At the server default (32) roughly **6-7% of true nearest neighbours are
+///   missed**. For Lambo that is not a latency question — a missed neighbour is
+///   a near-duplicate that hybrid matching fails to merge, so the concept is
+///   silently re-created and the graph ends up less connected.
+/// * **Higher is not monotonically better.** Beam 256 scored *worse* than 64 in
+///   BOTH datasets, reproducibly (recall@10 .86 vs .96). So "crank it up" is
+///   wrong advice, and 64 — not the maximum — is the measured knee.
+///
+/// Recall never reached 1.000 at any beam: this index is approximate by
+/// construction and no setting makes it exact. Exactness is available only by
+/// giving up index use, which spec §12.1 requires us to demonstrate.
+///
+/// Override per process (still `1..=2048`, the server's own bound, verified
+/// live — out-of-range is a server-side error, not a clamp):
+///
+/// ```text
+/// LAMBO_VECTOR_BEAM_SIZE=32 lambo serve …   # back to the server default
+/// ```
+///
+/// Applied per connection alongside `statement_timeout`, so it costs no
+/// per-query round trip. An invalid value is a hard error at pool construction
+/// (Level B fails closed — a silently ignored tuning knob is worse than none,
+/// because the operator believes accuracy was raised when it was not).
+///
+/// Caveat kept deliberately: both datasets are synthetic. The clustered set
+/// mimics embedding geometry but is not BGE-M3 output, so treat 64 as an
+/// evidence-based default rather than a tuned optimum.
+const DEFAULT_VECTOR_BEAM_SIZE: u32 = 64;
+const VECTOR_BEAM_SIZE_ENV: &str = "LAMBO_VECTOR_BEAM_SIZE";
+const VECTOR_BEAM_SIZE_MIN: u32 = 1;
+const VECTOR_BEAM_SIZE_MAX: u32 = 2048;
+
+/// Parse `LAMBO_VECTOR_BEAM_SIZE`. `Ok(None)` = unset, inherit the server
+/// default. Empty is treated as unset so an exported-but-blank var behaves like
+/// absence (same convention as `LAMBO_STORE`).
+fn vector_beam_size_from_env() -> Result<Option<u32>, StoreError> {
+    let raw = match std::env::var(VECTOR_BEAM_SIZE_ENV) {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(e) => return Err(backend(format!("{VECTOR_BEAM_SIZE_ENV}: {e}"))),
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let n: u32 = raw.parse().map_err(|_| {
+        backend(format!(
+            "{VECTOR_BEAM_SIZE_ENV} must be an integer in \
+             {VECTOR_BEAM_SIZE_MIN}..={VECTOR_BEAM_SIZE_MAX}, got {raw:?}"
+        ))
+    })?;
+    if !(VECTOR_BEAM_SIZE_MIN..=VECTOR_BEAM_SIZE_MAX).contains(&n) {
+        return Err(backend(format!(
+            "{VECTOR_BEAM_SIZE_ENV} must be in \
+             {VECTOR_BEAM_SIZE_MIN}..={VECTOR_BEAM_SIZE_MAX}, got {n}"
+        )));
+    }
+    Ok(Some(n))
+}
+
 /// STORE-4: structured retry decision for `tx_retry` — no message-text
 /// matching. Constraint violations (SQLSTATE 23xxx) are deterministic and are
 /// mapped to [`StoreError::Constraint`] by the write path: never replay them.
@@ -691,8 +845,10 @@ fn initial_fetch_k(limit: usize) -> usize {
 ///
 /// Final when any of:
 ///   - at least `limit` in-session hits were surfaced (`in_session >= limit`);
-///   - lookahead found no more row (`has_more == false`) — the global population is exhausted,
-///     so no further in-session candidate can exist (provable completeness);
+///   - lookahead found no more row (`has_more == false`). Exact scan: the global
+///     population is exhausted, so no further in-session candidate can exist. Partial
+///     ANN index (T7.4): the beam exhausted its visited neighbourhoods, so a true
+///     near neighbour may be missed — not provably complete (see the ANN dial doc);
 ///   - `k` is at `VECTOR_FETCH_CAP`.
 ///
 /// Otherwise the page has more rows yet under-delivered — more global rows may hold
@@ -973,7 +1129,7 @@ fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent, StoreErro
 /// is still parse-validated at construction (fail fast on typos), and the pool itself is
 /// `connect_lazy`, so even the first creation never touches the network.
 pub struct CockroachStore {
-    /// rustls-rewritten DSN (see [`dsn_for_rustls`]).
+    /// rustls-rewritten DSN (see `dsn_for_rustls`).
     dsn: String,
     /// Dense-vector column width parsed from the embedded DDL (`VECTOR(n)`).
     vector_dim: usize,
@@ -1009,28 +1165,40 @@ impl CockroachStore {
     async fn pool(&self) -> Result<&PgPool, StoreError> {
         self.pool
             .get_or_try_init(|| async {
-                let options = self
-                    .dsn
-                    .parse::<sqlx::postgres::PgConnectOptions>()
-                    .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
-                    // STORE-2: bound every statement server-side.
-                    // statement_timeout applies per statement, not per
-                    // transaction — a multi-statement flush batch can take
-                    // N x 20s. The whole-batch bound is the client-side
-                    // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
-                    // per-statement bound stays below it so the DB aborts a
-                    // hung statement before the client gives up on the
-                    // attempt (a hung statement must never wedge the flush
-                    // loop).
-                    .options([(
-                        "statement_timeout",
-                        format!("{}s", STATEMENT_TIMEOUT.as_secs()),
-                    )]);
                 Ok(PgPoolOptions::new()
                     .max_connections(MAX_POOL_CONNECTIONS)
-                    .connect_lazy_with(options))
+                    .connect_lazy_with(Self::connect_options(&self.dsn)?))
             })
             .await
+    }
+
+    /// Build the per-connection options. **Synchronous on purpose:** it reads
+    /// the environment, and a test that wants to pin an env-driven option must
+    /// be able to do so without holding a lock across an `.await` (spec §6.4,
+    /// enforced by `clippy::await_holding_lock`).
+    fn connect_options(dsn: &str) -> Result<sqlx::postgres::PgConnectOptions, StoreError> {
+        let options = dsn
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
+            // STORE-2: bound every statement server-side.
+            // statement_timeout applies per statement, not per
+            // transaction — a multi-statement flush batch can take
+            // N x 20s. The whole-batch bound is the client-side
+            // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
+            // per-statement bound stays below it so the DB aborts a
+            // hung statement before the client gives up on the
+            // attempt (a hung statement must never wedge the flush
+            // loop).
+            .options([(
+                "statement_timeout",
+                format!("{}s", STATEMENT_TIMEOUT.as_secs()),
+            )]);
+        // T7.4: ANN accuracy dial, applied per connection so it costs no
+        // per-query round trip. Unset => DEFAULT_VECTOR_BEAM_SIZE (measured —
+        // see its doc comment); an invalid value already failed closed above.
+        let beam = vector_beam_size_from_env()?.unwrap_or(DEFAULT_VECTOR_BEAM_SIZE);
+        let options = options.options([("vector_search_beam_size", beam.to_string())]);
+        Ok(options)
     }
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
     /// seven tables in one transaction — the full-snapshot path that carries synonyms and
@@ -1076,14 +1244,20 @@ impl CockroachStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
+            // Interactions before concepts (`concepts.origin_interaction`
+            // REFERENCES interactions(id)); each chunked the same way a flush
+            // is, so the seed path exercises the same statements (L82-1).
             for i in &snapshot.interactions {
-                upsert_interaction(&mut *tx, i).await?;
+                bulk_upsert_interactions(&mut *tx, &[i]).await?;
             }
-            for c in &snapshot.concepts {
-                upsert_concept(&mut *tx, c).await?;
+            // Deduplicated first (R1-6): a multi-row statement rejects colliding
+            // input rows outright, where the row-at-a-time seed this replaced
+            // simply last-wins'd them.
+            for chunk in seed_concept_rows(&snapshot.concepts).chunks(BULK_LIMITS.concepts) {
+                bulk_upsert_concepts(&mut *tx, chunk).await?;
             }
-            for e in &snapshot.edges {
-                upsert_edge(&mut *tx, e).await?;
+            for chunk in seed_edge_rows(&snapshot.edges).chunks(BULK_LIMITS.edges) {
+                bulk_upsert_edges(&mut *tx, chunk).await?;
             }
             for s in &snapshot.synonyms {
                 sqlx::query(UPSERT_SYNONYM_SQL)
@@ -1125,6 +1299,101 @@ impl CockroachStore {
         Ok(row.is_some())
     }
 
+    /// Atomic single-writer lease acquire / refresh (T8.6).
+    ///
+    /// ONE statement — `INSERT ... ON CONFLICT DO UPDATE ... WHERE ... RETURNING`
+    /// — so two processes acquiring on the same session serialize under
+    /// Cockroach's concurrency control with no read-then-write race. The update
+    /// fires only when the current lease is expired or already ours; a refresh
+    /// keeps the original `acquired_at`. Every timestamp comes from the cluster's
+    /// `now()` (the clock two processes share) — never a caller argument (F18).
+    /// `ttl` is a duration multiplied into an INTERVAL, so no client instant is
+    /// ever stored.
+    ///
+    /// An empty RETURNING means the guard was false — a live lease is held by
+    /// someone else — so we read it back and report [`LeaseOutcome::Held`] with
+    /// the holder and its age. A row released in the gap is retried a bounded
+    /// number of times.
+    async fn acquire_or_refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        const ACQUIRE_SQL: &str = "\
+            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second')) \
+            ON CONFLICT (session_id) DO UPDATE SET \
+                holder = excluded.holder, \
+                acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                                   THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+                expires_at = excluded.expires_at \
+            WHERE session_leases.expires_at <= now() \
+               OR session_leases.holder = excluded.holder \
+            RETURNING holder, acquired_at, expires_at";
+        let pool = self.pool().await?;
+        let token = holder.token();
+        let ttl_secs = ttl.as_secs_f64();
+        // T86-3: wrap the acquire in `tx_retry`, exactly like every other
+        // contended write in this file. sqlx does not auto-retry a SQLSTATE 40001
+        // `RETRY_SERIALIZABLE` abort, which `map_write_err` maps to a retryable
+        // `StoreError::Backend`; without this wrapper a genuine cross-node acquire
+        // conflict surfaced as an opaque `Backend` error (→ `LamboError::Store`)
+        // instead of transparently replaying — diverging from the SQLite backend
+        // (which absorbs contention via `busy_timeout`) and from the rest of
+        // `cockroach.rs`. The inner `for 0..3` still handles the orthogonal
+        // vanished-row case (empty RETURNING then empty read-back).
+        let session_id = &session.0;
+        let token_ref = token.as_str();
+        tx_retry(|| async move {
+            for _ in 0..3 {
+                let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> =
+                    sqlx::query_as(ACQUIRE_SQL)
+                        .bind(session_id)
+                        .bind(token_ref)
+                        .bind(ttl_secs)
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
+                if let Some((holder, acquired_at, expires_at)) = won {
+                    return Ok(LeaseOutcome::Acquired(LeaseInfo {
+                        holder,
+                        acquired_at,
+                        expires_at,
+                    }));
+                }
+                let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+                    "SELECT holder, acquired_at, expires_at FROM session_leases \
+                     WHERE session_id = $1",
+                )
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(backend)?;
+                match current {
+                    Some((holder, acquired_at, expires_at)) => {
+                        let age = (Utc::now() - acquired_at)
+                            .to_std()
+                            .unwrap_or(Duration::ZERO);
+                        return Ok(LeaseOutcome::Held {
+                            current: LeaseInfo {
+                                holder,
+                                acquired_at,
+                                expires_at,
+                            },
+                            age,
+                        });
+                    }
+                    None => continue,
+                }
+            }
+            Err(StoreError::Backend(
+                "acquire lease: contended row kept changing under us (retries exhausted)".into(),
+            ))
+        })
+        .await
+    }
+
     /// Return whether vector candidates are trusted for this session. Missing
     /// and fully unstamped rows are safe empty-search states: hybrid first use
     /// must gather before its atomic commit emits `SetEmbedding`. Partial
@@ -1160,65 +1429,260 @@ impl CockroachStore {
 
 // --- statement helpers (shared by flush and seed) ---
 
-async fn upsert_interaction(
+/// Multi-row upsert of one planned [`FlushStep::Interactions`] chunk (L82-1).
+///
+/// `rows` is already deduplicated on `id` and capped at
+/// [`BULK_LIMITS`]`.interactions`.
+async fn bulk_upsert_interactions(
     tx: &mut sqlx::PgConnection,
-    i: &Interaction,
+    rows: &[&Interaction],
 ) -> Result<(), StoreError> {
-    sqlx::query(UPSERT_INTERACTION_SQL)
-        .bind(i.id.0)
-        .bind(&i.session_id.0)
-        .bind(&i.agent_id.0)
-        .bind(&i.prompt_text)
-        .bind(i.previous_id.map(|n| n.0))
-        .bind(i.created_at)
+    if rows.is_empty() {
+        return Ok(());
+    }
+    interaction_upsert_query(rows)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert interaction: {m}")))?;
     Ok(())
 }
 
-async fn upsert_concept(tx: &mut sqlx::PgConnection, c: &Concept) -> Result<(), StoreError> {
-    let embedding = match &c.embedding {
-        Some(v) => Some(encode_vector(v)?),
-        None => None,
-    };
-    sqlx::query(UPSERT_CONCEPT_SQL)
-        .bind(c.id.0)
-        .bind(&c.session_id.0)
-        .bind(&c.content)
-        .bind(&c.canonical_key)
-        .bind(concept_type_sql(c.concept_type))
-        .bind(c.origin_interaction.0)
-        .bind(&c.origin_agent.0)
-        .bind(c.created_at)
-        .bind(c.access_count)
-        .bind(c.last_accessed)
-        .bind(c.gc_survived)
-        .bind(canonization_status_sql(c.canonization_status))
-        .bind(c.blast_radius)
-        .bind(c.last_demotion_time)
-        .bind(embedding)
-        .bind(c.chunk_group_id.clone())
+/// The statement [`bulk_upsert_interactions`] runs, built but not executed.
+///
+/// Separate from the execution so the generated SQL — the one part of this
+/// change no local test can reach through a cluster — is inspectable by
+/// `sql_shape_is_a_multi_row_upsert`.
+fn interaction_upsert_query<'a>(
+    rows: &'a [&'a Interaction],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_INTERACTION_PREFIX_SQL);
+    qb.push_values(rows.iter(), |mut b, i| {
+        b.push_bind(i.id.0)
+            .push_bind(i.session_id.0.as_str())
+            .push_bind(i.agent_id.0.as_str())
+            .push_bind(i.prompt_text.as_deref())
+            .push_bind(i.previous_id.map(|n| n.0))
+            .push_bind(i.created_at);
+    });
+    qb.push(ON_CONFLICT_INTERACTION_SQL);
+    qb
+}
+
+/// Multi-row upsert of one planned [`FlushStep::Concepts`] chunk (L82-1).
+///
+/// Each row's three canonization columns come from its
+/// [`ConceptRow::canonization`], **not** from `row.concept` — see [`ConceptRow`]
+/// for why a deduplicated row splits them.
+///
+/// Vectors are encoded up front because `push_values`' closure cannot fail.
+async fn bulk_upsert_concepts(
+    tx: &mut sqlx::PgConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut embeddings: Vec<Option<String>> = Vec::with_capacity(rows.len());
+    for r in rows {
+        embeddings.push(match &r.concept.embedding {
+            Some(v) => Some(encode_vector(v)?),
+            None => None,
+        });
+    }
+
+    concept_upsert_query(rows, &embeddings)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert concept: {m}")))?;
     Ok(())
 }
 
-async fn upsert_edge(tx: &mut sqlx::PgConnection, e: &Edge) -> Result<(), StoreError> {
-    sqlx::query(UPSERT_EDGE_SQL)
-        .bind(e.id.0)
-        .bind(&e.session_id.0)
-        .bind(e.source.0)
-        .bind(e.target.0)
-        .bind(edge_type_sql(e.edge_type))
-        .bind(e.weight)
-        .bind(e.reinforcements)
-        .bind(e.created_at)
-        .bind(e.last_reinforced)
+/// The statement [`bulk_upsert_concepts`] runs, built but not executed.
+fn concept_upsert_query<'a>(
+    rows: &'a [ConceptRow<'a>],
+    embeddings: &'a [Option<String>],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_CONCEPT_PREFIX_SQL);
+    qb.push_values(
+        rows.iter().zip(embeddings.iter()),
+        |mut b, (r, embedding)| {
+            let c = r.concept;
+            b.push_bind(c.id.0)
+                .push_bind(c.session_id.0.as_str())
+                .push_bind(c.content.as_str())
+                .push_bind(c.canonical_key.as_str())
+                .push_bind(concept_type_sql(c.concept_type))
+                .push_bind(c.origin_interaction.0)
+                .push_bind(c.origin_agent.0.as_str())
+                .push_bind(c.created_at)
+                .push_bind(c.access_count)
+                .push_bind(c.last_accessed)
+                .push_bind(c.gc_survived)
+                .push_bind(canonization_status_sql(r.canonization.status))
+                .push_bind(r.canonization.blast_radius)
+                .push_bind(r.canonization.last_demotion_time)
+                .push_bind(embedding.as_deref())
+                // The column is `VECTOR(n)` and the value travels as a text
+                // literal, so the cast is part of the value expression — it must
+                // ride with this placeholder, not with the separator.
+                .push_unseparated("::VECTOR")
+                .push_bind(c.chunk_group_id.as_deref());
+        },
+    );
+    qb.push(ON_CONFLICT_CONCEPT_SQL);
+    qb
+}
+
+/// Multi-row upsert of one planned [`FlushStep::Edges`] chunk (L82-1).
+///
+/// `rows` is already deduplicated on the **natural** key
+/// `(source, target, edge_type)` — the conflict target below — because two rows
+/// colliding there in one statement is an error, not a last-write-wins.
+async fn bulk_upsert_edges(tx: &mut sqlx::PgConnection, rows: &[&Edge]) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    edge_upsert_query(rows)
+        .build()
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert edge: {m}")))?;
+    Ok(())
+}
+
+/// The statement [`bulk_upsert_edges`] runs, built but not executed.
+fn edge_upsert_query<'a>(rows: &'a [&'a Edge]) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_EDGE_PREFIX_SQL);
+    qb.push_values(rows.iter(), |mut b, e| {
+        b.push_bind(e.id.0)
+            .push_bind(e.session_id.0.as_str())
+            .push_bind(e.source.0)
+            .push_bind(e.target.0)
+            .push_bind(edge_type_sql(e.edge_type))
+            .push_bind(e.weight)
+            .push_bind(e.reinforcements)
+            .push_bind(e.created_at)
+            .push_bind(e.last_reinforced);
+    });
+    qb.push(ON_CONFLICT_EDGE_SQL);
+    qb
+}
+
+/// Apply one planned [`FlushStep`].
+async fn apply_step(tx: &mut sqlx::PgConnection, step: &FlushStep<'_>) -> Result<(), StoreError> {
+    match step {
+        FlushStep::Interactions(rows) => bulk_upsert_interactions(&mut *tx, rows).await,
+        FlushStep::Concepts(rows) => bulk_upsert_concepts(&mut *tx, rows).await,
+        FlushStep::Edges(rows) => bulk_upsert_edges(&mut *tx, rows).await,
+        FlushStep::Single(m) => apply_single(&mut *tx, m).await,
+    }
+}
+
+/// Apply one mutation the planner could not bulk — a deletion, a canonization
+/// transition, or a session-column write.
+///
+/// Every one of these can *observe* a row an upsert may have written, which is
+/// exactly why [`plan_flush`] emits them alone and in place (see
+/// `store::batch`). The upsert arms are unreachable for the same reason, but
+/// they are handled rather than `unreachable!()`d: a planner change must not be
+/// able to turn into a panic inside a flush.
+async fn apply_single(tx: &mut sqlx::PgConnection, m: &Mutation) -> Result<(), StoreError> {
+    match m {
+        Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        } => bulk_upsert_interactions(&mut *tx, &[i]).await?,
+        Mutation::UpsertNode {
+            node: Node::Concept(c),
+        } => bulk_upsert_concepts(&mut *tx, &[ConceptRow::new(c)]).await?,
+        Mutation::UpsertEdge { edge } => bulk_upsert_edges(&mut *tx, &[edge]).await?,
+        Mutation::DeleteNode { id } => {
+            // Explicit incident-edge cleanup: edges carry no FK on source/target
+            // (spec §4); delete the node row from both node tables (interaction
+            // deletes are unreachable under the graph contract — see module doc).
+            sqlx::query(DELETE_NODE_EDGES_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node edges: {m}")))?;
+            sqlx::query(DELETE_NODE_CONCEPTS_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node concepts: {m}")))?;
+            sqlx::query(DELETE_NODE_INTERACTIONS_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete node interactions: {m}")))?;
+        }
+        Mutation::DeleteEdge { id } => {
+            sqlx::query(DELETE_EDGE_SQL)
+                .bind(id.0)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
+        }
+        Mutation::CanonizationTransition { event } => {
+            apply_canonization(&mut *tx, event).await?;
+        }
+        Mutation::SetRootGoal { session_id, goal } => {
+            let encoded = goal
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
+            let res = sqlx::query(SET_ROOT_GOAL_SQL)
+                .bind(session_id.as_str())
+                .bind(encoded.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
+            if res.rows_affected() == 0 {
+                return Err(StoreError::NotFound(format!(
+                    "sessions row for {session_id} while setting root_goal"
+                )));
+            }
+        }
+        Mutation::SetEmbedding {
+            session_id,
+            embedding,
+        } => {
+            if embedding.is_some() {
+                sqlx::query(QUARANTINE_LEGACY_EMBEDDINGS_SQL)
+                    .bind(session_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        map_write_err(e, |m| format!("quarantine legacy embeddings: {m}"))
+                    })?;
+            }
+            let res = sqlx::query(SET_EMBEDDING_SQL)
+                .bind(session_id.as_str())
+                .bind(embedding.as_ref().map(|e| e.kind.as_str()))
+                .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
+                .bind(
+                    embedding
+                        .as_ref()
+                        .map(|e| i64::try_from(e.dim))
+                        .transpose()
+                        .map_err(|_| {
+                            StoreError::Invariant(format!(
+                                "embedding dimension does not fit i64 for {session_id}"
+                            ))
+                        })?,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
+            if res.rows_affected() == 0 {
+                return Err(StoreError::NotFound(format!(
+                    "sessions row for {session_id} while setting embedding"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1311,6 +1775,94 @@ impl GraphStore for CockroachStore {
         Some(self.vector_dim)
     }
 
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        // Holder-scoped so a stale release cannot evict the writer that took
+        // over after our lease lapsed.
+        sqlx::query("DELETE FROM session_leases WHERE session_id = $1 AND holder = $2")
+            .bind(&session.0)
+            .bind(holder.token())
+            .execute(pool)
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
+        Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        // Upsert the whole row so re-publishes converge (idempotency, same
+        // contract as `flush`). Only the writer's FlushTask calls this;
+        // readers only read. `updated_at` is stamped from the cluster clock
+        // (now()).
+        sqlx::query(
+            "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+               flush_lag_ms = excluded.flush_lag_ms, \
+               log_depth = excluded.log_depth, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(&session.0)
+        .bind(stats.flush_lag_ms as i64)
+        .bind(stats.log_depth as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("write flush stats: {m}")))?;
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        let pool = self.pool().await?;
+        let row =
+            sqlx::query("SELECT flush_lag_ms, log_depth FROM session_stats WHERE session_id = $1")
+                .bind(&session.0)
+                .fetch_optional(pool)
+                .await
+                .map_err(backend)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let flush_lag_ms: i64 = row
+            .try_get("flush_lag_ms")
+            .map_err(|e| backend(format!("read flush stats: flush_lag_ms: {e}")))?;
+        let log_depth: i64 = row
+            .try_get("log_depth")
+            .map_err(|e| backend(format!("read flush stats: log_depth: {e}")))?;
+        Ok(Some(SessionFlushStats {
+            flush_lag_ms: u64::try_from(flush_lag_ms).unwrap_or(u64::MAX),
+            log_depth: u64::try_from(log_depth).unwrap_or(u64::MAX),
+        }))
+    }
+
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         tx_retry(|| async move {
@@ -1321,21 +1873,7 @@ impl GraphStore for CockroachStore {
             // Ensure a sessions row for every session the batch writes into — the DDL
             // enforces `REFERENCES sessions(session_id)` on interactions/concepts, and the
             // graph tier creates sessions implicitly (MemoryStore::ensure_session parity).
-            let mut sids: Vec<String> = Vec::new();
-            for m in &batch.mutations {
-                let sid = match m {
-                    Mutation::UpsertNode { node } => node.session_id().as_str(),
-                    Mutation::UpsertEdge { edge } => edge.session_id.as_str(),
-                    Mutation::CanonizationTransition { event } => event.session_id.as_str(),
-                    Mutation::SetRootGoal { session_id, .. } => session_id.as_str(),
-                    Mutation::SetEmbedding { session_id, .. } => session_id.as_str(),
-                    Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
-                };
-                if !sids.iter().any(|s| s == sid) {
-                    sids.push(sid.to_string());
-                }
-            }
-            for sid in &sids {
+            for sid in batch_session_ids(&batch.mutations) {
                 sqlx::query(UPSERT_SESSION_ROW_SQL)
                     .bind(sid)
                     .execute(&mut *tx)
@@ -1343,106 +1881,17 @@ impl GraphStore for CockroachStore {
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             }
 
-            // Replay in submission order — see module doc (T2.1 M2: MUST NOT re-sort).
-            for m in &batch.mutations {
-                match m {
-                    Mutation::UpsertNode { node } => match node {
-                        Node::Interaction(i) => upsert_interaction(&mut *tx, i).await?,
-                        Node::Concept(c) => upsert_concept(&mut *tx, c).await?,
-                    },
-                    Mutation::UpsertEdge { edge } => upsert_edge(&mut *tx, edge).await?,
-                    Mutation::DeleteNode { id } => {
-                        // Explicit incident-edge cleanup: edges carry no FK on source/target
-                        // (spec §4); delete the node row from both node tables (interaction
-                        // deletes are unreachable under the graph contract — see module doc).
-                        sqlx::query(DELETE_NODE_EDGES_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("delete node edges: {m}")))?;
-                        sqlx::query(DELETE_NODE_CONCEPTS_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| {
-                                map_write_err(e, |m| format!("delete node concepts: {m}"))
-                            })?;
-                        sqlx::query(DELETE_NODE_INTERACTIONS_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| {
-                                map_write_err(e, |m| format!("delete node interactions: {m}"))
-                            })?;
-                    }
-                    Mutation::DeleteEdge { id } => {
-                        sqlx::query(DELETE_EDGE_SQL)
-                            .bind(id.0)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("delete edge: {m}")))?;
-                    }
-                    Mutation::CanonizationTransition { event } => {
-                        apply_canonization(&mut *tx, event).await?;
-                    }
-                    Mutation::SetRootGoal { session_id, goal } => {
-                        let encoded = goal
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()
-                            .map_err(|e| backend(format!("serialize root_goal: {e}")))?;
-                        let res = sqlx::query(SET_ROOT_GOAL_SQL)
-                            .bind(session_id.as_str())
-                            .bind(encoded.as_deref())
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("set root_goal: {m}")))?;
-                        if res.rows_affected() == 0 {
-                            return Err(StoreError::NotFound(format!(
-                                "sessions row for {session_id} while setting root_goal"
-                            )));
-                        }
-                    }
-                    Mutation::SetEmbedding {
-                        session_id,
-                        embedding,
-                    } => {
-                        if embedding.is_some() {
-                            sqlx::query(QUARANTINE_LEGACY_EMBEDDINGS_SQL)
-                                .bind(session_id.as_str())
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(|e| {
-                                    map_write_err(e, |m| {
-                                        format!("quarantine legacy embeddings: {m}")
-                                    })
-                                })?;
-                        }
-                        let res = sqlx::query(SET_EMBEDDING_SQL)
-                            .bind(session_id.as_str())
-                            .bind(embedding.as_ref().map(|e| e.kind.as_str()))
-                            .bind(embedding.as_ref().and_then(|e| e.model.as_deref()))
-                            .bind(
-                                embedding
-                                    .as_ref()
-                                    .map(|e| i64::try_from(e.dim))
-                                    .transpose()
-                                    .map_err(|_| {
-                                        StoreError::Invariant(format!(
-                                            "embedding dimension does not fit i64 for {session_id}"
-                                        ))
-                                    })?,
-                            )
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|e| map_write_err(e, |m| format!("set embedding: {m}")))?;
-                        if res.rows_affected() == 0 {
-                            return Err(StoreError::NotFound(format!(
-                                "sessions row for {session_id} while setting embedding"
-                            )));
-                        }
-                    }
-                }
+            // Replay the batch as planned statements rather than one statement
+            // per mutation (L82-1). Order is still the batch's own — see
+            // `store::batch` for why bucketing upserts by table preserves it,
+            // and why every mutation that could *observe* a row is a barrier.
+            //
+            // This is the fix for the live finding: against a serverless
+            // cluster the old loop cost one network round-trip per mutation, so
+            // a 784-mutation shutdown tail could not drain inside `close()`'s
+            // 10 s grace window and was discarded.
+            for step in plan_flush(&batch.mutations, BULK_LIMITS) {
+                apply_step(&mut *tx, &step).await?;
             }
             tx.commit()
                 .await
@@ -1780,6 +2229,110 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn sql_test_ts() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_752_000_000, 0).unwrap()
+    }
+
+    /// Minimal rows for the SQL-shape tests. Only the *shape* of the generated
+    /// statement is under test, so the values are arbitrary.
+    fn test_interaction(id: NodeId) -> Interaction {
+        Interaction {
+            id,
+            session_id: SessionId::from("sql-shape"),
+            agent_id: crate::types::AgentId::from("agent-a"),
+            prompt_text: Some("p".into()),
+            previous_id: None,
+            created_at: sql_test_ts(),
+        }
+    }
+
+    fn test_concept(origin: NodeId, content: &str) -> Concept {
+        Concept {
+            id: NodeId::new(),
+            session_id: SessionId::from("sql-shape"),
+            content: content.into(),
+            canonical_key: content.into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: crate::types::AgentId::from("agent-a"),
+            created_at: sql_test_ts(),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            chunk_group_id: None,
+        }
+    }
+
+    fn test_edge(source: NodeId, target: NodeId, edge_type: EdgeType) -> Edge {
+        Edge {
+            id: NodeId::new(),
+            session_id: SessionId::from("sql-shape"),
+            source,
+            target,
+            edge_type,
+            weight: 0.5,
+            reinforcements: 1,
+            created_at: sql_test_ts(),
+            last_reinforced: sql_test_ts(),
+        }
+    }
+
+    /// T7.4: the ANN accuracy dial parses and fails closed. A tuning knob that
+    /// is silently ignored on a typo is worse than no knob — the operator
+    /// believes accuracy was raised when it was not.
+    #[test]
+    fn vector_beam_size_env_parses_and_fails_closed() {
+        let _g = crate::test_util::env_lock();
+        let restore = std::env::var(VECTOR_BEAM_SIZE_ENV).ok();
+
+        std::env::remove_var(VECTOR_BEAM_SIZE_ENV);
+        assert_eq!(
+            vector_beam_size_from_env().unwrap(),
+            None,
+            "the parser reports absence; the DEFAULT is applied at the call site"
+        );
+        // Pin the measured default (adve-review MAJOR-1). 32 is CockroachDB's
+        // default and measured ~6-7% worse on recall; 256 measured WORSE than
+        // 64. If this constant changes, the measurement in its doc must be
+        // redone — it is evidence-backed, not a taste call.
+        assert_eq!(DEFAULT_VECTOR_BEAM_SIZE, 64);
+        assert!(
+            (VECTOR_BEAM_SIZE_MIN..=VECTOR_BEAM_SIZE_MAX).contains(&DEFAULT_VECTOR_BEAM_SIZE),
+            "default must satisfy the server's own bounds"
+        );
+
+        // Exported-but-blank behaves as absent (same convention as LAMBO_STORE).
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "");
+        assert_eq!(vector_beam_size_from_env().unwrap(), None);
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "   ");
+        assert_eq!(vector_beam_size_from_env().unwrap(), None);
+
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(128));
+        // Server-enforced bounds, verified live 2026-08-13.
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "1");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(1));
+        std::env::set_var(VECTOR_BEAM_SIZE_ENV, "2048");
+        assert_eq!(vector_beam_size_from_env().unwrap(), Some(2048));
+
+        for bad in ["0", "2049", "-1", "64.5", "many", "1e3"] {
+            std::env::set_var(VECTOR_BEAM_SIZE_ENV, bad);
+            assert!(
+                vector_beam_size_from_env().is_err(),
+                "{bad:?} must be rejected at pool construction, not silently dropped"
+            );
+        }
+
+        match restore {
+            Some(v) => std::env::set_var(VECTOR_BEAM_SIZE_ENV, v),
+            None => std::env::remove_var(VECTOR_BEAM_SIZE_ENV),
+        }
+    }
+
     // Vector codec tests (roundtrip / rendering / non-finite) live in the shared
     // `super::vector` module — SQLite stores the same text form, so the codec's
     // coverage must run under either store feature (CON-8).
@@ -2054,13 +2607,44 @@ mod tests {
         max
     }
 
+    /// Build the concept upsert for `n` rows and hand back its SQL text.
+    fn concept_sql_for(n: usize) -> String {
+        let iid = NodeId::new();
+        let concepts: Vec<Concept> = (0..n)
+            .map(|k| {
+                let mut c = test_concept(iid, &format!("c{k}"));
+                c.embedding = Some(vec![0.5; 4]);
+                c
+            })
+            .collect();
+        let rows: Vec<ConceptRow<'_>> = concepts.iter().map(ConceptRow::new).collect();
+        let embeddings: Vec<Option<String>> = vec![Some("[0.5,0.5,0.5,0.5]".into()); n];
+        concept_upsert_query(&rows, &embeddings).sql().to_string()
+    }
+
     #[test]
     fn upsert_placeholder_shapes_match_structs() {
         // Snapshot->row mapping shapes: every struct column has exactly one placeholder
-        // and the column counts match the INSERT column lists.
-        assert_eq!(placeholder_max(UPSERT_INTERACTION_SQL), 6);
-        assert_eq!(placeholder_max(UPSERT_CONCEPT_SQL), 16);
-        assert_eq!(placeholder_max(UPSERT_EDGE_SQL), 9);
+        // and the column counts match the INSERT column lists. Upserts are built
+        // per-call by `QueryBuilder` now (L82-1), so a single row is the shape
+        // the old fixed-placeholder statements had.
+        let iid = NodeId::new();
+        let i = test_interaction(iid);
+        // Asserted against the shared column constants, not bare literals: those
+        // constants are what the per-adapter bind-parameter const-asserts divide
+        // the backend limit by (R1-4), so a column added to a statement without
+        // updating them must fail here rather than silently widen a chunk past
+        // the limit.
+        assert_eq!(
+            placeholder_max(interaction_upsert_query(&[&i]).sql()),
+            INTERACTION_COLUMNS
+        );
+        assert_eq!(placeholder_max(&concept_sql_for(1)), CONCEPT_COLUMNS);
+        let e = test_edge(iid, iid, EdgeType::Derives);
+        assert_eq!(
+            placeholder_max(edge_upsert_query(&[&e]).sql()),
+            EDGE_COLUMNS
+        );
         // STORE-1: the full-snapshot upsert now carries the embedding contract
         // (kind/model/dim) alongside root_goal/created_at/closed_at.
         assert_eq!(placeholder_max(UPSERT_SESSION_SQL), 7);
@@ -2075,11 +2659,59 @@ mod tests {
         assert!(INSERT_CANONIZATION_EVENT_SQL.contains("last_demotion_time"));
         // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is the
         // 16th, nullable, and included in the conflict UPDATE.
-        assert!(UPSERT_CONCEPT_SQL.contains("$15::VECTOR"));
-        assert!(UPSERT_CONCEPT_SQL.contains("embedding = EXCLUDED.embedding"));
-        assert!(UPSERT_CONCEPT_SQL.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
+        let concept_sql = concept_sql_for(1);
+        assert!(concept_sql.contains("$15::VECTOR"), "{concept_sql}");
+        assert!(concept_sql.contains("embedding = EXCLUDED.embedding"));
+        assert!(concept_sql.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
         // Edge conflict targets the natural key; id is replaceable on conflict.
-        assert!(UPSERT_EDGE_SQL.contains("ON CONFLICT (source, target, edge_type)"));
+        assert!(edge_upsert_query(&[&e])
+            .sql()
+            .contains("ON CONFLICT (source, target, edge_type)"));
+    }
+
+    /// **L82-1.** The flush issues one *multi-row* statement per planned chunk,
+    /// and the generated SQL is the half of that change no test on this machine
+    /// can put in front of a cluster — so it is asserted directly.
+    ///
+    /// Three rows must produce 48 placeholders in three `VALUES` tuples, carry
+    /// the `::VECTOR` cast on *each* row's embedding placeholder (the cast is
+    /// part of the value expression, not the statement), and end in exactly one
+    /// `ON CONFLICT` clause.
+    #[test]
+    fn sql_shape_is_a_multi_row_upsert() {
+        let sql = concept_sql_for(3);
+        assert_eq!(
+            placeholder_max(&sql),
+            48,
+            "3 rows x 16 columns, numbered across the whole statement: {sql}"
+        );
+        for n in [15, 31, 47] {
+            assert!(
+                sql.contains(&format!("${n}::VECTOR")),
+                "every row's embedding placeholder needs its own cast, missing ${n}: {sql}"
+            );
+        }
+        assert_eq!(
+            sql.matches("ON CONFLICT").count(),
+            1,
+            "the conflict clause is appended once, after the whole VALUES list: {sql}"
+        );
+        assert_eq!(
+            sql.matches("INSERT INTO concepts").count(),
+            1,
+            "one statement, not three: {sql}"
+        );
+
+        // Edges keep the natural-key conflict target across rows.
+        let a = NodeId::new();
+        let edges = [
+            test_edge(a, NodeId::new(), EdgeType::Causal),
+            test_edge(a, NodeId::new(), EdgeType::Dependency),
+        ];
+        let refs: Vec<&Edge> = edges.iter().collect();
+        let edge_sql = edge_upsert_query(&refs).sql().to_string();
+        assert_eq!(placeholder_max(&edge_sql), 18, "2 rows x 9 columns");
+        assert_eq!(edge_sql.matches("ON CONFLICT").count(), 1);
     }
 
     /// R2-1 (no live cluster: SQL text is the contract). The three
@@ -2089,9 +2721,16 @@ mod tests {
     /// back out of the row (or erase a demotion cooldown). `gc_survived`,
     /// which shares the same appenders, must still be updated: the property
     /// is column ownership, not a blanket skip.
+    ///
+    /// The multi-row rewrite (L82-1) is exactly where this could have been lost,
+    /// so the assertion runs against the generated statement rather than a
+    /// constant — and `store::batch` carries the matching property for the
+    /// *values*: a deduplicated row takes its canonization columns from the
+    /// first occurrence, which is what row-by-row replay left in the row.
     #[test]
     fn concept_upsert_does_not_write_the_canonization_columns_on_conflict() {
-        let (insert, on_conflict) = UPSERT_CONCEPT_SQL
+        let sql = concept_sql_for(2);
+        let (insert, on_conflict) = sql
             .split_once("ON CONFLICT")
             .expect("the concept upsert has a conflict clause");
         for col in ["canonization_status", "blast_radius", "last_demotion_time"] {
@@ -2105,7 +2744,7 @@ mod tests {
             );
         }
         assert!(
-            UPSERT_CONCEPT_SQL.contains("gc_survived = EXCLUDED.gc_survived"),
+            sql.contains("gc_survived = EXCLUDED.gc_survived"),
             "the upsert's own columns must still update on conflict"
         );
         // The canonization path is that single writer.
@@ -2474,6 +3113,163 @@ mod conformance {
         CockroachStore::new(cfg(dsn.to_string())).unwrap()
     }
 
+    /// T8.6 (live): the store-enforced single-writer lease across two **separate
+    /// pools** (the cross-process shape — each pool is an independent set of
+    /// connections, exactly what two processes have). One acquires, the other is
+    /// refused fail-closed and told the holder; after a release the second wins;
+    /// an unreleased lease is reclaimable only after its TTL.
+    ///
+    /// `#[ignore]`d like every live cockroach test, so a run without
+    /// `LAMBO_COCKROACH_DSN` reports it as ignored, never a skip-as-green. Run:
+    /// `cargo test --features store-cockroach,fixtures -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn single_writer_lease_is_enforced_across_pools() {
+        let Some(dsn) = dsn_or_skip("single_writer_lease_is_enforced_across_pools") else {
+            return;
+        };
+        use crate::store::lease::{LeaseHolder, LeaseOutcome};
+
+        let store_a = new_store(&dsn);
+        store_a.init_schema().await.expect("init_schema");
+        let store_b = new_store(&dsn);
+
+        // Unique session per run so a shared cluster never cross-contaminates.
+        let sid = SessionId::from(format!("t8.6-lease-{}", Uuid::new_v4()));
+        let a = LeaseHolder {
+            agent: AgentId::new("proc-a"),
+            pid: 111,
+            host: "host-a".into(),
+        };
+        let b = LeaseHolder {
+            agent: AgentId::new("proc-b"),
+            pid: 222,
+            host: "host-b".into(),
+        };
+        let ttl = Duration::from_secs(30);
+
+        // Clean any leftover row from a previous aborted run.
+        let _ = store_a.release_lease(&sid, &a).await;
+
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A acquire")
+            .is_acquired());
+
+        match store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B acquire")
+        {
+            LeaseOutcome::Held { current, .. } => assert_eq!(current.holder, a.token()),
+            other => panic!("the second pool must be refused, got {other:?}"),
+        }
+
+        // Refresh keeps acquired_at.
+        let LeaseOutcome::Acquired(first) = store_a.acquire_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh");
+        };
+        let LeaseOutcome::Acquired(refreshed) = store_a.refresh_lease(&sid, &a, ttl).await.unwrap()
+        else {
+            panic!("A refresh 2");
+        };
+        assert_eq!(first.acquired_at, refreshed.acquired_at);
+
+        // Release → B takes it.
+        store_a.release_lease(&sid, &a).await.expect("A release");
+        assert!(store_b
+            .acquire_lease(&sid, &b, ttl)
+            .await
+            .expect("B re-acquire")
+            .is_acquired());
+
+        // Expiry-after-crash: B holds a short-TTL lease and never releases; A is
+        // refused before the TTL and reclaims after it.
+        let short = Duration::from_secs(2);
+        store_b.release_lease(&sid, &b).await.ok();
+        store_b
+            .acquire_lease(&sid, &b, short)
+            .await
+            .expect("B short");
+        assert!(matches!(
+            store_a.acquire_lease(&sid, &a, ttl).await.unwrap(),
+            LeaseOutcome::Held { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(store_a
+            .acquire_lease(&sid, &a, ttl)
+            .await
+            .expect("A reclaim after expiry")
+            .is_acquired());
+
+        // Cleanup.
+        store_a.release_lease(&sid, &a).await.ok();
+    }
+
+    /// T7.4: prove the ANN accuracy dial actually reaches the server **through
+    /// sqlx**, not merely that it parses.
+    ///
+    /// This test exists because the obvious way to check it by hand is wrong:
+    /// `PGOPTIONS=-c vector_search_beam_size=128 psql …` is silently IGNORED on
+    /// this deployment (measured 2026-08-13: still reports 32, and a
+    /// `statement_timeout` set the same way reports 0). Only the `options`
+    /// **connection parameter** in the startup message is honoured — which is
+    /// what `PgConnectOptions::options()` sets, and what `pool()` uses for both
+    /// `statement_timeout` and this dial. A hand-check with `PGOPTIONS` would
+    /// therefore "disprove" a setting that works perfectly.
+    ///
+    /// Also pins that `options()` APPENDS rather than replaces: sqlx 0.8 builds
+    /// one space-joined `-c k=v` string, so adding the beam size must not drop
+    /// the STORE-2 `statement_timeout` bound.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn vector_beam_size_reaches_the_server_and_keeps_statement_timeout() {
+        let Some(dsn) = dsn_or_skip("vector_beam_size_reaches_the_server") else {
+            return;
+        };
+        // Build the options under the env lock and RELEASE it before any await
+        // (spec §6.4 / clippy::await_holding_lock). This is exactly why
+        // `connect_options` is synchronous.
+        let options = {
+            let _g = crate::test_util::env_lock();
+            let restore = env::var(VECTOR_BEAM_SIZE_ENV).ok();
+            env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+            // Same normalization `CockroachStore::new` applies: sqlx + rustls
+            // cannot open libpq's `sslrootcert=system`, and `connect_options`
+            // is fed `self.dsn`, which is already rewritten.
+            let built = CockroachStore::connect_options(&dsn_for_rustls(&dsn));
+            match restore {
+                Some(v) => env::set_var(VECTOR_BEAM_SIZE_ENV, v),
+                None => env::remove_var(VECTOR_BEAM_SIZE_ENV),
+            }
+            built.unwrap()
+        };
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options);
+        let beam: String = sqlx::query_scalar("SHOW vector_search_beam_size")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            beam, "128",
+            "explicit LAMBO_VECTOR_BEAM_SIZE did not reach the server"
+        );
+        assert_ne!(
+            timeout, "0",
+            "adding the beam-size option dropped the STORE-2 statement_timeout \
+             — options() must append, not replace"
+        );
+    }
+
     fn embed(seed: f32) -> Vec<f32> {
         let mut v: Vec<f32> = (0..1024)
             .map(|i| ((i as f32 + 1.0) * seed).sin() * 0.5)
@@ -2776,9 +3572,16 @@ mod conformance {
         // so the plan must NOT scan the anti-pattern `concepts_session_id_canonical_key_key`
         // (the T0.3-spike shape that bypassed the vector index). The plan is an ordered
         // top-k over the whole table; whether the optimizer accelerates that top-k with
-        // the vector index (`vector search`) is a cost decision that depends on
-        // deployment shape (see the standalone `vector_explain_camera_proof` gate —
-        // PENDING where the optimizer scans a small table).
+        // the vector index (`vector search`) is asserted separately by the standalone
+        // `vector_explain_camera_proof` gate.
+        //
+        // T7.4 correction (2026-08-13): this comment used to say that gate was
+        // "PENDING where the optimizer scans a small table". That was wrong on both
+        // counts — table size was never the cause. The proof failed because it asserted
+        // the spaced `vector search` against `EXPLAIN (OPT, VERBOSE)`, which spells the
+        // operator `vector-search`, and because a NON-partial vector index cannot imply
+        // the query's `embedding IS NOT NULL` predicate, forcing a FULL SCAN. With the
+        // index partial (migrations/cockroach/001_init.sql) the proof is green.
         //
         // T7.3 remediation (planner-variance hardening): EXPLAIN with a LITERAL
         // `LIMIT 5` (not a parameterized `LIMIT $2`) to match the captured T0.3
@@ -3791,26 +4594,51 @@ mod conformance {
 
     /// DECISION D1 item 3 camera-proof: the global vector query must execute as
     /// `vector search` on `concepts@concepts_embedding_idx` (spec §12.1 — "we used the
-    /// vector index", on camera). Selecting `vector search` is a COST decision by the
-    /// optimizer: it materializes on a deployment where the vector index is cheaper than a
-    /// scan (single-region and/or a large embedding population — matching the T0.3 spike
-    /// on `distribution: local`). On the small multi-region demo cluster the optimizer
-    /// legitimately scans instead, so this gate is PENDING infra there while
-    /// `check_vector_explain_is_global_topk` (in [`conformance_suite`]) still proves the
-    /// DECISION D1 *shape* (global top-k, no session-filtered anti-pattern index).
+    /// CockroachDB distributed vector index", on camera).
+    ///
+    /// **T7.4 (2026-08-13) — this gate is no longer deployment-conditional.** The
+    /// historical "PENDING on an index-favorable cluster" reading was wrong on both
+    /// counts, and both causes are now fixed:
+    ///
+    /// 1. The assertion could never match its own output. The test used
+    ///    `EXPLAIN (OPT, VERBOSE)`, whose operator is spelled `vector-search`
+    ///    (hyphenated), and asserted the spaced `vector search` — so it failed at the
+    ///    first assertion on ANY cluster, behind ANY index, even with a perfect vector
+    ///    plan. See `dev-diary/evidence/20260813-131108-…-camera-proof-diagnosis.txt`.
+    /// 2. `WHERE embedding IS NOT NULL` — which is load-bearing and must not be removed,
+    ///    since NULL-`dist` rows hard-error the `f64` decode — cannot be proven implied
+    ///    by a NON-partial vector index, so the optimizer planned a FULL SCAN. T7.4 made
+    ///    `concepts_embedding_idx` itself PARTIAL on that same predicate in
+    ///    `migrations/cockroach/001_init.sql`; the production query is unchanged.
+    ///
+    /// **Why plain `EXPLAIN` and not `EXPLAIN (OPT, VERBOSE)`** (a deliberate choice —
+    /// each format spells the operator differently, and asserting the union of both
+    /// spellings would be an assertion that cannot fail informatively):
+    /// - Plain `EXPLAIN` is the format that literally emits `vector search`, the wording
+    ///   DECISION D1 and spec §12.1 use, and it renders the proof in ~17 readable lines:
+    ///   `• vector search / table: concepts@concepts_embedding_idx (partial index)`.
+    /// - `OPT, VERBOSE` inlines the full 1024-element probe vector into the plan text,
+    ///   producing a ~52 KB blob (measured). That is unusable as an on-camera artifact
+    ///   and would make any assertion failure message unreadable — which is the entire
+    ///   argument that had favoured it.
+    ///
+    /// The plan below was re-verified against the test's **bound** `$1`/`$2` over the
+    /// extended protocol, not against literals: T7.3 round R2 established that a
+    /// parameterized `LIMIT` can change plan shape, so a literal-`LIMIT` measurement
+    /// would not have proven this test green.
     #[tokio::test]
-    #[ignore = "camera-proof: set LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"]
+    #[ignore = "camera-proof: set LAMBO_REQUIRE_VECTOR_INDEX=1 (spec §12.1 vector-index proof)"]
     async fn vector_explain_camera_proof() {
-        // The general live conformance tier runs every ignored test against the
-        // provisioned multi-region cluster. That cluster legitimately cost-selects
-        // a small-table scan, so the deployment-specific camera assertion must be
-        // requested independently. `conformance_suite` still verifies the global
-        // ordered query shape and rejects the session-index anti-pattern on every
-        // required-live run.
+        // Kept behind its own env gate (not merged into `conformance_suite`) so the
+        // §12.1 claim is asserted only when someone is deliberately capturing it, and
+        // so a cluster provisioned from an older migration fails LOUDLY here rather
+        // than reporting a green suite. `conformance_suite`'s
+        // `check_vector_explain_is_global_topk` independently proves the DECISION D1
+        // *shape* (global top-k, no session-filtered anti-pattern index) on every run.
         if env::var_os("LAMBO_REQUIRE_VECTOR_INDEX").is_none() {
             eprintln!(
-                "vector_explain_camera_proof: skipped; set \
-                 LAMBO_REQUIRE_VECTOR_INDEX=1 on an index-favorable cluster"
+                "vector_explain_camera_proof: skipped; set LAMBO_REQUIRE_VECTOR_INDEX=1 \
+                 against a cluster provisioned from migrations/cockroach/001_init.sql"
             );
             return;
         }
@@ -3820,30 +4648,44 @@ mod conformance {
         let store = new_store(&dsn);
         let pool = store.pool().await.unwrap();
         let probe = encode_vector(&embed(0.5)).unwrap();
-        let rows = sqlx::query(
-            "EXPLAIN (OPT, VERBOSE) \
-             SELECT id, session_id, embedding <-> $1::VECTOR AS dist \
-             FROM concepts WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT $2",
-        )
-        .bind(&probe)
-        .bind(5i64)
-        .fetch_all(pool)
-        .await
-        .map_err(backend)
-        .unwrap();
+        // EXPLAIN the production constant ITSELF, not a hand-copied lookalike.
+        // adve-review MINOR-4 caught the previous version claiming to be
+        // "byte-for-byte" `VECTOR_CANDIDATES_SQL` while actually dropping its
+        // `::STRING` output casts. The casts cannot change index selection, so
+        // the finding was cosmetic — but the entire value of this proof is that
+        // it explains the query production runs, so the claim has to be true by
+        // construction rather than by careful copying. Interpolating the
+        // constant also means a future edit to the query cannot silently
+        // desynchronize the camera proof from it.
+        let rows = sqlx::query(&format!("EXPLAIN {VECTOR_CANDIDATES_SQL}"))
+            .bind(&probe)
+            .bind(5i64)
+            .fetch_all(pool)
+            .await
+            .map_err(backend)
+            .unwrap();
         let plan: Vec<String> = rows
             .iter()
             .map(|r| r.try_get::<String, usize>(0).map_err(backend))
             .collect::<Result<_, _>>()
             .unwrap();
         let text = plan.join("\n");
+        // The plan IS the artifact — print it so a `--nocapture` run is the camera shot.
+        eprintln!("vector_explain_camera_proof plan:\n{text}");
         assert!(
             text.contains("vector search"),
-            "EXPLAIN must show vector search on the index, got:\n{text}"
+            "EXPLAIN must show `vector search` (plain-EXPLAIN spelling), got:\n{text}"
         );
         assert!(
-            text.contains("concepts_embedding_idx"),
-            "EXPLAIN must reference concepts_embedding_idx, got:\n{text}"
+            text.contains("concepts@concepts_embedding_idx"),
+            "EXPLAIN must show the vector search on concepts@concepts_embedding_idx, got:\n{text}"
+        );
+        // The exact regression T7.4 fixed: with a NON-partial index the predicate forces
+        // `spans: FULL SCAN` on concepts_pkey. Assert it is gone, so a cluster that
+        // silently reverts to a non-partial index fails with a pointed message.
+        assert!(
+            !text.contains("FULL SCAN"),
+            "EXPLAIN must not fall back to a full scan (non-partial index?), got:\n{text}"
         );
     }
 }

@@ -1,0 +1,340 @@
+---
+title: "Command line"
+description: "Read and write session memory from the terminal"
+---
+import Note from '../../components/MdxNote.astro';
+import Warning from '../../components/MdxWarning.astro';
+
+Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
+
+## Global options
+
+`--config <PATH>` is a global flag, so it comes before the subcommand.
+
+```bash
+lambo --config lambo.toml recall --session demo --query "user schema"
+```
+
+Lambo looks for the config file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. See [Configuration](/config) for the file contents.
+
+`lambo --version` prints the version, and `lambo --help` lists the subcommands.
+
+## Exit codes
+
+Every verb uses the same three codes, so you can branch on them in a script.
+
+| Code | Meaning |
+|---|---|
+| `0` | The command succeeded. |
+| `1` | The command failed at runtime. Another writer holds the session, the store is unreachable, or the node you named does not exist. |
+| `2` | You passed a bad flag or a bad value. Nothing ran. |
+
+An oversized or malformed value is a usage error, so a bad payload exits `2` rather than half-writing.
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "$(cat huge.txt)" --kind entity
+lambo derive: concept.content exceeds 16384 bytes (17000 given)
+$ echo $?
+2
+```
+
+## What Lambo accepts in text
+
+Every string you pass is limited to 16 KB, and two classes of character are refused. Lambo names the offending codepoint and never echoes the raw byte back into your terminal.
+
+Tab and newline are the only control characters you may send. Every other control character is refused, so a stray `U+0000` or an ANSI escape sequence cannot reach stored content and corrupt whatever prints it later.
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "$(printf 'ok\001no')" --kind entity
+lambo derive: concept.content contains a disallowed control character (U+0001); tab and newline are the only control characters allowed
+$ echo $?
+2
+```
+
+Invisible formatting characters are refused too. That covers bidi overrides such as `U+202E`, the zero-width family such as `U+200B`, blank-rendering fillers such as `U+3164`, the byte order mark, and tag characters. None of them paint anything on screen, so a concept carrying one looks innocuous when you read it back while reading differently to a model.
+
+The examples below build their input with `printf` escapes, because pasting one of these characters into a document would hide it there too.
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "$(printf 'amount 100\342\200\256DSU 5')" --kind entity
+lambo derive: concept.content contains a disallowed invisible formatting character (U+202E); bidi overrides, zero-width characters, blank fillers, the BOM and tag characters are refused because they are invisible in review but not to the model (zero-width joiner and non-joiner are allowed, and are stripped from canonical keys)
+$ echo $?
+2
+```
+
+Invisible characters that real writing needs stay allowed. The zero-width joiner and non-joiner, the variation selectors, and the combining grapheme joiner all pass, so Persian, Indic, and emoji text goes through unchanged.
+
+<Note>
+Lambo keeps the allowed invisible characters in the content it stores, and ignores them when it decides whether two concepts are the same. Text that looks identical on screen lands on the same concept, so nobody can mint a hidden duplicate by slipping an invisible character into an existing concept.
+</Note>
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "billing retries change" --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+$ lambo derive --session demo --agent agent-a --content "$(printf 'billing\342\200\215 retries change')" --kind entity
+derived 1 concept(s): 0 created, 1 matched existing
+```
+
+## Read commands
+
+Read commands query the store directly and never take the writer lease, so they are safe to run against a session another process owns.
+
+### lambo recall
+
+Recalls the context block for a query, with canonical markers, blast-radius warnings, and conflict lines.
+
+Recall combines keyword matching with vector similarity, then expands through the graph. Concepts your agents write keep their embedding, so on a CockroachDB store recall finds memory the swarm wrote itself and not only memory you loaded in bulk. The SQLite and in-memory stores have no vector column, so there recall matches on words rather than on meaning.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--query <QUERY>` | Yes | |
+| `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
+| `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
+| `--traversal-depth <TRAVERSAL_DEPTH>` | No | The session's `default_traversal_depth`, which is `2`. |
+
+```bash
+$ lambo recall --session demo --query "update user schema" --top-k 5
+user schema [Entity] (score 1.44)
+
+auth middleware [Entity] (score 0.25)
+
+migrations/003.sql [Resource] (score 0.25)
+```
+
+### lambo saints
+
+Lists the session's canonical memories, which are the concepts that earned canonical status. It takes `--session` only.
+
+```bash
+$ lambo saints --session demo
+0 canonical memories in session 'demo'
+```
+
+### lambo inspect
+
+Shows the neighbourhood around a concept: its type, its blast radius, and the typed edges leading out from it.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--focus <FOCUS>` | Yes | |
+| `--depth <DEPTH>` | No | `2`, and at most `5`. |
+
+`--focus` takes concept text or a node UUID. Lambo resolves text exactly first, then as a single substring match.
+
+```bash
+$ lambo inspect --session demo --focus "user schema" --depth 2
+focus: user schema [Entity]
+blast radius: 1
+⚑ Load-bearing pillar — 1 nodes depend on this. Modify with caution.
+
+hop 1:
+  CoOccurrence
+    -> must stay backward compatible [Constraint]
+  Hierarchical
+    -> auth middleware [Entity]
+```
+
+If the focus matches more than one concept, Lambo refuses rather than guessing, and lists up to ten candidates with their node ids so you can name one exactly. The refusal is a usage error, so it exits `2`.
+
+```bash
+$ lambo inspect --session demo --focus "a"
+lambo inspect: 'a' matches 5 concepts — name one exactly, or pass its node_id:
+  user schema [c8599134-59a1-4b17-9b9e-8bd76ac38394]
+  auth middleware [73406631-042f-4a83-8cf7-64bbf3405c70]
+```
+
+The rendered neighbourhood stops after 200 neighbours and says so.
+
+### lambo stats
+
+Reports session health. A reader process sees the counts but not the writer's flush figures, and the output says which is which.
+
+```bash
+$ lambo stats --session demo
+session 'demo' (reader snapshot)
+nodes=7 edges=12 concepts=5 canonical=0
+epoch=0
+flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a
+note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; this is a reader process
+```
+
+For flush lag and write-log depth, ask the writer through the `lambo_stats` MCP tool instead.
+
+## Write commands
+
+Write commands acquire the session's writer lease. If a `lambo serve` process already owns the session, the write is refused and names the holder, so a command line write never becomes a silent second writer.
+
+```bash
+$ lambo derive --session demo --agent agent-b --content "a contended write" --kind entity
+lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago and is still refreshing it. Refusing to open a second writer. If that holder is wedged, an operator can force a takeover (see the single-writer lease note in docs/reference/cli.mdx)
+$ echo $?
+1
+```
+
+The same refusal covers `derive`, `record-action`, `reserve`, `release`, and a second `serve`.
+
+### lambo derive
+
+Stores concepts from the current interaction. Lambo stamps the time itself, so there is no timestamp flag.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--agent <AGENT>` | Yes | Stamped on the interaction and the concepts. |
+| `--content <CONTENT>` | Yes | The first concept's text. |
+| `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
+| `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
+| `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
+
+`--parent-of` puts the child left of the colon and the parent right of it. Each value takes exactly one colon, and Lambo refuses extra colons as ambiguous.
+
+```bash
+$ lambo derive --session demo --agent agent-a \
+    --content "user schema" --kind entity \
+    --concept "auth middleware:entity" \
+    --parent-of "auth middleware:user schema"
+derived 3 concept(s): 3 created, 2 matched existing
+```
+
+### lambo record-action
+
+Records an action the agent took. The action becomes a `Resource` concept, and the targets become typed edges.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--agent <AGENT>` | Yes | |
+| `--action <ACTION>` | Yes | |
+| `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
+| `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
+| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. |
+
+```bash
+$ lambo record-action --session demo --agent agent-a \
+    --action "created migrations/003.sql" \
+    --produces "migrations/003.sql" \
+    --depends-on "user schema"
+recorded action 'created migrations/003.sql': 2 concept(s) created, 2 edge(s) added
+```
+
+### lambo reserve and lambo release
+
+`reserve` takes a soft lock on a node, and `release` gives it back.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--agent <AGENT>` | Yes | |
+| `--node <NODE>` | Yes | A node UUID from `recall` or `inspect`. |
+| `--ttl-seconds <TTL_SECONDS>` | `reserve` only, optional | `30` by default, and at most `3600`. |
+
+<Warning>
+A soft lock lives in the writer's memory, so a command line reservation ends the moment the command exits. `lambo reserve` tells you this in its output, and a later `lambo release` reports that there is no reservation to release. Use `reserve` from a long-lived writer, such as `lambo serve` through the `lambo_reserve` tool, when you need the lock to outlast a single call.
+</Warning>
+
+```bash
+$ lambo reserve --session demo --agent agent-a --node c8599134-... --ttl-seconds 60
+reserved c8599134-... for agent 'agent-a'
+reservations are advisory and RAM-local: this reservation ends when this process exits (now). The TTL that would apply inside a long-lived writer such as serve is 60s
+```
+
+## Serve a session
+
+`lambo serve` runs the MCP server and owns the session as its single writer.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--agent <AGENT>` | No | `lambo-serve` |
+| `--transport <TRANSPORT>` | No | `stdio`, or `http` |
+| `--port <PORT>` | No | `7700`, used when the transport is `http`. |
+| `--bind <BIND>` | No | `127.0.0.1`, used when the transport is `http`. |
+| `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport. Loopback runs unauthenticated by default. A non-loopback bind fails closed without one. Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. |
+| `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions. |
+| `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate. Burst allowance is double. |
+
+```bash
+lambo serve --config lambo.toml --session demo --agent agent-a
+```
+
+See [MCP tools](/mcp) for the tools it exposes.
+
+### Stopping a writer
+
+Stop the server with `Ctrl-C` or a clean client disconnect. On the way out it flushes whatever has not reached the store yet. It then releases the session lease. The next writer can take the session immediately instead of waiting for the lease to expire.
+
+Lambo writes a flush as a few batched statements rather than one per change. Even a large burst written just before you stop drains in a handful of round trips. A heavy write burst followed straight away by `Ctrl-C` is a case that used to need many seconds to drain.
+
+<Warning>
+Shutdown is time-bounded, so it stops rather than hanging if the store is unreachable. If it runs out of time, the writes that had not reached the store are lost. There is no on-disk journal to replay them from on the next start. Let the process finish its shutdown, and do not `kill -9` a writer you care about the tail of.
+</Warning>
+
+### Watch a session in a browser
+
+`lambo serve-web` opens a read-only browser window onto a session. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--port <PORT>` | No | `7710` |
+| `--bind <BIND>` | No | `127.0.0.1` |
+| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. |
+
+```bash
+lambo serve-web --config lambo.toml --session demo
+```
+
+The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes the whole session to whoever can reach the port.
+
+## Provision a store
+
+`lambo provision` creates or migrates the durable store schema. It reads the store choice from your config and takes no other flags. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
+
+```bash
+$ lambo --config lambo.toml provision
+sqlite schema provisioned (init_schema, idempotent)
+```
+
+Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/config).
+
+## Run the demo
+
+`lambo demo` runs a scripted two-agent scenario: two agents build one REST API, `user schema` earns canonical status, and the second agent's recall carries the blast-radius and conflict warnings.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
+| `--session <SESSION>` | No | A fresh session id per run. |
+
+The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/end-to-end) for the topology it exercises.
+
+## The swarm idiom
+
+Run one `lambo serve` writer for the session, then give each small agent a single deterministic line to run. One `lambo derive` per agent is the intended high-throughput pattern, because the agent needs no tool schema in its context and the call either succeeds or exits non-zero.
+
+```bash
+lambo derive --session demo --agent agent-7 --content "retry budget is 3" --kind constraint
+```
+
+Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/end-to-end) for the full topology.
+
+## Limits
+
+The command line enforces the same limits as the MCP tools.
+
+| Limit | Value |
+|---|---|
+| Any single string | 16 KB |
+| `--top-k` | 100 |
+| `--traversal-depth` and `--depth` | 5 |
+| `--max-tokens` | 100,000 |
+| `--ttl-seconds` | 3600 |
+| Neighbours rendered by `inspect` | 200 |
+
+`inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
+
+See [What Lambo accepts in text](#what-lambo-accepts-in-text) for the character rules, which apply to every string on every verb.
+
+See [MCP tools](/mcp) for the same operations over MCP, and [Library API](/api) for the type both surfaces share.

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Lambo",
+  "colors": {
+    "primary": "#16A34A",
+    "light": "#07C983",
+    "dark": "#15803D"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "installation"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "mcp",
+              "cli",
+              "config",
+              "api"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "end-to-end"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
