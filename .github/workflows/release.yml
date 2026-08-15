@@ -33,6 +33,13 @@ jobs:
   build:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Every `run:` step here is bash. windows-latest defaults to PowerShell, which
+    # parses `VERSION=$(...)` as a module name and fails the job before it builds.
+    # Git Bash ships on the Windows runner, so pinning the shell keeps one script
+    # working on all five targets.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
