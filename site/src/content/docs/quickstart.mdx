@@ -1,29 +1,23 @@
 ---
 title: "Quickstart"
-description: "Build Lambo from source and recall memory in about 30 seconds."
+description: "Install the binary, write a config, and recall memory in about 30 seconds."
 ---
 
-This guide gets a running session in about 30 seconds. It uses the in-memory store and the fixture embedder, so you need no external services and no model files.
+This guide gets a running session in about 30 seconds. It uses the in-memory store and the fixture embedder, so you need no external services, no model files, and no toolchain.
 
-## Before you start
+## Install the binary
 
-You need a stable Rust toolchain. Install it from [rustup.rs](https://rustup.rs) if you do not have it.
-
-## Build from source
-
-Lambo builds from source with Cargo. The `demo` feature profile compiles every store and embedder, which is the easiest way to get a working binary.
+Run the install script on macOS or Linux.
 
 ```bash
-git clone https://github.com/nrynss/lambo.git
-cd lambo
-cargo build --release --features demo
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
 ```
 
-Cargo writes the binary to `target/release/lambo`. Confirm the build with `lambo --help`.
+The script picks the binary for your platform, verifies its SHA-256 checksum, and installs it to `~/.local/bin`. Confirm it with `lambo --version`. Windows binaries and a build-from-source path are in [Installation](/lambo/installation/).
 
 ## Configure a quick session
 
-Create a `lambo.toml` that selects the in-memory store and the fixture embedder.
+Create a `lambo.toml` that selects the in-memory store and the fixture embedder. This file is how you choose backends. The binary already carries all of them.
 
 ```toml lambo.toml
 [store]
@@ -67,7 +61,10 @@ The server runs and waits for MCP clients. Leave it running in its own terminal.
 
 ## What to try next
 
+Pick whichever direction matches what you want to build.
+
 - Connect an MCP client with an `mcpServers` block in [Installation](/lambo/installation/).
+- Point the same binary at a durable store by editing `lambo.toml`. See [Configuration](/lambo/config/).
 - Run a full walkthrough in [End to end](/lambo/end-to-end/).
 - Run the scripted two-agent demo described in [Demo](/lambo/demo/).
 - Explore the seven [MCP tools](/lambo/mcp/).

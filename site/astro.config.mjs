@@ -15,7 +15,7 @@ export default defineConfig({
         { icon: 'github', label: 'GitHub', href: 'https://github.com/nrynss/lambo' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/nrynss/lambo/edit/phase/p8-surface/site',
+        baseUrl: 'https://github.com/nrynss/lambo/edit/main/site',
       },
       sidebar: [
         {

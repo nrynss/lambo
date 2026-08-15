@@ -57,7 +57,7 @@ The kind you choose must be compiled into your binary. If it is not, Lambo fails
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3`, `bedrock`, or `fixture`. |
+| `kind` | string | `bge_m3` | `bge_m3` or `fixture`. `bedrock` parses but is not implemented, so it fails at startup. |
 | `dim` | integer | `1024` | The width you expect the embedder to emit. |
 | `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
 | `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
@@ -98,7 +98,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `store-cockroach` | The CockroachDB store. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
-| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
+| `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
 | `fixtures` | Committed fixture graphs, which also enables `store-memory`. |
 | `demo` | A convenience profile covering the memory and CockroachDB stores, both local embedders, and the fixtures. |
 

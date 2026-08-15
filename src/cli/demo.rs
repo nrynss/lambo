@@ -1463,7 +1463,7 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
         "  agents       {AGENT_A} (builds the API) · {AGENT_B} (separate feature)"
     ));
     n.blank();
-    n.say("  Compressed for the video — intervals only, no threshold weakened:".to_string());
+    n.say("  Compressed for a fast run — intervals only, no threshold weakened:".to_string());
     n.say(format!(
         "    canonization_edge_min_age   60s     → {DEMO_EDGE_MIN_AGE:?}"
     ));
