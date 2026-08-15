@@ -538,7 +538,7 @@ requires:   T8.1        # http transport from T8.2 when it lands
 fixture-ok: yes
 owns:       web/, src/cli/serve_web.rs
 appends-to: src/main.rs (serve-web dispatch arm only, if any)
-status:     not-started
+status:     task-complete (awaiting adve-review)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 The "functional demo app URL" deliverable (spec §12.4). Minimal axum-served page over the
@@ -1403,3 +1403,139 @@ regressions).
 **`cargo test --features store-sqlite`:** **664 lib + 5 bin + 8 integration + 1
 doctest passing, 3 ignored** (R1 baseline 657 lib + 4 bin + 8 integration + 1
 doctest — **+7 lib, +1 bin**).
+
+---
+
+### T8.5 — Demo app / read-only session window (task agent, 2026-08-14)
+
+**Gates:** all nine lines of the binding block run, exit 0. `cargo fmt --all -- --check`
+clean; `cargo clippy --all-targets -- -D warnings` clean; `cargo clippy --all-targets
+--features store-cockroach,store-memory,fixtures -- -D warnings` clean; `cargo clippy
+--all-targets --features store-sqlite -- -D warnings` clean; `cargo test
+--no-default-features --features store-sqlite --no-run` clean; `cargo test
+--no-default-features --features store-cockroach --no-run` clean; `cargo check
+--no-default-features` clean.
+
+**`cargo test`:** **636 lib + 5 bin + 3 integration + 1 doctest passing, 3 ignored**
+(baseline 620 lib — **+16 lib**, all in `cli::serve_web`; no regressions, nothing removed).
+
+**`cargo test --features store-sqlite`:** **680 lib + 5 bin + 8 integration + 1 doctest
+passing, 3 ignored** (baseline 664 lib — **+16 lib**, the same 16).
+
+#### Files touched outside `owns`
+
+| File | Change | Authorization |
+|---|---|---|
+| `src/main.rs` | `Commands::ServeWeb` variant (+ its clap help), one `name()` arm, one dispatch arm calling `cli::serve_web::run` through the existing `run_async`. `needs_embedder()` **not** edited — the default arm already returns true, which is right: recall embeds when the store claims `VECTOR_SEARCH`. Serve lifecycle, demo stub, every other arm untouched. | `appends-to` (dispatch arm + own flags) |
+| `src/cli/mod.rs` | `pub mod serve_web;`, placed alphabetically between `saints` and `stats` | one-line module declaration; nothing else in the file changed |
+| `Cargo.toml` / `Cargo.lock` | **not touched** — axum 0.8 was already there, and nothing else was needed | — |
+| `src/mcp/*`, `src/store/*`, `src/graph/*` | **not touched** | — |
+
+#### The architecture decision: reader + store poll, not the writer's broadcast
+
+`serve-web` is a **lease-free reader** (spec §2.2). It never constructs a `Memory`, never
+takes the T8.6 lease, never spawns GC — the `cli::recall` / `cli::stats` discipline — so it
+runs beside a live `lambo serve` on the same session instead of competing for it.
+
+The live feed therefore polls `GraphSnapshot::canonization_events` rather than subscribing
+to `Memory::events()`. That broadcast is an in-process `tokio::sync::broadcast` owned by the
+writer; a separate reader process cannot subscribe to it at all. Taking it would mean
+becoming the writer, which would mean holding the lease, which would mean the page could not
+coexist with `serve` — the one thing the demo needs. The durable audit trail is the same
+transitions, one flush behind, and a **superset** across writer restarts.
+
+What that costs, said on the page rather than papered over:
+
+- **`flush_lag` / `log_depth` report `n/a`.** They live in the writer's flush task. A reader
+  printing `0` would be claiming a durability bound it cannot see — the call `cli::stats`
+  already makes, kept identical here.
+- **Graph `epoch` is not surfaced at all.** `Graph::from_snapshot` loads at epoch 0, so a
+  reader's epoch is *always* 0. (`lambo stats` does print it; that is a pre-existing wart in
+  a file T8.5 does not own, noted for whoever does own it.)
+- **Two store round-trips per `/api/pulse`** — one raw `load_session` for the event tail,
+  one `load_reader_graph` for counts. Deliberate: reusing both existing paths verbatim beats
+  reimplementing the snapshot→graph invariant checks to save a SELECT.
+
+What *is* live and does move during a scenario: node / edge / concept / canonical counts,
+the canonization feed, and `durable_change_age_ms` (how long this reader has seen the
+durable counts stand still).
+
+#### Read-only is enforced, not asserted
+
+The HTTP surface is unauthenticated until T8.7, so a write route reachable from a browser is
+a stranger with a pen in the session's memory. Every route is `routing::get`; there is no
+derive / record_action / reserve path. Three tests hold the line:
+
+- `read_only_router_has_no_mutating_route` — live 405 sweep, 9 routes × POST/PUT/PATCH/DELETE.
+- `the_module_registers_only_get_routes` — source scan of the production half for
+  `routing::post|put|patch|delete` **and** for writer constructs (`Memory::builder`,
+  `open_writer`, `acquire_lease`, `.spawn()`).
+- `routes_constant_covers_every_registered_route` — parses the router body and proves the
+  sweep's route list has no gaps, so a new path cannot dodge the sweep.
+
+`--bind` defaults to loopback; a non-loopback bind warns on stderr **and** raises a banner on
+the page. **Public exposure still requires T8.7 first** — even read access hands the whole
+session to anyone who can reach the port.
+
+#### Endpoints
+
+`GET /` · `/app.css` · `/app.js` · `/healthz` · `/api/session` · `/api/recall` ·
+`/api/events?since=N` · `/api/stats` · `/api/pulse?since=N`. The page polls `/api/pulse`
+(stats + event tail in one round trip) every 1.5 s.
+
+#### P9 / AWS readiness (deployment is P9; this is what it can rely on)
+
+- **Self-contained binary.** `web/{index.html,app.css,app.js}` are `include_str!`-embedded —
+  no CDN, no webfont, no asset directory. `embedded_assets_reference_no_external_origin`
+  rejects any external origin in them, so a zero-egress task still renders.
+- **`GET /healthz`** answers ALB / ECS checks **without touching the store**, so a slow
+  database degrades the page instead of failing the target and pulling the task out of rotation.
+- **No secrets in the page.** `/api/session` reports store and embedder *kind* only.
+  `session_info_never_leaks_the_dsn_path_or_embedder_url` seeds a DSN with a password, a
+  SQLite path and an embedder URL, then asserts none of them appear in the response body.
+- **`/api/*` is `Cache-Control: no-store`** — session memory must never be served from a
+  CloudFront edge.
+- **Polling, not SSE.** There is no `Stream` impl in the dependency set to hand
+  `axum::response::Sse` (adding `futures-core`/`tokio-stream` would be a Cargo.toml change
+  T8.5 does not need), and a 1.5 s poll survives ALB / CloudFront idle timeouts and
+  connection recycling that a long-lived SSE channel does not.
+- **`--bind` / `--port`** follow `serve`'s conventions; port default 7710 (serve is 7700), so
+  both can run on one host.
+
+#### The bug the tests could not have caught
+
+`serve_bounded` applies the grace window to the **post-signal drain only**. The first cut
+wrapped the whole `axum::serve` future in `timeout(SHUTDOWN_GRACE, ..)`, so the server exited
+`0` on its own after five seconds. Unit tests could not see it — they call `axum::serve`
+directly — and it surfaced only from running the binary.
+`the_grace_window_bounds_the_drain_not_the_server` now fails on it in ~240 ms, with
+`a_shutdown_signal_stops_the_server_within_the_grace_window` on the other side.
+
+#### What the next agent should NOT re-derive
+
+- **The reader cannot see writer stats.** Do not "fix" `flush_lag` / `log_depth` by printing
+  zeros; the only honest fix is a writer-side endpoint, which needs T8.7's auth first.
+- **The `memory` store is process-local.** A reader in another process sees an empty session
+  through it. `serve-web` warns on stderr and banners the page rather than looking broken;
+  the demo needs sqlite or cockroach.
+- **`seq` is a position in a `(occurred_at, id)`-sorted list**, sorted in `events_from`
+  rather than trusted from the adapter, so the poll cursor means the same thing on
+  MemoryStore, SQLite and Cockroach.
+- **Canonization thresholds are not reachable in a demo window** (`min_peer_count` 20,
+  `canonization_edge_min_age` 60 s, `canonization_eval_interval` 60 s, all from
+  `Config::default()`, which `serve` does not read from file — T82-12). Planting the feed for
+  a video is **T8.4's** scenario job, not this page's.
+
+#### Verified end to end, two live processes over one sqlite file
+
+`lambo serve-web` reading while separate `lambo derive` / `record-action` writer processes
+landed writes: counts moved `0/0/0 → 3/4/2 → 7/12/4` and `durable_change_age_ms` reset to 0
+on each; `/api/recall` returned the context block verbatim, canonical marker and `⚑`
+load-bearing-pillar line intact, after real transitions were recorded through the store's own
+`record_canonization`; `/api/events?since=N` tailed the three hops incrementally; the live
+405 sweep matched the test. Browser-verified in the pane.
+
+**UI caveat for personal review:** the recall form is spec-correct (a real `<form>`, one
+text input, `<button type="submit">`, no console errors) and submits on click, but a
+*synthetic* Return from browser automation did not reach it. Implicit submission should work
+for a human pressing Enter — worth one manual keypress before the video.
