@@ -371,7 +371,7 @@ mod tests {
         assert!(!batch.is_empty());
 
         let store: &dyn GraphStore = &MemoryStore::new();
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
 
         let loaded = load_session(store, &SessionId::from("roundtrip")).unwrap();
 
@@ -477,7 +477,7 @@ mod tests {
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(interaction(&chain_sid, 1, Some(NodeId::nil()), 0)),
         });
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let err = load_session(store, &chain_sid).unwrap_err();
         assert!(
             matches!(err, StoreError::Invariant(_)),
@@ -490,7 +490,7 @@ mod tests {
         batch.push(Mutation::UpsertNode {
             node: Node::Concept(concept(&concept_sid, 1, NodeId::nil(), "orphan")),
         });
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let err = load_session(store, &concept_sid).unwrap_err();
         assert!(
             matches!(err, StoreError::Invariant(_)),
@@ -510,7 +510,7 @@ mod tests {
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(interaction(&sid, 1, None, 0)),
         });
-        block_on(store.flush(&batch))
+        block_on(store.flush(&batch, None))
             .expect("load_session test: worker thread")
             .expect("flush failed");
 
@@ -574,8 +574,8 @@ mod tests {
             self.inner.capabilities()
         }
 
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-            self.inner.flush(batch).await
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.inner.flush(batch, token).await
         }
 
         async fn load_session(&self, _session: &SessionId) -> Result<GraphSnapshot, StoreError> {
@@ -626,8 +626,12 @@ mod tests {
                 .await
         }
 
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -673,7 +677,7 @@ mod tests {
         assert!(!batch.is_empty());
 
         let store: &dyn GraphStore = &MemoryStore::new();
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
 
         let loaded = load_session_async(store, &SessionId::from("roundtrip"))
             .await

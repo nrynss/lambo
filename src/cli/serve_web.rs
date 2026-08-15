@@ -954,8 +954,8 @@ mod tests {
         fn vector_dimensions(&self) -> Option<usize> {
             self.0.vector_dimensions()
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-            self.0.flush(batch).await
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.0.flush(batch, token).await
         }
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
             self.0.load_session(session).await
@@ -994,8 +994,12 @@ mod tests {
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             self.0.interaction_span(session, node, min_age, now).await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.0.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.0.record_canonization(event, token).await
         }
         async fn acquire_lease(
             &self,
@@ -1133,16 +1137,19 @@ mod tests {
             (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
         ] {
             store
-                .record_canonization(&CanonizationEvent {
-                    id: NodeId::new(),
-                    session_id: sid.clone(),
-                    node_id: node,
-                    from_status: from,
-                    to_status: to,
-                    blast_radius: Some(1),
-                    occurred_at: Utc::now(),
-                    last_demotion_time: None,
-                })
+                .record_canonization(
+                    &CanonizationEvent {
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        node_id: node,
+                        from_status: from,
+                        to_status: to,
+                        blast_radius: Some(1),
+                        occurred_at: Utc::now(),
+                        last_demotion_time: None,
+                    },
+                    None,
+                )
                 .await
                 .expect("record canonization");
         }

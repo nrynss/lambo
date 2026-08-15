@@ -548,12 +548,16 @@ impl MemoryBuilder {
         // refusal) leaves the lease held with no heartbeat, so it lapses at the
         // TTL — the same crash-shaped expiry a mid-startup crash would produce.
         let lease_holder = LeaseHolder::for_this_process(&agent);
-        match store
+        let lease_token = match store
             .acquire_lease(&session, &lease_holder, LEASE_TTL)
             .await
             .map_err(LamboError::Store)?
         {
-            LeaseOutcome::Acquired(_) => {}
+            // Capture the monotonic fencing token (GitHub issue #1) the store
+            // minted for this holder. A refresh PRESERVES it, so the value is
+            // stable for the handle's life; every durable write (flush + canon)
+            // presents it and the store rejects a stale one after a takeover.
+            LeaseOutcome::Acquired(info) => info.token,
             LeaseOutcome::Held { current, age } => {
                 // Fail closed, naming the current holder and its age.
                 return Err(LamboError::Conflict(format!(
@@ -565,7 +569,7 @@ impl MemoryBuilder {
                     age.as_secs(),
                 )));
             }
-        }
+        };
 
         // (1) Startup load (spec §2.5). The async core, not the sync wrapper:
         // `store::load::load_session` parks a worker thread and joins it, which
@@ -610,8 +614,10 @@ impl MemoryBuilder {
                 log_max: config.backend_log_max,
             },
         )
-        .with_fence(lease_lost.clone());
-        let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config);
+        .with_fence(lease_lost.clone())
+        .with_token(lease_token);
+        let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config)
+            .with_token(lease_token);
 
         // Each `spawn` panics if called twice — each is called exactly once,
         // here, and nowhere else in this type.
@@ -663,6 +669,7 @@ impl MemoryBuilder {
             closed: AtomicBool::new(false),
             registered: AtomicBool::new(true),
             lease_holder,
+            lease_token,
             lease_released: AtomicBool::new(false),
             lease_lost,
         })
@@ -821,6 +828,12 @@ pub struct Memory {
     /// This handle's single-writer lease identity (agent + pid + host), reused
     /// by the heartbeat and by release (T8.6).
     lease_holder: LeaseHolder,
+    /// Monotonic fencing token (GitHub issue #1) this handle presents on every
+    /// durable write (via the FlushTask and the canon task). Minted by the
+    /// store at takeover; a refresh PRESERVES it, so it is stable for the
+    /// handle's life. The store rejects a stale/missing one after a takeover —
+    /// the hard store-side fence, independent of the cooperative `lease_lost`.
+    lease_token: u64,
     /// `true` once this handle has released its lease. A **successful** `close()`
     /// releases (a graceful close hands off rather than waiting out the TTL); a
     /// failed close keeps the lease for a retry and lets it lapse at TTL if none
@@ -1649,7 +1662,7 @@ impl Memory {
         // bound out of the `match` scrutinee so the borrow of `tail` ends
         // here rather than spanning the arms.
         let count = tail.len();
-        let flushed = final_flush(self.store.as_ref(), tail.batch()).await;
+        let flushed = final_flush(self.store.as_ref(), tail.batch(), Some(self.lease_token)).await;
         match flushed {
             Ok(()) => {
                 // Custody ends: the tail is durable, so it must NOT go back
@@ -2234,9 +2247,13 @@ impl Drop for TailCustody<'_> {
 ///
 /// Dropping the timed-out future is safe for the same reason it is in the loop:
 /// the adapter only borrows `&MutationBatch`, which the caller still owns.
-async fn final_flush(store: &dyn GraphStore, batch: &MutationBatch) -> Result<(), StoreError> {
+async fn final_flush(
+    store: &dyn GraphStore,
+    batch: &MutationBatch,
+    token: Option<u64>,
+) -> Result<(), StoreError> {
     let attempt = async {
-        match CatchUnwindPoll(async { store.flush(batch).await }).await {
+        match CatchUnwindPoll(async { store.flush(batch, token).await }).await {
             Ok(result) => result,
             Err(payload) => {
                 let message = panic_message(&payload);
@@ -2357,7 +2374,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.inner.capabilities()
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             self.batches.lock().push(batch.clone());
             let should_fail = self
                 .fail_remaining
@@ -2368,7 +2385,7 @@ mod tests {
             if should_fail {
                 Err(StoreError::Backend("simulated outage".into()))
             } else {
-                self.inner.flush(batch).await
+                self.inner.flush(batch, token).await
             }
         }
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
@@ -2414,8 +2431,12 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -2466,7 +2487,7 @@ mod tests {
 
     #[async_trait]
     impl GraphStore for RoundTripStore {
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             let statements = match self.model {
                 CostModel::PerMutation => batch.mutations.len(),
                 CostModel::PerPlannedStatement => crate::store::batch::planned_statements(
@@ -2480,7 +2501,7 @@ mod tests {
             } + 2;
             self.round_trips.fetch_add(statements, Ordering::SeqCst);
             tokio::time::sleep(self.rtt * u32::try_from(statements).unwrap()).await;
-            self.inner.flush(batch).await
+            self.inner.flush(batch, token).await
         }
         async fn release_lease(
             &self,
@@ -2539,8 +2560,12 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -2805,7 +2830,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.inner.capabilities()
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             match self.behaviour {
                 FlushBehaviour::Hang => std::future::pending::<()>().await,
@@ -2817,7 +2842,7 @@ mod tests {
                 FlushBehaviour::Panic => panic!("store adapter exploded mid-flush"),
                 FlushBehaviour::Delay(d) => tokio::time::sleep(d).await,
             }
-            let result = self.inner.flush(batch).await;
+            let result = self.inner.flush(batch, token).await;
             self.flush_completed.store(true, Ordering::SeqCst);
             result
         }
@@ -2864,8 +2889,12 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -2937,8 +2966,8 @@ mod tests {
                 ParkPoint::BlastRadius => self.inner.capabilities(),
             }
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-            self.inner.flush(batch).await
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.inner.flush(batch, token).await
         }
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
             self.inner.load_session(session).await
@@ -2985,8 +3014,12 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -3028,8 +3061,8 @@ mod tests {
         fn vector_dimensions(&self) -> Option<usize> {
             Some(1024)
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
-            self.inner.flush(batch).await
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.inner.flush(batch, token).await
         }
         async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
             self.inner.load_session(session).await
@@ -3104,8 +3137,12 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
         async fn acquire_lease(
             &self,

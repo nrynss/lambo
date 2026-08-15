@@ -155,7 +155,7 @@ use super::batch::{
 };
 #[cfg(feature = "fixtures")]
 use super::batch::{seed_concept_rows, seed_edge_rows};
-use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
     map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
@@ -551,6 +551,13 @@ impl GraphStore for SqliteStore {
             "ALTER TABLE canonization_events ADD COLUMN last_demotion_time TEXT",
         )
         .await?;
+        ensure_column(
+            self.pool(),
+            "session_leases",
+            "current_token",
+            "ALTER TABLE session_leases ADD COLUMN current_token INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         Ok(())
     }
 
@@ -643,7 +650,7 @@ impl GraphStore for SqliteStore {
         }))
     }
 
-    async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         if batch.mutations.is_empty() {
             return Ok(());
         }
@@ -677,6 +684,34 @@ impl GraphStore for SqliteStore {
             }
         }
         self.ensure_sessions(&mut *tx, &sessions).await?;
+
+        // Fencing-token gate (#1): reject a stale/missing token for every
+        // session the batch touches, INSIDE the same transaction as the writes
+        // (atomic with them — a takeover cannot slip between the check and the
+        // commit; on rejection the `?` drops `tx`, rolling the batch back). A
+        // session with a lease row (current_token >= 1) must present a token
+        // that is current; an unleased session has no row and passes (seed /
+        // fixture parity).
+        for sid in &sessions {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT current_token FROM session_leases WHERE session_id = ?1",
+            )
+            .bind(sid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_err("flush: read lease token", e))?;
+            if let Some(cur) = current {
+                let cur = u64::try_from(cur).map_err(|_| {
+                    StoreError::Invariant(format!("session {sid}: negative lease current_token"))
+                })?;
+                if !lease_permits_write(cur, token) {
+                    return Err(StoreError::StaleWrite(format!(
+                        "session {sid}: presented token {token:?} is stale (lease token {cur}) — \
+                         single-writer fence (GitHub issue #1)"
+                    )));
+                }
+            }
+        }
 
         // Same planned-statement replay as the Cockroach adapter (L82-1). There
         // is no network here, so this is not the latency fix it is there — it is
@@ -991,10 +1026,38 @@ impl GraphStore for SqliteStore {
         })
     }
 
-    async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
         let mut tx = self.pool().begin().await.map_err(|e| {
             map_write_err(e, |m| format!("begin record_canonization transaction: {m}"))
         })?;
+        // Fencing-token gate (#1): this durable write path HAD no lease check
+        // at all — the canon task bypassed `lease_lost`. Check the token inside
+        // this transaction, atomically with the write (rolls back on `?`).
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT current_token FROM session_leases WHERE session_id = ?1")
+                .bind(&event.session_id.0)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| db_err("record_canonization: read lease token", e))?;
+        if let Some(cur) = current {
+            let cur = u64::try_from(cur).map_err(|_| {
+                StoreError::Invariant(format!(
+                    "session {}: negative lease current_token",
+                    event.session_id
+                ))
+            })?;
+            if !lease_permits_write(cur, token) {
+                return Err(StoreError::StaleWrite(format!(
+                    "session {}: presented token {token:?} is stale (lease token {cur}) — \
+                     single-writer fence (GitHub issue #1)",
+                    event.session_id,
+                )));
+            }
+        }
         apply_canonization_transition(&mut *tx, event).await?;
         tx.commit().await.map_err(|e| {
             map_write_err(e, |m| {
@@ -1038,21 +1101,25 @@ async fn acquire_or_refresh(
     let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
     let token = holder.token();
     const ACQUIRE_SQL: &str = "\
-        INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+        INSERT INTO session_leases (session_id, holder, acquired_at, expires_at, current_token) \
         VALUES (?1, ?2, \
                 strftime('%Y-%m-%dT%H:%M:%fZ','now'), \
-                strftime('%Y-%m-%dT%H:%M:%fZ','now', ?3)) \
+                strftime('%Y-%m-%dT%H:%M:%fZ','now', ?3), \
+                1) \
         ON CONFLICT (session_id) DO UPDATE SET \
             holder = excluded.holder, \
             acquired_at = CASE WHEN session_leases.holder = excluded.holder \
                                THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
-            expires_at = excluded.expires_at \
+            expires_at = excluded.expires_at, \
+            current_token = CASE WHEN session_leases.holder = excluded.holder \
+                                 THEN session_leases.current_token \
+                                 ELSE session_leases.current_token + 1 END \
         WHERE session_leases.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') \
            OR session_leases.holder = excluded.holder \
-        RETURNING holder, acquired_at, expires_at";
+        RETURNING holder, acquired_at, expires_at, current_token";
 
     for _ in 0..3 {
-        let won: Option<(String, String, String)> = sqlx::query_as(ACQUIRE_SQL)
+        let won: Option<(String, String, String, i64)> = sqlx::query_as(ACQUIRE_SQL)
             .bind(&session.0)
             .bind(&token)
             .bind(&ttl_modifier)
@@ -1063,8 +1130,9 @@ async fn acquire_or_refresh(
             return Ok(LeaseOutcome::Acquired(lease_info_from_text(row)?));
         }
         // Guard was false — someone else holds a live lease. Read it back.
-        let current: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT holder, acquired_at, expires_at FROM session_leases WHERE session_id = ?1",
+        let current: Option<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT holder, acquired_at, expires_at, current_token \
+             FROM session_leases WHERE session_id = ?1",
         )
         .bind(&session.0)
         .fetch_optional(pool)
@@ -1087,10 +1155,12 @@ async fn acquire_or_refresh(
     ))
 }
 
-fn lease_info_from_text(row: (String, String, String)) -> Result<LeaseInfo, StoreError> {
-    let (holder, acquired_at, expires_at) = row;
+fn lease_info_from_text(row: (String, String, String, i64)) -> Result<LeaseInfo, StoreError> {
+    let (holder, acquired_at, expires_at, current_token) = row;
     Ok(LeaseInfo {
         holder,
+        token: u64::try_from(current_token)
+            .map_err(|_| StoreError::Backend("lease row has a negative current_token".into()))?,
         acquired_at: text_to_ts(&acquired_at)?,
         expires_at: text_to_ts(&expires_at)?,
     })
@@ -2012,7 +2082,7 @@ mod tests {
                 },
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let loaded = store.load_session(&sid).await.unwrap();
         assert_eq!(
             loaded.root_goal.as_ref(),
@@ -2027,7 +2097,7 @@ mod tests {
                 goal: Some(serde_json::json!("only this one")),
             }],
         };
-        store.flush(&replace).await.unwrap();
+        store.flush(&replace, None).await.unwrap();
         assert_eq!(
             store.load_session(&sid).await.unwrap().root_goal,
             Some(serde_json::json!("only this one"))
@@ -2038,13 +2108,13 @@ mod tests {
                 goal: None,
             }],
         };
-        store.flush(&clear).await.unwrap();
+        store.flush(&clear, None).await.unwrap();
         assert_eq!(store.load_session(&sid).await.unwrap().root_goal, None);
 
         #[cfg(feature = "store-memory")]
         {
             let memory = MemoryStore::new();
-            memory.flush(&batch).await.unwrap();
+            memory.flush(&batch, None).await.unwrap();
             let want = memory.load_session(&sid).await.unwrap();
             assert_eq!(
                 want.root_goal.as_ref(),
@@ -2065,20 +2135,23 @@ mod tests {
             dim: 1024,
         };
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(
-                        &sid,
-                        NodeId::new(),
-                        None,
-                        Utc.timestamp_opt(1_752_000_000, 0).unwrap(),
-                    ),
-                    Mutation::SetEmbedding {
-                        session_id: sid.clone(),
-                        embedding: Some(contract.clone()),
-                    },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(
+                            &sid,
+                            NodeId::new(),
+                            None,
+                            Utc.timestamp_opt(1_752_000_000, 0).unwrap(),
+                        ),
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(contract.clone()),
+                        },
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2100,12 +2173,15 @@ mod tests {
         {
             let memory = MemoryStore::new();
             memory
-                .flush(&MutationBatch {
-                    mutations: vec![Mutation::SetEmbedding {
-                        session_id: sid.clone(),
-                        embedding: Some(contract.clone()),
-                    }],
-                })
+                .flush(
+                    &MutationBatch {
+                        mutations: vec![Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(contract.clone()),
+                        }],
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -2154,7 +2230,7 @@ mod tests {
                 },
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let loaded = store.load_session(&sid).await.unwrap();
         assert_eq!(loaded.concepts.len(), 1);
         assert_eq!(
@@ -2165,7 +2241,7 @@ mod tests {
         #[cfg(feature = "store-memory")]
         {
             let memory = MemoryStore::new();
-            memory.flush(&batch).await.unwrap();
+            memory.flush(&batch, None).await.unwrap();
             let want = memory.load_session(&sid).await.unwrap();
             assert_eq!(
                 loaded, want,
@@ -2201,25 +2277,28 @@ mod tests {
         };
         value.embedding = Some(vec![0.1, 0.2, 0.3]);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, interaction, None, ts),
-                    concept_mutation,
-                    Mutation::UpsertEdge {
-                        edge: Edge {
-                            id: NodeId::new(),
-                            session_id: sid.clone(),
-                            source: interaction,
-                            target: concept,
-                            edge_type: EdgeType::Derives,
-                            weight: 1.0,
-                            reinforcements: 1,
-                            created_at: ts,
-                            last_reinforced: ts,
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, interaction, None, ts),
+                        concept_mutation,
+                        Mutation::UpsertEdge {
+                            edge: Edge {
+                                id: NodeId::new(),
+                                session_id: sid.clone(),
+                                source: interaction,
+                                target: concept,
+                                edge_type: EdgeType::Derives,
+                                weight: 1.0,
+                                reinforcements: 1,
+                                created_at: ts,
+                                last_reinforced: ts,
+                            },
                         },
-                    },
-                ],
-            })
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -2232,16 +2311,19 @@ mod tests {
         assert!(loaded.graph.snapshot().concepts[0].embedding.is_none());
 
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetEmbedding {
-                    session_id: sid.clone(),
-                    embedding: Some(EmbeddingContract {
-                        kind: "fixture".into(),
-                        model: Some("fixture-v1".into()),
-                        dim: 3,
-                    }),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: Some("fixture-v1".into()),
+                            dim: 3,
+                        }),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
         let migrated = store.load_session(&sid).await.unwrap();
@@ -2333,14 +2415,17 @@ mod tests {
         );
         // A later flush (session-row ensure only) must not clobber the contract.
         store
-            .flush(&MutationBatch {
-                mutations: vec![plant_interaction(
-                    &sid,
-                    NodeId::new(),
-                    None,
-                    Utc.timestamp_opt(1_752_003_600, 0).unwrap(),
-                )],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_interaction(
+                        &sid,
+                        NodeId::new(),
+                        None,
+                        Utc.timestamp_opt(1_752_003_600, 0).unwrap(),
+                    )],
+                },
+                None,
+            )
             .await
             .unwrap();
         let loaded = store.load_session(&sid).await.unwrap();
@@ -2362,10 +2447,10 @@ mod tests {
 
         let sqlite = test_store();
         sqlite.init_schema().await.unwrap();
-        sqlite.flush(&batch).await.unwrap();
+        sqlite.flush(&batch, None).await.unwrap();
 
         let memory = MemoryStore::new();
-        memory.flush(&batch).await.unwrap();
+        memory.flush(&batch, None).await.unwrap();
 
         let sid = SessionId::from("session-mutations");
         let got = sqlite.load_session(&sid).await.unwrap();
@@ -2485,7 +2570,7 @@ mod tests {
         let batch = g.drain_log();
         assert!(!batch.is_empty());
 
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let loaded = load_session(&store, &sid).unwrap();
 
         assert_eq!(loaded.graph.snapshot(), expected);
@@ -2649,7 +2734,7 @@ mod tests {
                 },
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let loaded = load_session(&store, &sid).unwrap();
         let obs = loaded
             .graph
@@ -2684,8 +2769,8 @@ mod tests {
                 plant_concept(&sid, c3, i1, "Register User", ConceptType::Entity, ts),
             ],
         };
-        sqlite.flush(&batch).await.unwrap();
-        memory.flush(&batch).await.unwrap();
+        sqlite.flush(&batch, None).await.unwrap();
+        memory.flush(&batch, None).await.unwrap();
 
         for tokens in [
             vec!["schema".to_string()],
@@ -2822,9 +2907,9 @@ mod tests {
             let batch = snapshot_to_batch(&snap);
             let sqlite = test_store();
             sqlite.init_schema().await.unwrap();
-            sqlite.flush(&batch).await.unwrap();
+            sqlite.flush(&batch, None).await.unwrap();
             let memory = MemoryStore::new();
-            memory.flush(&batch).await.unwrap();
+            memory.flush(&batch, None).await.unwrap();
 
             total_assertions +=
                 assert_structural_agreement_matrix(&sqlite, &memory, &sid, &snap).await;
@@ -2896,9 +2981,9 @@ mod tests {
                 plant_edge(&sid, i1, alone, EdgeType::Derives, ts),
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let memory = MemoryStore::new();
-        memory.flush(&batch).await.unwrap();
+        memory.flush(&batch, None).await.unwrap();
 
         for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
             let want = memory
@@ -2963,11 +3048,11 @@ mod tests {
                 plant_concept(&there, foreign, i2, "foreign", ConceptType::Entity, ts),
             ],
         };
-        store.flush(&local).await.unwrap();
-        store.flush(&elsewhere).await.unwrap();
+        store.flush(&local, None).await.unwrap();
+        store.flush(&elsewhere, None).await.unwrap();
         let memory = MemoryStore::new();
-        memory.flush(&local).await.unwrap();
-        memory.flush(&elsewhere).await.unwrap();
+        memory.flush(&local, None).await.unwrap();
+        memory.flush(&elsewhere, None).await.unwrap();
 
         let want = memory
             .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
@@ -3058,15 +3143,15 @@ mod tests {
                 plant_edge(&sid, probe_src, probe_victim, EdgeType::Dependency, old_ts),
             ],
         };
-        store.flush(&base).await.unwrap();
+        store.flush(&base, None).await.unwrap();
         let memory = MemoryStore::new();
-        memory.flush(&base).await.unwrap();
+        memory.flush(&base, None).await.unwrap();
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
             mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
-        store.flush(&fresh).await.unwrap();
-        memory.flush(&fresh).await.unwrap();
+        store.flush(&fresh, None).await.unwrap();
+        memory.flush(&fresh, None).await.unwrap();
 
         let one_hour = Duration::from_secs(3600);
         for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
@@ -3227,9 +3312,9 @@ mod tests {
             mutations.push(plant_edge(&here, id, target, EdgeType::Dependency, t(0)));
         }
         let batch = MutationBatch { mutations };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let memory = MemoryStore::new();
-        memory.flush(&batch).await.unwrap();
+        memory.flush(&batch, None).await.unwrap();
 
         let got = store
             .interaction_span(&here, target, Duration::from_secs(0), Utc::now())
@@ -3288,9 +3373,9 @@ mod tests {
                 },
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let memory = MemoryStore::new();
-        memory.flush(&batch).await.unwrap();
+        memory.flush(&batch, None).await.unwrap();
 
         let span = store
             .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
@@ -3332,12 +3417,15 @@ mod tests {
         // format), so Utc::now()'s nanoseconds would not round-trip.
         let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3352,9 +3440,12 @@ mod tests {
             occurred_at: ts,
         };
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3378,7 +3469,7 @@ mod tests {
             last_demotion_time: None,
             occurred_at: ts + chrono::Duration::minutes(1),
         };
-        store.record_canonization(&ev2).await.unwrap();
+        store.record_canonization(&ev2, None).await.unwrap();
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(
             snap.concepts[0].canonization_status,
@@ -3398,16 +3489,19 @@ mod tests {
             last_demotion_time: None,
             occurred_at: ts,
         };
-        let err = store.record_canonization(&ghost).await.unwrap_err();
+        let err = store.record_canonization(&ghost, None).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
 
         // F12: the write-behind log now replays ev1, which was already
         // recorded. The replay must be a no-op — not a status rollback to
         // Candidate, and not a duplicate audit row.
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -3433,12 +3527,15 @@ mod tests {
         let c1 = NodeId::new();
         let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3453,7 +3550,7 @@ mod tests {
             last_demotion_time: Some(demote_at),
             occurred_at: demote_at,
         };
-        store.record_canonization(&ev).await.unwrap();
+        store.record_canonization(&ev, None).await.unwrap();
 
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(
@@ -3476,7 +3573,7 @@ mod tests {
             last_demotion_time: None,
             occurred_at: demote_at + chrono::Duration::minutes(1),
         };
-        store.record_canonization(&promo).await.unwrap();
+        store.record_canonization(&promo, None).await.unwrap();
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(
             snap.concepts[0].last_demotion_time,
@@ -3538,9 +3635,12 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
         let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
         store
-            .flush(&MutationBatch {
-                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3554,15 +3654,18 @@ mod tests {
             last_demotion_time: None,
             occurred_at: ts,
         };
-        store.record_canonization(&hop).await.unwrap();
+        store.record_canonization(&hop, None).await.unwrap();
 
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    with_stale_canonization(plant, CanonizationStatus::None, None, None),
-                    Mutation::CanonizationTransition { event: hop },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        with_stale_canonization(plant, CanonizationStatus::None, None, None),
+                        Mutation::CanonizationTransition { event: hop },
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3621,15 +3724,18 @@ mod tests {
         later.content = "pillar (revised)".into();
 
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    born,
-                    Mutation::UpsertNode {
-                        node: NodeKind::Concept(later),
-                    },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        born,
+                        Mutation::UpsertNode {
+                            node: NodeKind::Concept(later),
+                        },
+                    ],
+                },
+                None,
+            )
             .await
             .expect("a batch with a repeated id must not be rejected as a duplicate conflict");
 
@@ -3680,13 +3786,16 @@ mod tests {
         let i1 = NodeId::new();
         let i2 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_interaction(&sid, i2, Some(i1), ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_interaction(&sid, i2, Some(i1), ts),
+                    ],
+                },
+                None,
+            )
             .await
             .expect("the adjacent-repeat control must always pass");
         assert_eq!(
@@ -3702,13 +3811,16 @@ mod tests {
         let i1 = NodeId::new();
         let i2 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_interaction(&sid, i2, Some(i1), ts),
-                    plant_interaction(&sid, i1, None, ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_interaction(&sid, i2, Some(i1), ts),
+                        plant_interaction(&sid, i1, None, ts),
+                    ],
+                },
+                None,
+            )
             .await
             .expect(
                 "the repeated interaction must not be relocated past the row that references \
@@ -3777,7 +3889,10 @@ mod tests {
             "both buckets must actually span multiple statements"
         );
 
-        store.flush(&MutationBatch { mutations }).await.unwrap();
+        store
+            .flush(&MutationBatch { mutations }, None)
+            .await
+            .unwrap();
 
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(
@@ -3807,23 +3922,29 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap();
         let plant = plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts);
         store
-            .flush(&MutationBatch {
-                mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
+                },
+                None,
+            )
             .await
             .unwrap();
 
         store
-            .record_canonization(&CanonizationEvent {
-                id: NodeId::new(),
-                session_id: sid.clone(),
-                node_id: c1,
-                from_status: CanonizationStatus::Venerable,
-                to_status: CanonizationStatus::Canonical,
-                blast_radius: Some(8),
-                last_demotion_time: None,
-                occurred_at: ts,
-            })
+            .record_canonization(
+                &CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: sid.clone(),
+                    node_id: c1,
+                    from_status: CanonizationStatus::Venerable,
+                    to_status: CanonizationStatus::Canonical,
+                    blast_radius: Some(8),
+                    last_demotion_time: None,
+                    occurred_at: ts,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3838,15 +3959,23 @@ mod tests {
             last_demotion_time: Some(demote_at),
             occurred_at: demote_at,
         };
-        store.record_canonization(&demote).await.unwrap();
+        store.record_canonization(&demote, None).await.unwrap();
 
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    with_stale_canonization(plant, CanonizationStatus::Canonical, Some(8), None),
-                    Mutation::CanonizationTransition { event: demote },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        with_stale_canonization(
+                            plant,
+                            CanonizationStatus::Canonical,
+                            Some(8),
+                            None,
+                        ),
+                        Mutation::CanonizationTransition { event: demote },
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3875,12 +4004,15 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
         let t2 = t1 + chrono::Duration::milliseconds(250);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, NodeId::new(), None, t1),
-                    plant_interaction(&sid, NodeId::new(), None, t2),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, NodeId::new(), None, t1),
+                        plant_interaction(&sid, NodeId::new(), None, t2),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3936,28 +4068,31 @@ mod tests {
         // same key: all legal (the partial index only constrains
         // concept_type <> 'Observation').
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_concept(
-                        &sid,
-                        o1,
-                        i1,
-                        "duplicate sentence",
-                        ConceptType::Observation,
-                        ts,
-                    ),
-                    plant_concept(
-                        &sid,
-                        o2,
-                        i1,
-                        "duplicate sentence",
-                        ConceptType::Observation,
-                        ts,
-                    ),
-                    plant_concept(&sid, e1, i1, "duplicate sentence", ConceptType::Entity, ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_concept(
+                            &sid,
+                            o1,
+                            i1,
+                            "duplicate sentence",
+                            ConceptType::Observation,
+                            ts,
+                        ),
+                        plant_concept(
+                            &sid,
+                            o2,
+                            i1,
+                            "duplicate sentence",
+                            ConceptType::Observation,
+                            ts,
+                        ),
+                        plant_concept(&sid, e1, i1, "duplicate sentence", ConceptType::Entity, ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -3967,16 +4102,19 @@ mod tests {
         // unique index and must fail the flush (transaction rolled back).
         let e2 = NodeId::new();
         let err = store
-            .flush(&MutationBatch {
-                mutations: vec![plant_concept(
-                    &sid,
-                    e2,
-                    i1,
-                    "duplicate sentence",
-                    ConceptType::Entity,
-                    ts,
-                )],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_concept(
+                        &sid,
+                        e2,
+                        i1,
+                        "duplicate sentence",
+                        ConceptType::Entity,
+                        ts,
+                    )],
+                },
+                None,
+            )
             .await
             .unwrap_err();
         // STORE-4: constraint violations are classified (never flattened
@@ -4003,12 +4141,15 @@ mod tests {
                 let i1 = NodeId::new();
                 let c1 = NodeId::new();
                 let ts = Utc::now();
-                s.flush(&MutationBatch {
-                    mutations: vec![
-                        plant_interaction(&sid, i1, None, ts),
-                        plant_concept(&sid, c1, i1, &format!("n{n}"), ConceptType::Entity, ts),
-                    ],
-                })
+                s.flush(
+                    &MutationBatch {
+                        mutations: vec![
+                            plant_interaction(&sid, i1, None, ts),
+                            plant_concept(&sid, c1, i1, &format!("n{n}"), ConceptType::Entity, ts),
+                        ],
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
                 s.load_session(&sid).await.unwrap();
@@ -4038,12 +4179,15 @@ mod tests {
         let c1 = NodeId::new();
         let ts = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, None, ts),
-                    plant_concept(&sid, c1, i1, "registry concept", ConceptType::Entity, ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, None, ts),
+                        plant_concept(&sid, c1, i1, "registry concept", ConceptType::Entity, ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -4091,12 +4235,22 @@ mod tests {
             let c1 = NodeId::new();
             let ts = Utc::now();
             store
-                .flush(&MutationBatch {
-                    mutations: vec![
-                        plant_interaction(&sid, i1, None, ts),
-                        plant_concept(&sid, c1, i1, "file-backed concept", ConceptType::Entity, ts),
-                    ],
-                })
+                .flush(
+                    &MutationBatch {
+                        mutations: vec![
+                            plant_interaction(&sid, i1, None, ts),
+                            plant_concept(
+                                &sid,
+                                c1,
+                                i1,
+                                "file-backed concept",
+                                ConceptType::Entity,
+                                ts,
+                            ),
+                        ],
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
             let snap = store.load_session(&sid).await.unwrap();

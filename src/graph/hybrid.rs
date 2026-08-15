@@ -1052,7 +1052,11 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.caps
         }
-        async fn flush(&self, _batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(
+            &self,
+            _batch: &MutationBatch,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
             self.unexpected()
         }
         async fn load_session(
@@ -1102,6 +1106,7 @@ mod tests {
         async fn record_canonization(
             &self,
             _event: &crate::types::CanonizationEvent,
+            _token: Option<u64>,
         ) -> Result<(), StoreError> {
             self.unexpected()
         }

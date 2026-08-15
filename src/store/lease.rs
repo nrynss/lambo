@@ -49,6 +49,27 @@
 //! backdate anything, which is the F18 hazard.) The lease adds **no wire-visible
 //! field** — it is invisible to the MCP surface — so the F18 golden-allowlist
 //! guard is untouched.
+//!
+//! ## Monotonic fencing tokens (GitHub issue #1) — the store is the authority
+//!
+//! The cooperative fence alone has a **detection window**: between a lease
+//! expiring and the old holder's next heartbeat observing the loss (≤ one
+//! `LEASE_HEARTBEAT_INTERVAL`) — plus any `FLUSH_ATTEMPT_TIMEOUT`-bounded
+//! in-flight flush — the old holder can still write. This module closes that
+//! at the **store**: every `session_leases` row carries a strictly-increasing
+//! `current_token`, minted on *takeover* (fresh acquire or expired-lease steal)
+//! as `max(current, 0) + 1` and **preserved** on a same-holder refresh. The
+//! holder carries that token and presents it on every durable write
+//! ([`crate::store::GraphStore::flush`] and
+//! [`crate::store::GraphStore::record_canonization`]); the store rejects any
+//! write whose token is below the row's current one. The cooperative
+//! [`crate::memory`] fence stays as belt-and-braces; the token is the hard
+//! guarantee, and it closes the window because a pre-takeover holder's stale
+//! token can never pass.
+//!
+//! Only the two durable write gates validate the token. Bulk snapshot writes
+//! (`seed()`, fixture parity) are off-lease and deliberately bypass it — see
+//! [`lease_permits_write`].
 
 use std::time::Duration;
 
@@ -144,15 +165,39 @@ impl std::fmt::Display for LeaseHolder {
     }
 }
 
-/// A lease row's identity and timing, as the store reports it.
+/// A lease row's identity, timing and fencing token, as the store reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseInfo {
     /// The holder token ([`LeaseHolder::token`]) currently written to the row.
     pub holder: String,
+    /// Monotonic fencing token (GitHub issue #1). Minted on takeover (fresh or
+    /// expired-lease steal), PRESERVED across a same-holder refresh. The holder
+    /// must present this on every durable write; the store rejects any write
+    /// whose token is below the row's current one. `0` is the "never minted"
+    /// sentinel (no lease has ever been taken on the session).
+    pub token: u64,
     /// When this holder first took the lease (stable across its own refreshes).
     pub acquired_at: DateTime<Utc>,
     /// When the lease lapses if not refreshed.
     pub expires_at: DateTime<Utc>,
+}
+
+/// Store-side fence check (GitHub issue #1): may a write presenting `presented`
+/// proceed against a lease row whose current fencing token is `current`?
+///
+/// * `current == 0` (the "never minted" sentinel — the session has no lease) →
+///   any write is allowed. This is the `seed()` / fixture-parity bypass: a
+///   full-snapshot write, off-lease, must not fail.
+/// * `current > 0` (the session IS leased) → the writer must present
+///   `Some(token)` with `token >= current`. A pre-takeover holder from an
+///   earlier generation presents a strictly lower token and is rejected; `None`
+///   (no token at all) is rejected too — a lease has been set, so a write that
+///   does not even claim a token must not slip through.
+pub fn lease_permits_write(current: u64, presented: Option<u64>) -> bool {
+    if current == 0 {
+        return true;
+    }
+    presented.is_some_and(|p| p >= current)
 }
 
 /// Outcome of an [`crate::store::GraphStore::acquire_lease`] /

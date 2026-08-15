@@ -86,6 +86,10 @@ pub struct CanonizationTask {
     clock: Clock,
     wake: Arc<Notify>,
     shared: Arc<Shared>,
+    /// Monotonic fencing token (GitHub issue #1) presented on every
+    /// `record_canonization`, so the store rejects a stale/missing one after a
+    /// takeover. `None` for tests / advisory-default backends (no lease).
+    token: Option<u64>,
 }
 
 impl CanonizationTask {
@@ -110,10 +114,18 @@ impl CanonizationTask {
             clock: Arc::new(chrono::Utc::now),
             wake: Arc::new(Notify::new()),
             shared: Arc::new(Shared::default()),
+            token: None,
         }
     }
 
-    /// The assembled-process entry point: take the graph, the store and the
+    /// Present `token` on every `record_canonization` (GitHub issue #1); the
+    /// store rejects a stale/missing fencing token after a takeover.
+    /// `Memory::build` passes the token it acquired with the lease.
+    pub fn with_token(mut self, token: u64) -> Self {
+        self.token = Some(token);
+        self
+    }
+
     /// running [`Daemon`]'s score table + event channel, and read every knob
     /// from `config`.
     ///
@@ -172,6 +184,7 @@ impl CanonizationTask {
             clock: self.clock.clone(),
             wake: self.wake.clone(),
             shared: self.shared.clone(),
+            token: self.token,
             evaluator: Evaluator::new(),
         };
         tokio::spawn(async move { loop_state.run().await })
@@ -206,6 +219,9 @@ struct CanonizationLoop {
     clock: Clock,
     wake: Arc<Notify>,
     shared: Arc<Shared>,
+    /// Fencing token presented on every `record_canonization` (GitHub issue
+    /// #1); see [`CanonizationTask::with_token`].
+    token: Option<u64>,
     /// Round-robin cursors live here, across cycles — that is the whole point
     /// of the ring (spec §10 "anti-starvation preserved").
     evaluator: Evaluator,
@@ -237,6 +253,7 @@ impl CanonizationLoop {
             &self.events,
             &self.params,
             now,
+            self.token,
         ))
         .await;
 
@@ -360,7 +377,7 @@ mod tests {
                 node: Node::Concept(c),
             });
         }
-        futures_lite_block(store.flush(&batch)).unwrap();
+        futures_lite_block(store.flush(&batch, None)).unwrap();
         let mut ranked: Vec<Scored<NodeId>> = (1..=19).map(|i| Scored::new(nid(i), 0.1)).collect();
         ranked.push(Scored::new(nid(20), 1.0));
         let epoch = g.epoch();
@@ -440,8 +457,12 @@ mod tests {
         fn capabilities(&self) -> crate::store::Capabilities {
             self.inner.capabilities()
         }
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), crate::types::StoreError> {
-            self.inner.flush(batch).await
+        async fn flush(
+            &self,
+            batch: &MutationBatch,
+            token: Option<u64>,
+        ) -> Result<(), crate::types::StoreError> {
+            self.inner.flush(batch, token).await
         }
         async fn load_session(
             &self,
@@ -492,6 +513,7 @@ mod tests {
         async fn record_canonization(
             &self,
             event: &crate::types::CanonizationEvent,
+            token: Option<u64>,
         ) -> Result<(), crate::types::StoreError> {
             if self.panic_record.load(Ordering::SeqCst) {
                 panic!("simulated canonization panic (FaultyStore)");
@@ -501,7 +523,7 @@ mod tests {
                     "record_canonization is down".into(),
                 ));
             }
-            self.inner.record_canonization(event).await
+            self.inner.record_canonization(event, token).await
         }
     }
 

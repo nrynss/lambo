@@ -219,7 +219,7 @@ mod tests {
         for e in edges {
             batch.push(Mutation::UpsertEdge { edge: e.clone() });
         }
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         store
     }
 

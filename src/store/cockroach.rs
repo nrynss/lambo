@@ -110,7 +110,7 @@ use super::batch::{
 };
 #[cfg(feature = "fixtures")]
 use super::batch::{seed_concept_rows, seed_edge_rows};
-use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
     map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
@@ -1321,16 +1321,19 @@ impl CockroachStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         const ACQUIRE_SQL: &str = "\
-            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
-            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second')) \
+            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at, current_token) \
+            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second'), 1) \
             ON CONFLICT (session_id) DO UPDATE SET \
                 holder = excluded.holder, \
                 acquired_at = CASE WHEN session_leases.holder = excluded.holder \
                                    THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
-                expires_at = excluded.expires_at \
+                expires_at = excluded.expires_at, \
+                current_token = CASE WHEN session_leases.holder = excluded.holder \
+                                     THEN session_leases.current_token \
+                                     ELSE session_leases.current_token + 1 END \
             WHERE session_leases.expires_at <= now() \
                OR session_leases.holder = excluded.holder \
-            RETURNING holder, acquired_at, expires_at";
+            RETURNING holder, acquired_at, expires_at, current_token";
         let pool = self.pool().await?;
         let token = holder.token();
         let ttl_secs = ttl.as_secs_f64();
@@ -1347,7 +1350,7 @@ impl CockroachStore {
         let token_ref = token.as_str();
         tx_retry(|| async move {
             for _ in 0..3 {
-                let won: Option<(String, DateTime<Utc>, DateTime<Utc>)> =
+                let won: Option<(String, DateTime<Utc>, DateTime<Utc>, i64)> =
                     sqlx::query_as(ACQUIRE_SQL)
                         .bind(session_id)
                         .bind(token_ref)
@@ -1355,29 +1358,37 @@ impl CockroachStore {
                         .fetch_optional(pool)
                         .await
                         .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
-                if let Some((holder, acquired_at, expires_at)) = won {
+                if let Some((holder, acquired_at, expires_at, current_token)) = won {
                     return Ok(LeaseOutcome::Acquired(LeaseInfo {
                         holder,
+                        token: u64::try_from(current_token).map_err(|_| {
+                            StoreError::Backend("lease row has a negative current_token".into())
+                        })?,
                         acquired_at,
                         expires_at,
                     }));
                 }
-                let current: Option<(String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-                    "SELECT holder, acquired_at, expires_at FROM session_leases \
-                     WHERE session_id = $1",
+                let current: Option<(String, DateTime<Utc>, DateTime<Utc>, i64)> = sqlx::query_as(
+                    "SELECT holder, acquired_at, expires_at, current_token \
+                     FROM session_leases WHERE session_id = $1",
                 )
                 .bind(session_id)
                 .fetch_optional(pool)
                 .await
                 .map_err(backend)?;
                 match current {
-                    Some((holder, acquired_at, expires_at)) => {
+                    Some((holder, acquired_at, expires_at, current_token)) => {
                         let age = (Utc::now() - acquired_at)
                             .to_std()
                             .unwrap_or(Duration::ZERO);
                         return Ok(LeaseOutcome::Held {
                             current: LeaseInfo {
                                 holder,
+                                token: u64::try_from(current_token).map_err(|_| {
+                                    StoreError::Backend(
+                                        "lease row has a negative current_token".into(),
+                                    )
+                                })?,
                                 acquired_at,
                                 expires_at,
                             },
@@ -1863,7 +1874,7 @@ impl GraphStore for CockroachStore {
         }))
     }
 
-    async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         tx_retry(|| async move {
             let mut tx = pool
@@ -1880,6 +1891,34 @@ impl GraphStore for CockroachStore {
                     .await
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             }
+
+            // Fencing-token gate (#1): reject a stale/missing token for every
+            // session the batch touches, INSIDE the same transaction as the
+            // writes (atomic with them; a takeover cannot slip between the
+            // check and the commit — on rejection `?` drops `tx`, rolling back).
+            // An unleased session (no row / current_token 0) passes — seed /
+            // fixture parity.
+            for sid in batch_session_ids(&batch.mutations) {
+                let current: Option<i64> = sqlx::query_scalar(
+                    "SELECT current_token FROM session_leases WHERE session_id = $1",
+                )
+                .bind(sid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?;
+                if let Some(cur) = current {
+                    let cur = u64::try_from(cur).map_err(|_| {
+                        StoreError::Invariant(format!("session {sid}: negative lease current_token"))
+                    })?;
+                    if !lease_permits_write(cur, token) {
+                        return Err(StoreError::StaleWrite(format!(
+                            "session {sid}: presented token {token:?} is stale (lease token {cur}) — \
+                             single-writer fence (GitHub issue #1)"
+                        )));
+                    }
+                }
+            }
+
 
             // Replay the batch as planned statements rather than one statement
             // per mutation (L82-1). Order is still the batch's own — see
@@ -2202,12 +2241,42 @@ impl GraphStore for CockroachStore {
         })
     }
 
-    async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         tx_retry(|| async move {
             let mut tx = pool.begin().await.map_err(|e| {
                 map_write_err(e, |m| format!("begin record_canonization transaction: {m}"))
             })?;
+            // Fencing-token gate (#1): this durable write path HAD no lease
+            // check at all — the canon task bypassed `lease_lost`. Check the
+            // token inside this transaction, atomically with the write
+            // (rolls back on `?`).
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT current_token FROM session_leases WHERE session_id = $1",
+            )
+            .bind(event.session_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?;
+            if let Some(cur) = current {
+                let cur = u64::try_from(cur).map_err(|_| {
+                    StoreError::Invariant(format!(
+                        "session {}: negative lease current_token",
+                        event.session_id
+                    ))
+                })?;
+                if !lease_permits_write(cur, token) {
+                    return Err(StoreError::StaleWrite(format!(
+                        "session {}: presented token {token:?} is stale (lease token {cur}) — \
+                         single-writer fence (GitHub issue #1)",
+                        event.session_id,
+                    )));
+                }
+            }
             apply_canonization(&mut *tx, event).await?;
             tx.commit().await.map_err(|e| {
                 map_write_err(e, |m| {
@@ -3409,7 +3478,7 @@ mod conformance {
     async fn check_flush_mutations_batch_roundtrip(store: &CockroachStore) {
         let batch = load_mutation_batch("mutations-batch").unwrap();
         let sid = SessionId::from("session-mutations");
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
 
         // Direct snapshot read-back.
         let snap = store.load_session(&sid).await.unwrap();
@@ -3455,21 +3524,24 @@ mod conformance {
         let ts = Utc::now();
         let probe = embed(0.17);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::SetEmbedding {
-                        session_id: sid.clone(),
-                        embedding: Some(EmbeddingContract {
-                            kind: "fixture".into(),
-                            model: Some("fixture-v1".into()),
-                            dim: store.vector_dim,
-                        }),
-                    },
-                    plant_interaction(&sid, i1, ts),
-                    plant_concept(&sid, a, i1, "alpha concept", ts, Some(probe.clone())),
-                    plant_concept(&sid, b, i1, "beta concept", ts, Some(embed(0.5))),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(EmbeddingContract {
+                                kind: "fixture".into(),
+                                model: Some("fixture-v1".into()),
+                                dim: store.vector_dim,
+                            }),
+                        },
+                        plant_interaction(&sid, i1, ts),
+                        plant_concept(&sid, a, i1, "alpha concept", ts, Some(probe.clone())),
+                        plant_concept(&sid, b, i1, "beta concept", ts, Some(embed(0.5))),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3514,40 +3586,46 @@ mod conformance {
         let ts = Utc::now();
         let probe = embed(0.11);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::SetEmbedding {
-                        session_id: sid_a.clone(),
-                        embedding: Some(EmbeddingContract {
-                            kind: "fixture".into(),
-                            model: Some("fixture-v1".into()),
-                            dim: store.vector_dim,
-                        }),
-                    },
-                    plant_interaction(&sid_a, i1, ts),
-                    plant_concept(&sid_a, a, i1, "register user", ts, Some(probe.clone())),
-                    plant_concept(&sid_a, c, i1, "create account", ts, Some(embed(0.115))),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid_a.clone(),
+                            embedding: Some(EmbeddingContract {
+                                kind: "fixture".into(),
+                                model: Some("fixture-v1".into()),
+                                dim: store.vector_dim,
+                            }),
+                        },
+                        plant_interaction(&sid_a, i1, ts),
+                        plant_concept(&sid_a, a, i1, "register user", ts, Some(probe.clone())),
+                        plant_concept(&sid_a, c, i1, "create account", ts, Some(embed(0.115))),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         // Foreign session B holds a concept whose vector is EXACTLY the probe — the
         // globally-closest row — so it would rank first in the raw query.
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::SetEmbedding {
-                        session_id: sid_b.clone(),
-                        embedding: Some(EmbeddingContract {
-                            kind: "fixture".into(),
-                            model: Some("fixture-v1".into()),
-                            dim: store.vector_dim,
-                        }),
-                    },
-                    plant_interaction(&sid_b, i2, ts),
-                    plant_concept(&sid_b, b, i2, "foreign closer", ts, Some(probe.clone())),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid_b.clone(),
+                            embedding: Some(EmbeddingContract {
+                                kind: "fixture".into(),
+                                model: Some("fixture-v1".into()),
+                                dim: store.vector_dim,
+                            }),
+                        },
+                        plant_interaction(&sid_b, i2, ts),
+                        plant_concept(&sid_b, b, i2, "foreign closer", ts, Some(probe.clone())),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -3626,12 +3704,15 @@ mod conformance {
         let i1 = NodeId::new();
         let c1 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, Utc::now()),
-                    plant_concept(&sid, c1, i1, "user schema", Utc::now(), None),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, Utc::now()),
+                        plant_concept(&sid, c1, i1, "user schema", Utc::now(), None),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let hits = store
@@ -3694,9 +3775,9 @@ mod conformance {
                 ),
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let mem = MemoryStore::new();
-        mem.flush(&batch).await.unwrap();
+        mem.flush(&batch, None).await.unwrap();
 
         let tokens: Vec<String> = vec!["register".into(), "user".into()];
         let crdb = store.keyword_candidates(&sid, &tokens, 5).await.unwrap();
@@ -3727,33 +3808,36 @@ mod conformance {
         let o2 = NodeId::new();
         let ts = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, ts),
-                    plant_concept_full(
-                        &sid,
-                        o1,
-                        i1,
-                        "identical sentence",
-                        "identical sentence",
-                        ConceptType::Observation,
-                        ts,
-                        None,
-                        Some("chunk-1".into()),
-                    ),
-                    plant_concept_full(
-                        &sid,
-                        o2,
-                        i1,
-                        "identical sentence",
-                        "identical sentence",
-                        ConceptType::Observation,
-                        ts,
-                        None,
-                        Some("chunk-1".into()),
-                    ),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, ts),
+                        plant_concept_full(
+                            &sid,
+                            o1,
+                            i1,
+                            "identical sentence",
+                            "identical sentence",
+                            ConceptType::Observation,
+                            ts,
+                            None,
+                            Some("chunk-1".into()),
+                        ),
+                        plant_concept_full(
+                            &sid,
+                            o2,
+                            i1,
+                            "identical sentence",
+                            "identical sentence",
+                            ConceptType::Observation,
+                            ts,
+                            None,
+                            Some("chunk-1".into()),
+                        ),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -3802,7 +3886,7 @@ mod conformance {
             ],
         };
         assert!(
-            store.flush(&bad).await.is_err(),
+            store.flush(&bad, None).await.is_err(),
             "duplicate-key non-Observation must violate concepts_key_non_obs_idx"
         );
     }
@@ -3817,33 +3901,36 @@ mod conformance {
         let plain = NodeId::new();
         let ts = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, ts),
-                    plant_concept_full(
-                        &sid,
-                        obs,
-                        i1,
-                        "overflow sentence",
-                        "overflow sentence",
-                        ConceptType::Observation,
-                        ts,
-                        None,
-                        Some("chunk-42".into()),
-                    ),
-                    plant_concept_full(
-                        &sid,
-                        plain,
-                        i1,
-                        "plain concept",
-                        "plain concept",
-                        ConceptType::Entity,
-                        ts,
-                        None,
-                        None,
-                    ),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, ts),
+                        plant_concept_full(
+                            &sid,
+                            obs,
+                            i1,
+                            "overflow sentence",
+                            "overflow sentence",
+                            ConceptType::Observation,
+                            ts,
+                            None,
+                            Some("chunk-42".into()),
+                        ),
+                        plant_concept_full(
+                            &sid,
+                            plain,
+                            i1,
+                            "plain concept",
+                            "plain concept",
+                            ConceptType::Entity,
+                            ts,
+                            None,
+                            None,
+                        ),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -3893,12 +3980,15 @@ mod conformance {
         // seeded contract.
         let i1 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, Utc::now()),
-                    plant_concept(&sid, NodeId::new(), i1, "seed concept", Utc::now(), None),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, Utc::now()),
+                        plant_concept(&sid, NodeId::new(), i1, "seed concept", Utc::now(), None),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&sid).await.unwrap();
@@ -3916,9 +4006,12 @@ mod conformance {
         // Session with no stamp reads back None.
         let plain_sid = SessionId::from(format!("conformance-embed-none-{}", Uuid::new_v4()));
         store
-            .flush(&MutationBatch {
-                mutations: vec![plant_interaction(&plain_sid, NodeId::new(), Utc::now())],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_interaction(&plain_sid, NodeId::new(), Utc::now())],
+                },
+                None,
+            )
             .await
             .unwrap();
         let snap = store.load_session(&plain_sid).await.unwrap();
@@ -4116,15 +4209,15 @@ mod conformance {
                 plant_edge(&sid, probe_src, probe_victim, EdgeType::Dependency, old_ts),
             ],
         };
-        store.flush(&base).await.unwrap();
+        store.flush(&base, None).await.unwrap();
         let mem = MemoryStore::new();
-        mem.flush(&base).await.unwrap();
+        mem.flush(&base, None).await.unwrap();
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
             mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
-        store.flush(&fresh).await.unwrap();
-        mem.flush(&fresh).await.unwrap();
+        store.flush(&fresh, None).await.unwrap();
+        mem.flush(&fresh, None).await.unwrap();
 
         let one_hour = Duration::from_secs(3600);
         // Aged-vs-fresh edge interaction: EVERY node × both cutoffs must agree
@@ -4258,9 +4351,9 @@ mod conformance {
                 plant_edge(&sid, i1, alone, EdgeType::Derives, old_ts),
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let mem = MemoryStore::new();
-        mem.flush(&batch).await.unwrap();
+        mem.flush(&batch, None).await.unwrap();
 
         for min_age in [Duration::ZERO, Duration::from_secs(3600)] {
             let want = mem
@@ -4289,26 +4382,32 @@ mod conformance {
         let pillar = NodeId::new();
         let orphan = NodeId::new();
         store
-            .flush(&MutationBatch {
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, ts),
+                        plant_concept(&sid, pillar, i1, "pillar", ts, None),
+                        plant_concept(&sid, orphan, i1, "orphan", ts, None),
+                        plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
+                    ],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mem = MemoryStore::new();
+        mem.flush(
+            &MutationBatch {
                 mutations: vec![
                     plant_interaction(&sid, i1, ts),
                     plant_concept(&sid, pillar, i1, "pillar", ts, None),
                     plant_concept(&sid, orphan, i1, "orphan", ts, None),
                     plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
                 ],
-            })
-            .await
-            .unwrap();
-
-        let mem = MemoryStore::new();
-        mem.flush(&MutationBatch {
-            mutations: vec![
-                plant_interaction(&sid, i1, ts),
-                plant_concept(&sid, pillar, i1, "pillar", ts, None),
-                plant_concept(&sid, orphan, i1, "orphan", ts, None),
-                plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
-            ],
-        })
+            },
+            None,
+        )
         .await
         .unwrap();
 
@@ -4346,12 +4445,15 @@ mod conformance {
         let i1 = NodeId::new();
         let c1 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&sid, i1, Utc::now()),
-                    plant_concept(&sid, c1, i1, "pillar", Utc::now(), None),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, i1, Utc::now()),
+                        plant_concept(&sid, c1, i1, "pillar", Utc::now(), None),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -4365,9 +4467,9 @@ mod conformance {
             last_demotion_time: None,
             occurred_at: Utc::now(),
         };
-        store.record_canonization(&event).await.unwrap();
+        store.record_canonization(&event, None).await.unwrap();
         // Same event re-recorded (retried flush) must not duplicate the audit row.
-        store.record_canonization(&event).await.unwrap();
+        store.record_canonization(&event, None).await.unwrap();
 
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(snap.canonization_events.len(), 1, "idempotent append");
@@ -4393,7 +4495,7 @@ mod conformance {
             last_demotion_time: None,
             occurred_at: Utc::now(),
         };
-        let err = store.record_canonization(&ghost).await.unwrap_err();
+        let err = store.record_canonization(&ghost, None).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound(_)));
     }
 
@@ -4449,19 +4551,22 @@ mod conformance {
         let concept = NodeId::new();
         let now = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    plant_interaction(&legacy, interaction, now),
-                    plant_concept(
-                        &legacy,
-                        concept,
-                        interaction,
-                        "legacy unknown vector",
-                        now,
-                        Some(probe.clone()),
-                    ),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&legacy, interaction, now),
+                        plant_concept(
+                            &legacy,
+                            concept,
+                            interaction,
+                            "legacy unknown vector",
+                            now,
+                            Some(probe.clone()),
+                        ),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         assert!(store
@@ -4476,12 +4581,15 @@ mod conformance {
             dim: store.vector_dim,
         };
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetEmbedding {
-                    session_id: legacy.clone(),
-                    embedding: Some(contract.clone()),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: legacy.clone(),
+                        embedding: Some(contract.clone()),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
         let loaded = store.load_session(&legacy).await.unwrap();
@@ -4511,24 +4619,30 @@ mod conformance {
         let sid = SessionId::from("live-set-root-goal");
         let goal = serde_json::json!({"text": "finish the demo", "n": 1});
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetRootGoal {
-                    session_id: sid.clone(),
-                    goal: Some(goal.clone()),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetRootGoal {
+                        session_id: sid.clone(),
+                        goal: Some(goal.clone()),
+                    }],
+                },
+                None,
+            )
             .await
             .expect("flush SetRootGoal");
         let snap = store.load_session(&sid).await.expect("load after set");
         assert_eq!(snap.root_goal, Some(goal), "goal read back identical");
 
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetRootGoal {
-                    session_id: sid.clone(),
-                    goal: None,
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetRootGoal {
+                        session_id: sid.clone(),
+                        goal: None,
+                    }],
+                },
+                None,
+            )
             .await
             .expect("flush SetRootGoal clear");
         let snap = store.load_session(&sid).await.expect("load after clear");
@@ -4545,12 +4659,15 @@ mod conformance {
                 .expect("Cockroach has a vector dimension"),
         };
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetEmbedding {
-                    session_id: sid.clone(),
-                    embedding: Some(embedding.clone()),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(embedding.clone()),
+                    }],
+                },
+                None,
+            )
             .await
             .expect("flush SetEmbedding");
         let snap = store.load_session(&sid).await.expect("load after stamp");

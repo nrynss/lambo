@@ -180,8 +180,12 @@ pub struct FlushTask {
     /// and another writer took the session), the heartbeat latches this `true`;
     /// the loop then stops flushing and **drops** its not-yet-durable `pending`
     /// rather than overwriting the new holder's rows. `None` for a task with no
-    /// lease (every test store, the advisory-default backends).
     fence: Option<Arc<AtomicBool>>,
+    /// Monotonic fencing token (GitHub issue #1) this task presents on every
+    /// `store.flush`, so the store can reject a stale/missing one after a
+    /// takeover. `None` for a task with no lease (every test store, the
+    /// advisory-default backends).
+    token: Option<u64>,
 }
 
 impl FlushTask {
@@ -193,6 +197,7 @@ impl FlushTask {
             params,
             shared: Arc::new(Shared::new()),
             fence: None,
+            token: None,
         }
     }
 
@@ -205,10 +210,15 @@ impl FlushTask {
         self
     }
 
-    /// Spawn the interval loop and return its handle.
-    ///
-    /// Call `spawn` **exactly once** per `FlushTask` — a second call panics.
-    /// Exactly one loop may run: two concurrent loops would each carry an
+    /// Present `token` on every `store.flush` (GitHub issue #1): the store
+    /// rejects a stale/missing fencing token after a takeover, closing the
+    /// lease-detection window at the store. `Memory::build` passes the token
+    /// it acquired with the lease.
+    pub fn with_token(mut self, token: u64) -> Self {
+        self.token = Some(token);
+        self
+    }
+
     /// independent `pending` buffer and could persist batches out of order
     /// (drain serialization alone does not order flushes).
     ///
@@ -235,6 +245,7 @@ impl FlushTask {
         let shared = self.shared.clone();
         let params = self.params; // Copy — do not capture `self` into the 'static task
         let fence = self.fence.clone();
+        let token = self.token;
         tokio::spawn(async move {
             FlushLoop {
                 graph,
@@ -242,6 +253,7 @@ impl FlushTask {
                 params,
                 shared,
                 fence,
+                token,
                 pending: MutationBatch::default(),
                 retry_after: None,
             }
@@ -350,6 +362,9 @@ struct FlushLoop {
     shared: Arc<Shared>,
     /// Single-writer-lease fence (T86-2); see [`FlushTask::with_fence`].
     fence: Option<Arc<AtomicBool>>,
+    /// Monotonic fencing token presented on every `store.flush` (GitHub issue
+    /// #1); see [`FlushTask::with_token`].
+    token: Option<u64>,
     /// Mutations not yet durable. Retained batches stay at the front; newly
     /// drained mutations are appended in chronological order — never re-sorted
     /// (mod.rs contract).
@@ -382,13 +397,20 @@ impl FlushLoop {
             // not requeued: those mutations belong to a session this process no
             // longer owns, and writing them (here OR handing them back for
             // `close`'s final flush) would overwrite the new holder's rows —
-            // the exact split-brain the lease exists to prevent. A `cycle`
-            // already in flight when the fence is set runs to completion; the
-            // guarantee is "no NEW flush after the fence is observed". The
-            // exposure is one in-flight cycle — bounded by `FLUSH_ATTEMPT_TIMEOUT`
-            // (30s) plus the lease-detection interval (heartbeat), not the
-            // `POLL_QUANTUM` this comment once claimed. That residual (and the
-            // fencing-token fix) is tracked in GitHub issue #1.
+            // the exact split-brain the lease exists to prevent.
+            //
+            // This cooperative latch is belt-and-braces. The HARD guarantee is
+            // the store-side monotonic fencing token (GitHub issue #1): every
+            // flush carries this holder's token, and the store rejects a
+            // stale/missing one. So even in the residual window between a lease
+            // expiring and the heartbeat observing the loss — bounded by the
+            // lease-detection interval (heartbeat) plus an in-flight cycle
+            // already inside `store.flush` (≤ `FLUSH_ATTEMPT_TIMEOUT`, 30s) —
+            // a pre-takeover flush cannot overwrite the new holder's rows: it
+            // presents a token below the row's current one and is refused with
+            // [`StoreError::StaleWrite`]. The window is closed at the store,
+            // not by any cooperative timer. (`POLL_QUANTUM`, 100ms, never
+            // bounded the in-flight cycle.)
             if self.fenced() {
                 let dropped = self.pending.mutations.len();
                 self.pending.mutations.clear();
@@ -587,7 +609,9 @@ impl FlushLoop {
             // and route a panic into the typed-error path below (same backoff
             // → retain/degrade handling), logging the payload.
             let attempt = async {
-                match CatchUnwindPoll(async { self.store.flush(&self.pending).await }).await {
+                match CatchUnwindPoll(async { self.store.flush(&self.pending, self.token).await })
+                    .await
+                {
                     Ok(result) => result,
                     Err(payload) => {
                         let message = panic_message(&payload);
@@ -838,7 +862,7 @@ mod tests {
             self.inner.capabilities()
         }
 
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
             if self.should_fail() {
@@ -846,7 +870,7 @@ mod tests {
                     "simulated flush failure (FlakyStore)".into(),
                 ))
             } else {
-                self.inner.flush(batch).await
+                self.inner.flush(batch, token).await
             }
         }
 
@@ -898,8 +922,12 @@ mod tests {
                 .await
         }
 
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -965,13 +993,13 @@ mod tests {
             self.inner.capabilities()
         }
 
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
             if self.should_panic() {
                 panic!("simulated flush panic (PanicStore)");
             } else {
-                self.inner.flush(batch).await
+                self.inner.flush(batch, token).await
             }
         }
 
@@ -1023,8 +1051,12 @@ mod tests {
                 .await
         }
 
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -1086,7 +1118,7 @@ mod tests {
             self.inner.capabilities()
         }
 
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
             if self.should_hang() {
@@ -1094,7 +1126,7 @@ mod tests {
                 // this (STORE-2); the pending future is dropped on timeout.
                 std::future::pending().await
             } else {
-                self.inner.flush(batch).await
+                self.inner.flush(batch, token).await
             }
         }
 
@@ -1146,8 +1178,12 @@ mod tests {
                 .await
         }
 
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 
@@ -1183,7 +1219,11 @@ mod tests {
             self.inner.capabilities()
         }
 
-        async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+        async fn flush(
+            &self,
+            batch: &MutationBatch,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
             self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
             Err(StoreError::Constraint("23505".into()))
@@ -1237,8 +1277,12 @@ mod tests {
                 .await
         }
 
-        async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
-            self.inner.record_canonization(event).await
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
         }
     }
 

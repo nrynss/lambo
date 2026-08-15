@@ -292,6 +292,7 @@ impl Evaluator {
     /// Takes the lock itself, in three short scopes, so the `!Send` guards
     /// structurally cannot span the store I/O — the future this returns is
     /// `Send` and can be `tokio::spawn`ed.
+    #[allow(clippy::too_many_arguments)] // one cycle's full input; mirrors eval_cycle()
     pub async fn eval_cycle(
         &mut self,
         graph: &RwLock<Graph>,
@@ -300,6 +301,7 @@ impl Evaluator {
         events: &EventSender,
         params: &EvalParams,
         now: DateTime<Utc>,
+        token: Option<u64>,
     ) -> Result<EvalOutcome, EvalError> {
         // 1. Gather — read guard, released before the first await.
         let plan = {
@@ -364,8 +366,7 @@ impl Evaluator {
             return Err(EvalError::new(outcome, err));
         }
 
-        // 4. Record — durable audit, no lock held.
-        if let Err(err) = record(store, &outcome).await {
+        if let Err(err) = record(store, &outcome, token).await {
             return Err(EvalError::new(outcome, err));
         }
         Ok(outcome)
@@ -662,9 +663,15 @@ fn apply(
 /// graph, in its audit, and in the write-behind log, so the flush task
 /// records the same rows (deduped on event id) on its next pass. The error is
 /// still surfaced — with the outcome attached — so the caller can log it.
-async fn record(store: &dyn GraphStore, outcome: &EvalOutcome) -> Result<(), StoreError> {
+async fn record(
+    store: &dyn GraphStore,
+    outcome: &EvalOutcome,
+    token: Option<u64>,
+) -> Result<(), StoreError> {
     for event in outcome.transitions() {
-        store.record_canonization(event).await?;
+        // Fencing-token gate (#1): present the holder's token; the store
+        // rejects a stale/missing one (this path had NO lease check before).
+        store.record_canonization(event, token).await?;
     }
     Ok(())
 }
@@ -680,8 +687,11 @@ pub async fn eval_cycle(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Result<EvalOutcome, EvalError> {
+    // Free-function test/utility form: no lease context, so no token is
+    // presented (unleased stores permit it). The assembled loop calls the
+    // `Evaluator` method directly with the holder's token.
     evaluator
-        .eval_cycle(graph, store, scores, events, params, now)
+        .eval_cycle(graph, store, scores, events, params, now, None)
         .await
 }
 
@@ -940,7 +950,7 @@ mod tests {
             for e in snap.edges {
                 batch.push(Mutation::UpsertEdge { edge: e });
             }
-            store.flush(&batch).await.unwrap();
+            store.flush(&batch, None).await.unwrap();
             store
         }
 
@@ -1261,8 +1271,12 @@ mod tests {
             fn capabilities(&self) -> crate::store::Capabilities {
                 self.inner.capabilities()
             }
-            async fn flush(&self, batch: &MutationBatch) -> Result<(), crate::types::StoreError> {
-                self.inner.flush(batch).await
+            async fn flush(
+                &self,
+                batch: &MutationBatch,
+                token: Option<u64>,
+            ) -> Result<(), crate::types::StoreError> {
+                self.inner.flush(batch, token).await
             }
             async fn load_session(
                 &self,
@@ -1316,11 +1330,12 @@ mod tests {
             async fn record_canonization(
                 &self,
                 event: &CanonizationEvent,
+                token: Option<u64>,
             ) -> Result<(), crate::types::StoreError> {
                 if self.fail_record {
                     return Err(StoreError::Backend("record_canonization is down".into()));
                 }
-                self.inner.record_canonization(event).await
+                self.inner.record_canonization(event, token).await
             }
         }
 
@@ -1964,7 +1979,7 @@ mod tests {
             // Replay the write-behind log (the same transition as the live write).
             let batch = g.write().drain_log();
             assert!(!batch.is_empty());
-            store.flush(&batch).await.unwrap();
+            store.flush(&batch, None).await.unwrap();
 
             let reloaded = store
                 .load_session(&sid())
