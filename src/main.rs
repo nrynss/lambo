@@ -59,9 +59,9 @@ enum Commands {
     /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
     ///
     /// A reader process: it never takes the writer lease and exposes no mutating
-    /// route, so it runs safely beside `lambo serve` on the same session. The
-    /// HTTP surface is unauthenticated (T8.7) — keep --bind on loopback, or put
-    /// an authenticating proxy in front of it.
+    /// route, so it runs safely beside `lambo serve` on the same session.
+    /// Loopback is unauthenticated by default; a non-loopback bind requires a
+    /// bearer token (LAMBO_AUTH_TOKEN or --auth-token) and fails closed without one.
     ServeWeb {
         /// Session to open a read-only window onto (reader process; does not take the writer lease).
         #[arg(
@@ -72,13 +72,21 @@ enum Commands {
         /// HTTP port to listen on.
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
-        /// Bind address. Loopback by default — the page is unauthenticated (T8.7).
+        /// Bind address. Loopback by default — unauthenticated. A non-loopback
+        /// bind REQUIRES --auth-token (or LAMBO_AUTH_TOKEN) and refuses to start
+        /// without one.
         #[arg(
             long,
             default_value = "127.0.0.1",
-            help = "Bind address. Loopback by default — the page is unauthenticated (T8.7)."
+            help = "Bind address. Loopback by default. A non-loopback bind requires a bearer token (--auth-token or LAMBO_AUTH_TOKEN)."
         )]
         bind: std::net::IpAddr,
+        /// Bearer token required on every request. Prefer the LAMBO_AUTH_TOKEN
+        /// env var, which overrides this flag — a token in argv is visible in
+        /// `ps` and shell history. Optional on loopback, mandatory on any other
+        /// bind.
+        #[arg(long, value_name = "TOKEN")]
+        auth_token: Option<lambo::cli::serve_web::AuthToken>,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -460,6 +468,7 @@ fn main() -> ExitCode {
                 session,
                 port,
                 bind,
+                auth_token,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -470,6 +479,7 @@ fn main() -> ExitCode {
                     session,
                     port,
                     bind,
+                    auth_token,
                 },
             ),
         ),

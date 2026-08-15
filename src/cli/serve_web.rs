@@ -9,21 +9,26 @@
 //!
 //! # Read-only, by construction
 //!
-//! **The HTTP surface is unauthenticated (T8.7 is still pending).** Two
-//! consequences this module is built around:
+//! **Auth, mirroring T8.7's fail-closed rule.** Two consequences this module
+//! is built around:
 //!
 //! 1. **This app must stay read-only.** Every route is registered with
 //!    `routing::get` and every handler reads. There is deliberately no
 //!    `derive` / `record_action` / `reserve` path reachable from the browser:
-//!    an unauthenticated write surface is a stranger with a pen in your
-//!    session's memory. `read_only_router_has_no_mutating_route` and
+//!    a write surface is a stranger with a pen in your session's memory.
+//!    `read_only_router_has_no_mutating_route` and
 //!    `the_module_registers_only_get_routes` fail the build's test gate if a
 //!    later edit adds one.
-//! 2. **Public exposure requires T8.7 first.** Even read access leaks the whole
-//!    session to anyone who can reach the port. `--bind` defaults to loopback
-//!    for that reason, and a non-loopback bind prints a warning on stderr and
-//!    raises a banner on the page. Until T8.7 lands, "hosted" means *behind a
-//!    private network or an authenticating proxy* — not a public URL.
+//! 2. **Loopback is unauthenticated by default; anywhere else fails closed.**
+//!    Reading still leaks the whole session to whoever can reach the port, so
+//!    `--bind` defaults to loopback and needs **no token** — a judge's browser
+//!    just works. A non-loopback bind (LAN or public) is refused at startup
+//!    unless a bearer token is configured (`LAMBO_AUTH_TOKEN` env or
+//!    `--auth-token`); when a token is set, every request must send
+//!    `Authorization: Bearer <token>` (mirrors `crate::mcp::serve`'s
+//!    `authorize_bind`). The surface stays read-only either way, and a
+//!    token-protected bind should still sit behind a private network or an
+//!    authenticating proxy.
 //!
 //! # Reader, not writer (spec §2.2)
 //!
@@ -80,6 +85,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -89,6 +95,7 @@ use serde::{Deserialize, Serialize};
 use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::load_reader_graph;
 use crate::graph::Graph;
+use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
 use crate::store::{Capabilities, GraphStore, StoreKind};
 use crate::types::{CanonizationStatus, GraphSnapshot, NodeId, SessionId, StoreError};
@@ -124,8 +131,127 @@ pub struct Args {
     pub session: String,
     /// TCP port to listen on.
     pub port: u16,
-    /// Bind address. Loopback by default — the server is unauthenticated.
+    /// Bind address. Loopback by default — no token required. A non-loopback
+    /// bind requires a token (see [`authorize_bind_web`]).
     pub bind: IpAddr,
+    /// Optional bearer token required on every request. Prefer the
+    /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
+    /// is visible in `ps` and shell history. Mandatory on any non-loopback bind.
+    pub auth_token: Option<AuthToken>,
+}
+
+// ---------------------------------------------------------------------------
+// Auth (mirrors T8.7's fail-closed bearer posture in `crate::mcp::serve`)
+// ---------------------------------------------------------------------------
+
+/// A bearer token that cannot be printed.
+///
+/// Mirrors `mcp::serve::SecretToken`: a redacting [`Debug`] makes "never
+/// logged" a property of the type, and rejecting empty/whitespace tokens makes
+/// a set-but-empty [`AUTH_TOKEN_ENV`] a usage error rather than a silent
+/// authenticate-everything.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthToken(String);
+
+impl AuthToken {
+    /// Reject empty and whitespace-only tokens (fail closed, not silently).
+    fn new(raw: impl Into<String>) -> Result<Self, String> {
+        let raw = raw.into();
+        if raw.trim().is_empty() {
+            return Err(
+                "auth token is empty — pass a non-empty secret, or omit it entirely to \
+                 run unauthenticated on loopback"
+                    .into(),
+            );
+        }
+        Ok(Self(raw))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthToken(<redacted>)")
+    }
+}
+
+impl std::str::FromStr for AuthToken {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+/// Compare `presented` against `expected` without an early exit.
+///
+/// Mirrors `mcp::serve`'s `tokens_match`: the accumulate-then-test shape keeps
+/// the time independent of where the first differing byte falls, and
+/// [`std::hint::black_box`] stops the optimiser from proving the accumulator
+/// can be short-circuited.
+fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
+    if expected.is_empty() {
+        // Unreachable via `AuthToken::new`, which rejects empty tokens; a
+        // belt-and-braces guard so the `%` below cannot divide by zero.
+        return false;
+    }
+    let mut diff = (presented.len() ^ expected.len()) as u64;
+    for (i, byte) in presented.iter().enumerate() {
+        diff |= u64::from(byte ^ expected[i % expected.len()]);
+    }
+    std::hint::black_box(diff) == 0
+}
+
+/// Does an `Authorization` header carry the expected bearer token?
+///
+/// Scheme matched case-insensitively (RFC 7235 §2.1); the credential compared
+/// byte-for-byte in constant time. Mirrors `mcp::serve::bearer_ok`.
+fn bearer_ok(header: Option<&str>, expected: &AuthToken) -> bool {
+    let Some(raw) = header else {
+        return false;
+    };
+    let raw = raw.trim();
+    let Some((scheme, credential)) = raw.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    tokens_match(credential.trim().as_bytes(), expected.as_bytes())
+}
+
+/// Resolve the effective token from the flag and the environment (env wins).
+///
+/// Mirrors `mcp::serve::resolve_auth_token`: a set-but-empty env var is an
+/// error rather than a silent fallback to the flag.
+fn resolve_auth_token(flag: Option<AuthToken>) -> Result<Option<AuthToken>, CliError> {
+    match std::env::var(AUTH_TOKEN_ENV).ok() {
+        Some(raw) => AuthToken::new(raw)
+            .map(Some)
+            .map_err(|e| CliError::Usage(format!("{AUTH_TOKEN_ENV}: {e}"))),
+        None => Ok(flag),
+    }
+}
+
+/// Fail closed when a non-loopback bind has no token.
+///
+/// Mirrors `mcp::serve::authorize_bind`. serve-web is a *reader* — it never
+/// takes the writer lease, so exposure is read-only — but the whole session
+/// is still readable, so a token-less bind to the world is not a configuration
+/// worth starting.
+fn authorize_bind_web(bind: IpAddr, token: Option<&AuthToken>) -> Result<(), CliError> {
+    if bind.is_loopback() || token.is_some() {
+        return Ok(());
+    }
+    Err(CliError::Usage(format!(
+        "refusing to start: --bind {bind} exposes an unauthenticated read-only session beyond \
+         loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token) to require \
+         'Authorization: Bearer <token>' on every request, or bind 127.0.0.1 and reach it \
+         through a tunnel or an authenticating proxy."
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +267,11 @@ struct Freshness {
 struct AppState {
     session: SessionId,
     backends: ResolvedBackends,
-    /// True when `--bind` reaches beyond loopback on an unauthenticated server.
+    /// True when `--bind` reaches beyond loopback. A non-loopback bind always
+    /// carries a token (see [`authorize_bind_web`]).
     exposed: bool,
+    /// Optional bearer token. When set, every route requires it.
+    auth: Option<AuthToken>,
     freshness: Mutex<Freshness>,
 }
 
@@ -190,7 +319,9 @@ struct SessionInfo {
     /// The in-RAM store is per-process: a reader cannot see another process's
     /// writes through it. Surfaced so the page can say so instead of looking broken.
     store_is_process_local: bool,
-    /// `--bind` reaches beyond loopback while the server is unauthenticated (T8.7).
+    /// `--bind` reaches beyond loopback. Such a bind always requires a bearer
+    /// token; the page can only reach this surface through an authenticated
+    /// proxy or a client that sends the token.
     exposed_beyond_loopback: bool,
     poll_interval_ms: u64,
     version: &'static str,
@@ -525,12 +656,47 @@ async fn api_recall(
 // Router
 // ---------------------------------------------------------------------------
 
+/// Bearer gate applied when a token is configured.
+///
+/// When [`AppState::auth`] is `Some`, every request — static asset, health
+/// check, or API — must carry `Authorization: Bearer <token>`. When it is
+/// `None` (the loopback default) this is a pure pass-through, so a judge's
+/// browser needs no credentials. Mirrors `mcp::serve`'s `guard_request`, minus
+/// the transport-specific rate/session guards this read-only process does not
+/// have.
+async fn require_auth(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if let Some(expected) = &state.auth {
+        let presented = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if !bearer_ok(presented, expected) {
+            // Deliberately terse and identical for "no header" and "wrong
+            // token": the difference is not the caller's business, and the
+            // token itself is never echoed.
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// Every route, `GET`-only.
 ///
 /// Adding a mutating method here is what `read_only_router_has_no_mutating_route`
-/// exists to catch: this server is unauthenticated until T8.7, so a write route
-/// is a stranger with a pen. A new path must also be added to the tests' `ROUTES`
-/// list, which `routes_constant_covers_every_registered_route` enforces.
+/// exists to catch: this server is read-only, so a write route is a stranger
+/// with a pen. A new path must also be added to the tests' `ROUTES` list, which
+/// `routes_constant_covers_every_registered_route` enforces. The `require_auth`
+/// layer sits over the whole router and enforces the bearer token whenever one
+/// is configured.
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
@@ -542,6 +708,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(api_events))
         .route("/api/stats", get(api_stats))
         .route("/api/pulse", get(api_pulse))
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
 }
 
@@ -590,11 +757,25 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     require_nonempty("session", &args.session)?;
     check_size_cli("session", &args.session)?;
 
+    // Env beats flag (mirrors `mcp::serve`). A set-but-empty LAMBO_AUTH_TOKEN
+    // is a usage error, not a silent fallback to the flag.
+    let auth = match resolve_auth_token(args.auth_token) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("lambo serve-web: {e}");
+            return Err(e);
+        }
+    };
+    // Fail closed: a non-loopback bind with no token is a config error, not a
+    // warning (same posture as `mcp::serve::authorize_bind`).
+    authorize_bind_web(args.bind, auth.as_ref())?;
+
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState {
         session: SessionId::new(args.session.as_str()),
         backends,
         exposed,
+        auth,
         freshness: Mutex::new(Freshness {
             fingerprint: 0,
             observed_at: Instant::now(),
@@ -614,11 +795,18 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         args.session
     );
     println!("lambo serve-web: reader process — no writer lease, no write routes");
-    if exposed {
+    // A non-loopback bind always carries a token (`authorize_bind_web`), so
+    // the two branches below are exhaustive: token configured, or loopback.
+    if state.auth.is_some() {
         eprintln!(
-            "⚑ lambo serve-web: bound to {} — the HTTP surface is UNAUTHENTICATED (T8.7 pending). \
-             Anyone who can reach this port can read the whole session. Keep it on a private \
-             network or behind an authenticating proxy.",
+            "⚑ lambo serve-web: authentication is ON — every request must send \
+             'Authorization: Bearer <token>' (from {AUTH_TOKEN_ENV} or --auth-token)."
+        );
+    } else {
+        eprintln!(
+            "⚑ lambo serve-web: bound to {} — no auth token configured, so the surface is \
+             unauthenticated. Anyone who can reach this port can read the whole session; keep \
+             it on a private network or behind an authenticating proxy.",
             args.bind
         );
     }
@@ -824,10 +1012,19 @@ mod tests {
     }
 
     fn state_on(store: Arc<MemoryStore>, session: &str) -> Arc<AppState> {
+        state_with_auth(store, session, None)
+    }
+
+    fn state_with_auth(
+        store: Arc<MemoryStore>,
+        session: &str,
+        auth: Option<AuthToken>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             session: SessionId::new(session),
             backends: backends_on(store),
-            exposed: false,
+            exposed: auth.is_some(),
+            auth,
             freshness: Mutex::new(Freshness {
                 fingerprint: 0,
                 observed_at: Instant::now(),
@@ -937,6 +1134,40 @@ mod tests {
 
         // `Connection: close` means no chunked framing from hyper, so the body
         // is the bytes after the header block, verbatim.
+        HttpResponse {
+            status,
+            headers: head.to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    /// Like [`request`], but with an optional `Authorization` header so the
+    /// auth gate can be exercised.
+    async fn request_authed(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        authorization: Option<&str>,
+    ) -> HttpResponse {
+        let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let auth = authorization
+            .map(|a| format!("Authorization: {a}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\n{auth}Connection: close\r\n\r\n"
+        );
+        sock.write_all(req.as_bytes()).await.expect("write");
+        sock.flush().await.expect("flush");
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.expect("read");
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+        let status = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse::<u16>().ok())
+            .unwrap_or_else(|| panic!("no status line in: {head}"));
         HttpResponse {
             status,
             headers: head.to_string(),
@@ -1196,9 +1427,8 @@ mod tests {
                 let r = request(addr, method, path).await;
                 assert_eq!(
                     r.status, 405,
-                    "{method} {path} must be Method Not Allowed — the HTTP surface is \
-                     unauthenticated (T8.7 pending) and this app is a read window, so a \
-                     mutating route here is a stranger with a pen. Got {} / {}",
+                    "{method} {path} must be Method Not Allowed — this is a read-only window \
+                     and a mutating route here would be a stranger with a pen. Got {} / {}",
                     r.status, r.body
                 );
             }
@@ -1225,8 +1455,8 @@ mod tests {
         ] {
             assert!(
                 !prod.contains(banned),
-                "serve_web registers '{banned}' — the demo app must stay read-only until T8.7 \
-                 authenticates the HTTP surface"
+                "serve_web registers '{banned}' — the demo app must stay read-only on every \
+                 bind, token-protected or not"
             );
         }
         // A reader never opens a writer, never takes the lease, never spawns GC.
@@ -1270,6 +1500,93 @@ mod tests {
         assert_eq!(registered.len(), ROUTES.len(), "ROUTES has stale entries");
     }
 
+    // ---- auth: fail-closed non-loopback bind (mirrors T8.7) -------------
+
+    /// A non-loopback bind without a token is a startup refusal; loopback
+    /// stays optional-auth. Mirrors `mcp::serve`'s `authorize_bind` test.
+    #[test]
+    fn authorize_bind_web_fails_closed_off_loopback() {
+        let public: IpAddr = "0.0.0.0".parse().unwrap();
+        let any_v6: IpAddr = "0:0:0:0:0:0:0:0".parse().unwrap();
+        let lan: IpAddr = "192.168.1.10".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let loopback_v6: IpAddr = "::1".parse().unwrap();
+        let loopback_subnet: IpAddr = "127.9.9.9".parse().unwrap();
+
+        for bind in [public, any_v6, lan] {
+            let err =
+                authorize_bind_web(bind, None).expect_err("{bind} without a token must not start");
+            let msg = err.to_string();
+            assert!(msg.contains("refusing to start"), "{msg}");
+
+            let token = AuthToken::new("s3cret").expect("valid");
+            authorize_bind_web(bind, Some(&token)).expect("a token satisfies the rule");
+        }
+
+        for bind in [loopback, loopback_v6, loopback_subnet] {
+            authorize_bind_web(bind, None).expect("loopback stays optional-auth");
+        }
+    }
+
+    /// AuthToken rejects empty/whitespace tokens, so a set-but-empty
+    /// LAMBO_AUTH_TOKEN is a usage error rather than authenticate-everything.
+    #[test]
+    fn an_empty_auth_token_is_refused() {
+        assert!(AuthToken::new("").is_err());
+        assert!(AuthToken::new("   ").is_err());
+        assert!(AuthToken::new("s3cret").is_ok());
+    }
+
+    /// The `Authorization` header is parsed strictly: scheme case-insensitive,
+    /// credential exact.
+    #[test]
+    fn bearer_header_is_parsed_strictly() {
+        let expected = AuthToken::new("s3cret").expect("valid");
+        assert!(bearer_ok(Some("Bearer s3cret"), &expected));
+        assert!(bearer_ok(Some("bearer s3cret"), &expected), "RFC 7235 §2.1");
+        assert!(bearer_ok(Some("  Bearer s3cret  "), &expected));
+        assert!(!bearer_ok(None, &expected), "a missing header is a refusal");
+        assert!(!bearer_ok(Some("Bearer wrong"), &expected));
+        assert!(!bearer_ok(Some("Basic s3cret"), &expected), "wrong scheme");
+        assert!(!bearer_ok(Some("s3cret"), &expected), "no scheme at all");
+        assert!(!bearer_ok(Some("Bearer"), &expected));
+        assert!(!bearer_ok(Some(""), &expected));
+    }
+
+    /// When a token is configured, every route — API, asset, healthz — refuses
+    /// a request without it and serves one that carries it. This is the
+    /// middleware wiring that the `authorize_bind_web` unit test only proves is
+    /// *called*.
+    #[tokio::test]
+    async fn a_configured_token_is_required_on_every_route() {
+        let store = seed("t85-auth").await;
+        let (addr, handle) = spawn(state_with_auth(
+            store,
+            "t85-auth",
+            Some(AuthToken::new("s3cret").unwrap()),
+        ))
+        .await;
+
+        // No token and a wrong token are refused identically (terse 401).
+        for path in ROUTES {
+            let r = request_authed(addr, "GET", path, None).await;
+            assert_eq!(r.status, 401, "GET {path} without a token must be 401");
+        }
+        let r = request_authed(addr, "GET", "/api/session", Some("Bearer wrong")).await;
+        assert_eq!(r.status, 401, "a wrong token must be refused");
+
+        // The correct bearer token is accepted on the data API and the page.
+        let r = request_authed(addr, "GET", "/api/session", Some("Bearer s3cret")).await;
+        assert_eq!(r.status, 200, "the correct token must be served");
+        let info: serde_json::Value = serde_json::from_str(&r.body).expect("json");
+        assert_eq!(info["read_only"], true);
+        assert_eq!(info["exposed_beyond_loopback"], true);
+        let r = request_authed(addr, "GET", "/", Some("Bearer s3cret")).await;
+        assert_eq!(r.status, 200, "the correct token must serve the page");
+
+        handle.abort();
+    }
+
     // ---- no secrets in the page ----------------------------------------
 
     #[tokio::test]
@@ -1284,6 +1601,7 @@ mod tests {
             session: SessionId::new("t85-secrets"),
             backends,
             exposed: false,
+            auth: None,
             freshness: Mutex::new(Freshness {
                 fingerprint: 0,
                 observed_at: Instant::now(),

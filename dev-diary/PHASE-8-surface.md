@@ -549,8 +549,10 @@ window onto T5.3's text and T6.4's feed, not a product. Deployment target decide
 
 `axum` 0.8 is **already** in `Cargo.toml` — no dependency change needed.
 
-**Done when:** a browser against `lambo serve --transport http` shows a live recall and the
-event feed updating during the demo scenario.
+**Done when:** a browser against `lambo serve-web` (the separate read-only demo
+command, port 7710) shows a live recall and the event feed updating during the
+demo scenario, with `lambo serve-web` running **beside** the MCP writer
+`lambo serve` on the same session.
 
 **Optional swarm showcase (non-blocking — must NOT jeopardize the base demo above):**
 if time allows after the two-agent demo works, add a swarm view — N concurrent small
@@ -1918,3 +1920,34 @@ green.
   fabricated; recorded with `demo/LIVE-RUNBOOK.md` §1-§6 for the cluster holder. This is an
   **open exit-criteria item**: T8.4 is code-CLEAN but not exit-complete until a holder with
   cluster access performs those two legs.
+
+### T8.5 — demo web app (review loop, 2026-08-15)
+
+Adversarial review of T8.5 at current HEAD (report `adve-review-t8.5-web.md`), including a
+LIVE verification against the running server. The web surface WORKS: a real rest-api demo
+scenario (T8.4 writer) ran while `lambo serve-web` polled the same session and confirmed live
+updates (nodes 11→39, edges 23→93, concepts 8→27, canonical 0→1, events 0→5 with 5 real
+canonization transitions in the feed); `/api/recall` returned the T5.3 context block verbatim
+(incl. `[Entity, canonical]` + the ⚑ load-bearing-pillar line); the page is READ-ONLY (405 on
+every mutation verb); a headless browser renders all four pieces (session view, recall box,
+event feed, stats). Gate block green. Findings closed:
+
+- **T85-1 (P2) FIXED — serve-web now mirrors the T8.7 fail-closed bind auth.** Previously
+  `--bind 0.0.0.0` served the whole session unauthenticated with a stale "T8.7 pending" banner.
+  Now: non-loopback bind with NO token is a hard startup refusal (exit 2, honest error);
+  loopback stays unauthenticated by default (judge's browser works); a token comes from
+  `LAMBO_AUTH_TOKEN` or `--auth-token` (env overrides flag; set-but-empty env fails closed);
+  every route requires `Authorization: Bearer` when a token is set (constant-time compare);
+  stale "T8.7 pending" wording removed from module doc/stderr/app.js/main.rs help. Read-only
+  preserved (no write route; mutations still 405). New tests pin the auth (fail if removed).
+- **T85-2 (P3) FIXED** — done-when now names `lambo serve-web` (port 7710) beside the MCP
+  writer `lambo serve`, not `serve --transport http`.
+- **T85-3 (P3) ACCEPTED-by-design** — flush_lag/log_depth stay n/a on the read-only reader
+  (a lease-free reader cannot observe the writer's flush task; printing 0 would be a lie);
+  already disclosed on-page.
+- **T85-4 (P3) informational** — surfaced for the T8.4 video crew, not addressed here.
+
+Reverify CLEAN. Headless-browser confirmation that a browser shows live recall + the event
+feed updating (the done-when) came from the fixture/sqlite path; the Cockroach live-cluster leg
+is infra-blocked like T8.4 (no `LAMBO_COCKROACH_DSN`) and belongs to the same cluster-holder
+run.

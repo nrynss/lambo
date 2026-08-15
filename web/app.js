@@ -93,9 +93,10 @@
     }
     if (info.exposed_beyond_loopback) {
       banner(
-        "Bound beyond loopback on an unauthenticated server.",
-        "Anyone who can reach this port can read the session. Keep it behind a private " +
-        "network until authentication lands."
+        "Bound beyond loopback; bearer token required.",
+        "Every request must send 'Authorization: Bearer <token>' (set via LAMBO_AUTH_TOKEN " +
+        "or --auth-token). This surface stays read-only. If this page loaded without a " +
+        "token, route it through an authenticating proxy from the start."
       );
     }
   }
