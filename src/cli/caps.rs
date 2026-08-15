@@ -28,7 +28,13 @@ pub const MAX_ACTION_TARGETS: usize = 64;
 pub const MAX_RESERVE_TTL_SECS: u64 = 3600;
 /// Upper bound on `inspect` depth.
 pub const MAX_INSPECT_DEPTH: usize = 5;
-/// Cap on neighbours rendered per `inspect` frontier level.
+/// Cap on neighbours rendered by `inspect`, as a **total** across every hop.
+///
+/// `render_neighbourhood` (`src/cli/inspect.rs`) initialises one budget from
+/// this constant *before* the hop loop and decrements it as it renders, so the
+/// bound is on the whole rendered neighbourhood, not on each frontier level.
+/// (T88-H8: this doc-comment previously said "per frontier level", which the
+/// code has never done.)
 pub const MAX_INSPECT_NODES: usize = 200;
 /// Upper bound on **every** client-supplied string this surface accepts.
 ///
