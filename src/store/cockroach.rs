@@ -1775,6 +1775,20 @@ impl GraphStore for CockroachStore {
             .execute(pool)
             .await
             .map_err(backend)?;
+
+        // Post-T3.1 columns (T86 fencing): fresh databases carry `current_token`
+        // inline from the DDL above; an EXISTING cluster provisioned before the
+        // fencing change does not, so converge it here with an idempotent ALTER
+        // (Cockroach supports `IF NOT EXISTS` on `ADD COLUMN` — same pattern the
+        // module documents for the `chunk_group_id` / `embedding_*` upgrades).
+        // Safe to run on every `init_schema` (a fresh DB is a no-op).
+        sqlx::query(
+            "ALTER TABLE session_leases \
+             ADD COLUMN IF NOT EXISTS current_token INT NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 
