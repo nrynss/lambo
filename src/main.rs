@@ -65,10 +65,21 @@ enum Commands {
         )]
         bind: std::net::IpAddr,
     },
-    /// Scripted two-agent demo scenario.
+    /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
-        #[arg(long, default_value = "rest-api")]
+        /// Scenario to run. Only `rest-api` exists in v0.1.
+        #[arg(
+            long,
+            default_value = "rest-api",
+            help = "Scenario to run. Only `rest-api` exists in v0.1."
+        )]
         scenario: String,
+        /// Session to write. Defaults to a fresh id per run; the scenario is not re-runnable into a used session (canonization state is not restored over one).
+        #[arg(
+            long,
+            help = "Session to write. Defaults to a fresh id per run; the scenario is not re-runnable into a used session (canonization state is not restored over one)."
+        )]
+        session: Option<String>,
     },
     /// Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines).
     Recall {
@@ -431,11 +442,10 @@ fn main() -> ExitCode {
                 },
             ),
         ),
-        (Commands::Demo { scenario }, Resolved::Full(backends)) => {
-            let _ = backends;
-            println!("lambo demo (stub): scenario={scenario}");
-            ExitCode::SUCCESS
-        }
+        (Commands::Demo { scenario, session }, Resolved::Full(backends)) => run_async(
+            "demo",
+            lambo::cli::demo::run(*backends, lambo::cli::demo::Args { scenario, session }),
+        ),
         (
             Commands::Recall {
                 session,

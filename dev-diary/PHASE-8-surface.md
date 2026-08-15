@@ -489,7 +489,7 @@ requires:   T8.2, T6.4, T4.3   # live store strongly preferred: T3.2, T3.6
 fixture-ok: partial   # logic testable on MemoryStore; the artifact must run live
 owns:       src/cli/demo.rs, demo/
 appends-to: src/main.rs (demo dispatch arm only)
-status:     not-started
+status:     task-complete (awaiting adve-review) — task/t8.4-demo
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Spec §13, scripted and **deterministic** — a demo that works 3 times in 5 is not done:
@@ -1539,3 +1539,112 @@ load-bearing-pillar line intact, after real transitions were recorded through th
 text input, `<button type="submit">`, no console errors) and submits on click, but a
 *synthetic* Return from browser automation did not reach it. Implicit submission should work
 for a human pressing Enter — worth one manual keypress before the video.
+### T8.4 — task agent (2026-08-15) — two-agent demo scenario
+
+- **Branch:** `task/t8.4-demo`, cut from `phase/p8-surface` @ `f68cfc3`.
+- **Owns:** `src/cli/demo.rs`, `demo/README.md`, `demo/LIVE-RUNBOOK.md`,
+  `tests/t84_demo.rs`.
+- **Appends only:** `src/cli/mod.rs` (`pub mod demo;` — the one line the
+  shared-file rule allows) and `src/main.rs` (**one** dispatch arm, plus the
+  `demo` subcommand's own two flags `--scenario` / `--session` with help text).
+  Nothing else in `main.rs` was touched. This closes **T88-H9**: `lambo demo` is
+  no longer a stub printing `lambo demo (stub)`.
+- **Entry point:** `lambo demo --scenario rest-api`. Library seam:
+  `cli::demo::run_scenario(store, embedder, contract, args, echo) -> DemoRun`.
+
+**Scenario (spec §13).** 12 scripted interactions on one session, static data in
+`ACT_I` / `ACT_II` / `ACT_III`: agent A derives `user schema` / `auth
+middleware` / `session store`, plants nine `parent_of` children under the pillar
+and records six actions that depend on it; agent B joins on a separate feature
+and takes an edge to the pillar; agent A returns for the last edit
+(`modifies: user schema`). `user schema` then climbs Candidate → Venerable →
+Canonical with one `canonization_events` row per hop, and agent B's
+`recall("update user schema")` renders the canonical marker, the ⚑ 9-nodes line
+and the conflict line. **No code path in `demo.rs` writes a status or an audit
+row** — the real `CanonizationTask` does, through the same write gate that
+rejects fabricated transitions.
+
+**Knobs (documented in `demo/README.md` and the module docs).** Two `Config`s;
+**no threshold weakened**, only intervals and one age floor compressed:
+`canonization_edge_min_age` 60s → **10ms** (kept non-zero, so the inflation
+guard still bites), `canonization_eval_interval` 60s → **1h during the build**
+(frozen) then **25ms**, `daemon_tick_interval` 1s → **5ms**,
+`backend_flush_interval` 1s → **5ms**, `gc_interval` 10 000 → spec default
+during the build then **1**, `match_strategy` → **Canonical** (determinism: no
+embedding lookups on the write path). Untouched: `min_peer_count` 20,
+`eval_batch_size` 50, `repromotion_cooldown` 300s, `max_canonical_nodes` 1000,
+`conflict_recency_window` 30s, scoring/recall weights, and every stage constant.
+**No new `Config` key was added.**
+
+**Determinism — the four things that actually bit, and the fix for each.**
+
+| Source | Fix |
+|---|---|
+| Canonization cycles racing the build | acts I–III run with the eval interval frozen and GC at spec default; the canonization attach **writes nothing**, so no cycle ever sees a half-built graph |
+| Stage 1's `gc_survived >= 3` gate | GC bumps only on session mutations, so an idle session's counters stop. `settle_gc_survived` declares one real synonym at a time and **awaits the resulting sweep** until the floor is met for every concept — which is what makes the fixed point unique (a node admitted under the earlier P90 is still admitted under the final one) |
+| `recency` measured against real timestamps | `STEP_PACING` (10ms) makes the session's temporal extent a property of the script, not of scheduler jitter. Also makes the narration readable on camera |
+| Exact score ties broken by random `NodeId` | structurally identical siblings in one derive carry **distinct concept types**; the audit trail is grouped by concept rather than by node id |
+
+**GC cannot be disabled for the demo** (this was tried first): Stage 1 gates on
+`gc_survived >= 3` and GC's survivor bump is the only thing in the system that
+raises it, so a GC-free demo has **zero transitions**. GC therefore runs, and
+the script is instead a session with nothing collectable: `cli::demo::gc_headroom`
+measures every concept's distance from GC's step-2 bar and the run refuses below
+`MIN_GC_HEADROOM` 1.25×, naming the concept. Current worst is **1.55×**. Two
+script edits were needed to get there (artifacts now carry a real dependency
+chain), and one more to separate the two concepts that were within ~0.005 of
+each other at Stage 1's P90 cut.
+
+**Normalized in the ×2 comparison, and only these three:** the conflict line's
+age (`<n>`, the true age of agent A's write), the rendered composite score
+(`<s>`, its `recency` term is a wall-clock measurement) and node ids (`<node>`,
+`Uuid::new_v4()`). Hit **ordering**, contents, `[Entity, canonical]`,
+`blast radius 9`, the ⚑ line and the conflict sentence are all compared byte for
+byte. The demo prints the real values.
+
+**R3-1 honoured:** `lambo demo` mints a fresh session id per run
+(`demo-rest-api-<uuid>`); `--session` is documented fresh-only. `seed()` is
+never called.
+
+**Tests.** `tests/t84_demo.rs` runs the whole scenario **twice in one process
+per backend** against a store that already holds run 1's session, and asserts
+the two `DemoOutcome`s are equal plus every spec §13 string:
+`scenario_is_identical_twice_on_the_memory_store` and
+`sqlite::scenario_is_identical_twice_on_sqlite` (`--features store-sqlite`),
+plus an unknown-scenario usage test. 19 unit tests in `cli::demo` cover the
+script invariants (nine dependents with the pillar as only parent, no action
+target collides with one, ≥6 distinct span sources, agent A writes last, agent B
+holds an edge, sibling type distinctness) and the normalizers. Stability
+measured: **14 consecutive invocations green** (8 default + 6 sqlite = 28 full
+scenario runs, all pairwise identical). One earlier failure was a 61s run that
+spanned a host suspend — the waits are wall-clock bounded and the conflict
+window is 30s, so a laptop that sleeps mid-run invalidates that run; noted in
+the runbook's failure table.
+
+**Gates (full binding block, all green):** `cargo fmt --all -- --check` clean;
+all three clippy `-D warnings` lines exit 0; `cargo test` **639 lib + 5 bin + 5
+integration + 1 doctest passing, 3 ignored** (T8.3 baseline 620 lib + 5 bin + 3
+integration — **+19 lib, +2 integration**); `cargo test --features store-sqlite`
+**683 lib + 5 bin + 11 integration + 1 doctest passing, 3 ignored** (baseline
+664 lib + 5 bin + 8 integration — **+19 lib, +3 integration**); no regressions.
+`cargo test --no-default-features --features store-sqlite --no-run`
+and `--features store-cockroach --no-run` both build; `cargo check
+--no-default-features` clean. `demo.rs` is not feature-gated — it uses only core
+APIs and compiles on every row of the matrix.
+
+**Live-only, not done here.** The T8.4 "done when" needs the scenario ×2 against
+the **live cluster**, plus the split-screen `canonization_events` query through
+CockroachDB's managed MCP server. Neither can run on this machine (no DSN).
+`demo/LIVE-RUNBOOK.md` carries the exact commands, the expected transcript, the
+`diff` that constitutes the ×2 proof, the session-scoped audit query for the
+split screen, a failure-mode table, and the **schema-divergence warning** (the
+hand-created `concepts_embedding_nonnull_idx` and the ~2833 seeded concepts on
+the cluster; the demo reads only its own fresh session, so seed rows do not
+affect its outcome, but table-wide queries must be scoped by `session_id`).
+
+**Residual, for the reviewer.** `src/main.rs`'s `every_subcommand_and_required_arg_has_help`
+still skips `demo` with the comment "its flags are not authored here". The flags
+now exist and carry help text, so that skip can be dropped — left alone
+deliberately, because the shared-file rule limits this task to one dispatch arm
+plus its own flags, and another task is appending to the same `match` in
+parallel.
