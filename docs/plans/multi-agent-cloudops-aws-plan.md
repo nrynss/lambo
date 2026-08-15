@@ -98,24 +98,38 @@ This architecture earns the remaining **$60 in AWS Promotional Credits** while m
 
 ---
 
-## 4. Implementation Checklist
+## 4. CockroachDB Agent Skill: `lambo-cloudops`
+
+To satisfy the hackathon requirement for **CockroachDB Agent Skills** and make this behavior machine-executable for any LLM agent (Claude Code, Cursor, Antigravity, OMP), we package a dedicated Agent Skill in `skills/lambo-cloudops/SKILL.md`.
+
+### What the Skill Encodes:
+1. **Pre-flight Recall Protocol**: Before executing destructive AWS commands (`delete-*`, `terminate-*`, `disassociate-*`), the agent MUST run `lambo recall` against the active session. If a `⚑ Load-bearing pillar` warning is returned with blast radius > 0, the modification MUST be halted or require explicit human override.
+2. **Provenance & Derivation Protocol**: Whenever a new resource is provisioned (e.g. EC2, RDS, Lambda, Subnets), the agent MUST run `lambo derive` and `lambo record-action` registering parent-child hierarchies and cross-resource dependencies.
+3. **CockroachDB Direct Inspection**: Teaches agents how to query CockroachDB's `canonization_events` and `concepts` tables (via CockroachDB Cloud MCP or SQL) to understand why a specific cloud component became canonical.
+
+---
+
+## 5. Implementation Checklist
 
 ### Phase 1: Local Binary Validation (Prerequisite)
 - [ ] Run full unit and integration test suite: `cargo test --all-features`.
 - [ ] Verify `lambo serve`, `lambo serve-web`, `lambo derive`, `lambo record-action`, and `lambo recall` against local SQLite & live CockroachDB.
 - [ ] Ensure binary build outputs are clean and ready for packaging.
 
-### Phase 2: AWS Resource Provisioning Scripts (`scripts/aws-infra/`)
+### Phase 2: CockroachDB Agent Skill (`skills/lambo-cloudops/`)
+- [ ] Create `skills/lambo-cloudops/SKILL.md` defining the Lambo Memory & CockroachDB safety rules for agents.
+
+### Phase 3: AWS Resource Provisioning Scripts (`scripts/aws-infra/`)
 - [ ] `provision_network.py` (VPC, Subnets, Gateways, Route Tables, SGs, Secrets Manager).
 - [ ] `provision_app_data.py` (RDS instance, Lambda function with Function URL).
 - [ ] `launch_exhibit_ec2.py` (EC2 `t4g.micro` with Caddy + `lambo serve-web` systemd service).
 
-### Phase 3: CloudOps Multi-Agent Orchestration (`scripts/cloudops/`)
+### Phase 4: CloudOps Multi-Agent Orchestration (`scripts/cloudops/`)
 - [ ] `01_network_agent.py`: Executes Network Agent actions and feeds derivations into Lambo.
 - [ ] `02_app_data_agent.py`: Executes App Agent actions, queries Lambo, and links dependencies.
 - [ ] `03_crossover_protect.py`: Executes the destructive query, verifies Lambo's blast-radius warning, and renders outcome.
 
-### Phase 4: Verification & Demo Recording
+### Phase 5: Verification & Demo Recording
 - [ ] Verify judge URL (`https://<EC2-IP-or-Domain>`) renders live `lambo serve-web` session window.
 - [ ] Verify Lambda Function URL returns live stats.
 - [ ] Record 3-minute video covering the multi-agent workflow and blast-radius protection.
