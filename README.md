@@ -59,7 +59,7 @@ To run it for real, write a `lambo.toml` that picks a store and an embedder.
 kind = "memory"     # memory | sqlite | cockroach
 
 [embedder]
-kind = "fixture"    # fixture | bge_m3 | bedrock
+kind = "fixture"    # fixture | bge_m3
 dim = 1024
 ```
 
@@ -136,9 +136,13 @@ flowchart LR
 
 ## AWS services used
 
-| Service | How Lambo uses it |
-|---|---|
-| **Amazon Bedrock** | Titan Text Embeddings V2 behind the `Embedder` trait at 1024 dimensions, through `aws-sdk-bedrockruntime` under the `embed-bedrock` feature. The adapter ships, and BGE-M3 remains the default dense path while account authorization is pending. |
+None yet. Lambo v0.1 runs entirely on CockroachDB plus a local embedder, and no released
+build calls an AWS API.
+
+The `Embedder` trait was designed so Amazon Titan Text Embeddings V2 on Bedrock can drop in
+as the dense path, and `embed-bedrock` is reserved as a Cargo feature. The adapter behind
+that feature is not implemented, so selecting `kind = "bedrock"` fails at startup with that
+message. BGE-M3 served by a local `llama-server` is the only real embedder today.
 
 ## Development
 
@@ -148,7 +152,7 @@ GitHub Pages from `main`.
 
 ## License and credit
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Lambo v0.1 was written during the hackathon submission period. It draws on a prior v0.6.0
 design document by the same author, credited here for honesty. No code from that document

@@ -166,6 +166,6 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `store-cockroach` | CockroachDB store, for a hosted cluster. |
 | `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
 | `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
-| `embed-bedrock` | Amazon Titan embeddings through Bedrock. |
+| `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented, so it fails at startup if selected. |
 
 Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.

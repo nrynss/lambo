@@ -21,7 +21,8 @@ owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
 status:     drafted 2026-08-15 on branch task/t9.1-docs (6194b55, worktrees/t9.1-docs),
             UNMERGED. README + site rewritten binary-first; `lambo demo` promoted to a
             documented front door. Two "Done when" checks still outstanding: the
-            clean-machine/container repro and the GitHub About "MIT license" confirmation.
+            clean-machine/container repro and the GitHub About license confirmation
+            (Apache-2.0, NOT MIT — the spec and this doc were stale; see Handoff Log).
             Crossed into T8.8's docs/reference/ and into site/ — see Handoff Log.
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
@@ -29,7 +30,7 @@ or container); **the single-writer constraint stated** (spec §12.4); the Cockro
 and AWS services used, written out (that written identification is itself a deliverable);
 credit to the v0.6.0 design doc for honesty (spec §12.4 note); MIT license visible in the
 GitHub About sidebar (add the license file mapping if GitHub doesn't auto-detect). Repo
-public.
+public.  **CORRECTION 2026-08-15: the repo is Apache-2.0, not MIT — see Handoff Log.**
 
 **Boundary with T8.8:** this is the getting-started / onboarding path. The per-surface
 **reference** (MCP tools, CLI verbs, `Memory` API, config keys, end-to-end) lives in
@@ -47,7 +48,7 @@ public.
 - Never instruct users to mix embedder models mid-session without re-embed.
 
 **Done when:** a cold reader reproduces the demo from README alone (including features +
-config), and the About section shows "MIT license".
+config), and the About section shows the license.  **The repo is Apache-2.0, not MIT (Handoff Log).**
 
 ---
 
@@ -137,7 +138,7 @@ fixture-ok: n/a
 owns:       dev-diary/notes/devpost.md
 status:     not-started
 ```
-The form itself, drafted in-repo first: repo URL (public, MIT About-visible), demo app URL
+The form itself, drafted in-repo first: repo URL (public, Apache-2.0 About-visible — NOT MIT, see Handoff Log), demo app URL
 (T8.5, live), video link, written CockroachDB-tools + AWS-services identification (lift
 from T9.1), team/eligibility fields. Submit **hours** before 5:00 pm ET, not minutes —
 Devpost under deadline load is a known failure mode. Confirmation screenshot into
@@ -149,11 +150,11 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 
 ## Exit criteria — the spec §12.4 checklist, verbatim
 
-- [ ] Public repo, MIT license detectable in About
+- [ ] Public repo, license detectable in About  ·  **Apache-2.0, not MIT (Handoff Log)**
 - [ ] README with setup/run instructions + single-writer constraint stated
 - [ ] Functional demo app URL
 - [ ] Video under 3 minutes showing the memory layer at work
-- [ ] Written identification of CockroachDB tools and AWS services used
+- [ ] Written identification of CockroachDB tools and AWS services used  ·  **AWS count is currently ZERO — §12.2 requires one (Handoff Log)**
 - [ ] Architecture diagram
 - [ ] **Submitted before Tue Aug 18, 5:00 pm ET**
 
@@ -217,12 +218,43 @@ Consequences the next agent must respect:
   (`demo.rs:1219/1091/1039`) into `src/test_util.rs`. T9.6's swarm benchmark will want that
   fixed-point protocol. No user-visible effect, so it can wait.
 
+#### Two places the spec is now wrong about this repo — READ BEFORE FILING T9.5
+
+Both were caught by the owner on review of the T9.1 draft, after the draft had asserted the
+spec's version as fact. The repo is the truth here, not spec §12.
+
+**1. The license is Apache-2.0, not MIT.** `LICENSE` is the Apache 2.0 text, `Cargo.toml`
+declares `license = "Apache-2.0"`, and a `NOTICE` file exists. Spec §12.4 and this phase
+doc's own exit checklist both say MIT, in four places. Those are **stale**. The README now
+says Apache-2.0 and links `LICENSE` + `NOTICE`. The About-sidebar check is still worth doing,
+but it is checking for "Apache-2.0".
+
+**2. Zero AWS services are used.** Not "Bedrock pending authorization" — there is **no
+Bedrock adapter at all**. `src/embed/` contains only `bge_m3.rs`, `fixture.rs`, `math.rs`,
+`mod.rs`. `src/embed/mod.rs:272` returns "BedrockEmbedder is not implemented yet (T7.1)",
+and `EmbedderKind::Bedrock::available()` is hardcoded `false` (`mod.rs:101`). The
+`embed-bedrock` Cargo feature exists and pulls the SDK deps, which makes the tree *look*
+AWS-wired to a reader who does not open `src/embed/`. **It is not.** `ship` excludes it.
+
+The T9.1 draft's "AWS services used" table claimed the adapter shipped. That was false and
+is corrected: the README section now says "None yet" and explains the reserved feature.
+
+**This is a submission-eligibility problem, not a docs problem.** Spec §12.2 requires **one**
+AWS service. The count is currently zero, and P7's handoff has T7.1 blocked on an external
+authorization that has not moved since Aug 11 (`notes/bedrock-authorization-blocker.md`).
+
+**Cheapest path that fixes two deliverables at once:** host `lambo serve-web` on AWS. It is
+a read-only single binary against the existing cluster, so App Runner, Lightsail, or a small
+EC2 box all work. That produces the **functional demo app URL** (§12.4, still missing, still
+unowned) *and* the **one AWS service used** (§12.2) from one afternoon of work. It does not
+depend on Bedrock authorization arriving. Recommend doing this before T9.3 records, so the
+video can show the hosted URL.
+
 #### Deliverable status against spec §12.4
 
-Written identification of CockroachDB tools and AWS services is **done** in the README. One
-correction made while writing it: `scripts/provision.sh` applies schema through docker or
-psql, **not** ccloud, so the ccloud row credits cluster creation and DSN capture per
+Written identification of CockroachDB tools is **done** in the README. One correction made
+while writing it: `scripts/provision.sh` applies schema through docker or psql, **not**
+ccloud, so the ccloud row credits cluster creation and DSN capture per
 `notes/spike-runbook.md` and names provision.sh separately. Do not re-conflate them.
 
-The **demo app URL is still missing** and is the one §12.4 deliverable with no owner making
-progress. `lambo serve-web` has only ever run locally. T9.5 cannot be filed without it.
+The AWS half of that same deliverable is written but currently reads "none", per above.
