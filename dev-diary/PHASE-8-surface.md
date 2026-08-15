@@ -1951,3 +1951,28 @@ Reverify CLEAN. Headless-browser confirmation that a browser shows live recall +
 feed updating (the done-when) came from the fixture/sqlite path; the Cockroach live-cluster leg
 is infra-blocked like T8.4 (no `LAMBO_COCKROACH_DSN`) and belongs to the same cluster-holder
 run.
+
+### T8.6 — single-writer lease (re-verification, 2026-08-15)
+
+T8.6 was re-run through an adversarial review at current HEAD (report
+`adve-review-t8.6-lease-r2.md`) because its prior CLEAN verdict (2026-08-14) predated the L82
+lease-release change and today's lease-message rewrite. **Verdict CLEAN** — no P1/P2.
+
+- Atomic acquire intact on all three backends (memory single map-lock; sqlite/cockroach single
+  `INSERT ... ON CONFLICT ... WHERE ... RETURNING` — no read-then-write race).
+- Fail-closed `Conflict` naming holder+age intact after the T88-H6 message rewrite (only the
+  inline takeover SQL + spec citation were dropped; still points at `docs/reference/cli.mdx`).
+- Heartbeat / expiry-after-crash / release-on-close intact. The L82 "lease release" change
+  (`060cca1`) is ADDITIVE — `release_lease_after_abandoned_close` + `serve::release_lease_bounded`
+  on every abandoned-close path — strictly wider release coverage, not a regression.
+- `serve` acquires on start and releases on every exit path (`close_bounded` +
+  `release_lease_bounded`); readers never touch the lease.
+- Cross-process battle-tests green: `serve_single_writer_lease` +
+  `cli_write_lease::derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds`.
+- **T86R2-2 (P3) infra-blocked:** the live Cockroach cross-pool done-when leg
+  (`single_writer_lease_is_enforced_across_pools`) is compile-only + `#[ignore]d`/`dsn_or_skip`
+  with no `LAMBO_COCKROACH_DSN` — same cluster-holder exit item as T8.4/T8.5. The cockroach
+  atomic acquire, T86-3 `tx_retry`, and holder-scoped release are present, clippy-clean, and
+  reviewable; the live leg awaits a cluster run.
+- **T86R2-1 (P3)** recorded, no action: the message rewrite cost is operator convenience only
+  (SQL is in `docs/reference/cli.mdx` + the migrations' comments, not inlined in the refusal).
