@@ -18,7 +18,11 @@ Nothing here is optional except where marked; the checklist *is* the phase.
 requires:   T8.1; soft T8.8   # links into the reference docs T8.8 produces
 fixture-ok: n/a
 owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
-status:     not-started
+status:     drafted 2026-08-15 on branch task/t9.1-docs (6194b55, worktrees/t9.1-docs),
+            UNMERGED. README + site rewritten binary-first; `lambo demo` promoted to a
+            documented front door. Two "Done when" checks still outstanding: the
+            clean-machine/container repro and the GitHub About "MIT license" confirmation.
+            Crossed into T8.8's docs/reference/ and into site/ — see Handoff Log.
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
 or container); **the single-writer constraint stated** (spec §12.4); the CockroachDB tools
@@ -34,7 +38,10 @@ public.
 **Level B (required in README):**
 
 - Default features vs demo/ship: `cargo build --release --features demo` (or list
-  `store-cockroach,embed-bge,…`).
+  `store-cockroach,embed-bge,…`). **AMENDED 2026-08-15** — `demo` is no longer the release
+  profile (T8.9 introduced `ship`), and the deployment story is now prebuilt binary +
+  `lambo.toml`. The README states the features/config split in prose and links the build
+  command on the site instead of carrying it. See Handoff Log.
 - `lambo.example.toml` / `lambo.toml` + env override rules.
 - Link to `dev-diary/notes/level-b-pluggability.md`.
 - Never instruct users to mix embedder models mid-session without re-embed.
@@ -155,3 +162,67 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 ## Handoff Log
 
 > _Fill on completion. Last entry in this diary: what would v0.7.0's first day want to know?_
+
+### T9.1 — README & docs site, binary-first (2026-08-15, branch `task/t9.1-docs`)
+
+**Not merged.** Two commits on `task/t9.1-docs` from `db387fd`: `4f0b149` (README + site
+binary-first) and `6194b55` (demo promoted to a documented front door). Eleven files.
+Merge with `git merge --no-ff task/t9.1-docs`.
+
+#### The ruling that shaped everything
+
+**Prebuilt binary + `lambo.toml` is the documented deployment path.** Owner's call,
+2026-08-15. Cargo is now the path you take to hack on Lambo, not the path you take to run
+it. Every page that opened with `git clone && cargo build` was rewritten to open with the
+install script. The build-from-source material was not deleted, only demoted to a closing
+section of `installation`.
+
+#### What was wrong before this task
+
+- **The live site never got T8.9's prebuilt-binary section.** `docs/reference/installation.mdx`
+  had it; `site/src/content/docs/installation.mdx` did not. The site pages are hand-ported
+  copies (component imports + `/lambo/` link rewriting), so a content edit to
+  `docs/reference/` does **not** reach the site by itself. **Port both, every time.**
+- **Starlight edit links pointed at `phase/p8-surface`**, merged and dead since `e0fcc91`.
+  Fixed to `main` in `site/astro.config.mjs`. `docs.yml` also still triggered on that
+  branch; now `main` only.
+
+#### Ownership crossings — flagged per the repo rule
+
+- **`docs/reference/` is T8.8's**, and T9.1 wrote to `installation.mdx`, `index.mdx`, and
+  `end-to-end.mdx` there. Unavoidable: the site copies are generated from those files, and
+  leaving them cargo-first would have re-introduced the drift on the next port.
+- **`site/` has no owner in any phase doc.** It was built under T8.5/T8.8 without an `owns`
+  line. T9.1 treated it as part of the README deliverable. **P9 should assign it.**
+
+#### `lambo demo` is a product surface now, not a video prop
+
+Owner's call, 2026-08-15, reversing an earlier suggestion to feature-gate it out of the
+shipped binary. Verified before documenting: `lambo demo` runs with **no config file at
+all**, against the in-memory store, in a few seconds, and two runs match.
+
+Consequences the next agent must respect:
+
+- **The golden constants are a public contract.** 12 interactions, 27 concepts, `user
+  schema` at blast radius 9 are documented on the demo page as claims a reader checks.
+  Changing scoring or canonization tuning now breaks a documented promise, not just a test.
+- **`src/cli/demo.rs` is not feature-gated** (`src/cli/mod.rs:9`, no `cfg`), so all ~1876
+  lines ship in the `ship` binary and `lambo demo` is a permanent CLI verb. That is now
+  intentional. Do not gate it.
+- **Banner string updated** (`demo.rs:1466`): "Compressed for the video" → "Compressed for
+  a fast run", since the feature outlives the video. `demo/LIVE-RUNBOOK.md`'s sample output
+  was updated to match. `dev-diary/evidence/demo-live-{1,2}.txt` were **left alone** as
+  historical captures, so they now differ from a fresh run by that one line.
+- **Still worth doing post-submission:** lift `wait_until` / `quiesce` / `settle_gc_survived`
+  (`demo.rs:1219/1091/1039`) into `src/test_util.rs`. T9.6's swarm benchmark will want that
+  fixed-point protocol. No user-visible effect, so it can wait.
+
+#### Deliverable status against spec §12.4
+
+Written identification of CockroachDB tools and AWS services is **done** in the README. One
+correction made while writing it: `scripts/provision.sh` applies schema through docker or
+psql, **not** ccloud, so the ccloud row credits cluster creation and DSN capture per
+`notes/spike-runbook.md` and names provision.sh separately. Do not re-conflate them.
+
+The **demo app URL is still missing** and is the one §12.4 deliverable with no owner making
+progress. `lambo serve-web` has only ever run locally. T9.5 cannot be filed without it.

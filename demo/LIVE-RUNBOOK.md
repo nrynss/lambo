@@ -90,7 +90,7 @@ Expected output — this is the **live-verified** transcript
   capabilities Capabilities(VECTOR_SEARCH)
   agents       agent-a (builds the API) · agent-b (separate feature)
 
-  Compressed for the video — intervals only, no threshold weakened:
+  Compressed for a fast run — intervals only, no threshold weakened:
     canonization_edge_min_age   60s     → 10ms
     canonization_eval_interval  60s     → 25ms  (frozen during the build)
     daemon_tick_interval        1s      → 5ms
