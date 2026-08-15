@@ -615,13 +615,32 @@ appends-to: rustdoc on public items across src/ (doc-comments only; safe — T8.
             in the serial queue, nothing else is editing these files concurrently)
 status:     docs-verification pass done — 2026-08-15 (branch task/t8.8-docs, docs/reference/ only).
             All five reference pages verified against the 34c9959 binary and rewritten where
-            they disagreed with it. PENDING: (a) rustdoc + help-text fixes — 53 cargo doc
-            warnings and 11 help-text findings recorded in dev-diary/notes/t8.8-surface-audit.md,
-            deferred to a post-L82-merge src/ pass because task/live-l82-remediation and
-            task/l82-4-fresh-embeddings hold the affected files; (b) the L82 delta itself
-            (control-char ranges, organic vector recall, bulk flush) — markers left at the top
-            of mcp.mdx, cli.mdx, end-to-end.mdx; (c) T8.7-dependent config sections (HTTP auth,
-            rate limit, session cap) — config.mdx documents the current no-auth state.
+            they disagreed with it.
+            DELTA PASS DONE — 2026-08-15 (branch task/t8.8-delta, from 8134a3c). Covers
+            docs/reference/**, dev-diary/**, and comment-only rustdoc in src/ EXCLUDING
+            src/mcp/** (held by a parallel branch). Landed:
+              * L82 delta written into mcp.mdx / cli.mdx / end-to-end.mdx; all three
+                {/* L82 delta pass pending */} markers removed. Control + invisible character
+                rules, organic vector recall with a per-store leg table (only CockroachDB
+                reports VECTOR_SEARCH), and batched flush paired with the honest
+                abandoned-tail loss. Verified live against a store-sqlite binary at 8134a3c.
+              * Help-text triage table for T88-H1..H11 at the top of
+                dev-diary/notes/t8.8-surface-audit.md. T88-H1 marked ASSIGNED to the parallel
+                src/mcp branch. T88-H8 FIXED (src/cli/caps.rs, comment-only: MAX_INSPECT_NODES
+                is a total budget across all hops, not per frontier level).
+              * Rustdoc: cargo doc --no-deps 62 -> 6 warnings (63 -> 6 with
+                store-sqlite,store-cockroach). All 6 remaining are src/mcp/** and are NOT
+                this pass's; outside src/mcp the count is ZERO. Missing docs 358 -> 185:
+                src/types/mod.rs 159 -> 0, src/memory.rs 14 -> 0, src/lib.rs expanded into a
+                real crate landing page with a compiling no_run example. Not chased to zero
+                by design; 185 recorded honestly in the audit note, best next target is
+                src/config.rs (30, prose already exists in config.mdx).
+            PENDING: (a) T88-H2/H3/H4 wire text + schema maxima — need the T8.7 / src/mcp
+            branch; T88-H6/H7/H9/H10 are string-literal (code) changes owned by T8.3/T8.4,
+            outside a comment-only pass. Each finding's docs half is already done.
+            (b) 6 cargo doc warnings and 31 missing docs inside src/mcp/**, pending that
+            branch's merge. (c) T8.7-dependent config sections (HTTP auth, rate limit,
+            session cap) — config.mdx documents the current no-auth state.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14: everything P8 ships is a **user-facing surface** and needs proper
