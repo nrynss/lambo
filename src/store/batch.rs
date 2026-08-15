@@ -2,7 +2,7 @@
 //!
 //! # Why this exists
 //!
-//! Both SQL adapters used to replay a [`MutationBatch`] one `sqlx::query` per
+//! Both SQL adapters used to replay a [`crate::types::MutationBatch`] one `sqlx::query` per
 //! mutation, sequentially awaited inside one transaction. Against a local
 //! SQLite file that is merely wasteful; against a *serverless* CockroachDB
 //! cluster every statement is a network round-trip, so the cost of a flush was
@@ -49,7 +49,7 @@
 //! * **Within a bucket, submission order is preserved**, and duplicates are
 //!   collapsed to the value row-by-row replay would have left (see
 //!   [`ConceptRow`] for the one subtle case) **at the position row-by-row replay
-//!   would have first written them** (see [`dedupe_last_at_first_position`]).
+//!   would have first written them** (see `dedupe_last_at_first_position`).
 //!
 //! Duplicate collapsing is not an optimisation, it is **required**: PostgreSQL
 //! and CockroachDB both reject a multi-row `INSERT … ON CONFLICT DO UPDATE`
@@ -148,7 +148,7 @@ impl CanonizationColumns {
 /// the two are trivially equivalent there.)
 ///
 /// It is emitted at the **first** occurrence's position, for a reason unrelated
-/// to either half — see [`dedupe_last_at_first_position`] (R1-1).
+/// to either half — see `dedupe_last_at_first_position` (R1-1).
 #[derive(Clone, Copy, Debug)]
 pub struct ConceptRow<'a> {
     /// Every column except the three below comes from here (last occurrence).
@@ -322,7 +322,7 @@ fn dedupe_last_at_first_position<T, K: Eq + std::hash::Hash + Clone>(
         .collect()
 }
 
-/// [`dedupe_last_at_first_position`] by concept id, keeping the **first**
+/// `dedupe_last_at_first_position` by concept id, keeping the **first**
 /// occurrence's canonization columns. See [`ConceptRow`] for why the two halves
 /// differ.
 fn dedupe_concepts(items: Vec<&Concept>) -> Vec<ConceptRow<'_>> {

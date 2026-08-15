@@ -1,4 +1,4 @@
-//! `lambo record-action` — lease-held thin adapter over [`Memory::record_action`].
+//! `lambo record-action` — lease-held thin adapter over [`crate::memory::Memory::record_action`].
 
 use super::caps::{check_size_cli, require_nonempty, CliError, MAX_ACTION_TARGETS};
 use super::{close_writer, open_writer};

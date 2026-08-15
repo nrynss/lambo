@@ -67,13 +67,13 @@ use crate::types::{
 /// # Behavior
 ///
 /// 1. Validate `interaction` — must be an existing `Interaction` node.
-/// 2. Segment `chunk` with UAX #29 ([`split_sentence_bounds`]) — the one and
+/// 2. Segment `chunk` with UAX #29 (`split_sentence_bounds`) — the one and
 ///    only segmentation (custom `chunk_split_fn` is cut, spec §7).
 /// 3. Per sentence: trim, skip empty/whitespace-only, then create exactly one
 ///    `Observation` concept:
 ///    * `content` = the trimmed sentence;
 ///    * `canonical_key` = the T2.2 derivation with the graph's synonym table
-///      ([`canonical_key_for`]) — the key is derived, never matched (demoted
+///      (`canonical_key_for`) — the key is derived, never matched (demoted
 ///      observations skip spec §7.1 step 5);
 ///    * `origin_interaction` = `interaction`, `origin_agent` = `agent`;
 ///    * `chunk_group_id` = `Some(chunk_group_id)` (T5.2 co-retrieval contract).

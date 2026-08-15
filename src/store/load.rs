@@ -35,7 +35,7 @@
 //! to a private worker thread with its own current-thread runtime, so it is
 //! callable from sync startup code and from inside a tokio task alike (a direct
 //! `Handle::block_on` would panic in the latter case). The bridge bounds the
-//! store call with [`LOAD_SESSION_TIMEOUT`] (F2) so a hung store cannot block
+//! store call with `LOAD_SESSION_TIMEOUT` (F2) so a hung store cannot block
 //! the sync caller forever.
 
 use std::future::Future;
@@ -72,7 +72,7 @@ const LOAD_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 ///
 /// This is the async CORE (F4): the sync [`load_session`] is a thin wrapper
 /// running it on a private worker thread via the bridge (with
-/// [`load_session_with_timeout`]'s timeout).
+/// `load_session_with_timeout`'s timeout).
 pub async fn load_session_async(
     store: &dyn GraphStore,
     session: &SessionId,
@@ -138,9 +138,9 @@ async fn load_session_with_timeout(
 /// Load a session from a durable store into RAM (spec §2.5) — **sync
 /// wrapper** over [`load_session_async`] (F4), with the same semantics.
 ///
-/// Runs the async core on a private worker thread (see [`block_on`]) so it is
+/// Runs the async core on a private worker thread (see `block_on`) so it is
 /// callable from sync startup code and from inside a tokio task alike. The
-/// store call is bounded by [`LOAD_SESSION_TIMEOUT`] (F2): a hung store yields
+/// store call is bounded by `LOAD_SESSION_TIMEOUT` (F2): a hung store yields
 /// `StoreError::Backend("load_session timed out after 30s")` instead of a
 /// permanent block.
 pub fn load_session(

@@ -98,7 +98,7 @@
 //!    that chain cannot start.
 //! 2. **The merge bar did not move.** A merge still requires
 //!    `score >= semantic_match_threshold` (0.85 default, calibrated against
-//!    BGE-M3 — PHASE-7), after [`best_candidate`]'s finite/`[0,1]`/deterministic
+//!    BGE-M3 — PHASE-7), after `best_candidate`'s finite/`[0,1]`/deterministic
 //!    tie-break validation and the commit-time "target really is a Concept"
 //!    check. Persisting a vector lowers nothing.
 //! 3. **A vector minted in this call can never drive a merge in this call.**

@@ -1,6 +1,6 @@
 //! `lambo saints` — lease-free list of Canonical memories.
 //!
-//! Scans the loaded graph exactly like [`Memory::canonical_memories`]: Canonical
+//! Scans the loaded graph exactly like [`crate::memory::Memory::canonical_memories`]: Canonical
 //! only; order blast-radius desc, then created_at, then id. Not a store query.
 
 use super::caps::{check_size_cli, require_nonempty, CliError};

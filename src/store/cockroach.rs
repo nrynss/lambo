@@ -85,7 +85,7 @@
 //!   `VECTOR(n)` out of the embedded `001_init.sql` (not a global constant), so
 //!   `resolve::check_vector_compatibility` can reject mismatched embedders.
 //! - **rustls DSN rewrite.** sqlx's rustls stack cannot open libpq's magic
-//!   `sslrootcert=system` path; the `.env` DSN uses it. [`dsn_for_rustls`] rewrites it
+//!   `sslrootcert=system` path; the `.env` DSN uses it. `dsn_for_rustls` rewrites it
 //!   to a real CA bundle (or downgrades `verify-full` → `require`) before pooling
 //!   (T0.3 spike, proven against the cloud cluster).
 
@@ -1126,7 +1126,7 @@ fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent, StoreErro
 /// is still parse-validated at construction (fail fast on typos), and the pool itself is
 /// `connect_lazy`, so even the first creation never touches the network.
 pub struct CockroachStore {
-    /// rustls-rewritten DSN (see [`dsn_for_rustls`]).
+    /// rustls-rewritten DSN (see `dsn_for_rustls`).
     dsn: String,
     /// Dense-vector column width parsed from the embedded DDL (`VECTOR(n)`).
     vector_dim: usize,

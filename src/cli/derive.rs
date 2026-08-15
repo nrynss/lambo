@@ -1,4 +1,4 @@
-//! `lambo derive` — lease-held thin adapter over [`Memory::derive`].
+//! `lambo derive` — lease-held thin adapter over [`crate::memory::Memory::derive`].
 
 use super::caps::{
     check_size_cli, require_nonempty, CliError, ConceptKind, MAX_CONCEPTS_PER_DERIVE,

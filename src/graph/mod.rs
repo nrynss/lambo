@@ -12,7 +12,7 @@
 //!
 //! ## Mutation log contract
 //!
-//! Every write appends its [`Mutation`]s to an ordered log drained by
+//! Every write appends its [`crate::types::Mutation`]s to an ordered log drained by
 //! [`Graph::drain_log`]. Ordering is guaranteed: within one logical write, node
 //! mutations precede the edge mutations that reference them, and deletions follow
 //! upserts (spec §2.4).
@@ -41,7 +41,7 @@
 //!
 //! ## InvertedIndex ownership (P3 contract — muse-spark M3)
 //!
-//! [`InvertedIndex`] (T2.6) is a **separate structure owned by the session owner**
+//! [`crate::graph::index::InvertedIndex`] (T2.6) is a **separate structure owned by the session owner**
 //! (P3's `Memory`, the `Arc<RwLock<Graph>>` holder) — the graph module itself is
 //! index-free and no write API touches it. The owner MUST mirror every concept
 //! write into the index: `index.add` on every concept create/update (including

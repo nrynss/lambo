@@ -163,7 +163,7 @@ fn is_disallowed_format(c: char) -> bool {
 /// Validate one client string before it reaches the store: refuse it if it is
 /// over [`MAX_CONTENT_BYTES`], carries a control character other than
 /// tab/newline, **or** carries an invisible character (see
-/// [`is_disallowed_format`]).
+/// `is_disallowed_format`).
 ///
 /// The size cap is the single-process fairness guard. The character checks are
 /// data-hygiene and anti-injection ones:
