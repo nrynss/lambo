@@ -79,6 +79,31 @@ jobs:
       - name: Build release binary
         run: cargo build --release --features "$FEATURES" --target ${{ matrix.target }}
 
+      - name: Binary + TOML parity test (release artifact)
+        run: |
+          set -euo pipefail
+          # Drive the exact shipped binary (the `--features ship --target <triple>`
+          # release artifact built above) with a real lambo.toml via
+          # tests/binary_parity.rs. unix targets only: KillOnDrop/SIGTERM is unix.
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            echo "parity test is unix-only (SIGTERM/KillOnDrop); skipping on Windows"
+            exit 0
+          fi
+          # Run with the SAME default CARGO_TARGET_DIR and `--target <triple>` as
+          # the build step, so env!("CARGO_BIN_EXE_lambo") resolves to
+          # target/<triple>/release/lambo -- the exact artifact the Stage step
+          # below copies and publishes -- not a fresh NESTED rebuild.
+          # `--features ship` is a superset of the parity test's cfg gate
+          # (store-sqlite + embed-fixture are both in ship), so this step
+          # compiles the full ship profile, never a store-sqlite,embed-fixture
+          # subset. Cargo still relinks `lambo` into that same path with full
+          # ship features (identical feature set, same release profile), so the
+          # staged artifact stays feature-complete and is never clobbered by a
+          # subset binary. Because the parity run builds the whole ship profile,
+          # a ship-only regression now fails this build job.
+          cargo test --release --features "$FEATURES" \
+            --test binary_parity --target ${{ matrix.target }}
+
       - name: Stage and checksum
         run: |
           set -euo pipefail
