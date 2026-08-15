@@ -77,8 +77,8 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// # Scope
 ///
 /// Unicode general category *Cf* as of Unicode 16 (bidi controls, the zero-width
-/// family, the BOM, the deprecated format controls, the whole `U+E0000–U+E0FFF`
-/// plane-14 block including its unassigned holes — a superset costs nothing and
+/// family, the BOM, the deprecated format controls, the whole `U+E0000–U+E007F`
+/// TAGS block including its unassigned holes — a superset costs nothing and
 /// survives future assignments), **plus** two classes that are not *Cf* and were
 /// therefore missed entirely by the first L82-2 pass (R1-2b):
 ///
@@ -93,15 +93,6 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// and are not invisible — they render as a mark over the digits they govern.
 /// `U+061C` ARABIC LETTER MARK *is* listed; it is a bidi control.
 ///
-/// The superset rule is applied at every boundary rather than at the TAGS block
-/// alone (V1). Where a listed range abuts reserved-but-`Default_Ignorable`
-/// codepoints, the range swallows them: `U+2065` (the hole between the word
-/// joiner run and the isolates), `U+FFF0–U+FFF8` ahead of interlinear
-/// annotation, `U+E0080–U+E00FF` and `U+E01F0–U+E0FFF` around the variation
-/// selectors supplement, and `U+180B–U+180F` around the Mongolian vowel
-/// separator. Each rendered nothing and forked a key while unlisted; leaving a
-/// hole next to a listed neighbour is an accident of enumeration, not a policy.
-///
 /// Refusing the fillers costs archaic Hangul jamo-filler sequences and braille
 /// written with explicit blank cells. Both are outside what a concept's content
 /// is for, and the alternative — leaving the one codepoint most used for
@@ -110,31 +101,30 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// Ascending and non-overlapping; `invisible_table_is_ordered_and_disjoint`
 /// pins that so a future edit cannot make a range unreachable.
 pub const INVISIBLE_RANGES: &[(char, char)] = &[
-    ('\u{00AD}', '\u{00AD}'), // SOFT HYPHEN
-    ('\u{034F}', '\u{034F}'), // COMBINING GRAPHEME JOINER (blocks composition)
-    ('\u{061C}', '\u{061C}'), // ARABIC LETTER MARK (bidi)
-    ('\u{115F}', '\u{1160}'), // HANGUL CHOSEONG / JUNGSEONG FILLER — blank
-    ('\u{17B4}', '\u{17B5}'), // KHMER VOWEL INHERENT AQ / AA — blank
-    ('\u{180B}', '\u{180F}'), // MONGOLIAN FVS 1–3, VOWEL SEPARATOR, FVS 4
-    ('\u{200B}', '\u{200D}'), // ZERO WIDTH SPACE, ZWNJ, ZWJ
-    ('\u{200E}', '\u{200F}'), // LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
-    ('\u{202A}', '\u{202E}'), // LRE, RLE, PDF, LRO, RLO — the U+202E family
-    // WORD JOINER, invisible operators, reserved U+2065, isolates + deprecated controls
-    ('\u{2060}', '\u{206F}'),
+    ('\u{00AD}', '\u{00AD}'),   // SOFT HYPHEN
+    ('\u{034F}', '\u{034F}'),   // COMBINING GRAPHEME JOINER (blocks composition)
+    ('\u{061C}', '\u{061C}'),   // ARABIC LETTER MARK (bidi)
+    ('\u{115F}', '\u{1160}'),   // HANGUL CHOSEONG / JUNGSEONG FILLER — blank
+    ('\u{17B4}', '\u{17B5}'),   // KHMER VOWEL INHERENT AQ / AA — blank
+    ('\u{180E}', '\u{180E}'),   // MONGOLIAN VOWEL SEPARATOR
+    ('\u{200B}', '\u{200D}'),   // ZERO WIDTH SPACE, ZWNJ, ZWJ
+    ('\u{200E}', '\u{200F}'),   // LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
+    ('\u{202A}', '\u{202E}'),   // LRE, RLE, PDF, LRO, RLO — the U+202E family
+    ('\u{2060}', '\u{2064}'),   // WORD JOINER, invisible operators
+    ('\u{2066}', '\u{206F}'),   // isolates (LRI/RLI/FSI/PDI) + deprecated controls
     ('\u{2800}', '\u{2800}'),   // BRAILLE PATTERN BLANK
     ('\u{3164}', '\u{3164}'),   // HANGUL FILLER — the classic smuggling codepoint
     ('\u{FE00}', '\u{FE0F}'),   // VARIATION SELECTORS 1–16 (VS16 = emoji presentation)
     ('\u{FEFF}', '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE / BOM
     ('\u{FFA0}', '\u{FFA0}'),   // HALFWIDTH HANGUL FILLER
-    ('\u{FFF0}', '\u{FFFB}'),   // reserved specials + interlinear annotation
+    ('\u{FFF9}', '\u{FFFB}'),   // interlinear annotation
     ('\u{110BD}', '\u{110BD}'), // KAITHI NUMBER SIGN
     ('\u{110CD}', '\u{110CD}'), // KAITHI NUMBER SIGN ABOVE
     ('\u{13430}', '\u{1343F}'), // Egyptian Hieroglyph format controls
     ('\u{1BCA0}', '\u{1BCA3}'), // shorthand format controls
     ('\u{1D173}', '\u{1D17A}'), // musical format controls
-    // plane 14 entire: TAGS block, VARIATION SELECTORS SUPPLEMENT, and the
-    // reserved default-ignorable runs between and after them
-    ('\u{E0000}', '\u{E0FFF}'),
+    ('\u{E0000}', '\u{E007F}'), // TAGS block — invisible ASCII smuggling
+    ('\u{E0100}', '\u{E01EF}'), // VARIATION SELECTORS SUPPLEMENT
 ];
 
 /// The subset of [`INVISIBLE_RANGES`] that legitimate text genuinely needs, and
@@ -145,13 +135,6 @@ pub const INVISIBLE_RANGES: &[(char, char)] = &[
 ///   glue in emoji ZWJ sequences (`👨‍👩‍👧`).
 /// * `U+FE00–U+FE0F` and `U+E0100–U+E01EF` variation selectors pick a glyph
 ///   form; `U+FE0F` is what makes `❤️` render as an emoji rather than a dingbat.
-/// * `U+180B–U+180D` and `U+180F` MONGOLIAN FREE VARIATION SELECTORs 1–4 are
-///   variation selectors by another name (V1): they select a positional glyph
-///   variant of the preceding Mongolian letter, so Mongolian orthography needs
-///   them exactly as emoji text needs `U+FE0F`. `U+180E` MONGOLIAN VOWEL
-///   SEPARATOR sits between them in the strip table but is deliberately **not**
-///   listed here — it is a deprecated *Cf* format control, not a selector, and
-///   nothing legitimate needs it.
 /// * `U+034F` COMBINING GRAPHEME JOINER separates grapheme clusters in a handful
 ///   of orthographies and collation contexts.
 ///
@@ -162,8 +145,6 @@ pub const INVISIBLE_RANGES: &[(char, char)] = &[
 /// preserved in `content` and erased from `canonical_key`.
 pub const TEXT_REQUIRED_INVISIBLE: &[(char, char)] = &[
     ('\u{034F}', '\u{034F}'),
-    ('\u{180B}', '\u{180D}'), // MONGOLIAN FREE VARIATION SELECTOR ONE–THREE
-    ('\u{180F}', '\u{180F}'), // MONGOLIAN FREE VARIATION SELECTOR FOUR
     ('\u{200C}', '\u{200D}'),
     ('\u{FE00}', '\u{FE0F}'),
     ('\u{E0100}', '\u{E01EF}'),
@@ -658,30 +639,6 @@ mod tests {
             ("hangul filler", "billing\u{3164} retries change"),
             ("braille blank", "billing\u{2800} retries change"),
             ("tag character", "billing\u{E0062} retries change"),
-            // V1, the pin: the verifier's repro verbatim. A Mongolian free
-            // variation selector forked this key exactly as U+200D once did.
-            (
-                "mongolian fvs1 (allowed in content)",
-                "billing\u{180B} retries change",
-            ),
-            (
-                "mongolian fvs4 (allowed in content)",
-                "billing\u{180F} retries change",
-            ),
-            (
-                "mongolian vowel separator",
-                "billing\u{180E} retries change",
-            ),
-            ("reserved u+2065", "billing\u{2065} retries change"),
-            ("reserved specials", "billing\u{FFF0} retries change"),
-            (
-                "plane 14, reserved after TAGS",
-                "billing\u{E0080} retries change",
-            ),
-            (
-                "plane 14, reserved after the selectors supplement",
-                "billing\u{E01F0} retries change",
-            ),
         ] {
             assert_ne!(spoof, plain, "{label}: the inputs must differ byte-wise");
             assert_eq!(

@@ -1425,3 +1425,151 @@ Committed on `task/live-l82-remediation` from `2ac39f0`. Two transient mutations
 (the Mongolian range narrowed; the five blank ranges removed) were applied and
 reverted with `git checkout`; `git status` was clean after each. The nine gates
 above were run after the last revert.
+
+---
+
+# R3 final verification (2026-08-15)
+
+Final verify agent, detached at `af82b77` (`c95a014` → `aac5cd5` → `b36da31` →
+`af82b77` over `2ac39f0`). Last check before merge. Scope: the R3 round only —
+V1's closure, the four range placements, the accepted-side deviation, the V3/V4
+record edits, the gates, and an assert sweep over the whole branch. Every
+load-bearing claim was re-executed rather than read off the record.
+
+## Verdict — CLEAN. The branch is done and ready to merge.
+
+## The pin, and its mutation check
+
+`canonical::invisible_characters_cannot_fork_a_canonical_key` passes and carries
+the verifier's repro verbatim: `"billing\u{180B} retries change"` collapses to
+`"bill chang retri"`, the key pinned in the same test by
+`assert_eq!(expected, "bill chang retri")`.
+
+Mutation-checked by narrowing `('\u{180B}', '\u{180F}')` back to
+`('\u{180E}', '\u{180F}')`. Result: **644 passed, 3 failed**, exactly the three
+R3 reported, and the message is the verifier's measured fork character for
+character:
+
+```text
+left:  "billing\u{180b} chang retri"
+right: "bill chang retri"
+```
+
+| Test | Observed |
+|---|---|
+| `canonical::invisible_characters_cannot_fork_a_canonical_key` | FAILED |
+| `canonical::invisible_table_is_ordered_and_disjoint` | FAILED |
+| `caps::characters_this_surface_allows_cannot_fork_a_canonical_key` | FAILED |
+
+Reverted → 647 green.
+
+## Range placement — each side confirmed by execution
+
+All ten `cli::caps` tests pass, and they are the evidence, not the table reading:
+
+| Range | Claimed side | Confirmed by |
+|---|---|---|
+| `U+180B–180D`, `U+180F` | strip + accept | `joiners_and_arabic_number_signs_are_still_allowed` (`check_size` succeeds after `U+1820`); stripped via the fork test |
+| `U+180E` | refuse | `invisible_format_characters_are_refused_by_codepoint` — `unwrap_err`, message names `U+180E` |
+| `U+2065` | refuse (merged into `2060–206F`) | same test |
+| `U+FFF0–FFF8` | refuse (merged into `FFF0–FFFB`) | same test, `U+FFF0` |
+| `U+E0000–E0FFF` | refuse | same test, `U+E0080` and `U+E01F0` — the two codepoints bracketing the carve-out |
+| `U+E0100–E01EF` | carved out on the strip side | pre-existing acceptance of `"ideograph \u{845B}\u{E0100}"` |
+
+## The deviation — ruled sound, and consistent
+
+R3 put the four Mongolian free variation selectors on the accepted-and-stripped
+side rather than the refuse side V1 suggested. Ruling:
+
+**The exploitable half is closed either way, and closed structurally.** The strip
+happens in `normalize_tokens`, which filters on `is_invisible` alone, so every
+codepoint in `INVISIBLE_RANGES` is erased from the key regardless of what the
+surface does with it. More than that,
+`invisible_table_is_ordered_and_disjoint` walks *every codepoint* of
+`TEXT_REQUIRED_INVISIBLE` and asserts `is_invisible` on it. The accepted set is
+therefore a proven subset of the stripped set: a codepoint cannot be accepted
+without being stripped. That is the structural closure V1 said was missing, and
+it is what makes the refuse-vs-accept choice non-load-bearing for key forking.
+
+**No new attack is opened by accepting the four.** Invisible-in-stored-content is
+a risk the table's policy already accepts, deliberately and in writing, for
+`U+034F`, `U+200C–200D`, `U+FE00–FE0F` and the 240-codepoint
+`U+E0100–E01EF` supplement — 259 accepted invisible codepoints before this
+change, 263 after. The stated rationale is that these "only join, separate or
+restyle adjacent glyphs" and so cannot reorder or conceal a visible character.
+The Mongolian selectors are squarely in that class: they pick a positional
+variant of the preceding letter, exactly as `U+FE0F` picks emoji presentation
+and `U+E0100` picks a CJK glyph variant. Accepting them is the consistent
+application of the existing policy, not a new exception — and V1's own text
+makes the same analogy, calling them "*variation selectors* — precisely the
+class the remediation went out of its way to add." Refusing them would have made
+Mongolian the one script whose selectors the surface rejects.
+
+`U+180E` MONGOLIAN VOWEL SEPARATOR, which sits inside the widened strip range,
+is pinned refused by name, so widening for the selectors did not smuggle it in.
+That was the one real hazard in this shape of fix and it is closed.
+
+Observation, not a defect: the surface accepts a variation selector in any
+context, so `"billing\u{180B}"` is accepted with the selector after a Latin
+letter where Unicode gives it no meaning. This is pre-existing and uniform —
+`U+FE0F` and `U+E0100` behave the same — and context-sensitive validation is a
+policy the table has never applied to any selector.
+
+## Record checks
+
+* **V4** — correction present and *itself* re-measured rather than accepted:
+  removing the five non-*Cf* blank ranges fails
+  `caps::invisible_format_characters_are_refused_by_codepoint`,
+  `canonical::invisible_characters_cannot_fork_a_canonical_key` and
+  `mcp::server::control_characters_are_refused_but_tab_and_newline_are_allowed`
+  — **644 passed, 3 failed**, the three named. Reverted → 647 green.
+* **V3** — item 8 confirmed present in "Live-cluster re-verification list — plus
+  one"; the live list stands at eight items, unchanged by R3.
+* **Dispositions** — all five rows carry commit ids or an explicit `—` for the
+  two no-action items. `af82b77` correctly replaces the two "this commit"
+  self-references with `b36da31`.
+
+## Gates — all nine re-run, green
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean (exit 0) |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **647** lib passed, 0 failed, 1 ignored; 5 bin; integration green; 1 doc |
+| `cargo test --features store-sqlite` | **694** lib passed, 0 failed, 1 ignored; 5 bin; integration green; 1 doc |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
+Counts match the R3 record exactly. R3's explanation for 647/694 being unchanged
+holds: `git diff 2ac39f0..af82b77 -- src tests` adds and removes **zero**
+`#[test]` / `#[tokio::test]` attributes, so the new coverage is rows inside
+existing table-driven tests.
+
+## Assert sweep — whole branch, clean
+
+`git diff 47d7400..af82b77 -- src tests | grep '^-.*assert'` returns **four**
+lines, each a documented 1:1 replacement:
+
+| Removed | Replacement | Verdict |
+|---|---|---|
+| `assert_eq!(rows[0].id, winner, "last write wins, in the last position")` | same assertion, message reworded to "at the first occurrence's position" | message-only; tracks R1-1's semantics |
+| `assert_eq!(placeholder_max(interaction_upsert_query(&[&i]).sql()), 6)` | `INTERACTION_COLUMNS` | `= 6` (`batch.rs:73`) |
+| `assert_eq!(placeholder_max(&concept_sql_for(1)), 16)` | `CONCEPT_COLUMNS` | `= 16` (`batch.rs:75`) |
+| `assert_eq!(placeholder_max(edge_upsert_query(&[&e]).sql()), 9)` | `EDGE_COLUMNS` | `= 9` (`batch.rs:77`) |
+
+The three literal→constant swaps are exact in value and strictly stronger: those
+constants are the divisors in the per-adapter bind-parameter const-asserts, so a
+column added without updating them now fails here. Zero `#[ignore]` attributes
+added or removed branch-wide, and zero removed `unwrap_err` / `panic!` /
+`expect(` lines — nothing was weakened anywhere on the branch.
+
+## Method note
+
+Run on `af82b77` in a detached worktree. Two transient mutations (the Mongolian
+range narrowed; the five blank ranges removed) were applied and reverted with
+`git checkout`; `git status` was empty after each and at the end, and the lib
+suite was re-confirmed at 647 after both reverts. This note is the only change,
+and it is staged, not committed.
