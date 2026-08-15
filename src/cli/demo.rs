@@ -184,12 +184,40 @@ pub const STAGE1_MIN_GC_SURVIVED: i32 = 3;
 /// before the state machine is called settled.
 pub const QUIESCE_STABLE_CYCLES: u64 = 3;
 
+/// Every concept in the scripted graph must sit at least this multiple of GC's
+/// step-2 eviction bar. See [`gc_headroom`] for why the demo cannot simply
+/// disable GC, and why a collectable concept would break determinism.
+pub const MIN_GC_HEADROOM: f64 = 1.25;
+
 /// Ceiling on any single bounded wait. Generous: it exists to turn a hang into
 /// a diagnosis, not to pace the demo (every wait returns as soon as its
 /// condition holds — typically in single-digit milliseconds).
 pub const STEP_DEADLINE: Duration = Duration::from_secs(60);
 /// Poll period inside [`wait_until`].
 pub const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Spacing between scripted interactions.
+///
+/// This is the one deliberate delay in the file, and it is **not** a wait for
+/// progress — it paces the script. Two reasons, both load-bearing:
+///
+/// * **Determinism.** Interactions are server-stamped from the process clock
+///   (`Memory`: deliberately no API to supply one), and the `recency` scoring
+///   dimension is each concept's position within the session's temporal
+///   extent. Twelve writes issued back to back land microseconds apart, so
+///   their *interior spacing* is scheduler jitter — which moves every
+///   `recency` value, and with it GC's eviction margins and Stage 1's
+///   ordering, run to run. Pacing the script makes the extent a property of
+///   the script instead: 10ms between writes dominates the jitter by three
+///   orders of magnitude, so the same interaction lands at the same relative
+///   position every run.
+/// * **It is a video.** Twelve interactions in 300µs is a flicker; a human has
+///   to be able to read the narration as it scrolls.
+///
+/// The whole script costs [`EXPECT_INTERACTIONS`] × this — about a tenth of a
+/// second, comfortably inside the 30s conflict-recency window agent B's
+/// warning depends on.
+pub const STEP_PACING: Duration = Duration::from_millis(10);
 
 /// Session aliases agent A declares while settling `gc_survived`. Each is a
 /// real spec §7.1 synonym for `user schema`; each also advances the mutation
@@ -303,8 +331,8 @@ pub const ACT_I: &[Step] = &[
     Step::Derive {
         concepts: &[
             ("email column", ConceptType::Entity),
-            ("password hash column", ConceptType::Entity),
-            ("user id column", ConceptType::Entity),
+            ("password hash column", ConceptType::Constraint),
+            ("user id column", ConceptType::Logic),
         ],
         parent_of: &[
             (USER_SCHEMA, "email column"),
@@ -317,13 +345,13 @@ pub const ACT_I: &[Step] = &[
         action: "write POST /users handler",
         produces: &["handlers/users.rs"],
         modifies: &[],
-        depends_on: &[USER_SCHEMA],
+        depends_on: &[USER_SCHEMA, "auth middleware"],
         narration: "write POST /users handler            depends on user schema",
     },
     Step::Derive {
         concepts: &[
             ("created at column", ConceptType::Entity),
-            ("role column", ConceptType::Entity),
+            ("role column", ConceptType::Constraint),
             ("users table migration", ConceptType::Resource),
         ],
         parent_of: &[
@@ -337,12 +365,12 @@ pub const ACT_I: &[Step] = &[
         action: "write session middleware",
         produces: &["middleware/session.rs"],
         modifies: &[],
-        depends_on: &["session store", USER_SCHEMA],
+        depends_on: &["session store", USER_SCHEMA, "handlers/users.rs"],
         narration: "write session middleware             depends on session store, user schema",
     },
     Step::Derive {
         concepts: &[
-            ("user serializer", ConceptType::Resource),
+            ("user serializer", ConceptType::Logic),
             ("user validation rules", ConceptType::Constraint),
             ("user fixtures", ConceptType::Resource),
         ],
@@ -357,21 +385,28 @@ pub const ACT_I: &[Step] = &[
         action: "add JWT verification",
         produces: &["middleware/jwt.rs"],
         modifies: &[],
-        depends_on: &["auth middleware", USER_SCHEMA],
+        depends_on: &["auth middleware", USER_SCHEMA, "middleware/session.rs"],
         narration: "add JWT verification                 depends on auth middleware, user schema",
     },
     Step::Action {
         action: "write user repository",
         produces: &["repo/users.rs"],
         modifies: &[],
-        depends_on: &[USER_SCHEMA],
+        depends_on: &[USER_SCHEMA, "handlers/users.rs"],
         narration: "write user repository                depends on user schema",
     },
     Step::Action {
         action: "wire login endpoint",
         produces: &["handlers/login.rs"],
         modifies: &[],
-        depends_on: &["auth middleware", "session store", USER_SCHEMA],
+        depends_on: &[
+            "auth middleware",
+            "session store",
+            USER_SCHEMA,
+            "handlers/users.rs",
+            "middleware/jwt.rs",
+            "repo/users.rs",
+        ],
         narration: "wire login endpoint                  depends on all three pillars",
     },
 ];
@@ -383,7 +418,7 @@ pub const ACT_II: &[Step] = &[
     Step::Derive {
         concepts: &[
             ("rate limiter", ConceptType::Entity),
-            ("redis backend", ConceptType::Entity),
+            ("redis backend", ConceptType::Resource),
         ],
         parent_of: &[],
         narration: "rate limiter, redis backend          (agent B's own feature)",
@@ -392,7 +427,7 @@ pub const ACT_II: &[Step] = &[
         action: "add rate limiting middleware",
         produces: &["middleware/ratelimit.rs"],
         modifies: &[],
-        depends_on: &["auth middleware", USER_SCHEMA],
+        depends_on: &["auth middleware", USER_SCHEMA, "handlers/login.rs"],
         narration: "add rate limiting middleware         depends on auth middleware, user schema",
     },
 ];
@@ -404,7 +439,7 @@ pub const ACT_III: &[Step] = &[Step::Action {
     action: "add oauth_id to user schema",
     produces: &[],
     modifies: &[USER_SCHEMA],
-    depends_on: &["auth middleware"],
+    depends_on: &["auth middleware", "repo/users.rs"],
     narration: "add oauth_id to user schema          MODIFIES user schema",
 }];
 
@@ -457,7 +492,14 @@ pub struct DemoOutcome {
     pub edges: usize,
     /// Every concept's canonization status, content-sorted.
     pub statuses: Vec<(String, String)>,
-    /// The `canonization_events` audit trail, in commit order.
+    /// The `canonization_events` audit trail, grouped by concept (content
+    /// order), hops in commit order within each concept.
+    ///
+    /// Grouped rather than raw because two concepts promoted in the **same**
+    /// cycle are committed in `NodeId`-ascending order and node ids are
+    /// `Uuid::new_v4()`: their interleaving is a property of the random ids,
+    /// not of the script. Each concept's own hop sequence — the thing spec §13
+    /// step 2 asks for — is preserved exactly.
     pub transitions: Vec<Transition>,
     /// Canonical memories in `lambo saints` order: `(content, blast radius)`.
     pub canonical: Vec<(String, u64)>,
@@ -705,11 +747,11 @@ pub async fn run_scenario(
         statuses,
         transitions,
         canonical,
-        recall_context: normalize_conflict_age(&result.context),
+        recall_context: normalize_volatile(&result.context),
         recall_warnings: result
             .warnings
             .iter()
-            .map(|w| normalize_conflict_age(w))
+            .map(|w| normalize_volatile(w))
             .collect(),
     };
 
@@ -788,6 +830,10 @@ async fn play(
 ) -> Result<(), CliError> {
     for (offset, step) in steps.iter().enumerate() {
         let index = first_index + offset;
+        // Pace the script (see `STEP_PACING`) before the write, so the very
+        // first interaction of an act is spaced from the last one of the act
+        // before it too.
+        tokio::time::sleep(STEP_PACING).await;
         match step {
             Step::Derive {
                 concepts,
@@ -878,6 +924,25 @@ fn assert_shape(graph: &Arc<RwLock<Graph>>, n: &mut Narrator) -> Result<(), CliE
     n.say(format!(
         "  graph complete: {interactions} interactions, {concepts} concepts, \
          '{USER_SCHEMA}' blast radius {radius}"
+    ));
+
+    let headroom = gc_headroom(&graph.read());
+    let (weakest, ratio) = headroom
+        .first()
+        .cloned()
+        .unwrap_or_else(|| (String::new(), f64::INFINITY));
+    if ratio < MIN_GC_HEADROOM {
+        return Err(CliError::Runtime(format!(
+            "demo: '{weakest}' sits at {ratio:.2}× GC's eviction bar (floor \
+             {MIN_GC_HEADROOM:.2}×). GC has to run — Stage 1's `gc_survived >= 3` gate has \
+             no other source — so a collectable concept would make the concept count and \
+             the ⚑ count depend on how many sweeps ran. Give it more structure in the \
+             script rather than turning GC off."
+        )));
+    }
+    n.say(format!(
+        "  GC headroom: closest to the eviction bar is '{weakest}' at {ratio:.2}× \
+         — nothing in this session is collectable"
     ));
     Ok(())
 }
@@ -1094,6 +1159,48 @@ async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) -> Result<(), 
 // Graph readers
 // ---------------------------------------------------------------------------
 
+/// Every concept's distance from GC's step-2 eviction bar, closest first:
+/// `(content, eviction_score / bar)`. A ratio at or below `1.0` means GC will
+/// collect that concept on its next sweep.
+///
+/// This is a **determinism precondition**, not a nicety. GC cannot simply be
+/// switched off for the demo: canonization Stage 1 gates on `gc_survived >= 3`
+/// and GC's survivor bump is the only thing in the system that raises it, so a
+/// demo with GC disabled has no transitions at all — the exact fakery the task
+/// forbids. GC therefore runs, and the script instead has to be a *healthy*
+/// session: one where the sub-threshold clause has nothing to collect. If it
+/// did collect something, the ⚑ count and the concept total would depend on
+/// how many sweeps happened to run.
+///
+/// `min_concept_score` (0.12) is not a [`Config`] key — the daemon passes
+/// `GcParams::default()` for it — so this is measured against the same
+/// constant GC uses, and mirrors GC's own two adjustments: the live-dimension
+/// score while `access_count` is dead session-wide (ALGO-1) and the per-type
+/// bar (ALGO-11).
+pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
+    use crate::daemon::gc::MIN_CONCEPT_SCORE;
+    use crate::daemon::score::{score, score_concept, score_over_live_dimensions, SessionContext};
+
+    let ctx = SessionContext::compute(graph);
+    let weights = Config::default().scoring;
+    let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
+    let mut out: Vec<(String, f64)> = graph
+        .concepts()
+        .map(|c| {
+            let dims = score_concept(graph, c, &ctx);
+            let value = if frequency_is_live {
+                score(dims, &weights)
+            } else {
+                score_over_live_dimensions(dims, &weights)
+            };
+            let bar = MIN_CONCEPT_SCORE / c.concept_type.eviction_resistance();
+            (c.content.clone(), value / bar)
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    out
+}
+
 fn concept_id(graph: &Graph, content: &str) -> Option<NodeId> {
     graph.concepts().find(|c| c.content == content).map(|c| c.id)
 }
@@ -1115,12 +1222,15 @@ fn min_gc_survived(graph: &Arc<RwLock<Graph>>) -> i32 {
         .unwrap_or(0)
 }
 
-/// The `canonization_events` audit trail, resolved to concept contents.
+/// The `canonization_events` audit trail, resolved to concept contents and
+/// grouped by concept (see [`DemoOutcome::transitions`]). A stable sort keeps
+/// each concept's hops in commit order.
 fn trail(graph: &Arc<RwLock<Graph>>) -> Vec<Transition> {
     let g = graph.read();
     let contents: HashMap<NodeId, String> =
         g.concepts().map(|c| (c.id, c.content.clone())).collect();
-    g.canonization_events()
+    let mut out: Vec<Transition> = g
+        .canonization_events()
         .iter()
         .map(|e| Transition {
             content: contents
@@ -1131,12 +1241,101 @@ fn trail(graph: &Arc<RwLock<Graph>>) -> Vec<Transition> {
             to: format!("{:?}", e.to_status),
             blast_radius: e.blast_radius,
         })
-        .collect()
+        .collect();
+    out.sort_by(|a, b| a.content.cmp(&b.content));
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
+
+/// Everything the ×2 comparison must not see: the conflict line's age
+/// ([`normalize_conflict_age`]) and the rendered composite score
+/// ([`normalize_score`]).
+///
+/// The hit *ordering*, every concept's content, the `[Entity, canonical]`
+/// marker, `blast radius 9`, the ⚑ line and the conflict sentence all survive
+/// this untouched and are compared byte for byte.
+pub fn normalize_volatile(text: &str) -> String {
+    normalize_node_ids(&normalize_score(&normalize_conflict_age(text)))
+}
+
+/// Replace every UUID-shaped token with `<node>`.
+///
+/// Node ids are `Uuid::new_v4()` — random by construction, and one reaches the
+/// rendered surface: the high-risk warning names the node it fired on. The
+/// warning's text, condition and the fact that it fired on the pillar are all
+/// still compared; only the identifier is masked.
+pub fn normalize_node_ids(text: &str) -> String {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if is_uuid_at(bytes, i) {
+            out.push_str("<node>");
+            i += GROUPS.iter().sum::<usize>() + 4;
+        } else {
+            // Advance one char, not one byte: the context block is UTF-8 and
+            // carries `⚑`.
+            let ch = text[i..].chars().next().expect("char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Whether a canonical 8-4-4-4-12 hex UUID starts at byte `i`.
+fn is_uuid_at(bytes: &[u8], i: usize) -> bool {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let mut at = i;
+    for (g, len) in GROUPS.iter().enumerate() {
+        if g > 0 {
+            if bytes.get(at) != Some(&b'-') {
+                return false;
+            }
+            at += 1;
+        }
+        for _ in 0..*len {
+            match bytes.get(at) {
+                Some(b) if b.is_ascii_hexdigit() => at += 1,
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Replace `(score X.XX` with `(score <s>`.
+///
+/// The composite's `recency` dimension is each concept's position inside the
+/// session's real temporal extent, and interactions are server-stamped from
+/// the process clock. [`STEP_PACING`] makes that extent the script's rather
+/// than the scheduler's, which pins the *ordering* — the meaningful part, and
+/// the part the context block's line order still asserts — but the second
+/// decimal of a score is a wall-clock measurement and replaying it bit for bit
+/// would be a claim the system does not make.
+pub fn normalize_score(text: &str) -> String {
+    const HEAD: &str = "(score ";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(h) = rest.find(HEAD) {
+        let split = h + HEAD.len();
+        let after = &rest[split..];
+        let digits = after
+            .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+            .unwrap_or(after.len());
+        out.push_str(&rest[..split]);
+        if digits > 0 {
+            out.push_str("<s>");
+        }
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
 
 /// Replace the age in every `... wrote to it <N> seconds ago` with `<n>`.
 ///
