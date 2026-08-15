@@ -1895,3 +1895,26 @@ exit 0 (were 101); `cargo check --features store-cockroach,store-memory,fixtures
 `RUSTFLAGS=-D warnings`) caught it. Recommend adding `-D warnings` to those two rows (or a
 `-D warnings` check of the minimal rows) so feature-mismatch dead imports fail locally, not in
 CI.
+
+### T8.4 — two-agent demo (review loop, 2026-08-15)
+
+Adversarial review of T8.4 at current HEAD (report `adve-review-t8.4-demo.md`). The demo is
+**REAL, merged, and verified** (not a stub — T88-H9 CLOSED): the scenario runs x2 on the memory
+backend with byte-identical OUTCOME blocks (12 interactions / 27 concepts / 93 edges / `user
+schema` Canonical + the ⚑ 9-nodes warning + conflict line); a real Candidate→Venerable→Canonical
+transition driven through the real engine with a documented 10 ms `canonization_edge_min_age`
+knob (no faked transitions); R3-1 honored (fresh sessions per run, never calls `seed()`);
+`--scenario bogus` → exit 2 listing valid scenarios; `demo --help` names the flags. Gate block
+green.
+
+- **T84-2 (P3) FIXED** — dropped the stale `demo` skip (and its stale comment) from the
+  `every_subcommand_and_required_arg_has_help` test in `src/main.rs`; the demo's about +
+  `--scenario`/`--session` help already satisfy the invariant, so `demo` is now covered like
+  every other subcommand. No help-text additions needed. Reverify CLEAN.
+- **T84-1 (P2) DEFERRED-INFRA** — the two live done-when legs (scenario x2 against the LIVE
+  Cockroach cluster; split-screen `canonization_events` screenshot into `dev-diary/evidence/`)
+  are UNPERFORMED and blocked by live infrastructure (`LAMBO_COCKROACH_DSN` unset, cluster +
+  CockroachDB-managed MCP unreachable from the review machine). NOT a code defect and NOT
+  fabricated; recorded with `demo/LIVE-RUNBOOK.md` §1-§6 for the cluster holder. This is an
+  **open exit-criteria item**: T8.4 is code-CLEAN but not exit-complete until a holder with
+  cluster access performs those two legs.

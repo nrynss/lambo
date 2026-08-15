@@ -629,8 +629,7 @@ mod tests {
 
     fn walk_help(cmd: &clap::Command, path: &str) {
         for sub in cmd.get_subcommands() {
-            if sub.get_name() == "help" || sub.get_name() == "demo" {
-                // `demo` is T8.4; its flags are not authored here.
+            if sub.get_name() == "help" {
                 continue;
             }
             let here = format!("{path} {}", sub.get_name());
