@@ -21,3 +21,6 @@ spikes/*/Cargo.lock
 
 # git worktrees (star model task checkouts)
 /worktrees/
+
+# local MCP client config (carries a cluster id)
+.mcp.json
