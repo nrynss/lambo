@@ -36,10 +36,25 @@ enum Commands {
         /// HTTP port when transport=http
         #[arg(long, default_value_t = 7700)]
         port: u16,
-        /// Bind address when transport=http. Loopback by default — the HTTP
-        /// transport is unauthenticated and this process is a session *writer*.
+        /// Bind address when transport=http. Loopback by default. Binding
+        /// anywhere else REQUIRES --auth-token (or LAMBO_AUTH_TOKEN): this
+        /// process is a session *writer* and serve refuses to start otherwise.
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,
+        /// Bearer token required on every HTTP request. Prefer the
+        /// LAMBO_AUTH_TOKEN env var, which overrides this flag — a token in
+        /// argv is visible in `ps` and shell history. Optional on loopback,
+        /// mandatory on any other bind. Ignored by --transport stdio.
+        #[arg(long, value_name = "TOKEN")]
+        auth_token: Option<lambo::mcp::SecretToken>,
+        /// Maximum concurrently live MCP sessions on the HTTP transport;
+        /// further `initialize` requests are refused with 503.
+        #[arg(long, default_value_t = lambo::mcp::DEFAULT_MAX_SESSIONS)]
+        max_sessions: usize,
+        /// Sustained HTTP request/second ceiling (burst allowance is 2x). Set
+        /// 0 to disable the limit.
+        #[arg(long, default_value_t = lambo::mcp::DEFAULT_RATE_LIMIT_RPS)]
+        rate_limit_rps: u32,
     },
     /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
     ///
@@ -369,6 +384,9 @@ fn main() -> ExitCode {
                 transport,
                 port,
                 bind,
+                auth_token,
+                max_sessions,
+                rate_limit_rps,
             },
             Resolved::Full(backends),
         ) => {
@@ -384,12 +402,25 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // Env beats flag (T8.7) — resolved here, before any of it reaches a
+            // log line. A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not
+            // a silent fallback to the flag.
+            let auth_token = match lambo::mcp::resolve_auth_token(auth_token) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("lambo serve: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             let opts = ServeOptions {
                 session,
                 agent,
                 transport,
                 port,
                 bind,
+                auth_token,
+                max_sessions,
+                rate_limit_rps,
             };
 
             // `backends` is the single resolve from `resolve_for_command` above

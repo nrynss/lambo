@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::transport::io::stdio;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -164,6 +164,362 @@ impl std::str::FromStr for Transport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T8.7 — HTTP surface hardening
+// ---------------------------------------------------------------------------
+
+/// Environment variable holding the HTTP bearer token. **Takes precedence over
+/// `--auth-token`**: a process manager can inject the secret without it ever
+/// appearing in a command line (where `ps` and shell history would expose it).
+pub const AUTH_TOKEN_ENV: &str = "LAMBO_AUTH_TOKEN";
+
+/// Default ceiling on concurrently live MCP sessions (T82-16).
+///
+/// The HTTP transport mints one session per `initialize`, and before this
+/// nothing bounded that: a client that reconnects in a loop grows
+/// `LocalSessionManager`'s map — and its per-session worker tasks — without
+/// limit, against a process that owns exactly one `Memory`. 32 is chosen to sit
+/// far above any real fan-in (the demo uses one; a swarm uses a handful of
+/// long-lived sessions) while still being a bound.
+pub const DEFAULT_MAX_SESSIONS: usize = 32;
+
+/// Default sustained request rate for the HTTP transport, in requests/second.
+///
+/// Generous on purpose: this is an abuse bound, not a quality-of-service knob,
+/// and a limit that a legitimate agent can trip is a limit that gets disabled.
+pub const DEFAULT_RATE_LIMIT_RPS: u32 = 50;
+
+/// Burst allowance as a multiple of [`DEFAULT_RATE_LIMIT_RPS`] — the bucket
+/// capacity. An agent that fires a batch of calls after an idle pause should not
+/// be refused for being bursty; only a *sustained* excess is.
+const RATE_LIMIT_BURST_FACTOR: u32 = 2;
+
+/// A bearer token that cannot be printed.
+///
+/// The redacting [`std::fmt::Debug`] is the point: `ServeOptions` and clap's
+/// `Commands` both derive `Debug`, and `serve` logs its options-adjacent fields
+/// at startup. Holding the secret in a type with no `Display` and a redacting
+/// `Debug` makes "never logged" a property of the type rather than a promise
+/// every future caller has to keep.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretToken(String);
+
+impl SecretToken {
+    /// Reject empty and whitespace-only tokens.
+    ///
+    /// Fail closed rather than quietly accept: an empty `LAMBO_AUTH_TOKEN` is
+    /// almost always an unset variable that expanded to nothing, and treating it
+    /// as a valid credential would authenticate every request that sends
+    /// `Authorization: Bearer `.
+    pub fn new(raw: impl Into<String>) -> Result<Self, String> {
+        let raw = raw.into();
+        if raw.trim().is_empty() {
+            return Err("auth token is empty — pass a non-empty secret, or omit it entirely to \
+                        run unauthenticated on loopback"
+                .into());
+        }
+        Ok(Self(raw))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for SecretToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretToken(<redacted>)")
+    }
+}
+
+impl std::str::FromStr for SecretToken {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+/// Compare a presented token against the expected one without an early exit.
+///
+/// The accumulate-then-test shape keeps the time taken independent of *where*
+/// the first differing byte falls, so a caller cannot recover the secret byte by
+/// byte from response timing. Two deliberate details:
+///
+/// * the loop runs over the **presented** input and indexes the expected token
+///   modulo its length, so a wrong-length guess does not return early and
+///   thereby disclose the expected length;
+/// * [`std::hint::black_box`] stops the optimiser from proving the accumulator
+///   can be short-circuited.
+///
+/// The honest caveat: the *duration* still scales with the presented length,
+/// which is attacker-controlled and reveals nothing about the secret. This is
+/// the same guarantee `subtle::ConstantTimeEq` gives on slices, reached without
+/// adding a dependency for one comparison.
+fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
+    if expected.is_empty() {
+        // Unreachable via `SecretToken::new`, which rejects empty tokens; a
+        // belt-and-braces guard so the `%` below cannot divide by zero.
+        return false;
+    }
+    let mut diff = (presented.len() ^ expected.len()) as u64;
+    for (i, byte) in presented.iter().enumerate() {
+        diff |= u64::from(byte ^ expected[i % expected.len()]);
+    }
+    std::hint::black_box(diff) == 0
+}
+
+/// Does an `Authorization` header value carry the expected bearer token?
+///
+/// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
+/// itself is compared byte-for-byte in constant time.
+fn bearer_ok(header: Option<&str>, expected: &SecretToken) -> bool {
+    let Some(raw) = header else {
+        return false;
+    };
+    let raw = raw.trim();
+    let Some((scheme, credential)) = raw.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    tokens_match(credential.trim().as_bytes(), expected.as_bytes())
+}
+
+/// Resolve the effective token from the flag and the environment.
+///
+/// **The environment wins.** A token on the command line is visible in `ps` and
+/// in shell history, so the deployment-friendly channel is the one that takes
+/// precedence — an operator who exports [`AUTH_TOKEN_ENV`] does not have to also
+/// remember to drop the flag.
+///
+/// A *set but empty* environment variable is an error rather than a silent
+/// fallback to the flag: that shape is nearly always an unset variable that
+/// expanded to nothing, and resolving it to "whatever the flag said" would make
+/// a typo look like it worked.
+pub fn resolve_auth_token(flag: Option<SecretToken>) -> Result<Option<SecretToken>, LamboError> {
+    resolve_auth_token_from(flag, std::env::var(AUTH_TOKEN_ENV).ok())
+}
+
+fn resolve_auth_token_from(
+    flag: Option<SecretToken>,
+    env: Option<String>,
+) -> Result<Option<SecretToken>, LamboError> {
+    match env {
+        Some(raw) => SecretToken::new(raw)
+            .map(Some)
+            .map_err(|e| LamboError::Config(format!("{AUTH_TOKEN_ENV}: {e}"))),
+        None => Ok(flag),
+    }
+}
+
+/// Fail closed when a non-loopback bind has no token (T82-16).
+///
+/// The rule, and why it is a *startup* check rather than a warning:
+///
+/// * **stdio** is process-local — the client already owns the process it
+///   spawned, so there is nothing for a token to protect. Unaffected.
+/// * **HTTP on loopback** keeps today's behaviour: auth is optional, because
+///   reaching the socket already means local code execution. A token is still
+///   honoured if given.
+/// * **HTTP on anything else** — `0.0.0.0`, a LAN address, a public one —
+///   *requires* a token. This process is a session **writer** with an
+///   unauthenticated write surface; binding it to the world without a
+///   credential is not a configuration worth starting, so `serve` refuses
+///   rather than coming up and hoping a proxy is in front of it.
+fn authorize_bind(
+    transport: Transport,
+    bind: IpAddr,
+    token: Option<&SecretToken>,
+) -> Result<(), LamboError> {
+    if transport != Transport::Http || bind.is_loopback() || token.is_some() {
+        return Ok(());
+    }
+    Err(LamboError::Config(format!(
+        "refusing to start: --transport http --bind {bind} exposes an unauthenticated MCP \
+         *writer* beyond loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token) to require \
+         'Authorization: Bearer <token>' on every request, or bind 127.0.0.1 and reach it \
+         through a tunnel or an authenticating proxy."
+    )))
+}
+
+/// A token bucket over the whole HTTP transport.
+///
+/// **Scope, stated honestly:** this limits *HTTP requests to `/mcp`*, not
+/// `tools/call` specifically. Singling out `tools/call` means buffering and
+/// re-injecting every request body to read the JSON-RPC `method` — real
+/// machinery, and a correctness risk on the streaming transport — for a
+/// distinction that barely matters here: on streamable HTTP each `tools/call` is
+/// its own POST, so a request-rate bound *is* a call-rate bound plus a few
+/// cheap handshake requests. The wider net is the cheaper and safer cut.
+///
+/// The limit is **global**, not per-connection: per-connection state would be
+/// trivially defeated by opening more connections, which is exactly the abuse
+/// shape the session cap and this bound exist to bound together.
+pub(crate) struct RateLimiter {
+    capacity: f64,
+    refill_per_sec: f64,
+    state: parking_lot::Mutex<BucketState>,
+}
+
+struct BucketState {
+    tokens: f64,
+    last: Instant,
+}
+
+impl RateLimiter {
+    /// `None` when `rps == 0` — the documented way to disable the limit.
+    fn new(rps: u32, now: Instant) -> Option<Self> {
+        if rps == 0 {
+            return None;
+        }
+        let capacity = f64::from(rps.saturating_mul(RATE_LIMIT_BURST_FACTOR));
+        Some(Self {
+            capacity,
+            refill_per_sec: f64::from(rps),
+            state: parking_lot::Mutex::new(BucketState {
+                tokens: capacity,
+                last: now,
+            }),
+        })
+    }
+
+    /// Take one token if the bucket has one. `now` is a parameter so the tests
+    /// drive the refill deterministically instead of sleeping.
+    fn try_acquire_at(&self, now: Instant) -> bool {
+        let mut st = self.state.lock();
+        let elapsed = now.saturating_duration_since(st.last).as_secs_f64();
+        st.last = now;
+        st.tokens = (st.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        if st.tokens >= 1.0 {
+            st.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        self.try_acquire_at(Instant::now())
+    }
+}
+
+/// How many MCP sessions are live right now.
+///
+/// A trait so the cap is testable without standing up a real transport:
+/// `LocalSessionManager` is the production implementation, a counter is the
+/// test one.
+#[async_trait::async_trait]
+pub(crate) trait LiveSessions: Send + Sync + 'static {
+    async fn live(&self) -> usize;
+}
+
+#[async_trait::async_trait]
+impl LiveSessions for LocalSessionManager {
+    async fn live(&self) -> usize {
+        // `sessions` is rmcp's own public map, and it is the authority: a DELETE
+        // /mcp or a dropped worker removes the entry, so counting it here needs
+        // no bookkeeping of ours that could drift from the truth.
+        self.sessions.read().await.len()
+    }
+}
+
+/// The three checks every HTTP request passes before it reaches rmcp.
+#[derive(Clone)]
+pub(crate) struct HttpGuard {
+    auth: Option<SecretToken>,
+    max_sessions: usize,
+    live: Arc<dyn LiveSessions>,
+    rate: Option<Arc<RateLimiter>>,
+}
+
+/// Is this the request that would mint a **new** MCP session?
+///
+/// Streamable HTTP assigns the session id in the `initialize` response, so the
+/// one request that arrives without an `Mcp-Session-Id` — and can create state —
+/// is that POST. Everything else either carries the header or is a GET/DELETE
+/// against an existing session, and must not be counted against the cap.
+fn opens_a_new_session(req: &axum::extract::Request) -> bool {
+    req.method() == axum::http::Method::POST
+        && req.headers().get("Mcp-Session-Id").is_none()
+        && req.headers().get("Last-Event-ID").is_none()
+}
+
+/// Auth, then rate, then the session cap — in that order, deliberately.
+///
+/// Authentication runs **first and alone**: an unauthenticated caller must not
+/// be able to consume rate-limit budget or read the live-session count (a 503
+/// vs 401 difference would leak how loaded the server is), and it must be
+/// refused before rmcp sees the request at all — before any session is minted,
+/// any worker task spawned, or any body parsed.
+async fn guard_request(
+    axum::extract::State(guard): axum::extract::State<HttpGuard>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if let Some(expected) = &guard.auth {
+        let presented = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if !bearer_ok(presented, expected) {
+            // Deliberately terse and identical for "no header" and "wrong
+            // token": the difference is not the caller's business, and the
+            // token itself is never echoed.
+            tracing::warn!(
+                had_header = presented.is_some(),
+                "mcp http: rejected an unauthenticated request"
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
+            )
+                .into_response();
+        }
+    }
+
+    if let Some(rate) = &guard.rate {
+        if !rate.try_acquire() {
+            tracing::warn!("mcp http: request refused by the rate limit");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                "rate limit exceeded: slow down and retry\n",
+            )
+                .into_response();
+        }
+    }
+
+    if opens_a_new_session(&req) {
+        let live = guard.live.live().await;
+        if live >= guard.max_sessions {
+            tracing::warn!(
+                live,
+                max = guard.max_sessions,
+                "mcp http: refusing a new session — at the concurrent-session cap"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                format!(
+                    "at the concurrent-session cap ({live}/{max} sessions live): this server \
+                     will not open another. Close an idle session (HTTP DELETE /mcp with its \
+                     Mcp-Session-Id), or restart with a higher --max-sessions.\n",
+                    max = guard.max_sessions
+                ),
+            )
+                .into_response();
+        }
+    }
+
+    next.run(req).await
+}
+
 /// Everything `serve` needs that is not in `lambo.toml`.
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
@@ -174,10 +530,17 @@ pub struct ServeOptions {
     pub agent: String,
     pub transport: Transport,
     pub port: u16,
-    /// Bind address for `--transport http`. Defaults to loopback: the HTTP
-    /// transport has no authentication, and this process is a *writer* on the
-    /// session.
+    /// Bind address for `--transport http`. Defaults to loopback. Binding
+    /// anywhere else requires [`ServeOptions::auth_token`] — see
+    /// [`authorize_bind`].
     pub bind: IpAddr,
+    /// Bearer token required on every HTTP request (T8.7). `None` is allowed
+    /// only on loopback; [`AUTH_TOKEN_ENV`] overrides whatever the flag said.
+    pub auth_token: Option<SecretToken>,
+    /// Ceiling on concurrently live MCP sessions.
+    pub max_sessions: usize,
+    /// Sustained requests/second on the HTTP transport; `0` disables the limit.
+    pub rate_limit_rps: u32,
 }
 
 impl ServeOptions {
@@ -188,6 +551,9 @@ impl ServeOptions {
             transport: Transport::Stdio,
             port: 7700,
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            auth_token: None,
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            rate_limit_rps: DEFAULT_RATE_LIMIT_RPS,
         }
     }
 }
@@ -280,6 +646,13 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
 /// signal in *any* of those still reaches [`Memory::close`] instead of hitting
 /// the default disposition and killing the process with the tail un-flushed.
 pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
+    // T8.7, and it runs FIRST — before `build_memory`, which attaches to the
+    // store and takes the single-writer lease. A misconfigured bind must cost
+    // nothing and leave nothing behind: refusing here means no lease is taken,
+    // so the operator's retry after setting a token is not blocked by the
+    // lease their own refused start would otherwise be holding.
+    authorize_bind(opts.transport, opts.bind, opts.auth_token.as_ref())?;
+
     let mem = Arc::new(build_memory(&opts, backends).await?);
 
     // Exactly once, at startup: `events()` is stateful on its first call — it
@@ -602,9 +975,12 @@ async fn serve_http(
     mut shutdown: Pin<&mut impl Future<Output = ()>>,
 ) -> Result<(), LamboError> {
     let factory_mem = mem.clone();
+    // Held as its own `Arc` so the session cap can read the live count from the
+    // same manager rmcp mutates — see [`LiveSessions`].
+    let sessions = Arc::new(LocalSessionManager::default());
     let service = StreamableHttpService::new(
         move || Ok(LamboServer::new(factory_mem.clone())),
-        Arc::new(LocalSessionManager::default()),
+        sessions.clone(),
         {
             // `#[non_exhaustive]` — mutate the SDK default rather than
             // constructing, so a new field cannot silently break the build.
@@ -614,7 +990,25 @@ async fn serve_http(
         },
     );
 
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let guard = HttpGuard {
+        auth: opts.auth_token.clone(),
+        max_sessions: opts.max_sessions,
+        live: sessions,
+        rate: RateLimiter::new(opts.rate_limit_rps, Instant::now()).map(Arc::new),
+    };
+    // T8.7 posture, logged once at startup so an operator can see what this
+    // process is actually enforcing. The token itself is never logged — only
+    // whether one is required.
+    tracing::info!(
+        auth_required = guard.auth.is_some(),
+        max_sessions = guard.max_sessions,
+        rate_limit_rps = opts.rate_limit_rps,
+        "mcp http: request guard armed"
+    );
+
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
     let addr = SocketAddr::new(opts.bind, opts.port);
     // Race `bind` against the shutdown signal too (R2-a): the ~5 ms bind window
     // is small but non-zero, and a signal in it must still reach `close()`.

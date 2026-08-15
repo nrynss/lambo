@@ -12,7 +12,10 @@
 pub mod serve;
 pub mod server;
 
-pub use serve::{build_memory, resolve_serve_backends, serve, ServeOptions, Transport};
+pub use serve::{
+    build_memory, resolve_auth_token, resolve_serve_backends, serve, SecretToken, ServeOptions,
+    Transport, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
+};
 pub use server::LamboServer;
 
 /// Initialise logging for a serve process.
