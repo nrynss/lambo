@@ -130,12 +130,13 @@ CREATE TABLE IF NOT EXISTS reservations (
     expires_at      TEXT NOT NULL,
     PRIMARY KEY (session_id, node_id)
 );
-
 -- Single-writer lease (spec §2.2, T8.6): one row per session, holder =
--- 'agent@host#pid', timestamps stamped from the store clock. The adapter's
--- acquire is a single INSERT ... ON CONFLICT guarded by an expiry check, so two
--- processes opening the same DB file serialize on this row. External SQL readers
--- of a *live* holder MUST filter
+-- 'agent@host#pid', timestamps stamped from the store clock. `current_token`
+-- is the monotonic fencing token (issue #1): minted on takeover, PRESERVED on a
+-- same-holder refresh, 0 = never leased (seed/fixture parity bypass). The
+-- adapter's acquire is a single INSERT ... ON CONFLICT guarded by an expiry
+-- check, so two processes opening the same DB file serialize on this row.
+-- External SQL readers of a *live* holder MUST filter
 -- `WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')` — an expired row
 -- persists until the next acquire overwrites it. Operator override (force a
 -- takeover from a wedged-but-heartbeating holder):
@@ -144,7 +145,8 @@ CREATE TABLE IF NOT EXISTS session_leases (
     session_id  TEXT PRIMARY KEY,
     holder      TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
-    expires_at  TEXT NOT NULL
+    expires_at  TEXT NOT NULL,
+    current_token INTEGER NOT NULL DEFAULT 0
 );
 
 -- Flush stats published by the writer's FlushTask (T85-3): one row per
