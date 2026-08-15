@@ -76,7 +76,7 @@ The fastest way to see Lambo work uses the in-memory store and the fixture embed
   </Step>
 </Steps>
 
-Your agent can now connect over MCP. See [MCP tools](/mcp) for the tool surface, and [End to end](/end-to-end) for a full walkthrough.
+Your agent can now connect over MCP. See [MCP tools](/lambo/mcp/) for the tool surface, and [End to end](/lambo/end-to-end/) for a full walkthrough.
 
 ## Connect an MCP client
 
@@ -104,7 +104,7 @@ The `--config` flag comes before `serve`, because it is a global flag. The `serv
 To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
 
 <Warning>
-The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/config#http-transport).
+The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/lambo/config/#http-transport).
 </Warning>
 
 ## Set up real embeddings
@@ -130,4 +130,4 @@ Do not switch embedder models in the middle of a session without re-embedding, b
 
 ## Set up durable storage
 
-For a durable store, run `scripts/provision.sh` to create the schema before you serve. See [Configuration](/config) for the store keys and the provisioning details.
+For a durable store, run `scripts/provision.sh` to create the schema before you serve. See [Configuration](/lambo/config/) for the store keys and the provisioning details.
