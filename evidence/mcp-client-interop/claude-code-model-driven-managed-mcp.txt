@@ -1,0 +1,90 @@
+Claude Code — model-driven calls against the managed CockroachDB MCP server
+Captured 2026-08-15, in-session (tools in the assistant's own roster, not a subprocess).
+
+The cluster UUID returned by list_clusters is redacted below as <CLUSTER_ID>; it is the
+same id that keeps .mcp.json gitignored (commit 21009f8). Nothing else here is a secret.
+
+Four tool calls. The model chose every argument; nothing was scripted at the JSON-RPC
+layer and no SQL was copied from a prepared script except the documented query in step 4,
+which is the one published in site/src/content/docs/demo.mdx.
+
+--------------------------------------------------------------------------------
+[1] mcp__cockroachdb-cloud__list_clusters  {}
+
+{"rows":[{"id":"<CLUSTER_ID>","name":"nrynss","cockroach_version":"v26.2.5",
+  "cloud_provider":"GCP","state":"CREATED","plan":"BASIC",
+  "regions":[{"name":"asia-south1","node_count":0}],
+  "created_at":"2026-08-10T10:10:29Z","updated_at":"2026-08-10T10:10:32Z"}]}
+
+--------------------------------------------------------------------------------
+[2] mcp__cockroachdb-cloud__list_databases  {}
+
+{"rows":[
+  {"database_name":"defaultdb","owner":"root","primary_region":null,...},
+  {"database_name":"lambo","owner":"root","primary_region":"gcp-asia-south1",
+   "regions":["gcp-asia-south1"],"survival_goal":"zone"}]}
+
+--------------------------------------------------------------------------------
+[3] mcp__cockroachdb-cloud__list_tables  {"database":"lambo"}
+
+  sessions              994 rows
+  interactions         1082
+  concepts             1834
+  edges                1178
+  synonyms               23
+  canonization_events   143
+  reservations            0
+  session_leases          3
+  session_stats           6
+
+All nine tables of the lambo schema are present, REGIONAL BY TABLE IN PRIMARY REGION.
+
+--------------------------------------------------------------------------------
+[4a] mcp__cockroachdb-cloud__select_query  {"database":"lambo", "query":
+     "SELECT session_id, count(*) AS events, min(occurred_at) AS first_event
+      FROM canonization_events GROUP BY session_id HAVING count(*) >= 3
+      ORDER BY first_event DESC LIMIT 5"}
+
+  demo-rest-api-bdd69691-ea92-41b7-ad3a-7506332071dc   5   2026-08-15T14:50:08.306429Z
+  demo-rest-api-196865e2-b7ee-479f-ba1c-f9d6aa0f8914   5   2026-08-15T14:49:58.494946Z
+  demo-rest-api-7274756e-7cf3-4497-9d55-035f2793c1cb   5   2026-08-15T14:42:16.291741Z
+  demo-rest-api-b4a2d878-00a1-4b78-9591-c53d77cf8bcf   5   2026-08-15T09:37:41.837098Z
+  demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2   5   2026-08-15T09:37:04.214601Z
+
+(This step exists because the published query requires a session id, and one cluster
+accumulates events from every session that has ever run against it — the warning in
+demo.mdx is load-bearing, not decorative. 143 event rows across many sessions.)
+
+--------------------------------------------------------------------------------
+[4b] THE DOCUMENTED QUERY — verbatim from site/src/content/docs/demo.mdx:128
+     mcp__cockroachdb-cloud__select_query  {"database":"lambo", "query":
+     "SELECT node_id, from_status, to_status, blast_radius, occurred_at
+      FROM canonization_events
+      WHERE session_id = 'demo-rest-api-bdd69691-ea92-41b7-ad3a-7506332071dc'
+      ORDER BY occurred_at"}
+
+  node_id     from_status  to_status   blast_radius  occurred_at
+  ----------  -----------  ----------  ------------  ---------------------------
+  724c92b9…   None         Candidate   null          2026-08-15T14:50:08.306429Z
+  3e3a6984…   None         Candidate   null          2026-08-15T14:50:08.306429Z
+  724c92b9…   Candidate    Venerable   null          2026-08-15T14:50:08.992263Z
+  724c92b9…   Venerable    Canonical   9             2026-08-15T14:50:09.600577Z
+  1848c6e5…   None         Candidate   null          2026-08-15T14:50:10.103585Z
+
+--------------------------------------------------------------------------------
+WHAT [4b] CONFIRMS
+
+demo.mdx:134 claims, of this exact query: "the parent concept moving Candidate, then
+Venerable, then Canonical, with the blast radius recorded on the promotion and left
+null on the earlier hops."
+
+Row-by-row, that holds. Node 724c92b9 walks None → Candidate → Venerable → Canonical
+across three rows spanning 1.29 seconds. blast_radius is null on both earlier hops and
+9 on the Venerable → Canonical promotion.
+
+The value 9 independently matches the recall block published at demo.mdx:96 —
+"user schema [Entity, canonical] (score 2.27, blast radius 9)". The number the demo
+narrates and the number durably written to CockroachDB are the same number.
+
+The two other nodes (3e3a6984, 1848c6e5) reach Candidate and stop, which is the
+expected shape: only the parent concept accumulates enough support to be promoted.

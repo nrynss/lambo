@@ -435,8 +435,8 @@ impl LamboServer {
             Ok(vec![format!(
                 "attribution: this process owns the session as agent '{owner}'; \
                  the call from '{agent_id}' is recorded in the graph as '{owner}'. \
-                 Per-call agent attribution needs a Memory-level agent override \
-                 (see T8.2 Handoff Log)."
+                 Per-call agent attribution needs a Memory-level agent override; \
+                 until then, run one serve process per agent."
             )])
         }
     }
@@ -466,7 +466,7 @@ impl LamboServer {
              single identity, so a reservation made for you could not be told apart from \
              '{owner}'s own — and you could release a lock you do not hold. \
              NOTHING WAS RESERVED OR RELEASED. Per-call agent identity needs a Memory-level \
-             agent override (T8.1 re-open; see the T8.2 Handoff Log). Until then, call \
+             agent override. Until then, call \
              lambo_reserve with agent_id '{owner}', or run one serve process per agent."
         ))]))
     }

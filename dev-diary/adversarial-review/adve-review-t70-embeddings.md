@@ -223,7 +223,7 @@ T7.1–T7.3 are **out of scope** for this review and **do not reopen** it.
 ### Residual backlog (non-blocking; do not reopen)
 
 1. Pin HF GGUF repo + revision (+ optional SHA) in Handoff when demo freezes.  
-2. One live smoke evidence file under `dev-diary/evidence/` when convenient.  
+2. One live smoke evidence file under `evidence/` when convenient.  
 3. Downstream (separate tasks): T7.2 hybrid, T7.3 vector store, T7.1 Bedrock, session embedder id.
 
 ---

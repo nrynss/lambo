@@ -171,7 +171,7 @@ self-flagged in the handoff as out-of-`owns`; one-line fix.
 
 ## NIT-6 — `distribution: local` vs "Distributed Vector Indexing"
 
-**File/construct:** `dev-diary/evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`.
+**File/construct:** `evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`.
 
 The PASSING plan is `distribution: local` (single-node) with ~883 rows. The index is used
 (`vector search`), but nothing in the capture demonstrates the *distributed* half of the

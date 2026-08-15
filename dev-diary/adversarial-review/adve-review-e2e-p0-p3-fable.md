@@ -14,7 +14,7 @@
 ║          code by the orchestrator before inclusion             ║
 ║  Discount: Bedrock account authorization (T0.4/T7.1) — support ║
 ║          ticket raised; unavailability not held against P0-P3  ║
-║  Evidence: dev-diary/evidence/e2e-p0-p3-fable-gates.txt        ║
+║  Evidence: evidence/e2e-gates-fable.txt        ║
 ║  Verdict: PLATFORM HOLDS — no false closures, gates green,     ║
 ║          docs honest. 45 findings: 7 P1, 15 P2, 23 P3. No P0.  ║
 ║          Disposition the P1s before the tracks that consume    ║
@@ -184,7 +184,7 @@ path; P3 = latent/robustness. No P0 (nothing red today).
 
 ### COH-1 — shipped `vector_candidates` bypasses the vector index the project must demo
 
-- **Location:** src/store/cockroach.rs:1267–1274 vs dev-diary/evidence/t0.3-vector-spike.txt; consumed by PHASE-7 T7.3 and spec §12.1
+- **Location:** src/store/cockroach.rs:1267–1274 vs evidence/vector-spike.txt; consumed by PHASE-7 T7.3 and spec §12.1
 - **Claim:** The shipped SQL (`WHERE session_id = $1 AND embedding IS NOT NULL ORDER BY dist LIMIT $3`) is the exact session-filtered shape the project's own spike evidence shows does a table scan, not `vector search` ("EXPLAIN filtered … does NOT use vector index; filtered=false"). T0.3's GO verdict was on the *pure* query; T3.2 silently took "accept-no-index" without recording the choice; module doc never mentions it.
 - **Failure scenario:** T7.3's done-when is EXPLAIN-verified index usage "true on camera"; spec §12.1 lists Distributed Vector Indexing as a required tool. As merged, that claim is false; whoever picks up T7.3 (late, one of the last tasks) discovers it on EXPLAIN day and rewrites the query under deadline pressure.
 - **Disposition:** decide now (T0.3's own options): global vector search + Rust-side session filter, or the spike's recommended composite/`STORING` index. Record the choice in the T7.3 task text either way.
@@ -451,7 +451,7 @@ clean; default 242 passed / 0 failed; `--features store-sqlite` 268+5 passed /
 failed under `-D warnings`; `--features store-cockroach` 263 passed / 5 ignored
 (live tests honest); fixtures regenerate byte-identical; live Cockroach
 conformance 2/2 green with committed evidence
-(dev-diary/evidence/20260812-025148-cockroach-live.txt); phase/p4-p7
+(evidence/20260812-025148-cockroach-live.txt); phase/p4-p7
 fast-forwarded onto final main (COH-12).
 
 The three cross-cutting themes from this review are materially closed:
@@ -542,7 +542,7 @@ Wave-1 evidence (20260811-233251) plus the #[ignore]/REQUIRE_LIVE machinery.
 | STORE-4 | Wave 4 / 3083586 | VERIFIED | `StoreError::Constraint` types/mod.rs:496 + `is_retryable` :508; structured classifier store/error.rs:47–96 (SQLSTATE 23xxx / SQLITE code 19 → Constraint; 40xxx/08xxx/57P01-3/BUSY → retryable; substring "40001" gone); dead-letter drop-after-log + `FlushStats::dead_lettered` flush.rs:383/:111; test `constraint_violation_dead_letters_the_batch` :1731 |
 | TEST-3 | Wave 1 / 0cf585f | **NOT VERIFIED** | ci.yml:5 `branches: [main, master, 'phase-*']` — GitHub Actions `*` does not match `/`, and real phase branches are `phase/<slug>` (dev-diary/README.md:164/:214; this branch is `phase/p4-daemon`), so the push trigger can never fire for them (none is pushed to origin either). Failure scenario demonstrably NOT neutralized: 2/5 matrix rows are red on this branch, invisibly. Fix: `'phase/**'` + push phase branches |
 | TEST-4 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | exit criteria re-worded honestly (the review's own alternative): PHASE-1-contracts.md:82/:172 and PHASE-3-stores.md:186–194 name the three per-adapter suites and state "there is NO generic tests/store_conformance.rs" |
-| TEST-5 | Wave 1 / 0cf585f | VERIFIED | scripts/capture-cockroach-evidence.sh + committed dev-diary/evidence/20260811-233251-cockroach-live.txt (2/2 green). Note: the newer 20260812-025148 evidence is main-only (wrap-up commit) |
+| TEST-5 | Wave 1 / 0cf585f | VERIFIED | scripts/capture-cockroach-evidence.sh + committed evidence/20260811-233251-cockroach-live.txt (2/2 green). Note: the newer 20260812-025148 evidence is main-only (wrap-up commit) |
 | COH-2 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | rmcp-removed + T8.2 re-add owner named in all three claimed places: PHASE-0-ground.md:44/:132, spec §6.3 erratum (lambo-hackathon-spec-v0.1.md:549, incl. 0.1.x-vs-v3 choice), PHASE-8-surface.md:109 |
 | COH-3 | Wave 3 / 1849d3e (+ wrap-up 99052e7) | VERIFIED (Wave-3 scope) | `CanonizationEvent.last_demotion_time` types/mod.rs:456–463; `demote()` stamps demote.rs:151 (test :293–295); non-clobber propagation graph.rs:615–620; column in both DDLs (cockroach :48/:113, sqlite :81/:118); cockroach COALESCE :236–242 + SQL-shape test :1552–1554; sqlite insert :416; memory :159–162; P6 audit-row carry flagged in the decisions note. **Caveat:** the wrap-up convergence for pre-existing DBs (99052e7) is NOT on this branch — see headline |
 | COH-5 | Waves 6/7 / 6266f53 | DOC-DISPOSITIONED | PHASE-4-daemon.md:50–54: poll `Graph::epoch()`, "There is no mutation-notify channel and no T3.5 rescore signal — both were explicitly deferred", seam lands T8.1. Survived P4's edits; P4's daemon actually implements the polling design (:191–192) |

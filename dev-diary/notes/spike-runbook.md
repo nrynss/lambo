@@ -93,7 +93,7 @@ LIMIT 5;
 
 **Recording the verdict (PHASE-0 Handoff Log):** which attempt won, the exact working
 snippet, the distance operator chosen, the EXPLAIN output (also drop it in
-`dev-diary/evidence/`), and any cluster settings flipped. T3.2 and T7.3 are written from
+`evidence/`), and any cluster settings flipped. T3.2 and T7.3 are written from
 this entry alone.
 
 **If nothing passes by end of session:** the verdict is still a deliverable. Write NO-GO

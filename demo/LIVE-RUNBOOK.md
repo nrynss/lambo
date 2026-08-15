@@ -79,7 +79,7 @@ Expected: `cockroach schema provisioned via .../scripts/provision.sh`, exit 0.
 ```
 
 Expected output — this is the **live-verified** transcript
-(`dev-diary/evidence/demo-live-{1,2}.txt`); per run only the session id, the real
+(`evidence/demo-live-{1,2}.txt`); per run only the session id, the real
 `(score …)` values, the created/matched counts and the two masked values differ.
 
 ```
@@ -210,7 +210,7 @@ diff <(sed -n '/OUTCOME/,$p' demo-live-1.txt) \
 The two full transcripts will differ — different session ids, different real
 `(score …)` values and `Agent A wrote to it N seconds ago` readings, different
 node uuids. That is by design; see `demo/README.md` for what is masked and why.
-The `OUTCOME` block is the artifact to screenshot for `dev-diary/evidence/`.
+The `OUTCOME` block is the artifact to screenshot for `evidence/`.
 
 If `diff` reports a difference, keep both files and attach them — a real
 divergence here is a finding, not a retry.
@@ -261,7 +261,7 @@ Expected: four rows, three of them `user schema`'s, in this order — `None →
 Candidate`, `Candidate → Venerable`, `Venerable → Canonical` with
 `blast_radius = 9`. That is the promotion history that produced the ⚑ warning
 agent B saw, read out of the database by a second tool. Screenshot it into
-`dev-diary/evidence/`.
+`evidence/`.
 
 ---
 
@@ -278,7 +278,7 @@ agent B saw, read out of the database by a second tool. Screenshot it into
 
 ---
 
-## 6. What to record in `dev-diary/evidence/`
+## 6. What to record in `evidence/`
 
 1. `demo-live-1.txt`, `demo-live-2.txt` (full transcripts).
 2. The `diff` command and its empty output plus `IDENTICAL — T8.4 x2 met`.

@@ -1,6 +1,6 @@
-# T8.2 — MCP server evidence (2026-08-14)
+# MCP server evidence — stdio and HTTP (2026-08-14)
 
-Captured on branch `phase/p8-surface` against `target/debug/lambo` built with
+Captured against `target/debug/lambo` built with
 default features (`store-memory`, `embed-bge`, `embed-fixture`, `fixtures`).
 
 No DSN or secret appears in this directory. The one config that names a
@@ -12,8 +12,8 @@ Cockroach DSN (fail-closed case B below) uses a redacted placeholder host.
 |---|---|---|---|
 | 1 | A **real Claude Code client** completes the MCP handshake against `--transport stdio` | `claude mcp add` + `claude mcp list` / `claude mcp get` (Claude Code 2.1.226) | **PASS** — `✔ Connected` |
 | 2 | Tool discovery lists all seven tools with usable schemas | `tools/list` over the real stdio transport | **PASS** — see `stdio-tools-list.jsonl` |
-| 3 | `lambo_recall` returns the T5.3 context block | `tools/call` over the real stdio transport | **PASS** — see below |
-| 3b | **All seven tools** driven over the real stdio wire, requests *and* responses captured | `tools/call` × 7, R1 remediation | **PASS** — see `stdio-all-seven-tools.jsonl` |
+| 3 | `lambo_recall` returns the recall context block | `tools/call` over the real stdio transport | **PASS** — see below |
+| 3b | **All seven tools** driven over the real stdio wire, requests *and* responses captured | `tools/call` × 7, during remediation | **PASS** — see `stdio-all-seven-tools.jsonl` |
 | 4 | Streamable HTTP transport serves MCP | `curl POST /mcp` with `initialize` | **PASS** — 200, `mcp-session-id`, SSE result frame |
 | 5 | Level B fails closed | four negative configs | **PASS** — see the table below |
 | — | A **model-driven** tool call from Claude Code | `claude -p --allowedTools …` | **NOT VERIFIED** — see the honest limitation below |
@@ -45,7 +45,7 @@ scratch directory, never in the repo.
 
 ### 2. Tool discovery — `stdio-tools-list.jsonl`
 
-Seven tools, exactly the spec §6.2 set:
+Seven tools, exactly the specified set:
 
 ```
 lambo_derive, lambo_inspect, lambo_recall, lambo_record_action,
@@ -54,7 +54,7 @@ lambo_reserve, lambo_saints, lambo_stats
 
 Each publishes a JSON-Schema object with a **required** `agent_id`, plus a
 description. `initialize` also returns server instructions naming the session and
-telling the model never to send a timestamp (F18).
+telling the model never to send a timestamp.
 
 ### 3. `lambo_recall` context block — `stdio-jsonrpc-session.jsonl`
 
@@ -62,16 +62,16 @@ A session over one stdio process driving **four** of the seven tools:
 `initialize` → `lambo_derive` → `lambo_record_action` → `lambo_recall` →
 `lambo_stats`.
 
-> **Corrected in R1 remediation.** This file, and the sentence that used to
+> **Corrected during remediation.** This file, and the sentence that used to
 > introduce it, claimed "all seven tools were driven end-to-end". It holds four
 > — `lambo_reserve`, `lambo_inspect` and `lambo_saints` were never on the wire —
 > and it records **responses only**, so the requests behind it cannot be
-> checked. The R1 review (T82-8) caught the overclaim. The gap is closed by
+> checked. A later review caught the overclaim. The gap is closed by
 > `stdio-all-seven-tools.jsonl` below rather than by rewording, and this file is
 > kept as captured.
 
 `lambo_recall(query = "update user schema")` returned this as the **text content
-of the tool result, verbatim** — this is T5.3's renderer output, not a summary:
+of the tool result, verbatim** — this is the recall renderer's output, not a summary:
 
 ```
 user schema [Entity] (score 1.70)
@@ -90,7 +90,8 @@ blast-radius line and no conflict line, because in a fresh session nothing has
 been canonized (canonization needs `canonization_edge_min_age` to elapse), every
 blast radius is below the warning threshold, and there is only one writer. Those
 lines are rendered by the same `recall::format` path and are exercised by the
-T5.3 unit tests; producing them here needs the T8.4 demo scenario's aged session.
+recall renderer's unit tests; producing them here needs the demo scenario's aged
+session.
 What this evidence proves is that the **real context block text reaches an MCP
 client verbatim** — not that a canonical/conflict-annotated block was produced.
 
@@ -106,6 +107,12 @@ attribution: this process owns the session as agent 'agent-a'; the call from
 a Memory-level agent override (see T8.2 Handoff Log).
 ```
 
+That is the message exactly as the binary emitted it on 2026-08-14, kept unedited
+because it is a capture. The trailing pointer to an internal document was a leak of
+project-internal vocabulary into a string returned to every agent, and has since been
+removed from `src/mcp/server.rs`; the warning now ends "…until then, run one serve
+process per agent." The same was done for the `lambo_reserve` refusal.
+
 Server stderr for that run ends with:
 
 ```
@@ -117,7 +124,7 @@ INFO lambo::mcp::serve: lambo serve: session closed, tail durable
 
 ### 3b. All seven tools on the wire — `stdio-all-seven-tools.jsonl`
 
-Captured during R1 remediation, one stdio process, session `t8.2-evidence`,
+Captured during remediation, one stdio process, session `t8.2-evidence`,
 agent `agent-a`. **33 frames, requests and responses both**, each request
 carrying a `note` saying what it demonstrates. Every tool call is a real
 `tools/call` over the MCP wire protocol:
@@ -132,23 +139,23 @@ carrying a `note` saying what it demonstrates. Every tool call is a real
 7/7 lambo_reserve        isError=False  reserved 478416c2-… until … for agent 'agent-a'
 ```
 
-The same transcript carries the R1 fixes, each as a live wire experiment:
+The same transcript carries the review fixes, each as a live wire experiment:
 
-| Finding | Frame note | Result on the wire |
+| Case | Frame note | Result on the wire |
 |---|---|---|
-| T82-3 | `agent-b` reserves a node `agent-a` holds | `isError=True` — *"refusing to take a soft lock on behalf of 'agent-b' … NOTHING WAS RESERVED OR RELEASED"* |
-| T82-3 | `agent-c` releases `agent-a`'s lock | `isError=True` — same refusal |
-| T82-3 | `lambo_inspect` after both refusals | `Reserved by agent-a until …` — the original lock survived |
-| T82-9 | `lambo_stats` as `agent-b` | the `attribution:` warning is now in the **text** content, after a `warnings:` line |
-| T82-7 | `lambo_inspect(focus="auth")` with three matches | `isError=True` — *"'auth' matches 3 concepts — name one exactly, or pass its node_id"*, candidates listed with node ids |
-| T82-6 | `lambo_record_action` with a 16 KiB + 1 action | `isError=True` — `action exceeds 16384 bytes (16385 given)` |
-| T82-11 | `lambo_derive` with a client `created_at` | `isError=True` — `unknown field 'created_at', expected one of 'agent_id', 'concepts', 'parent_of'` |
+| Foreign reserve | `agent-b` reserves a node `agent-a` holds | `isError=True` — *"refusing to take a soft lock on behalf of 'agent-b' … NOTHING WAS RESERVED OR RELEASED"* |
+| Foreign release | `agent-c` releases `agent-a`'s lock | `isError=True` — same refusal |
+| Lock survived | `lambo_inspect` after both refusals | `Reserved by agent-a until …` — the original lock survived |
+| Attribution warning | `lambo_stats` as `agent-b` | the `attribution:` warning is now in the **text** content, after a `warnings:` line |
+| Ambiguous focus | `lambo_inspect(focus="auth")` with three matches | `isError=True` — *"'auth' matches 3 concepts — name one exactly, or pass its node_id"*, candidates listed with node ids |
+| Oversize argument | `lambo_record_action` with a 16 KiB + 1 action | `isError=True` — `action exceeds 16384 bytes (16385 given)` |
+| Unknown field | `lambo_derive` with a client `created_at` | `isError=True` — `unknown field 'created_at', expected one of 'agent_id', 'concepts', 'parent_of'` |
 
 Server stderr ended with `lambo serve: session closed, tail durable`, exit 0.
 
-### 3c. Shutdown on a signal — R1/T82-1 and T82-2
+### 3c. Shutdown on a signal
 
-The R1 review demonstrated that `Memory::close()` did **not** run on SIGINT or
+An earlier review demonstrated that `Memory::close()` did **not** run on SIGINT or
 SIGTERM under stdio, and that HTTP hung forever when a real client held its SSE
 channel open. Re-running the same experiment against the fixed binary (spawned
 with `preexec_fn=os.setsid`, so signal dispositions are the true defaults):
@@ -162,7 +169,7 @@ with `preexec_fn=os.setsid`, so signal dispositions are the true defaults):
 [http-SIGTERM with SSE open]exited rc=0 after 5.02s   close() ran: True
 ```
 
-R1 measured `rc=-2` / `rc=-15` with `close() ran: False` for the two stdio
+That review measured `rc=-2` / `rc=-15` with `close() ran: False` for the two stdio
 cases, and *never exited* for the two SSE cases. The 5.02 s is the bounded
 grace window (`SHUTDOWN_GRACE`) expiring on the SSE stream that will never
 finish on its own, after which the connection is dropped and the session
@@ -218,7 +225,7 @@ successful `initialize` handshake over stdio.
 
 What is therefore **proven**: a real Claude Code client launches and handshakes
 with `lambo serve`, and all seven tools — including `lambo_recall` returning the
-T5.3 block — work over the real MCP wire protocol (evidence 3b; the handshake
+context block — work over the real MCP wire protocol (evidence 3b; the handshake
 itself is evidence 1, with a real client).
 
 What is **not proven**: that a *model* chooses and invokes these tools, i.e. that

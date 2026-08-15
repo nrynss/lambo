@@ -1,0 +1,89 @@
+Cursor Agent CLI — re-check of the two approval gotchas
+Captured 2026-08-15, AFTER the Cursor account was re-authenticated.
+cursor-agent 2026.08.11-e8db854 (same build as the original capture).
+
+Purpose: confirm whether either approval step had stopped being necessary. Both are
+still necessary. Run from a clean scratch workspace outside the repo, holding only a
+lambo config (store=memory, embedder=fixture, dim=1024) and .cursor/mcp.json.
+
+--------------------------------------------------------------------------------
+GOTCHA 1 — `mcp enable` is still required before tool discovery
+
+$ cursor-agent mcp list
+aws-mcp: Error: Connection failed
+cockroachdb-cloud: requires_authentication
+lambo: not loaded (needs approval)
+
+$ cursor-agent mcp list-tools lambo
+Failed to list tools: Failed to load MCP 'lambo': MCP server "lambo" has not been approved
+
+$ cursor-agent mcp enable lambo
+✓ Enabled and approved MCP server: lambo
+
+$ cursor-agent mcp list-tools lambo
+Tools for lambo (7):
+- lambo_derive (agent_id, concepts, parent_of)
+- lambo_inspect (agent_id, depth, focus)
+- lambo_recall (agent_id, max_tokens, query, top_k, traversal_depth)
+- lambo_record_action (action, agent_id, depends_on, modifies, produces)
+- lambo_reserve (agent_id, node_id, release, ttl_seconds)
+- lambo_saints (agent_id)
+- lambo_stats (agent_id)
+
+--------------------------------------------------------------------------------
+GOTCHA 2 — `--approve-mcps` alone still does NOT approve individual tool calls
+
+Same workspace, server now enabled and discoverable (7/7 above). Deliberately omitting
+--force this time:
+
+$ cursor-agent -p --trust --approve-mcps --sandbox enabled --output-format text \
+    "Using only the lambo MCP tools with agent_id \"agent-a\": 1) call lambo_derive to
+     add concept \"user schema\" as an entity. 2) call lambo_recall with query
+     \"user schema\" top_k 3. 3) call lambo_stats. Report each tool's raw response."
+
+--- agent output, verbatim (tail) ---
+
+The lambo MCP calls were rejected in the IDE, so I couldn't run them and don't have raw
+responses to report.
+
+Here is exactly what was attempted:
+
+### 1) `lambo_derive`
+{
+  "agent_id": "agent-a",
+  "concepts": [
+    {
+      "concept_type": "entity",
+      "content": "user schema"
+    }
+  ]
+}
+
+### 2) `lambo_recall` (planned after derive)
+{
+  "agent_id": "agent-a",
+  "query": "user schema",
+  "top_k": 3
+}
+
+### 3) `lambo_stats` (planned after recall)
+{
+  "agent_id": "agent-a"
+}
+
+**Status:** `lambo_derive` was rejected twice (`User rejected MCP: lambo-lambo_derive`),
+so steps 2 and 3 were not run.
+
+If you approve the lambo MCP tools when prompted, I can rerun all three in order and
+paste each tool's raw response.
+
+--------------------------------------------------------------------------------
+CONCLUSION
+
+Neither gotcha has been fixed by the client, and neither was an artifact of an
+unauthenticated account. The model still selected correct arguments for all three tools
+— the arguments it printed are well-formed — so the failure is purely the per-call
+approval gate, not tool discovery and not the model's understanding of the schema.
+
+`--force` (bounded by `--sandbox enabled`) remains required for a model-driven run in
+non-interactive print mode.

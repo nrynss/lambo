@@ -145,7 +145,7 @@ Capture cost/latency of a single call in the Handoff Log.
 
 ### T0.3 — sqlx × VECTOR ★ **VERDICT: GO (Rust)** (2026-08-10)
 
-Evidence: `dev-diary/evidence/t0.3-vector-spike.txt`
+Evidence: `evidence/vector-spike.txt`
 
 | Check | Result |
 |-------|--------|
@@ -187,7 +187,7 @@ index storing embedding). T3.2 should either:
 
 ### T0.4 — Bedrock Titan (2026-08-10) — **BLOCKED (account)**
 
-Evidence: `dev-diary/evidence/t0.4-bedrock-blocked.txt`
+Evidence: `evidence/bedrock-blocked.txt`
 
 - Spike crate: `spikes/bedrock-spike/` — dual auth:
   1. **Bearer** via `AWS_BEARER_TOKEN_BEDROCK` / `LAMBO_BEDROCK_API_KEY` (HTTP `reqwest`)

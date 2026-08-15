@@ -2,7 +2,7 @@
 
 > **Outcome (2026-08-14, cluster `nrynss`, commit `b45c102`):** `REQUEST CHANGES` — see the full
 > record in `dev-diary/adversarial-review/adve-review-t8.2-t8.3-live.md` and the scripts/evidence
-> in `dev-diary/evidence/live-review-t8.2-t8.3/`.
+> in `evidence/live-review-cockroach/`.
 
 ```text
 Gates:            fmt [x] clippy [x] default-suite [x] live --ignored [x] vector-proof [x]
@@ -450,7 +450,7 @@ succeed on the cluster. One command against a scratch session settles it.
 `lambo demo --scenario rest-api` runs on the cluster, `diff` the normalized
 transcripts (that diff IS the ×2 proof), screenshot the `canonization_events`
 split-screen query via the CockroachDB managed MCP server into
-`dev-diary/evidence/`. Note the runbook's schema-divergence warning (hand-created
+`evidence/`. Note the runbook's schema-divergence warning (hand-created
 index, ~2833 seeded concepts — scope all queries by session_id).
 
 Record outcomes in a dated section here, same conventions as the 2026-08-14 run.

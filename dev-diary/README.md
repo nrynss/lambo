@@ -112,7 +112,7 @@ status:     not-started        # not-started | claimed:<agent> | done
    undocumented finish is an unfinished task.
 8. **Adversarial review before a phase closes.** Findings go in
    `dev-diary/adversarial-review/adve-review-<phase|task>.md`; screenshots and captured
-   output in `dev-diary/evidence/`.
+   output in `evidence/`.
 9. **All code written during the submission period** (Aug 8 onward). The v0.6.0 spec is
    prior design, credited in the README, never pasted in as code.
 

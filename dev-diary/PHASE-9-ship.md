@@ -75,7 +75,7 @@ aspirations), including feature-gated adapters.
 ```yaml
 requires:   T8.4 (rehearsed), T8.5
 fixture-ok: n/a
-owns:       dev-diary/evidence/video/, demo/script.md
+owns:       evidence/video/, demo/script.md
 status:     not-started
 ```
 Under 3 minutes, memory layer visibly at work (spec §12.4). Script beats (spec §13): the
@@ -109,7 +109,7 @@ logged in `canonization_events`.
 ```yaml
 requires:   T8.2 (R4 CLEAN), P8 exit "surface holds under concurrency"; soft: T8.5
 fixture-ok: yes (fixture embedder; store = memory or live)
-owns:       dev-diary/evidence/swarm/, bench/
+owns:       evidence/swarm/, bench/
 status:     not-started
 parallel:   yes — separate hardware, off the submission critical path
 ```
@@ -144,7 +144,7 @@ The form itself, drafted in-repo first: repo URL (public, Apache-2.0 About-visib
 (T8.5, live), video link, written CockroachDB-tools + AWS-services identification (lift
 from T9.1), team/eligibility fields. Submit **hours** before 5:00 pm ET, not minutes —
 Devpost under deadline load is a known failure mode. Confirmation screenshot into
-`dev-diary/evidence/`.
+`evidence/`.
 
 **Done when:** submission shows as received on Devpost and the screenshot is committed.
 
@@ -214,7 +214,7 @@ Consequences the next agent must respect:
   intentional. Do not gate it.
 - **Banner string updated** (`demo.rs:1466`): "Compressed for the video" → "Compressed for
   a fast run", since the feature outlives the video. `demo/LIVE-RUNBOOK.md`'s sample output
-  was updated to match. `dev-diary/evidence/demo-live-{1,2}.txt` were **left alone** as
+  was updated to match. `evidence/demo-live-{1,2}.txt` were **left alone** as
   historical captures, so they now differ from a fresh run by that one line.
 - **Still worth doing post-submission:** lift `wait_until` / `quiesce` / `settle_gc_survived`
   (`demo.rs:1219/1091/1039`) into `src/test_util.rs`. T9.6's swarm benchmark will want that
@@ -252,12 +252,47 @@ directly.
 invocation, it needs `sqlite` or `cockroach`. `memory` is only correct inside a single
 process, which means one `serve` with agents attached to it, or `lambo demo`.
 
+#### DONE 2026-08-15 — managed-MCP evidence captured
+
+Captured via **OMP**, not Claude Code — see `evidence/managed-mcp-canonization-events.md`
+for the transcript, the exact re-run command, and the two gotchas (query `database=lambo` or you
+hit `defaultdb`; OMP needs `INFERX_API_KEY` from `~/.zshrc` to boot).
+
+#### ALSO DONE 2026-08-15 — Claude Code OAuth completed, second client captured
+
+The OAuth problem described below is **fixed**. `claude mcp list` reports
+`cockroachdb-cloud: ✔ Connected`, the `mcp__cockroachdb-cloud__*` tools land in an
+interactive session's roster, and a model-driven run through them
+(`list_clusters` → `list_databases` → `list_tables` → `select_query`) returned the identical
+five rows OMP had returned for the same session. Transcript:
+`evidence/mcp-client-interop/claude-code-model-driven-managed-mcp.txt`.
+
+One trap worth keeping: **nested `claude -p` cannot do this and re-authenticating does not
+help.** It fails on `claude -p "say hi"` too, and still fails with the child-session env
+vars stripped. `~/.claude/.credentials.json` under a host-managed session holds an access
+token with no refresh token, so a standalone CLI process has nothing to refresh with.
+Non-model commands like `claude mcp list` are unaffected. Use an interactive session's own
+tool roster, not a subprocess.
+
+Original instruction retained below for the record.
+
 #### NEXT ACTION — capture the managed-MCP evidence (session restarted 2026-08-15)
 
-`cockroachdb-cloud` is now **authorized** in `~/.claude.json` (`https://cockroachlabs.cloud/mcp`,
-http transport, `mcp-cluster-id` header). A Claude Code session started after that
-authorization gets the tools directly. Run the query through **those MCP tools, not psql** —
+`cockroachdb-cloud` is **registered** in `~/.claude.json` and in a gitignored `.mcp.json`
+(`https://cockroachlabs.cloud/mcp`, http transport, with an `mcp-cluster-id` header — read the
+id from the gitignored `.mcp.json`, do not paste it into a tracked file). Run the query through
+**those MCP tools, not psql** —
 the point of the evidence is that the managed MCP server answered.
+
+**Restarting the session is NOT sufficient — tried 2026-08-15, tools still absent.** What
+`~/.claude.json` holds is the server *registration* (url + cluster-id header), not an access
+token. `cockroachlabs.cloud/mcp` is a remote HTTP MCP server behind OAuth, and the harness
+reports it under "servers require authentication before their tools can be used" until that
+handshake completes. The handshake needs an **interactive** session: run `/mcp` (or
+`claude mcp`) in a terminal `claude`, pick `cockroachdb-cloud`, complete the browser consent.
+Only after the token is stored will a session pick up the tools. Do not record "authorized"
+again on the strength of the config file alone — check that a `cockroach`-named tool actually
+appears in the session's roster.
 
 Query one of the three complete demo sessions (5 events each, `user schema` walking
 Candidate to Venerable to Canonical):
@@ -270,7 +305,7 @@ ORDER BY occurred_at;
 ```
 
 Scope by `session_id` always — the cluster also holds ~2833 seeded concepts and 240 events
-across many sessions. Save the transcript to `dev-diary/evidence/` naming the MCP tool that
+across many sessions. Save the transcript to `evidence/` naming the MCP tool that
 answered, which closes the one UNEVIDENCED row in the claim audit below and gives T9.3 its
 split-screen beat.
 
@@ -348,11 +383,11 @@ The AWS half of that same deliverable is written but currently reads "none", per
 | Apache-2.0 license | TRUE — corrected this round |
 | Bedrock adapter | **FALSE, removed** — no implementation exists |
 | Prebuilt binaries | **NOT YET TRUE** — no release published, see blocker above |
-| MCP client interop | TRUE and **broader than first documented** — Claude Code 2.1.226 (handshake + all seven tools over stdio), **OMP v17.3.4 + DeepSeek Flash driving `derive`/`recall`/`stats` autonomously against live Cockroach**, and Pi 0.84.1 once `pi-mcp-adapter` is installed. The model-driven leg is OMP's; Claude Code's own evidence marks it NOT VERIFIED. Docs originally named only Claude Code and understated this. |
+| MCP client interop | TRUE and **broader again** (2026-08-15) — now **three** clients: Claude Code 2.1.226 (handshake + all seven tools over stdio), **OMP v17.3.4 + DeepSeek Flash** driving `derive`/`recall`/`stats` autonomously against live Cockroach, and **Cursor Agent CLI 2026.08.11** (handshake, 7/7 tool discovery, and a model-driven derive → record_action → recall → stats run). Pi 0.84.1 also works once `pi-mcp-adapter` is installed. The **model-driven leg is now verified twice** (OMP and Cursor), closing the row T8.2 marked NOT VERIFIED. Evidence: `evidence/mcp-client-interop/`. |
 | Demo golden numbers | TRUE on a durable store — re-ran against SQLite: 12 interactions, 27 concepts, blast radius 9, score 2.27, identical to the memory-store run. Cockroach untested (no DSN here). |
 | Quickstart write-then-read | **WAS BROKEN, FIXED** — see below |
 | CLI verbs and flags | TRUE — every subcommand and flag the docs name exists in the binary |
 | Release matrix and asset names | TRUE — 5 targets, `lambo-<version>-<name>[.exe]` + `.sha256`, matching the docs |
 | Ports 7700 / 7710 | TRUE — clap defaults |
 | serve-web is read-only | TRUE and **test-enforced** — `serve_web.rs:1535` greps its own production source for `Memory::builder`, `open_writer`, `acquire_lease`, `.spawn()` |
-| Managed MCP server | **UNEVIDENCED** — console-side setup recorded DONE 2026-08-13, but the split-screen `canonization_events` query was never rehearsed and no screenshot reached `dev-diary/evidence/`. It is one of the **two required** §12.1 tools, so the README asserts it while nothing in the repo backs it. Either capture the evidence during the T9.3 recording or soften the claim. |
+| Managed MCP server | **TRUE, now evidenced** (2026-08-15) — `mcp__cockroachdb_cloud_select_query` returned the five-row `canonization_events` walk for the demo session off the live cluster, with `user schema` going Candidate → Venerable → Canonical at blast_radius 9. Transcript and cross-check in `evidence/managed-mcp-canonization-events.md`. **Caveat now lifted (same day):** the `cockroachdb-cloud` OAuth was completed for both Claude Code and Cursor, and each drove the same server model-first, returning the identical five rows for the same session. So **three** independent clients have now driven the managed server — OMP, Claude Code, Cursor — agreeing on every field. Transcripts: `evidence/mcp-client-interop/claude-code-model-driven-managed-mcp.txt` and `.../cursor-model-driven-managed-mcp.txt`. Bonus finding recorded there: Cursor's per-call MCP approval gate is specific to `-p` print mode, and interactive runs need no `--force`. |

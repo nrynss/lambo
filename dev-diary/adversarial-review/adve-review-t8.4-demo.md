@@ -87,10 +87,10 @@ Two done-when clauses depend on the live cluster + managed MCP server and **were
 performed**:
 
 - The ×2 run **against the live Cockroach cluster** (two consecutive runs, identical
-  outcomes, transcripts + diff into `dev-diary/evidence/`): no `demo-live-*.txt` or live
+  outcomes, transcripts + diff into `evidence/`): no `demo-live-*.txt` or live
   ×2 proof exists anywhere in the repo.
 - The **split-screen `canonization_events` query** through CockroachDB's managed MCP
-  server, rehearsed and **screenshotted into `dev-diary/evidence/`**: the evidence dir
+  server, rehearsed and **screenshotted into `evidence/`**: the evidence dir
   holds only earlier-phase files (T7.4 vector-index, T8.2/T8.3 live review); there is no
   screenshot.
 
@@ -114,7 +114,7 @@ session-scoped audit query, and the schema-divergence warning (hand-created
 - **line:** PHASE-8-surface.md:529-531
 - **severity:** P2
 - **title:** "Done when" requires the live-cluster ×2 run and the split-screen `canonization_events` screenshot; neither exists
-- **detail:** The demo code and the runnable legs are real, merged, and verified. But the task's own "Done when" — scenario ×2 against the **live cluster** with identical outcomes, **and** the MCP-server split-screen query rehearsed and screenshotted into `dev-diary/evidence/` — is not met: no live transcripts, no diff proof, and no screenshot exist. This is blocked by live infrastructure (`LAMBO_COCKROACH_DSN` absent here; managed MCP console side), not by a code defect; I could not run it. Because the task status line reads *task-complete*, this gap must be closed by whoever holds cluster access before the task can be called done. **Evidence:** `find`/`grep` over the repo and `dev-diary/evidence/` return nothing matching `demo-live*`, `IDENTICAL`, or a T8.4 screenshot; runbook §6 enumerates exactly the artifacts that are missing. **Reproduction:** none (blocked); the missing artifacts are the reproduction.
+- **detail:** The demo code and the runnable legs are real, merged, and verified. But the task's own "Done when" — scenario ×2 against the **live cluster** with identical outcomes, **and** the MCP-server split-screen query rehearsed and screenshotted into `evidence/` — is not met: no live transcripts, no diff proof, and no screenshot exist. This is blocked by live infrastructure (`LAMBO_COCKROACH_DSN` absent here; managed MCP console side), not by a code defect; I could not run it. Because the task status line reads *task-complete*, this gap must be closed by whoever holds cluster access before the task can be called done. **Evidence:** `find`/`grep` over the repo and `evidence/` return nothing matching `demo-live*`, `IDENTICAL`, or a T8.4 screenshot; runbook §6 enumerates exactly the artifacts that are missing. **Reproduction:** none (blocked); the missing artifacts are the reproduction.
 - **Inheritor:** the live-cluster holder — run `demo/LIVE-RUNBOOK.md` §1–§6 (provision, run ×2, diff, reader CLIs, split-screen query, record artifacts), then re-review.
 
 ### T84-2 — P3 — stale `demo` skip in the help-invariant test
@@ -157,7 +157,7 @@ exists") are superseded: the live CockroachDB Cloud cluster run closed **T84-1**
 --scenario rest-api` ran **×2 consecutively against the live cluster** with byte-identical
 OUTCOME blocks (diff: `IDENTICAL — T8.4 x2 met`: 12 interactions / 27 concepts / 114 edges /
 5 canonization_events), and the split-screen `canonization_events` query read back via `psql`
-shows the same 5 rows. Evidence now present in `dev-diary/evidence/`:
+shows the same 5 rows. Evidence now present in `evidence/`:
 `demo-live-{1,2}.txt`, `demo-live-diff.txt`, `demo-live-saints.txt`,
 `demo-live-canon-events.txt`. Recorded in PHASE-8 Handoff "T8.4 / T8.6 / T8.5 — live-cluster
 verification". The historical FINDINGS verdict body above is left as written.

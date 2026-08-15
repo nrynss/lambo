@@ -1,0 +1,17 @@
+$ cursor-agent --version
+2026.08.11-e8db854
+
+$ cd <SCRATCH> && cursor-agent mcp list
+aws-mcp: Error: Connection failed
+cockroachdb-cloud: requires_authentication
+lambo: ready
+
+$ cursor-agent mcp list-tools lambo
+Tools for lambo (7):
+- lambo_derive (agent_id, concepts, parent_of)
+- lambo_inspect (agent_id, depth, focus)
+- lambo_recall (agent_id, max_tokens, query, top_k, traversal_depth)
+- lambo_record_action (action, agent_id, depends_on, modifies, produces)
+- lambo_reserve (agent_id, node_id, release, ttl_seconds)
+- lambo_saints (agent_id)
+- lambo_stats (agent_id)

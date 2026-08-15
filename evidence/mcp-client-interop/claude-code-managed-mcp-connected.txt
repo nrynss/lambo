@@ -1,0 +1,5 @@
+$ claude mcp list
+Checking MCP server health…
+
+aws-mcp: uvx mcp-proxy-for-aws@latest https://aws-mcp.us-east-1.api.aws/mcp --metadata INSTALL_SOURCE=aws-cli - ✘ Failed to connect — -32602: MCP error -32602: Invalid request parameters
+cockroachdb-cloud: https://cockroachlabs.cloud/mcp (HTTP) - ✔ Connected

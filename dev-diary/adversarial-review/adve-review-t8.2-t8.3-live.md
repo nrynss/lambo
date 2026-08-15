@@ -3,7 +3,7 @@
 **Cluster:** CockroachDB Cloud `nrynss` (serverless, GCP asia-south1), CCL v26.2.5
 **Commit:** `b45c102` (branch `phase/p8-surface`)
 **Toolchain:** rustc/cargo 1.97.1; binary `target/debug/lambo`
-**Reviewer:** live run, scripted + model-driven probes; evidence in `dev-diary/evidence/live-review-t8.2-t8.3/`
+**Reviewer:** live run, scripted + model-driven probes; evidence in `evidence/live-review-cockroach/`
 
 ## Verdict
 
@@ -290,7 +290,7 @@ Feature gate: `--features store-cockroach,embed-bge`.
 
 ## Evidence files
 
-`dev-diary/evidence/live-review-t8.2-t8.3/` — `lease-test.sh` (4a/4b), `fence2.sh` (4c),
+`evidence/live-review-cockroach/` — `lease-test.sh` (4a/4b), `fence2.sh` (4c),
 `5d-test.sh`, `cli-test.sh` (6a/6b/6c), `lambo-live.toml` + `lambo-bad-embed.toml`,
 `pi.mcp.json` + `pi.lambo.cockroach.toml` (DSN redacted), and raw wire/log captures
 (`result4a.b-refusal.log`, `result5d.*`, `result6b.*`, `result6c.*`). All secrets redacted and

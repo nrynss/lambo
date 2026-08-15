@@ -15,7 +15,7 @@
 **Task:** T8.2 — MCP server (spec §6.2/§6.3/§2.2; PHASE-8-surface.md)
 **Branch reviewed:** `phase/p8-surface` @ `fafb739` (implementing commit)
 **Scope:** `src/mcp/server.rs`, `src/mcp/serve.rs`, `src/mcp/mod.rs`, `src/main.rs`,
-`Cargo.toml`, `dev-diary/evidence/t8.2-mcp-client/`
+`Cargo.toml`, `evidence/mcp-client-stdio/`
 **Method:** clause-by-clause read against the T8.2 spec block, the T8.1 review's three "For
 T8.2" constraints and the F18 carryover; then **13 live experiments** against the real
 binary over the real MCP wire protocol (stdio + streamable HTTP), plus **4 source mutations**
@@ -312,7 +312,7 @@ content. Refusing is the safer default given the reserve path.
 ### T82-8 (P2) — the evidence does not support "all seven tools driven end-to-end"; three tools were never driven over the wire — CONFIRMED
 
 `dev-diary/PHASE-8-surface.md:779-782` (Handoff Log) vs
-`dev-diary/evidence/t8.2-mcp-client/stdio-jsonrpc-session.jsonl`.
+`evidence/mcp-client-stdio/stdio-jsonrpc-session.jsonl`.
 
 The Handoff Log states: *"**All seven tools were driven end-to-end over the real MCP wire
 protocol** (`initialize` → `lambo_derive` → `lambo_record_action` → `lambo_recall` →
@@ -768,7 +768,7 @@ repeats on the same graph).
 
 Both, deliberately — the claim is corrected *and* the missing coverage was actually produced:
 
-- **New evidence** `dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl`: 33 frames,
+- **New evidence** `evidence/mcp-client-stdio/stdio-all-seven-tools.jsonl`: 33 frames,
   **requests and responses both**, each request carrying a `note` naming what it demonstrates.
   All seven tools driven over the real stdio wire, `lambo_reserve` / `lambo_inspect` /
   `lambo_saints` among them, plus live wire experiments for T82-3, T82-6, T82-7, T82-9 and
@@ -920,8 +920,8 @@ cargo test    581 lib + 2 bin + 3 integration + 1 doc, 0 failed, 3 ignored
 
 Lib tests **562 → 581** (+19). No test was weakened or removed: `git diff | grep '^-.*assert'`
 is empty. Files touched: `src/mcp/serve.rs`, `src/mcp/server.rs`, `src/main.rs`,
-`dev-diary/evidence/t8.2-mcp-client/README.md`,
-`dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl` (new),
+`evidence/mcp-client-stdio/README.md`,
+`evidence/mcp-client-stdio/stdio-all-seven-tools.jsonl` (new),
 `dev-diary/PHASE-8-surface.md`, and this file.
 
 ---
@@ -1198,7 +1198,7 @@ their own values for all three. No integration test spawns the `lambo` binary; t
 2. One real subprocess SIGTERM test (kills M1/M8/M2b + covers the `#[cfg(unix)]`
    branch and `main.rs` `shutdown_background`): spawn `lambo serve`, write a record
    frame, `kill(pid, SIGTERM)`, reopen the store, assert the row is durable. The
-   evidence harness half-exists in `dev-diary/evidence/t8.2-mcp-client/`.
+   evidence harness half-exists in `evidence/mcp-client-stdio/`.
 3. One-line `SHUTDOWN_GRACE` sanity assert (kills M2b): `>= 1 s && <= 30 s`.
 
 ### Evidence-methodology defect

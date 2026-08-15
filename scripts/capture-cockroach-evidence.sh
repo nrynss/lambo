@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # capture-cockroach-evidence.sh — run the live Cockroach conformance suite and
-# capture a timestamped evidence file (dev-diary/evidence/), matching the review
-# evidence convention (see dev-diary/evidence/e2e-p0-p3-fable-gates.txt).
+# capture a timestamped evidence file (evidence/), matching the review
+# evidence convention (see evidence/e2e-gates-fable.txt).
 #
 # Live tests are #[ignore]d by default (TEST-1): this script runs them via
 # `-- --ignored` under LAMBO_REQUIRE_LIVE=1, so a missing DSN fails loudly
@@ -20,7 +20,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-EV_DIR="$ROOT/dev-diary/evidence"
+EV_DIR="$ROOT/evidence"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="$EV_DIR/${TS}-cockroach-live.txt"
 

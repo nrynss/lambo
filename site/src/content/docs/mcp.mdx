@@ -223,6 +223,43 @@ after that write's own tool call has returned, so sequence a
 lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant to see it.
 ```
 
+## Verified clients
+
+Lambo speaks standard MCP, so any compliant client should work. These are the ones actually exercised against the server, rather than assumed:
+
+| Client | Handshake | Tool discovery | Model-driven calls |
+|---|---|---|---|
+| Claude Code 2.1.226 | Verified | 7 of 7 over stdio | Not captured against Lambo's server (but see [below](#claude-code-against-the-managed-cockroachdb-server)) |
+| Cursor Agent CLI 2026.08.11 | Verified | 7 of 7 over stdio | Verified |
+| OMP 17.3.4 (DeepSeek Flash) | Verified | Verified | Verified, against a live CockroachDB store |
+| Pi 0.84.1 | Verified, with `pi-mcp-adapter` installed | Verified | Not captured |
+
+"Model-driven" means the model chose the arguments and issued the tool calls itself, rather than the calls being scripted at the JSON-RPC layer. In the Cursor run the model called `lambo_derive`, `lambo_record_action`, `lambo_recall`, and `lambo_stats` in sequence against one stdio process, and `lambo_recall` ranked the parent concept above its two children and the action node recorded moments earlier.
+
+<Note>
+Two client quirks worth knowing before you script anything, both re-checked on 2026-08-15 and both still current. Cursor needs `cursor-agent mcp enable <name>` before it will list tools, and in non-interactive `-p` mode `--approve-mcps` approves loading the server but not the individual tool calls, which are then auto-rejected with `User rejected MCP: lambo-lambo_derive`. Pass `--force` for a scripted run, and bound it with `--sandbox enabled`. This gate is specific to print mode: the same client running interactively approves calls normally and needs no `--force`. Claude Code registers the server with `claude mcp add` and reports health through `claude mcp list`.
+</Note>
+
+## Claude Code against the managed CockroachDB server
+
+The row above is about driving *Lambo's* server. Separately, Claude Code drove the **CockroachDB Cloud managed MCP server** model-first, reading back the graph Lambo had written. That is the read-only half of the deployment model: the writer is `lambo serve`, and a managed MCP server inspects the durable store without ever writing to it.
+
+Scoped to a single session, the canonization history comes back as the durable record of what the demo narrates:
+
+| node_id | from_status | to_status | blast_radius | occurred_at |
+|---|---|---|---|---|
+| 724c92b9… | None | Candidate | null | 14:50:08.306429Z |
+| 3e3a6984… | None | Candidate | null | 14:50:08.306429Z |
+| 724c92b9… | Candidate | Venerable | null | 14:50:08.992263Z |
+| 724c92b9… | Venerable | **Canonical** | **9** | 14:50:09.600577Z |
+| 1848c6e5… | None | Candidate | null | 14:50:10.103585Z |
+
+Node `724c92b9` is `user schema`. It walks Candidate, then Venerable, then Canonical across 1.29 seconds, and `blast_radius` is null on the earlier hops and 9 on the promotion, because only the promotion gate measures it. That 9 is the same blast radius the [demo](/lambo/demo/) prints in its final recall block — the number the demo narrates and the number written to CockroachDB are the same number, checked from opposite ends.
+
+Three independent MCP clients have now produced this table from the managed server: OMP, Claude Code, and the Cursor Agent CLI. Their captures agree on every field — different clients, different models, one durable record.
+
+Full transcripts for every run live in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) in the repository: `mcp-client-stdio/` for the Claude Code handshake and the seven-tool stdio capture, `mcp-client-interop/` for the Cursor runs and the managed-server capture above, and `managed-mcp-canonization-events.md` for the OMP capture.
+
 ## Limits
 
 Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.

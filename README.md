@@ -27,9 +27,11 @@ Any number of readers query the store directly and see eventually consistent sta
 Dashboards and the CockroachDB managed MCP server work this way. Readers never write.
 Multi-writer coordination stays out of scope for v0.1.
 
-Real agents drive this. Claude Code connects over stdio and lists all seven tools, and a
-DeepSeek Flash model running under OMP autonomously called derive, recall, and stats
-against a live CockroachDB session.
+Real agents drive this. Claude Code and the Cursor Agent CLI each connect over stdio and
+list all seven tools, and two different models have driven the tools autonomously: DeepSeek
+Flash under OMP called derive, recall, and stats against a live CockroachDB session, and
+Cursor's model ran derive, record_action, recall, and stats in sequence. Transcripts are in
+[`evidence/`](evidence/).
 
 ## Install and run
 
@@ -135,7 +137,7 @@ flowchart LR
 | Tool | How Lambo uses it |
 |---|---|
 | **Distributed vector indexing** | `concepts.embedding VECTOR(1024)` with a vector index, powering semantic concept merging. The vectors live beside the graph they describe rather than in a separate retrieval sidecar. |
-| **Cloud managed MCP server** | Connected read-only to inspect a live session from an agent client. Querying `canonization_events` shows concepts earning status, and `edges` traces provenance. |
+| **Cloud managed MCP server** | Connected read-only to inspect a live session from an agent client. Querying `canonization_events` shows concepts earning status, and `edges` traces provenance. Captured: `select_query` returned the five-event status walk for a demo session, with `user schema` going Candidate to Venerable to Canonical at blast radius 9 ([transcript](evidence/managed-mcp-canonization-events.md)). Three MCP clients have now driven that server model-first — OMP, Claude Code, and the Cursor Agent CLI — returning the same rows and agreeing on every field ([transcripts](evidence/mcp-client-interop/)). |
 | **ccloud CLI** | Cluster creation and DSN capture, following [`dev-diary/notes/spike-runbook.md`](dev-diary/notes/spike-runbook.md). [`scripts/provision.sh`](scripts/provision.sh) then applies the schema idempotently. |
 
 ## AWS services used
@@ -150,7 +152,9 @@ message. BGE-M3 served by a local `llama-server` is the only real embedder today
 
 ## Development
 
-Phase by phase handoffs, adversarial reviews, and evidence live in [`dev-diary/`](dev-diary/).
+Raw captures behind every claim live in [`evidence/`](evidence/), indexed by its
+[README](evidence/README.md). Phase by phase handoffs and adversarial reviews live in
+[`dev-diary/`](dev-diary/).
 Run `cargo test` for the suite. The docs site source sits in [`site/`](site/) and deploys to
 GitHub Pages from `main`.
 

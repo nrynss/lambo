@@ -248,5 +248,5 @@ the live CockroachDB Cloud conformance suite
 `single_writer_lease_is_enforced_across_pools` (and `cockroach_three_hop_progression_matches_memory`,
 `saints_and_stats_on_live`, and the vector `EXPLAIN` camera proof). The Cockroach cross-pool
 done-when leg is therefore **observed and enforced**, not compile-only. Evidence:
-`dev-diary/evidence/demo-live-conformance.txt`. Recorded in PHASE-8 Handoff "T86R2-2 CLOSED
+`evidence/demo-live-conformance.txt`. Recorded in PHASE-8 Handoff "T86R2-2 CLOSED
 (2026-08-15)". The historical INFRA-BLOCKED verdict body above is left as written.

@@ -26,7 +26,7 @@
 # vectors — the plan is `vector search` on
 # `concepts@concepts_embedding_idx (partial index)`. So the seed was neither
 # necessary nor sufficient. Evidence:
-# dev-diary/evidence/20260813-134333-vector-index-camera-proof-PASSING.txt
+# evidence/20260813-134333-vector-index-camera-proof-PASSING.txt
 #
 # T7.4 therefore left the demo cluster UNSEEDED (--clean applied): the §12.1
 # claim is stronger when the plan is captured against ordinary demo-shaped data

@@ -269,7 +269,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             #[cfg(feature = "embed-bedrock")]
             {
                 Err(EmbedError::Unavailable(
-                    "embed-bedrock is enabled but BedrockEmbedder is not implemented yet (T7.1); \
+                    "embed-bedrock is enabled but the Bedrock embedder is not implemented yet; \
                      account must also be authorizationStatus=AUTHORIZED"
                         .into(),
                 ))
@@ -465,7 +465,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("embed-bedrock") || msg.contains("T7.1") || msg.contains("not compiled"),
+            msg.contains("embed-bedrock") || msg.contains("not compiled"),
             "msg={msg}"
         );
         assert!(!msg.to_ascii_lowercase().contains("fixture"));

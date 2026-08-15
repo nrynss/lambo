@@ -377,7 +377,7 @@ propagates to every concept and edge below it — and backdating by 61s neuters 
 or store×embedder dims disagree. Document demo features (`--features demo`).
 
 **Done when:** `lambo serve` pasted into a Claude Code MCP config works — recall through a
-real client returns the T5.3 context block. Config + resolve proven in `dev-diary/evidence/`.
+real client returns the T5.3 context block. Config + resolve proven in `evidence/`.
 
 ---
 
@@ -543,7 +543,7 @@ exists on it — and the cluster was seeded to 2833 concepts / 2004 distinct vec
 
 **Done when:** `cargo run --features demo -- demo --scenario rest-api` (or equivalent)
 runs end-to-end against the live cluster twice consecutively with identical outcomes, and
-the MCP-server split-screen query is rehearsed and screenshotted into `dev-diary/evidence/`.
+the MCP-server split-screen query is rehearsed and screenshotted into `evidence/`.
 
 ---
 
@@ -792,7 +792,7 @@ release (not only build from source) and run `lambo serve` on a clean machine.
 - [x] `retract(_, DryRun)` and `canonical_memories()` exist and are tested (T8.1 build items)  ·  T8.1 CLEAN
 - [x] Inverted-index mirroring holds for `derive` / `record_action` / `demote` / removal  ·  T8.1 CLEAN
 - [x] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed  ·  T8.2 CLEAN (Handoff 1856-1866)
-- [x] MCP flow proven from a real Claude Code config  ·  evidence `dev-diary/evidence/t8.2-mcp-client/`
+- [x] MCP flow proven from a real Claude Code config  ·  evidence `evidence/mcp-client-stdio/`
 - [x] MCP tools stamp `created_at` server-side (F18)  ·  T8.2 F18 tests green
 - [x] **T8.6 writer lease enforced cross-process** (two writer opens → one holder, one
       honest refusal; expiry-after-crash tested) and **CLI write verbs land behind it**
@@ -803,7 +803,7 @@ release (not only build from source) and run `lambo serve` on a clean machine.
       driver) issuing a mix of valid + adversarial tool calls do **not** starve the
       process — SIGTERM still flushes the tail (`session closed, tail durable`), oversized
       `record_action` gets the honest cap refusal, and no internal detail (URLs/DSNs/driver
-      text) crosses the wire. Runs on the MBP; evidence into `dev-diary/evidence/`. This is
+      text) crosses the wire. Runs on the MBP; evidence into `evidence/`. This is
       the correctness half; the P9 T9.6 benchmark is the scale half.
 - [x] Demo app reachable and honest (renders real recall output, not canned text)  ·  T8.5 reverify CLEAN + live Cockroach `serve-web` (Handoff 1927-1956, 2020-2025)
 - [x] **T8.7 surface hardening:** HTTP transport refuses unauthenticated non-loopback
@@ -1039,7 +1039,7 @@ ruling predicted.
 |---|---|---|
 | `Cargo.toml` | added `rmcp 3.1.2` (`default-features = false`, 4 features) and `schemars 1` | standing additive rule |
 | `Cargo.lock` | resolved the above | standing additive rule |
-| `dev-diary/evidence/t8.2-mcp-client/` | new evidence directory | required by the task's Done-when |
+| `evidence/mcp-client-stdio/` | new evidence directory | required by the task's Done-when |
 | `src/lib.rs` | **not touched** — `pub mod mcp;` already existed | — |
 
 #### Level B — single construction site
@@ -1049,7 +1049,7 @@ ruling predicted.
 `mcp::serve::build_memory` **takes `ResolvedBackends`, not a config path**, deliberately: a
 second resolve is not expressible through the API. Fail-closed verified four ways (unknown
 TOML key, uncompiled store kind, bad transport, missing `--session`) — all exit before any
-session is attached. Captured in `dev-diary/evidence/t8.2-mcp-client/README.md`.
+session is attached. Captured in `evidence/mcp-client-stdio/README.md`.
 
 #### F18 — server-side timestamps
 
@@ -1129,10 +1129,10 @@ afterwards.
 corrected in R1 remediation (T82-8).** As originally captured, **four** tools were driven
 (`lambo_derive`, `lambo_record_action`, `lambo_recall`, `lambo_stats`) and the transcript held
 responses only. R1 remediation drove all seven over the real stdio wire with requests *and*
-responses captured, in `dev-diary/evidence/t8.2-mcp-client/stdio-all-seven-tools.jsonl`; that
+responses captured, in `evidence/mcp-client-stdio/stdio-all-seven-tools.jsonl`; that
 file, not this sentence, is what supports the seven-tool claim. `lambo_recall` returns the
 T5.3 context block verbatim. HTTP transport verified with `curl POST /mcp`. Transcripts in
-`dev-diary/evidence/t8.2-mcp-client/`.
+`evidence/mcp-client-stdio/`.
 
 **NOT verified: a model-driven tool call.** `claude -p` failed reproducibly with
 `Failed to authenticate: OAuth session expired and could not be refreshed` — the nested CLI
@@ -1941,7 +1941,7 @@ green.
   `--scenario`/`--session` help already satisfy the invariant, so `demo` is now covered like
   every other subcommand. No help-text additions needed. Reverify CLEAN.
 - **T84-1 (P2) DEFERRED-INFRA** — the two live done-when legs (scenario x2 against the LIVE
-  Cockroach cluster; split-screen `canonization_events` screenshot into `dev-diary/evidence/`)
+  Cockroach cluster; split-screen `canonization_events` screenshot into `evidence/`)
   are UNPERFORMED and blocked by live infrastructure (`LAMBO_COCKROACH_DSN` unset, cluster +
   CockroachDB-managed MCP unreachable from the review machine). NOT a code defect and NOT
   fabricated; recorded with `demo/LIVE-RUNBOOK.md` §1-§6 for the cluster holder. This is an
@@ -2016,7 +2016,7 @@ lease-release change and today's lease-message rewrite. **Verdict CLEAN** — no
 ### T8.4 / T8.6 / T8.5 — live-cluster verification (2026-08-15)
 
 The live CockroachDB Cloud cluster legs were exercised end-to-end. Evidence in
-`dev-diary/evidence/`: `demo-live-{1,2}.txt`, `demo-live-diff.txt`,
+`evidence/`: `demo-live-{1,2}.txt`, `demo-live-diff.txt`,
 `demo-live-saints.txt`, `demo-live-canon-events.txt`,
 `demo-live-conformance.txt`, `demo-live-serveweb-cockroach.txt`.
 

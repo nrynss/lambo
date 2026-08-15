@@ -207,7 +207,7 @@ feature:    store-cockroach
 > **`vector-search`** (hyphenated) — so the test cannot pass on any cluster, with any data,
 > behind any index. Separately, the query's own `WHERE embedding IS NOT NULL` defeats a
 > **non-partial** vector index. Full evidence:
-> `dev-diary/evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt`.
+> `evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt`.
 > Read the paragraphs below as history, not as instructions.
 The T0.3 spike productionized: embedding column write in `flush()`, index-backed
 similarity query, `Capabilities::VECTOR_SEARCH` advertised. Integration tests under
@@ -215,7 +215,7 @@ similarity query, `Capabilities::VECTOR_SEARCH` advertised. Integration tests un
 
 **DECISION D1 (recorded 2026-08-12, adversarial review COH-1) — the query is GLOBAL
 vector search + a Rust-side session filter.** T0.3's own spike evidence
-(`dev-diary/evidence/t0.3-vector-spike.txt`) shows the session-filtered shape bypasses
+(`evidence/vector-spike.txt`) shows the session-filtered shape bypasses
 the index: with `WHERE session_id = $1` the planner scans
 `concepts_session_id_canonical_key_key` (`vector search` absent; recommends
 `CREATE INDEX ON concepts (session_id) STORING (embedding)`), while the pure
@@ -235,7 +235,7 @@ use" claim (spec §12.1) was false on EXPLAIN day. T7.3 therefore:
 
 **Done when:** integration test: two paraphrase concepts derived through the full live
 stack merge via the index, and `EXPLAIN` output — captured into
-`dev-diary/evidence/` — proves `vector search` on `concepts@concepts_embedding_idx`
+`evidence/` — proves `vector search` on `concepts@concepts_embedding_idx`
 (index used, per DECISION D1 item 3).
 
 **Handoff (T7.3, 2026-08-12):**
@@ -281,7 +281,7 @@ stack merge via the index, and `EXPLAIN` output — captured into
   (`distribution: gcp-asia-south1`, ~79 non-null embeddings) the planner correctly chooses
   `scan concepts` (top-k over the primary) — a small-table scan is cheaper there. The T0.3
   spike's `vector search` was on a `distribution: local` (single-region) cluster. Captured
-  the honest plan into `dev-diary/evidence/<ts>-vector-index.txt` (shows the global top-k
+  the honest plan into `evidence/<ts>-vector-index.txt` (shows the global top-k
   shape + the scan decision + PENDING note). To get the on-camera proof, run the query
   against a vector-search-favorable deployment (freshly ANALYZEd, >~1k DISTINCT embeddings,
   or single-region) until `vector search` on `concepts@concepts_embedding_idx` appears, and
@@ -291,7 +291,7 @@ stack merge via the index, and `EXPLAIN` output — captured into
   Do NOT treat the demo cluster's scan
   as a query bug — the rework is correct and the live session-scoping suite PASSES.
 - **OPEN ITEM for the integrator (T8.4 / ship):** the §12.1 vector-index camera-proof is
-  still PENDING (evidence at `dev-diary/evidence/<ts>-vector-index.txt`, honest scan-plan
+  still PENDING (evidence at `evidence/<ts>-vector-index.txt`, honest scan-plan
   recorded). This is an integrator/demo-time decision, not a code fix — capture the
   `vector search` plan on a favorable deployment, then run
   `LAMBO_REQUIRE_LIVE=1 LAMBO_REQUIRE_VECTOR_INDEX=1 cargo test --features
@@ -328,7 +328,7 @@ flow:       serial; task → adve-review → remediation → review (repeat to C
 CockroachDB tools. The proof that we use it — `vector_explain_camera_proof` — has never
 passed. T7.3 concluded that was a cost/deployment matter and left it PENDING. That
 conclusion was wrong. Root-caused 2026-08-13; evidence at
-`dev-diary/evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt` and
+`evidence/20260813-131108-vector-index-camera-proof-diagnosis.txt` and
 `…-130218-vector-index-predicate-finding.txt`.
 
 **Do not re-architect `VECTOR_CANDIDATES_SQL`.** That instruction from T7.3 still stands and
@@ -397,7 +397,7 @@ LAMBO_REQUIRE_VECTOR_INDEX=1 ./scripts/run-live-cockroach.sh
 ```
 passes with `vector_explain_camera_proof` green against a cluster provisioned **from the
 migration alone** (no hand-created indexes), the passing plan is captured into
-`dev-diary/evidence/`, and the §12.1 vector-indexing claim is finally honest. If any part
+`evidence/`, and the §12.1 vector-indexing claim is finally honest. If any part
 proves impossible, the fallback remains the T7.3 option: formally downgrade the §12.1 claim
 and show the honest scan plan — but do that only after findings 1–3 have actually been tried.
 
@@ -405,7 +405,7 @@ and show the honest scan plan — but do that only after findings 1–3 have act
 
 Findings 1–3 were all correct and all fixed. `vector_explain_camera_proof` is GREEN; the
 whole live suite is 5/5. Evidence:
-`dev-diary/evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`.
+`evidence/20260813-134333-vector-index-camera-proof-PASSING.txt`.
 
 **The "MIGRATION TRAP" prescription above is WRONG and must not be reinstated.** The trap
 itself is real — measured: `CREATE VECTOR INDEX IF NOT EXISTS concepts_embedding_idx …

@@ -1,0 +1,98 @@
+Cursor Agent CLI — model-driven calls against the managed CockroachDB MCP server
+Captured 2026-08-15, after the cockroachdb-cloud connector was authorized for Cursor.
+cursor-agent 2026.08.11-e8db854. Interactive session, NOT print mode.
+
+Third independent MCP client to answer the same question against the same managed server.
+No cluster id appears in this capture: list_clusters was deliberately not called, so there
+was nothing to redact.
+
+--------------------------------------------------------------------------------
+CONNECTOR STATE
+
+$ cursor-agent mcp list
+aws-mcp: Error: Connection failed
+cockroachdb-cloud: ready
+
+This supersedes the `cockroachdb-cloud: requires_authentication` line that appears in the
+three earlier Cursor captures in this directory. Those were accurate when taken.
+
+--------------------------------------------------------------------------------
+APPROVAL BEHAVIOUR — the notable negative result
+
+$ cursor-agent          # interactive, no flags
+
+Every MCP call proceeded. Nothing was auto-rejected, and `--force` was neither passed nor
+needed. This is the direct contrast to `cursor-approval-recheck.txt`, where the same
+account and the same build auto-rejected every call in `-p` print mode with
+`User rejected MCP: lambo-lambo_derive`.
+
+So the per-call approval gate is a property of non-interactive print mode, not of the
+client, the account, or the server. Interactive approval is the supported path; `--force`
+is the workaround for scripting, and it is the only path that needs bounding.
+
+The agent also called its schema-discovery step first ("Explored available MCP tools
+cockroachdb-cloud · list_databases / · select_query") before issuing either call.
+
+--------------------------------------------------------------------------------
+[1] cockroachdb-cloud list_databases
+
+{"rows":[{"database_name":"defaultdb","owner":"root","primary_region":null,
+  "secondary_region":null,"regions":[],"survival_goal":null},
+ {"database_name":"lambo","owner":"root","primary_region":"gcp-asia-south1",
+  "secondary_region":"","regions":["gcp-asia-south1"],"survival_goal":"zone"}]}
+
+Byte-for-byte the same shape the Claude Code capture returned.
+
+--------------------------------------------------------------------------------
+[2] cockroachdb-cloud select_query   database="lambo"
+
+SELECT node_id, from_status, to_status, blast_radius, occurred_at
+FROM canonization_events
+WHERE session_id = 'demo-rest-api-bdd69691-ea92-41b7-ad3a-7506332071dc'
+ORDER BY occurred_at;
+
+{"rows":[
+ {"node_id":"724c92b9-a8a0-4d58-aa2e-29ed3cc43a57","from_status":"None",
+  "to_status":"Candidate","blast_radius":null,"occurred_at":"2026-08-15T14:50:08.306429Z"},
+ {"node_id":"3e3a6984-3bd6-480d-8490-d9df9b03540a","from_status":"None",
+  "to_status":"Candidate","blast_radius":null,"occurred_at":"2026-08-15T14:50:08.306429Z"},
+ {"node_id":"724c92b9-a8a0-4d58-aa2e-29ed3cc43a57","from_status":"Candidate",
+  "to_status":"Venerable","blast_radius":null,"occurred_at":"2026-08-15T14:50:08.992263Z"},
+ {"node_id":"724c92b9-a8a0-4d58-aa2e-29ed3cc43a57","from_status":"Venerable",
+  "to_status":"Canonical","blast_radius":9,"occurred_at":"2026-08-15T14:50:09.600577Z"},
+ {"node_id":"1848c6e5-8b63-4a64-942e-76c75afd0ce1","from_status":"None",
+  "to_status":"Candidate","blast_radius":null,"occurred_at":"2026-08-15T14:50:10.103585Z"}]}
+
+--------------------------------------------------------------------------------
+[3] cockroachdb-cloud select_query   database="lambo"   (node labels)
+
+SELECT id, content FROM concepts
+WHERE id IN ('724c92b9-a8a0-4d58-aa2e-29ed3cc43a57',
+             '3e3a6984-3bd6-480d-8490-d9df9b03540a',
+             '1848c6e5-8b63-4a64-942e-76c75afd0ce1');
+
+{"rows":[{"id":"1848c6e5-8b63-4a64-942e-76c75afd0ce1","content":"add rate limiting middleware"},
+ {"id":"3e3a6984-3bd6-480d-8490-d9df9b03540a","content":"add oauth_id to user schema"},
+ {"id":"724c92b9-a8a0-4d58-aa2e-29ed3cc43a57","content":"user schema"}]}
+
+Row ORDER differs from the OMP capture of the same query, which listed 724c92b9 first.
+That is expected and not a discrepancy: the query has no ORDER BY, so the store is free to
+return the rows in any order. The id→content mapping is identical in both.
+
+--------------------------------------------------------------------------------
+THREE-CLIENT AGREEMENT
+
+The same five-row status walk has now been returned by three independent MCP clients
+against the managed server:
+
+  OMP v17.3.4 (DeepSeek Flash)   ../managed-mcp-canonization-events.md
+  Claude Code 2.1.226            claude-code-model-driven-managed-mcp.txt
+  Cursor Agent CLI 2026.08.11    this file
+
+All three agree on every field: node 724c92b9 walking None → Candidate → Venerable →
+Canonical across 1.29 seconds, blast_radius null on the two earlier hops and 9 on the
+promotion, and the same two sibling nodes stopping at Candidate.
+
+Different clients, different models, different transports into the same managed server,
+one durable record. The blast radius of 9 is also the number the demo prints in its final
+recall block, so the narrated figure and the stored figure match from opposite ends.

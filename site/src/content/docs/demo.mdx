@@ -122,7 +122,16 @@ lambo --config lambo.toml inspect --session evaluation --focus "user schema"
 lambo --config lambo.toml serve-web --session evaluation
 ```
 
-On CockroachDB you can also query `canonization_events` directly, through `psql` or through the CockroachDB managed MCP server, and watch the same transitions the demo narrated.
+On CockroachDB you can also query `canonization_events` directly, through `psql` or through the CockroachDB managed MCP server, and watch the same transitions the demo narrated. Scope the query by `session_id`, because one cluster accumulates events from every session that has run against it:
+
+```sql
+SELECT node_id, from_status, to_status, blast_radius, occurred_at
+FROM canonization_events
+WHERE session_id = '<your session id>'
+ORDER BY occurred_at;
+```
+
+Run through the managed MCP server, that returns the status walk as the demo told it: the parent concept moving Candidate, then Venerable, then Canonical, with the blast radius recorded on the promotion and left null on the earlier hops.
 
 ## What it is not
 

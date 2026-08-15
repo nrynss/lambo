@@ -123,7 +123,7 @@ I did not edit source or add tests during this review (adversarial, read/trace o
 
 ### MINOR-3 (P3) — §12.1 "vector index in use" is not camera-proven on the target infra (PENDING is honest but the spec item is unmet)
 
-- **File/construct:** `dev-diary/evidence/20260812-235945-vector-index.txt` +
+- **File/construct:** `evidence/20260812-235945-vector-index.txt` +
   `#[ignore] vector_explain_camera_proof` + T7.3 handoff "status: done # EXPLAIN
   vector-search camera-proof is PENDING".
 - **Why it matters:** the captured plan is a global `top-k` over `scan concepts`
