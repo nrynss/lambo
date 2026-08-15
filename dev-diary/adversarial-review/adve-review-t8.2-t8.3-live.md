@@ -1316,8 +1316,8 @@ verifier as no-action and are recorded as such.
 |---|---|---|
 | V1 — invisible codepoints that still fork a key | **FIXED** | `c95a014` (table), `aac5cd5` (tests) |
 | V2 — whitespace class out of scope | **NO ACTION** (verifier's own; recorded so it is not re-derived) | — |
-| V3 — R1-6's "fails it outright" is engine-specific | **CONFIRMED, already on the live list** | this commit |
-| V4 — R1-2 mutation table understates itself | **CORRECTED** | this commit |
+| V3 — R1-6's "fails it outright" is engine-specific | **CONFIRMED, already on the live list** | `b36da31` (record only; no code or list change) |
+| V4 — R1-2 mutation table understates itself | **CORRECTED** | `b36da31` |
 | V5 — values-last vs replay permissiveness | **NO ACTION** (observation, inherited from L82-1) | — |
 
 ## V1 — the four gaps, closed on the policy side each one's class dictates
