@@ -989,3 +989,316 @@ can settle, and it is cheap to fold into item 2:
    *old* code may or may not have failed there — the fix is correct either way, but
    "Cockroach would also have dead-lettered" is asserted from the docs, not
    measured. Any conformance run over `flush` exercises the new ordering regardless.
+
+---
+
+# R2 verification (2026-08-15)
+
+Verify agent, detached at `658780d` (`5b2e15e` → `635b272` → `658780d` over
+`47d7400`). Scope: the R2 claims only — R1 already attacked the surface. Every
+load-bearing check was re-run independently rather than read off the record. All
+mutations transient and reverted; `git status` clean against `658780d` at the end.
+
+## Verdict — REQUEST CHANGES (narrow)
+
+**All six R2 dispositions verify.** R1-1 is correct and its equivalence argument
+survives column-by-column scrutiny; R1-2's two-rule design is sound and its
+single-table property is real; R1-4/R1-5/R1-6 are each pinned by a test that
+fails when the fix is removed. The nine gates are green at the stated counts.
+
+One thing is still false as written, and it is the same class of overstatement
+R1-2 was raised for. **R1-2(a) is not closed structurally — it is still an
+enumeration, and the enumeration has assigned members missing.** Four invisible
+codepoints a caller may store today measurably fork a canonical key (V1 below).
+The fix is four range edits. Nothing else blocks.
+
+## What verified — claim by claim
+
+### R1-1(a) — mutation check, executed
+
+Restored the relocating spelling in `dedupe_last_at_first_position`
+(`src/store/batch.rs:302`) — the pre-R1-1 body recovered verbatim from
+`47d7400`. Result under `--features store-sqlite`: **694 → 690 passed, 4
+failed**, exactly the four named:
+
+| Test | Observed |
+|---|---|
+| `batch::a_repeated_interaction_keeps_its_first_position` | FAILED |
+| `batch::dedupe_never_moves_a_row_later_in_the_plan` | FAILED |
+| `batch::seed_rows_collapse_repeats_like_the_flush_path` | FAILED |
+| `sqlite::a_repeated_interaction_does_not_outrun_the_row_that_chains_onto_it` | FAILED — `Constraint("787")` |
+
+The SQLite failure carries the expected message and the expected error:
+`SQLITE_CONSTRAINT_FOREIGNKEY`. No fifth test moved. Reverted → 694 green.
+The adjacent-repeat control does sit first in that test and does execute when
+the repro fails, as claimed.
+
+### R1-1(b) — the equivalence argument, checked rather than accepted
+
+The record rests values-last on "every column of the three upsert statements
+except a concept's canonization triple is in the `DO UPDATE SET` list". Verified
+against the generated SQL, not the prose:
+
+| Statement | Columns | In `DO UPDATE SET` | Excluded |
+|---|---|---|---|
+| `ON_CONFLICT_INTERACTION_SQL` (`cockroach.rs:279`) | 6 | 5 | `id` (conflict target) |
+| `ON_CONFLICT_CONCEPT_SQL` (`:310`) | 16 | 12 | `id` + `canonization_status`, `blast_radius`, `last_demotion_time` |
+| `ON_CONFLICT_EDGE_SQL` (`:337`) | 9 | 6 incl. `id` | `source`/`target`/`edge_type` (conflict target — equal by definition) |
+
+So last-wins is replay's final state for **every** column, and the only
+exclusions are exactly the canonization triple `dedupe_concepts` already routes
+from the first occurrence. The argument is sound as stated.
+
+Position, therefore, can only matter for reference-before-use. Interactions'
+sole intra-table FK is `previous_id`, and its invariance holds:
+
+* the rejection exists — `src/graph/graph.rs:349-362`, the `(true, Some(pos))`
+  arm, "re-upsert of interaction {} would move it within the chain";
+* and it is not bypassable, which the record does not say and which is the
+  actual load-bearing half: `insert_interaction` (`graph.rs:313`, emitting at
+  `:378`) is the **only** non-test producer of
+  `Mutation::UpsertNode { node: Node::Interaction }` in the crate.
+  `Graph::from_snapshot` writes `g.nodes` directly (`graph.rs:127`) and appends
+  no mutation, so a loaded snapshot cannot inject a divergent `previous_id`.
+* `session_id` (the other FK-bearing column) is safe independently:
+  `batch_session_ids` (`batch.rs:373`) iterates the **raw** mutations, not the
+  deduped rows, so both occurrences' sessions get rows.
+
+No other mutable interaction column can differ between occurrences in a way
+position could observe.
+
+### R1-1(c) — the uniform-rule deviation
+
+DDL checked directly, `migrations/cockroach/001_init.sql`:
+
+* `:29` `previous_id UUID REFERENCES interactions(id)` — the self FK, confirmed;
+* `:40` `origin_interaction UUID NOT NULL REFERENCES interactions(id)` — points
+  at the bucket `drain_into` empties first (`batch.rs:218-228`), confirmed;
+* `:141-151` `edges` carries `REFERENCES` on `session_id` only — none on
+  `source`/`target`, confirmed, plus the `UNIQUE (source, target, edge_type)`
+  the dedupe key matches.
+
+Position is genuinely unobservable for both. And the canonization values-FIRST
+rule did not quietly flip: `a_repeated_concept_collapses_last_wins_but_keeps_the_first_canonization`
+is **byte-identical** across `47d7400..658780d` (diffed, not eyeballed) and
+passes. `edges_dedupe_on_the_natural_key_not_the_id` differs only in the
+assertion message plus a rustfmt reflow; the assertion itself is unchanged.
+
+### R1-2(a) — one table, two consumers
+
+Confirmed single-source. `INVISIBLE_RANGES` is defined once
+(`canonical.rs:103`); the only readers are `normalize_tokens` (`:238`, via
+`is_invisible`) and `caps::is_disallowed_format` (`caps.rs:154`, via
+`is_invisible` + `is_text_required_invisible`). A sweep for the codepoint
+literals across `src/`, `tests/` and `migrations/` returns only test data and
+doc prose — no second policy list anywhere. `TEXT_REQUIRED_INVISIBLE` is a
+strict subset of the strip set by inspection as well as by its own test.
+
+### R1-2(b) — mutation checks, executed
+
+| Mutation | Claimed | Observed |
+|---|---|---|
+| strip removed from `normalize_tokens` | 3 tests fail | **exactly those 3**: `canonical::invisible_characters_cannot_fork_a_canonical_key`, `canonical::a_composition_blocker_cannot_fork_a_key`, `caps::characters_this_surface_allows_cannot_fork_a_canonical_key` |
+| five non-*Cf* blank ranges removed | 1 test fails | **3 fail** — the named `caps::invisible_format_characters_are_refused_by_codepoint`, plus `canonical::invisible_characters_cannot_fork_a_canonical_key` and `mcp::server::control_characters_are_refused_but_tab_and_newline_are_allowed` |
+
+The second row is *understated* in the record (V4). Reverted after each.
+
+### R1-2(c) — STRIP semantics, probed adversarially
+
+Transient probe, both halves of the property:
+
+```text
+canonical_key("billing retries change")              = "bill chang retri"
+  + U+200C ZWNJ    stored=true   key = "bill chang retri"   (identical)
+  + U+200D ZWJ     stored=true   key = "bill chang retri"   (identical)
+  + U+FE0E VS15    stored=true   key = "bill chang retri"   (identical)
+  + U+FE0F VS16    stored=true   key = "bill chang retri"   (identical)
+  + U+034F CGJ     stored=true   key = "bill chang retri"   (identical)
+  + U+E0100 VS-S   stored=true   key = "bill chang retri"   (identical)
+```
+
+Every codepoint the surface still accepts collapses onto the plain key. And the
+legitimate text survives — `check_size` returns `Ok(())` for Persian
+`می‌خوانم`, the emoji ZWJ family, `❤️` with VS16, and a Devanagari ZWJ cluster.
+Content is lossless by construction, not by convention: `check_size` returns
+`Result<(), String>` and has no path that rewrites its input.
+
+Worth recording: Persian ZWNJ is orthographically significant, so
+`می‌خوانم` and `میخوانم` now share a key. That is the intended trade (merge in
+the key, preserve in `content`) but it is a semantic merge, not a no-op, and the
+record does not name it.
+
+### R1-2(d) — the migration story
+
+No collision path found; the record's claim holds, for a reason it does not give.
+The decisive fact is that **keys are never recomputed on load**:
+`Graph::from_snapshot` carries `canonical_key` through from the stored row. So an
+old unstripped key and a new stripped key are two distinct strings under the
+partial index and under the in-RAM uniqueness rule, exactly as claimed. Two
+further paths checked and clear:
+
+* `demote::canonical_key_for` (`demote.rs:174`) *does* recompute — but only for
+  newly created **Observation** rows, which `concepts_key_non_obs_idx` excludes.
+* a fresh stripped key *can* equal a pre-existing plain row's key. That is the
+  fix working: `canonicalize` step 5 matches it against RAM (which mirrors the
+  store for a loaded session) and merges onto the existing concept rather than
+  reaching the index. The index is `(session_id, canonical_key)`, so no
+  cross-session collision exists either.
+
+Declining the backfill is the right call for the reason given.
+
+### R1-4 / R1-5 / R1-6
+
+* **R1-4** — both mutations are hard build failures, not test failures.
+  `CONCEPT_COLUMNS` 16 → 17 (60 × 17 = 1020) and the reviewer's own
+  `BULK_LIMITS.concepts` 60 → 70 (70 × 16 = 1120) each produce
+  `error[E0080]: evaluation panicked: concepts chunk exceeds
+  SQLITE_MAX_VARIABLE_NUMBER` at `sqlite.rs:194`. Reverted.
+* **R1-5** — `every_non_upsert_variant_is_a_barrier` iterates five variants,
+  `CanonizationTransition` included. 5 of 5, confirmed by reading the test.
+* **R1-6** — the pre-L82-1 claim is accurate. `git show 060cca1^:src/store/sqlite.rs`
+  shows the seed path as `for c in &snapshot.concepts { upsert_concept(...) }` /
+  `for e in &snapshot.edges { upsert_edge(...) }`, each a per-row
+  `INSERT ... ON CONFLICT ... DO UPDATE SET` — last-wins, as claimed. Both
+  adapters now route through `seed_concept_rows`/`seed_edge_rows`
+  (`cockroach.rs:1253-1256`, `sqlite.rs:433-436`). Public `seed` accepts repeats
+  again end-to-end: a transient probe seeded a snapshot carrying the same concept
+  id twice and the same edge natural key twice against a real SQLite engine →
+  `Ok`, one concept row with the last content, one edge row with the last id and
+  weight. The fix is pinned — removing the dedupe fails
+  `seed_rows_collapse_repeats_like_the_flush_path`. See V3 for what that probe
+  also showed.
+
+### The four-line assert sweep
+
+`git diff 47d7400..658780d -- src tests | grep '^-.*assert'` returns **exactly
+four lines**, matching the record's table 1:1 and nothing else. Widened the
+sweep as well: **zero** `#[test]` / `#[tokio::test]` attributes removed (+8
+added), and no removed `panic!`, `unreachable!`, `should_panic`, `.expect(` or
+`.unwrap()`. The one behavioural line is unchanged apart from its message
+(diffed above).
+
+### Gates — all nine green, counts exact
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **647** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --features store-sqlite` | **694** lib passed, 0 failed, 1 ignored; 5 bin; integration green |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
+Both counts are the record's, exactly.
+
+---
+
+## Findings
+
+### V1 (P3 exploitability, but the claim it falsifies is P2-shaped) — invisible codepoints that still fork a canonical key
+
+`canonical.rs:71` states the strip set means "no invisible character can ever
+fork a key", and the R2 record says it "closes (a) **structurally** rather than
+by enumerating attackers' choices". Both are still enumeration, and four
+**assigned** codepoints are missing from it. Measured:
+
+```text
+                                             stored?   forks key?
+U+180B MONGOLIAN FREE VARIATION SELECTOR ONE    true       true
+U+180C MONGOLIAN FREE VARIATION SELECTOR TWO    true       true
+U+180D MONGOLIAN FREE VARIATION SELECTOR THREE  true       true
+U+180F MONGOLIAN FREE VARIATION SELECTOR FOUR   true       true
+U+180E MONGOLIAN VOWEL SEPARATOR (in table)     false      false
+```
+
+`canonical_key("billing\u{180B} retries change")` = `"billing\u{180b} chang retri"`
+against `"bill chang retri"` — the reviewer's original R1-2(a) repro, working
+today with one substituted codepoint.
+
+These are `Default_Ignorable_Code_Point`, render nothing, and are *variation
+selectors* — precisely the class the remediation went out of its way to add,
+with the reasoning that `U+FE0F` "forks a key exactly as `U+200D` does" and that
+"fixing only the reviewer's examples would have left an identical hole one round
+from being found." The table already contains their immediate neighbour
+`U+180E`, so this is a gap inside a range the edit had its hands on.
+
+Also absent, unassigned but `Default_Ignorable` and behaving identically:
+`U+2065` (a hole between the table's own `2060–2064` and `2066–206F` entries),
+`U+FFF0–U+FFF8`, `U+E0080–U+E00FF`, `U+E01F0–U+E0FFF`. The doc argues the
+superset principle explicitly for the TAGS block — "a superset costs nothing and
+survives future assignments" — and then does not apply it at these four points.
+
+* **Blast radius:** the R1-2(a) vector, undiminished for an attacker who reads
+  the table. A shadow concept that renders identically to a legitimate one and
+  that canonization can never merge.
+* **Fix:** four range edits, no new mechanism —
+  `('\u{180B}', '\u{180F}')` replacing the lone `U+180E` entry;
+  `('\u{2060}', '\u{206F}')` merging the two entries around the `U+2065` hole;
+  `('\u{FFF0}', '\u{FFFB}')` absorbing the reserved run ahead of the existing
+  interlinear entry; and `('\u{E0000}', '\u{E0FFF}')` collapsing the two
+  supplementary entries into the whole plane-14 block.
+  Add `U+180B` to `invisible_format_characters_are_refused_by_codepoint` and to
+  the key-forking table so the hole cannot reopen.
+* **Or:** disposition it as an accepted residual — but then the two absolute
+  claims must be reworded, because as written they are false.
+
+### V2 (no action) — the whitespace class is correctly out of scope
+
+Checked, since "blank" and "invisible" are easy to conflate. `U+00A0`,
+`U+1680`, `U+2000–U+200A`, `U+202F`, `U+205F`, `U+2028`, `U+2029` and `U+3000`
+are all `stored=true, forks=false`: Rust's `char::is_whitespace` is the
+`White_Space` property, so `normalize_tokens`' split already treats every one of
+them as a token separator. They are legitimate whitespace, the tokenizer
+neutralizes them, and refusing them would be wrong. Recording it so the next
+round does not re-derive it.
+
+### V3 (P3, doc precision) — R1-6's "fails it outright" is engine-specific
+
+The record says feeding a repeat to a multi-row statement "fails it outright
+(*cannot affect row a second time*)". Measured against SQLite with the seed
+dedupe removed: it **succeeds**, and last-wins natively — SQLite applies a
+multi-row `INSERT ... ON CONFLICT` row by row, so the second tuple upserts onto
+the first. "Cannot affect row a second time" is PostgreSQL/CockroachDB
+behaviour.
+
+So the *regression* R1-6 identifies is real for the **Cockroach adapter only**,
+and cannot be settled from this machine. The fix is right either way and is
+genuinely pinned at the planner level, but the record states the failure
+unconditionally. This belongs on the live-cluster list next to item 7.
+
+### V4 (nit — the mirror image of R1-3) — the R1-2 mutation table understates itself
+
+Removing the five non-*Cf* blank ranges fails three tests, not the one named.
+R1-3 corrected an overstatement; this is the same kind of imprecision pointing
+the other way. Accuracy only.
+
+### V5 (observation, inherited from L82-1, not introduced by R2)
+
+Values-last can be *more* permissive than replay against
+`concepts_key_non_obs_idx`: if a concept's first occurrence carries a key that
+collides with a durable non-Observation row and its last occurrence does not,
+replay would insert-then-update and fail the first statement while the bulk path
+inserts the final key and succeeds. The divergence is in the safe direction
+(bulk succeeds where replay dead-lettered) and needs a caller that moves a
+concept's `canonical_key` mid-batch. Noted for completeness; no action.
+
+## Live-cluster re-verification list — plus one
+
+Items 1–7 stand unchanged. R1-6 adds:
+
+8. **Whether the pre-R1-6 seed path actually failed on CockroachDB.** V3 shows
+   SQLite never rejected the repeat, so the regression is asserted from
+   PostgreSQL semantics rather than measured. Seed a snapshot carrying a repeated
+   concept id against the cluster on `47d7400` and on `658780d`; folds into any
+   conformance run.
+
+## Method note
+
+Run on `658780d` in a detached worktree. Seven transient mutations (the
+relocating dedupe; the strip removal; the five blank ranges; two column/limit
+bumps; the seed-dedupe removal) and three probe files were applied and reverted
+with `git checkout` / `rm`; `git status` and `git diff 658780d` were both empty
+at the end. Nothing outside this document is modified, and nothing is committed.
