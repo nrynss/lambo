@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Lambo — session window</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="mark">lambo</span>
+    <span class="sub">session window</span>
+  </div>
+  <div class="ident">
+    <span class="label">session</span>
+    <span class="value" id="session-id">…</span>
+  </div>
+  <div class="chips" id="backend-chips"></div>
+  <span class="badge readonly" title="This page issues read requests only. It never derives, records, or reserves.">read-only</span>
+</header>
+
+<div id="banners"></div>
+
+<main>
+
+  <section class="panel recall">
+    <h2>Recall</h2>
+    <p class="note">
+      The context block below is what an agent receives, rendered verbatim —
+      canonical markers, <span class="glyph">⚑</span> blast-radius warnings and conflict
+      lines included. Nothing here is reformatted.
+    </p>
+    <form id="recall-form" autocomplete="off">
+      <input type="text" id="recall-query" name="q" placeholder="What should the agent remember?" aria-label="Recall query" spellcheck="false">
+      <button type="submit" id="recall-go">Recall</button>
+    </form>
+    <div class="meta" id="recall-meta"></div>
+    <pre id="recall-out" class="context" aria-live="polite">Ask the session something. The reply is the raw context block.</pre>
+  </section>
+
+  <aside class="side">
+
+    <section class="panel stats">
+      <h2>Session</h2>
+      <div class="tiles" id="stat-tiles"></div>
+      <p class="note" id="stats-note"></p>
+    </section>
+
+    <section class="panel feed">
+      <h2>Canonization <span class="count" id="event-count">0</span></h2>
+      <p class="note">
+        Status transitions as the writer records them. A concept earns
+        <em>Canonical</em>; it is never assigned.
+      </p>
+      <ol id="event-list" class="events" aria-live="polite"></ol>
+      <p class="empty" id="event-empty">No transitions recorded yet.</p>
+    </section>
+
+  </aside>
+
+</main>
+
+<footer class="bar foot">
+  <span id="link-status" class="status">connecting…</span>
+  <span class="spacer"></span>
+  <span class="muted" id="version"></span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

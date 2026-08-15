@@ -41,6 +41,30 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,
     },
+    /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
+    ///
+    /// A reader process: it never takes the writer lease and exposes no mutating
+    /// route, so it runs safely beside `lambo serve` on the same session. The
+    /// HTTP surface is unauthenticated (T8.7) — keep --bind on loopback, or put
+    /// an authenticating proxy in front of it.
+    ServeWeb {
+        /// Session to open a read-only window onto (reader process; does not take the writer lease).
+        #[arg(
+            long,
+            help = "Session to open a read-only window onto (reader process; does not take the writer lease)."
+        )]
+        session: String,
+        /// HTTP port to listen on.
+        #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
+        port: u16,
+        /// Bind address. Loopback by default — the page is unauthenticated (T8.7).
+        #[arg(
+            long,
+            default_value = "127.0.0.1",
+            help = "Bind address. Loopback by default — the page is unauthenticated (T8.7)."
+        )]
+        bind: std::net::IpAddr,
+    },
     /// Scripted two-agent demo scenario.
     Demo {
         #[arg(long, default_value = "rest-api")]
@@ -222,6 +246,7 @@ impl Commands {
     fn name(&self) -> &'static str {
         match self {
             Self::Serve { .. } => "serve",
+            Self::ServeWeb { .. } => "serve-web",
             Self::Demo { .. } => "demo",
             Self::Recall { .. } => "recall",
             Self::Saints { .. } => "saints",
@@ -385,6 +410,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // T8.5 — the read-only demo window. Reader path: `run_async` owns the
+        // runtime exactly as it does for `recall`, and the command body takes
+        // the single `ResolvedBackends` from `resolve_for_command` above.
+        (
+            Commands::ServeWeb {
+                session,
+                port,
+                bind,
+            },
+            Resolved::Full(backends),
+        ) => run_async(
+            "serve-web",
+            lambo::cli::serve_web::run(
+                *backends,
+                lambo::cli::serve_web::Args {
+                    session,
+                    port,
+                    bind,
+                },
+            ),
+        ),
         (Commands::Demo { scenario }, Resolved::Full(backends)) => {
             let _ = backends;
             println!("lambo demo (stub): scenario={scenario}");
