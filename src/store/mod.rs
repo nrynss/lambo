@@ -117,6 +117,16 @@ pub trait GraphStore: Send + Sync {
 
     /// Persist a mutation batch durably (spec §2.4–§2.5).
     ///
+    /// **Fencing token (GitHub issue #1).** `token` is the holder's monotonic
+    /// fencing token, minted by [`Self::acquire_lease`] at takeover and
+    /// preserved on refresh. The store MUST reject any write whose token is
+    /// below the session lease's `current_token` (or `None` when a token has
+    /// been set) with [`StoreError::StaleWrite`] — never silently drop it. Pass
+    /// `None` only for an unleased write (a session with no lease row, e.g.
+    /// `seed()` / fixture parity), which the store permits. The three real
+    /// backends enforce this; the advisory default (no lease) lets everything
+    /// through.
+    ///
     /// **Idempotency contract (flush replay, F5):** adapters MUST implement
     /// every mutation kind with upsert / `ON CONFLICT` semantics. The flush
     /// task may replay a batch that partially succeeded (a mid-batch backend
@@ -132,7 +142,7 @@ pub trait GraphStore: Send + Sync {
     /// (schema `TIMESTAMPTZ NOT NULL DEFAULT now()`) but `None` on SQLite/Memory
     /// (no session-metadata `Mutation` kind exists to bind it — S5 snapshot-only).
     /// Adapters may differ here; do NOT rely on `created_at` presence.
-    async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError>;
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError>;
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError>;
 
     async fn keyword_candidates(
@@ -188,7 +198,17 @@ pub trait GraphStore: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError>;
 
-    async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError>;
+    /// Durable write gate for a canonization transition (spec §10). **Fencing
+    /// token (GitHub issue #1):** like [`Self::flush`], `token` must be the
+    /// holder's monotonic token, and the store MUST reject a stale/missing one
+    /// with [`StoreError::StaleWrite`]. This is the second of the two durable
+    /// write gates — it previously had NO lease check at all (the canon task
+    /// bypassed `lease_lost`), a real fencing gap this token closes.
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError>;
 
     // -----------------------------------------------------------------------
     // Single-writer lease (spec §2.2, T8.6)
@@ -230,6 +250,9 @@ pub trait GraphStore: Send + Sync {
         let now = Utc::now();
         Ok(LeaseOutcome::Acquired(LeaseInfo {
             holder: holder.token(),
+            // Advisory default: no fencing token is minted (nothing is stored),
+            // so the sentinel 0 means "never leased" — unleased writes pass.
+            token: 0,
             acquired_at: now,
             expires_at: now
                 + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0)),

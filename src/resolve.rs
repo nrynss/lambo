@@ -228,6 +228,7 @@ mod tests {
         async fn flush(
             &self,
             _batch: &crate::types::MutationBatch,
+            _token: Option<u64>,
         ) -> Result<(), crate::types::StoreError> {
             unreachable!("resolve never flushes")
         }
@@ -276,6 +277,7 @@ mod tests {
         async fn record_canonization(
             &self,
             _event: &crate::types::CanonizationEvent,
+            _token: Option<u64>,
         ) -> Result<(), crate::types::StoreError> {
             unreachable!("resolve never writes")
         }

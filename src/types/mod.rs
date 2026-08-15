@@ -734,6 +734,12 @@ pub enum StoreError {
     /// flush loop dead-letters it instead of retrying.
     #[error("constraint violated ({0})")]
     Constraint(String),
+    /// A write whose fencing token is stale (GitHub issue #1). The lease moved
+    /// to a newer holder since this writer acquired it, so the store refuses
+    /// the write: a fenced holder must not overwrite the new holder's rows.
+    /// An honest, explicit refusal — never a silent drop.
+    #[error("stale write (fencing token): {0}")]
+    StaleWrite(String),
     /// Any other failure, kept whole.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -743,10 +749,13 @@ impl StoreError {
     /// STORE-4: retryability for the flush loop. A constraint violation is
     /// deterministic — retrying it can never succeed and only blocks the
     /// queue (head-of-line) — so it is non-retryable and dead-lettered
-    /// (D5: drop-after-log, visible in `FlushStats::dead_lettered`). Every
-    /// other error keeps the existing retry / retain semantics.
+    /// (D5: drop-after-log, visible in `FlushStats::dead_lettered`). A
+    /// `StaleWrite` is also non-retryable: the holder's token will never catch
+    /// up (it lost the lease), so retrying cannot succeed — on detection the
+    /// flush loop treats it like a constraint (bail out of the retry ladder).
+    /// Every other error keeps the existing retry / retain semantics.
     pub fn is_retryable(&self) -> bool {
-        !matches!(self, StoreError::Constraint(_))
+        !matches!(self, StoreError::Constraint(_) | StoreError::StaleWrite(_))
     }
 }
 

@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
     CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
@@ -27,6 +27,9 @@ use crate::types::{
 #[derive(Clone)]
 struct LeaseRow {
     holder: String,
+    /// Monotonic fencing token (GitHub issue #1): minted on takeover, preserved
+    /// on refresh. `0` == "never leased yet" (seed / fixture parity bypass).
+    current_token: u64,
     acquired_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -34,6 +37,7 @@ struct LeaseRow {
 fn row_info(row: &LeaseRow) -> LeaseInfo {
     LeaseInfo {
         holder: row.holder.clone(),
+        token: row.current_token,
         acquired_at: row.acquired_at,
         expires_at: row.expires_at,
     }
@@ -328,31 +332,46 @@ impl GraphStore for MemoryStore {
                 .map_err(|e| StoreError::Backend(format!("lease ttl out of range: {e}")))?;
         let token = holder.token();
         let mut leases = self.leases.write();
-        match leases.get(&session.0) {
+        match leases.get(&session.0).cloned() {
             // A live lease held by someone else — refuse, fail closed.
             Some(row) if row.expires_at > now && row.holder != token => {
                 let age = (now - row.acquired_at).to_std().unwrap_or(Duration::ZERO);
                 Ok(LeaseOutcome::Held {
-                    current: row_info(row),
+                    current: row_info(&row),
                     age,
                 })
             }
-            // Our own lease — refresh, keeping the original acquisition time.
+            // Our own lease — refresh, keeping the original acquisition time
+            // AND the fencing token (no takeover, no bump; #1).
             Some(row) if row.holder == token => {
-                let acquired_at = row.acquired_at;
                 let updated = LeaseRow {
                     holder: token,
-                    acquired_at,
+                    current_token: row.current_token,
+                    acquired_at: row.acquired_at,
                     expires_at,
                 };
                 let info = row_info(&updated);
                 leases.insert(session.0.clone(), updated);
                 Ok(LeaseOutcome::Acquired(info))
             }
-            // Fresh or expired — take it.
-            _ => {
+            // Expired & held by someone else — take it over and mint a
+            // strictly-increasing token (#1).
+            Some(row) => {
                 let fresh = LeaseRow {
                     holder: token,
+                    current_token: row.current_token + 1,
+                    acquired_at: now,
+                    expires_at,
+                };
+                let info = row_info(&fresh);
+                leases.insert(session.0.clone(), fresh);
+                Ok(LeaseOutcome::Acquired(info))
+            }
+            // Fresh — first ever lease on the session; mint token 1.
+            None => {
+                let fresh = LeaseRow {
+                    holder: token,
+                    current_token: 1,
                     acquired_at: now,
                     expires_at,
                 };
@@ -407,7 +426,7 @@ impl GraphStore for MemoryStore {
         Ok(self.flush_stats.read().get(&session.0).copied())
     }
 
-    async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         if batch.mutations.is_empty() {
             return Ok(());
         }
@@ -436,6 +455,27 @@ impl GraphStore for MemoryStore {
             };
             if !affected.iter().any(|s| s == &sid) {
                 affected.push(sid);
+            }
+        }
+
+        // Fencing-token gate (#1): reject a stale/missing token for every
+        // session the batch touches, before any mutation applies. The lease
+        // read sits under this `inner` WRITE lock; no path takes `leases` then
+        // `inner` (acquire/release only touch `leases`, seed/load only touch
+        // `inner`), so there is no lock-order cycle and the check is atomic
+        // with the applying write.
+        {
+            let leases = self.leases.read();
+            for sid in &affected {
+                if let Some(row) = leases.get(&sid.0) {
+                    if !lease_permits_write(row.current_token, token) {
+                        return Err(StoreError::StaleWrite(format!(
+                            "session {sid}: presented token {token:?} is stale (lease token {}) — \
+                             single-writer fence (GitHub issue #1)",
+                            row.current_token,
+                        )));
+                    }
+                }
             }
         }
 
@@ -682,8 +722,28 @@ impl GraphStore for MemoryStore {
         Ok(InteractionSpan { distinct, coverage })
     }
 
-    async fn record_canonization(&self, event: &CanonizationEvent) -> Result<(), StoreError> {
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
         let mut map = self.inner.write();
+        // Fencing-token gate (#1): this write path HAD no lease check at all.
+        // Reject a stale/missing token under the inner write lock, atomically
+        // with the applying write (see `flush`'s gate for the lock-ordering
+        // reasoning).
+        {
+            let leases = self.leases.read();
+            if let Some(row) = leases.get(&event.session_id.0) {
+                if !lease_permits_write(row.current_token, token) {
+                    return Err(StoreError::StaleWrite(format!(
+                        "session {}: presented token {token:?} is stale (lease token {}) — \
+                         single-writer fence (GitHub issue #1)",
+                        event.session_id, row.current_token,
+                    )));
+                }
+            }
+        }
         let data = Self::ensure_session(&mut map, &event.session_id);
         Self::apply_mutation(
             data,
@@ -882,7 +942,7 @@ mod tests {
                 plant_concept(&sid, c1, i1, "user schema", ts),
             ],
         };
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let snap = store.load_session(&sid).await.unwrap();
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
@@ -902,21 +962,24 @@ mod tests {
         let (sid, i1, c1, _) = sample_session();
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: sid.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&sid, c1, i1, "user schema", ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&sid, c1, i1, "user schema", ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -936,8 +999,8 @@ mod tests {
             CanonizationStatus::Venerable,
             ts + chrono::Duration::seconds(60),
         );
-        store.record_canonization(&hop1).await.unwrap();
-        store.record_canonization(&hop2).await.unwrap();
+        store.record_canonization(&hop1, None).await.unwrap();
+        store.record_canonization(&hop2, None).await.unwrap();
         assert_eq!(
             store.load_session(&sid).await.unwrap().concepts[0].canonization_status,
             CanonizationStatus::Venerable
@@ -945,11 +1008,14 @@ mod tests {
 
         // The write-behind log now replays hop 1 — already recorded.
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::CanonizationTransition {
-                    event: hop1.clone(),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::CanonizationTransition {
+                        event: hop1.clone(),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -1009,21 +1075,24 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let plant = plant_concept(&sid, c1, i1, "user schema", ts);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: sid.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant.clone(),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant.clone(),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -1038,17 +1107,20 @@ mod tests {
             occurred_at: ts,
         };
         // The evaluator's immediate durable write.
-        store.record_canonization(&hop).await.unwrap();
+        store.record_canonization(&hop, None).await.unwrap();
 
         // The write-behind log flushes: a GC bump queued BEFORE the hop, then
         // the hop itself.
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    with_stale_canonization(plant, CanonizationStatus::None, None, None),
-                    Mutation::CanonizationTransition { event: hop },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        with_stale_canonization(plant, CanonizationStatus::None, None, None),
+                        Mutation::CanonizationTransition { event: hop },
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -1077,21 +1149,24 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let plant = plant_concept(&sid, c1, i1, "user schema", ts);
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: sid.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant.clone(),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant.clone(),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -1105,7 +1180,7 @@ mod tests {
             last_demotion_time: None,
             occurred_at: ts,
         };
-        store.record_canonization(&promote).await.unwrap();
+        store.record_canonization(&promote, None).await.unwrap();
 
         let demote_at = ts + chrono::Duration::minutes(5);
         let demote = CanonizationEvent {
@@ -1118,17 +1193,25 @@ mod tests {
             last_demotion_time: Some(demote_at),
             occurred_at: demote_at,
         };
-        store.record_canonization(&demote).await.unwrap();
+        store.record_canonization(&demote, None).await.unwrap();
 
         // A GC bump snapshotted while the node was still Canonical, flushed
         // after the demotion was recorded.
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    with_stale_canonization(plant, CanonizationStatus::Canonical, Some(8), None),
-                    Mutation::CanonizationTransition { event: demote },
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        with_stale_canonization(
+                            plant,
+                            CanonizationStatus::Canonical,
+                            Some(8),
+                            None,
+                        ),
+                        Mutation::CanonizationTransition { event: demote },
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -1167,32 +1250,35 @@ mod tests {
         let i2 = NodeId::new();
         let c2 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: s1.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&s1, c1, i1, "alpha", ts),
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i2,
-                            session_id: s2.clone(),
-                            agent_id: AgentId::from("b"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&s2, c2, i2, "beta", ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: s1.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&s1, c1, i1, "alpha", ts),
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i2,
+                                session_id: s2.clone(),
+                                agent_id: AgentId::from("b"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&s2, c2, i2, "beta", ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let h1 = store
@@ -1213,21 +1299,24 @@ mod tests {
         let (sid, i1, c1, _) = sample_session();
         let ts = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: sid.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&sid, c1, i1, "user schema", ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&sid, c1, i1, "user schema", ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let hits = store
@@ -1243,21 +1332,24 @@ mod tests {
         let (sid, i1, c1, _) = sample_session();
         let ts = Utc::now();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: sid.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&sid, c1, i1, "user schema", ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&sid, c1, i1, "user schema", ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         let hits = store
@@ -1360,7 +1452,7 @@ mod tests {
                 last_reinforced: ts,
             },
         });
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let r = store
             .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
@@ -1405,7 +1497,7 @@ mod tests {
                 last_reinforced: ts,
             },
         });
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let span = store
             .interaction_span(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
@@ -1475,7 +1567,7 @@ mod tests {
                 last_reinforced: ts,
             },
         });
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let r = store
             .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
             .await
@@ -1494,38 +1586,44 @@ mod tests {
         let i2 = NodeId::new();
         let c2 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i1,
-                            session_id: s1.clone(),
-                            agent_id: AgentId::from("a"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&s1, c1, i1, "keep-me-elsewhere-name", ts),
-                    Mutation::UpsertNode {
-                        node: Node::Interaction(Interaction {
-                            id: i2,
-                            session_id: s2.clone(),
-                            agent_id: AgentId::from("b"),
-                            prompt_text: None,
-                            previous_id: None,
-                            created_at: ts,
-                        }),
-                    },
-                    plant_concept(&s2, c2, i2, "victim", ts),
-                ],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i1,
+                                session_id: s1.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&s1, c1, i1, "keep-me-elsewhere-name", ts),
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                id: i2,
+                                session_id: s2.clone(),
+                                agent_id: AgentId::from("b"),
+                                prompt_text: None,
+                                previous_id: None,
+                                created_at: ts,
+                            }),
+                        },
+                        plant_concept(&s2, c2, i2, "victim", ts),
+                    ],
+                },
+                None,
+            )
             .await
             .unwrap();
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::DeleteNode { id: c2 }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::DeleteNode { id: c2 }],
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(store.load_session(&s1).await.unwrap().concepts.len(), 1);
@@ -1543,21 +1641,24 @@ mod tests {
                 let i1 = NodeId::new();
                 let c1 = NodeId::new();
                 let ts = Utc::now();
-                s.flush(&MutationBatch {
-                    mutations: vec![
-                        Mutation::UpsertNode {
-                            node: Node::Interaction(Interaction {
-                                id: i1,
-                                session_id: sid.clone(),
-                                agent_id: AgentId::from("a"),
-                                prompt_text: None,
-                                previous_id: None,
-                                created_at: ts,
-                            }),
-                        },
-                        plant_concept(&sid, c1, i1, &format!("n{n}"), ts),
-                    ],
-                })
+                s.flush(
+                    &MutationBatch {
+                        mutations: vec![
+                            Mutation::UpsertNode {
+                                node: Node::Interaction(Interaction {
+                                    id: i1,
+                                    session_id: sid.clone(),
+                                    agent_id: AgentId::from("a"),
+                                    prompt_text: None,
+                                    previous_id: None,
+                                    created_at: ts,
+                                }),
+                            },
+                            plant_concept(&sid, c1, i1, &format!("n{n}"), ts),
+                        ],
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
             }));
@@ -1582,26 +1683,32 @@ mod tests {
         let ts = Utc::now();
         let i1 = NodeId::new();
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::UpsertNode {
-                    node: Node::Interaction(Interaction {
-                        id: i1,
-                        session_id: s1.clone(),
-                        agent_id: AgentId::from("a"),
-                        prompt_text: None,
-                        previous_id: None,
-                        created_at: ts,
-                    }),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: s1.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
         // Manually violate: edge for session s1 is fine. Use record path — N/A.
         // Idempotent delete of unknown id is ok:
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(store.load_session(&s1).await.unwrap().interactions.len(), 1);
@@ -1619,18 +1726,21 @@ mod tests {
 
         // Seed a session with one interaction.
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::UpsertNode {
-                    node: Node::Interaction(Interaction {
-                        id: i1,
-                        session_id: sid.clone(),
-                        agent_id: AgentId::from("a"),
-                        prompt_text: Some("hi".into()),
-                        previous_id: None,
-                        created_at: ts,
-                    }),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: Some("hi".into()),
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
         let before = store.load_session(&sid).await.unwrap();
@@ -1655,7 +1765,7 @@ mod tests {
             ],
         };
         assert!(
-            store.flush(&bad).await.is_err(),
+            store.flush(&bad, None).await.is_err(),
             "canonization of a missing concept must error"
         );
 
@@ -1676,17 +1786,148 @@ mod tests {
             dim: 1024,
         };
         store
-            .flush(&MutationBatch {
-                mutations: vec![Mutation::SetEmbedding {
-                    session_id: sid.clone(),
-                    embedding: Some(embedding.clone()),
-                }],
-            })
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(embedding.clone()),
+                    }],
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
             store.load_session(&sid).await.unwrap().embedding,
             Some(embedding)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GitHub issue #1 — fencing-token write gates (pinning). These fail if the
+    // token check in `flush`/`record_canonization` is removed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_stale_token_is_rejected_by_flush_and_record_canonization() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("fenced");
+        let a = holder("agent-a", 100);
+        let ttl = Duration::from_secs(30);
+        store.acquire_lease(&sid, &a, ttl).await.unwrap();
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let ts = Utc::now();
+
+        let batch = MutationBatch {
+            mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
+        };
+        let err = store.flush(&batch, Some(0)).await.unwrap_err();
+        assert!(
+            matches!(err, StoreError::StaleWrite(_)),
+            "flush with a stale token must be rejected, got {err:?}"
+        );
+
+        let ev = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: sid.clone(),
+            node_id: c1,
+            from_status: CanonizationStatus::None,
+            to_status: CanonizationStatus::Candidate,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts,
+        };
+        let err = store.record_canonization(&ev, Some(0)).await.unwrap_err();
+        assert!(
+            matches!(err, StoreError::StaleWrite(_)),
+            "record_canonization with a stale token must be rejected, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_takeover_bumps_the_token_and_the_new_holder_writes() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("fenced");
+        let a = holder("agent-a", 100);
+        let b = holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let ts = Utc::now();
+
+        let LeaseOutcome::Acquired(ra) = store.acquire_lease(&sid, &a, ttl).await.unwrap() else {
+            panic!("holder a must acquire the lease");
+        };
+        assert_eq!(ra.token, 1);
+
+        // The holder writes with its own token.
+        let batch = MutationBatch {
+            mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
+        };
+        store.flush(&batch, Some(ra.token)).await.unwrap();
+
+        // A's lease lapses; b takes it over and mints a strictly-higher token.
+        store.force_expire_lease(&sid);
+        let LeaseOutcome::Acquired(rb) = store.acquire_lease(&sid, &b, ttl).await.unwrap() else {
+            panic!("holder b must take the lease over");
+        };
+        assert_eq!(
+            rb.token,
+            ra.token + 1,
+            "takeover must bump the fencing token"
+        );
+
+        // a's old token is now stale and rejected…
+        assert!(
+            matches!(
+                store.flush(&batch, Some(ra.token)).await,
+                Err(StoreError::StaleWrite(_))
+            ),
+            "the displaced holder's token must be rejected after a takeover"
+        );
+        // …while the new holder writes fine with the bumped token.
+        store.flush(&batch, Some(rb.token)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refresh_preserves_the_token_and_the_holder_still_writes() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("fenced");
+        let a = holder("agent-a", 100);
+        let ttl = Duration::from_secs(30);
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let ts = Utc::now();
+
+        let LeaseOutcome::Acquired(r1) = store.acquire_lease(&sid, &a, ttl).await.unwrap() else {
+            panic!("holder must acquire the lease");
+        };
+        let LeaseOutcome::Acquired(r2) = store.refresh_lease(&sid, &a, ttl).await.unwrap() else {
+            panic!("holder must refresh its own lease");
+        };
+        assert_eq!(
+            r2.token, r1.token,
+            "a same-holder refresh must preserve, not bump, the fencing token"
+        );
+        let batch = MutationBatch {
+            mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
+        };
+        store.flush(&batch, Some(r2.token)).await.unwrap();
+    }
+
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn seed_still_works_without_a_token() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("seeded");
+        store
+            .seed(GraphSnapshot {
+                session_id: sid.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().session_id,
+            sid,
+            "seed() must write the snapshot even with no lease / token (fixture parity)"
         );
     }
 }

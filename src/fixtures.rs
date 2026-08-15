@@ -297,7 +297,7 @@ mod tests {
     async fn mutations_batch_apply_semantics() {
         let store = MemoryStore::new();
         let batch = load_mutation_batch("mutations-batch").unwrap();
-        store.flush(&batch).await.unwrap();
+        store.flush(&batch, None).await.unwrap();
         let sid = SessionId::from("session-mutations");
         let snap = store.load_session(&sid).await.unwrap();
         // kept concept survives; deleted concept gone; transition applied.

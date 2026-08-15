@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS session_leases (
     session_id  STRING PRIMARY KEY,
     holder      STRING NOT NULL,
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at  TIMESTAMPTZ NOT NULL
+    expires_at  TIMESTAMPTZ NOT NULL,
+    current_token INT NOT NULL DEFAULT 0
 );
 
 -- Flush stats published by the writer's FlushTask (T85-3): one row per
