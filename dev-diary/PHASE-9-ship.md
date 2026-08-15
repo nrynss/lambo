@@ -252,6 +252,34 @@ directly.
 invocation, it needs `sqlite` or `cockroach`. `memory` is only correct inside a single
 process, which means one `serve` with agents attached to it, or `lambo demo`.
 
+#### NEXT ACTION — capture the managed-MCP evidence (session restarted 2026-08-15)
+
+`cockroachdb-cloud` is now **authorized** in `~/.claude.json` (`https://cockroachlabs.cloud/mcp`,
+http transport, `mcp-cluster-id` header). A Claude Code session started after that
+authorization gets the tools directly. Run the query through **those MCP tools, not psql** —
+the point of the evidence is that the managed MCP server answered.
+
+Query one of the three complete demo sessions (5 events each, `user schema` walking
+Candidate to Venerable to Canonical):
+
+```sql
+SELECT node_id, from_status, to_status, blast_radius, occurred_at
+FROM canonization_events
+WHERE session_id = 'demo-rest-api-bdd69691-ea92-41b7-ad3a-7506332071dc'
+ORDER BY occurred_at;
+```
+
+Scope by `session_id` always — the cluster also holds ~2833 seeded concepts and 240 events
+across many sessions. Save the transcript to `dev-diary/evidence/` naming the MCP tool that
+answered, which closes the one UNEVIDENCED row in the claim audit below and gives T9.3 its
+split-screen beat.
+
+**OMP is not a viable driver right now.** It crashes at startup: `Provider inferx: "apiKey"
+or "oauth" is required when defining models`. OMP validates every registered provider before
+booting, so setting the model role to deepseek does not help. Clear the custom `inferx`
+provider or add it to `disabledProviders` first. A local `.mcp.json` for OMP is already
+written and gitignored.
+
 #### BLOCKER — the documented install path does not exist yet
 
 `gh release list` is **empty** and `git tag -l` is **empty**. No release, no tag. So today:
