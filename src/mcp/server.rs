@@ -970,6 +970,18 @@ impl LamboServer {
                 }
                 return CallToolResult::error(vec![ContentBlock::text(msg)]);
             }
+            Err(Focus::Oversized { cap }) => {
+                // T8.7 residual #3 graph-size guard: the session's graph is too
+                // large to pay the fuzzy leg's O(total-content) lowercase pass,
+                // so refuse rather than let an unattended graph amplify one call
+                // into unbounded per-request work. Exact / node-id focus still
+                // works.
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "lambo_inspect: this session's graph has more than {cap} concepts, so the \
+                     substring (fuzzy) focus is disabled; pass a node_id or an exact concept \
+                     instead"
+                ))]);
+            }
             Err(_) => {
                 return CallToolResult::error(vec![ContentBlock::text(format!(
                     "lambo_inspect: no concept matching '{}' in session '{}'",

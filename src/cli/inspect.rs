@@ -17,6 +17,20 @@ use crate::recall::format;
 use crate::store::GraphStore;
 use crate::types::{CanonizationStatus, EdgeType, Node, NodeId};
 
+/// Upper bound on the number of concepts `inspect`'s fuzzy (substring) leg
+/// will scan (T8.7 residual #3 graph-size guard).
+///
+/// [`resolve_focus`]'s substring pass lowercases **every** concept's content —
+/// O(total-content) allocation per call. The HTTP rate limit bounds the call
+/// *rate*; this constant bounds the *per-call* concept set, so the combined
+/// per-second work is `rate_limit×MAX_INSPECT_SCAN_CONCEPTS` no matter how large
+/// the session graph grows. A graph past the cap **refuses** the fuzzy focus
+/// (the exact and node-id legs still resolve) rather than paying the unbounded
+/// pass — refusing, not trimming, so the search never silently misses a match
+/// it did not look at. It lives here, not in `caps`, because it guards this
+/// function's own iteration and the task that added it touches this file.
+pub(crate) const MAX_INSPECT_SCAN_CONCEPTS: usize = 2_000;
+
 /// A concept `inspect` could have meant.
 #[derive(Clone, Debug)]
 pub(crate) struct FocusCandidate {
@@ -35,6 +49,9 @@ pub(crate) enum Focus {
     Ambiguous(Vec<FocusCandidate>),
     /// Nothing matched.
     Missing,
+    /// The graph exceeded [`MAX_INSPECT_SCAN_CONCEPTS`]; the fuzzy leg refused
+    /// rather than pay its O(total-content) pass (T8.7 residual #3 guard).
+    Oversized { cap: usize },
 }
 
 /// Resolve inspect's focus **deterministically**.
@@ -65,6 +82,19 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
         // there is nothing to disambiguate — just pick one *stably*.
         exact.sort_by(|a, b| a.content.cmp(&b.content).then(a.id.0.cmp(&b.id.0)));
         return Focus::Exact(exact[0].id);
+    }
+
+    // Graph-size guard for the fuzzy leg (T8.7 residual #3). The rate limit
+    // bounds the request *rate*; this bounds the *per-call* concept set the
+    // O(total-content) lowercase pass iterates, so per-second work cannot grow
+    // with an unattended graph. Refuse (not trim) a graph past the cap — a trim
+    // would silently search a subset and could miss the real match. The count
+    // itself is an allocation-free linear scan; the bounded cost is the
+    // lowercase+alloc pass below, which never runs on an oversized graph.
+    if g.concepts().count() > MAX_INSPECT_SCAN_CONCEPTS {
+        return Focus::Oversized {
+            cap: MAX_INSPECT_SCAN_CONCEPTS,
+        };
     }
 
     let needle = focus.to_lowercase();
@@ -266,9 +296,112 @@ pub async fn run(
             }
             Err(CliError::Usage(msg))
         }
+        Focus::Oversized { cap } => Err(CliError::Runtime(format!(
+            "inspect: this session's graph has more than {cap} concepts, so the substring \
+             (fuzzy) focus is disabled; pass a node_id or an exact concept instead"
+        ))),
         Focus::Missing => Err(CliError::Runtime(format!(
             "inspect: no concept matching '{}' in session '{}'",
             focus, session
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::graph::Graph;
+    use crate::types::{AgentId, CanonizationStatus, Concept, ConceptType, Interaction, SessionId};
+
+    fn sid() -> SessionId {
+        SessionId::from("test-session")
+    }
+
+    fn ts() -> chrono::DateTime<Utc> {
+        Utc.timestamp_opt(1_752_000_000, 0).unwrap()
+    }
+
+    fn interaction(id: u64) -> Interaction {
+        Interaction {
+            id: NodeId(Uuid::from_u64_pair(1, id)),
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some(format!("prompt {id}")),
+            previous_id: None,
+            created_at: ts(),
+        }
+    }
+
+    fn concept(id: u64, origin: NodeId, content: &str) -> Concept {
+        Concept {
+            id: NodeId(Uuid::from_u64_pair(2, id)),
+            session_id: sid(),
+            content: content.to_string(),
+            canonical_key: content.to_string(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::from("agent-a"),
+            created_at: ts(),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            chunk_group_id: None,
+        }
+    }
+
+    fn graph_with_concepts(n: usize) -> (Graph, NodeId, NodeId) {
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        let mut last = iid;
+        for k in 1..=n {
+            let c = concept(k as u64, iid, &format!("concept-{k}"));
+            last = c.id;
+            g.insert_concept(c, iid).unwrap();
+        }
+        (g, iid, last)
+    }
+
+    /// The fuzzy leg must refuse a graph past [`MAX_INSPECT_SCAN_CONCEPTS`]
+    /// instead of running its O(total-content) lowercase pass (T8.7 #3 guard),
+    /// while the exact and node-id legs still resolve.
+    #[test]
+    fn a_graph_past_the_scan_cap_refuses_only_the_fuzzy_leg() {
+        let (g, _iid, cid) = graph_with_concepts(MAX_INSPECT_SCAN_CONCEPTS + 1);
+
+        // Exact content match still resolves — the guard only gates the
+        // substring leg's lowercase pass.
+        assert!(matches!(resolve_focus(&g, "concept-7"), Focus::Exact(_)));
+        // Node-id focus still resolves.
+        assert!(matches!(
+            resolve_focus(&g, &cid.0.to_string()),
+            Focus::Exact(_)
+        ));
+        // A non-matching substring focus is refused before the O(total-content)
+        // pass, not silently scanned.
+        match resolve_focus(&g, "no-such-substring") {
+            Focus::Oversized { cap } => assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS),
+            other => panic!("a graph past the cap must refuse the fuzzy leg, got {other:?}"),
+        }
+    }
+
+    /// A graph within the cap still resolves the fuzzy leg normally (so the
+    /// guard does not fire spuriously).
+    #[test]
+    fn a_graph_within_the_scan_cap_still_resolves_the_fuzzy_leg() {
+        let (g, _iid, _cid) = graph_with_concepts(3);
+        match resolve_focus(&g, "concept-2") {
+            Focus::Fuzzy { .. } | Focus::Exact(_) => {}
+            other => panic!("a small graph must resolve a substring focus, got {other:?}"),
+        }
     }
 }

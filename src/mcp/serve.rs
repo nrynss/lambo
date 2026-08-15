@@ -436,6 +436,17 @@ pub(crate) struct HttpGuard {
     rate: Option<Arc<RateLimiter>>,
 }
 
+/// Ceiling on the size of a single HTTP request body (T82-16 remainder).
+///
+/// The tool layer already bounds every client string (16 KiB) and the per-call
+/// concept count (64 ≈ ~1 MiB of content), and the rate limit bounds request
+/// *count* — but the transport itself imposed no ceiling, so a body padded with
+/// rejected or oversized fields still incurred parse + validation cost before
+/// the tool layer refused it. This caps the *declared* body of a request before
+/// any of it is parsed. A body that arrives without `Content-Length` (chunked)
+/// keeps the tool-layer caps + the rate limit as its bound.
+const MAX_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+
 /// Is this the request that would mint a **new** MCP session?
 ///
 /// Streamable HTTP assigns the session id in the `initialize` response, so the
@@ -516,6 +527,26 @@ async fn guard_request(
                 ),
             )
                 .into_response();
+        }
+    }
+
+    // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
+    // A declared body over the cap is refused up front: parse and validation
+    // never see it, so amplification through an oversized body is bounded.
+    if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH) {
+        if let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
+            if len > MAX_HTTP_BODY_BYTES {
+                tracing::warn!(
+                    len,
+                    max = MAX_HTTP_BODY_BYTES,
+                    "mcp http: refusing an oversized request body"
+                );
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
+                )
+                    .into_response();
+            }
         }
     }
 
@@ -1669,6 +1700,39 @@ mod tests {
         // And the token is never echoed back to the caller.
         let (_, body) = request(addr, &post(None, None)).await;
         assert!(!body.contains("s3cret"), "the 401 leaked the token: {body}");
+    }
+
+    /// **T82-16 request-size limit.** An oversized declared body is refused
+    /// up front with 413 and never reaches the MCP service; a normal-size body
+    /// still gets through.
+    #[tokio::test]
+    async fn an_oversized_request_body_is_refused_before_the_service() {
+        let (addr, reached) = spawn_guarded(guard_with(Some("s3cret"), 32, 0, 0)).await;
+
+        let mut h = String::from("POST /mcp HTTP/1.1\r\nHost: localhost\r\n");
+        h.push_str(&format!("Content-Length: {}\r\n", MAX_HTTP_BODY_BYTES + 1));
+        h.push_str("Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n");
+        let (status, body) = request(addr, &h).await;
+        assert_eq!(
+            status, 413,
+            "an oversized declared body must be refused with 413: {body}"
+        );
+        assert!(
+            body.to_lowercase().contains("too large"),
+            "the refusal should name the reason: {body}"
+        );
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an oversized body must never reach the MCP service"
+        );
+
+        // A body within the cap is still served.
+        let (status, _) = request(addr, &post(Some("Bearer s3cret"), None)).await;
+        assert_eq!(
+            status, 200,
+            "a normal-size body must still be served: {status}"
+        );
     }
 
     /// The accepted path: the right token gets through to the service.

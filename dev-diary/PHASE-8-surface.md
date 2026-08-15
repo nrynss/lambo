@@ -570,10 +570,13 @@ appends-to: src/main.rs (serve flags for auth/rate-limit config, if any)
 status:     minimal-hardening cut done — 2026-08-15 (branch task/t8.7-hardening).
             Bearer auth (fail-closed off-loopback), concurrent-session cap, global
             rate limit, and the T88-H1 wire-hygiene fix are IN with tests; full
-            binding gate block green, 703 lib (baseline 685). NOT done: the three
-            R5-verify residuals (#1 byte-echo, #2 redact_urls host:port, #3
-            resolve_focus to_lowercase) and the request-size limit — see the
-            Handoff Log entry for what each still needs.
+            binding gate block green, 703 lib (baseline 685). R1 remediation
+            (2026-08-15) closed the T8.7 review findings: residual #3 fixed via a
+            graph-size guard on the `resolve_focus` fuzzy leg; residuals #1/#2
+            closed with dated accepted-rationales in the review file; and an HTTP
+            request-body size limit added (413 past 4 MiB). Gate block re-run green.
+            See dev-diary/adversarial-review/adve-review-t8.7-hardening.md + the
+            Handoff Log entry below.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14: collects everything the T8.2 review deferred that is **not** demo-app
@@ -1806,3 +1809,41 @@ well-formed but the server will not start (bind-policy refusal, unprovisioned st
 hygiene test), `src/main.rs` (three `serve` flags + token resolution — flags only, per the
 shared-file rule), `src/mcp/mod.rs` (re-exports for the new public items; additive).
 `Cargo.toml` **not touched** — no new dependency was needed for any of it.
+
+#### R1 remediation (2026-08-15) — closed the T8.7 review findings
+
+Follow-up to the review `dev-diary/adversarial-review/adve-review-t8.7-hardening.md`. The
+findings are closed here and marked in that file. No new tools, no config knobs, no
+dependencies, no `Cargo.toml` change.
+
+- **T87-1 (P1) residual #3 — FIXED via graph-size guard.** `resolve_focus`
+  (`src/cli/inspect.rs`) now counts the session's concepts before its O(total-content)
+  lowercase pass and refuses (`Focus::Oversized { cap }`) a graph over
+  `MAX_INSPECT_SCAN_CONCEPTS` (2_000) instead of paying the pass — the graph-size guard the
+  rate limit was missing. The exact and node-id legs are unaffected. The refusal is surfaced
+  in MCP `lambo_inspect` (`src/mcp/server.rs`) and CLI `inspect::run`. Tests in
+  `src/cli/inspect.rs` pin both the firing (cap+1 graph) and the non-firing (small graph)
+  cases.
+- **T87-2 (P2) residuals #1/#2 — CLOSED-ACCEPTED (2026-08-15).** Dated accepted-rationales
+  recorded in the review file: #1 (concept_type `-32602`) is built inside rmcp's
+  `Parameters<T>` before any `LamboServer` code runs — not interceptable, and replacing
+  `Parameters<T>` in all seven tools is not worth it; #2 (`redact_urls` bare `host:port`) is
+  latent with no emitter, and widening the matcher risks over-redacting readable warnings.
+- **T87-3 (P2) HTTP body limit — FIXED.** `guard_request` (`src/mcp/serve.rs`) returns 413 for
+  any declared body over `MAX_HTTP_BODY_BYTES` (4 MiB) before streaming to rmcp. Test
+  `an_oversized_request_body_is_refused_before_the_service` asserts the 413 and that the inner
+  service is never reached.
+
+```text
+cargo fmt --all -- --check                                    CLEAN
+cargo clippy --all-targets -- -D warnings                    CLEAN
+cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings  CLEAN
+cargo clippy --all-targets --features store-sqlite -- -D warnings                          CLEAN
+cargo test                                                  706 lib + 5 bin + 5 int + 1 doc, 0 failed, 1 ignored
+cargo test --features store-sqlite                          753 lib + 5 bin + 11 int + 1 doc, 0 failed, 1 ignored
+cargo test --no-default-features --features store-sqlite --no-run    BUILDS
+cargo test --no-default-features --features store-cockroach --no-run BUILDS
+cargo check --no-default-features                             CLEAN
+```
+
+The remediation agent's gate-run output (exact counts) is in its result for this task.
