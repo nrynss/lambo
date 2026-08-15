@@ -18,11 +18,13 @@ Nothing here is optional except where marked; the checklist *is* the phase.
 requires:   T8.1; soft T8.8   # links into the reference docs T8.8 produces
 fixture-ok: n/a
 owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
-status:     drafted 2026-08-15 on branch task/t9.1-docs (6194b55, worktrees/t9.1-docs),
-            UNMERGED. README + site rewritten binary-first; `lambo demo` promoted to a
-            documented front door. Two "Done when" checks still outstanding: the
-            clean-machine/container repro and the GitHub About license confirmation
-            (Apache-2.0, NOT MIT — the spec and this doc were stale; see Handoff Log).
+status:     MERGED to main 2026-08-15 as 7b0a9f8 (branch task/t9.1-docs, 5 commits).
+            README + site rewritten binary-first; `lambo demo` promoted to a documented
+            front door; license corrected to Apache-2.0; the false AWS/Bedrock claim
+            removed. NOT PUSHED — see the release blocker in the Handoff Log before
+            pushing, because the docs deploy fires on push to main.
+            Outstanding "Done when": clean-machine/container repro, and the GitHub About
+            license confirmation (Apache-2.0, NOT MIT — spec and this doc were stale).
             Crossed into T8.8's docs/reference/ and into site/ — see Handoff Log.
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
@@ -218,6 +220,23 @@ Consequences the next agent must respect:
   (`demo.rs:1219/1091/1039`) into `src/test_util.rs`. T9.6's swarm benchmark will want that
   fixed-point protocol. No user-visible effect, so it can wait.
 
+#### BLOCKER — the documented install path does not exist yet
+
+`gh release list` is **empty** and `git tag -l` is **empty**. No release, no tag. So today:
+
+- `curl .../releases/latest/download/install.sh | sh` (README headline, quickstart step 1,
+  installation step 1) resolves to a **404**.
+- `lambo demo`, now the README's see-it-work step, presupposes that install.
+- Every prebuilt-binary claim on the site is written against artifacts nobody has published.
+
+T8.9 built the machinery and it is CLEAN, but nothing has triggered it. The workflow fires
+on a version tag and asserts `tag == v$VERSION`, and `Cargo.toml` is at `0.1.0`, so the
+trigger is `git tag v0.1.0 && git push origin v0.1.0`.
+
+**This is why the T9.1 merge (7b0a9f8) was left unpushed.** `docs.yml` deploys the site on
+push to `main`, so pushing publishes install instructions that fail until the tag lands.
+**Push the tag first, or push both together.** Owner decision either way.
+
 #### Two places the spec is now wrong about this repo — READ BEFORE FILING T9.5
 
 Both were caught by the owner on review of the T9.1 draft, after the draft had asserted the
@@ -258,3 +277,15 @@ ccloud, so the ccloud row credits cluster creation and DSN capture per
 `notes/spike-runbook.md` and names provision.sh separately. Do not re-conflate them.
 
 The AWS half of that same deliverable is written but currently reads "none", per above.
+
+**Claims audited at merge time**, after two spec-sourced errors got through the first draft:
+
+| Claim | Verdict |
+|---|---|
+| Seven MCP tools | TRUE — `lambo_{derive,recall,record_action,reserve,inspect,stats,saints}` |
+| Distributed vector indexing | TRUE — `CREATE VECTOR INDEX` in `migrations/cockroach/001_init.sql`, camera-proof PASSING in evidence |
+| Single-writer lease | TRUE — `serve_single_writer_lease` + `cli_write_lease` green |
+| Apache-2.0 license | TRUE — corrected this round |
+| Bedrock adapter | **FALSE, removed** — no implementation exists |
+| Prebuilt binaries | **NOT YET TRUE** — no release published, see blocker above |
+| Managed MCP server | **UNEVIDENCED** — console-side setup recorded DONE 2026-08-13, but the split-screen `canonization_events` query was never rehearsed and no screenshot reached `dev-diary/evidence/`. It is one of the **two required** §12.1 tools, so the README asserts it while nothing in the repo backs it. Either capture the evidence during the T9.3 recording or soften the claim. |
