@@ -1847,3 +1847,51 @@ cargo check --no-default-features                             CLEAN
 ```
 
 The remediation agent's gate-run output (exact counts) is in its result for this task.
+
+### T8.2 / T8.3 — re-verification at HEAD post-hardening (2026-08-15)
+
+Because the T8.7 hardening, the L82 remediation, and the `596f40f` P3-remediation merge all
+reached into `src/mcp/**` and `src/cli/**`, T8.2 and T8.3 were re-run through the full
+adversarial review→remediation→reverify loop at current HEAD after those merged. Both came
+back **CLEAN**, reverified in this session:
+
+- **T8.2 (MCP server)** — re-verified CLEAN at HEAD `596f40f` (report
+  `adve-review-t8.2-mcp-r2.md`). Seven tools intact; T88-H1 off the wire; F18 refuses client
+  `created_at` via `deny_unknown_fields`; single-writer/lease intact; the HTTP auth/session-
+  cap/rate-limit/413 layers do not regress any tool contract. Zero P1/P2.
+- **T8.3 (CLI)** — main review CLEAN (report `adve-review-t8.3-cli-r2.md`) with 3 pre-existing
+  P3s (T88-H6/H7/H10). Because phase 8 is being driven to full correctness, those cheap P3s
+  were remediated through the agent loop (R2/R3 reverify, both CLEAN):
+  - **T88-H7** — doubled `inspect: inspect:` prefix stripped in `src/cli/inspect.rs` (the
+    dispatcher already supplies `lambo inspect: `); `cli.mdx` quote updated to match.
+  - **T88-H6** — lease-conflict message in `src/memory.rs` dropped the `Spec §2.2` citation and
+    the raw `DELETE FROM session_leases` takeover SQL; still names holder+age and fails closed,
+    now points at `docs/reference/cli.mdx`. The pinned behavior test was updated to the new
+    message contract (memory suite 70 passed). `cli.mdx` quote matched byte-for-byte.
+  - **T88-H10** — `release` not-found now explains (CLI-side wrap in `src/cli/reserve.rs`) that
+    a CLI reservation is RAM-local to the reserving process.
+  This P3 work crosses T8.1 paths (`src/memory.rs`) — authorized and recorded here.
+
+### Cockroach/SQLite minimal-row CI fix (2026-08-15)
+
+CI surfaced an unused-import failure under `-D warnings` on the bare minimal rows
+(`--no-default-features --features store-cockroach` and `store-sqlite`): `seed_concept_rows` /
+`seed_edge_rows` at `src/store/cockroach.rs:107-110` and `src/store/sqlite.rs:152-155` were
+imported unconditionally but their only user is the `#[cfg(feature = "fixtures")]` `seed`
+method, so with `fixtures` off they compiled unused. Introduced by the L82 bulk-seed refactor
+(commit `635b272e`) which did not gate the two imports; the `fixtures` gate on `seed` predates
+it (`0e76a9f9`). **Not a coverage hole** — the conformance tests were already `/ignore`d behind
+`fixtures` + a live DSN, and the `seed_*` helpers remain unit-tested in `batch.rs` under every
+row. Root-caused by a scout, remediated and reverified by agents.
+
+Fix: split the fixtures-exclusive helpers out of the unconditional `use super::batch::{…}` into
+a dedicated `#[cfg(feature = "fixtures")] use super::batch::{seed_concept_rows, seed_edge_rows};`
+in BOTH adapters. No `#[allow]`. Proven: `RUSTFLAGS="-D warnings" cargo check
+--no-default-features --features store-cockroach --tests` and `... store-sqlite --tests` both
+exit 0 (were 101); `cargo check --features store-cockroach,store-memory,fixtures` still exit 0.
+
+**Gate-block gap this exposed:** the phase gate block's two `--no-run` minimal rows do not pass
+`-D warnings`, so this landed as a warning locally and only CI (which runs
+`RUSTFLAGS=-D warnings`) caught it. Recommend adding `-D warnings` to those two rows (or a
+`-D warnings` check of the minimal rows) so feature-mismatch dead imports fail locally, not in
+CI.

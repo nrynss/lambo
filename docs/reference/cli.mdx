@@ -138,7 +138,7 @@ If the focus matches more than one concept, Lambo refuses rather than guessing, 
 
 ```bash
 $ lambo inspect --session demo --focus "a"
-lambo inspect: inspect: 'a' matches 5 concepts — name one exactly, or pass its node_id:
+lambo inspect: 'a' matches 5 concepts — name one exactly, or pass its node_id:
   user schema [c8599134-59a1-4b17-9b9e-8bd76ac38394]
   auth middleware [73406631-042f-4a83-8cf7-64bbf3405c70]
 ```
@@ -166,7 +166,7 @@ Write commands acquire the session's writer lease. If a `lambo serve` process al
 
 ```bash
 $ lambo derive --session demo --agent agent-b --content "a contended write" --kind entity
-lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago and is still refreshing it. Spec §2.2 is one writer per session; refusing to open a second. If that holder is wedged, an operator can force a takeover: DELETE FROM session_leases WHERE session_id = '<session>';
+lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago and is still refreshing it. Refusing to open a second writer. If that holder is wedged, an operator can force a takeover (see the single-writer lease note in docs/reference/cli.mdx)
 $ echo $?
 1
 ```

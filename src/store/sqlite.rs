@@ -150,9 +150,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::batch::{
-    plan_flush, seed_concept_rows, seed_edge_rows, BulkLimits, ConceptRow, FlushStep,
-    CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+    plan_flush, BulkLimits, ConceptRow, FlushStep, CONCEPT_COLUMNS, EDGE_COLUMNS,
+    INTERACTION_COLUMNS,
 };
+#[cfg(feature = "fixtures")]
+use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};

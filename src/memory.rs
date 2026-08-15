@@ -555,15 +555,14 @@ impl MemoryBuilder {
         {
             LeaseOutcome::Acquired(_) => {}
             LeaseOutcome::Held { current, age } => {
-                // Fail closed, naming the current holder and its age (spec §2.2).
+                // Fail closed, naming the current holder and its age.
                 return Err(LamboError::Conflict(format!(
                     "session {session} is already held by another writer ({}) — it acquired the \
-                     single-writer lease {}s ago and is still refreshing it. Spec §2.2 is one \
-                     writer per session; refusing to open a second. If that holder is wedged, an \
-                     operator can force a takeover: {}",
+                     single-writer lease {}s ago and is still refreshing it. Refusing to open a \
+                     second writer. If that holder is wedged, an operator can force a takeover \
+                     (see the single-writer lease note in docs/reference/cli.mdx)",
                     current.holder,
                     age.as_secs(),
-                    crate::store::lease::OPERATOR_OVERRIDE,
                 )));
             }
         }
@@ -3346,12 +3345,24 @@ mod tests {
             .build()
             .await
             .expect_err("a second writer on a shared store must be refused by the lease");
-        let msg = err.to_string();
-        assert!(msg.contains("single-writer"), "{msg}");
+        // Fail closed: refused, and it stays a LamboError::Conflict.
+        let LamboError::Conflict(msg) = err else {
+            panic!("a shared-store second writer must fail closed as a Conflict, got: {err:?}");
+        };
+        assert!(msg.contains("single-writer"), "lease still enforced: {msg}");
+        // Names the current holder and its age, so an operator can tell who to evict.
         assert!(msg.contains("agent-a"), "names the current holder: {msg}");
+        assert!(msg.contains("s ago"), "names the holder's age: {msg}");
+        // Surfaces the operator-takeover pointer — deliberately NOT the raw
+        // `session_leases` SQL constant, which is no longer part of the
+        // user-facing message (that string is intentionally not emitted).
         assert!(
-            msg.contains("session_leases"),
-            "points at the operator override: {msg}"
+            msg.contains("operator can force a takeover"),
+            "surfaces the operator-takeover path: {msg}"
+        );
+        assert!(
+            msg.contains("docs/reference/cli.mdx"),
+            "points at the single-writer lease note: {msg}"
         );
 
         // After a clean close the lease is released, so a new writer attaches.

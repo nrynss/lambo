@@ -83,6 +83,15 @@ pub async fn release(backends: ResolvedBackends, args: ReleaseArgs) -> Result<St
     let mem = open_writer(backends, &args.session, &args.agent).await?;
     let out = match mem.release(node_id) {
         Ok(()) => Ok(format!("released {}", node_id.0)),
+        Err(crate::types::LamboError::Store(crate::types::StoreError::NotFound(_))) => {
+            Err(CliError::Runtime(format!(
+                "no reservation on node {} — a CLI reservation is RAM-local to the process \
+             that made it and ends when that process exits, so release must run in the \
+             same process that reserved; either re-reserve here first or pass a node_id \
+             this session actually holds",
+                node_id.0
+            )))
+        }
         Err(e) => Err(CliError::from(e)),
     };
     close_writer(mem, out).await

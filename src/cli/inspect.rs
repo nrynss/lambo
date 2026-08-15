@@ -281,7 +281,7 @@ pub async fn run(
         }
         Focus::Ambiguous(candidates) => {
             let mut msg = format!(
-                "inspect: '{}' matches {} concepts — name one exactly, or pass its node_id:",
+                "'{}' matches {} concepts — name one exactly, or pass its node_id:",
                 focus.trim(),
                 candidates.len()
             );
@@ -297,11 +297,11 @@ pub async fn run(
             Err(CliError::Usage(msg))
         }
         Focus::Oversized { cap } => Err(CliError::Runtime(format!(
-            "inspect: this session's graph has more than {cap} concepts, so the substring \
+            "this session's graph has more than {cap} concepts, so the substring \
              (fuzzy) focus is disabled; pass a node_id or an exact concept instead"
         ))),
         Focus::Missing => Err(CliError::Runtime(format!(
-            "inspect: no concept matching '{}' in session '{}'",
+            "no concept matching '{}' in session '{}'",
             focus, session
         ))),
     }

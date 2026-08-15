@@ -105,9 +105,11 @@ use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
 use super::batch::{
-    batch_session_ids, plan_flush, seed_concept_rows, seed_edge_rows, BulkLimits, ConceptRow,
-    FlushStep, CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+    batch_session_ids, plan_flush, BulkLimits, ConceptRow, FlushStep, CONCEPT_COLUMNS,
+    EDGE_COLUMNS, INTERACTION_COLUMNS,
 };
+#[cfg(feature = "fixtures")]
+use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
