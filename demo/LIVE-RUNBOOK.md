@@ -160,11 +160,12 @@ the `capabilities` line, the timings and the two masked values differ:
   interactions        12
   concepts            27
   edges               93
-  canonization_events 4
+  canonization_events 5
     add oauth_id to user schema: None -> Candidate
     user schema: None -> Candidate
     user schema: Candidate -> Venerable
     user schema: Venerable -> Canonical  (blast radius 9)
+    wire login endpoint: None -> Candidate
   canonical           1
     user schema  blast_radius=9
   statuses

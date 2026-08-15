@@ -333,6 +333,7 @@ pub const ACT_I: &[Step] = &[
             ("email column", ConceptType::Entity),
             ("password hash column", ConceptType::Constraint),
             ("user id column", ConceptType::Logic),
+            ("users table migration", ConceptType::Resource),
         ],
         parent_of: &[
             (USER_SCHEMA, "email column"),
@@ -345,7 +346,12 @@ pub const ACT_I: &[Step] = &[
         action: "write POST /users handler",
         produces: &["handlers/users.rs"],
         modifies: &[],
-        depends_on: &[USER_SCHEMA, "auth middleware"],
+        depends_on: &[
+            USER_SCHEMA,
+            "auth middleware",
+            "middleware/ratelimit.rs",
+            "repo/users.rs",
+        ],
         narration: "write POST /users handler            depends on user schema",
     },
     Step::Derive {
@@ -365,7 +371,13 @@ pub const ACT_I: &[Step] = &[
         action: "write session middleware",
         produces: &["middleware/session.rs"],
         modifies: &[],
-        depends_on: &["session store", USER_SCHEMA, "handlers/users.rs"],
+        depends_on: &[
+            "session store",
+            USER_SCHEMA,
+            "handlers/users.rs",
+            "redis backend",
+            "middleware/jwt.rs",
+        ],
         narration: "write session middleware             depends on session store, user schema",
     },
     Step::Derive {
@@ -385,7 +397,12 @@ pub const ACT_I: &[Step] = &[
         action: "add JWT verification",
         produces: &["middleware/jwt.rs"],
         modifies: &[],
-        depends_on: &["auth middleware", USER_SCHEMA, "middleware/session.rs"],
+        depends_on: &[
+            "auth middleware",
+            USER_SCHEMA,
+            "middleware/session.rs",
+            "handlers/login.rs",
+        ],
         narration: "add JWT verification                 depends on auth middleware, user schema",
     },
     Step::Action {
@@ -405,7 +422,10 @@ pub const ACT_I: &[Step] = &[
             USER_SCHEMA,
             "handlers/users.rs",
             "middleware/jwt.rs",
+            "middleware/session.rs",
             "repo/users.rs",
+            "redis backend",
+            "middleware/ratelimit.rs",
         ],
         narration: "wire login endpoint                  depends on all three pillars",
     },
@@ -419,6 +439,7 @@ pub const ACT_II: &[Step] = &[
         concepts: &[
             ("rate limiter", ConceptType::Entity),
             ("redis backend", ConceptType::Resource),
+            ("user fixtures", ConceptType::Resource),
         ],
         parent_of: &[],
         narration: "rate limiter, redis backend          (agent B's own feature)",
@@ -427,7 +448,14 @@ pub const ACT_II: &[Step] = &[
         action: "add rate limiting middleware",
         produces: &["middleware/ratelimit.rs"],
         modifies: &[],
-        depends_on: &["auth middleware", USER_SCHEMA, "handlers/login.rs"],
+        depends_on: &[
+            "auth middleware",
+            USER_SCHEMA,
+            "handlers/login.rs",
+            "middleware/session.rs",
+            "redis backend",
+            "rate limiter",
+        ],
         narration: "add rate limiting middleware         depends on auth middleware, user schema",
     },
 ];
@@ -453,6 +481,8 @@ pub const ACT_III: &[Step] = &[Step::Action {
         "repo/users.rs",
         "handlers/users.rs",
         "middleware/jwt.rs",
+        "middleware/ratelimit.rs",
+        "handlers/login.rs",
     ],
     narration: "add oauth_id to user schema          MODIFIES user schema",
 }];
@@ -732,8 +762,17 @@ pub async fn run_scenario(
 
     n.banner("CANONIZATION — the engine, not the script, promotes user schema");
     settle_gc_survived(&mem, &mut n).await?;
-    let transitions = await_progression(&mem, &mut n).await?;
+    await_progression(&mem, &mut n).await?;
     quiesce(&mem, &mut n).await?;
+
+    // Snapshot the canonization trail at the fixed point, AFTER `quiesce` has
+    // run out the remaining cycles to a stable end state. `await_progression`
+    // returns as soon as `user schema` reaches Canonical, which can be before
+    // the last non-canonical concept crosses None→Candidate during the
+    // quiesce window; taking `trail` here instead makes the OUTCOME's
+    // `canonization_events` reflect the same fixed-point event set that
+    // `quiesce` counts ("{N} events total") and the durable store holds.
+    let transitions = trail(mem.graph());
 
     let canonical: Vec<(String, u64)> = mem
         .canonical_memories()
@@ -1814,7 +1853,7 @@ mod tests {
             scenario: SCENARIO_REST_API.into(),
             interactions: EXPECT_INTERACTIONS,
             concepts: EXPECT_CONCEPTS,
-            edges: 60,
+            edges: 114,
             statuses: vec![(USER_SCHEMA.into(), "Canonical".into())],
             transitions: vec![Transition {
                 content: USER_SCHEMA.into(),
