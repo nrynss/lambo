@@ -1461,6 +1461,119 @@ mod tests {
     }
 
     #[test]
+    fn normalize_score_masks_the_number_and_keeps_the_blast_radius() {
+        let line = "user schema [Entity, canonical] (score 2.27, blast radius 9)";
+        assert_eq!(
+            normalize_score(line),
+            "user schema [Entity, canonical] (score <s>, blast radius 9)"
+        );
+        assert_eq!(
+            normalize_score("a [Resource] (score 0.13)\nb [Logic] (score 12.5)"),
+            "a [Resource] (score <s>)\nb [Logic] (score <s>)"
+        );
+        // Idempotent, and a total function on text that has no score at all.
+        let once = normalize_score(line);
+        assert_eq!(once, normalize_score(&once));
+        assert_eq!(normalize_score("no score here"), "no score here");
+    }
+
+    #[test]
+    fn normalize_node_ids_masks_uuids_and_preserves_multibyte_text() {
+        let line = format!(
+            "{EXPECT_BLAST_WARNING}\nHigh-risk modification: high-value node \
+             445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 9)"
+        );
+        let got = normalize_node_ids(&line);
+        assert!(got.contains("high-value node <node> (Canonical"), "{got}");
+        // The ⚑ line is multibyte and must survive byte-wise scanning intact.
+        assert!(got.contains(EXPECT_BLAST_WARNING), "{got}");
+        assert!(!got.contains("445370df"), "{got}");
+        assert_eq!(got, normalize_node_ids(&got));
+        // Not a UUID: too short, and a hex-looking word.
+        assert_eq!(normalize_node_ids("deadbeef-1234"), "deadbeef-1234");
+    }
+
+    #[test]
+    fn normalize_volatile_masks_all_three_and_keeps_every_spec_string() {
+        let ctx = "user schema [Entity, canonical] (score 2.27, blast radius 9)\n\
+                   ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.\n\
+                   Agent A wrote to it 11 seconds ago\n\
+                   High-risk modification: high-value node \
+                   445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 9)";
+        let got = normalize_volatile(ctx);
+        assert!(got.contains(EXPECT_CANONICAL_LABEL), "{got}");
+        assert!(got.contains(EXPECT_BLAST_WARNING), "{got}");
+        assert!(got.contains(EXPECT_CONFLICT_LINE), "{got}");
+        assert!(got.contains("blast radius 9"), "{got}");
+        assert!(got.contains("(score <s>"), "{got}");
+        assert!(got.contains("<node>"), "{got}");
+        assert_eq!(got, normalize_volatile(&got), "must be idempotent");
+    }
+
+    /// How many scripted actions name `content` — the coarse structural
+    /// signature that separates otherwise-identical siblings.
+    fn action_mentions(content: &str) -> usize {
+        ACT_I
+            .iter()
+            .chain(ACT_II)
+            .chain(ACT_III)
+            .filter(|s| match s {
+                Step::Action {
+                    produces,
+                    modifies,
+                    depends_on,
+                    ..
+                } => {
+                    produces.contains(&content)
+                        || modifies.contains(&content)
+                        || depends_on.contains(&content)
+                }
+                Step::Derive { .. } => false,
+            })
+            .count()
+    }
+
+    /// Two concepts derived in one interaction with the same structure score
+    /// **exactly** equal, and an exact tie is broken by `NodeId` — a random
+    /// UUID, so the demo's rank order would change run to run. The tie-break
+    /// is distinct concept types.
+    ///
+    /// Siblings that differ structurally (the three pillars: 8 / 5 / 2 actions
+    /// name them) cannot tie in the first place, so the rule is scoped to
+    /// siblings with the same signature.
+    #[test]
+    fn structurally_identical_siblings_carry_distinct_concept_types() {
+        for step in ACT_I.iter().chain(ACT_II).chain(ACT_III) {
+            let Step::Derive { concepts, .. } = step else {
+                continue;
+            };
+            let mut seen: Vec<(usize, ConceptType)> = Vec::new();
+            for (content, kind) in concepts.iter() {
+                let signature = (action_mentions(content), *kind);
+                assert!(
+                    !seen.contains(&signature),
+                    "'{content}' is structurally identical to an earlier sibling in the same \
+                     derive AND shares its concept type — their scores tie exactly and the \
+                     order becomes NodeId (random) order"
+                );
+                seen.push(signature);
+            }
+        }
+        // The pillars are the exemption this rule relies on: same type, but
+        // separated by how much of the codebase depends on them.
+        let mentions: Vec<usize> = PILLARS.iter().map(|p| action_mentions(p)).collect();
+        let mut unique = mentions.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            PILLARS.len(),
+            "the three pillars share ConceptType::Entity, so they must be separated \
+             structurally instead: {mentions:?}"
+        );
+    }
+
+    #[test]
     fn missing_strings_names_every_absent_requirement() {
         let missing = missing_strings("").expect("empty context is missing all three");
         assert_eq!(missing.len(), 3, "{missing:?}");
