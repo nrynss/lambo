@@ -395,3 +395,64 @@ Notes:            <what could not be reproduced and why>
 Record any new finding with a concrete repro and a severity, the same way the existing
 `adve-review-t8.2-mcp.md` and `adve-review-t8.3-cli.md` do, and drop the filled verdict at the
 top of this file so the next reader sees the outcome first.
+
+---
+
+## Addendum — re-verification run after the L82 merges (written 2026-08-15)
+
+The L82-1/L82-2/L82-4 remediations merged at `8134a3c` after the full local loop.
+Everything below is the list of claims that only a live cluster can settle,
+consolidated from all review rounds. Run on the Cockroach machine, top to bottom.
+Baseline gates first: `cargo test --features store-cockroach,embed-bge` (expect ~685+
+lib green) and the `-- --ignored` live suite.
+
+**1. The bulk multi-row VALUES statement executes on CockroachDB.** Highest value —
+the generated SQL (multi-row `INSERT ... ON CONFLICT` with per-row `::VECTOR` casts)
+is byte-asserted in tests but never executed against Postgres wire semantics locally.
+The `--ignored` conformance suite is the flush→load round-trip; run it first. If it
+passes, items 2–3 confirm the behavior under real load.
+
+**2. Result 5c repro, expected to now PASS.** Four at-cap `lambo_record_action`
+calls (784 mutations), then SIGTERM before the 1s flush tick. Old result: close
+timed out at 10s, tail discarded, stale lease. Expected now: rc 0,
+`session closed, tail durable`, all rows in Cockroach (bulk flush drains in
+single-digit statements), lease row gone.
+
+**3. Stale-lease release on a genuinely hung close.** Force a close overrun (e.g.
+firewall the cluster mid-close or use an unreachable embedder plus a large tail):
+expect the bounded 2s lease release to still land (`session_leases` row gone), or
+the honest "will lapse at LEASE_TTL" warning if the store is unreachable.
+
+**4. Invisible-character wire probes.** `lambo_derive` with U+202E, U+0000, U+3164,
+U+FFF0: expect `isError:true` naming the codepoint, zero rows landed. Then U+200D
+(ZWJ) inside otherwise-identical content twice: expect BOTH accepted and matched to
+ONE concept (stripped from the key), not two.
+
+**5. Organic vectors (L82-4).** Fresh session, a few `lambo_derive` calls over MCP
+with BGE up, then:
+`SELECT count(*) FILTER (WHERE embedding IS NOT NULL), count(*) FROM concepts WHERE session_id='<fresh>';`
+Expect every concept to carry a vector. Then a `lambo_recall` with a
+keyword-disjoint query and confirm the vector leg returns the concept.
+
+**6. Second-order L82-4 effects.** Organic `Semantic` merge edges are now reachable
+for the first time. Watch `edges WHERE edge_type='semantic'` count and the
+canonization-event rate on an organic session against expectations (density is the
+heaviest scoring dimension). Also eyeball the far-class cosine distribution under
+production-length context vs the 0.85 bar (P2-2): derive concepts with realistic
+16KB-ish prompts and check merge decisions look sane.
+
+**7. Cockroach seed-path regression measurement (V3/item 8).** With repeats in one
+seed batch: pre-fix code would error on Cockroach ("cannot affect row a second
+time") where SQLite last-wins natively. Post-fix: expect seed with repeats to
+succeed on the cluster. One command against a scratch session settles it.
+
+**8. T8.4 live ×2 demo runs.** Follow `demo/LIVE-RUNBOOK.md`: two consecutive
+`lambo demo --scenario rest-api` runs on the cluster, `diff` the normalized
+transcripts (that diff IS the ×2 proof), screenshot the `canonization_events`
+split-screen query via the CockroachDB managed MCP server into
+`dev-diary/evidence/`. Note the runbook's schema-divergence warning (hand-created
+index, ~2833 seeded concepts — scope all queries by session_id).
+
+Record outcomes in a dated section here, same conventions as the 2026-08-14 run.
+Items 2, 5 and 8 are the P8 exit-criteria-relevant ones; the rest close review
+residuals.
