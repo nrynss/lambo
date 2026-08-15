@@ -567,7 +567,13 @@ requires:   T8.2 (CLEAN)
 fixture-ok: yes
 owns:       src/mcp/server.rs, src/mcp/serve.rs (hardening only — no new tools)
 appends-to: src/main.rs (serve flags for auth/rate-limit config, if any)
-status:     not-started
+status:     minimal-hardening cut done — 2026-08-15 (branch task/t8.7-hardening).
+            Bearer auth (fail-closed off-loopback), concurrent-session cap, global
+            rate limit, and the T88-H1 wire-hygiene fix are IN with tests; full
+            binding gate block green, 703 lib (baseline 685). NOT done: the three
+            R5-verify residuals (#1 byte-echo, #2 redact_urls host:port, #3
+            resolve_focus to_lowercase) and the request-size limit — see the
+            Handoff Log entry for what each still needs.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14: collects everything the T8.2 review deferred that is **not** demo-app
@@ -1667,3 +1673,136 @@ now exist and carry help text, so that skip can be dropped — left alone
 deliberately, because the shared-file rule limits this task to one dispatch arm
 plus its own flags, and another task is appending to the same `match` in
 parallel.
+
+### T8.7 — MCP surface hardening (task agent, 2026-08-15) — MINIMAL CUT, not the full block
+
+Scope was deliberately narrowed on 2026-08-15 to the pieces the AWS-bound demo needs:
+auth, a session cap, a rate limit if cheap, and the T88-H1 wire-hygiene fix. **Three of the
+four T8.7 residuals were not touched** — see "Not done" below. The T8.7 "Done when" is
+therefore *not* satisfied; the status line says so.
+
+**Branch:** `task/t8.7-hardening`, cut from `8134a3c`.
+
+#### 1. Bearer-token auth, fail-closed off loopback
+
+`--auth-token` plus `LAMBO_AUTH_TOKEN`, **env wins** — a token in argv is visible in `ps`
+and shell history, so the deployment channel takes precedence rather than the reverse. A
+*set-but-empty* env var is a usage error (exit 2), not a silent fallback to the flag: that
+shape is almost always an unset variable that expanded to nothing.
+
+The rule by transport: **stdio** unaffected (process-local — the client owns the process it
+spawned); **HTTP on loopback** keeps today's optional-auth behaviour; **HTTP anywhere else**
+requires a token or `serve` refuses to start. The refusal runs as the *first statement* in
+`serve()`, before `build_memory` — so a misconfigured start takes no single-writer lease and
+the operator's retry is not blocked by their own refused attempt.
+
+Comparison is constant-time: no early exit, and the loop runs over the *presented* input
+indexing the expected token modulo its length, so a wrong-length guess does not disclose the
+expected length. `std::hint::black_box` stops the optimiser short-circuiting the accumulator.
+No new dependency — this is one comparison, not a reason to take `subtle`.
+
+The token lives in a `SecretToken` newtype with a redacting `Debug` and **no `Display`**, so
+"never logged" is a property of the type rather than a promise each future caller must keep.
+`ServeOptions` and clap's `Commands` both derive `Debug`; this is what makes that safe.
+
+#### 2. Concurrent-session cap (T82-16's unbounded half)
+
+Default 32, `--max-sessions`. Enforced in the same middleware, counted from
+`LocalSessionManager`'s own public `sessions` map — rmcp mutates it on create and on
+DELETE, so there is **no bookkeeping of ours that can drift from the truth**. Past the cap a
+new `initialize` gets 503 naming the live count, `--max-sessions`, and the `DELETE /mcp`
+remedy. Requests carrying an `Mcp-Session-Id` are never counted, so the cap bounds *new*
+sessions instead of becoming an outage for established ones.
+
+Known and accepted: two concurrent `initialize`s can both pass the check and overshoot by
+one. Bounded by in-flight concurrency, harmless at this scale, and closing it would mean
+wrapping rmcp's 13-method `SessionManager` trait — not worth it for the minimal cut.
+
+#### 3. Rate limit — BUILT, not deferred, but narrower than the block asked
+
+The block says "a request rate limit"; the brief said build it only if cheap. It was cheap:
+a token bucket over `parking_lot::Mutex` + `Instant`, both already in the tree. **No new
+dependency.** Default 50 rps sustained with a 2× burst, `--rate-limit-rps 0` disables.
+
+**The honest caveat:** it limits *HTTP requests to `/mcp`*, **not `tools/call` specifically**.
+Singling out `tools/call` means buffering and re-injecting every request body to read the
+JSON-RPC `method` — real machinery and a correctness risk on a streaming transport — for a
+distinction that barely matters here, since on streamable HTTP each `tools/call` is its own
+POST. The limit is **global, not per-connection**: per-connection state is trivially defeated
+by opening more connections.
+
+**Ordering is load-bearing and tested:** auth → rate → cap. An anonymous flood gets 401 and
+never spends rate budget or reads the session count (a 503-vs-401 difference would leak how
+loaded the server is).
+
+#### 4. T88-H1 — internal notes were being published to every MCP client
+
+`WireConceptType`'s rustdoc became its JSON-Schema `description` in every `tools/list`
+response, carrying a review marker ("Byte-echo note (R4 nit)"), rmcp's `Parameters<T>`
+internals, the internal helper name `validate_size`, and a "revisit if…" note. Rewritten as
+a user-facing description of the five concept kinds; the rationale moved to a plain `//`
+block that opens by saying why it must not become rustdoc again.
+
+Swept the other wire types for the same pattern. `RecallParams.agent_id` published
+`"spec §2.2 — see the attribution note in the tool docs"` (**T88-H2**) — both references are
+unreachable from the wire. Replaced with the rule the runtime actually applies, and the same
+sentence added to the five other `agent_id` fields that carried **no** description at all,
+plus `reserve`'s stricter variant which refuses a foreign id rather than warning
+(**T88-H3**, which asked for exactly that sentence).
+
+New `published_schemas_carry_no_internal_notes` scans every tool description and every
+schema string for marker substrings (`rmcp`, `revisit`, `spec §`, `t82-`, `r1/`, `r4 nit`,
+`byte-echo`, `handoff log`, `validate_size`, `todo`, `fixme`, `xxx`). **Mutation-verified**:
+re-adding the note shape to one field description fails it. The **F18 golden allowlist is
+unaffected** — descriptions are not in the property set — and both F18 tests still pass.
+
+#### Gates (full binding block, all green)
+
+`cargo fmt --all -- --check` clean; all three clippy `-D warnings` lines exit 0;
+`cargo test` **703 lib + 5 bin + 5 integration + 1 doctest passing, 3 ignored**
+(baseline **685** lib — **+18 lib**, no regressions); `cargo test --features store-sqlite`
+**750 lib + 5 bin + 11 integration + 1 doctest passing, 3 ignored** (baseline **732** lib —
+**+18 lib**, the same eighteen, no regressions); `cargo test --no-default-features --features
+store-sqlite --no-run` and `--features store-cockroach --no-run` both build;
+`cargo check --no-default-features` clean.
+
+The +18 breaks down as 17 in `src/mcp/serve.rs` (auth, cap, rate limit, fail-closed start)
+and 1 in `src/mcp/server.rs` (`published_schemas_carry_no_internal_notes`).
+
+#### Verified against the real binary, not just tests
+
+`--bind 0.0.0.0` with no token refuses with the full message (exit 1). Empty
+`LAMBO_AUTH_TOKEN` is a usage error (exit 2). On loopback with a token: no credential → 401
++ `WWW-Authenticate: Bearer`, wrong token → 401, correct token → 200 with a session id. With
+`--max-sessions 3`: sessions 1–3 admitted, 4th and 5th refused 503 with the honest body.
+With `--max-sessions 2`: `DELETE /mcp` → 202 and the next `initialize` → 200, proving the
+count is live rather than monotonic. Startup log shows `auth_required=true max_sessions=32
+rate_limit_rps=50` — **posture visible, token absent**. SIGTERM still logs "session closed,
+tail durable", so the middleware did not disturb the durability path.
+
+**Exit-code scheme used** (consistent with T88-H11): **2** = the command line or environment
+is malformed and cannot be interpreted (bad `--transport` value, empty token value); **1** =
+well-formed but the server will not start (bind-policy refusal, unprovisioned store).
+
+#### Not done — the rest of the T8.7 block
+
+- **R5-verify residual #1** (`concept_type` variant error echoes an escaped control byte).
+  Untouched. The rmcp survey done for T88-H1 confirms it is still not interceptable:
+  `Parameters<T>` builds the `-32602` inside the framework before any `LamboServer` code
+  runs. Needs an rmcp extraction-error hook, or hand-rolled deserialize in all seven tools.
+- **R5-verify residual #2** (`redact_urls` misses a bare `host:port`). Untouched; still
+  latent, still no live emitter.
+- **R5-verify residual #3** (`resolve_focus` O(total-content) `to_lowercase`). Untouched.
+  The rate limit now bounds the amplification rate, which is the "defused by the rate limit"
+  half of the block's own disjunction — but the **graph-size guard** it pairs that with does
+  not exist, and the allocation is unchanged. Do not read this entry as closing #3.
+- **Request-size limit.** Not addressed. Tool-layer string caps (`MAX_CONTENT_BYTES`, 16 KiB)
+  still apply, but no HTTP body limit was added or audited.
+- **Session-cap overshoot** under concurrent `initialize` (above).
+
+#### Files touched
+
+`src/mcp/serve.rs` (all three checks + tests), `src/mcp/server.rs` (T88-H1/H2/H3 + the
+hygiene test), `src/main.rs` (three `serve` flags + token resolution — flags only, per the
+shared-file rule), `src/mcp/mod.rs` (re-exports for the new public items; additive).
+`Cargo.toml` **not touched** — no new dependency was needed for any of it.

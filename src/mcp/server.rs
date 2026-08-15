@@ -55,21 +55,40 @@ use crate::types::{ConceptType, LamboError, NodeId, RecallQuery};
 // Parameters
 // ---------------------------------------------------------------------------
 
-/// Concept type as it crosses the wire. Mirrors [`ConceptType`] rather than
-/// deriving `JsonSchema` on the core type, so the MCP schema is owned here and
-/// a core rename cannot silently change a published tool schema.
+// ===========================================================================
+// INTERNAL NOTES — deliberately `//` and not `///`.
+//
+// Everything in this module's rustdoc on a params struct, field, or enum is
+// published VERBATIM as the JSON-Schema `description` in every `tools/list`
+// response, so it is read by every MCP client and every model. Review markers,
+// dependency internals and "revisit if…" notes are not wire copy (T88-H1).
+// Keep engineering rationale here; keep the rustdoc user-facing.
+//
+// Why this mirrors `ConceptType` instead of deriving `JsonSchema` on the core
+// type: the MCP schema is owned here, so a core rename cannot silently change
+// a published tool schema.
+//
+// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
+// variant \`…\`` error, which repeats the caller's decoded string — potentially
+// a decoded control char such as `U+0001` — back to the model, unlike
+// `validate_size`, which names control codepoints instead of echoing them. This
+// is **not** interceptable at our layer: every tool takes its params through
+// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
+// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
+// Sanitising it would mean abandoning `Parameters<T>` for a hand-rolled
+// deserialize in all seven tools — a large, error-prone change for a field whose
+// only reachable "byte" is an escaped control char in an enum slot. Left as-is;
+// revisit if rmcp grows an extraction-error hook.
+// ===========================================================================
+
+/// What kind of thing a concept is. Pick the one that fits the content best:
 ///
-/// Byte-echo note (R4 nit): an invalid value here yields serde's `unknown
-/// variant \`…\`` error, which repeats the caller's decoded string — potentially
-/// a decoded control char such as `U+0001` — back to the model, unlike
-/// [`validate_size`], which names control codepoints instead of echoing them. This
-/// is **not** interceptable at our layer: every tool takes its params through
-/// rmcp's `Parameters<T>` extractor, so the variant error is built and returned
-/// (as a `-32602`) inside the rmcp framework, before any `LamboServer` code runs.
-/// Sanitising it would mean abandoning `Parameters<T>` for a hand-rolled
-/// deserialize in all seven tools — a large, error-prone change for a field whose
-/// only reachable "byte" is an escaped control char in an enum slot. Left as-is;
-/// revisit if rmcp grows an extraction-error hook.
+/// - `entity` — a named thing: a person, service, file, table, or component.
+/// - `logic` — a rule, decision, or piece of reasoning about how things work.
+/// - `constraint` — a requirement or limit that must keep holding.
+/// - `resource` — something produced, consumed, or acted on by the work.
+/// - `observation` — something noticed in passing; the weakest, most
+///   evictable kind, and the only one that can later be demoted.
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireConceptType {
@@ -95,7 +114,9 @@ impl From<WireConceptType> for ConceptType {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
-    /// Calling agent (spec §2.2 — see the attribution note in the tool docs).
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
     /// Natural-language query.
     pub query: String,
@@ -126,6 +147,9 @@ pub struct WireParentOf {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
     /// Concepts to derive from this interaction.
     pub concepts: Vec<WireConcept>,
@@ -137,6 +161,9 @@ pub struct DeriveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
     pub action: String,
@@ -151,6 +178,10 @@ pub struct RecordActionParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReserveParams {
+    /// Id of the agent making this call. Unlike the other tools this one is
+    /// strict: soft locks are taken and released under the single identity this
+    /// server process runs as, so a call from any other id is refused outright
+    /// rather than granted under the wrong name.
     pub agent_id: String,
     /// Node to reserve, as a UUID string (from `lambo_recall` or
     /// `lambo_inspect`).
@@ -164,6 +195,9 @@ pub struct ReserveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectParams {
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
     /// Concept content (or a node UUID) to centre the neighbourhood on.
     pub focus: String,
@@ -174,12 +208,18 @@ pub struct InspectParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaintsParams {
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatsParams {
+    /// Id of the agent making this call. Work is recorded under the agent this
+    /// server process runs as, so a different id here does not change
+    /// attribution — the response carries a warning when the two differ.
     pub agent_id: String,
 }
 
@@ -1337,6 +1377,64 @@ mod tests {
                  time (F18) and then update the golden set.",
                 t.name
             );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// **T88-H1 pinned.** Nothing a client reads may carry internal notes.
+    ///
+    /// `WireConceptType`'s rustdoc was published verbatim as its JSON-Schema
+    /// `description` in every `tools/list` response, and it carried a review
+    /// marker ("Byte-echo note (R4 nit)"), a dependency's internals (rmcp's
+    /// `Parameters<T>` extractor), an internal helper name (`validate_size`) and
+    /// a "revisit if…" note. Every MCP client and every model saw it.
+    ///
+    /// The trap is that rustdoc on these types is *simultaneously* developer
+    /// documentation and wire copy, and nothing in the type system says so — the
+    /// next person to explain a subtlety in a `///` above a params field
+    /// republishes it to the world. This guard covers the whole published
+    /// surface (tool descriptions **and** every schema string) so that mistake
+    /// fails here instead of shipping.
+    #[tokio::test]
+    async fn published_schemas_carry_no_internal_notes() {
+        let s = server("mcp-wire-hygiene").await;
+        // Distinctive enough not to collide with legitimate wire copy: each is
+        // a review marker, a dependency internal, an internal symbol, or a
+        // note-to-self that has no meaning to a client.
+        const MARKERS: &[&str] = &[
+            "rmcp",
+            "revisit",
+            "spec §",
+            "t82-",
+            "r1/",
+            "r4 nit",
+            "byte-echo",
+            "handoff log",
+            "validate_size",
+            "todo",
+            "fixme",
+            "xxx",
+        ];
+
+        for t in tools(&s) {
+            // The tool description and the full input schema — every string a
+            // client can read, not just the ones we remembered to check.
+            let mut published = serde_json::to_string(&*t.input_schema).expect("schema to json");
+            if let Some(d) = &t.description {
+                published.push(' ');
+                published.push_str(d);
+            }
+            let haystack = published.to_lowercase();
+            for m in MARKERS {
+                assert!(
+                    !haystack.contains(m),
+                    "tool {} publishes internal note marker {m:?} to every MCP client. \
+                     Rustdoc on a params struct/field/enum in this module becomes the \
+                     JSON-Schema description on the wire — keep engineering rationale in a \
+                     plain `//` comment (T88-H1). Offending text: {published}",
+                    t.name,
+                );
+            }
         }
         s.mem.close().await.expect("close");
     }
