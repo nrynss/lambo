@@ -658,6 +658,30 @@ mod tests {
             ("hangul filler", "billing\u{3164} retries change"),
             ("braille blank", "billing\u{2800} retries change"),
             ("tag character", "billing\u{E0062} retries change"),
+            // V1, the pin: the verifier's repro verbatim. A Mongolian free
+            // variation selector forked this key exactly as U+200D once did.
+            (
+                "mongolian fvs1 (allowed in content)",
+                "billing\u{180B} retries change",
+            ),
+            (
+                "mongolian fvs4 (allowed in content)",
+                "billing\u{180F} retries change",
+            ),
+            (
+                "mongolian vowel separator",
+                "billing\u{180E} retries change",
+            ),
+            ("reserved u+2065", "billing\u{2065} retries change"),
+            ("reserved specials", "billing\u{FFF0} retries change"),
+            (
+                "plane 14, reserved after TAGS",
+                "billing\u{E0080} retries change",
+            ),
+            (
+                "plane 14, reserved after the selectors supplement",
+                "billing\u{E01F0} retries change",
+            ),
         ] {
             assert_ne!(spoof, plain, "{label}: the inputs must differ byte-wise");
             assert_eq!(

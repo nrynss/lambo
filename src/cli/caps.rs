@@ -303,6 +303,21 @@ mod tests {
             ("braille pattern blank", "a\u{2800}b", "U+2800"),
             ("khmer vowel inherent aq", "a\u{17B4}b", "U+17B4"),
             ("khmer vowel inherent aa", "a\u{17B5}b", "U+17B5"),
+            // V1: the range gaps. Each is reserved or deprecated and
+            // default-ignorable, so each takes the refuse side its already
+            // listed neighbour had. U+180E sits *inside* the widened Mongolian
+            // range and must stay refused — widening it for the four free
+            // variation selectors must not smuggle the vowel separator into
+            // the accepted set with them.
+            ("mongolian vowel separator", "a\u{180E}b", "U+180E"),
+            ("reserved u+2065", "a\u{2065}b", "U+2065"),
+            ("reserved specials", "a\u{FFF0}b", "U+FFF0"),
+            ("plane 14, reserved after TAGS", "a\u{E0080}b", "U+E0080"),
+            (
+                "plane 14, reserved after the selectors supplement",
+                "a\u{E01F0}b",
+                "U+E01F0",
+            ),
         ] {
             let err = check_size("concept.content", bad).unwrap_err();
             assert!(
@@ -339,6 +354,14 @@ mod tests {
         check_size("concept.content", "love \u{2764}\u{FE0F}").unwrap();
         check_size("concept.content", "ideograph \u{845B}\u{E0100}").unwrap();
         check_size("concept.content", "a\u{034F}b").unwrap();
+        // V1: the Mongolian free variation selectors pick a positional glyph
+        // variant of the preceding letter, so Mongolian needs them exactly as
+        // emoji text needs VS16. All four, either side of the vowel separator
+        // that stays refused.
+        check_size("concept.content", "\u{1820}\u{180B}").unwrap();
+        check_size("concept.content", "\u{1820}\u{180C}").unwrap();
+        check_size("concept.content", "\u{1820}\u{180D}").unwrap();
+        check_size("concept.content", "\u{1820}\u{180F}").unwrap();
         // Plain multilingual text and emoji are untouched.
         check_size("concept.content", "درخواست — 请求 — request 🚀").unwrap();
     }
@@ -362,6 +385,9 @@ mod tests {
             "billing\u{FE0F} retries change",
             "billing\u{034F} retries change",
             "billing\u{E0100} retries change",
+            // V1: newly accepted, so it must be newly key-invariant too.
+            "billing\u{180B} retries change",
+            "billing\u{180F} retries change",
         ] {
             check_size("concept.content", spoof)
                 .unwrap_or_else(|e| panic!("{spoof:?} must still be accepted: {e}"));
