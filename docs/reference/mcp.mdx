@@ -221,7 +221,7 @@ lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant to 
 
 ## Limits
 
-Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it.
+Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
 
 | Limit | Value |
 |---|---|
@@ -234,5 +234,13 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Reservation TTL | 3600 seconds |
 | Neighbours rendered by `lambo_inspect` | 200 |
 | Candidates listed for an ambiguous focus | 10 |
+
+Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused.
+
+<Warning>
+The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.
+</Warning>
+
+`lambo_inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
 
 See [Command line](/cli) for the same operations from the terminal, and [Library API](/api) for the underlying Rust library.
