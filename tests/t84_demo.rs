@@ -158,7 +158,10 @@ fn assert_transcript(run: &DemoRun) {
         EXPECT_BLAST_WARNING,
         "agent-b does not make the breaking change.",
     ] {
-        assert!(text.contains(beat), "transcript is missing {beat:?}:\n{text}");
+        assert!(
+            text.contains(beat),
+            "transcript is missing {beat:?}:\n{text}"
+        );
     }
     // Every knob the demo compresses has to be on screen, not just in a doc.
     assert!(text.contains("no threshold weakened"), "{text}");

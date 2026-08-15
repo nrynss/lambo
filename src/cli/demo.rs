@@ -663,7 +663,15 @@ pub async fn run_scenario(
 
     // ---- Acts I–III: build the session -----------------------------------
     n.banner("ACT I — agent-a builds the REST API (9 interactions)");
-    let mem = open(&store, &embedder, &embedding, &session, AGENT_A, build_config()).await?;
+    let mem = open(
+        &store,
+        &embedder,
+        &embedding,
+        &session,
+        AGENT_A,
+        build_config(),
+    )
+    .await?;
     play(&mem, ACT_I, &mut n, 1).await?;
     mem.close()
         .await
@@ -671,7 +679,15 @@ pub async fn run_scenario(
     n.say("  agent-a released the single-writer lease".to_string());
 
     n.banner("ACT II — agent-b joins on a separate feature (2 interactions)");
-    let mem = open(&store, &embedder, &embedding, &session, AGENT_B, build_config()).await?;
+    let mem = open(
+        &store,
+        &embedder,
+        &embedding,
+        &session,
+        AGENT_B,
+        build_config(),
+    )
+    .await?;
     play(&mem, ACT_II, &mut n, ACT_I.len() + 1).await?;
     mem.close()
         .await
@@ -679,7 +695,15 @@ pub async fn run_scenario(
     n.say("  agent-b released the single-writer lease".to_string());
 
     n.banner("ACT III — agent-a comes back for one last edit");
-    let mem = open(&store, &embedder, &embedding, &session, AGENT_A, build_config()).await?;
+    let mem = open(
+        &store,
+        &embedder,
+        &embedding,
+        &session,
+        AGENT_A,
+        build_config(),
+    )
+    .await?;
     play(&mem, ACT_III, &mut n, ACT_I.len() + ACT_II.len() + 1).await?;
     mem.close()
         .await
@@ -788,12 +812,13 @@ pub async fn run_scenario(
 /// Acts I–III: canonization frozen, GC at its spec default (no sweep can run),
 /// flush and daemon compressed so the build is not paced by 1s timers.
 pub fn build_config() -> Config {
-    let mut cfg = Config::default();
-    cfg.match_strategy = MatchStrategy::Canonical;
-    cfg.daemon_tick_interval = DEMO_TICK_INTERVAL;
-    cfg.backend_flush_interval = DEMO_FLUSH_INTERVAL;
-    cfg.canonization_eval_interval = BUILD_EVAL_INTERVAL;
-    cfg
+    Config {
+        match_strategy: MatchStrategy::Canonical,
+        daemon_tick_interval: DEMO_TICK_INTERVAL,
+        backend_flush_interval: DEMO_FLUSH_INTERVAL,
+        canonization_eval_interval: BUILD_EVAL_INTERVAL,
+        ..Config::default()
+    }
 }
 
 /// The canonization phase and agent B's read: the compressed knobs from the
@@ -993,10 +1018,9 @@ async fn settle_gc_survived(mem: &Memory, n: &mut Narrator) -> Result<(), CliErr
             .map_err(|e| CliError::Runtime(format!("declare_synonym: {e}")))?;
         used += 1;
         let graph = mem.graph().clone();
-        wait_until(
-            &format!("gc sweep after synonym '{alias}'"),
-            move || min_gc_survived(&graph) > floor,
-        )
+        wait_until(&format!("gc sweep after synonym '{alias}'"), move || {
+            min_gc_survived(&graph) > floor
+        })
         .await?;
     }
 }
@@ -1064,8 +1088,7 @@ async fn await_conflict(mem: &Memory, n: &mut Narrator) -> Result<(), CliError> 
             Ok(Ok(DaemonEvent::Conflict {
                 node_id, agents, ..
             })) if node_id == node => {
-                let names: Vec<String> =
-                    agents.iter().map(|a| a.as_str().to_string()).collect();
+                let names: Vec<String> = agents.iter().map(|a| a.as_str().to_string()).collect();
                 n.say(format!(
                     "  daemon event: Conflict on '{USER_SCHEMA}' — contesting agents: {}",
                     names.join(", ")
@@ -1216,7 +1239,10 @@ pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
 }
 
 fn concept_id(graph: &Graph, content: &str) -> Option<NodeId> {
-    graph.concepts().find(|c| c.content == content).map(|c| c.id)
+    graph
+        .concepts()
+        .find(|c| c.content == content)
+        .map(|c| c.id)
 }
 
 fn status_of(graph: &Arc<RwLock<Graph>>, content: &str) -> Option<CanonizationStatus> {
@@ -1390,7 +1416,9 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
         "  lambo demo — scenario {scenario}   (spec §13: two agents, one REST API)"
     ));
     n.say("═".repeat(72));
-    n.say(format!("  session      {session}   (fresh per run — P6 R3-1)"));
+    n.say(format!(
+        "  session      {session}   (fresh per run — P6 R3-1)"
+    ));
     n.say(format!("  capabilities {:?}", store.capabilities()));
     n.say(format!(
         "  agents       {AGENT_A} (builds the API) · {AGENT_B} (separate feature)"
@@ -1677,12 +1705,7 @@ mod tests {
     /// names agent B instead of agent A.
     #[test]
     fn agent_a_makes_the_newest_write_to_the_pillar() {
-        let Some(Step::Action {
-            modifies,
-            action: _,
-            ..
-        }) = ACT_III.last()
-        else {
+        let Some(Step::Action { modifies, .. }) = ACT_III.last() else {
             panic!("act III must end with an action");
         };
         assert!(
@@ -1728,7 +1751,10 @@ mod tests {
         // Frozen during the build, compressed after.
         assert_eq!(build.canonization_eval_interval, BUILD_EVAL_INTERVAL);
         assert_eq!(canon.canonization_eval_interval, DEMO_EVAL_INTERVAL);
-        assert_eq!(build.canonization_edge_min_age, spec.canonization_edge_min_age);
+        assert_eq!(
+            build.canonization_edge_min_age,
+            spec.canonization_edge_min_age
+        );
         assert_eq!(canon.canonization_edge_min_age, DEMO_EDGE_MIN_AGE);
         assert_eq!(build.gc_interval, spec.gc_interval);
         assert_eq!(canon.gc_interval, DEMO_GC_INTERVAL);
@@ -1802,7 +1828,10 @@ mod tests {
         };
         let once = outcome.render();
         assert_eq!(once, outcome.clone().render());
-        assert!(once.contains("user schema: Venerable -> Canonical"), "{once}");
+        assert!(
+            once.contains("user schema: Venerable -> Canonical"),
+            "{once}"
+        );
         assert!(once.contains("blast_radius=9"), "{once}");
     }
 }
