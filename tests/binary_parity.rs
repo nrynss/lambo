@@ -127,15 +127,14 @@ fn derive(s: &Scratch, session: &str, agent: &str, content: &str) -> Output {
 /// Initialize the sqlite schema with the binary's own idempotent `provision`
 /// verb (the CLI's `derive`/`serve` do not auto-migrate).
 fn provision(s: &Scratch) -> Output {
-    run(lambo().args([
-        "--config",
-        s.config.to_str().unwrap(),
-        "provision",
-    ]))
+    run(lambo().args(["--config", s.config.to_str().unwrap(), "provision"]))
 }
 
 fn sigterm(pid: u32) {
-    let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
 }
 
 fn cleanup(s: &Scratch) {
@@ -214,7 +213,6 @@ impl Mcp {
             }
         }
     }
-
 
     fn shutdown(mut self) {
         // Reap the serve stdio child deterministically. The owning KillOnDrop
@@ -388,8 +386,18 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
         "rest-api",
     ]));
 
-    assert_eq!(run1.status.code(), Some(0), "demo must exit 0; stderr=\n{}", run1.stderr);
-    assert_eq!(run2.status.code(), Some(0), "demo (run 2) must exit 0; stderr=\n{}", run2.stderr);
+    assert_eq!(
+        run1.status.code(),
+        Some(0),
+        "demo must exit 0; stderr=\n{}",
+        run1.stderr
+    );
+    assert_eq!(
+        run2.status.code(),
+        Some(0),
+        "demo (run 2) must exit 0; stderr=\n{}",
+        run2.stderr
+    );
 
     let o1 = outcome_block(&run1.stdout);
     let o2 = outcome_block(&run2.stdout);
@@ -409,7 +417,10 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
         "the canonical line must name user schema with blast radius 9:\n{o1}"
     );
     // ...and it alone sits at Canonical (mirror of the `statuses` assertion).
-    assert!(o1.contains("Canonical  user schema"), "user schema must be Canonical:\n{o1}");
+    assert!(
+        o1.contains("Canonical  user schema"),
+        "user schema must be Canonical:\n{o1}"
+    );
 
     // Step 3 recall context block: the canonical marker and the load-bearing
     // pillar line, verbatim (spec §13).
@@ -529,7 +540,11 @@ fn serve_web_serves_live_data_over_http_and_stays_read_only() {
 
     // Seed the session with a writer derive (writer acquires/releases the lease).
     let seeded = derive(&s, SESSION, "agent-a", "user schema");
-    assert!(seeded.status.success(), "seed derive; stderr=\n{}", seeded.stderr);
+    assert!(
+        seeded.status.success(),
+        "seed derive; stderr=\n{}",
+        seeded.stderr
+    );
 
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
@@ -570,7 +585,8 @@ fn serve_web_serves_live_data_over_http_and_stays_read_only() {
         stats.body
     );
     assert!(
-        stats.body.contains("\"nodes\":") && stats.body.contains("\"edges\":")
+        stats.body.contains("\"nodes\":")
+            && stats.body.contains("\"edges\":")
             && stats.body.contains("\"concepts\":"),
         "/api/stats must carry real node/edge/concept counts: {}",
         stats.body
