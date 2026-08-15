@@ -49,9 +49,14 @@
 //!   writer's flush interval) and a *superset* across writer restarts. Taking
 //!   the broadcast would mean becoming the writer, which would mean holding the
 //!   lease, which would mean this page could not run beside a live `lambo serve`.
-//! * **`flush_lag` / `log_depth` are reported as `n/a`.** They live in the
-//!   writer's flush task; a reader that printed `0` would be claiming a
-//!   durability bound it cannot see. Same call [`crate::cli::stats`] makes.
+//! * **`flush_lag` / `log_depth` are reported as `n/a` only when no writer has
+//!   published them yet.** The writer's `FlushTask` publishes its flush stats
+//!   into the shared store after each cycle (T85-3), and this reader fetches
+//!   them — so a live writer shows real numbers. When no writer has published
+//!   yet (or the store doesn't support it), the page reports `n/a`. A reader
+//!   that fabricated `0` would be claiming a durability bound it cannot see
+//!   (same call [`crate::cli::stats`] makes); a published value is a real
+//!   measurement this reader *can* see.
 //! * **Graph `epoch` is not surfaced at all.** `Graph::from_snapshot` starts a
 //!   loaded graph at epoch 0, so a reader's epoch is always 0 — a number that
 //!   looks live and is not.
@@ -97,7 +102,7 @@ use super::load_reader_graph;
 use crate::graph::Graph;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
-use crate::store::{Capabilities, GraphStore, StoreKind};
+use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreKind};
 use crate::types::{CanonizationStatus, GraphSnapshot, NodeId, SessionId, StoreError};
 
 // ---------------------------------------------------------------------------
@@ -132,7 +137,7 @@ pub struct Args {
     /// TCP port to listen on.
     pub port: u16,
     /// Bind address. Loopback by default — no token required. A non-loopback
-    /// bind requires a token (see [`authorize_bind_web`]).
+    /// bind requires a token (see `authorize_bind_web`).
     pub bind: IpAddr,
     /// Optional bearer token required on every request. Prefer the
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
@@ -358,10 +363,11 @@ struct WebStats {
     concepts: usize,
     canonical: usize,
     canonization_events: usize,
-    /// Always `null` — see the module docs. A reader cannot observe the
-    /// writer's flush task, and `0` would be a lie shaped like a measurement.
+    /// `Some` when a writer has published flush stats into the shared store
+    /// (T85-3); `null` (rendered `n/a`) when no writer has yet, or the store
+    /// doesn't support it — never a fabricated `0`.
     flush_lag_ms: Option<u64>,
-    /// Always `null`, same reason.
+    /// Same: writer-published log depth, or `null`/`n/a` when absent.
     log_depth: Option<usize>,
     /// How long the durable counts above have been unchanged, as seen here.
     durable_change_age_ms: u64,
@@ -469,7 +475,12 @@ fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
     }
 }
 
-fn stats_from(state: &AppState, g: &Graph, event_total: usize) -> WebStats {
+fn stats_from(
+    state: &AppState,
+    g: &Graph,
+    event_total: usize,
+    flush: Option<SessionFlushStats>,
+) -> WebStats {
     let concepts = g.concepts().count();
     let canonical = g
         .concepts()
@@ -485,6 +496,15 @@ fn stats_from(state: &AppState, g: &Graph, event_total: usize) -> WebStats {
         fingerprint = (fingerprint ^ part as u64).wrapping_mul(0x100_0000_01b3);
     }
 
+    // T85-3: a writer that has published flush stats into the shared store is
+    // visible to this reader, so render the real numbers. When the store
+    // returns `None` (no writer yet, or store doesn't support it) we keep the
+    // honest `n/a` + `writer_only` tooltip — never a fabricated `0`.
+    let (flush_lag_ms, log_depth) = match flush {
+        Some(s) => (Some(s.flush_lag_ms), Some(s.log_depth as usize)),
+        None => (None, None),
+    };
+
     WebStats {
         session: state.session.as_str().to_string(),
         nodes,
@@ -492,27 +512,41 @@ fn stats_from(state: &AppState, g: &Graph, event_total: usize) -> WebStats {
         concepts,
         canonical,
         canonization_events: event_total,
-        flush_lag_ms: None,
-        log_depth: None,
+        flush_lag_ms,
+        log_depth,
         durable_change_age_ms: state.observe(fingerprint).as_millis() as u64,
         mode: "reader",
         writer_only: WRITER_ONLY,
     }
 }
 
-async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
-    let snap = load_snapshot(state.store(), &state.session).await?;
-    Ok(events_from(&snap, since))
-}
-
 async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, CliError> {
     let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
+    // T85-3: fetch the writer-published flush stats from the shared store when
+    // available. A read failure degrades to `n/a` (None) rather than failing
+    // the whole stats endpoint — the session/counts payload is the load-bearing
+    // part, and a transient stats read must not take the page down.
+    let flush = match state.store().read_flush_stats(&state.session).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "read_flush_stats failed; reporting n/a for flush_lag/log_depth"
+            );
+            None
+        }
+    };
     // Scoped so the (`!Send`) read guard provably never spans an await.
     let stats = {
         let g = loaded.graph.read();
-        stats_from(state, &g, event_total)
+        stats_from(state, &g, event_total, flush)
     };
     Ok(stats)
+}
+
+async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
+    let snap = load_snapshot(state.store(), &state.session).await?;
+    Ok(events_from(&snap, since))
 }
 
 // ---------------------------------------------------------------------------
@@ -986,6 +1020,19 @@ mod tests {
         ) -> Result<(), StoreError> {
             self.0.release_lease(session, holder).await
         }
+        async fn write_flush_stats(
+            &self,
+            session: &SessionId,
+            stats: &crate::store::SessionFlushStats,
+        ) -> Result<(), StoreError> {
+            self.0.write_flush_stats(session, stats).await
+        }
+        async fn read_flush_stats(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
+            self.0.read_flush_stats(session).await
+        }
     }
 
     fn backends_on(store: Arc<MemoryStore>) -> ResolvedBackends {
@@ -1383,6 +1430,32 @@ mod tests {
                 .contains("reader"),
             "{stats}"
         );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stats_endpoint_renders_writer_published_flush_stats() {
+        // T85-3: once a writer's FlushTask has published flush stats into the
+        // shared store, a reader must render the real numbers (not n/a).
+        let store = seed("t85-stats-live").await;
+        let sid = SessionId::from("t85-stats-live");
+        store
+            .write_flush_stats(
+                &sid,
+                &crate::store::SessionFlushStats {
+                    flush_lag_ms: 12,
+                    log_depth: 3,
+                },
+            )
+            .await
+            .unwrap();
+        let (addr, handle) = spawn(state_on(store, "t85-stats-live")).await;
+
+        let stats = get_json(addr, "/api/stats").await;
+        assert_eq!(stats["flush_lag_ms"], 12, "{stats}");
+        assert_eq!(stats["log_depth"], 3, "{stats}");
+        assert_eq!(stats["mode"], "reader");
 
         handle.abort();
     }

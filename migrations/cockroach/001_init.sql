@@ -204,3 +204,14 @@ CREATE TABLE IF NOT EXISTS session_leases (
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL
 );
+
+-- Flush stats published by the writer's FlushTask (T85-3): one row per
+-- session, upserted after each flush cycle so a reader in another process can
+-- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers
+-- READ. An absent row means "no writer has published yet" (the honest n/a).
+CREATE TABLE IF NOT EXISTS session_stats (
+    session_id   STRING PRIMARY KEY,
+    flush_lag_ms INT NOT NULL,
+    log_depth    INT NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);

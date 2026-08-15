@@ -147,6 +147,18 @@ CREATE TABLE IF NOT EXISTS session_leases (
     expires_at  TEXT NOT NULL
 );
 
+-- Flush stats published by the writer's FlushTask (T85-3): one row per
+-- session, upserted after each flush cycle so a reader in another process can
+-- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers
+-- READ. An absent row means "no writer has published yet" (the honest n/a).
+-- updated_at follows the SQLite TIMESTAMPTZ-as-TEXT convention.
+CREATE TABLE IF NOT EXISTS session_stats (
+    session_id   TEXT PRIMARY KEY,
+    flush_lag_ms INTEGER NOT NULL,
+    log_depth    INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 -- Spec §4 INDEX clauses, as separate statements (order preserved):
 CREATE INDEX IF NOT EXISTS interactions_session_created_idx ON interactions (session_id, created_at);
 CREATE INDEX IF NOT EXISTS concepts_session_status_idx ON concepts (session_id, canonization_status);

@@ -113,7 +113,8 @@ use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, StoreConfig,
+    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
+    StoreConfig,
 };
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
@@ -1807,6 +1808,59 @@ impl GraphStore for CockroachStore {
             .await
             .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
         Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        // Upsert the whole row so re-publishes converge (idempotency, same
+        // contract as `flush`). Only the writer's FlushTask calls this;
+        // readers only read. `updated_at` is stamped from the cluster clock
+        // (now()).
+        sqlx::query(
+            "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+               flush_lag_ms = excluded.flush_lag_ms, \
+               log_depth = excluded.log_depth, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(&session.0)
+        .bind(stats.flush_lag_ms as i64)
+        .bind(stats.log_depth as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("write flush stats: {m}")))?;
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        let pool = self.pool().await?;
+        let row =
+            sqlx::query("SELECT flush_lag_ms, log_depth FROM session_stats WHERE session_id = $1")
+                .bind(&session.0)
+                .fetch_optional(pool)
+                .await
+                .map_err(backend)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let flush_lag_ms: i64 = row
+            .try_get("flush_lag_ms")
+            .map_err(|e| backend(format!("read flush stats: flush_lag_ms: {e}")))?;
+        let log_depth: i64 = row
+            .try_get("log_depth")
+            .map_err(|e| backend(format!("read flush stats: log_depth: {e}")))?;
+        Ok(Some(SessionFlushStats {
+            flush_lag_ms: u64::try_from(flush_lag_ms).unwrap_or(u64::MAX),
+            log_depth: u64::try_from(log_depth).unwrap_or(u64::MAX),
+        }))
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {

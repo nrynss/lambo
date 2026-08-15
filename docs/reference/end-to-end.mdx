@@ -106,6 +106,14 @@ Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes whatever has 
 Shutdown is time-bounded, so it gives up rather than hanging when the store is unreachable. Anything still un-flushed when it gives up is lost, because there is no on-disk journal to replay it from. Let the process finish, and do not `kill -9` a writer whose most recent writes matter to you.
 </Warning>
 
+To watch the session in a browser while the writer runs, add a read-only `lambo serve-web` window on the same store:
+
+```bash
+lambo --config lambo.toml serve-web --session demo
+```
+
+It serves on port `7710` (loopback, unauthenticated by default) and only reads — live recall, the canonization feed, and durable counts — so it never contends for the writer lease. See [Command line](/cli) for its flags.
+
 ## What recall searches
 
 Recall has three legs: keyword matching, vector similarity, and expansion through the graph edges around what it found. The vector leg needs a store with vector search.

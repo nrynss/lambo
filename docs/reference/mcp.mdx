@@ -9,13 +9,13 @@ Lambo is agentic graph memory. It runs as an MCP server that exposes seven tools
 
 Lambo serves over stdio by default, and over HTTP when you ask for it.
 
-| Transport | Command | Notes |
-|---|---|---|
 | stdio | `lambo serve --session demo` | The default. Works with any MCP client through the standard `mcpServers` configuration. |
 | HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. Change them with `--port` and `--bind`. |
 
+On loopback the HTTP transport is unauthenticated by default; binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`). It also applies a global rate limit, a ceiling on concurrently live sessions, and a request-body limit. See [Configuration](/config#http-transport) for the knobs.
+
 <Warning>
-The HTTP endpoint has no authentication. Keep it on loopback, and remember that the process behind it is a session writer.
+The process behind the HTTP endpoint is a session writer, and it is not open to the world. Unless you bind only to loopback, configure a bearer token or `lambo serve` refuses to start, and once you do, every request must carry `Authorization: Bearer <token>`. Protect it as a writer, not as a read-only service.
 </Warning>
 
 ## What every tool expects

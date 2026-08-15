@@ -65,7 +65,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::graph::Graph;
-use crate::store::GraphStore;
+use crate::store::{GraphStore, SessionFlushStats};
 use crate::types::{MutationBatch, StoreError};
 
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
@@ -384,8 +384,11 @@ impl FlushLoop {
             // `close`'s final flush) would overwrite the new holder's rows —
             // the exact split-brain the lease exists to prevent. A `cycle`
             // already in flight when the fence is set runs to completion; the
-            // guarantee is "no NEW flush after the fence is observed", one
-            // `POLL_QUANTUM` (100ms) latency at worst.
+            // guarantee is "no NEW flush after the fence is observed". The
+            // exposure is one in-flight cycle — bounded by `FLUSH_ATTEMPT_TIMEOUT`
+            // (30s) plus the lease-detection interval (heartbeat), not the
+            // `POLL_QUANTUM` this comment once claimed. That residual (and the
+            // fencing-token fix) is tracked in GitHub issue #1.
             if self.fenced() {
                 let dropped = self.pending.mutations.len();
                 self.pending.mutations.clear();
@@ -545,6 +548,24 @@ impl FlushLoop {
                     RETAINED_BACKOFF,
                 );
             }
+        }
+
+        // T85-3: publish the observable flush stats to the shared store so a
+        // reader in another process (e.g. `serve-web`) can render real
+        // `flush_lag_ms` / `log_depth` instead of `n/a`. Called after each
+        // completed cycle. Best-effort by design: publication failure must
+        // never perturb the flush path (the local stats handle is unaffected).
+        let fs = self.shared.stats();
+        let session_stats = SessionFlushStats {
+            flush_lag_ms: fs.lag.as_millis() as u64,
+            log_depth: fs.depth as u64,
+        };
+        if let Err(err) = self.store.write_flush_stats(&session, &session_stats).await {
+            tracing::trace!(
+                error = %err,
+                session = %session,
+                "failed to publish flush stats (best-effort)"
+            );
         }
     }
 
@@ -1262,6 +1283,50 @@ mod tests {
             "lag reset after success"
         );
         assert!(!task.degraded());
+    }
+
+    /// T85-3: the writer's `FlushTask` publishes its flush stats into the
+    /// shared store after each completed flush cycle, so a reader in another
+    /// process can render real `flush_lag_ms` / `log_depth` instead of `n/a`.
+    #[tokio::test(start_paused = true)]
+    async fn writer_publishes_flush_stats_into_shared_store() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        // Nothing flushed yet → nothing published → honest `None` (n/a).
+        assert_eq!(store.read_flush_stats(&sid()).await.unwrap(), None);
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations total
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| graph.read().log_len() == 0).await;
+
+        // Interval tick flushes; the loop publishes the resulting stats.
+        tokio::time::advance(Duration::from_millis(900)).await;
+        wait_until(|| task.stats().depth == 0).await;
+
+        let published = store
+            .read_flush_stats(&sid())
+            .await
+            .unwrap()
+            .expect("writer published flush stats into the shared store");
+        assert_eq!(
+            published.log_depth, 0,
+            "depth is the in-graph log after a clean flush"
+        );
+        assert!(
+            published.flush_lag_ms < 100,
+            "lag reset just after a successful flush: {published:?}"
+        );
+
+        handle.abort();
     }
 
     /// T86-2: once the single-writer-lease fence is latched, the loop stops

@@ -104,11 +104,27 @@ The default build enables `store-memory`, `embed-bge`, `embed-fixture`, and `fix
 
 ## HTTP transport
 
-The HTTP transport binds to `127.0.0.1` on port `7700`. Change them with `--bind` and `--port` on `lambo serve`.
+The HTTP transport binds to `127.0.0.1` on port `7700` and serves Streamable HTTP. Change the address with `--bind` and `--port` on `lambo serve`.
 
-<Warning>
-The HTTP transport has no authentication, no rate limiting, and no cap on the number of sessions it creates. Keep it on loopback. Do not expose it to a network until authentication is added.
-</Warning>
+### Authentication
+
+On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag). When a token is configured, every request must send `Authorization: Bearer <token>`; a missing or wrong token is refused with `401`. A set-but-empty `LAMBO_AUTH_TOKEN` is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
+
+### Rate limit
+
+The HTTP transport enforces a global sustained request rate, `50` requests per second by default with a burst allowance of twice that. A request over the limit is refused with `429` and `Retry-After: 1`. Adjust it with `--rate-limit-rps`.
+
+### Concurrent sessions
+
+The HTTP transport mints one MCP session per `initialize` and refuses to exceed a ceiling of `32` concurrently live sessions by default. At the cap, a new `initialize` is refused with a `503` that tells you to close an idle session or raise `--max-sessions`.
+
+### Request body limit
+
+A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` before its body is parsed. A chunked request with no `Content-Length` keeps the per-string and per-call caps plus the rate limit as its bound.
+
+### The read-only window
+
+`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. See [Command line](/cli).
 
 ## Provisioning a durable store
 

@@ -34,6 +34,9 @@ no task branches. Merge `phase/p8-surface → main` when the phase exit criteria
 Run ALL of these before claiming done. This list matches CI's feature matrix — the two
 `--no-default-features` rows were missing from agents' local runs on 2026-08-14 and the
 resulting unused-import/dead-code `-D warnings` failures reached CI (run 31791918843).
+The two `--no-run` rows now prefix `RUSTFLAGS="-D warnings"` so a feature-mismatched dead
+import fails locally exactly as CI's global `RUSTFLAGS` catches it; `-- -D warnings` would
+pass the flag to the test binary, not the compiler, so the env-var form is the correct one.
 Do not restate a subset in a handoff entry; run the block.
 
 ```bash
@@ -43,8 +46,8 @@ cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -
 cargo clippy --all-targets --features store-sqlite -- -D warnings
 cargo test
 cargo test --features store-sqlite
-cargo test --no-default-features --features store-sqlite --no-run     # CI: sqlite-minimal
-cargo test --no-default-features --features store-cockroach --no-run  # CI: cockroach row
+RUSTFLAGS="-D warnings" cargo test --no-default-features --features store-sqlite --no-run    # CI: sqlite-minimal
+RUSTFLAGS="-D warnings" cargo test --no-default-features --features store-cockroach --no-run # CI: cockroach row
 cargo check --no-default-features                                     # CI: minimal row
 ```
 

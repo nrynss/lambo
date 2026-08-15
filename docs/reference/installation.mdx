@@ -101,7 +101,7 @@ The `--config` flag comes before `serve`, because it is a global flag. The `serv
 To connect over HTTP instead, start the server yourself with `--transport http` and point your client at `http://127.0.0.1:7700`.
 
 <Warning>
-The HTTP endpoint has no authentication yet. Keep it on localhost, and do not expose it to a network.
+The HTTP endpoint is a session writer, so treat it accordingly. On loopback it is unauthenticated by default; binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`), which every request must then send as `Authorization: Bearer <token>`. See [Configuration](/config#http-transport).
 </Warning>
 
 ## Set up real embeddings

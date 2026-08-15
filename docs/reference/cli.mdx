@@ -249,6 +249,9 @@ reservations are advisory and RAM-local: this reservation ends when this process
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
 | `--bind <BIND>` | No | `127.0.0.1`, used when the transport is `http`. |
+| `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport. Loopback runs unauthenticated by default; a non-loopback bind fails closed without one. Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. |
+| `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions. |
+| `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate; burst allowance is double. |
 
 ```bash
 lambo serve --config lambo.toml --session demo --agent agent-a
@@ -266,6 +269,23 @@ Lambo writes a flush as a few batched statements rather than one statement per c
 Shutdown is time-bounded, so it stops rather than hanging if the store is unreachable. If it runs out of time, the writes that had not reached the store are lost. There is no on-disk journal to replay them from on the next start. Let the process finish its shutdown, and do not `kill -9` a writer you care about the tail of.
 </Warning>
 
+### Watch a session in a browser
+
+`lambo serve-web` opens a read-only browser window onto a session. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--port <PORT>` | No | `7710` |
+| `--bind <BIND>` | No | `127.0.0.1` |
+| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default; a non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. |
+
+```bash
+lambo serve-web --config lambo.toml --session demo
+```
+
+The page polls read-only `GET` endpoints — `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse` — so it can show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes the whole session to whoever can reach the port.
+
 ## Provision a store
 
 `lambo provision` creates or migrates the durable store schema. It reads the store choice from your config and takes no other flags. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
@@ -279,11 +299,14 @@ Running it again is safe. For a CockroachDB store it runs the repository's provi
 
 ## Run the demo
 
-`lambo demo` is reserved for a scripted two-agent scenario. `--scenario` defaults to `rest-api`.
+`lambo demo` runs a scripted two-agent scenario: two agents build one REST API, `user schema` earns canonical status, and the second agent's recall carries the blast-radius and conflict warnings.
 
-<Note>
-This command is not built yet. It prints the scenario name and exits `0` without touching memory. Use the walkthrough in [End to end](/end-to-end) instead.
-</Note>
+| Flag | Required | Default |
+|---|---|---|
+| `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
+| `--session <SESSION>` | No | A fresh session id per run. |
+
+The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/end-to-end) for the topology it exercises.
 
 ## The swarm idiom
 

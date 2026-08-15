@@ -122,20 +122,25 @@
       lastCounts[t.key] = v;
     });
 
-    // flush_lag / log_depth belong to the writer process. A reader that
-    // printed 0 for them would be claiming a durability bound it cannot see.
+    // Flush stats come from the writer's FlushTask, published into the shared
+    // store (T85-3). When a live writer has published them, show the real
+    // numbers; when absent (no writer yet / store without support) show the
+    // honest n/a with a writer-only tooltip — never a fabricated 0.
+    var hasFlush = s.flush_lag_ms !== null && s.flush_lag_ms !== undefined;
     [["flush lag", s.flush_lag_ms], ["log depth", s.log_depth]].forEach(function (pair) {
-      var tile = text("div", "tile na");
+      var tile = text("div", "tile" + (hasFlush ? "" : " na"));
       tile.appendChild(text("span", "k", pair[0]));
       tile.appendChild(text("span", "v", pair[1] === null || pair[1] === undefined ? "n/a" : pair[1]));
-      tile.title = s.writer_only || "";
+      tile.title = hasFlush ? "" : (s.writer_only || "");
       el.tiles.appendChild(tile);
     });
 
     var age = Math.round((s.durable_change_age_ms || 0) / 1000);
     el.statsNote.textContent =
       "Last durable change seen by this reader: " + age + "s ago. " +
-      "Flush lag and log depth are writer-only — a reader process cannot observe them.";
+      (hasFlush
+        ? "Flush lag and log depth are the writer's latest published values."
+        : "Flush lag and log depth are writer-only — this reader cannot observe them until the writer publishes them.");
   }
 
   // ---- canonization feed ----------------------------------------------
@@ -219,6 +224,16 @@
     }).then(function () {
       el.go.disabled = false;
     });
+  });
+
+  // Synthetic Return from browser automation can bypass implicit form
+  // submission, so drive submit explicitly on Enter. preventDefault stops
+  // the browser's native implicit submit too, so the path fires exactly once.
+  el.query.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.defaultPrevented) {
+      e.preventDefault();
+      el.form.requestSubmit();
+    }
   });
 
   // ---- boot ------------------------------------------------------------

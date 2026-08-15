@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
-use super::{validate_vector_candidate_limit, Capabilities, GraphStore};
+use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
     CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
     NodeId, Scored, SessionId, StoreError,
@@ -75,6 +75,10 @@ pub struct MemoryStore {
     /// Single-writer leases (T8.6), keyed by session id. Separate from `inner`
     /// so lease contention never touches the graph data lock.
     leases: RwLock<HashMap<String, LeaseRow>>,
+    /// Flush stats published by the writer's FlushTask (T85-3), keyed by
+    /// session id. Separate lock so publish/read contention never touches the
+    /// graph data or lease locks.
+    flush_stats: RwLock<HashMap<String, SessionFlushStats>>,
 }
 
 impl MemoryStore {
@@ -383,6 +387,24 @@ impl GraphStore for MemoryStore {
             leases.remove(&session.0);
         }
         Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        // In-memory publish: one lock, replace the whole row. Only the
+        // writer's FlushTask calls this; readers only read.
+        self.flush_stats.write().insert(session.0.clone(), *stats);
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        Ok(self.flush_stats.read().get(&session.0).copied())
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {

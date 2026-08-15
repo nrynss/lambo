@@ -117,14 +117,19 @@ pub struct RecallParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Natural-language query.
+    #[schemars(length(max = 16_384))]
     pub query: String,
     /// Hits to return. Defaults to the session config's `default_top_k`.
+    #[schemars(range(min = 1, max = 100))]
     pub top_k: Option<usize>,
     /// Token budget for the rendered context block.
+    #[schemars(range(min = 1, max = 100_000))]
     pub max_tokens: Option<usize>,
     /// Graph traversal depth for phase 2 expansion.
+    #[schemars(range(min = 0, max = 5))]
     pub traversal_depth: Option<usize>,
 }
 
@@ -132,6 +137,7 @@ pub struct RecallParams {
 #[serde(deny_unknown_fields)]
 pub struct WireConcept {
     /// The concept text.
+    #[schemars(length(max = 16_384))]
     pub content: String,
     /// One of `entity`, `logic`, `constraint`, `resource`, `observation`.
     pub concept_type: WireConceptType,
@@ -140,7 +146,9 @@ pub struct WireConcept {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireParentOf {
+    #[schemars(length(max = 16_384))]
     pub parent: String,
+    #[schemars(length(max = 16_384))]
     pub child: String,
 }
 
@@ -150,6 +158,7 @@ pub struct DeriveParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concepts to derive from this interaction.
     pub concepts: Vec<WireConcept>,
@@ -157,6 +166,12 @@ pub struct DeriveParams {
     /// be created) as concepts.
     pub parent_of: Option<Vec<WireParentOf>>,
 }
+/// One entry in a `lambo_record_action` resource list (`produces`,
+/// `modifies`, `depends_on`). A plain string on the wire, with the same
+/// per-string size cap the runtime enforces, so a client can pre-validate an
+/// entry without a round trip.
+#[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
+pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -164,15 +179,17 @@ pub struct RecordActionParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
+    #[schemars(length(max = 16_384))]
     pub action: String,
     /// Resources this action creates (`Causal` edges).
-    pub produces: Option<Vec<String>>,
+    pub produces: Option<Vec<WireResource>>,
     /// Resources this action mutates (`Causal` edges).
-    pub modifies: Option<Vec<String>>,
+    pub modifies: Option<Vec<WireResource>>,
     /// Things this action depends on (`Dependency` edges).
-    pub depends_on: Option<Vec<String>>,
+    pub depends_on: Option<Vec<WireResource>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -182,11 +199,14 @@ pub struct ReserveParams {
     /// strict: soft locks are taken and released under the single identity this
     /// server process runs as, so a call from any other id is refused outright
     /// rather than granted under the wrong name.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Node to reserve, as a UUID string (from `lambo_recall` or
     /// `lambo_inspect`).
+    #[schemars(length(max = 16_384))]
     pub node_id: String,
     /// Soft-lock lifetime in seconds (default 30, max 3600).
+    #[schemars(range(min = 1, max = 3_600))]
     pub ttl_seconds: Option<u64>,
     /// Release this agent's existing soft lock instead of taking one.
     pub release: Option<bool>,
@@ -198,10 +218,13 @@ pub struct InspectParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concept content (or a node UUID) to centre the neighbourhood on.
+    #[schemars(length(max = 16_384))]
     pub focus: String,
     /// Hops out from the focus (default 2, max 5).
+    #[schemars(range(min = 0, max = 5))]
     pub depth: Option<usize>,
 }
 
@@ -211,6 +234,7 @@ pub struct SaintsParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
 }
 
@@ -220,6 +244,7 @@ pub struct StatsParams {
     /// Id of the agent making this call. Work is recorded under the agent this
     /// server process runs as, so a different id here does not change
     /// attribution — the response carries a warning when the two differ.
+    #[schemars(length(max = 16_384))]
     pub agent_id: String,
 }
 
@@ -741,9 +766,24 @@ impl LamboServer {
         if let Err(e) = check_size("action", &p.action) {
             return e;
         }
-        let produces: Vec<String> = p.produces.unwrap_or_default();
-        let modifies: Vec<String> = p.modifies.unwrap_or_default();
-        let depends_on: Vec<String> = p.depends_on.unwrap_or_default();
+        let produces: Vec<String> = p
+            .produces
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        let modifies: Vec<String> = p
+            .modifies
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        let depends_on: Vec<String> = p
+            .depends_on
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
         // N1: cap the combined fan-out. Without this bound one client could hand
         // `record_action` an arbitrarily long target list and hold the single
         // process's graph write lock for as long as it takes to fan every entry
@@ -1449,6 +1489,135 @@ mod tests {
             }
         }
         s.mem.close().await.expect("close");
+    }
+    /// **T88-H4 pinned.** Published schemas carry the runtime's enforceable
+    /// maxima so a client can pre-validate, and `top_k`'s published minimum is
+    /// corrected from `0` (which the runtime refuses) to `1`.
+    ///
+    /// Two properties are pinned end-to-end: every **integer** field carries
+    /// both a `minimum` and a `maximum` (the audit found none did), and every
+    /// **string** field (including array entries) carries `maxLength` equal to
+    /// the runtime's per-string cap. The exact bounds per field are asserted
+    /// too, so a future widening of a cap is a deliberate, explicit change
+    /// here rather than a silent drift.
+    #[tokio::test]
+    async fn published_schemas_carry_runtime_maxima() {
+        let s = server("mcp-maxima").await;
+        // (tool, field path as `schema_property_paths` renders it, min, max).
+        let integer_bounds: &[(&str, &str, i64, i64)] = &[
+            ("lambo_recall", "max_tokens", 1, 100_000),
+            ("lambo_recall", "top_k", 1, 100),
+            ("lambo_recall", "traversal_depth", 0, 5),
+            ("lambo_inspect", "depth", 0, 5),
+            ("lambo_reserve", "ttl_seconds", 1, 3_600),
+        ];
+
+        for t in tools(&s) {
+            let schema = serde_json::to_value(&*t.input_schema).unwrap();
+            let leaves = schema_leaves(&schema);
+            // Every integer-typed leaf must be bounded — nothing unbounded on
+            // the wire that the runtime caps (`top_k` 1..=100 etc.).
+            for (path, node) in &leaves {
+                if type_includes(node, "integer") {
+                    assert!(
+                        node.get("minimum").is_some() && node.get("maximum").is_some(),
+                        "tool {} integer field {path:?} must publish both minimum and maximum \
+                         (T88-H4): {}",
+                        t.name,
+                        node
+                    );
+                }
+                if type_includes(node, "string") && node.get("enum").is_none() {
+                    assert_eq!(
+                        node.get("maxLength").and_then(|v| v.as_u64()),
+                        Some(16_384),
+                        "tool {} string field {path:?} must publish maxLength 16384 matching \
+                         the runtime per-string cap (T88-H4): {}",
+                        t.name,
+                        node
+                    );
+                }
+            }
+            // Exact bounds for the fields the audit named.
+            for &(tool, path, min, max) in integer_bounds {
+                if tool == t.name.as_ref() {
+                    let n = leaves
+                        .iter()
+                        .find(|(p, _)| p == path)
+                        .map(|(_, n)| n)
+                        .unwrap_or_else(|| {
+                            panic!("tool {} missing integer field {path:?}", t.name)
+                        });
+                    assert_eq!(
+                        n.get("minimum").and_then(|v| v.as_i64()),
+                        Some(min),
+                        "tool {} {path:?} minimum",
+                        t.name
+                    );
+                    assert_eq!(
+                        n.get("maximum").and_then(|v| v.as_i64()),
+                        Some(max),
+                        "tool {} {path:?} maximum",
+                        t.name
+                    );
+                }
+            }
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// True when a JSON-Schema node's `type` names the kind — `type` may be a
+    /// bare string ("string", "integer") or an array of types, as schemars
+    /// emits for an `Option<T>` (`["integer","null"]`).
+    fn type_includes(node: &serde_json::Value, kind: &str) -> bool {
+        match node.get("type") {
+            Some(serde_json::Value::String(s)) => s == kind,
+            Some(serde_json::Value::Array(a)) => a.iter().any(|v| v.as_str() == Some(kind)),
+            _ => false,
+        }
+    }
+
+    /// Collect every primitive leaf `(path, node)` in a published schema,
+    /// following `$ref` into `$defs`, `items` into array elements and
+    /// `properties` into nested objects — the same walk
+    /// [`schema_property_paths`] does, but keeping the leaf **node** so its
+    /// bounds and `maxLength` can be asserted.
+    fn schema_leaves(schema: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+        fn walk(
+            node: &serde_json::Value,
+            root: &serde_json::Value,
+            prefix: &str,
+            out: &mut Vec<(String, serde_json::Value)>,
+        ) {
+            let node = match node.get("$ref").and_then(|v| v.as_str()) {
+                Some(r) if r.starts_with("#/$defs/") => root
+                    .get("$defs")
+                    .and_then(|d| d.get(&r["#/$defs/".len()..]))
+                    .unwrap_or(node),
+                _ => node,
+            };
+            let has_children = node.get("properties").is_some() || node.get("items").is_some();
+            if node.get("type").is_some() && !has_children {
+                out.push((prefix.to_string(), node.clone()));
+                return;
+            }
+            if let Some(props) = node.get("properties").and_then(|v| v.as_object()) {
+                for (k, v) in props {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    walk(v, root, &path, out);
+                }
+            }
+            if let Some(items) = node.get("items") {
+                walk(items, root, &format!("{prefix}[]"), out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(schema, schema, "", &mut out);
+        out
     }
 
     /// The walker must actually descend — a guard that only ever sees the root

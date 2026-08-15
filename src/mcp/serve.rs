@@ -565,7 +565,7 @@ pub struct ServeOptions {
     pub port: u16,
     /// Bind address for `--transport http`. Defaults to loopback. Binding
     /// anywhere else requires [`ServeOptions::auth_token`] — see
-    /// [`authorize_bind`].
+    /// `authorize_bind`.
     pub bind: IpAddr,
     /// Bearer token required on every HTTP request (T8.7). `None` is allowed
     /// only on loopback; [`AUTH_TOKEN_ENV`] overrides whatever the flag said.
@@ -663,13 +663,13 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
 /// acquired the lease as this process attached (failing closed here if another
 /// writer holds it — see [`build_memory`]); a successful `close()` **releases**
 /// it so the next writer takes over at once. On the one exit that abandons
-/// `close()` — the [`close_bounded`] timeout or a second signal — the lease is
+/// `close()` — the `close_bounded` timeout or a second signal — the lease is
 /// *not* released and instead lapses at [`lease::LEASE_TTL`], exactly as it would
-/// on a crash. That is why the TTL is sized to outlast [`SHUTDOWN_BUDGET`]: a
+/// on a crash. That is why the TTL is sized to outlast `SHUTDOWN_BUDGET`: a
 /// graceful-but-slow close still holds a valid lease at the moment it releases.
 ///
-/// Both transports route their shutdown through [`run_until_shutdown`], so the
-/// signal path is the same on each: cancel, wait up to [`SHUTDOWN_GRACE`], then
+/// Both transports route their shutdown through `run_until_shutdown`, so the
+/// signal path is the same on each: cancel, wait up to `SHUTDOWN_GRACE`, then
 /// drop the transport and close regardless. A client that will not let go
 /// cannot hold the tail hostage.
 ///

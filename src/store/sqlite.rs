@@ -157,7 +157,9 @@ use super::batch::{
 use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
-use super::{map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore};
+use super::{
+    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
+};
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
     InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
@@ -588,6 +590,57 @@ impl GraphStore for SqliteStore {
             .await
             .map_err(|e| db_err("release lease", e))?;
         Ok(())
+    }
+
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        // Upsert the whole row so re-publishes converge (idempotency, same
+        // contract as `flush`). Only the writer's FlushTask calls this;
+        // readers only read. `updated_at` is stamped from the store clock
+        // (strftime), matching the SQLite TIMESTAMPTZ-as-TEXT convention.
+        sqlx::query(
+            "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now')) \
+             ON CONFLICT (session_id) DO UPDATE SET \
+               flush_lag_ms = excluded.flush_lag_ms, \
+               log_depth = excluded.log_depth, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(&session.0)
+        .bind(stats.flush_lag_ms as i64)
+        .bind(stats.log_depth as i64)
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("write flush stats", e))?;
+        Ok(())
+    }
+
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        let row =
+            sqlx::query("SELECT flush_lag_ms, log_depth FROM session_stats WHERE session_id = ?1")
+                .bind(&session.0)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(|e| db_err("read flush stats", e))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let flush_lag_ms: i64 = row
+            .try_get("flush_lag_ms")
+            .map_err(|e| db_err("read flush stats: flush_lag_ms", e))?;
+        let log_depth: i64 = row
+            .try_get("log_depth")
+            .map_err(|e| db_err("read flush stats: log_depth", e))?;
+        Ok(Some(SessionFlushStats {
+            flush_lag_ms: u64::try_from(flush_lag_ms).unwrap_or(u64::MAX),
+            log_depth: u64::try_from(log_depth).unwrap_or(u64::MAX),
+        }))
     }
 
     async fn flush(&self, batch: &MutationBatch) -> Result<(), StoreError> {
@@ -1863,6 +1916,42 @@ mod tests {
         let store = test_store();
         store.init_schema().await.unwrap();
         store.init_schema().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_stats_write_then_read_round_trips_sqlite() {
+        // T85-3: a writer publishes flush stats into the durable table; a
+        // reader (possibly another process) reads them back. Absent row =
+        // honest `None` (n/a).
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("stats-roundtrip");
+
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), None);
+
+        let stats = SessionFlushStats {
+            flush_lag_ms: 42,
+            log_depth: 7,
+        };
+        store.write_flush_stats(&sid, &stats).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(stats));
+
+        // A different session has no row → None (n/a), never fabricated 0.
+        assert_eq!(
+            store
+                .read_flush_stats(&SessionId::from("other"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Re-publish converges (idempotent upsert), the whole row is replaced.
+        let later = SessionFlushStats {
+            flush_lag_ms: 99,
+            log_depth: 1,
+        };
+        store.write_flush_stats(&sid, &later).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(later));
     }
 
     #[tokio::test]

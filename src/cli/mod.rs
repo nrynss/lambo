@@ -105,6 +105,7 @@ mod tests {
     use crate::embed::{EmbedderConfig, EmbedderKind, FixtureEmbedder};
     use crate::mcp::server::{
         DeriveParams, RecallParams, RecordActionParams, WireConcept, WireConceptType, WireParentOf,
+        WireResource,
     };
     use crate::mcp::LamboServer;
     use crate::store::lease::{LeaseHolder, LeaseOutcome};
@@ -322,9 +323,9 @@ mod tests {
             .record_action_impl(RecordActionParams {
                 agent_id: "agent-a".into(),
                 action: "create user".into(),
-                produces: Some(vec!["user schema".into()]),
+                produces: Some(vec![WireResource("user schema".into())]),
                 modifies: None,
-                depends_on: Some(vec!["auth middleware".into()]),
+                depends_on: Some(vec![WireResource("auth middleware".into())]),
             })
             .await;
         assert_eq!(mcp_action.is_error, Some(false), "{mcp_action:?}");

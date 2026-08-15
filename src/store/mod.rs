@@ -64,6 +64,22 @@ use crate::types::{
 /// allocation, and integer narrowing at the public store/recall boundary.
 pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
 
+/// Observable flush stats published by the lease-holding writer and readable
+/// by a reader in another process (T85-3).
+///
+/// This is the durable/remote snapshot of the writer's in-memory
+/// [`crate::store::flush::FlushStats`] (lag / depth / dead-lettered), which is
+/// process-local and therefore invisible to a separate reader. A reader that
+/// sees `None` reports the honest `n/a`, never a fabricated `0`. Written ONLY
+/// by the writer's `FlushTask`; readers must never write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionFlushStats {
+    /// Milliseconds since the writer's last successful flush — the observable
+    /// durability-lag bound.
+    pub flush_lag_ms: u64,
+    /// Mutations not yet durable (in-graph log + pending batch) at publish time.
+    pub log_depth: u64,
+}
 pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
     if limit > MAX_VECTOR_CANDIDATE_LIMIT {
         return Err(StoreError::Invariant(format!(
@@ -247,6 +263,42 @@ pub trait GraphStore: Send + Sync {
         _holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Flush stats publication (T85-3)
+    // -----------------------------------------------------------------------
+
+    /// Persist this session's observable flush stats (T85-3).
+    ///
+    /// Called ONLY by the lease-holding writer's `FlushTask` after a flush
+    /// cycle, so a reader in another process can render real
+    /// `flush_lag_ms` / `log_depth` instead of `n/a`. A reader must never
+    /// call this. Best-effort by callers: a publish failure must not perturb
+    /// the flush path.
+    ///
+    /// **Default is a no-op** so non-target backends, test doubles, and the
+    /// advisory-default stores keep their prior behaviour; the three real
+    /// stores (`MemoryStore`, `SqliteStore`, `CockroachStore`) override it.
+    async fn write_flush_stats(
+        &self,
+        _session: &SessionId,
+        _stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Read the session's persisted flush stats (T85-3), for a reader.
+    ///
+    /// Returns `None` when no writer has published yet, or when the store does
+    /// not support it — the honest `n/a` fallback, not a fabricated value.
+    /// Default returns `None` (no-op read) so non-target backends and test
+    /// doubles keep their prior behaviour; the three real stores override it.
+    async fn read_flush_stats(
+        &self,
+        _session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        Ok(None)
     }
 }
 
@@ -799,5 +851,39 @@ mod tests {
         // Empty LAMBO_STORE is unset → keep file kind.
         assert_eq!(o.kind, StoreKind::Sqlite);
         env::remove_var("LAMBO_STORE");
+    }
+    #[tokio::test]
+    #[cfg(feature = "store-memory")]
+    async fn flush_stats_write_then_read_round_trips_memory() {
+        // T85-3: a writer publishes flush stats; a reader (same store, possibly
+        // another process) reads them back. Absent = honest `None` (n/a).
+        let store = MemoryStore::new();
+        let sid = SessionId::from("stats-roundtrip");
+
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), None);
+
+        let stats = SessionFlushStats {
+            flush_lag_ms: 42,
+            log_depth: 7,
+        };
+        store.write_flush_stats(&sid, &stats).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(stats));
+
+        // A different session stays `None` (absent = n/a, never fabricated 0).
+        assert_eq!(
+            store
+                .read_flush_stats(&SessionId::from("other"))
+                .await
+                .unwrap(),
+            None
+        );
+
+        // Re-publish converges (idempotent): the whole row is replaced.
+        let later = SessionFlushStats {
+            flush_lag_ms: 99,
+            log_depth: 1,
+        };
+        store.write_flush_stats(&sid, &later).await.unwrap();
+        assert_eq!(store.read_flush_stats(&sid).await.unwrap(), Some(later));
     }
 }
