@@ -439,7 +439,21 @@ pub const ACT_III: &[Step] = &[Step::Action {
     action: "add oauth_id to user schema",
     produces: &[],
     modifies: &[USER_SCHEMA],
-    depends_on: &["auth middleware", "repo/users.rs"],
+    // Four dependencies, not one, and deliberately so: this action and
+    // `wire login endpoint` are the two concepts that compete for the
+    // non-`user schema` places above canonization Stage 1's P90 cut, and with
+    // a near-tie between them the P90 boundary was decided by the last digit
+    // of the recency dimension — i.e. by scheduling. Giving the last edit the
+    // structure it would really have (the oauth column reaches the repo, the
+    // handler and the JWT middleware) separates the two by an order of
+    // magnitude more than the jitter, so the Candidate set is the same set
+    // every run.
+    depends_on: &[
+        "auth middleware",
+        "repo/users.rs",
+        "handlers/users.rs",
+        "middleware/jwt.rs",
+    ],
     narration: "add oauth_id to user schema          MODIFIES user schema",
 }];
 
