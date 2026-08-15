@@ -34,6 +34,7 @@ export default defineConfig({
             { label: 'Configuration', slug: 'config' },
             { label: 'Library API', slug: 'api' },
             { label: 'End to end', slug: 'end-to-end' },
+            { label: 'Evidence & evaluation', slug: 'evidence' },
           ],
         },
       ],
