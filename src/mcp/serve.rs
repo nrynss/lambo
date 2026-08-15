@@ -214,9 +214,11 @@ impl SecretToken {
     pub fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
         if raw.trim().is_empty() {
-            return Err("auth token is empty — pass a non-empty secret, or omit it entirely to \
+            return Err(
+                "auth token is empty — pass a non-empty secret, or omit it entirely to \
                         run unauthenticated on loopback"
-                .into());
+                    .into(),
+            );
         }
         Ok(Self(raw))
     }
@@ -1505,7 +1507,10 @@ mod tests {
         for i in 0..20 {
             assert!(rl.try_acquire_at(t0), "burst token {i} must be allowed");
         }
-        assert!(!rl.try_acquire_at(t0), "the 21st in the same instant is out");
+        assert!(
+            !rl.try_acquire_at(t0),
+            "the 21st in the same instant is out"
+        );
 
         // Half a second later, 10 rps has put ~5 tokens back.
         let t1 = t0 + Duration::from_millis(500);
@@ -1651,7 +1656,10 @@ mod tests {
         assert_eq!(status, 401, "a wrong token must be 401");
 
         let (status, _) = request(addr, &post(Some("Basic s3cret"), None)).await;
-        assert_eq!(status, 401, "the right secret under the wrong scheme is 401");
+        assert_eq!(
+            status, 401,
+            "the right secret under the wrong scheme is 401"
+        );
 
         assert_eq!(
             reached.load(std::sync::atomic::Ordering::SeqCst),
