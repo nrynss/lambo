@@ -876,7 +876,7 @@ non-breaking**, not retroactive.
 | Mutation | Result |
 |---|---|
 | strip removed from `normalize_tokens` | `canonical::invisible_characters_cannot_fork_a_canonical_key`, `canonical::a_composition_blocker_cannot_fork_a_key` and `caps::characters_this_surface_allows_cannot_fork_a_canonical_key` all FAILED |
-| the five non-*Cf* blank ranges removed from the table | `caps::invisible_format_characters_are_refused_by_codepoint` FAILED |
+| the five non-*Cf* blank ranges removed from the table | `caps::invisible_format_characters_are_refused_by_codepoint`, `canonical::invisible_characters_cannot_fork_a_canonical_key` and `mcp::server::control_characters_are_refused_but_tab_and_newline_are_allowed` all FAILED (three, not the one first recorded — corrected under V4) |
 
 Coverage: the reviewer's exact key-forking repro across 11 codepoints plus step-5
 matching against a real `Graph`; a CGJ composition-blocker case (which is why the
@@ -1302,3 +1302,126 @@ relocating dedupe; the strip removal; the five blank ranges; two column/limit
 bumps; the seed-dedupe removal) and three probe files were applied and reverted
 with `git checkout` / `rm`; `git status` and `git diff 658780d` were both empty
 at the end. Nothing outside this document is modified, and nothing is committed.
+
+---
+
+# R3 remediation (2026-08-15)
+
+Narrow round: V1 fixed, V4 corrected, V3 confirmed. V2 and V5 were filed by the
+verifier as no-action and are recorded as such.
+
+## Dispositions
+
+| Finding | Disposition | Commit |
+|---|---|---|
+| V1 — invisible codepoints that still fork a key | **FIXED** | `c95a014` (table), `aac5cd5` (tests) |
+| V2 — whitespace class out of scope | **NO ACTION** (verifier's own; recorded so it is not re-derived) | — |
+| V3 — R1-6's "fails it outright" is engine-specific | **CONFIRMED, already on the live list** | this commit |
+| V4 — R1-2 mutation table understates itself | **CORRECTED** | this commit |
+| V5 — values-last vs replay permissiveness | **NO ACTION** (observation, inherited from L82-1) | — |
+
+## V1 — the four gaps, closed on the policy side each one's class dictates
+
+The strip table had drifted into enumeration at exactly four boundaries. Each
+range was widened to swallow the codepoints its listed neighbour had left out:
+
+| Added | Side | Why that side |
+|---|---|---|
+| `U+180B–U+180D`, `U+180F` MONGOLIAN FREE VARIATION SELECTOR 1–4 | **strip** — `INVISIBLE_RANGES` *and* `TEXT_REQUIRED_INVISIBLE` | They are variation selectors. `TEXT_REQUIRED_INVISIBLE` already carries every other variation selector (`U+FE00–FE0F`, `U+E0100–E01EF`) on the reasoning that a selector picks a glyph form legitimate text needs; Mongolian needs these to select a positional variant exactly as emoji text needs VS16. Accepted in `content`, erased from the key |
+| `U+2065` | refuse | Reserved, `Default_Ignorable`, and a hole between the table's own `2060–2064` and `2066–206F` — both neighbours refuse, nothing legitimate uses it. Merged into one `2060–206F` |
+| `U+FFF0–U+FFF8` | refuse | Reserved specials directly ahead of the existing `FFF9–FFFB` interlinear entry; same family, same side |
+| `U+E0080–U+E00FF`, `U+E01F0–U+E0FFF` | refuse | Reserved `Default_Ignorable` runs either side of the selectors supplement. Collapsed with the TAGS block into the whole plane-14 range `E0000–E0FFF`; the supplement stays carved out on the strip side |
+
+One deviation from the verifier's suggested fix, deliberate: V1 proposed adding
+`U+180B` to `invisible_format_characters_are_refused_by_codepoint`. It is
+**accepted**, not refused, because it is a variation selector and the table's own
+convention puts every variation selector on the accepted-and-stripped side.
+Refusing it would have made the Mongolian selectors the only selectors the
+surface rejects. The key-forking half of the finding — the half that was
+exploitable — is closed either way, and `U+180E` MONGOLIAN VOWEL SEPARATOR
+(deprecated *Cf*, not a selector) is pinned **refused** so widening the range for
+the selectors could not smuggle it into the accepted set.
+
+The doc comment's superset argument now states the rule generally rather than
+for the TAGS block alone, which is what let the holes open.
+
+**Test proof.** `canonical::invisible_characters_cannot_fork_a_canonical_key`
+gains the verifier's repro verbatim plus one case per new range — FVS1, FVS4,
+the vowel separator, `U+2065`, `U+FFF0`, `U+E0080`, `U+E01F0`, all collapsing
+onto `"bill chang retri"`. `caps::invisible_format_characters_are_refused_by_codepoint`
+gains the five refuse-side codepoints including `U+180E`;
+`caps::joiners_and_arabic_number_signs_are_still_allowed` accepts all four
+selectors after a Mongolian letter; and
+`caps::characters_this_surface_allows_cannot_fork_a_canonical_key` pins that what
+the surface newly accepts is newly key-invariant.
+
+Mutation-checked, as required rather than asserted:
+
+| Mutation | Result |
+|---|---|
+| `('\u{180B}', '\u{180F}')` narrowed back to `('\u{180E}', '\u{180F}')` | `canonical::invisible_characters_cannot_fork_a_canonical_key` FAILED with `left: "billing\u{180b} chang retri"` / `right: "bill chang retri"` — the verifier's measured fork, reproduced exactly. `canonical::invisible_table_is_ordered_and_disjoint` and `caps::characters_this_surface_allows_cannot_fork_a_canonical_key` FAILED with it (3 total) |
+
+The subset invariant catching it independently is the point of the second table:
+narrowing the strip set while the exception set still listed the selectors would
+have left a codepoint accepted but unstripped, and that test says so by name.
+
+## V3 — confirmed, no edit needed
+
+Checked rather than assumed: the R2-verify note **already** carries the item, as
+"Live-cluster re-verification list — plus one", item 8 — *whether the pre-R1-6
+seed path actually failed on CockroachDB*, to be seeded on `47d7400` and
+`658780d`. It states the SQLite measurement and that the regression is asserted
+from PostgreSQL semantics, which is the substance of V3. Nothing added; the live
+list stands at eight items.
+
+## V4 — corrected
+
+The R1-2 mutation table named one failing test where three fail. Re-measured by
+re-applying the mutation rather than reasoning about it: removing the five
+non-*Cf* blank ranges fails `caps::invisible_format_characters_are_refused_by_codepoint`,
+`canonical::invisible_characters_cannot_fork_a_canonical_key` **and**
+`mcp::server::control_characters_are_refused_but_tab_and_newline_are_allowed` —
+644 passed, 3 failed. The row is corrected above. Same class of imprecision as
+R1-3, pointing the other way, as the verifier noted.
+
+## Gates
+
+Full binding block, all nine green, counts exact.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-cockroach,store-memory,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite -- -D warnings` | clean |
+| `cargo test` | **647** lib passed, 0 failed, 1 ignored; 5 bin; integration green; 1 doc |
+| `cargo test --features store-sqlite` | **694** lib passed, 0 failed, 1 ignored; 5 bin; integration green; 1 doc |
+| `cargo test --no-default-features --features store-sqlite --no-run` | builds |
+| `cargo test --no-default-features --features store-cockroach --no-run` | builds |
+| `cargo check --no-default-features` | clean |
+
+647 and 694 both **unchanged** from R2, and that is the expected result: V1's
+coverage went in as new rows in four existing table-driven tests, not as new
+`#[test]` functions. Zero `#[test]` / `#[tokio::test]` attributes removed, zero
+added. No assertion was removed or weakened — the only edits to existing
+assertions are added table rows and added `check_size` lines.
+
+## Migration note
+
+`U+180B–U+180D` and `U+180F` move from *silently accepted and key-affecting* to
+*accepted and stripped*. A concept row written before this change whose content
+carries one keeps its unstripped `canonical_key` and will not be matched by a
+recomputation — the same orphan situation R1-2 documented for the joiners, with
+the same reasoning: those rows were already unmergeable, which is the bug being
+fixed, and no new error path opens because the stripped key is a different string
+from the stored one and cannot collide with it under `concepts_key_non_obs_idx`.
+The refuse-side additions (`U+2065`, `U+FFF0–FFF8`, the plane-14 runs) narrow
+what the surface accepts; they were reserved or deprecated codepoints, so no
+legitimate caller was sending them.
+
+## Method note
+
+Committed on `task/live-l82-remediation` from `2ac39f0`. Two transient mutations
+(the Mongolian range narrowed; the five blank ranges removed) were applied and
+reverted with `git checkout`; `git status` was clean after each. The nine gates
+above were run after the last revert.
