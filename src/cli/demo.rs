@@ -622,8 +622,20 @@ pub async fn run_scenario(
         .map_err(|e| CliError::Runtime(format!("agent-b close: {e}")))?;
     n.say("  agent-b released the single-writer lease".to_string());
 
-    // ---- Act III + canonization ------------------------------------------
     n.banner("ACT III — agent-a comes back for one last edit");
+    let mem = open(&store, &embedder, &embedding, &session, AGENT_A, build_config()).await?;
+    play(&mem, ACT_III, &mut n, ACT_I.len() + ACT_II.len() + 1).await?;
+    mem.close()
+        .await
+        .map_err(|e| CliError::Runtime(format!("agent-a close: {e}")))?;
+    n.say("  agent-a released the single-writer lease".to_string());
+
+    // ---- Canonization ----------------------------------------------------
+    // A separate attach, and deliberately one that writes nothing: the graph
+    // is complete and frozen before the first daemon cycle, so no GC sweep and
+    // no canonization cycle can ever see a half-written session. Every sweep
+    // from here is funded by exactly one settle synonym and awaited, which is
+    // what makes the sequence identical run to run.
     let mem = open(
         &store,
         &embedder,
@@ -633,11 +645,9 @@ pub async fn run_scenario(
         canonization_config(),
     )
     .await?;
-    play(&mem, ACT_III, &mut n, ACT_I.len() + ACT_II.len() + 1).await?;
 
-    // The graph is complete: check the two structural facts the whole demo
-    // rests on before waiting on anything, so a broken script fails here with
-    // a diagnosis instead of timing out in the canonization wait.
+    // Check the facts the whole demo rests on before waiting on anything, so a
+    // broken script fails here with a diagnosis instead of timing out.
     assert_shape(mem.graph(), &mut n)?;
 
     n.banner("CANONIZATION — the engine, not the script, promotes user schema");
