@@ -1,0 +1,10 @@
+=== GET /api/session ===
+{"session":"demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2","store":"cockroach","embedder":"fixture","embedding_dim":1024,"vector_search":true,"mode":"reader","read_only":true,"store_is_process_local":false,"exposed_beyond_loopback":false,"poll_interval_ms":1500,"version":"0.1.0"}
+=== GET /api/recall?q=update user schema (head) ===
+{"session":"demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2","query":"update user schema","context":"user schema [Entity, canonical] (score 1.92, blast radius 9)\n⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.\n\nadd oauth_id to us
+=== GET /api/stats ===
+{"session":"demo-rest-api-0d0d5148-3dac-478e-8e07-111a3ad3cbe2","nodes":39,"edges":114,"concepts":27,"canonical":1,"canonization_events":5,"flush_lag_ms":0,"log_depth":0,"durable_change_age_ms":0,"mode":"reader","writer_only":"flush_lag / log_depth / daemon_cycles live in the writer process; this is a lease-free reader and cannot observe them"}
+=== GET /api/events?since=0 (head) ===
+{"total":5,"since":0,"events":[{"seq":0,"occurred_at":"2026-08-15T09:37:04.214601+00:00","node_id":"a30fef36-9c49-412c-8f25-2eabf8dc27b4","content":"user schema","from_status":"None","to_status":"Cand
+=== POST /api/pulse (read-only check) ===
+405

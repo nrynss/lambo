@@ -1979,3 +1979,49 @@ lease-release change and today's lease-message rewrite. **Verdict CLEAN** — no
   reviewable; the live leg awaits a cluster run.
 - **T86R2-1 (P3)** recorded, no action: the message rewrite cost is operator convenience only
   (SQL is in `docs/reference/cli.mdx` + the migrations' comments, not inlined in the refusal).
+
+### T8.4 / T8.6 / T8.5 — live-cluster verification (2026-08-15)
+
+The live CockroachDB Cloud cluster legs were exercised end-to-end. Evidence in
+`dev-diary/evidence/`: `demo-live-{1,2}.txt`, `demo-live-diff.txt`,
+`demo-live-saints.txt`, `demo-live-canon-events.txt`,
+`demo-live-conformance.txt`, `demo-live-serveweb-cockroach.txt`.
+
+- **T84-1 (P2) CLOSED — the two live done-when legs are met.** `lambo demo
+  --scenario rest-api` ran twice against the live cluster (session
+  `demo-rest-api-0d0d5148-…`), each exit 0, OUTCOME blocks byte-identical
+  (`diff` prints `IDENTICAL — T8.4 x2 met`): 12 interactions, 27 concepts, 114
+  edges, `user schema` Canonical blast radius 9, `canonization_events 5`
+  (user schema None→Candidate→Venerable→Canonical, plus two non-canonical
+  entries). `saints` returns the canonical memory; the `canonization_events`
+  split-screen query read back via `psql` shows the same 5 rows. The
+  parallelism: drive the demo ×2 while `serve-web` (reader) shows live
+  recall + feed + real stats on the same cockroach session.
+- **GC-headroom fix (the live failure the loop caught).** The first live run
+  failed the demo's GC-headroom assertion (`'middleware/session.rs'` at 1.03×
+  vs floor 1.25); a second weak concept then surfaced (`'users table
+  migration'` at 1.08×). Root cause: several concepts rest on the
+  timing-sensitive `recency` score term, which real network flush latency
+  jitters run to run on live (memory/sqlite replay near-instantly and clear
+  it). Fixed by lifting ALL structurally weak concepts at once (GC multi-lift,
+  11 depends_on additions + 2 derive-only additions for the user-schema
+  dependents + 2 assurance edges); headroom now robust (~1.4×–2.07×).
+  Adversarially reviewed CLEAN. `DemoOutcome.edges` 60 -> 114.
+- **OUTCOME canonization fixed-point (submit/verify).** The OUTCOME
+  `canonization_events` was snapshotted before the quiesce window, showing 4
+  while the fixed-point trail + store held 5. Moved the trail capture to the
+  fixed point; OUTCOME now reports 5 == "5 events total" == store row count.
+- **T86R2-2 CLOSED — the live Cockroach lease leg passed.** The live
+  conformance suite (`scripts/run-live-cockroach.sh`, `LAMBO_REQUIRE_LIVE=1`)
+  is green 8/8, including `single_writer_lease_is_enforced_across_pools`,
+  `cockroach_three_hop_progression_matches_memory`, `saints_and_stats_on_live`,
+  and the vector `EXPLAIN` camera proof. This supersedes the earlier
+  "T86R2-2 infra-blocked" note above.
+- **Serve-web Cockroach leg (T8.5) verified live.** `serve-web` against the
+  cockroach session is a read-only reader (`store_is_process_local:false`,
+  `vector_search:true`); `/api/recall` returns the T5.3 context block verbatim
+  under `user schema [Entity, canonical]`; `/api/stats` shows real numbers
+  (39/114/27/1/5, `flush_lag_ms:0`, `log_depth:0` — the T85-3 writer-stats
+  fix demonstrated on Cockroach); POST `/api/pulse` -> 405 (read-only holds).
+- **T86R2-2 (P3): now CLOSED — superseded by the live-passing conformance 8/8
+  above (single_writer_lease_is_enforced_across_pools passed live).**
