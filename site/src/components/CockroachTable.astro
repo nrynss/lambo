@@ -1,0 +1,286 @@
+---
+// CockroachTable.astro
+// Renders an interactive, terminal-styled view of CockroachDB table query output.
+interface Row {
+  node_id: string;
+  concept_name?: string;
+  from_status: string;
+  to_status: string;
+  blast_radius: number | null;
+  occurred_at: string;
+}
+
+interface Props {
+  title?: string;
+  query?: string;
+  cluster?: string;
+  database?: string;
+  rows?: Row[];
+}
+
+const {
+  title = "CockroachDB Cloud - SQL Query Output",
+  query = "SELECT node_id, from_status, to_status, blast_radius, occurred_at FROM canonization_events ORDER BY occurred_at;",
+  cluster = "nrynss-19495 (CockroachDB Cloud)",
+  database = "lambo",
+  rows = [
+    {
+      node_id: "724c92b9-a8a0-4d58-aa2e-29ed3cc43a57",
+      concept_name: "user schema",
+      from_status: "None",
+      to_status: "Candidate",
+      blast_radius: null,
+      occurred_at: "2026-08-15T14:50:08.306Z"
+    },
+    {
+      node_id: "3e3a6984-3bd6-480d-8490-d9df9b03540a",
+      concept_name: "add oauth_id to user schema",
+      from_status: "None",
+      to_status: "Candidate",
+      blast_radius: null,
+      occurred_at: "2026-08-15T14:50:08.306Z"
+    },
+    {
+      node_id: "724c92b9-a8a0-4d58-aa2e-29ed3cc43a57",
+      concept_name: "user schema",
+      from_status: "Candidate",
+      to_status: "Venerable",
+      blast_radius: null,
+      occurred_at: "2026-08-15T14:50:08.992Z"
+    },
+    {
+      node_id: "724c92b9-a8a0-4d58-aa2e-29ed3cc43a57",
+      concept_name: "user schema",
+      from_status: "Venerable",
+      to_status: "Canonical",
+      blast_radius: 9,
+      occurred_at: "2026-08-15T14:50:09.600Z"
+    },
+    {
+      node_id: "1848c6e5-8b63-4a64-942e-76c75afd0ce1",
+      concept_name: "add rate limiting middleware",
+      from_status: "None",
+      to_status: "Candidate",
+      blast_radius: null,
+      occurred_at: "2026-08-15T14:50:10.103Z"
+    }
+  ]
+} = Astro.props;
+---
+
+<div class="crdb-window">
+  <div class="crdb-header">
+    <div class="crdb-dots">
+      <span class="dot dot-red"></span>
+      <span class="dot dot-yellow"></span>
+      <span class="dot dot-green"></span>
+    </div>
+    <div class="crdb-title">{title}</div>
+    <div class="crdb-cluster-badge">{cluster} | db: {database}</div>
+  </div>
+
+  <div class="crdb-query-bar">
+    <span class="prompt">cockroach&gt;</span>
+    <code>{query}</code>
+  </div>
+
+  <div class="crdb-table-wrapper">
+    <table class="crdb-table">
+      <thead>
+        <tr>
+          <th>node_id</th>
+          <th>concept</th>
+          <th>from_status</th>
+          <th>to_status</th>
+          <th>blast_radius</th>
+          <th>occurred_at</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr class={row.to_status === 'Canonical' ? 'row-canonical' : ''}>
+            <td class="cell-mono cell-dim">{row.node_id.slice(0, 8)}…</td>
+            <td class="cell-concept">
+              <code>{row.concept_name}</code>
+            </td>
+            <td>
+              <span class={`status-pill status-${row.from_status.toLowerCase()}`}>
+                {row.from_status}
+              </span>
+            </td>
+            <td>
+              <span class={`status-pill status-${row.to_status.toLowerCase()}`}>
+                {row.to_status}
+              </span>
+            </td>
+            <td class="cell-num">
+              {row.blast_radius !== null ? (
+                <span class="blast-badge">⚑ {row.blast_radius}</span>
+              ) : (
+                <span class="cell-dim">null</span>
+              )}
+            </td>
+            <td class="cell-mono cell-dim">{row.occurred_at}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+  <div class="crdb-footer">
+    <span>({rows.length} rows)</span>
+    <span class="crdb-verified">✓ Verified via CockroachDB Cloud Managed MCP Server</span>
+  </div>
+</div>
+
+<style>
+  .crdb-window {
+    background: #0f141c;
+    border: 1px solid #1f293d;
+    border-radius: 8px;
+    margin: 1.5rem 0;
+    overflow: hidden;
+    font-family: var(--sl-font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+    font-size: 0.82rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  }
+
+  .crdb-header {
+    background: #161e2e;
+    padding: 0.5rem 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #1f293d;
+  }
+
+  .crdb-dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .dot-red { background: #ef4444; }
+  .dot-yellow { background: #f59e0b; }
+  .dot-green { background: #10b981; }
+
+  .crdb-title {
+    color: #94a3b8;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .crdb-cluster-badge {
+    color: #6978eb;
+    background: rgba(105, 120, 235, 0.12);
+    border: 1px solid rgba(105, 120, 235, 0.3);
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+  }
+
+  .crdb-query-bar {
+    background: #111827;
+    padding: 0.6rem 0.85rem;
+    border-bottom: 1px solid #1f293d;
+    color: #e2e8f0;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    overflow-x: auto;
+  }
+
+  .prompt {
+    color: #6978eb;
+    font-weight: bold;
+    user-select: none;
+  }
+
+  .crdb-table-wrapper {
+    overflow-x: auto;
+  }
+
+  .crdb-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+    margin: 0;
+  }
+
+  .crdb-table th {
+    background: #161e2e;
+    color: #94a3b8;
+    font-weight: 600;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid #1f293d;
+  }
+
+  .crdb-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #172033;
+    color: #cbd5e1;
+    white-space: nowrap;
+  }
+
+  .row-canonical {
+    background: rgba(245, 158, 11, 0.06);
+  }
+
+  .cell-mono {
+    font-size: 0.78rem;
+  }
+
+  .cell-dim {
+    color: #64748b;
+  }
+
+  .cell-concept code {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.78rem;
+  }
+
+  .status-pill {
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.72rem;
+    font-weight: 500;
+  }
+
+  .status-none { color: #64748b; background: rgba(100, 116, 139, 0.15); }
+  .status-candidate { color: #60a5fa; background: rgba(96, 165, 250, 0.15); }
+  .status-venerable { color: #a78bfa; background: rgba(167, 139, 250, 0.15); }
+  .status-canonical { color: #f59e0b; background: rgba(245, 158, 11, 0.2); font-weight: 600; }
+
+  .blast-badge {
+    color: #f59e0b;
+    font-weight: 600;
+    background: rgba(245, 158, 11, 0.15);
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+  }
+
+  .crdb-footer {
+    padding: 0.45rem 0.85rem;
+    background: #111827;
+    border-top: 1px solid #1f293d;
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    color: #64748b;
+  }
+
+  .crdb-verified {
+    color: #10b981;
+  }
+</style>

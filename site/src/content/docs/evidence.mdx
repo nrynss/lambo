@@ -4,6 +4,7 @@ description: "Live cluster verification, vector recall benchmarks, and determini
 ---
 import Note from '../../components/MdxNote.astro';
 import Warning from '../../components/MdxWarning.astro';
+import CockroachTable from '../../components/CockroachTable.astro';
 
 You do not have to trust claims on paper. You can verify every invariant against live CockroachDB clusters and raw logs in the `evidence/` directory.
 
@@ -69,11 +70,9 @@ When Agent B attempts to modify a load-bearing pillar, Lambo halts the regressio
 
 Lambo writes all promotions into `canonization_events`. You can inspect this audit trail directly through CockroachDB SQL or the Managed MCP Server.
 
-```sql
-SELECT session_id, concept_content, previous_status, new_status, reason, blast_radius 
-FROM canonization_events 
-WHERE session_id = 'demo-session' 
-ORDER BY event_order ASC;
-```
+<CockroachTable 
+  title="CockroachDB Cloud - canonization_events table"
+  query="SELECT node_id, from_status, to_status, blast_radius, occurred_at FROM canonization_events ORDER BY occurred_at;"
+/>
 
 You can view raw logs and execution plans in the `evidence/` folder of the repository.
