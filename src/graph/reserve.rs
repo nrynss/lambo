@@ -3,11 +3,11 @@
 //! Sits on top of T2.1's storage: [`Graph::set_reservation`] /
 //! [`Graph::clear_reservation`] / [`Graph::reservation`] / [`Graph::reservations`]
 //! are RAM-local (no `Mutation` kind exists; they round-trip via
-//! [`GraphSnapshot`] only). This module owns the *rules* — expiry, same-agent
+//! [`crate::types::GraphSnapshot`] only). This module owns the *rules* — expiry, same-agent
 //! extend, cross-agent deny/takeover — and deliberately adds nothing to `Graph`.
 //!
 //! Durability contract (P3 note, muse-spark S5): reservations persist ONLY via
-//! a full [`GraphSnapshot`] save/load (e.g. `store.load_session` /
+//! a full [`crate::types::GraphSnapshot`] save/load (e.g. `store.load_session` /
 //! `MemoryStore::seed`). The write-behind mutation log never carries them — a
 //! writer crash between two snapshot saves loses reservations, which is
 //! tolerable for advisory locks (spec §11) but must be stated, not assumed.

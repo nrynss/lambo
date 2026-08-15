@@ -27,7 +27,7 @@
 //!    canonical key alone — no embedding lookups on the write path, therefore
 //!    no dependence on an embedder's weights, network, or backend.
 //! 2. **No wall-clock waits decide anything.** Every wait is a bounded poll on
-//!    an observable condition ([`wait_until`]) — a status in the graph, an
+//!    an observable condition (`wait_until`) — a status in the graph, an
 //!    audit-trail length, a `gc_survived` floor, a daemon event, a completed
 //!    canonization cycle. Nothing in this file sleeps for a fixed duration and
 //!    then assumes progress happened.
@@ -54,12 +54,12 @@
 //!
 //! So the demo does two things after the last write:
 //!
-//! * **Settle** ([`settle_gc_survived`]): declare one session synonym at a
+//! * **Settle** (`settle_gc_survived`): declare one session synonym at a
 //!   time — a real spec §7.1 call, agent A teaching the session its aliases —
 //!   and wait for the resulting GC sweep, until **every** concept clears the
 //!   `gc_survived >= 3` floor. Stage 1's survival gate is then uniformly open
 //!   and admission is decided by score alone.
-//! * **Quiesce** ([`quiesce`]): keep polling until the audit trail stops
+//! * **Quiesce** (`quiesce`): keep polling until the audit trail stops
 //!   growing across [`QUIESCE_STABLE_CYCLES`] consecutive completed
 //!   canonization cycles.
 //!
@@ -193,7 +193,7 @@ pub const MIN_GC_HEADROOM: f64 = 1.25;
 /// a diagnosis, not to pace the demo (every wait returns as soon as its
 /// condition holds — typically in single-digit milliseconds).
 pub const STEP_DEADLINE: Duration = Duration::from_secs(60);
-/// Poll period inside [`wait_until`].
+/// Poll period inside `wait_until`.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// Spacing between scripted interactions.

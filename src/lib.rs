@@ -1,7 +1,77 @@
 //! Lambo — agentic graph memory library.
 //!
-//! Backends are **Level B** pluggable: Cargo features compile adapters in;
-//! `lambo.toml` / env select among them. See `dev-diary/notes/level-b-pluggability.md`.
+//! Lambo gives a group of agents a shared memory that is a graph rather than a
+//! transcript. Agents write what they learn and what they did; Lambo links it,
+//! scores it, and hands back the part that matters for the next query.
+//!
+//! # The primary type
+//!
+//! Everything routes through [`Memory`]. The MCP server and the CLI are both
+//! thin wrappers over it.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), lambo::LamboError> {
+//! use lambo::{resolve_backends, LamboFile, Memory, RecallQuery};
+//!
+//! // In a real program the file comes from `lambo.toml`.
+//! let backends = resolve_backends(LamboFile::default())?;
+//!
+//! let mem = Memory::builder()
+//!     .session("demo")
+//!     .agent("agent-a")
+//!     .backends(backends)
+//!     .build()
+//!     .await?;
+//!
+//! let result = mem.recall(RecallQuery {
+//!     query: "user schema".into(),
+//!     top_k: 5,
+//!     max_tokens: 500,
+//!     traversal_depth: 2,
+//! }).await?;
+//! println!("{}", result.context);
+//!
+//! mem.close().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # How a session behaves
+//!
+//! * **One writer.** A session has exactly one [`Memory`] writing it, held by a
+//!   lease that a second writer is refused against by name. Readers query the
+//!   store directly and take no lease.
+//! * **Durability is eventual.** Writes land in an in-memory graph and a
+//!   write-behind log, and flush to the store on an interval, in batched
+//!   statements. [`Memory::stats`] reports the current lag, which is the loss
+//!   bound. There is no on-disk journal, so a tail abandoned by a close that
+//!   ran out of time is lost rather than replayed.
+//! * **Canonization is earned.** Concepts become canonical facts from
+//!   structural evidence, not because an agent declared one important. See
+//!   [`CanonizationStatus`] and [`CanonizationEvent`].
+//! * **Text is validated on the way in.** Control characters other than tab and
+//!   newline, and invisible formatting characters such as bidi overrides, are
+//!   refused. Invisible characters that real writing needs are kept in content
+//!   and ignored when matching concepts, so they cannot mint a hidden duplicate.
+//!
+//! # Pluggable backends
+//!
+//! Backends are **Level B** pluggable: Cargo features compile adapters in, and
+//! `lambo.toml` or the environment selects among them at runtime. One binary
+//! carries every adapter it was built with. See
+//! `dev-diary/notes/level-b-pluggability.md`.
+//!
+//! Implement [`GraphStore`] for durable storage and [`Embedder`] for vectors.
+//! A store declares what it can do through [`Capabilities`]: only a store
+//! reporting `VECTOR_SEARCH` serves recall's vector leg, and the others fall
+//! back to keyword matching plus graph expansion.
+//!
+//! # Where to look next
+//!
+//! * [`Memory`] and [`MemoryBuilder`] — the API surface.
+//! * [`types`] — the contracts every surface shares.
+//! * [`store`] and [`embed`] — the adapter traits and the shipped adapters.
+//! * [`mcp`] and [`cli`] — the two user-facing surfaces.
 
 pub mod canon;
 pub mod cli;

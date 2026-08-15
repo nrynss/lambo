@@ -12,7 +12,7 @@
 //!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
 //!   tokio clock so it tracks paused time deterministically in tests.
 //! * **Bounded attempts.** Every `store.flush` attempt is bounded by
-//!   [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung store must not wedge the
+//!   `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung store must not wedge the
 //!   loop forever — the timeout maps into the retry path like any `Err`.
 //! * **Never dropped (except dead letters).** After `retries` retries the
 //!   batch is retained in the task's pending buffer and flushes before newly
@@ -21,7 +21,7 @@
 //!   the mod.rs contract). The in-memory graph is the primary tier (spec
 //!   §2.1), so the session keeps accepting writes throughout an outage. A
 //!   retained batch that exhausted its retries waits out
-//!   [`RETAINED_BACKOFF`] before the next attempt (F3): a permanently failing
+//!   `RETAINED_BACKOFF` before the next attempt (F3): a permanently failing
 //!   store re-enters the retry sequence at most once per hold, not once per
 //!   interval tick. The one exception (STORE-4/D5): a batch rejected with a
 //!   deterministic constraint violation is logged and dropped — never
@@ -41,10 +41,10 @@
 //! ## Timing model
 //!
 //! The task wakes on `interval` ticks (the tick-triggered flush) and, in
-//! between, polls every [`POLL_QUANTUM`] so a batch that reaches `max_batch`
+//! between, polls every `POLL_QUANTUM` so a batch that reaches `max_batch`
 //! flushes *early* — before the interval elapses (spec §2.4 "forces an early
 //! flush"). The graph is polled, not notified (there is no write channel on
-//! [`Graph`]), so [`POLL_QUANTUM`] is the granularity of the early-flush
+//! [`Graph`]), so `POLL_QUANTUM` is the granularity of the early-flush
 //! trigger and of the depth observation.
 //!
 //! ## Shutdown (COH-6, T8.1)
@@ -266,7 +266,7 @@ impl FlushTask {
     /// shutdown drain, T8.1). Returns immediately; the task stops later.
     ///
     /// This is a **signal, not a drain API**: the loop finishes its current
-    /// [`FlushLoop::cycle`] (any in-flight flush and its retry/backoff run to
+    /// `FlushLoop::cycle` (any in-flight flush and its retry/backoff run to
     /// completion — a post-retry `RETAINED_BACKOFF` hold is not waited out),
     /// re-appends whatever is still in its task-owned `pending` buffer to the
     /// FRONT of the graph's mutation log ([`Graph::push_front_log`]), and
@@ -550,7 +550,7 @@ impl FlushLoop {
 
     /// Attempt `store.flush` with exponential backoff, up to `retries` retries
     /// after the initial attempt (total attempts = `retries` + 1). Every
-    /// attempt is bounded by [`FLUSH_ATTEMPT_TIMEOUT`] (STORE-2): a hung
+    /// attempt is bounded by `FLUSH_ATTEMPT_TIMEOUT` (STORE-2): a hung
     /// store must not wedge the loop forever — the timeout maps into this
     /// retry path exactly like any other `Err` (retry → retain → degrade).
     /// A [`StoreError::Constraint`] (STORE-4) is deterministic and surfaces
@@ -1010,7 +1010,7 @@ mod tests {
     /// `GraphStore` mock: its flush HANGS (never resolves) for the first
     /// `hang_next(n)` calls, then delegates to an inner store. STORE-2
     /// harness — mirrors the F2 `HangingStore` (load.rs) for the flush path:
-    /// a hung flush must be bounded by [`FLUSH_ATTEMPT_TIMEOUT`], never wedge
+    /// a hung flush must be bounded by `FLUSH_ATTEMPT_TIMEOUT`, never wedge
     /// the loop.
     struct HungStore {
         inner: Arc<dyn GraphStore>,

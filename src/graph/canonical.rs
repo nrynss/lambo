@@ -4,7 +4,7 @@
 //! 1. Normalize — Unicode **NFC** (adve-review GRAPH-9: composed and decomposed
 //!    spellings of the same word must not become two concepts), split camelCase
 //!    boundaries, lowercase, split `[-_ ]` + whitespace, strip stopwords
-//!    ([`STOPWORDS`], pinned to the fixture convention
+//!    (`STOPWORDS`, pinned to the fixture convention
 //!    `scripts/gen-fixtures.py`). See [`normalize_tokens`] for why NFC and not
 //!    NFKC.
 //! 2. Stem — Porter via `rust-stemmers` (`Algorithm::English`; snowball and

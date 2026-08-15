@@ -1,5 +1,5 @@
 //! `lambo reserve` / `lambo release` — lease-held thin adapters over
-//! [`Memory::reserve`] / [`Memory::release`].
+//! [`crate::memory::Memory::reserve`] / [`crate::memory::Memory::release`].
 //!
 //! Reservations are advisory and RAM-local (pinned contract S5). On the CLI
 //! they end when this process exits (`close_writer` is the next line), not

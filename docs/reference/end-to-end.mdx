@@ -3,17 +3,19 @@ title: "End to end"
 description: "How the parts fit together, from serving a session to running a swarm"
 ---
 
-{/* L82 delta pass pending: control-char ranges, organic vector recall, bulk flush */}
-
 This page shows how the parts fit together, from serving a session to driving it with agents.
 
 ## The model
 
 A session has exactly one writer, which is a `lambo serve` process that holds the session's lease. Readers query the store directly and never open a writer.
 
-Writes flow through one in-memory graph. They land in a write-behind log and flush to the durable store on an interval, so durability is eventual, not immediate. Call `lambo_stats` on the writer to see the current lag.
+Writes flow through one in-memory graph. They land in a write-behind log and flush to the durable store on an interval, so durability is eventual, not immediate. Call `lambo_stats` on the writer to see the current lag. Each flush goes out as a few batched statements rather than one statement per change, so a burst of writes costs a handful of round trips to the store instead of one per change.
 
 Canonization runs in the background. It promotes concepts to canonical facts when they earn it from structural evidence, not when an agent declares them important.
+
+Every concept written this way keeps its embedding, so memory your agents produce is recallable by meaning and not only by keyword, on a store that supports vector search. See [What recall searches](#what-recall-searches).
+
+Text is checked on the way in. Lambo refuses control characters other than tab and newline, and refuses invisible formatting characters such as bidi overrides and zero-width spaces, so nothing that a reviewer cannot see reaches the graph. See [What Lambo accepts in text](/cli#what-lambo-accepts-in-text).
 
 ## A walkthrough you can run
 
@@ -98,7 +100,25 @@ The `initialize` reply names the session and carries the server's instructions, 
 {"content":[{"type":"text","text":"derived 1 concept(s): 1 created, 0 matched existing"}],"isError":false}
 ```
 
-Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes the pending tail and releases the lease, even on a signal.
+Stop the server with `Ctrl-C` or a clean disconnect. Lambo flushes whatever has not reached the store yet and releases the lease, even on a signal. Because a flush is batched, even a heavy burst written moments before you stop drains quickly rather than trickling out one change at a time.
+
+<Warning>
+Shutdown is time-bounded, so it gives up rather than hanging when the store is unreachable. Anything still un-flushed when it gives up is lost, because there is no on-disk journal to replay it from. Let the process finish, and do not `kill -9` a writer whose most recent writes matter to you.
+</Warning>
+
+## What recall searches
+
+Recall has three legs: keyword matching, vector similarity, and expansion through the graph edges around what it found. The vector leg needs a store with vector search.
+
+| Store | Keyword | Vector | Graph expansion |
+|---|---|---|---|
+| CockroachDB | Yes | Yes | Yes |
+| SQLite | Yes | No | Yes |
+| In-memory | Yes | No | Yes |
+
+Concepts your agents write through `derive` and `record-action` store their embedding along with their text. On a store with vector search, that means recall finds memory the swarm wrote itself by meaning, not just memory you loaded in bulk ahead of time. This matters most for the swarm pattern below, where many agents write the same idea in different words.
+
+The walkthrough above uses SQLite, so it exercises the keyword and graph legs only. Recall still works there. You get matches on the words you use rather than on meaning, so a query sharing no vocabulary with a stored concept can miss it.
 
 ## Readers and the writer
 

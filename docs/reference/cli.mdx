@@ -3,8 +3,6 @@ title: "Command line"
 description: "Read and write session memory from the terminal"
 ---
 
-{/* L82 delta pass pending: control-char ranges, organic vector recall, bulk flush */}
-
 Lambo has command line verbs that mirror the MCP tools, so you can read and write session memory from the terminal without an MCP client. The command line is the primary surface for large swarms of small agents, because each call is one deterministic line with no tool schema overhead.
 
 ## Global options
@@ -38,6 +36,43 @@ $ echo $?
 2
 ```
 
+## What Lambo accepts in text
+
+Every string you pass is limited to 16 KB, and two classes of character are refused. Lambo names the offending codepoint and never echoes the raw byte back into your terminal.
+
+Tab and newline are the only control characters you may send. Every other control character is refused, so a stray `U+0000` or an ANSI escape sequence cannot reach stored content and corrupt whatever prints it later.
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "$(printf 'ok\001no')" --kind entity
+lambo derive: concept.content contains a disallowed control character (U+0001); tab and newline are the only control characters allowed
+$ echo $?
+2
+```
+
+Invisible formatting characters are refused too. That covers bidi overrides such as `U+202E`, the zero-width family such as `U+200B`, blank-rendering fillers such as `U+3164`, the byte order mark, and tag characters. None of them paint anything on screen, so a concept carrying one looks innocuous when you read it back while reading differently to a model.
+
+The examples below build their input with `printf` escapes, because pasting one of these characters into a document would hide it there too.
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "$(printf 'amount 100\342\200\256DSU 5')" --kind entity
+lambo derive: concept.content contains a disallowed invisible formatting character (U+202E); bidi overrides, zero-width characters, blank fillers, the BOM and tag characters are refused because they are invisible in review but not to the model (zero-width joiner and non-joiner are allowed, and are stripped from canonical keys)
+$ echo $?
+2
+```
+
+Invisible characters that real writing needs stay allowed. The zero-width joiner and non-joiner, the variation selectors, and the combining grapheme joiner all pass, so Persian, Indic, and emoji text goes through unchanged.
+
+<Note>
+Lambo keeps the allowed invisible characters in the content it stores, and ignores them when it decides whether two concepts are the same. Text that looks identical on screen lands on the same concept, so nobody can mint a hidden duplicate by slipping an invisible character into an existing concept.
+</Note>
+
+```bash
+$ lambo derive --session demo --agent agent-a --content "billing retries change" --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+$ lambo derive --session demo --agent agent-a --content "$(printf 'billing\342\200\215 retries change')" --kind entity
+derived 1 concept(s): 0 created, 1 matched existing
+```
+
 ## Read commands
 
 Read commands query the store directly and never take the writer lease, so they are safe to run against a session another process owns.
@@ -45,6 +80,8 @@ Read commands query the store directly and never take the writer lease, so they 
 ### lambo recall
 
 Recalls the context block for a query, with canonical markers, blast-radius warnings, and conflict lines.
+
+Recall combines keyword matching with vector similarity, then expands through the graph. Concepts your agents write keep their embedding, so on a CockroachDB store recall finds memory the swarm wrote itself and not only memory you loaded in bulk. The SQLite and in-memory stores have no vector column, so there recall matches on words rather than on meaning.
 
 | Flag | Required | Default |
 |---|---|---|
@@ -219,6 +256,16 @@ lambo serve --config lambo.toml --session demo --agent agent-a
 
 See [MCP tools](/mcp) for the tools it exposes.
 
+### Stopping a writer
+
+Stop the server with `Ctrl-C` or a clean client disconnect. On the way out it flushes whatever has not reached the store yet and releases the session lease, so the next writer can take the session immediately instead of waiting for the lease to expire.
+
+Lambo writes a flush as a few batched statements rather than one statement per change, so even a large burst written just before you stop drains in a handful of round trips. A heavy write burst followed straight away by `Ctrl-C` is a case that used to need many seconds to drain.
+
+<Warning>
+Shutdown is time-bounded, so it stops rather than hanging if the store is unreachable. If it runs out of time, the writes that had not reached the store are lost. There is no on-disk journal to replay them from on the next start. Let the process finish its shutdown, and do not `kill -9` a writer you care about the tail of.
+</Warning>
+
 ## Provision a store
 
 `lambo provision` creates or migrates the durable store schema. It reads the store choice from your config and takes no other flags. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
@@ -261,6 +308,8 @@ The command line enforces the same limits as the MCP tools.
 | `--ttl-seconds` | 3600 |
 | Neighbours rendered by `inspect` | 200 |
 
-A string may not contain control characters other than tab and newline. Lambo names the offending codepoint and never echoes the raw byte.
+`inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
+
+See [What Lambo accepts in text](#what-lambo-accepts-in-text) for the character rules, which apply to every string on every verb.
 
 See [MCP tools](/mcp) for the same operations over MCP, and [Library API](/api) for the type both surfaces share.

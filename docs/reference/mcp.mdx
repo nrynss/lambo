@@ -3,8 +3,6 @@ title: "MCP tools"
 description: "The seven tools your agents call, with arguments and limits"
 ---
 
-{/* L82 delta pass pending: control-char ranges, organic vector recall, bulk flush */}
-
 Lambo is agentic graph memory. It runs as an MCP server that exposes seven tools your agent can call to store what it learns, recall relevant prior memory, and coordinate edits. A running `lambo serve --session <id>` process is the single writer for that session, and your agents connect to it as MCP clients.
 
 ## Transports
@@ -28,9 +26,25 @@ Every tool takes an `agent_id`, and every tool rejects any argument it does not 
 Do not send timestamps. Lambo stamps all times itself, and no tool accepts a timestamp argument. Sending one is refused by name.
 </Note>
 
-Any string you send is limited to 16 KB, and it may not contain control characters other than tab and newline. Lambo names the offending codepoint rather than echoing the raw byte.
-
 You manage ordering. A read sees a write only after that write's tool call has returned. If you want a recall to see something you just derived, call `lambo_derive` first, wait for it to return, and then call `lambo_recall`.
+
+### What Lambo accepts in text
+
+Any string you send is limited to 16 KB. Lambo also refuses two classes of character. In both cases it names the offending codepoint and never echoes the raw byte back to you.
+
+- **Control characters.** Tab and newline are the only ones you may send. Every other control character is refused, so a stray `U+0000` or an ANSI escape sequence cannot reach stored content and corrupt whatever renders it later.
+- **Invisible formatting characters.** Lambo refuses bidi overrides such as `U+202E`, the zero-width family such as `U+200B`, blank-rendering fillers such as `U+3164`, the byte order mark, and tag characters. These paint nothing on screen, so a concept carrying one reads as innocuous to you while reading differently to a model.
+
+Invisible characters that real writing needs stay allowed. The zero-width joiner and non-joiner, the variation selectors, and the combining grapheme joiner all pass, so Persian, Indic, and emoji text goes through unchanged.
+
+<Note>
+Lambo keeps the allowed invisible characters in the content it stores, and ignores them when it decides whether two concepts are the same. Texts that look identical on screen therefore land on the same concept. Nobody can mint a hidden duplicate of an existing concept by slipping an invisible character into it.
+</Note>
+
+```json
+{"content": [{"type": "text", "text": "concept.content contains a disallowed invisible formatting character (U+202E); bidi overrides, zero-width characters, blank fillers, the BOM and tag characters are refused because they are invisible in review but not to the model (zero-width joiner and non-joiner are allowed, and are stripped from canonical keys)"}],
+ "isError": true}
+```
 
 ### How agent_id is used
 
@@ -50,7 +64,8 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 |---|---|
 | A missing, unknown, or malformed argument | The parameter error naming the field, before the tool runs. |
 | A value outside its range | The bound, such as `top_k must be in 1..=100`. |
-| A string over the size cap or carrying a control character | The field, the cap, and the size given, or the offending codepoint. |
+| A string over the size cap | The field, the cap, and the size given. |
+| A string carrying a control or invisible character | The field, the offending codepoint, and which class of character was refused. |
 | A focus that matches several concepts | The candidate list with node ids, so you can name one exactly. |
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
@@ -60,6 +75,16 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 ### lambo_recall
 
 Recall relevant memory for a query. This returns the Lambo context block, which is the set of memories that matter for the query, with markers for canonical facts, blast-radius warnings, and conflicts. The block is the first text content of the result, and the individual hits come back as structured content alongside it.
+
+Recall combines keyword matching with vector similarity, then expands through the graph. Which of those legs run depends on your store. Every concept your agents write through `lambo_derive` and `lambo_record_action` keeps its embedding, so a store with vector search finds memory your own agents wrote, not just memory you loaded in bulk.
+
+| Store | What recall uses |
+|---|---|
+| CockroachDB | Keyword matching and vector similarity, plus graph expansion. |
+| SQLite | Keyword matching plus graph expansion. It has no vector column. |
+| In-memory | Keyword matching plus graph expansion. |
+
+Recall still works without a vector leg. You get matches on the words you use rather than on meaning, so a query that shares no vocabulary with a stored concept may miss it.
 
 | Argument | Type | Required | Range or default |
 |---|---|---|---|
@@ -196,7 +221,7 @@ lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant to 
 
 ## Limits
 
-Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it.
+Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
 
 | Limit | Value |
 |---|---|
@@ -209,5 +234,13 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Reservation TTL | 3600 seconds |
 | Neighbours rendered by `lambo_inspect` | 200 |
 | Candidates listed for an ambiguous focus | 10 |
+
+Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused.
+
+<Warning>
+The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.
+</Warning>
+
+`lambo_inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
 
 See [Command line](/cli) for the same operations from the terminal, and [Library API](/api) for the underlying Rust library.

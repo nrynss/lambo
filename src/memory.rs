@@ -27,7 +27,7 @@
 //! the final drain: acknowledged to its caller, durable nowhere, and (for a
 //! retraction) resurrected on the next attach.
 //!
-//! So every mutating method holds a **read permit** on [`Memory::writers`] for
+//! So every mutating method holds a **read permit** on `Memory::writers` for
 //! its whole body, awaits included, and re-checks `closed` after acquiring it;
 //! [`Memory::close`] latches `closed` and then takes the **write** side before
 //! it stops anything. The two orders are the only two outcomes: an in-flight
@@ -43,7 +43,7 @@
 //! The graph is index-free by design and **the session owner MUST mirror every
 //! concept write into the index**. `Memory` is that owner. Every write path
 //! here — [`Memory::derive`], [`Memory::record_action`], [`Memory::demote`] —
-//! calls [`Memory::mirror_concepts`] on the ids it created, and
+//! calls `Memory::mirror_concepts` on the ids it created, and
 //! [`Memory::retract`] calls `index.remove`. GC-driven removals are mirrored by
 //! the daemon itself because [`MemoryBuilder::build`] hands it the index via
 //! [`Daemon::with_index`].
@@ -176,12 +176,17 @@ pub struct ImpactReport {
 /// One canonical ("saint") memory — [`Memory::canonical_memories`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalMemory {
+    /// The concept's node id.
     pub node_id: NodeId,
+    /// Its text.
     pub content: String,
+    /// How it is classified.
     pub concept_type: ConceptType,
     /// In-RAM blast radius (dependents), same source as recall's `⚑` warning.
     pub blast_radius: u64,
+    /// When it was first written.
     pub created_at: DateTime<Utc>,
+    /// How many times recall has returned it.
     pub access_count: i32,
 }
 
@@ -189,7 +194,9 @@ pub struct CanonicalMemory {
 /// *observable*, so `flush_lag` and `log_depth` are the load-bearing fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryStats {
+    /// The session these figures are for.
     pub session: SessionId,
+    /// The agent this writer runs as.
     pub agent: AgentId,
     /// Time since the last successful flush.
     pub flush_lag: Duration,
@@ -212,14 +219,21 @@ pub struct MemoryStats {
     pub dead_lettered: u64,
     /// `true` once the session degraded to `durability="none"` (spec §2.3).
     pub degraded: bool,
+    /// Nodes in the session, interactions and concepts together.
     pub node_count: usize,
+    /// Edges in the session.
     pub edge_count: usize,
+    /// Concepts in the session.
     pub concept_count: usize,
+    /// Concepts that have reached canonical status.
     pub canonical_count: usize,
     /// `MutationEpoch` — recall-cache key (spec §8).
     pub epoch: u64,
+    /// Background daemon cycles completed since the session opened.
     pub daemon_cycles: u64,
+    /// Canonization evaluation cycles completed.
     pub canonization_cycles: u64,
+    /// Canonization cycles that failed. A non-zero count is worth investigating.
     pub canonization_failures: u64,
 }
 
@@ -769,7 +783,7 @@ pub struct Memory {
     /// lease is released, and by `Drop` so a leaked handle stops squatting the
     /// lease (its row then lapses at TTL rather than being kept alive forever).
     /// Unlike the three producers it never touches the graph or the tail, so a
-    /// bare `abort()` is enough — no [`HandleCustody`] reap is needed.
+    /// bare `abort()` is enough — no `HandleCustody` reap is needed.
     heartbeat_handle: PlMutex<Option<JoinHandle<()>>>,
     /// The receiver subscribed before `Daemon::spawn`; handed to the first
     /// [`Memory::events`] caller so the warm-up condition set is not lost.
@@ -1053,7 +1067,7 @@ impl Memory {
     ///
     /// ## The durable-radius query is bounded (R2-5)
     ///
-    /// That store call gets [`RETRACT_IO_TIMEOUT`], and a timeout **fails the
+    /// That store call gets `RETRACT_IO_TIMEOUT`, and a timeout **fails the
     /// whole retraction** — nothing is removed, since the await precedes every
     /// mutation. Note the asymmetry with the arm above it, which is deliberate:
     /// a store *error* is an answer, and the commonest one ("no such session
@@ -1379,7 +1393,7 @@ impl Memory {
     /// second writer mid-flush — the exact window the lease exists to close.
     ///
     /// **The `serve` path avoids this by bounding `close()` below the TTL.**
-    /// [`crate::mcp::serve`] caps its close at `CLOSE_GRACE` (10s) inside a
+    /// [`crate::mcp::serve`](mod@crate::mcp::serve) caps its close at `CLOSE_GRACE` (10s) inside a
     /// `SHUTDOWN_BUDGET` (15s), and a build-time assertion pins
     /// `LEASE_TTL (45s) > SHUTDOWN_BUDGET`, so the lease is provably still valid
     /// when `release` lands. **A direct library caller gets no such bound** and
@@ -1413,11 +1427,11 @@ impl Memory {
     /// that used to leave a live flush loop still holding the tail in its own
     /// `pending` buffer while the retry — finding an empty slot and an empty log
     /// — took the shortcut below and returned `Ok(())`. Every handle therefore
-    /// travels in a [`HandleCustody`] guard that returns it to its slot unless
+    /// travels in a `HandleCustody` guard that returns it to its slot unless
     /// the join actually completed, so a retry re-joins the same task and picks
     /// up the tail it requeues. The invariant that falls out of it —
     /// no success is ever latched over an un-joined flush task — is asserted in
-    /// [`Memory::latch_success`].
+    /// `Memory::latch_success`.
     ///
     /// ## The drain (COH-6)
     ///
@@ -1429,7 +1443,7 @@ impl Memory {
     ///
     /// 0. **Shut the writers up — the surface's own, then the tasks'.** Latch
     ///    `closed` so new calls are refused, take the write side of
-    ///    [`Memory::writers`], which waits out every write already in flight on
+    ///    `Memory::writers`, which waits out every write already in flight on
     ///    a caller task (T81-1), and only then stop the two mutation producers,
     ///    canonization first and the daemon second. It takes both halves for
     ///    "nothing new lands after the drain" to be true of the *surface* and
@@ -1446,13 +1460,13 @@ impl Memory {
     ///    the **front** of the graph log, and exits.
     /// 2. Await its handle — the task is gone and can no longer take the graph
     ///    lock, so step 3 races nothing. The handle is held in a
-    ///    [`HandleCustody`] guard for the whole of that await, so a cancelled
+    ///    `HandleCustody` guard for the whole of that await, so a cancelled
     ///    join returns it to its slot instead of detaching the task (R3-1).
     /// 3. Take the graph lock, `drain_log()`, release. The batch is handed
-    ///    straight to a [`TailCustody`] guard, which returns it to the log if
+    ///    straight to a `TailCustody` guard, which returns it to the log if
     ///    this future is dropped before step 4 makes it durable (R2-1).
     /// 4. `store.flush(&batch)` directly, with **no lock held**, armored like
-    ///    every background attempt is: a [`FLUSH_ATTEMPT_TIMEOUT`] bound
+    ///    every background attempt is: a `FLUSH_ATTEMPT_TIMEOUT` bound
     ///    (STORE-2) and panic containment, so a hung or panicking adapter
     ///    yields an error instead of wedging or unwinding out of `close`.
     ///    Its result is this method's result; on failure the batch is returned
@@ -1468,7 +1482,7 @@ impl Memory {
     /// one `FLUSH_ATTEMPT_TIMEOUT` for step 4.
     ///
     /// Step 0 is itself bounded now (R2-5): every store call a gated write can
-    /// be parked in has a timeout — [`RETRACT_IO_TIMEOUT`] for `retract`'s
+    /// be parked in has a timeout — `RETRACT_IO_TIMEOUT` for `retract`'s
     /// durable radius, [`hybrid::HYBRID_IO_TIMEOUT`] over hybrid `derive`'s
     /// whole embed/query phase. A caller-supplied **embedder** is the one
     /// remaining way to stretch it: `Embedder` carries no bound of its own, so
@@ -1801,11 +1815,9 @@ impl Memory {
     /// that would confuse an operator reading it. `close()`'s fenced branch has
     /// the same rule and the same reason.
     ///
-    /// Best-effort by construction: [`release_lease_once`] already downgrades a
+    /// Best-effort by construction: `release_lease_once` already downgrades a
     /// store error to a warning, and the caller bounds this with its own
     /// deadline.
-    ///
-    /// [`release_lease_once`]: Self::release_lease_once
     pub async fn release_lease_after_abandoned_close(&self) {
         if self.lease_lost() {
             tracing::debug!(
@@ -1831,7 +1843,7 @@ impl Memory {
     /// live flush task may hold the tail in its own `pending` buffer, where an
     /// empty log looks exactly like a written one.
     ///
-    /// [`HandleCustody`] is what *guarantees* it, and the guarantee is a
+    /// `HandleCustody` is what *guarantees* it, and the guarantee is a
     /// two-line argument: the slot is emptied only into a custody guard, and
     /// that guard hands the handle back unless the join returned. So `None` at
     /// step 3 means "reaped", never "detached" — the state that made the
@@ -1840,7 +1852,7 @@ impl Memory {
     /// a neutered guard leaves the slot `None`, the very state this asserts,
     /// so the assertion cannot fire on the regression that matters. Detachment
     /// is undetectable from here by construction; the enforcement is
-    /// [`HandleCustody`] and the R3-1 regression test's durability assertion,
+    /// `HandleCustody` and the R3-1 regression test's durability assertion,
     /// not this line.
     fn latch_success(&self, succeeded: &mut bool) {
         debug_assert!(
@@ -2075,10 +2087,10 @@ impl Drop for Memory {
 /// straight to the drain — the same `Ok(())`-over-a-lost-mutation shape as the
 /// flush case, through a narrower window. Same guard, same reason.
 ///
-/// Like [`TailCustody`], the `parking_lot` guard is taken for one statement and
+/// Like `TailCustody`, the `parking_lot` guard is taken for one statement and
 /// never across an `.await` (§6.4): `join` holds nothing while it waits.
 ///
-/// **Composition with [`TailCustody`].** `close()` drops each of these
+/// **Composition with `TailCustody`.** `close()` drops each of these
 /// explicitly once its join has returned, so at most one custody guard is ever
 /// live and the two never overlap: a cancellation at step 2 restores a handle
 /// and no tail exists yet; a cancellation at step 4 restores the tail and every
@@ -2206,7 +2218,7 @@ impl Drop for TailCustody<'_> {
 /// `close()`'s step-4 store attempt, armored exactly like a background one
 /// (T81-2).
 ///
-/// The flush loop protects every `store.flush` twice — [`FLUSH_ATTEMPT_TIMEOUT`]
+/// The flush loop protects every `store.flush` twice — `FLUSH_ATTEMPT_TIMEOUT`
 /// (STORE-2) and [`CatchUnwindPoll`] — and both rationales apply verbatim to the
 /// final flush, which runs against the same caller-supplied adapter:
 ///
@@ -3952,7 +3964,7 @@ mod tests {
     /// durable. `Drop`'s R2-2 warning was blind to it for the same reason the
     /// shortcut was: the log really was empty.
     ///
-    /// With [`HandleCustody`] the cancelled join hands the handle back, so the
+    /// With `HandleCustody` the cancelled join hands the handle back, so the
     /// retry re-joins that same task — a cancelled poll leaves a `JoinHandle`
     /// re-awaitable — and the tail is written before any `Ok`.
     #[tokio::test(start_paused = true)]
@@ -4739,7 +4751,7 @@ mod tests {
     /// problem — `retract` holds its permit across that await, so step 0 waited
     /// on the hung backend for as long as it cared to hang.
     ///
-    /// Bounded, it fails at [`RETRACT_IO_TIMEOUT`] having mutated nothing (the
+    /// Bounded, it fails at `RETRACT_IO_TIMEOUT` having mutated nothing (the
     /// await precedes every graph write), and the session still closes.
     #[tokio::test(start_paused = true)]
     async fn retract_bounds_a_hanging_durable_radius_query() {

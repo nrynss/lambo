@@ -9,7 +9,7 @@
 //! ## Agent attribution ("who wrote this edge")
 //!
 //! Edges carry no agent id (the §5 `Edge` shape is frozen), so the writer is
-//! resolved — see [`edge_writers`]: an interaction-sourced edge belongs to that
+//! resolved — see `edge_writers`: an interaction-sourced edge belongs to that
 //! interaction's agent; a concept→concept edge belongs to the agent **acting at
 //! the edge's write timestamp**, falling back to the source concept's
 //! `origin_agent` when no interaction was written at that instant.

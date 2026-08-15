@@ -589,7 +589,7 @@ impl Graph {
     /// Write-gate validation (adve-review GRAPH-4): `from_status` must equal the
     /// concept's **current** status — a fabricated audit row is rejected with a
     /// typed invariant error — and the pair must be an edge of the spec §10
-    /// state machine ([`legal_canonization_transition`]; stage skips, downgrades
+    /// state machine (`legal_canonization_transition`; stage skips, downgrades
     /// and self-loops are rejected). A demotion event additionally carries the
     /// concept's new `last_demotion_time` (COH-3, spec §10 "Demotion sets
     /// `last_demotion_time`"); non-demotion events leave that field untouched.

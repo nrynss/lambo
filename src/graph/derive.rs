@@ -4,7 +4,7 @@
 //! dedup → match or create → `Derives` edge from the current interaction →
 //! pairwise `CoOccurrence` capped at `max_cooccurrence_per_derive` →
 //! `Hierarchical` edges from `ParentOf` → mutation batch (every write appends to
-//! `Graph`'s ordered log; [`derive`] emits no mutations itself) → daemon notify
+//! `Graph`'s ordered log; [`derive`](fn@derive) emits no mutations itself) → daemon notify
 //! (see the seam below).
 //!
 //! ## Derives edges — why `insert_concept`, not `upsert_edge`
@@ -51,7 +51,7 @@
 //!
 //! ## Timestamps
 //!
-//! [`derive`] is synchronous and takes no clock, so every timestamp derives
+//! [`derive`](fn@derive) is synchronous and takes no clock, so every timestamp derives
 //! from the interaction node's `created_at` (deterministic, rebuild-test
 //! friendly): new concepts are stamped with it, and derive-created
 //! `CoOccurrence`/`Hierarchical` edges carry it as `created_at` /
@@ -71,7 +71,7 @@
 //!
 //! ## Validate-then-mutate (no partial writes)
 //!
-//! [`derive`] validates every fallible input up front in a read-only pre-pass
+//! [`derive`](fn@derive) validates every fallible input up front in a read-only pre-pass
 //! (interaction exists; raw- and resolved-reflexive `parent_of` pairs), so the
 //! write loop that follows cannot fail mid-call — an error never leaves a
 //! partial batch in the graph or the mutation log (muse-spark M4). The loop's
@@ -79,7 +79,7 @@
 //!
 //! ## Daemon notify seam (T4.x — do NOT build the channel here)
 //!
-//! [`derive`] is the write path the daemon will subscribe to: T4.x's daemon
+//! [`derive`](fn@derive) is the write path the daemon will subscribe to: T4.x's daemon
 //! consumes the session's mutation stream and reacts to derive-created
 //! conflicts / drift / staleness. The notify hook (a channel send, spec §6.1
 //! `DaemonEvent`) is **deferred to T4** — there is nothing to send to yet, so
@@ -99,11 +99,11 @@ use crate::types::{
     SessionId, StoreError,
 };
 
-/// Initial weight of `CoOccurrence` edges written by [`derive`] (module
+/// Initial weight of `CoOccurrence` edges written by [`derive`](fn@derive) (module
 /// constant per task contract; `Derives`/`Temporal` are Graph-owned at 0.9/1.0).
 pub const COOCCURRENCE_WEIGHT: f64 = 0.5;
 
-/// Initial weight of `Hierarchical` edges written by [`derive`] (module
+/// Initial weight of `Hierarchical` edges written by [`derive`](fn@derive) (module
 /// constant per task contract).
 pub const HIERARCHICAL_WEIGHT: f64 = 0.5;
 
@@ -113,7 +113,7 @@ pub const HIERARCHICAL_WEIGHT: f64 = 0.5;
 /// `Entity` is the generic default (documented decision — T2.3 Handoff Log).
 pub const PARENT_OF_CONCEPT_TYPE: ConceptType = ConceptType::Entity;
 
-/// Declaration of `Hierarchical` parent→child relationships for one [`derive`]
+/// Declaration of `Hierarchical` parent→child relationships for one [`derive`](fn@derive)
 /// call. Contents are resolved through the same canonicalize/create path as the
 /// `concepts` argument.
 #[derive(Clone, Copy, Debug)]
@@ -141,7 +141,7 @@ impl<'a> ParentOf<'a> {
     }
 }
 /// Summary of one `derive` call — returned by both the sync
-/// [`derive`] and its async hybrid twin ([`crate::graph::hybrid::derive`]).
+/// [`derive`](fn@derive) and its async hybrid twin ([`crate::graph::hybrid::derive`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeriveOutcome {
     /// Concepts created by this call (fresh nodes), in resolution order:
@@ -186,7 +186,7 @@ pub struct DeriveOutcome {
 ///   [`HIERARCHICAL_WEIGHT`].
 ///
 /// Returns the [`DeriveOutcome`] (created / matched / reinforced counts). All
-/// mutations flow through `Graph`'s write APIs into its ordered log; [`derive`]
+/// mutations flow through `Graph`'s write APIs into its ordered log; [`derive`](fn@derive)
 /// is synchronous and pure of I/O (the daemon notify hook is T4.x's, see module
 /// docs).
 pub fn derive(
