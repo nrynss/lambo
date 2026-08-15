@@ -237,3 +237,16 @@ safety property.
 a regression; the P3 message rewrite preserves fail-closed, holder+age naming, and the `Conflict`
 class. No P1, no P2, no new actionable defect. The Cockroach cross-process done-when leg is
 unperformed and infra-blocked — recorded, not claimed, pending a cluster holder.
+
+---
+
+## SUPERSEDED (2026-08-15) — T86R2-2 CLOSED by the live conformance run
+
+The "INFRA-BLOCKED / NOT claimed / unperformed" record above for **T86R2-2** is superseded:
+the live CockroachDB Cloud conformance suite
+(`scripts/run-live-cockroach.sh`, `LAMBO_REQUIRE_LIVE=1`) ran **8/8 green**, including
+`single_writer_lease_is_enforced_across_pools` (and `cockroach_three_hop_progression_matches_memory`,
+`saints_and_stats_on_live`, and the vector `EXPLAIN` camera proof). The Cockroach cross-pool
+done-when leg is therefore **observed and enforced**, not compile-only. Evidence:
+`dev-diary/evidence/demo-live-conformance.txt`. Recorded in PHASE-8 Handoff "T86R2-2 CLOSED
+(2026-08-15)". The historical INFRA-BLOCKED verdict body above is left as written.

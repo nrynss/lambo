@@ -12,6 +12,11 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
 
+> **FINAL VERDICT (this file's R2 reverify, 2026-08-15): CLEAN.** The STATUS banner above is the
+> R1 / minimal-cut snapshot; the appended "R2 reverify verdict" at the end of this file confirms
+> "Done when (a)-(d): all met" and "Verdict: CLEAN. Zero P1/P2." All T8.7 findings (T87-1..4)
+> are fixed or closed with dated accepted-rationales; the loop is complete.
+
 **Task:** T8.7 — MCP surface hardening (PHASE-8-surface.md §T8.7).
 **Tree:** `phase/p8-surface` @ `5d765c9`, clean working tree (confirmed `git status`).
 **Method:** clause-by-clause read of the merge's own status line and Handoff Log entry

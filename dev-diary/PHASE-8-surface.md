@@ -393,7 +393,8 @@ owns:       src/cli/mod.rs,
             src/cli/derive.rs, src/cli/record_action.rs, src/cli/reserve.rs
 not-owned:  src/cli/demo.rs (T8.4), src/cli/serve_web.rs (T8.5)   # collision fixed 2026-08-13
 appends-to: src/main.rs (dispatch arms + own flags only; T8.2 is primary owner)
-status:     remediating:r1
+status:     DONE/CLEAN — 2026-08-15 (main review CLEAN + R2/R3 reverify CLEAN at HEAD 596f40f;
+            P3s T88-H6/H7/H10 remediated through R2/R3; see Handoff 1856-1878)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 **Read verbs (spec §6.2, reader processes):** `recall --session --query --top-k`,
@@ -454,7 +455,9 @@ owns:       src/store/lease.rs; lease columns/DDL in src/store/{memory,sqlite,co
             scripts/provision.sh (schema addition)
 appends-to: src/memory.rs (build acquires/refreshes lease), src/mcp/serve.rs (holder
             identity + release on close), src/store/mod.rs (trait method)
-status:     CLEAN — 2026-08-14 (R1 11 findings + R2/R3 T83-12 all closed, mutation-verified)
+status:     CLEAN — re-verified 2026-08-15 at HEAD (adve-review-t8.6-lease-r2.md; R1 11 +
+            R2/R3 T83-12 all closed, mutation-verified). T86R2-2 (live Cockroach lease leg)
+            CLOSED 2026-08-15 by the live conformance 8/8 run — see Handoff 2014-2019, 2026-2027.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Decided 2026-08-14: promote spec §2.2 single-writer from advisory (the process-local
@@ -492,7 +495,8 @@ requires:   T8.2, T6.4, T4.3   # live store strongly preferred: T3.2, T3.6
 fixture-ok: partial   # logic testable on MemoryStore; the artifact must run live
 owns:       src/cli/demo.rs, demo/
 appends-to: src/main.rs (demo dispatch arm only)
-status:     task-complete (awaiting adve-review) — task/t8.4-demo
+status:     CLEAN + live-verified — 2026-08-15 (adve-review-t8.4-demo.md; T84-2 FIXED; T84-1
+            live legs CLOSED by the cluster run — see Handoff 1904-1925, 1990-1999)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Spec §13, scripted and **deterministic** — a demo that works 3 times in 5 is not done:
@@ -529,6 +533,14 @@ demos before T7.4 lands: the cluster schema currently DIVERGES from
 `migrations/cockroach/001_init.sql`** — a hand-created `concepts_embedding_nonnull_idx`
 exists on it — and the cluster was seeded to 2833 concepts / 2004 distinct vectors.
 
+  > **SUPERSEDED (2026-08-15):** the divergence/seed warning above was scoped "before
+  > T7.4 lands". **T7.4 has since landed DONE** (PHASE-7-embeddings.md:322, camera-proof
+  > GREEN 2026-08-13): it dropped the hand-created `concepts_embedding_nonnull_idx`,
+  > re-provisioned the cluster from `migrations/cockroach/001_init.sql` alone, and removed
+  > the 2833/2004 seed session (`--clean`). The vector `EXPLAIN` camera proof passes on the
+  > reconciled cluster (see Handoff 2014-2019). The cluster is now provisioned-from-migration;
+  > the live demo session writes only its own fresh session rows.
+
 **Done when:** `cargo run --features demo -- demo --scenario rest-api` (or equivalent)
 runs end-to-end against the live cluster twice consecutively with identical outcomes, and
 the MCP-server split-screen query is rehearsed and screenshotted into `dev-diary/evidence/`.
@@ -541,7 +553,8 @@ requires:   T8.1        # http transport from T8.2 when it lands
 fixture-ok: yes
 owns:       web/, src/cli/serve_web.rs
 appends-to: src/main.rs (serve-web dispatch arm only, if any)
-status:     task-complete (awaiting adve-review)
+status:     CLEAN + live-verified — 2026-08-15 (adve-review-t8.5-web.md, reverify CLEAN;
+            serve-web Cockroach leg verified live — see Handoff 1927-1956, 2020-2025)
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 The "functional demo app URL" deliverable (spec §12.4). Minimal axum-served page over the
@@ -649,12 +662,20 @@ status:     docs-verification pass done — 2026-08-15 (branch task/t8.8-docs, d
                 real crate landing page with a compiling no_run example. Not chased to zero
                 by design; 185 recorded honestly in the audit note, best next target is
                 src/config.rs (30, prose already exists in config.mdx).
-            PENDING: (a) T88-H2/H3/H4 wire text + schema maxima — need the T8.7 / src/mcp
-            branch; T88-H6/H7/H9/H10 are string-literal (code) changes owned by T8.3/T8.4,
-            outside a comment-only pass. Each finding's docs half is already done.
-            (b) 6 cargo doc warnings and 31 missing docs inside src/mcp/**, pending that
-            branch's merge. (c) T8.7-dependent config sections (HTTP auth, rate limit,
-            session cap) — config.mdx documents the current no-auth state.
+            RESOLVED — 2026-08-15 (the PENDING note below is the point-in-time snapshot):
+            (a) T88-H2/H3/H4 wire text + schema maxima closed by the T8.7 / src/mcp merge
+            (see Handoff 1746-1759; T88-H1/H2/H3/H4 all fixed in src/mcp/server.rs);
+            T88-H6/H7/H10 closed by T8.3 R2/R3, T88-H9 by T8.4. (b) The 6 cargo doc
+            warnings and 31 missing docs inside src/mcp/** closed by the T8.7 merge — the
+            R2/rustdoc sweep left zero warnings (outside src/mcp it was already 0).
+            (c) config.mdx now documents the shipped auth/rate-limit/session-cap state
+            (no longer "no-auth").
+            PENDING-ORIGINAL-2026-08-14: (a) T88-H2/H3/H4 wire text + schema maxima — need
+            the T8.7 / src/mcp branch; T88-H6/H7/H9/H10 are string-literal (code) changes
+            owned by T8.3/T8.4, outside a comment-only pass. Each finding's docs half is
+            already done. (b) 6 cargo doc warnings and 31 missing docs inside src/mcp/**,
+            pending that branch's merge. (c) T8.7-dependent config sections (HTTP auth,
+            rate limit, session cap) — config.mdx documents the current no-auth state.
 flow:       serial; task → adve-review → remediation → review (repeat to CLEAN); hard stop after each agent
 ```
 Created 2026-08-14: everything P8 ships is a **user-facing surface** and needs proper
@@ -764,16 +785,16 @@ release (not only build from source) and run `lambo serve` on a clean machine.
 
 ## Exit criteria
 
-- [ ] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist
-- [ ] `retract(_, DryRun)` and `canonical_memories()` exist and are tested (T8.1 build items)
-- [ ] Inverted-index mirroring holds for `derive` / `record_action` / `demote` / removal
-- [ ] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed
-- [ ] MCP flow proven from a real Claude Code config
-- [ ] MCP tools stamp `created_at` server-side (F18)
-- [ ] **T8.6 writer lease enforced cross-process** (two writer opens → one holder, one
+- [x] Spec §6.1 doc-test green (Level B `resolve_backends`); §6.2 commands all exist  ·  T8.1/T8.3 CLEAN (Handoff 1856-1878)
+- [x] `retract(_, DryRun)` and `canonical_memories()` exist and are tested (T8.1 build items)  ·  T8.1 CLEAN
+- [x] Inverted-index mirroring holds for `derive` / `record_action` / `demote` / removal  ·  T8.1 CLEAN
+- [x] `serve` / CLI use **one** `ResolvedBackends` (no double construction); fail closed  ·  T8.2 CLEAN (Handoff 1856-1866)
+- [x] MCP flow proven from a real Claude Code config  ·  evidence `dev-diary/evidence/t8.2-mcp-client/`
+- [x] MCP tools stamp `created_at` server-side (F18)  ·  T8.2 F18 tests green
+- [x] **T8.6 writer lease enforced cross-process** (two writer opens → one holder, one
       honest refusal; expiry-after-crash tested) and **CLI write verbs land behind it**
-      with the CLI↔MCP differential test green
-- [ ] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured
+      with the CLI↔MCP differential test green  ·  `serve_single_writer_lease` + `cli_write_lease` green (Handoff 1958-1981)
+- [x] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured  ·  T84-1 CLOSED; `demo-live-{1,2,diff}.txt`
 - [ ] **Surface holds under concurrency (T8.2 N1/N2 closure):** K concurrent clients
       (K ≥ the CPU worker count, ~12–32 via the local LFM2.5-230M rig or a raw MCP load
       driver) issuing a mix of valid + adversarial tool calls do **not** starve the
@@ -781,16 +802,16 @@ release (not only build from source) and run `lambo serve` on a clean machine.
       `record_action` gets the honest cap refusal, and no internal detail (URLs/DSNs/driver
       text) crosses the wire. Runs on the MBP; evidence into `dev-diary/evidence/`. This is
       the correctness half; the P9 T9.6 benchmark is the scale half.
-- [ ] Demo app reachable and honest (renders real recall output, not canned text)
-- [ ] **T8.7 surface hardening:** HTTP transport refuses unauthenticated non-loopback
+- [x] Demo app reachable and honest (renders real recall output, not canned text)  ·  T8.5 reverify CLEAN + live Cockroach `serve-web` (Handoff 1927-1956, 2020-2025)
+- [x] **T8.7 surface hardening:** HTTP transport refuses unauthenticated non-loopback
       requests, enforces a documented rate limit + concurrent-session cap (tested);
       T82-16 remainder + R5-verify residuals #1/#2/#3 each fixed or closed with a dated
-      accepted-rationale
-- [ ] **T8.8 reference docs** exist for every P8 surface (MCP tools, CLI read+write verbs,
+      accepted-rationale  ·  T8.7 CLEAN (adve-review-t8.7-hardening.md R2)
+- [x] **T8.8 reference docs** exist for every P8 surface (MCP tools, CLI read+write verbs,
       `Memory`/adapter API, config, end-to-end); every documented command/flag/tool/method
-      verified against the binary; `cargo doc` builds warning-free
-- [ ] Every task reached a CLEAN review verdict; all review files closed in
-      `dev-diary/adversarial-review/`
+      verified against the binary; `cargo doc` builds warning-free  ·  T8.8 RESOLVED (see the T8.8 yaml block; docs/reference/)
+- [x] Every task reached a CLEAN review verdict; all review files closed in
+      `dev-diary/adversarial-review/`  ·  every T8.x review CLEAN/CLOSED
 
 ---
 
@@ -1924,6 +1945,12 @@ green.
   **open exit-criteria item**: T8.4 is code-CLEAN but not exit-complete until a holder with
   cluster access performs those two legs.
 
+  > **SUPERSEDED (2026-08-15):** T84-1 is now **CLOSED**. The live-cluster verification entry
+  > below (this handoff, "T8.4 / T8.6 / T8.5 — live-cluster verification") ran `lambo demo
+  > --scenario rest-api` ×2 against the live Cockroach cluster with byte-identical OUTCOME
+  > blocks (12 interactions / 27 concepts / 114 edges / 5 canonization_events) and read the
+  > split-screen `canonization_events` back via `psql`. Evidence: `demo-live-{1,2,diff,canon-events}.txt`.
+
 ### T8.5 — demo web app (review loop, 2026-08-15)
 
 Adversarial review of T8.5 at current HEAD (report `adve-review-t8.5-web.md`), including a
@@ -1951,9 +1978,12 @@ event feed, stats). Gate block green. Findings closed:
 - **T85-4 (P3) informational** — surfaced for the T8.4 video crew, not addressed here.
 
 Reverify CLEAN. Headless-browser confirmation that a browser shows live recall + the event
-feed updating (the done-when) came from the fixture/sqlite path; the Cockroach live-cluster leg
-is infra-blocked like T8.4 (no `LAMBO_COCKROACH_DSN`) and belongs to the same cluster-holder
-run.
+feed updating (the done-when) came from the fixture/sqlite path.
+
+**SUPERSEDED — the Cockroach live-cluster leg is now performed.** The T8.5 serve-web
+Cockroach leg was verified live against the cluster (see the live-cluster entry below:
+read-only reader, verbatim recall, real flush stats 39/114/27/1/5, POST `/api/pulse` -> 405).
+This supersedes the earlier "infra-blocked like T8.4" statement in this T8.5 entry.
 
 ### T8.6 — single-writer lease (re-verification, 2026-08-15)
 

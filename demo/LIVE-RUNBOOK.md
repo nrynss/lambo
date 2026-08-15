@@ -78,8 +78,9 @@ Expected: `cockroach schema provisioned via .../scripts/provision.sh`, exit 0.
   | tee demo-live-1.txt
 ```
 
-Expected output — this is a real local run; on the cluster only the session id,
-the `capabilities` line, the timings and the two masked values differ:
+Expected output — this is the **live-verified** transcript
+(`dev-diary/evidence/demo-live-{1,2}.txt`); per run only the session id, the real
+`(score …)` values, the created/matched counts and the two masked values differ.
 
 ```
 ════════════════════════════════════════════════════════════════════════
@@ -119,13 +120,13 @@ the `capabilities` line, the timings and the two masked values differ:
   [12] record-action  add oauth_id to user schema          MODIFIES user schema  → 1 created, 5 edges
   agent-a released the single-writer lease
   graph complete: 12 interactions, 27 concepts, 'user schema' blast radius 9
-  GC headroom: closest to the eviction bar is 'users table migration' at 1.55× — nothing in this session is collectable
+  GC headroom: closest to the eviction bar is 'write user repository' at 1.40× — nothing in this session is collectable
 
 ── CANONIZATION — the engine, not the script, promotes user schema ─────
   gc_survived floor 3 ≥ 3 — Stage 1's survival gate is open for every concept
-  cycle   1   user schema              → Candidate   (canonization_events row written)
-  cycle   2   user schema              → Venerable   (canonization_events row written)
-  cycle   3   user schema              → Canonical   (canonization_events row written)
+  cycle   0   user schema              → Candidate   (canonization_events row written)
+  cycle   1   user schema              → Venerable   (canonization_events row written)
+  cycle   2   user schema              → Canonical   (canonization_events row written)
   no transitions for 3 consecutive cycles — the state machine is at its fixed point (5 events total)
   agent-a released the single-writer lease
 
@@ -159,22 +160,22 @@ the `capabilities` line, the timings and the two masked values differ:
   scenario            rest-api
   interactions        12
   concepts            27
-  edges               93
+  edges               114
   canonization_events 5
     add oauth_id to user schema: None -> Candidate
+    add rate limiting middleware: None -> Candidate
     user schema: None -> Candidate
     user schema: Candidate -> Venerable
     user schema: Venerable -> Canonical  (blast radius 9)
-    wire login endpoint: None -> Candidate
   canonical           1
     user schema  blast_radius=9
   statuses
     ...
     Candidate  add oauth_id to user schema
     Canonical  user schema
-    Candidate  wire login endpoint
+    Candidate  add rate limiting middleware
     ... (every other concept None)
-  recall_warnings     5
+  recall_warnings     8
   recall_context
     ...
 ```

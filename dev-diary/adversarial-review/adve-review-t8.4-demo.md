@@ -147,3 +147,17 @@ live-cluster ×2 + split-screen screenshot done-when clauses, which are **blocke
 infrastructure** (no `LAMBO_COCKROACH_DSN` in this environment) rather than by any code
 defect; the inheritor must run `demo/LIVE-RUNBOOK.md` and record the artifacts before the
 task is done.
+
+---
+
+## SUPERSEDED (2026-08-15) — T84-1 CLOSED by the live cluster run
+
+The banner and verdict above ("live legs pending / no `demo-live-*.txt` or live ×2 proof
+exists") are superseded: the live CockroachDB Cloud cluster run closed **T84-1**. `lambo demo
+--scenario rest-api` ran **×2 consecutively against the live cluster** with byte-identical
+OUTCOME blocks (diff: `IDENTICAL — T8.4 x2 met`: 12 interactions / 27 concepts / 114 edges /
+5 canonization_events), and the split-screen `canonization_events` query read back via `psql`
+shows the same 5 rows. Evidence now present in `dev-diary/evidence/`:
+`demo-live-{1,2}.txt`, `demo-live-diff.txt`, `demo-live-saints.txt`,
+`demo-live-canon-events.txt`. Recorded in PHASE-8 Handoff "T8.4 / T8.6 / T8.5 — live-cluster
+verification". The historical FINDINGS verdict body above is left as written.

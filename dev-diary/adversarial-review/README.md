@@ -1,10 +1,20 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (43 records).
+Complete index of the review records in this directory (53 records).
 
 | File | Scope | Status |
 |------|-------|--------|
 | **[adve-review-t8.1-memory-fable.md](adve-review-t8.1-memory-fable.md)** | phase/p8-surface — T8.1 `Memory` builder & assembly, fable deep | **CLOSED** (1 P1 / 2 P2 / 6 P3 + 9 follow-on findings across rounds; 3 opus remediation rounds, R4 verify CLEAN 2026-08-14; COH-6 all 15 clauses PASS; merged c6576f7) |
+| [adve-review-t8.2-mcp.md](adve-review-t8.2-mcp.md) | phase/p8-surface — T8.2 MCP server (`serve`/`server`), R5-verify | **CLOSED** (CLEAN, 2026-08-14) |
+| [adve-review-t8.2-mcp-r2.md](adve-review-t8.2-mcp-r2.md) | phase/p8-surface — T8.2 re-verify at `596f40f` post-hardening | **CLOSED** (CLEAN, 0 P1 / 0 P2 / 0 P3, 2026-08-15) |
+| [adve-review-t8.2-t8.3-live.md](adve-review-t8.2-t8.3-live.md) | Live-CockroachDB review — T8.2 + T8.3 (cluster `nrynss`, `b45c102`) | **LIVE** (2026-08-14; evidence in `dev-diary/evidence/live-review-t8.2-t8.3/`) |
+| [adve-review-t8.3-cli.md](adve-review-t8.3-cli.md) | phase/p8-surface — T8.3 CLI read+write verbs | **CLOSED** (CLEAN — R1 11 findings + R2 T83-12 closed, R3) |
+| [adve-review-t8.3-cli-r2.md](adve-review-t8.3-cli-r2.md) | phase/p8-surface — T8.3 re-verify at `596f40f` | **CLOSED** (CLEAN, zero P1/P2, 2026-08-15) |
+| [adve-review-t8.4-demo.md](adve-review-t8.4-demo.md) | phase/p8-surface — T8.4 two-agent demo scenario | **CLOSED** (FINDINGS; T84-2 FIXED, T84-1 live legs SUPERSEDED/closed 2026-08-15) |
+| [adve-review-t8.5-web.md](adve-review-t8.5-web.md) | phase/p8-surface — T8.5 demo web app (`serve-web`) | **CLOSED** (findings remediated; reverify CLEAN + live Cockroach leg verified 2026-08-15) |
+| [adve-review-t8.6-lease.md](adve-review-t8.6-lease.md) | phase/p8-surface — T8.6 single-writer lease | **CLOSED** (R2-VERIFY CLEAN; 3 P2 + 3 P3) |
+| [adve-review-t8.6-lease-r2.md](adve-review-t8.6-lease-r2.md) | phase/p8-surface — T8.6 re-verify at HEAD post-L82 | **CLOSED** (CLEAN; T86R2-2 live leg SUPERSEDED/closed 2026-08-15) |
+| [adve-review-t8.7-hardening.md](adve-review-t8.7-hardening.md) | phase/p8-surface — T8.7 MCP surface hardening | **CLOSED** (R1 FINDINGS → R2 reverify **CLEAN**, 2026-08-15) |
 | [adve-review-t5.1-candidates.md](adve-review-t5.1-candidates.md) | T5.1 — Phase-1 candidates | **CLOSED** (ACCEPT, no findings) |
 | [adve-review-t5.2-expand.md](adve-review-t5.2-expand.md) | T5.2 — Expansion | **CLOSED** (ACCEPT after 1 remediation round) |
 | [adve-review-t5.3-assemble.md](adve-review-t5.3-assemble.md) | T5.3 — Assembly | **CLOSED** (ACCEPT; 3 P3 recorded, no remediation) |
