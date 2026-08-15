@@ -2,45 +2,139 @@
 title: "Demo"
 description: "Run the scripted two-agent scenario and watch shared memory form."
 ---
+import Warning from '../../components/MdxWarning.astro';
+import Note from '../../components/MdxNote.astro';
 
-`lambo demo` runs a scripted two-agent scenario. It shows how two agents build one REST API against one session, and how the shared memory consolidates into canonical facts that carry blast-radius warnings.
+`lambo demo` replays two agents building one REST API against one session. It is the fastest way to watch the memory layer work end to end, and it needs no cluster, no model files, and no config.
 
-## The scenario at a glance
+The demo is a permanent part of the binary rather than a sample you delete. Use it to evaluate Lambo before you wire it into anything. Use it to check a new store or embedder end to end. Use it to see what recall output looks like on a graph that has earned some structure.
 
-Two agents work one session. Agent A lays down `user schema`, `auth middleware`, and `session store`, then records the actions that depend on them. Agent B joins and works a separate feature. Agent A returns for one last edit. Agent B then asks `recall("update user schema")`.
-
-The recall answers from memory rather than from a colleague. It reports that the thing Agent B is about to change is load-bearing and was touched seconds ago.
+## Run it
 
 ```bash
-lambo demo --scenario rest-api
+lambo demo
 ```
 
-`rest-api` is the only scenario in v0.1. The command mints a fresh session id per run, so you can run it repeatedly without polluting an existing session.
+With no config file present it runs against the in-memory store and finishes in a few seconds. It mints a fresh session id per run, so repeated runs never collide.
 
-## What is real
+| Flag | Default | What it does |
+|---|---|---|
+| `--scenario` | `rest-api` | Picks the scenario. `rest-api` is the only one in v0.1. |
+| `--session` | fresh id per run | Writes into a session id you choose. |
 
-The demo is not a mock. It runs the real canonization engine against the real store. The context block is the actual renderer output.
+<Warning>
+The scenario is not re-runnable into a session that has already been used, because canonization state is not restored over an existing graph. Let it mint a fresh id unless you have a reason not to.
+</Warning>
 
-The demo asserts its own claims before it reports success. It expects 12 interactions and 27 concepts, with `user schema` at blast radius 9. A run that produces a different graph fails with a diagnosis instead of quietly showing a different demo.
+## What the scenario does
 
-## What to expect
+Agent A builds the API across nine interactions. It lays down `user schema`, `auth middleware`, and `session store`, then records the actions that depend on them.
 
-The run prints the interaction narration as the demo replays. It shows the three `user schema` canonization transitions as `user schema` earns canonical status from structural evidence.
+Agent B joins on a separate feature and adds rate limiting, which quietly depends on `auth middleware` and `user schema`.
 
-The final recall carries the canonical marker, the blast radius warning, and the conflict line. The demo prints the real values. Only the internal comparison masks node ids and recorded ages.
+Agent A returns for one last edit and adds `oauth_id` to `user schema`.
 
-## Provision a durable store first
+Agent B then asks `recall("update user schema")`. Memory answers that the thing it is about to change is load-bearing, carries a blast radius of 9, and was touched seconds ago by another agent. No colleague told it that.
 
-The demo takes and releases the single-writer lease across its two acts. If you want to persist the session, provision a durable store first.
+## What it proves
+
+Each act demonstrates one claim you can check in the output.
+
+- **Consolidation.** Twelve interactions produce 27 concepts rather than 27 unrelated notes, because repeated ideas match existing concepts instead of duplicating them.
+- **Promotion by evidence.** `user schema` walks Candidate, then Venerable, then Canonical. The canonization engine decides that from structural evidence. No line in the demo writes a status.
+- **Blast radius.** The recall block marks `user schema` as a load-bearing pillar with 9 dependents.
+- **Conflict awareness.** The recall block names the other agent and how recently it wrote.
+
+## Nothing is staged
+
+The demo drives the same public `Memory` API an MCP client drives. Every concept, edge, and canonization transition comes from the real engine running against the real store. The context block you see is the actual renderer output, not a formatted string.
+
+The run asserts its own claims before reporting success. It expects 12 interactions, 27 concepts, and `user schema` at blast radius 9. A run that produces a different graph fails with a diagnosis rather than quietly showing you something else.
+
+## The knobs it compresses
+
+The demo has to finish in seconds rather than in an afternoon, so it compresses intervals. It weakens no threshold, and it prints this table on every run so you can check that claim yourself.
+
+| Knob | Default | Demo |
+|---|---|---|
+| `canonization_edge_min_age` | 60s | 10ms |
+| `canonization_eval_interval` | 60s | 25ms, frozen during the build phase |
+| `daemon_tick_interval` | 1s | 5ms |
+| `backend_flush_interval` | 1s | 5ms |
+| `gc_interval` | 10000 mutations | 1 mutation |
+
+Every admission threshold stays at its default. Those are minimum peer count 20, `gc_survived` at least 3, and a score strictly above P90. They also include at least 3 distinct sources, coverage at least 0.3, blast radius above 5, and a 30 second conflict window.
+
+## Why two runs match
+
+Canonization advances on session mutations rather than on a clock, so a naive scripted demo settles wherever the daemon happened to be when the script ended. This one drives the state machine to a unique fixed point instead.
+
+After the last write it declares session synonyms one at a time until every concept clears the `gc_survived` floor, which opens Stage 1's survival gate uniformly. Then it polls until the audit trail stops growing across three consecutive canonization cycles. With the graph frozen and every scoring dimension measured against the session rather than the wall clock, the outcome becomes a pure function of the graph.
+
+The run prints a normalized summary with the volatile parts masked. Session ids, node ids, scores, and recorded ages become placeholders, so you can diff two runs by eye.
+
+<Note>
+Waits are bounded polls on observable conditions, never fixed sleeps. The demo either observes the condition it needs or fails naming the condition it was waiting for.
+</Note>
+
+## Reading the output
+
+The canonization section shows the engine promoting one concept across three cycles, then confirming it reached a fixed point.
+
+```
+── CANONIZATION — the engine, not the script, promotes user schema ─────
+  gc_survived floor 3 ≥ 3 — Stage 1's survival gate is open for every concept
+  cycle   1   user schema              → Candidate   (canonization_events row written)
+  cycle   2   user schema              → Venerable   (canonization_events row written)
+  cycle   3   user schema              → Canonical   (canonization_events row written)
+  no transitions for 3 consecutive cycles — the state machine is at its fixed point
+```
+
+The final recall is the payoff. This is the block an agent receives, verbatim.
+
+```
+  user schema [Entity, canonical] (score 2.27, blast radius 9)
+  ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+  Agent A wrote to it 0 seconds ago
+  High-risk modification: high-value node d034055c (Canonical, blast radius 9) modified within 30s
+
+  add oauth_id to user schema [Resource] (score 1.50)
+
+  user fixtures [Resource] (score 0.78)
+```
+
+The age reads 0 seconds because the whole session replays in under a second. On a real session it reads the true age of the other agent's write.
+
+## Run it against a durable store
+
+Point the demo at SQLite or CockroachDB to exercise the full write-behind path and leave a graph behind you can inspect.
 
 ```bash
 lambo --config lambo.toml provision
+lambo --config lambo.toml demo --session evaluation
 ```
 
-The in-memory store needs no schema, so you can skip this step when you run the demo against memory.
+Then read the result back with ordinary read verbs, which do not take the writer lease.
+
+```bash
+lambo --config lambo.toml saints --session evaluation
+lambo --config lambo.toml inspect --session evaluation --focus "user schema"
+lambo --config lambo.toml serve-web --session evaluation
+```
+
+On CockroachDB you can also query `canonization_events` directly, through `psql` or through the CockroachDB managed MCP server, and watch the same transitions the demo narrated.
+
+## What it is not
+
+The demo is a correctness showcase rather than a benchmark. Its compressed intervals make its timings meaningless as performance figures.
+
+It also covers one scenario. It does not exercise reservations, drift detection, or the HTTP transport. Use [End to end](/lambo/end-to-end/) for a walkthrough you drive yourself.
 
 ## Where to go next
 
-- Read the [End to end](/lambo/end-to-end/) page for the topology this demo exercises.
-- Read the [MCP tools](/lambo/mcp/) reference for the tools the server exposes.
-- Read the [Command line](/lambo/cli/) reference for the verbs a swarm uses.
+Follow whichever thread the demo made interesting.
+
+- Read [End to end](/lambo/end-to-end/) for the topology this scenario exercises.
+- Read [MCP tools](/lambo/mcp/) for the seven tools your agents call.
+- Read [Command line](/lambo/cli/) for the verbs a swarm uses.
+- Read [Configuration](/lambo/config/) to point Lambo at a durable store.

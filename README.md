@@ -4,7 +4,18 @@ Agentic graph memory for multi-agent coding. Lambo stores what your agents learn
 it by meaning. A background process promotes concepts to canonical facts when they earn it
 from structural evidence, not when an agent declares them important.
 
-**[Documentation](https://nrynss.github.io/lambo)** covers everything below in depth.
+### [Read the documentation at nrynss.github.io/lambo](https://nrynss.github.io/lambo)
+
+[Quickstart](https://nrynss.github.io/lambo/quickstart/) ·
+[Demo](https://nrynss.github.io/lambo/demo/) ·
+[Installation](https://nrynss.github.io/lambo/installation/) ·
+[MCP tools](https://nrynss.github.io/lambo/mcp/) ·
+[Command line](https://nrynss.github.io/lambo/cli/) ·
+[Configuration](https://nrynss.github.io/lambo/config/) ·
+[Library API](https://nrynss.github.io/lambo/api/) ·
+[End to end](https://nrynss.github.io/lambo/end-to-end/)
+
+Everything below is covered there in depth.
 
 ## Deployment model
 
@@ -27,6 +38,20 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 
 The script verifies a SHA-256 checksum and installs to `~/.local/bin`. Windows binaries sit
 on the [releases page](https://github.com/nrynss/lambo/releases).
+
+See the memory layer work before you configure anything. This needs no config file, runs
+against the in-memory store, and finishes in seconds.
+
+```bash
+lambo demo
+```
+
+Two agents build one REST API. `user schema` earns canonical status from the real
+canonization engine, and the second agent's recall warns that it is load-bearing and was
+just edited. The [Demo page](https://nrynss.github.io/lambo/demo/) explains what the run
+proves and what it compresses.
+
+To run it for real, write a `lambo.toml` that picks a store and an embedder.
 
 ```toml
 # lambo.toml
