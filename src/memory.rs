@@ -176,12 +176,17 @@ pub struct ImpactReport {
 /// One canonical ("saint") memory — [`Memory::canonical_memories`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalMemory {
+    /// The concept's node id.
     pub node_id: NodeId,
+    /// Its text.
     pub content: String,
+    /// How it is classified.
     pub concept_type: ConceptType,
     /// In-RAM blast radius (dependents), same source as recall's `⚑` warning.
     pub blast_radius: u64,
+    /// When it was first written.
     pub created_at: DateTime<Utc>,
+    /// How many times recall has returned it.
     pub access_count: i32,
 }
 
@@ -189,7 +194,9 @@ pub struct CanonicalMemory {
 /// *observable*, so `flush_lag` and `log_depth` are the load-bearing fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryStats {
+    /// The session these figures are for.
     pub session: SessionId,
+    /// The agent this writer runs as.
     pub agent: AgentId,
     /// Time since the last successful flush.
     pub flush_lag: Duration,
@@ -212,14 +219,21 @@ pub struct MemoryStats {
     pub dead_lettered: u64,
     /// `true` once the session degraded to `durability="none"` (spec §2.3).
     pub degraded: bool,
+    /// Nodes in the session, interactions and concepts together.
     pub node_count: usize,
+    /// Edges in the session.
     pub edge_count: usize,
+    /// Concepts in the session.
     pub concept_count: usize,
+    /// Concepts that have reached canonical status.
     pub canonical_count: usize,
     /// `MutationEpoch` — recall-cache key (spec §8).
     pub epoch: u64,
+    /// Background daemon cycles completed since the session opened.
     pub daemon_cycles: u64,
+    /// Canonization evaluation cycles completed.
     pub canonization_cycles: u64,
+    /// Canonization cycles that failed. A non-zero count is worth investigating.
     pub canonization_failures: u64,
 }
 
