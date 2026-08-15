@@ -56,7 +56,7 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings, not `lambo.toml` keys. The file only chooses the store and the embedder, and it refuses any other key. See [Configuration](/config).
+These are library settings, not `lambo.toml` keys. The file only chooses the store and the embedder, and it refuses any other key. See [Configuration](/lambo/config/).
 
 ```rust
 let mem = Memory::builder()
@@ -101,7 +101,7 @@ There is no on-disk write-ahead log, so an abandoned tail is lost, not replayed 
 
 ## Backends
 
-Backends are chosen by Cargo feature and configuration, not loaded as plugins. See [Configuration](/config) for the feature flags.
+Backends are chosen by Cargo feature and configuration, not loaded as plugins. See [Configuration](/lambo/config/) for the feature flags.
 
 ### The GraphStore trait
 
@@ -134,4 +134,4 @@ A session has exactly one writer. Lambo enforces this in the store with a per-se
 There is one known limitation. The fence trips when the holder's heartbeat notices the loss, not at the instant it happens. After a lease expires and a new writer takes over, the old holder can still write for a short, bounded window. This matters most when many writers contend on one session. It is tracked in [issue #1](https://github.com/nrynss/lambo/issues/1).
 </Note>
 
-See [MCP tools](/mcp) and [Configuration](/config).
+See [MCP tools](/lambo/mcp/) and [Configuration](/lambo/config/).

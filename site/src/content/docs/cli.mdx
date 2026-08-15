@@ -15,7 +15,7 @@ Lambo has command line verbs that mirror the MCP tools, so you can read and writ
 lambo --config lambo.toml recall --session demo --query "user schema"
 ```
 
-Lambo looks for the config file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. See [Configuration](/config) for the file contents.
+Lambo looks for the config file in this order: the `--config` path, then the `LAMBO_CONFIG` environment variable, then `./lambo.toml`. See [Configuration](/lambo/config/) for the file contents.
 
 `lambo --version` prints the version, and `lambo --help` lists the subcommands.
 
@@ -259,7 +259,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 lambo serve --config lambo.toml --session demo --agent agent-a
 ```
 
-See [MCP tools](/mcp) for the tools it exposes.
+See [MCP tools](/lambo/mcp/) for the tools it exposes.
 
 ### Stopping a writer
 
@@ -297,7 +297,7 @@ $ lambo --config lambo.toml provision
 sqlite schema provisioned (init_schema, idempotent)
 ```
 
-Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/config).
+Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/lambo/config/).
 
 ## Run the demo
 
@@ -308,7 +308,7 @@ Running it again is safe. For a CockroachDB store it runs the repository's provi
 | `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
 | `--session <SESSION>` | No | A fresh session id per run. |
 
-The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/end-to-end) for the topology it exercises.
+The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/lambo/end-to-end/) for the topology it exercises.
 
 ## The swarm idiom
 
@@ -318,7 +318,7 @@ Run one `lambo serve` writer for the session, then give each small agent a singl
 lambo derive --session demo --agent agent-7 --content "retry budget is 3" --kind constraint
 ```
 
-Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/end-to-end) for the full topology.
+Canonization collapses the duplicate observations many agents produce into single canonical facts. See [End to end](/lambo/end-to-end/) for the full topology.
 
 ## Limits
 
@@ -337,4 +337,4 @@ The command line enforces the same limits as the MCP tools.
 
 See [What Lambo accepts in text](#what-lambo-accepts-in-text) for the character rules, which apply to every string on every verb.
 
-See [MCP tools](/mcp) for the same operations over MCP, and [Library API](/api) for the type both surfaces share.
+See [MCP tools](/lambo/mcp/) for the same operations over MCP, and [Library API](/lambo/api/) for the type both surfaces share.

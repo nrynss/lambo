@@ -26,7 +26,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. See [Library API](/api).
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. See [Library API](/lambo/api/).
 
 ```
 $ lambo --config lambo.toml provision
@@ -49,7 +49,7 @@ unknown field `default_top_k`, expected `store` or `embedder`
 
 `kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb`, `postgres`, and `pg` for `cockroach`, and `sqlite3` for `sqlite`.
 
-The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
+The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/lambo/installation/).
 
 ## Embedder
 
@@ -126,7 +126,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ### The read-only window
 
-`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. See [Command line](/cli).
+`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. See [Command line](/lambo/cli/).
 
 ## Provisioning a durable store
 
@@ -156,4 +156,4 @@ You can also run the script directly.
 
 Set `LAMBO_COCKROACH_DSN` in a `.env` file first, and run `./scripts/provision.sh --check` to verify the schema without applying it.
 
-See [Installation](/installation) and [Library API](/api).
+See [Installation](/lambo/installation/) and [Library API](/lambo/api/).

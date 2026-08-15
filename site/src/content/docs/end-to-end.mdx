@@ -19,7 +19,7 @@ Canonization runs in the background. It promotes concepts to canonical facts whe
 
 Every concept written this way keeps its embedding, so memory your agents produce is recallable by meaning and not only by keyword, on a store that supports vector search. See [What recall searches](#what-recall-searches).
 
-Text is checked on the way in. Lambo refuses control characters other than tab and newline. It also refuses invisible formatting characters such as bidi overrides and zero-width spaces. Nothing a reviewer cannot see reaches the graph. See [What Lambo accepts in text](/cli#what-lambo-accepts-in-text).
+Text is checked on the way in. Lambo refuses control characters other than tab and newline. It also refuses invisible formatting characters such as bidi overrides and zero-width spaces. Nothing a reviewer cannot see reaches the graph. See [What Lambo accepts in text](/lambo/cli/#what-lambo-accepts-in-text).
 
 ## A walkthrough you can run
 
@@ -82,7 +82,7 @@ Start the writer, and connect an MCP client to it.
 lambo --config lambo.toml serve --session demo --agent agent-a
 ```
 
-Point your client at that command over stdio. See [Installation](/installation) for the `mcpServers` block.
+Point your client at that command over stdio. See [Installation](/lambo/installation/) for the `mcpServers` block.
 
 To watch the wire yourself, pipe JSON-RPC frames into the server, one per line. This handshake, tool listing, and single call is what a client does for you.
 
@@ -116,7 +116,7 @@ To watch the session in a browser while the writer runs, add a read-only `lambo 
 lambo --config lambo.toml serve-web --session demo
 ```
 
-It serves on port `7710` (loopback, unauthenticated by default) and only reads. It shows live recall, the canonization feed, and durable counts. It never contends for the writer lease. See [Command line](/cli) for its flags.
+It serves on port `7710` (loopback, unauthenticated by default) and only reads. It shows live recall, the canonization feed, and durable counts. It never contends for the writer lease. See [Command line](/lambo/cli/) for its flags.
 
 ## What recall searches
 
@@ -172,6 +172,6 @@ lambo --config lambo.toml derive --session demo --agent agent-7 \
 
 Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context. Canonization collapses the duplicate observations that many agents produce into single canonical facts.
 
-For coordination, use `lambo_reserve` from the writer before editing a shared concept. A reservation taken by a one-shot command line call ends when that command exits, so the durable coordination point is the writer. See [Command line](/cli).
+For coordination, use `lambo_reserve` from the writer before editing a shared concept. A reservation taken by a one-shot command line call ends when that command exits, so the durable coordination point is the writer. See [Command line](/lambo/cli/).
 
-See [Installation](/installation), [MCP tools](/mcp), [Command line](/cli), [Library API](/api), and [Configuration](/config).
+See [Installation](/lambo/installation/), [MCP tools](/lambo/mcp/), [Command line](/lambo/cli/), [Library API](/lambo/api/), and [Configuration](/lambo/config/).

@@ -21,19 +21,19 @@ export default defineConfig({
         {
           label: 'Start here',
           items: [
-            { label: 'Quickstart', link: '/quickstart' },
-            { label: 'Demo', link: '/demo' },
+            { label: 'Quickstart', slug: 'quickstart' },
+            { label: 'Demo', slug: 'demo' },
           ],
         },
         {
           label: 'References',
           items: [
-            { label: 'Installation', link: '/installation' },
-            { label: 'MCP tools', link: '/mcp' },
-            { label: 'Command line', link: '/cli' },
-            { label: 'Configuration', link: '/config' },
-            { label: 'Library API', link: '/api' },
-            { label: 'End to end', link: '/end-to-end' },
+            { label: 'Installation', slug: 'installation' },
+            { label: 'MCP tools', slug: 'mcp' },
+            { label: 'Command line', slug: 'cli' },
+            { label: 'Configuration', slug: 'config' },
+            { label: 'Library API', slug: 'api' },
+            { label: 'End to end', slug: 'end-to-end' },
           ],
         },
       ],

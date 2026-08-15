@@ -7,15 +7,15 @@ hero:
   tagline: "Shared, self-consolidating memory for your agents."
   actions:
     - text: "Get started"
-      link: "/quickstart"
+      link: "/lambo/quickstart/"
 
     - text: "Read the reference"
-      link: "/mcp"
+      link: "/lambo/mcp/"
 
 ---
 
 import Mermaid from '../../components/Mermaid.astro';
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <div class="badges" style="text-align: center; margin-top: 1.5rem;">
   <img src="https://img.shields.io/github/actions/workflow/status/nrynss/lambo/ci.yml?branch=main&label=ci&logo=github" alt="CI status" height="20" />
@@ -70,22 +70,10 @@ Durability is write-behind and eventual. Mutations batch into a few round trips 
 Start with the quickstart or jump straight into a reference page.
 
 <CardGrid cols={2}>
-  <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Build Lambo from source and run your first session in about 30 seconds.
-  </Card>
-  <Card title="Demo" icon="flask" href="/demo">
-    Watch two agents build one REST API and share load-bearing memory.
-  </Card>
-  <Card title="Installation" icon="download" href="/installation">
-    Build from source, choose features, and connect an MCP client.
-  </Card>
-  <Card title="MCP tools" icon="wrench" href="/mcp">
-    The seven tools your agents call, with arguments and limits.
-  </Card>
-  <Card title="Command line" icon="terminal" href="/cli">
-    The same operations as single deterministic lines from the terminal.
-  </Card>
-  <Card title="End to end" icon="diagram-project" href="/end-to-end">
-    How the parts fit together, from serving a session to running a swarm.
-  </Card>
+  <LinkCard title="Quickstart" href="/lambo/quickstart/" description="Build Lambo from source and run your first session in about 30 seconds." />
+  <LinkCard title="Demo" href="/lambo/demo/" description="Watch two agents build one REST API and share load-bearing memory." />
+  <LinkCard title="Installation" href="/lambo/installation/" description="Build from source, choose features, and connect an MCP client." />
+  <LinkCard title="MCP tools" href="/lambo/mcp/" description="The seven tools your agents call, with arguments and limits." />
+  <LinkCard title="Command line" href="/lambo/cli/" description="The same operations as single deterministic lines from the terminal." />
+  <LinkCard title="End to end" href="/lambo/end-to-end/" description="How the parts fit together, from serving a session to running a swarm." />
 </CardGrid>
