@@ -166,6 +166,72 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 
 > _Fill on completion. Last entry in this diary: what would v0.7.0's first day want to know?_
 
+### Evidence promoted to top level, three-client MCP agreement (2026-08-15, `67d5064` on `main`)
+
+**Pushed to `main`, which publishes the docs site.** 79 files. The substance is two new
+captures and one structural move.
+
+#### Evidence now lives at `evidence/`, not `dev-diary/evidence/`
+
+Owner's call: evidence is the record behind the claims, and burying it in a working journal
+undersells it. Moved to a top-level `evidence/` with an index README.
+
+`dev-diary/evidence` is now a **symlink** to `../evidence` (git mode 120000). This was
+deliberate over the two alternatives:
+
+- *Repointing the ~52 references* inside dated handoffs and adversarial reviews would edit
+  documents that record what was true at review time.
+- *Copying the tree* would leave two copies to drift apart.
+
+The symlink keeps one source of truth and every old path resolving. If you ever flatten it,
+those 52 references are the thing to check.
+
+Directories and files carrying task numbers were renamed (`t8.2-mcp-client/` →
+`mcp-client-stdio/`, `live-review-t8.2-t8.3/` → `live-review-cockroach/`, and so on).
+**Identifiers inside captured transcripts were left alone** — editing a capture so it reads
+better stops it being a capture. That rule is now written into `evidence/README.md`.
+
+#### Three clients now agree on the managed-MCP walk
+
+OMP, Claude Code, and Cursor Agent CLI have each driven the CockroachDB managed MCP server
+model-first and returned the same five rows for the same session: `user schema`
+(`724c92b9`) going Candidate → Venerable → Canonical over 1.29s, `blast_radius` null on the
+earlier hops and **9** on the promotion. They agree on every field.
+
+That 9 is also what the demo prints in its final recall block, so the narrated number and
+the durably stored number now match from opposite ends. Transcripts in
+`evidence/mcp-client-interop/`.
+
+One honest detail preserved: Cursor's node-label query returned rows in a different order
+than OMP's. The query has no `ORDER BY`, so no order is owed and the id→content mapping is
+identical. Recorded as expected rather than quietly reordered.
+
+#### Two traps worth more than the captures
+
+**Nested `claude -p` cannot authenticate, and re-authenticating does not fix it.** Chased
+this properly instead of retrying: it fails on `claude -p "say hi"` too, and still fails
+with `CLAUDE_CODE_CHILD_SESSION`, `ANTHROPIC_BASE_URL` and the messaging-socket vars
+stripped. Under a host-managed session `~/.claude/.credentials.json` holds an access token
+with **no refresh token**, so a standalone CLI process has nothing to refresh with.
+Non-model commands like `claude mcp list` are unaffected, which is why the handshake looked
+healthy while every model-driven attempt died. The fix was to stop shelling out and use the
+session's own tool roster.
+
+**Cursor's per-call MCP approval gate is specific to `-p` print mode.** The earlier note
+said `--force` is required, full stop. Re-checked against a re-authenticated account: in
+print mode every call is still auto-rejected (`User rejected MCP: lambo-lambo_derive`), but
+running `cursor-agent` interactively approves normally and needs no `--force` at all. So
+`--force` is the scripting workaround, not a general requirement — and it is the only path
+that needs bounding, because the CockroachDB toolset ships `create_database`, `create_table`
+and `insert_rows` alongside the read-only tools.
+
+#### A cluster id was one commit away from being public
+
+`PHASE-9-ship.md` had the `mcp-cluster-id` UUID in plaintext in an **uncommitted** edit —
+the same id `.mcp.json` is gitignored to protect. Not in `HEAD`, so it was caught before
+publication and replaced with a pointer to the gitignored file. Worth a habit: the secret
+scan needs to cover the diary, not only `evidence/` and the site.
+
 ### T9.1 — README & docs site, binary-first (2026-08-15, branch `task/t9.1-docs`)
 
 **Not merged.** Two commits on `task/t9.1-docs` from `db387fd`: `4f0b149` (README + site
