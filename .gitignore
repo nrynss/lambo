@@ -28,3 +28,12 @@ spikes/*/Cargo.lock
 # Python bytecode from scripts/ (gen-fixtures.py, scripts/aws-infra/*.py)
 __pycache__/
 *.pyc
+lambo.toml
+scripts/recording/node_modules/
+evidence/cloudops-video/
+
+# Container build tree (scripts/aws-infra deploy pipeline)
+target-docker/
+
+# Agent worktrees and local agent config
+.claude/
