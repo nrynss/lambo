@@ -9,6 +9,13 @@ use crate::types::{EmbeddingContract, LamboError};
 use crate::LamboFile;
 
 /// Fully resolved Level B backends ready for `Memory` / CLI.
+///
+/// `#[non_exhaustive]` is deliberate: adding a field is a breaking change for
+/// library consumers of the resolved-backend bundle (see T1-P2-2), so the
+/// attribute future-proofs the struct against the next field addition — a
+/// one-time break now (callers can no longer literal-construct or
+/// exhaustively destructure it) that buys permanence for every field after.
+#[non_exhaustive]
 pub struct ResolvedBackends {
     pub store: Box<dyn GraphStore>,
     pub embedder: Box<dyn Embedder>,
