@@ -47,6 +47,17 @@ case "$ARCH" in
     ;;
 esac
 
+# No macos-x86_64 asset is published: the Intel macOS runner class never picked
+# up the release job, so that target was dropped from the matrix rather than
+# leaving every release blocked on it. Say so plainly here — otherwise this
+# resolves to an asset URL that does not exist and the user sees a bare 404.
+if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
+  echo "error: no prebuilt binary is published for Intel macOS (macos-x86_64)." >&2
+  echo "  Apple silicon is supported; Intel Macs need a build from source:" >&2
+  echo "    cargo install --git https://github.com/${REPO} --features ship lambo" >&2
+  exit 1
+fi
+
 echo "platform: ${OS}-${ARCH}"
 
 # --- Resolve version --------------------------------------------------------
