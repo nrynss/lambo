@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Launch `EC2-LamboWebExhibit`, the public judge portal (plan §2, §5, §8).
 
-A `t4g.micro` in `Subnet-Public-1a`, in `SG-PublicWeb`, running Caddy on 443 in
-front of `lambo serve-web` on loopback:7710, both as systemd services.
+A `t4g.large` in `Subnet-Public-1a`, in `SG-PublicWeb`, running Caddy on 443 in
+front of `lambo serve-web` on loopback:7710, with llama.cpp serving BGE-M3 on
+loopback:8080 beside it, all as systemd services.
 
 Four constraints shape everything below.
 
@@ -97,18 +98,32 @@ DEFAULT_CADDY_VERSION = "2.10.0"
 # from the stored embeddings, and nothing errors. The live sessions were written
 # with bge_m3, so the exhibit reads with bge_m3.
 #
-# Q8_0 is near-lossless, which matters here — quantization noise keeps the query
-# in the same space, where a different model would not be.
+# This is the FP16 build, pinned by hash, because it is byte-identical to the
+# model the operator's own llama.cpp serves — the one that produced every vector
+# currently in the store. Verified: HuggingFace's `x-linked-etag` (the LFS
+# sha256) equals the local file's sha256, and both are 1,157,671,200 bytes.
+# A quantized build would be *close enough* to be indistinguishable in casual
+# use and subtly wrong under comparison, which is the worst failure mode
+# available here, so the exact file is used instead.
+#
+# GGUF is architecture-independent: the same file gives the same vectors on
+# Graviton as on the x86 box that wrote them. The instance stays ARM because
+# that is cheaper per unit of throughput, not because the model differs.
 DEFAULT_BGE_MODEL_URL = (
-    "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf"
+    "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf"
+)
+DEFAULT_BGE_MODEL_SHA256 = (
+    "daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c"
 )
 DEFAULT_LLAMA_CPP_REF = "b4585"
 LLAMA_PORT = 8080
 
-# Local BGE-M3 needs roughly 1 GiB resident plus headroom for llama.cpp's build
-# and the OS. Instance types known to be too small are rejected up front rather
-# than discovered when the OOM killer takes llama-server mid-demo.
+# The FP16 model is ~1.2 GiB resident before llama.cpp's own allocations and the
+# KV cache, so these are rejected up front rather than discovered when the OOM
+# killer takes llama-server mid-demo. t4g.medium (4 GiB) fits but leaves little
+# room for the source build, so it is warned about rather than blocked.
 TOO_SMALL_FOR_LOCAL_BGE = ("t4g.nano", "t4g.micro", "t4g.small")
+TIGHT_FOR_LOCAL_BGE = ("t4g.medium",)
 
 # Amazon Linux 2023, arm64, resolved through the public SSM parameter rather
 # than a hardcoded AMI id: AMI ids are per-region and go stale every few weeks.
@@ -128,7 +143,7 @@ def arm_instance_type(value: str) -> str:
         raise argparse.ArgumentTypeError(
             f"{value!r} is not a Graviton (ARM64) instance type. User data fetches the "
             "lambo linux-arm64 asset, so an x86_64 type would boot and then fail. Use "
-            "t4g.micro, or add the family to ARM_FAMILIES and provide an x86_64 path."
+            "t4g.large, or add the family to ARM_FAMILIES and provide an x86_64 path."
         )
     return value
 
@@ -163,7 +178,7 @@ dnf -y install tar gzip >/dev/null
 @@LLAMA_BLOCK@@
 
 # ---------------------------------------------------------------- lambo -----
-# t4g.micro is Graviton, so this is the linux-arm64 asset. The release publishes
+# t4g is Graviton, so this is the linux-arm64 asset. The release publishes
 # `lambo-<version>-<name>` alongside a matching `.sha256` (see
 # .github/workflows/release.yml); verify rather than trust the download.
 cd /tmp
@@ -347,11 +362,20 @@ if [ ! -x /usr/local/bin/llama-server ]; then
 fi
 
 MODEL=/var/lib/llama/models/bge-m3.gguf
+BGE_MODEL_SHA256="@@BGE_MODEL_SHA256@@"
 if [ ! -s "${MODEL}" ]; then
+    # ~1.2 GB. Downloaded to .part and only renamed after the hash matches, so an
+    # interrupted boot cannot leave a truncated model that llama-server would
+    # happily load and then embed nonsense with.
     curl -fsSL --retry 5 --retry-delay 5 -o "${MODEL}.part" "${BGE_MODEL_URL}"
+    echo "${BGE_MODEL_SHA256}  ${MODEL}.part" | sha256sum -c -
     mv "${MODEL}.part" "${MODEL}"
     chown llama:llama "${MODEL}"
 fi
+# Re-check on every boot: this hash is what ties the exhibit's query embeddings
+# to the vectors already in the store. If it ever stops matching, the portal
+# must not come up pretending otherwise.
+echo "${BGE_MODEL_SHA256}  ${MODEL}" | sha256sum -c -
 
 cat >/etc/systemd/system/llama-server.service <<UNIT
 [Unit]
@@ -437,6 +461,7 @@ def render_llama_block(args: argparse.Namespace) -> str:
     for key, value in {
         "@@BGE_MODEL_URL@@": args.bge_model_url,
         "@@LLAMA_CPP_REF@@": args.llama_cpp_ref,
+        "@@BGE_MODEL_SHA256@@": args.bge_model_sha256,
         "@@LLAMA_PORT@@": str(LLAMA_PORT),
     }.items():
         out = out.replace(key, value)
@@ -759,6 +784,9 @@ def main(args: argparse.Namespace) -> int:
                 "is then killed by the OOM killer, usually mid-demo."
             ),
         )
+    if local_llama(args) and args.instance_type in TIGHT_FOR_LOCAL_BGE:
+        warn(f"{args.instance_type} fits the FP16 model but leaves little headroom for")
+        warn("llama.cpp's source build. t4g.large is the tested size.")
     if args.llama_url and args.embedder != "bge_m3":
         raise InfraError(
             "--llama-url only applies to --embedder bge_m3.",
@@ -913,25 +941,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="GGUF to serve when llama.cpp is installed locally. Must be BGE-M3.",
     )
     parser.add_argument(
+        "--bge-model-sha256",
+        default=DEFAULT_BGE_MODEL_SHA256,
+        help=(
+            "Expected sha256 of the GGUF, checked on download and on every boot. "
+            "Change it only alongside --bge-model-url, and only if you have "
+            "re-embedded the store with the new model."
+        ),
+    )
+    parser.add_argument(
         "--llama-cpp-ref",
         default=DEFAULT_LLAMA_CPP_REF,
         help=f"llama.cpp git tag to build (default {DEFAULT_LLAMA_CPP_REF}).",
     )
     parser.add_argument(
         "--instance-type",
-        default="t4g.medium",
+        default="t4g.large",
         type=arm_instance_type,
         help=(
-            "Graviton instance type (default t4g.medium). Must be ARM64. The "
-            "default is sized for local BGE-M3; t4g.micro is enough only with "
-            "--embedder fixture or an off-instance --llama-url."
+            "Graviton instance type (default t4g.large). Must be ARM64. The "
+            "default is sized for the FP16 BGE-M3 with headroom; t4g.micro is "
+            "enough only with --embedder fixture or an off-instance --llama-url."
         ),
     )
     parser.add_argument(
         "--volume-size",
         type=int,
-        default=24,
-        help="Root gp3 volume size in GB (default 24: the model is ~640 MB and llama.cpp builds from source).",
+        default=32,
+        help="Root gp3 volume size in GB (default 32: the FP16 model is ~1.2 GB and llama.cpp builds from source).",
     )
     parser.add_argument(
         "--key-name",

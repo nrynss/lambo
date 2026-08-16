@@ -64,9 +64,9 @@ resources the agents provision, plus the public read-only portal judges visit.
 │ app-data-agent               │──AWS──▶│                                          │
 │   (boto3 / AWS CLI)          │  APIs  │  Public Subnet 10.0.1.0/24               │
 │                              │        │   ┌────────────────────────────────────┐ │
-│ lambo serve (SINGLE WRITER)  │        │   │ EC2-LamboWebExhibit (t4g.medium)   │ │
+│ lambo serve (SINGLE WRITER)  │        │   │ EC2-LamboWebExhibit (t4g.large)    │ │
 │   stdio MCP + CLI verbs      │        │   │  Caddy 443 ─▶ lambo serve-web 7710 │ │
-└───────────────┬──────────────┘        │   │  llama.cpp BGE-M3 on 127.0.0.1:8080│ │
+└───────────────┬──────────────┘        │   │  llama.cpp BGE-M3 FP16 on :8080    │ │
                 │ writes                │   │  READ-ONLY. Instance profile reads │ │
                 │                       │   │  lambo/cockroach-dsn at boot.      │ │
                 ▼                       │   └────────────────────────────────────┘ │
@@ -226,27 +226,31 @@ EC2 instance is running and ~180 with the other credit activities. Rough
 
 | Resource | Approx. monthly |
 |---|---|
-| EC2 `t4g.medium` (exhibit, always on) | ~$24.50 |
-| Root gp3 volume, 24 GB | ~$1.90 |
+| EC2 `t4g.large` (exhibit, always on) | ~$49 |
+| Root gp3 volume, 32 GB | ~$2.60 |
 | RDS `db.t4g.micro` PostgreSQL, single-AZ + 20 GB gp3 | ~$14 |
 | Secrets Manager, 1 secret | ~$0.40 |
 | Lambda + Function URL (demo traffic) | ~$0 (free tier) |
 | VPC, subnets, IGW, route tables, security groups | $0 |
 | Route 53 hosted zone (if used for TLS, §8) | ~$0.50 |
-| **Total** | **~$41/month** |
+| **Total** | **~$66/month** |
 
-At ~$41/month the stack runs for the intended month well inside the remaining
-credit. **Cost is not a binding constraint on this design** — so do not let it
+At ~$66/month the stack runs for the intended month well inside the remaining
+credit (~$140 held, plus ~$40 earned by running EC2 and RDS). **Cost is not a binding constraint on this design** — so do not let it
 drive architecture decisions, and do not trim the exhibit to save single-digit
 dollars.
 
-**Why `t4g.medium` rather than `t4g.micro`.** `serve-web` builds an embedder and
+**Why `t4g.large` rather than `t4g.micro`.** `serve-web` builds an embedder and
 `/api/recall` embeds the judge's query with it. The live sessions were written
 with `bge_m3`, and `resolve_backends` enforces only the vector *width* — so a
 `fixture` embedder resolves cleanly and then ranks against a vector space the
 stored embeddings do not share, with no error anywhere. The exhibit therefore
 runs BGE-M3 itself via llama.cpp, which does not fit in the 1 GiB of a
-`t4g.micro`. The extra ~$18/month buys the portal's semantic recall being real.
+`t4g.micro`. The model served is the **FP16** build pinned by sha256, byte-identical
+to the one the operator's own llama.cpp serves and therefore to the one that wrote
+every vector in the store — a quantized build would be close enough to look right
+and be subtly wrong. The extra ~$43/month buys the portal's semantic recall being
+real rather than plausible.
 
 Two things still matter, for reasons other than the bill:
 
