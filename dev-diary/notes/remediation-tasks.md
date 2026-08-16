@@ -529,6 +529,32 @@ above remain LIVE + 5 new defects in the never-reviewed changed lines:
   (creds expired) + the `stable/current` AMI is never pinned. Verify both
   `UBUNTU_SSM` paths in `us-east-1` before shipping, pin/log the resolved AMI.
 
+
+### ✅ T6 — DONE (2026-08-17, merged `0ed7cc7`)
+
+All 13 findings (8 known + 5 new from T5) closed in
+`scripts/aws-infra/launch_exhibit_ec2.py` + `provision_network.py`:
+port 80 open by default (http→https redirect + ACME HTTP-01); `--bge-model-sha256`
+required with a custom URL; IAM retry narrowed to genuine propagation errors;
+stale x86_64/Ubuntu prose corrected; ephemeral-IP race bounded; `caddy.service`
+`Restart=always`; static UIDs 901-903 with fail-loud collision checks; health poll
+aborts after 3 consecutive llama-server failures; `--llama-cpp-ref` hash +
+extract-dir now follow the ref (unpinned refs refused at parse); post-boot
+readiness probe (status 2/2 + `:443`) with an honest console-diagnostic; tarball
+layout/loadability verified before install; ARM/X86 family lists completed.
+
+**Round 1 was REQUEST_CHANGES** — 2 P1 (a dropped `require_subnet`/`require_sg`
+import, a NameError on every real launch; and the accidental removal of the
+`libgomp1` install, a fresh-build llama-server failure) → remediated; R2/R3
+verified all genuine and clean. Docs in
+`adve-review-remed-T6round{1..3}.md`. README refreshed (this commit).
+
+**D1 blocker (documented):** NEW-5 — the Ubuntu 26.04 SSM parameter paths were
+not verifiable at review time (AWS creds expired; the instance role has no
+`ssm:SendCommand` and no SSM agent is installed). A precise
+`aws ssm get-parameter` command for both `UBUNTU_SSM` paths runs at launch
+(`launch_exhibit_ec2.py:178-192`). **Must be run before D1 (clean redeploy).**
+
 ---
 
 ## T7 — CloudOps agents

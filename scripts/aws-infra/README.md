@@ -106,7 +106,7 @@ ARN.
 | `InternetGateway` | attached to the VPC |
 | `RouteTable-Public` | `0.0.0.0/0` → IGW, associated with the public subnet |
 | `SG-Base-VPC` | self-referential all-protocol mesh, plus `5432` from `SG-PublicWeb` |
-| `SG-PublicWeb` | `443` from `0.0.0.0/0`; `22` from `--ssh-cidr`; `80` only with `--open-http` |
+| `SG-PublicWeb` | `80`, `443` from `0.0.0.0/0`; `22` from `--ssh-cidr` |
 | `lambo/cockroach-dsn` | Secrets Manager, created empty |
 
 **No NAT gateway, anywhere.** Nothing in this design needs one (plan §2), and the
@@ -114,7 +114,7 @@ private subnet deliberately has no route table of its own — it uses the VPC ma
 table, which carries only the local route.
 
 Arguments: `--ssh-cidr` (**required**, no default, `0.0.0.0/0` is rejected),
-`--open-http`, `--region`, `--profile`, `--dry-run`.
+`--region`, `--profile`, `--dry-run`.
 
 ### `provision_app_data.py`
 
@@ -152,7 +152,7 @@ Arguments: `--session` (**required**), `--skip-rds`, `--skip-lambda`,
 |---|---|
 | `lambo-cloudops-exhibit-role` | `GetSecretValue`/`DescribeSecret` on **exactly** `lambo/cockroach-dsn`. Not `secretsmanager:*`, not a resource wildcard. |
 | `lambo-cloudops-exhibit-profile` | instance profile holding that role |
-| `EC2-LamboWebExhibit` | `t4g.medium` (Graviton/ARM64) Amazon Linux 2023 in `Subnet-Public-1a` / `SG-PublicWeb`, 24 GB encrypted gp3, IMDSv2 required |
+| `EC2-LamboWebExhibit` | `t4g.large` (Graviton/arm64; x86_64 families like `m7i-flex.large` also accepted) Ubuntu 26.04 LTS in `Subnet-Public-1a` / `SG-PublicWeb`, 8 GB gp3, IMDSv2 required |
 | `llama-server.service` | llama.cpp built from a pinned tag, serving BGE-M3 (GGUF, Q8_0) on `127.0.0.1:8080`, loopback only |
 | `EIP-LamboWebExhibit` | Elastic IP, so the A record survives a stop/start (`--no-eip` to skip) |
 
@@ -190,8 +190,8 @@ for bare IP addresses. The script refuses to run without a decision:
 * Cloudflare Tunnel, §8's third option, is not automated here. It would need no
   inbound ports at all.
 
-If Caddy has to fall back to the ACME HTTP-01 challenge, re-run
-`provision_network.py --open-http` to open port 80.
+If Caddy has to fall back to the ACME HTTP-01 challenge, port 80 is already open
+by default (`Provision 80 from 0.0.0.0/0`).
 
 #### Embedder
 
@@ -207,7 +207,7 @@ The live sessions were written with `bge_m3`, so:
 
 * `--embedder bge_m3` (default) — installs llama.cpp and BGE-M3 on the instance
   and serves them on loopback. This is why the default instance type is
-  `t4g.medium`: BGE-M3 does not fit in a `t4g.micro`'s 1 GiB, and sizing it too
+  `t4g.large`: BGE-M3 does not fit in a `t4g.micro`'s 1 GiB, and sizing it too
   small does not fail at launch — llama-server loads the model and is then killed
   by the OOM killer, usually mid-demo. The script refuses the too-small types
   rather than letting that happen.
@@ -219,13 +219,14 @@ The live sessions were written with `bge_m3`, so:
   actual punchline survives, but "recalls by meaning" does not. The script warns
   on every run.
 
-Boot takes several minutes longer with a local llama.cpp: it is built from
-source, because upstream publishes no linux-arm64 binary. `lambo-web.service`
-waits for the embedder's health endpoint before starting, so it does not
-crash-loop under `Restart=always` while the model loads.
+Boot takes a few minutes longer with a local llama.cpp: it is a pinned
+prebuilt binary fetched by SHA-256 (no source build). `lambo-web.service` waits
+for the embedder's health endpoint before starting, so it does not crash-loop
+under `Restart=always` while the model loads.
 
-`--caddy-version`, `--embedder`, `--llama-url`, `--instance-type` (must be
-Graviton), `--volume-size`, `--key-name`, `--no-eip`, plus the common four.
+`--caddy-version`, `--embedder`, `--llama-url`, `--instance-type` (Graviton
+`t4g.large` by default; `m7i-flex.large` for the x86_64 free tier),
+`--volume-size`, `--key-name`, `--no-eip`, plus the common four.
 
 ### `teardown.py`
 
