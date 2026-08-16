@@ -165,6 +165,29 @@ correctness in the caller's head is a strange choice for a memory product.
 **Verify:** each of these needs a test that asserts the *refusal*, not the happy
 path. All four currently "pass" by doing the wrong thing quietly.
 
+**Acceptance criteria, applied at review rather than design time.** Adding four
+refusals converts four invisible failures into four visible ones, which is
+strictly better but not free: a caller now has four new ways to be rejected.
+Each refusal should therefore remove a decision, not just add a gate. A refusal
+that does not tell you how to succeed is only a new way to fail.
+
+- **Embedding contract:** the error names the model that wrote the vectors. The
+  contract already carries `kind`, `model` and `dim`, so "incompatible embedder"
+  alone is a regression on a message that could be actionable.
+- **`Observation`:** prefer not making the caller choose. If content
+  canonicalizes, requiring them to know that one enum variant silently opts out
+  of identity is the trap restated as a rule. A refusal is the floor, not the
+  goal.
+- **Single hierarchy parent:** the error names the parent that already claims
+  the child. Otherwise the caller knows they are wrong and not how.
+- **`--parent-of` colon:** this one should probably not refuse at all. Accept an
+  escape or an alternative separator. Refusing pushes the burden onto every
+  caller, which is exactly how it became client-side Python in `_lambo.py`.
+
+None of this changes the implementation shape. Error text and the separator
+scope call are the last things written, so it costs work already in flight
+nothing.
+
 ---
 
 ## T2 — Make `[daemon]` mean the same thing in every subcommand
