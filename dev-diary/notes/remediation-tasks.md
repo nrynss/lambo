@@ -453,6 +453,17 @@ truncation test (N1 landed here in the contract). Docs in
 Adding the `config` field already made this a breaking change for library
 consumers. The attribute stops the next field being another one.
 
+
+### ✅ T4 — DONE (2026-08-17, merged `6221feb`)
+
+`#[non_exhaustive]` on `ResolvedBackends` (`src/resolve.rs`), with a doc note
+stating it is deliberate — a one-time break (callers can no longer
+literal-construct or exhaustively destructure it) that buys permanence for
+every future field, per T1-P2-2. All construct/destruct sites are in-crate and
+compile unchanged. Docs in `adve-review-remed-T4round{1..2}.md`.
+
+**Verify:** full `cargo test --all-features` green — **835 passed / 0 failed**.
+
 ---
 
 ## T5 — Re-review the launcher
