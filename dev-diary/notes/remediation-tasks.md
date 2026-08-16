@@ -67,6 +67,48 @@ is the task most likely to break something unrelated. 763 tests pass today.
 
 ---
 
+### ✅ T1 — DONE (2026-08-16, merged `3899d3f`)
+
+**What landed** (`src/config.rs`, `src/memory.rs`, `src/resolve.rs`):
+- `Config::validate()` now enforces `gc_interval >= 1` and strictly-positive
+  `daemon_tick_interval`, `backend_flush_interval`, `canonization_eval_interval`
+  (the three `tokio::interval` feeders), on top of the pre-existing threshold /
+  top-k checks. Duration error messages render `0ns` via `{:?}` (the old
+  `.as_secs_f64()` always printed `0` for the only rejected value).
+- `MemoryBuilder::build()` calls `config.validate()?` on the **merged** config
+  (named setters included) before acquiring the single-writer lease, loading
+  the session, or spawning any task — a zero cadence can no longer reach
+  `tokio::interval` or leak a lease.
+- `resolve_backends` validates immediately after applying `[daemon]` overrides,
+  **before** `build_store`/`build_embedder` (an embedder build may load a
+  model), so every full-resolve command (`serve`/`derive`/`inspect`/`saints`)
+  fails closed at config load. `resolve_store_only` (provision, reader tools)
+  deliberately does not — documented; those commands never run a daemon interval.
+
+**Tests** (all new): `cadence_validation_fails_closed`,
+`daemon_config_zero_cadence_override_rejected` (both fields + each alone),
+`lambo_file_zero_daemon_cadences_fail_validate` (TOML-file-driven), and
+`build_rejects_zero_cadence_before_acquiring_the_lease` — the last issues a
+second `build()` on the same session with a valid config, so it genuinely
+detects a leaked lease (a validate-after-lease regression wedges that build).
+
+**Review:** 4 rounds, all APPROVE. R1 raised 3 P3 + 2 nits (resolve-boundary
+validate, test-coverage gaps, and 2 polish items); R2 found two were
+*claimed-not-delivered* (the `.as_secs_f64()` nit and the validate-before-store
+ordering) plus a lease-test overclaim; R3 verified all fixed; R4 cleared the
+single residual comment nit. Docs in
+`dev-diary/adversarial-review/adve-review-remed-T1round{1..4}.md`.
+
+**Deferred to T2 (documented, not a defect):** T1-R1-2 — `MemoryBuilder::backends()`
+drops `ResolvedBackends.config` and `open_writer()` never applies `[daemon]`
+overrides; that is exactly T2's charter and lands there.
+
+**Verify:** full `cargo test --all-features` green — **818 passed / 0 failed**
+(defaults 734). No production caller passes a zero cadence; `lambo demo` and the
+example config unaffected.
+
+---
+
 ## T2 — Make `[daemon]` mean the same thing in every subcommand
 
 **Files:** `src/cli/mod.rs`
@@ -82,6 +124,13 @@ Wire the file's config through `open_writer()` so every verb reads the same
 divergence, but it makes the file mean two different things depending on who
 opens it, and the CLI verbs are exactly where an operator would expect a
 lowered `gc_interval` to apply.
+
+> **Carries T1 review finding T1-R1-2 (P3).** The round-1 T1 review noted that
+> `Memory::builder().backends(ResolvedBackends)` drops `backends.config`, and
+> `open_writer()` never applies `[daemon]` overrides — the exact divergence this
+> task exists to close. Deferred here deliberately so the fix lands once, as this
+> task, rather than being pre-emptively done in T1. See
+> `dev-diary/adversarial-review/adve-review-remed-T1round1.md`.
 
 ---
 
