@@ -112,9 +112,12 @@ Every one of these is currently contradicted by what is running:
 Two things to get right rather than fast:
 
 - **The Function URL.** The Lambda works: invoked directly it returns live
-  counts read from CockroachDB through the scoped secret. Only the public URL
-  403s, and that is undiagnosed. §11 should describe it as IAM-invoked rather
-  than claim a public endpoint that does not answer.
+  counts read from CockroachDB through the scoped secret. The public URL
+  previously 403d because (post-Oct-2025) a public function URL requires BOTH
+  `lambda:InvokeFunctionUrl` AND `lambda:InvokeFunction` in its resource
+  policy; the missing second statement was added (remediation T10) and the URL
+  now returns HTTP 200. §11 should describe it as the live public endpoint at
+  the URL shown on deploy, per the T10 resolution.
 - **The portal's own copy.** It currently promises that Lambo "names the
   workloads that would break". `/api/recall` does not do that; remediation T3
   makes it true. If T3 does not land, that sentence comes down before the URL is

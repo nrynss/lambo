@@ -803,6 +803,36 @@ from here.
 This decides whether §11 can claim a public endpoint or has to describe the
 Lambda as IAM-invoked. Either is honest; the claim just has to match.
 
+### ✅ T10 — DONE (2026-08-17, merged `54165e3`)
+
+**Root cause (live-diagnosed):** since October 2025 a public (`AuthType=NONE`)
+Lambda Function URL requires BOTH `lambda:InvokeFunctionUrl` AND
+`lambda:InvokeFunction` in its resource-based policy. The provisioning (and
+the live function) only attached the first, so the URL 403d even though the
+policy "looked correct". The **account-level public-access-block hypothesis is
+ruled out**: `get-account-settings` exposes no such field, no such CLI
+operation exists, the account is not in an Organization (no SCP), and a
+resource-policy-only fix resolved it (an account-level deny would not have
+permitted that).
+
+**Fix:** added statement `AllowPublicFunctionUrlInvoke` (`lambda:InvokeFunction`,
+`Principal *`, condition `Bool lambda:InvokedViaFunctionUrl = true`); the URL
+flipped 403 → 200 (verified live: `concepts 41 / canonical 1 / edges 485 /
+interactions 72`). `provision_app_data.py` `ensure_lambda` now emits BOTH
+statements via an idempotent `_add_perm` helper, so a re-provision cannot
+re-break it.
+
+**§11 decision: public endpoint** — a public, unauthenticated read-only stats
+endpoint over the live CockroachDB session, outside the VPC. Deployment-doc
+guidance updated to match.
+
+**Review:** 2 rounds, all APPROVE. R1: 2 P3 (doc hygiene — section not marked
+done, §11 guidance stale) + 4 nits → remediated; R2 cleared. Docs in
+`adve-review-remed-T10round{1..2}.md`.
+
+**Verify:** URL returns HTTP 200; `py_compile` clean.
+
+
 ---
 
 ## T11 — Surface why a concept is not canonical yet
