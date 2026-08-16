@@ -1,0 +1,6 @@
+{
+  "name": "lambo-recording",
+  "private": true,
+  "description": "Playwright capture of the judge portal for the submission video.",
+  "devDependencies": { "@playwright/test": "^1.49.0" }
+}
