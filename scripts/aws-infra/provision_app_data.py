@@ -401,21 +401,37 @@ def ensure_lambda(aws: Aws, role_arn: str, zip_path: pathlib.Path, session: str)
         )["FunctionUrl"]
         created("function-url", url)
 
-    # AuthType=NONE still needs an explicit resource policy statement, or every
-    # request returns 403. This is the single most commonly missed step.
-    try:
-        aws.awslambda.add_permission(
-            FunctionName=LAMBDA_NAME,
-            StatementId="AllowPublicFunctionUrl",
-            Action="lambda:InvokeFunctionUrl",
-            Principal="*",
-            FunctionUrlAuthType="NONE",
-        )
-        note("public invoke permission added to the function URL")
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] != "ResourceConflictException":
-            raise
-        note("public invoke permission already present")
+    # AuthType=NONE still needs explicit resource policy statements, or every
+    # request returns 403. Since October 2025, public function URLs require BOTH
+    # lambda:InvokeFunctionUrl AND lambda:InvokeFunction; the helper below emits
+    # both, because omitting the second yields a 403 Forbidden on the URL even
+    # though the first statement looks correct.
+    def _add_perm(statement_id: str, action: str, **extra) -> str:
+        try:
+            aws.awslambda.add_permission(
+                FunctionName=LAMBDA_NAME,
+                StatementId=statement_id,
+                Action=action,
+                Principal="*",
+                **extra,
+            )
+            note(f"{statement_id} permission added to the function URL")
+            return "created"
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ResourceConflictException":
+                raise
+            note(f"{statement_id} permission already present")
+            return "existing"
+
+    perm_statuses = [
+        _add_perm("AllowPublicFunctionUrl", "lambda:InvokeFunctionUrl", FunctionUrlAuthType="NONE"),
+        _add_perm("AllowPublicFunctionUrlInvoke", "lambda:InvokeFunction", InvokedViaFunctionUrl=True),
+    ]
+    note(
+        "public function URL policy: "
+        f"{perm_statuses.count('created')} created, "
+        f"{perm_statuses.count('existing')} already present"
+    )
     return url
 
 
