@@ -34,27 +34,44 @@ We measured recall across 3,000 vectors on a live CockroachDB cluster. We evalua
 
 You can reproduce this test with `./scripts/seed-vector-index.sh --count 3000`.
 
-## Deterministic convergence on live clusters
+## Deterministic convergence
 
-Multi-agent graphs must reach a stable state regardless of write arrival order. We verified this by running the two-agent scenario twice against a live CockroachDB Cloud cluster.
+Multi-agent graphs must reach a stable state regardless of write arrival order. The demo's rendered OUTCOME block is asserted to be **byte-identical** across two runs of the same scenario, by a test that compares the blocks directly — no tolerance, no ordering leniency, no rounding.
+
+Measured on 2026-08-16 at commit `0006824`:
+
+| What was measured | Result |
+|---|---|
+| Consecutive parity runs, frozen build | **100 of 100 passed, 0 failed** |
+| Independent run-pairs, every diff line classified | **20 pairs, 0 unexpected differences** |
+| Distinct places two runs can differ at all | **3**, all intentional, all outside the asserted block |
+| Rendered scores across all 20 pairs | identical |
+
+The three permitted differences are the freshly-minted session id, a random node id quoted in the high-risk warning, and a narration line's canonization cycle index. The third is a genuine timer interleaving and fires in about 18 of 20 pairs, which is why two runs may differ in two places or three and both are healthy.
+
+The classification matters more than the pass count. Twenty pairs were compared with **every** changed line sorted into a known bucket, and anything unsorted counted as unexpected. That turns "we saw nothing else vary" into "we looked for a fourth source of variation and there is none". Full logs and the scripts that produced them are in [`evidence/demo-determinism/`](https://github.com/nrynss/lambo/tree/main/evidence/demo-determinism).
+
+### The same scenario against a live cluster
+
+Run twice against a live CockroachDB Cloud cluster:
 
 ```
 $ diff -u evidence/demo-live-1.txt evidence/demo-live-2.txt
 IDENTICAL - T8.4 x2 met
 ```
 
-You get identical outcomes across both runs.
-
-**Update — 2026-08-16.** That capture is genuine, but when it was taken identical output was not yet *guaranteed*. A time-derived term in the daemon score (`recency`, measured against the session's wall-clock temporal extent) varied slightly between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The run above passed at about nine attempts in ten rather than by construction.
-
-That is now fixed. The demo stamps its interactions from a script clock, so a session's temporal extent is a property of the script rather than of the scheduler, and the ordering no longer depends on how the OS happened to schedule a sleep. The byte-identical assertion in `binary_parity` was never weakened to accommodate the bug — it is the test that caught it.
-
-So the claim on this page holds, and now holds for the right reason. The earlier capture is left exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
-
 - Exactly 12 interactions and 27 concepts created.
 - Exactly 114 graph edges established.
 - Exactly 5 canonization events recorded in CockroachDB.
 - `user schema` promoted to Canonical with an exact blast radius of 9.
+
+### When this became a guarantee
+
+That live-cluster capture predates the fix, and is worth reading with its date in mind. When it was taken, identical output was not yet guaranteed: a time-derived term in the daemon score — `recency`, measured against the session's wall-clock temporal extent — varied between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The capture is genuine, but it passed at about nine attempts in ten rather than by construction.
+
+The cause was that the demo replays in around 110ms of logical span while stamping interactions from the wall clock, so ordinary scheduler jitter moved the denominator that every recency value is measured against. The demo now stamps from a script clock, making a session's temporal extent a property of the script rather than of the machine it runs on.
+
+The assertion was never weakened to accommodate the bug — it is the test that caught it, and it failed openly for as long as the bug existed. The earlier capture is kept exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
 
 ## Live conflict and blast radius interception
 
