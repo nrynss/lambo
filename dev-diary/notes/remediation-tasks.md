@@ -464,6 +464,15 @@ compile unchanged. Docs in `adve-review-remed-T4round{1..2}.md`.
 
 **Verify:** full `cargo test --all-features` green — **835 passed / 0 failed**.
 
+
+### ✅ T5 — DONE (2026-08-17, merged `22afa95`)
+
+Adversarial re-review of the launcher (`launch_exhibit_ec2.py`,
+`provision_network.py`, `_common.py`) after the prebuilt-tarball / Ubuntu
+switch. Result: all **8 known T6 findings remain LIVE** (none stale), plus **5
+new defects** in the ~194 never-reviewed lines. The five new items are folded
+into T6 below. Details: `dev-diary/adversarial-review/adve-review-remed-T5.md`.
+
 ---
 
 ## T5 — Re-review the launcher
@@ -500,6 +509,25 @@ adversarial pass at all.
   `Restart=on-failure` while the others use `Restart=always`; system users
   created without static UIDs; the health check polls 300s even after
   `llama-server` has died.
+
+**Also closes, from the T5 re-review** (`adve-review-remed-T5.md`): all 8 items
+above remain LIVE + 5 new defects in the never-reviewed changed lines:
+- **NEW-1 (P2)** — `--llama-cpp-ref` override changes the tarball URL but the
+  SHA-256 pin (`LLAMA_TARBALLS`) and extract dir stay pinned to the default ref,
+  so a non-default ref fails `sha256sum -c` at boot after the instance is
+  "running". Make hash + extract-dir depend on ref; refuse an unpinned
+  `--llama-cpp-ref` at ARG-PARSE time.
+- **NEW-2 (P2)** — no post-boot success detection; a bootstrap failure (tarball/
+  BGE checksum) aborts user-data with `set -e` while the script prints "exhibit
+  launched" and exits 0. Poll instance status 2/2 + probe the Caddy/lambo health
+  endpoint; on failure print console tail and return non-zero.
+- **NEW-3 (P3)** — `cp -a llama-${REF}/.` assumes the archive's top-level layout;
+  after extraction test `-x $DIR/llama-server` + `libllama.so*` and fail closed.
+- **NEW-4 (P3)** — `ARM_FAMILIES` entry `'x2g'` lacks the trailing dot; complete
+  the family lists (fail-closed but wrong for real families).
+- **NEW-5 (P3)** — Ubuntu 26.04 SSM parameter paths unverified at review time
+  (creds expired) + the `stable/current` AMI is never pinned. Verify both
+  `UBUNTU_SSM` paths in `us-east-1` before shipping, pin/log the resolved AMI.
 
 ---
 
