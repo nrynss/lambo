@@ -218,6 +218,26 @@ def _port_label(perm: dict) -> str:
         return str(proto)
     return f"{proto}/{lo}" if lo == hi else f"{proto}/{lo}-{hi}"
 
+def _peer_label(peer: str) -> str:
+    """Generalise a single-host CIDR to a role.
+
+    A /32 or /128 in these groups is the operator's own address: plan §8
+    requires SSH ingress be restricted to it rather than 0.0.0.0/0. These
+    concepts are rendered on the public judge portal by `lambo serve-web`,
+    so the literal would publish a home IP address to every visitor. What
+    matters for blast radius is that the rule is scoped to one host, not
+    which host, so the label keeps the property and drops the value.
+
+    `scripts/aws-infra/README.md` makes the same argument for the account
+    id. This is that rule applied to the graph rather than to the captures.
+
+    Module scope (not a closure in `_rule_texts`) so it is allocated once,
+    not re-created for every security group iterated.
+    """
+    if peer.endswith("/32") or peer.endswith("/128"):
+        return "the operator address"
+    return peer
+
 
 def _rule_texts(sg_name: str, group: dict, name_by_id: dict[str, str]) -> list[str]:
     """Render one security group's rules as concept contents.
@@ -226,23 +246,6 @@ def _rule_texts(sg_name: str, group: dict, name_by_id: dict[str, str]) -> list[s
     rule that is widened later shows up as a new concept beside the old one
     instead of quietly changing the meaning of an existing node.
     """
-
-    def _peer_label(peer: str) -> str:
-        """Generalise a single-host CIDR to a role.
-
-        A /32 or /128 in these groups is the operator's own address: plan §8
-        requires SSH ingress be restricted to it rather than 0.0.0.0/0. These
-        concepts are rendered on the public judge portal by `lambo serve-web`,
-        so the literal would publish a home IP address to every visitor. What
-        matters for blast radius is that the rule is scoped to one host, not
-        which host, so the label keeps the property and drops the value.
-
-        `scripts/aws-infra/README.md` makes the same argument for the account
-        id. This is that rule applied to the graph rather than to the captures.
-        """
-        if peer.endswith("/32") or peer.endswith("/128"):
-            return "the operator address"
-        return peer
 
     out: list[str] = []
     for direction, key, preposition in (
@@ -344,7 +347,8 @@ def derive_account_bindings(lam: Lambo, net: Network) -> None:
     agent adds in the next script.
 
     The secret is deliberately absent: its identifier is an ARN, and an ARN's
-    colons cannot cross `--parent-of CHILD:PARENT`, which takes exactly one.
+    colons cannot appear on the CHILD end of `--parent-of` (the first colon is
+    the separator).
     """
     names = [VPC_NAME, *VPC_CHILDREN]
     bindings = [(name, account_binding(name, net.ids[name])) for name in names]
@@ -405,7 +409,8 @@ def derive_security_rules(lam: Lambo, net: Network) -> None:
     usable: list[tuple[str, str]] = []
     for sg_name, text in net.rules:
         if ":" in text:
-            # An IPv6 CIDR renders with colons, which `--parent-of` cannot carry.
+            # The rule text becomes the CHILD end of `--parent-of`; an IPv6
+            # CIDR renders with colons, so the child end cannot carry it.
             # Skipping one rule is better than mangling it into a concept that
             # claims something slightly different from the account.
             skipped("constraint", text, "contains a colon, so it cannot be a hierarchy end")

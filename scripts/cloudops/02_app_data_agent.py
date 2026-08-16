@@ -138,7 +138,7 @@ def _plan(args: argparse.Namespace) -> int:
 
     say()
     step("query Lambo for what the network agent recorded")
-    would("inspect", VPC_NAME, "depth 1, expecting " + ", ".join(REQUIRED_FROM_NETWORK_AGENT))
+    would("inspect", ", ".join(REQUIRED_FROM_NETWORK_AGENT), "by name, expecting each present")
 
     say()
     step("derive into Lambo")
@@ -298,33 +298,30 @@ def read_network_topology(lam: Lambo) -> list[str]:
     right answer, and recall is a ranked semantic search that could plausibly
     return the network tier's neighbours in a different order or miss one under
     a token budget. The point of the check is to be certain, not to be relevant.
-    """
-    try:
-        text = lam.inspect(VPC_NAME, depth=1)
-    except InfraError as exc:
-        raise InfraError(
-            f"{VPC_NAME} is not in this Lambo session: {exc}",
-            hint=(
-                "run `python3 scripts/cloudops/01_network_agent.py --session <id>` "
-                "first. Writing the app tier into an empty session would create a "
-                "contentless network node instead of linking to the real one."
-            ),
-        ) from exc
 
-    dependents = parse_outbound_neighbours(text)
-    queried("inspect", VPC_NAME, f"{len(dependents)} structural dependent(s)")
-    for name in dependents:
-        note(name)
-    missing = [name for name in REQUIRED_FROM_NETWORK_AGENT if name not in dependents]
-    if missing:
-        raise InfraError(
-            f"{VPC_NAME} is in the session but does not carry {', '.join(missing)}.",
-            hint=(
-                "01_network_agent.py has not finished against this session, or it "
-                "ran against a different one. Re-run it, then re-run this script."
-            ),
-        )
-    return dependents
+    Each required node is asked for **by name**. Asking once for the VPC and
+    reading its hop-1 neighbour list is not enough: that list is bounded by the
+    CLI's neighbour budget (`MAX_INSPECT_NODES`), and once the session crosses
+    the bound the list truncates and a required node can soundly vanish, making
+    a large-but-fine session look like the network agent never ran. Asking for a
+    node by name is exact regardless of how many children it has — the focus
+    itself is always reported, and an absent one is an error.
+    """
+    present: list[str] = []
+    for name in REQUIRED_FROM_NETWORK_AGENT:
+        try:
+            lam.inspect(name, depth=1)
+        except InfraError as exc:
+            raise InfraError(
+                f"{name} is not in this Lambo session.",
+                hint=(
+                    "01_network_agent.py has not finished against this session, or it "
+                    "ran against a different one. Re-run it, then re-run this script."
+                ),
+            ) from exc
+        queried("inspect", name, "present in the session")
+        present.append(name)
+    return present
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +330,7 @@ def read_network_topology(lam: Lambo) -> list[str]:
 
 
 def derive_topology(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool) -> None:
-    """Where each app and data resource sits, in one interaction.
+    """Where each app and data resource sits.
 
     Containment parents, and the reasoning behind each:
 
@@ -346,36 +343,44 @@ def derive_topology(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool)
     * `Lambda-LamboStats-API` and the IAM roles have no parent. Nothing in the
       VPC contains them, and inventing a parent for the Lambda would be the same
       mistake as giving it a `VpcConfig`.
+
+    The RDS tier and the Lambda tier are derived in **separate** calls. Lambo
+    links everything written by one interaction with a `CoOccurrence` edge, and
+    the architecture deliberately isolates the two tiers: co-deriving them would
+    assert a relationship that does not exist. The DB subnet group stays with
+    RDS (same tier) and the roles stay with the Lambda (same tier); only the
+    cross-tier pairing is split apart.
     """
-    concepts: list[str] = []
-    pairs: list[tuple[str, str]] = []
-    root: str | None = None
+
 
     if not skip_rds:
-        root = DB_SUBNET_GROUP
-        pairs.append((VPC_NAME, DB_SUBNET_GROUP))
-        concepts.append(f"{RDS_NAME}:entity")
-        pairs.append((SG_BASE_NAME, RDS_NAME))
+        rds_pairs = [(VPC_NAME, DB_SUBNET_GROUP), (SG_BASE_NAME, RDS_NAME)]
+        check_single_source(rds_pairs)
+        out = lam.derive(
+            AGENT_APP_DATA,
+            DB_SUBNET_GROUP,
+            "entity",
+            concepts=[f"{RDS_NAME}:entity"],
+            parent_of=rds_pairs,
+        )
+        derived("topology", DB_SUBNET_GROUP, "+1 concept(s), 2 hierarchy edge(s)")
+        note(out)
+
     if not skip_lambda:
-        if root is None:
-            root = LAMBDA_NAME
-        else:
-            concepts.append(f"{LAMBDA_NAME}:entity")
-        concepts.append(f"{STATS_ROLE_NAME}:entity")
-    if app.exhibit_role:
-        if root is None:
-            root = EXHIBIT_ROLE_NAME
-        else:
-            concepts.append(f"{EXHIBIT_ROLE_NAME}:entity")
-
-    if root is None:
+        lam_concepts = [f"{STATS_ROLE_NAME}:entity"]
+        if app.exhibit_role:
+            lam_concepts.append(f"{EXHIBIT_ROLE_NAME}:entity")
+        out = lam.derive(AGENT_APP_DATA, LAMBDA_NAME, "entity", concepts=lam_concepts)
+        derived("topology", LAMBDA_NAME, f"+{len(lam_concepts)} concept(s)")
+        note(out)
+    elif app.exhibit_role:
+        # Both tiers skipped by flag, but the exhibit role still exists on the
+        # account; record it rather than silently dropping it.
+        out = lam.derive(AGENT_APP_DATA, EXHIBIT_ROLE_NAME, "entity")
+        derived("topology", EXHIBIT_ROLE_NAME, "+0 concept(s)")
+        note(out)
+    elif skip_rds:
         warn("both tiers were skipped; nothing to derive")
-        return
-
-    check_single_source(pairs)
-    out = lam.derive(AGENT_APP_DATA, root, "entity", concepts=concepts, parent_of=pairs)
-    derived("topology", root, f"+{len(concepts)} concept(s), {len(pairs)} hierarchy edge(s)")
-    note(out)
 
 
 def derive_facts(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool) -> None:

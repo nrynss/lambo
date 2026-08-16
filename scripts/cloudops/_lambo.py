@@ -35,7 +35,9 @@ Dependencies: stdlib + boto3, and the `lambo` binary at run time. Nothing else.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -101,6 +103,18 @@ PILLAR_WARNING_PREFIX = "⚑ Load-bearing pillar"
 # may appear in a blast-radius report. See `parse_outbound_neighbours` for why
 # the remaining kinds are not filtered further.
 PROVENANCE_EDGE_LABELS = ("Derives", "Temporal")
+
+# `inspect` renders a neighbour as `content [Type{, status}]`, where the
+# bracketed tail is render metadata (ConceptType plus optional canonization
+# status; see `src/cli/inspect.rs` `render_neighbourhood`/`label`). The content
+# itself may legitimately contain a ` [`, so the tail is stripped with this
+# anchored pattern rather than a blind `rsplit(" [", 1)` — which would truncate
+# bracketed concept text. `Parse outbound neighbour` rows are always concept
+# rows (provenance kinds are filtered out), so only ConceptType tags appear.
+NEIGHBOUR_METADATA_RE = re.compile(
+    r"\s*\[(?:Entity|Logic|Constraint|Resource|Observation)"
+    r"(?:,\s*(?:canonical|venerable|candidate))?\]\s*$"
+)
 
 # `observation` is never used as a concept kind by these scripts, and that is
 # not a stylistic choice. `canonicalize` (`src/graph/canonical.rs`) excludes
@@ -181,30 +195,47 @@ def add_lambo_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _require_executable(path: pathlib.Path) -> pathlib.Path:
+    """A resolvable-but-not-executable binary is a broken stage, not a fallback.
+
+    Spawning it would raise a bare `PermissionError` from `subprocess` that no
+    call site catches; fail here instead, where the offending path can be named.
+    """
+    if not os.access(path, os.X_OK):
+        raise InfraError(
+            f"{path} exists but is not executable.",
+            hint="fix the file mode (chmod +x), or pass a real binary via --lambo-bin.",
+        )
+    return path
+
+
 def resolve_lambo_binary(explicit: str | None) -> pathlib.Path:
     """Find the binary, or say exactly how to build one.
 
     Searched in this order because it matches how the operator's machine is
     likely to be set up: an installed `lambo` first (that is what the agent
-    skill and the docs assume), then the repo's own build outputs, release
-    before debug. A debug binary works, so it is offered rather than refused,
-    but it is slow enough that the release build is preferred when both exist.
+    skill and the docs assume), then the repo's own build outputs. When both
+    `target/release` and `target/debug` builds exist, the **newer** is used:
+    a debug build freshly rebuilt with newly enabled features is preferred over
+    a stale release build that predates them.
     """
     if explicit is not None:
         path = pathlib.Path(explicit).expanduser().resolve()
         if not path.is_file():
             raise InfraError(f"--lambo-bin {path} does not exist.")
-        return path
+        return _require_executable(path)
 
     found = shutil.which("lambo")
     if found:
-        return pathlib.Path(found)
-    for candidate in (
+        return _require_executable(pathlib.Path(found))
+    candidates = [
         REPO_ROOT / "target" / "release" / "lambo",
         REPO_ROOT / "target" / "debug" / "lambo",
-    ):
-        if candidate.is_file():
-            return candidate
+    ]
+    existing = [c for c in candidates if c.is_file()]
+    if existing:
+        newest = max(existing, key=lambda p: p.stat().st_mtime)
+        return _require_executable(newest)
     raise InfraError(
         "the `lambo` binary was not found on PATH or in this repo's target/ directory.",
         hint=(
@@ -275,8 +306,20 @@ class Lambo:
             ) from exc
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            last = detail[-1] if detail else f"exit {proc.returncode}"
-            raise InfraError(f"`lambo {verb}` failed: {last}", hint=_conflict_hint(proc.stderr))
+            # Clap closes its message with a usage block and the generic
+            # "For more information, try '--help'." line, so the LAST line is
+            # the least informative one. Surface the actual error instead.
+            message = next(
+                (line.strip() for line in detail
+                 if line.strip() and "For more information" not in line),
+                None,
+            )
+            if message is None:
+                message = f"exit {proc.returncode}"
+            raise InfraError(
+                f"`lambo {verb}` failed: {message}",
+                hint=_conflict_hint(proc.stderr),
+            )
         return proc.stdout.strip()
 
     # -- writers -----------------------------------------------------------
@@ -300,15 +343,7 @@ class Lambo:
         flags = ["--agent", agent, "--content", content, "--kind", kind]
         for spec in concepts or []:
             flags += ["--concept", spec]
-        for parent, child in parent_of or []:
-            # T7 (deferred — see dev-diary/notes/remediation-tasks.md): the CLI
-            # already accepts a colon-bearing (IPv6) parent via first-colon split,
-            # but this client still pre-refuses BOTH ends. When T7 updates the
-            # client split logic, relax the PARENT-side `_refuse_colon` (and the
-            # pre-filter) to colon-free-child-only; keep child colon-refusal.
-            _refuse_colon("parent-of", parent)
-            _refuse_colon("parent-of", child)
-            flags += ["--parent-of", f"{child}:{parent}"]
+        flags += _parent_of_flags(parent_of or [])
         return self._run("derive", flags)
 
     def record_action(
@@ -361,21 +396,42 @@ class Lambo:
 
 
 def _refuse_colon(flag: str, value: str) -> None:
-    """`--parent-of` takes CHILD:PARENT with exactly one colon.
+    """Refuse a colon on the CHILD end of `--parent-of`.
 
-    `src/cli/derive.rs` refuses a second colon as ambiguous, because both sides
-    are free text. A resource name that grew a colon would therefore fail at the
-    CLI with a message about ambiguity rather than about the name, so catch it
-    here where the offending value can be named.
+    The CLI flag is `CHILD:PARENT` and `src/cli/derive.rs` splits on the first
+    colon, so a colon in the child would be read as the delimiter and both sides
+    are free text besides. A resource name that grew a colon in the child would
+    therefore fail at the CLI with a message about ambiguity rather than about
+    the name, so catch it here where the offending value can be named.
+
+    The parent end may legitimately carry a colon — an IPv6 CIDR — because the
+    first-colon split keeps the remainder as the parent (T1 part 2 #4), so this
+    check guards the child only.
     """
     if ":" in value:
         raise InfraError(
-            f"{value!r} contains a colon, which --{flag} cannot express.",
+            f"{value!r} contains a colon, which --{flag} cannot express on the child end.",
             hint=(
-                "concept contents used in a hierarchy must be colon-free. Rename "
-                "the concept, or express the relationship with record-action."
+                "a hierarchy child must be colon-free: rename the child, or express "
+                "the relationship with record-action. (A colon-bearing *parent*, "
+                "e.g. an IPv6 CIDR, is fine.)"
             ),
         )
+
+
+def _parent_of_flags(parent_of: list[tuple[str, str]]) -> list[str]:
+    """Render `--parent-of CHILD:PARENT` flags from `(parent, child)` pairs.
+
+    The child must be colon-free ([`_refuse_colon`]); the parent may carry a
+    colon, so an IPv6 CIDR survives the client and round-trips to the CLI, which
+    splits on the first colon (T1 part 2 #4). Kept as its own pure function so
+    the IPv6 round-trip can be regression-tested without spawning a subprocess.
+    """
+    flags: list[str] = []
+    for parent, child in parent_of:
+        _refuse_colon("parent-of", child)
+        flags += ["--parent-of", f"{child}:{parent}"]
+    return flags
 
 
 def _conflict_hint(stderr: str | None) -> str | None:
@@ -509,8 +565,12 @@ def parse_outbound_neighbours(inspect_text: str) -> list[str]:
             continue
         elif raw.startswith("    "):
             if counts and stripped.startswith("-> "):
-                # Labels render as `content [Type, canonical]`; keep the content.
-                names.append(stripped[3:].rsplit(" [", 1)[0].strip())
+                # Labels render as `content [Type, canonical]`; keep only the
+                # content. The trailing ` [Type{, status}]` is render metadata;
+                # the content itself may contain a ` [`, so strip only a real
+                # trailing metadata bracket rather than truncating at the last
+                # ` [` ([`NEIGHBOUR_METADATA_RE`]).
+                names.append(NEIGHBOUR_METADATA_RE.sub("", stripped[3:]).strip())
         elif raw.startswith("  "):
             counts = stripped not in PROVENANCE_EDGE_LABELS
         else:
@@ -531,3 +591,30 @@ def carries_pillar_warning(text: str) -> bool:
 def indent(text: str, prefix: str = "    ") -> str:
     """Quote CLI output inside a script's own output without losing blank lines."""
     return "\n".join(prefix + line if line else prefix.rstrip() for line in text.splitlines())
+
+
+def _self_test_ipv6_parent() -> None:
+    """Regression for the T7 IPv6 deferral (T1b-R1-3): an IPv6 CIDR as a
+    `--parent-of` PARENT must survive the client's colon check and round-trip
+    into `CHILD:PARENT`, while a colon on the CHILD end is still refused.
+
+    These agent scripts have no formal test framework, so this runs as a
+    standalone self-check (`python3 scripts/cloudops/_lambo.py`).
+    """
+    flags = _parent_of_flags([("2001:db8::/64", "SG-PublicWeb")])
+    expected = ["--parent-of", "SG-PublicWeb:2001:db8::/64"]
+    if flags != expected:
+        raise SystemExit(
+            f"self-test FAILED: _parent_of_flags returned {flags!r}, expected {expected!r}"
+        )
+    try:
+        _parent_of_flags([("2001:db8::/64", "SG:Public")])  # colon in the child
+    except InfraError:
+        pass
+    else:
+        raise SystemExit("self-test FAILED: a colon-bearing child must still be refused")
+
+
+if __name__ == "__main__":
+    _self_test_ipv6_parent()
+    print("self-test: IPv6 --parent-of parent round-trips; child colon-refusal kept")
