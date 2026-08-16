@@ -17,7 +17,7 @@ A deadline, and a reason to stop designing.
 
 It also fixed a decision that had been open. Building against CockroachDB meant the graph and the vectors could live in one store rather than a database plus a retrieval sidecar, and that concepts could earn canonical status through a background process reading the same tables everything else reads. The design had assumed something like that was possible. The hackathon is where it became a thing that runs.
 
-So the implementation is recent and the ideas are not. The parts a reader might expect to be rushed — the canonization rules, the single-writer constraint, the shape of the recall contract — are the parts that had the most thought behind them, because they were settled long before there was a deadline.
+So the implementation is recent and the ideas are not. The parts a reader might expect to be rushed are the parts that had the most thought behind them: the canonization rules, the single-writer constraint, the shape of the recall contract. All three were settled long before there was a deadline.
 
 ## What was actually written here
 

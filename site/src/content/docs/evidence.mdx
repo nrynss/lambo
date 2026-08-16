@@ -36,7 +36,7 @@ You can reproduce this test with `./scripts/seed-vector-index.sh --count 3000`.
 
 ## Deterministic convergence
 
-Multi-agent graphs must reach a stable state regardless of write arrival order. The demo's rendered OUTCOME block is asserted to be **byte-identical** across two runs of the same scenario, by a test that compares the blocks directly — no tolerance, no ordering leniency, no rounding.
+Multi-agent graphs must reach a stable state regardless of write arrival order. The demo's rendered OUTCOME block is asserted to be **byte-identical** across two runs of the same scenario, by a test that compares the blocks directly. There is no tolerance, no ordering leniency, and no rounding.
 
 Measured on 2026-08-16 at commit `0006824`:
 
@@ -67,11 +67,11 @@ IDENTICAL - T8.4 x2 met
 
 ### When this became a guarantee
 
-That live-cluster capture predates the fix, and is worth reading with its date in mind. When it was taken, identical output was not yet guaranteed: a time-derived term in the daemon score — `recency`, measured against the session's wall-clock temporal extent — varied between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The capture is genuine, but it passed at about nine attempts in ten rather than by construction.
+That live-cluster capture predates the fix, and is worth reading with its date in mind. When it was taken, identical output was not yet guaranteed. A time-derived term in the daemon score varied between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The term is `recency`, measured against the session's wall-clock temporal extent. The capture is genuine, but it passed at about nine attempts in ten rather than by construction.
 
 The cause was that the demo replays in around 110ms of logical span while stamping interactions from the wall clock, so ordinary scheduler jitter moved the denominator that every recency value is measured against. The demo now stamps from a script clock, making a session's temporal extent a property of the script rather than of the machine it runs on.
 
-The assertion was never weakened to accommodate the bug — it is the test that caught it, and it failed openly for as long as the bug existed. The earlier capture is kept exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
+The assertion was never weakened to accommodate the bug. It is the test that caught it, and it failed openly for as long as the bug existed. The earlier capture is kept exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
 
 ## Live conflict and blast radius interception
 

@@ -1,0 +1,46 @@
+---
+title: "Hackathon submission"
+description: "Each entry condition, and where the thing that satisfies it lives"
+---
+import Note from '../../components/MdxNote.astro';
+
+This page maps the submission conditions to the specific artefact that satisfies each one, so nothing has to be taken on trust. Where a condition is not met yet, it says so rather than describing an intention as though it were done.
+
+[Origin](/lambo/origin/) covers where the project came from, and why the implementation is recent while the design is not.
+
+## Conditions
+
+| Condition | Status | Where it is |
+|---|---|---|
+| Public repository, license detectable | **Met** | [nrynss/lambo](https://github.com/nrynss/lambo), Apache-2.0, with `LICENSE` and `NOTICE` at the root |
+| README with setup and run instructions | **Met** | [README](https://github.com/nrynss/lambo#readme): install, `lambo demo`, and a `lambo.toml` that picks a store and an embedder |
+| Single-writer constraint stated | **Met** | Stated in the README's Deployment model, and on [End to end](/lambo/end-to-end/) |
+| Architecture diagram | **Met** | In the README, and the topology on [End to end](/lambo/end-to-end/) |
+| CockroachDB tools identified | **Met** | The table below, and the raw captures in [Evidence](/lambo/evidence/) |
+| Functional demo URL | **Not yet** | Not deployed. See below. |
+| Video under three minutes | **Not yet** | Not recorded. See below. |
+| AWS services identified | **Not yet** | Nothing is provisioned, so there is nothing to claim. See below. |
+
+## CockroachDB, and what was actually exercised
+
+Two capabilities, both with transcripts behind them rather than assertions.
+
+**Distributed vector indexing.** `concepts.embedding` is a `VECTOR(1024)` column with a vector index, and the vectors sit beside the graph they describe instead of in a separate retrieval service. The captures worth reading are the ones that failed first: an honest scan plan showing the index was *not* being used, the predicate finding that explained why, and then the plan showing `vector search` on `concepts@concepts_embedding_idx`. Recall against beam width was measured on the live cluster, which is where the default beam size came from.
+
+**The Cloud managed MCP server.** Connected read-only, it answers `select_query` against the live cluster. Scoped to one session, `canonization_events` returns the status walk the demo narrates: `user schema` moving Candidate, then Venerable, then Canonical, with a blast radius of 9 recorded on the promotion and left null on the earlier hops. Three independent MCP clients have now produced that same table and agree on every field.
+
+Both are covered on [Evidence and evaluation](/lambo/evidence/), with the raw logs in the repository.
+
+## What is not done yet
+
+Stating these plainly is more useful than a page that implies otherwise.
+
+**No demo URL.** The read-only portal is `lambo serve-web`, and it runs, but it is not deployed anywhere public yet. Until it is, there is no URL to give.
+
+**No video.** Not recorded.
+
+**No AWS services.** The README says `None yet`, and that remains accurate: the released build calls no AWS API. Provisioning scripts exist in the repository and have been validated offline, but nothing has been created in an account, so there is nothing to identify. When that changes, this page and the README change with it, and not before.
+
+<Note>
+The pattern above is deliberate. Everything in these docs marks what was measured and what was not, including [Evidence and evaluation](/lambo/evidence/), which dates a determinism claim to when it became a guarantee rather than presenting an earlier capture as stronger than it was. A submission page that broke that habit would be the least trustworthy page on the site.
+</Note>

@@ -36,6 +36,7 @@ export default defineConfig({
             { label: 'End to end', slug: 'end-to-end' },
             { label: 'Evidence & evaluation', slug: 'evidence' },
             { label: 'Origin', slug: 'origin' },
+            { label: 'Hackathon submission', slug: 'hackathon' },
           ],
         },
       ],
