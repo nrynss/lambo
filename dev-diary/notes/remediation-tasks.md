@@ -399,6 +399,49 @@ GET /api/graph
 Also in this file: T1-P3-1, the constant-time token comparator leaking input
 length through its loop count.
 
+
+### ✅ T3 — DONE (2026-08-17, merged `5a6f633`)
+
+`serve_web.rs` now exposes the structure and dependents the page is built
+against (`src/cli/serve_web.rs`, plus `src/canon/gate.rs` and `pub(super)`
+threshold exposure in `src/canon/stage1/2/3.rs`):
+
+- **`GET /api/inspect?focus=&depth=1`** — structural-only (Dependency/Causal/
+  Hierarchical) hop-1 dependents + `status`/`blast_radius`; every miss kind is a
+  `200` with `found:false`; bounded by `MAX_INSPECT_NODES` with an honest
+  `truncated`; read-only (no writer lease — the no-writer-lease source-grep test
+  still passes).
+- **`GET /api/graph`** — the structural skeleton (nodes with `status`/
+  `blast_radius`, edges), no `CoOccurrence` (so the false T7 edge cannot
+  appear), bounded with `truncated`, deterministic ordering.
+- **T11 gate progress** in `/api/inspect` — per-concept met/not-met for
+  `gc_survived`, `blast_radius`, `distinct_interactions`, `coverage`, plus
+  repromotion-cooldown state, surfaced from the eval's own queries and the
+  single-sourced stage thresholds; degrades to omitted (200 intact) on store
+  failure. One pause: this surfaces T11's payload in the `/api/inspect`
+  contract now; T11's remaining work (per the rewritten T11 section) closes
+  against the same payload.
+- **Constant-time token comparator** (T1-P3-1) — loop count fixed by the secret
+  length, length folded via XOR, no short-circuit.
+
+**Contract note (T3-R2-N1):** an `/api/inspect` hit carries two `blast_radius`
+keys with different provenance. The top-level `blast_radius` is the **live**
+dependent count (for tree marking, via `blast_radii`) and can count edges
+younger than `canonization_edge_min_age`; `gate_progress.blast_radius` is the
+engine's **aged** evidence (`store.blast_radius` with the `min_edge_age`
+cutoff), answering "does it clear the Stage-3 bar". They can transiently
+differ; that is intended.
+
+**Review:** 3 rounds, all APPROVE. R1: 5 P3 + 3 nits (aged blast-radius gate,
+graph/inspect blast-radius agreement, a `truncated` false-positive, the
+un-surfaced repromotion cooldown, and untested truncation; plus 3 nits) →
+remediated; R2 verified all genuine + 2 doc/test nits; R3 cleared the edge-bound
+truncation test (N1 landed here in the contract). Docs in
+`adve-review-remed-T3round{1..3}.md`.
+
+**Verify:** full `cargo test --all-features` green — **835 passed / 0 failed**
+(T1+T2+T1b+T3 merged); 30 serve_web + 59 canon tests pass.
+
 ---
 
 ## T4 — `#[non_exhaustive]` on `ResolvedBackends`
