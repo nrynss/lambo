@@ -246,6 +246,11 @@ GET /api/graph
   false Lambda to RDS edge from **T7** becomes a visible claim on the page.
 - `status` and `blast_radius` come from the `concepts` row, so the tree can mark
   load-bearing nodes without a second call.
+- **Carry gate progress in the `/api/inspect` payload** (T11): which canonization
+  gates this concept meets and which it does not, each with its current value
+  against the bar. All of it is computed during evaluation and thrown away, so
+  this is surfacing rather than calculating, and it is what lets a page explain a
+  `Candidate` instead of just labelling it.
 - Bound the payload and set `truncated` rather than silently cutting.
 - Read-only, no writer lease, same as every other route on this surface.
 
@@ -398,6 +403,20 @@ cause is that the stored concept contents are identifier-shaped
 (`SG-PublicWeb ingress tcp/443 from 0.0.0.0/0`) while the query is prose, so the
 vector arm contributes nothing and the lexical arm matches nothing either.
 
+**Instrument before changing anything.** Log which arm produced each hit and
+what each contributed to the final score. Nobody can currently say whether the
+vector arm contributes anything on identifier-shaped content, and the flat 0.18
+is unexplained. This is a few lines behind a flag and it converts the rest of
+this task from guesswork into measurement.
+
+The likely shape of the fix, once measured: **route by query kind rather than
+blending arms.** "What depends on X" has an exact answer reachable by traversal,
+and ranking it is a category error. Hybrid currently means blending lexical,
+vector and structural scores; it probably wants to mean recognising which arm a
+question belongs to and dispatching there. A structural question that falls
+through to word matching does not degrade gracefully, it returns something
+plausible and wrong.
+
 Worth establishing before changing anything:
 - Whether structural expansion runs at all for these queries, and if so why
   dependents do not reach the assembled block.
@@ -439,22 +458,43 @@ Lambda as IAM-invoked. Either is honest; the claim just has to match.
 
 ---
 
-## T11 — Canonization is unreachable at the default cadence
+## T11 — Surface why a concept is not canonical yet
 
-**Files:** `src/config.rs`, `src/daemon/mod.rs`, `src/canon/*`
+**Files:** `src/canon/*`, and the payload in T3
 **Blocked by:** T1
-**Not a review finding.** A design question rather than a defect.
+**Not a review finding.**
 
-GC sweeps every `gc_interval` mutations, defaulting to 10 000, and Stage 1
-requires `gc_survived >= 3`. A concept therefore needs roughly 30 000 mutations
-before it can be promoted. `lambo demo` only shows the state machine working
-because it sets the same knob to 1 internally, and the CloudOps exhibit only
-shows it because `[daemon]` was added and set low.
+**The earlier version of this task was wrong and has been rewritten.** It said
+canonization was unreachable at the default cadence. It is not.
+`evidence/managed-mcp-canonization-events.md` captures the full
+`Candidate → Venerable → Canonical` walk at blast radius 9, on the live cluster,
+reproduced through two independent MCP clients. The engine is proven.
 
-So on default settings, a real session runs indefinitely and promotes nothing.
-Either that is the intended behaviour for very large sessions and should be
-documented as such, or the default is wrong. It should not be the case that the
-only two sessions which have ever canonized both did so by overriding the knob.
+What is actually true is narrower, and worth keeping: every captured walk is the
+`lambo demo` scenario, which sets `gc_interval` to 1 internally. No session has
+yet been observed promoting at the **shipped default cadence**, because none has
+run long enough to try. That is unmeasured, not broken, and the distinction is
+the one `evidence/` maintains everywhere else.
+
+The useful work is therefore not to change a threshold. It is to make an
+un-promoted concept explicable:
+
+- Report, per concept, which gates are met and which are not, with the current
+  value against the bar. `gc_survived` 2 of 3. Blast radius 7, needs above 5.
+  Distinct interactions 2 of 3. Coverage 0.22, needs 0.3.
+- Every one of those numbers is already computed during a canonization
+  evaluation pass and then discarded. This is surfacing, not calculating.
+- Fold the payload into T3's `/api/inspect` response, which already carries
+  `status` and `blast_radius` from the same query path.
+
+Why it matters beyond a demo: a user asking "why is this not canonical yet" has
+no way to find out today, and the answer is fully computable. It is also the
+thing that would have prevented the exhibit being driven to a forced promotion,
+because the gap would have been visible rather than inferred.
+
+Separately, and cheaply: a session that runs at default cadence long enough to
+promote naturally would close the one genuinely unmeasured claim here. That is
+patience, not engineering.
 
 ---
 
