@@ -540,3 +540,150 @@ main {
 /* The audit trail is the page's evidence, and in a single column it left a
    dead half-width gap beside the sidebar. It spans the grid instead. */
 .panel.feed { grid-column: 1 / -1; }
+
+/* ======================================================================
+   CSS pass. Everything below is presentation only.
+   ====================================================================== */
+
+/* The lede was capped at 68ch inside a full-width panel, so the top of the
+   page was a narrow ragged column with an empty right half. */
+.intro .lede {
+  max-width: 92ch;
+  font-size: 15px;
+  line-height: 1.62;
+  color: var(--ink);
+}
+
+.intro h1 { font-size: 25px; letter-spacing: -0.015em; }
+
+/* Hierarchy: section headings were nearly the same weight as body text, so
+   nothing led the eye. */
+.panel > h2 {
+  font-size: 11.5px;
+  letter-spacing: 0.09em;
+  color: var(--ink-faint);
+}
+
+.panel .note { font-size: 13px; line-height: 1.58; }
+
+.intro code {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+/* ---- lookup field -----------------------------------------------------
+   The old control was a wide bare input beside a primary button, which reads
+   as a chat prompt. Labelled and demoted: the named resources above are the
+   affordance, this is the escape hatch. */
+
+.field-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  align-self: center;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+#recall-form { align-items: center; gap: 8px; }
+#recall-query { max-width: 320px; font-family: var(--mono); font-size: 13px; }
+
+#recall-go {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font-weight: 500;
+}
+#recall-go:hover:not(:disabled) { border-color: var(--accent, #6aa9ff); }
+
+.suggest .chip-q { font-family: var(--mono); font-size: 12px; }
+
+/* ---- the returned memory block ---------------------------------------
+   This is the payoff and it read as undifferentiated grey monospace. */
+
+.context { padding: 14px 16px; line-height: 1.5; }
+
+.ctx-line {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 2px 0;
+  color: var(--ink);
+}
+
+.ctx-gap { height: 8px; }
+.ctx-score { color: var(--ink-faint); }
+
+.ctx-canonical {
+  color: #7fe0a4;
+  font-weight: 500;
+}
+
+/* The load-bearing warning is the one line that should stop a reader. */
+.ctx-warn {
+  color: #f0c674;
+  font-weight: 600;
+  background: rgba(240, 198, 116, 0.07);
+  border-left: 2px solid #f0c674;
+  margin: 2px 0 2px -16px;
+  padding: 4px 0 4px 14px;
+}
+
+/* ---- stat tiles: weight by what matters -------------------------------
+   `load-bearing: 1` and `connections: 485` had identical weight, though one
+   is the point of the page and the other is a raw count. */
+
+.tile .v { font-size: 21px; }
+
+.tile[data-key="canonical"] {
+  border-color: rgba(53, 196, 106, 0.4);
+  background: rgba(53, 196, 106, 0.06);
+}
+.tile[data-key="canonical"] .v { color: #7fe0a4; }
+.tile[data-key="canonization_events"] .v { color: var(--ink); }
+.tile[data-key="nodes"] .v,
+.tile[data-key="edges"] .v { color: var(--ink-dim, var(--ink)); font-size: 17px; }
+
+/* ---- structure tree ---------------------------------------------------
+   Hidden until /api/graph answers. A tree drawn from a placeholder would be
+   the page inventing infrastructure. */
+
+.panel.tree { grid-column: 1 / -1; }
+.hidden { display: none; }
+
+.tree-out {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  margin-top: 4px;
+}
+
+.tnode { position: relative; }
+
+/* Indent by depth, with a rule showing containment rather than ASCII art. */
+.tnode .tnode { margin-left: 18px; padding-left: 14px; border-left: 1px solid var(--line); }
+
+.tnode-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.tnode-name { color: var(--ink); }
+
+.tnode-tag {
+  font-family: var(--sans, inherit);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #7fe0a4;
+  border: 1px solid rgba(53, 196, 106, 0.45);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.tnode-blast { color: var(--ink-faint); font-size: 11.5px; }

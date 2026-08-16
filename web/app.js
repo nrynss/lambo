@@ -139,6 +139,7 @@
       tile.appendChild(text("span", "k", t.label));
       tile.appendChild(text("span", "v", v));
       if (t.hint) { tile.appendChild(text("span", "h", t.hint)); }
+      tile.setAttribute("data-key", t.key);   // lets CSS weight the tiles that matter
       el.tiles.appendChild(tile);
       lastCounts[t.key] = v;
     });
@@ -278,7 +279,97 @@
     }, POLL_MS);
   }
 
+  // ---- structure -------------------------------------------------------
+
+  // Built from /api/graph when the build serving this page has it. On any
+  // failure the panel stays hidden: showing a placeholder tree would mean the
+  // page is describing infrastructure it cannot see.
+  function loadGraph() {
+    var panel = document.getElementById("tree-panel");
+    var out = document.getElementById("tree-out");
+    if (!panel || !out) { return; }
+
+    get("/api/graph").then(function (g) {
+      var byName = {};
+      (g.nodes || []).forEach(function (n) { byName[n.content] = n; });
+
+      var children = {};
+      var hasParent = {};
+      (g.edges || []).forEach(function (e) {
+        (children[e.parent] = children[e.parent] || []).push(e);
+        hasParent[e.child] = true;
+      });
+
+      var roots = Object.keys(children)
+        .filter(function (n) { return !hasParent[n]; })
+        .sort();
+      if (!roots.length) { return; }
+
+      out.textContent = "";
+      roots.forEach(function (r) { out.appendChild(branch(r, children, byName, 0)); });
+      panel.className = "panel tree";
+    }).catch(function () {
+      // Endpoint absent on this build. Leave the panel hidden.
+    });
+  }
+
+  function branch(name, children, byName, depth) {
+    var node = byName[name] || {};
+    var li = text("div", "tnode depth-" + Math.min(depth, 4));
+
+    var row = text("div", "tnode-row");
+    row.appendChild(text("span", "tnode-name", name));
+    if (node.status === "Canonical") {
+      row.appendChild(text("span", "tnode-tag", "load-bearing"));
+    }
+    if (node.blast_radius) {
+      row.appendChild(text("span", "tnode-blast", node.blast_radius + " depend on it"));
+    }
+    li.appendChild(row);
+
+    (children[name] || [])
+      .slice()
+      .sort(function (a, b) { return a.child.localeCompare(b.child); })
+      .forEach(function (e) {
+        li.appendChild(branch(e.child, children, byName, depth + 1));
+      });
+    return li;
+  }
+
   // ---- recall ----------------------------------------------------------
+
+  // The block is agent-authored memory, so it is built node by node with
+  // textContent and never innerHTML. Highlighting it means one element per
+  // line, classed by what the line is, not string-templated markup.
+  function renderContext(body) {
+    el.out.textContent = "";
+    if (!body || !body.length) {
+      el.out.appendChild(text("div", "ctx-line", "(the session returned nothing for that)"));
+      return;
+    }
+    body.split("\n").forEach(function (line) {
+      if (!line.trim()) {
+        el.out.appendChild(text("div", "ctx-gap"));
+        return;
+      }
+      var cls = "ctx-line";
+      if (line.trim().charAt(0) === "\u2691") {
+        cls += " ctx-warn";           // the load-bearing warning, the payoff line
+      } else if (line.indexOf(", canonical]") !== -1) {
+        cls += " ctx-canonical";      // a memory that earned its status
+      }
+      var row = text("div", cls);
+      // Split the score suffix off so it can recede without hiding it.
+      var at = line.lastIndexOf(" (score");
+      if (at === -1) {
+        row.appendChild(text("span", "ctx-main", line));
+      } else {
+        row.appendChild(text("span", "ctx-main", line.slice(0, at)));
+        row.appendChild(text("span", "ctx-score", line.slice(at + 1)));
+      }
+      el.out.appendChild(row);
+    });
+  }
 
   // A suggested query fills the box and runs it, so the first thing a reader
   // does is see a real answer rather than guess at the vocabulary.
@@ -299,9 +390,10 @@
     el.out.className = "context waiting";
 
     get("/api/recall?q=" + encodeURIComponent(q)).then(function (r) {
-      el.meta.textContent = "recall · " + r.elapsed_ms + " ms · " + r.context.length + " chars, verbatim";
+      el.meta.textContent =
+        "returned in " + r.elapsed_ms + " ms · " + r.context.length + " characters, verbatim";
       el.out.className = "context";
-      el.out.textContent = r.context.length ? r.context : "(the session returned an empty context block)";
+      renderContext(r.context);
     }).catch(function (err) {
       el.meta.textContent = "";
       el.out.className = "context failed";
@@ -326,6 +418,7 @@
   get("/api/session").then(function (info) {
     applySession(info);
     el.out.className = "context idle";
+    loadGraph();          // structure is static for the session, fetched once
     return poll(false);
   }).then(schedule).catch(function (e) {
     link("stale", "cannot reach the session: " + e.message);

@@ -3,7 +3,7 @@
 Source: `adve-review-full-stack-sweep-2026-08-16.md` (4 P1 / 12 P2 / 10 P3) and
 the Tier 3 detail review beside it, plus defects found outside the review.
 
-**T1 to T10 below are code-fix tasks, numbered so that every blocker has a
+**T1 to T14 below are code-fix tasks, numbered so that every blocker has a
 lower number than the thing it blocks.** Read top to bottom and the order works.
 
 Deployment, recording and submission live in `deployment-and-submission.md` as
@@ -30,7 +30,7 @@ not re-reported:
 
 - Published Linux binaries need GLIBC 2.39 and cannot run on Amazon Linux 2023
   (2.34). The exhibit moved to Ubuntu 26.04. The underlying packaging defect is
-  still open as **T10**.
+  still open as **T14**.
 - Caddy publishes SHA-512 checksums; the launcher verified them with
   `sha256sum`, failing every boot after lambo was already installed. Now
   `sha512sum`.
@@ -85,7 +85,7 @@ lowered `gc_interval` to apply.
 
 ---
 
-## T3 — `/api/inspect`, and the token comparator
+## T3 — `/api/graph` and `/api/inspect`, and the token comparator
 
 **Files:** `src/cli/serve_web.rs`
 **Closes:** T1-P3-1
@@ -137,6 +137,67 @@ Requirements, in order:
 4. `depth` may be ignored and treated as 1. The page needs hop 1 only.
 5. Bound the `dependents` array and say so in the payload rather than truncating
    silently. `MAX_INSPECT_NODES = 64` already bounds the CLI path.
+
+### `/api/graph` — the structure, for a tree view
+
+A free-text box next to a primary button reads as a chat prompt, promises a
+conversation, and delivers a memory dump. The honest presentation of this data
+is a tree of the components with their relationships, which is also what makes
+the isolation argument visible at a glance.
+
+The tree needs no new derivation. It is one query over indexed columns, and it
+has been run against the live session to confirm the shape:
+
+```sql
+SELECT s.content AS parent, e.edge_type, t.content AS child
+FROM edges e
+JOIN concepts s ON s.id = e.source AND s.session_id = e.session_id
+JOIN concepts t ON t.id = e.target AND t.session_id = e.session_id
+WHERE e.session_id = $1
+  AND e.edge_type IN ('Hierarchical','Dependency','Causal')
+ORDER BY e.edge_type, s.content, t.content;
+```
+
+which returns, for `cloudops-exhibit`:
+
+```
+VPC-Enterprise-Prod
+├── InternetGateway, RouteTable-Public, SG-PublicWeb,
+│   Subnet-Private-1a, Subnet-Private-1b, lambo-cloudops-db-subnets
+├── SG-Base-VPC
+│   └── RDS-Lambo-Demo-DB          the dependency the demo protects
+└── Subnet-Public-1a
+    └── EC2-LamboWebExhibit
+```
+
+`Lambda-LamboStats-API` is absent from the hierarchy because it genuinely runs
+outside the VPC. The tree states the architecture correctly without being told
+to, which is the whole argument the exhibit is making.
+
+Contract:
+
+```
+GET /api/graph
+
+200 {
+  "session": "cloudops-exhibit",
+  "nodes": [
+    { "content": "VPC-Enterprise-Prod", "concept_type": "Entity",
+      "status": "Canonical", "blast_radius": 7 }
+  ],
+  "edges": [
+    { "parent": "VPC-Enterprise-Prod", "child": "SG-Base-VPC", "edge": "Hierarchical" }
+  ],
+  "truncated": false
+}
+```
+
+- Structural edge types only, as above. `CoOccurrence` must not appear, or the
+  false Lambda to RDS edge from **T7** becomes a visible claim on the page.
+- `status` and `blast_radius` come from the `concepts` row, so the tree can mark
+  load-bearing nodes without a second call.
+- Bound the payload and set `truncated` rather than silently cutting.
+- Read-only, no writer lease, same as every other route on this surface.
 
 Also in this file: T1-P3-1, the constant-time token comparator leaking input
 length through its loop count.
@@ -255,17 +316,25 @@ the thing the video depends on. Running it is part of the task, not a follow-up.
 
 ---
 
-## T9 — Portal
+## T9 — Portal — PARKED until remediation is done
 
 **Files:** `web/index.html`, `web/app.css`, `web/app.js`
-**Blocked by:** T3, for the dependents panel to show real data
+**Status:** parked deliberately. Do not spend agent time here.
+**Blocked by:** T3, and by the decision to finish backend work first
 
 Done and deployed: labelled header facts, live strip, trust ladder, audit trail,
 plain-English stat tiles.
 
-Open:
-- Dead half-width gap beside the sidebar.
-- Flat `0.18` score presentation.
+Landed so far: labelled header facts, live strip, trust ladder, plain-English
+stat tiles, audit trail spanning the grid, a CSS pass, the chat-shaped Ask box
+replaced with a component lookup, and a tree renderer that stays hidden unless
+`/api/graph` answers.
+
+Left for the UI pass, after remediation:
+- Wire the tree to real data once **T3** lands. The renderer is written and the
+  panel hides itself when the endpoint is absent, so nothing on the page claims
+  structure it cannot see.
+- Revisit the intro copy against whatever T3 and T11 actually deliver.
 - **The intro copy currently over-promises.** It says Lambo "names the workloads
   that would break and counts them", which `/api/recall` does not do. **T3** makes
   it true, so the copy stays and the dependents panel gets wired to
@@ -277,7 +346,98 @@ Open:
 ---
 
 
-## T10 — Release workflow builds against too-new glibc
+## T11 — Recall does not answer dependency questions
+
+**Files:** `src/recall/*`
+**Blocked by:** nothing
+**Not a review finding.** Measured against the live exhibit.
+
+The graph holds the answer and recall does not surface it. Two measurements:
+
+```
+q = "what depends on SG-Base-VPC"
+  SG-Base-VPC                                    (score 2.94)
+  SG-Base-VPC ingress all protocols from SG-Base-VPC   (score 2.72)
+  SG-Base-VPC = sg-071b52ffe5950efdf             (score 2.61)
+  SG-Base-VPC ingress tcp/5432 from SG-PublicWeb (score 2.22)
+```
+
+It returns the security group and its own rules. It never names
+`RDS-Lambo-Demo-DB`, which is the only thing that depends on it, and which the
+store knows about through a `Hierarchical` edge that a single SQL query returns.
+Recall is matching words, not structure.
+
+```
+q = "is it safe to delete the shared security group"
+  five results, every one scored 0.18
+```
+
+An identical score across every hit is not a ranking, it is a floor. The likely
+cause is that the stored concept contents are identifier-shaped
+(`SG-PublicWeb ingress tcp/443 from 0.0.0.0/0`) while the query is prose, so the
+vector arm contributes nothing and the lexical arm matches nothing either.
+
+Worth establishing before changing anything:
+- Whether structural expansion runs at all for these queries, and if so why
+  dependents do not reach the assembled block.
+- Whether the flat 0.18 is a floor constant or genuine cosine agreement.
+- Whether identifier-shaped content needs different treatment from prose on the
+  way in, on the way out, or both.
+
+This is the difference between the exhibit demonstrating its thesis and merely
+asserting it, and it is more valuable than any remaining P2.
+
+---
+
+## T12 — The Lambda Function URL returns 403, undiagnosed
+
+**Files:** `scripts/aws-infra/provision_app_data.py`, AWS-side config
+**Blocked by:** nothing
+**Not a review finding.**
+
+The function itself works. Invoked directly it returns live counts read from
+CockroachDB through the scoped secret:
+
+```
+{"session": "cloudops-exhibit", "concepts": 41, "canonical": 1,
+ "edges": 485, "interactions": 10, ...}
+```
+
+Only the public Function URL 403s. The resource policy is correct
+(`Effect: Allow`, `Principal: *`, `lambda:InvokeFunctionUrl`, condition
+`FunctionUrlAuthType: NONE`), `AuthType` is `NONE`, and the account is not in an
+Organization, so no SCP explains it. It still 403d after the account moved from
+the Free plan to Paid, so the plan was not the cause either.
+
+Untested hypothesis: an account-level Lambda public-access block. The bundled
+botocore has no `get_public_access_block_config`, so it could not be checked
+from here.
+
+This decides whether §11 can claim a public endpoint or has to describe the
+Lambda as IAM-invoked. Either is honest; the claim just has to match.
+
+---
+
+## T13 — Canonization is unreachable at the default cadence
+
+**Files:** `src/config.rs`, `src/daemon/mod.rs`, `src/canon/*`
+**Blocked by:** T1
+**Not a review finding.** A design question rather than a defect.
+
+GC sweeps every `gc_interval` mutations, defaulting to 10 000, and Stage 1
+requires `gc_survived >= 3`. A concept therefore needs roughly 30 000 mutations
+before it can be promoted. `lambo demo` only shows the state machine working
+because it sets the same knob to 1 internally, and the CloudOps exhibit only
+shows it because `[daemon]` was added and set low.
+
+So on default settings, a real session runs indefinitely and promotes nothing.
+Either that is the intended behaviour for very large sessions and should be
+documented as such, or the default is wrong. It should not be the case that the
+only two sessions which have ever canonized both did so by overriding the knob.
+
+---
+
+## T14 — Release workflow builds against too-new glibc
 
 **Files:** `.github/workflows/release.yml`
 **Blocked by:** nothing
@@ -309,7 +469,7 @@ T5     re-review launcher
 T7 ─┐  agents
 T8 ─┘
 T9     portal          (panel on a fixture until T3)
-T10    release workflow
+T14    release workflow
 ```
 
 The chains:

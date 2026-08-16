@@ -69,36 +69,51 @@
         </p>
       </div>
       <div>
-        <h3>The thing worth trying</h3>
+        <h3>The thing worth looking at</h3>
         <p>
-          Ask what depends on the shared security group. Lambo names the workloads
-          that would break and counts them. That warning is what stops one agent
-          deleting the thing another agent's database is sitting behind, and it is
-          not something plain vector search can produce.
+          Open <code>VPC-Enterprise-Prod</code>. Lambo marks it load-bearing and
+          says how many things depend on it, because the agents recorded those
+          dependencies as they built. That count is what makes an agent stop
+          before deleting something another agent is sitting behind, and it is not
+          something plain vector search can produce.
         </p>
       </div>
     </div>
   </section>
 
-  <section class="panel recall">
-    <h2>Ask the memory</h2>
+  <!-- Rendered only when /api/graph answers. A structure view built from a
+       fixture would be a page inventing infrastructure, so absence hides it. -->
+  <section class="panel tree hidden" id="tree-panel">
+    <h2>What these agents built</h2>
     <p class="note">
-      Not a chat, and not a search box over documents. This asks the same question an
-      agent asks before it acts, and what comes back is the exact block of memory
-      Lambo would hand that agent, character for character.
+      The components in this session and how they contain each other, read from
+      the recorded graph. Nothing here is a diagram someone drew: it is the
+      structure the agents wrote down as they provisioned.
+    </p>
+    <div id="tree-out" class="tree-out"></div>
+  </section>
+
+  <section class="panel recall">
+    <h2>Look up a component</h2>
+    <p class="note">
+      Pick a resource from this session. What comes back is the block of memory
+      Lambo hands an agent that is about to touch it, character for character.
+      Nothing is rewritten for display, and nothing here is a conversation.
     </p>
     <div class="suggest">
-      <span class="suggest-label">Try</span>
-      <button type="button" class="chip-q" data-q="what depends on SG-Base-VPC">what depends on SG-Base-VPC</button>
-      <button type="button" class="chip-q" data-q="is it safe to delete the shared security group">is it safe to delete the shared security group</button>
+      <button type="button" class="chip-q" data-q="SG-Base-VPC">SG-Base-VPC</button>
       <button type="button" class="chip-q" data-q="RDS-Lambo-Demo-DB">RDS-Lambo-Demo-DB</button>
+      <button type="button" class="chip-q" data-q="VPC-Enterprise-Prod">VPC-Enterprise-Prod</button>
+      <button type="button" class="chip-q" data-q="EC2-LamboWebExhibit">EC2-LamboWebExhibit</button>
+      <button type="button" class="chip-q" data-q="Lambda-LamboStats-API">Lambda-LamboStats-API</button>
     </div>
     <form id="recall-form" autocomplete="off">
-      <input type="text" id="recall-query" name="q" placeholder="What should an agent know before it acts?" aria-label="Recall query" spellcheck="false">
-      <button type="submit" id="recall-go">Ask</button>
+      <label class="field-label" for="recall-query">or name another resource</label>
+      <input type="text" id="recall-query" name="q" placeholder="Subnet-Private-1a" aria-label="Resource name" spellcheck="false">
+      <button type="submit" id="recall-go">Look up</button>
     </form>
     <div class="meta" id="recall-meta"></div>
-    <pre id="recall-out" class="context" aria-live="polite">Pick one of the three above, or type your own.</pre>
+    <pre id="recall-out" class="context" aria-live="polite">Choose a resource above.</pre>
   </section>
 
   <aside class="side">
