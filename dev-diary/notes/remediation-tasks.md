@@ -39,7 +39,7 @@ not re-reported:
 
 ---
 
-## T1 — Validate config, and stop a text file panicking the daemon
+## T1 — Fail closed: config cadences (done), then write-path invariants (reopened)
 
 **Files:** `src/config.rs`, `src/memory.rs`
 **Closes:** T1-P1-1, T1-P1-2
@@ -106,6 +106,64 @@ overrides; that is exactly T2's charter and lands there.
 **Verify:** full `cargo test --all-features` green — **818 passed / 0 failed**
 (defaults 734). No production caller passes a zero cadence; `lambo demo` and the
 example config unaffected.
+
+---
+
+### T1 part 2 — REOPENED: guards that exist but are not applied
+
+The first part fixed a validation function that was never called in production.
+The same pattern shows up on the graph paths, and each instance corrupts the
+graph **silently**: no error, a plausible-looking result, and a wrong answer to
+the question the product exists to answer. Every one below was hit or verified
+during the CloudOps build.
+
+**1. The embedding contract is enforced for writers and nobody else.**
+Verified: `assert_session_embedding_compatible` has exactly one non-test call
+site, `src/memory.rs:626`, inside `MemoryBuilder::build()`. Readers reach a
+session through `load_reader_graph`, which never calls it, so `serve-web` and
+every read verb will happily attach an embedder that disagrees with the space
+the stored vectors live in. Its own doc comment says "Call on `load_session` /
+serve attach" and the serve-attach half was never wired.
+
+This is not theoretical: it is exactly why `launch_exhibit_ec2.py` pins BGE-M3
+by sha256 and carries three paragraphs explaining that a same-width substitute
+"resolves cleanly and then returns confident nonsense". A guard for that already
+existed; it just was not applied on the surface that needed it. Wire it into the
+reader path and the launcher's warning becomes belt and braces rather than the
+only defence.
+
+**2. `Observation` concepts never match a canonical key.**
+Verified at `src/graph/canonical.rs:304`:
+
+```rust
+.filter(|c| c.concept_type != ConceptType::Observation)
+.filter(|c| c.canonical_key == key)
+```
+
+Deriving an identifier as `observation` therefore creates a **new node on every
+reference**. I did this, and it split one child in two and halved a pillar's
+blast radius with nothing logged. Either refuse `observation` for content that
+canonicalizes, or warn at the derive boundary that this type opts out of
+identity. Today the caller has to know.
+
+**3. A second hierarchy parent zeroes blast radius.**
+Reported by the Tier 3 review and encoded defensively in
+`scripts/cloudops/_lambo.py::check_single_source`, which is client-side Python
+guarding an engine invariant. That is the signal: if a caller had to write the
+check, the engine should own it. Refuse the second structural parent, or make
+the zeroing explicit rather than arithmetic.
+
+**4. `--parent-of CHILD:PARENT` cannot carry a colon**, so IPv6 CIDRs are
+dropped in silence (T3-1-P2-3). The client-side half is already in **T7**; the
+question here is whether the CLI should accept an escaped or alternative
+separator instead of making every caller pre-filter.
+
+**The principle worth stating once:** rules the tool enforces cost nothing to
+follow. Rules the caller must remember are the entire adoption tax, and putting
+correctness in the caller's head is a strange choice for a memory product.
+
+**Verify:** each of these needs a test that asserts the *refusal*, not the happy
+path. All four currently "pass" by doing the wrong thing quietly.
 
 ---
 
