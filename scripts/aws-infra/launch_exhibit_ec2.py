@@ -8,7 +8,7 @@ loopback:8080 beside it, all as systemd services.
 Four constraints shape everything below.
 
 **t4g is Graviton, so the machine is ARM64.** User data fetches the
-`lambo-<version>-linux-arm64` release asset, not x86_64, and verifies it against
+`lambo-<version>-linux-<arch>` release asset matching the instance type, and verifies it against
 the `.sha256` published beside it rather than trusting the download. Same for
 Caddy, against the release's `checksums.txt`.
 
@@ -115,36 +115,93 @@ DEFAULT_BGE_MODEL_URL = (
 DEFAULT_BGE_MODEL_SHA256 = (
     "daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c"
 )
-DEFAULT_LLAMA_CPP_REF = "b4585"
+DEFAULT_LLAMA_CPP_REF = "b10453"
+
+# Prebuilt llama.cpp, per architecture, pinned by a hash computed from the
+# downloaded artefact. Upstream publishes no checksum file beside these, so the
+# pin is what makes the download verifiable at all.
+LLAMA_TARBALLS = {
+    "x86_64": (
+        "llama-{ref}-bin-ubuntu-x64.tar.gz",
+        "550eb155a09c3051c7add5becf6d0badc3a4c33416807985963036b27b859fb4",
+    ),
+    "arm64": (
+        "llama-{ref}-bin-ubuntu-arm64.tar.gz",
+        "b164e72dfb69c711275178e0d0fae54748042f039e4fe7386f1c0ea7019c109c",
+    ),
+}
 LLAMA_PORT = 8080
 
 # The FP16 model is ~1.2 GiB resident before llama.cpp's own allocations and the
 # KV cache, so these are rejected up front rather than discovered when the OOM
 # killer takes llama-server mid-demo. t4g.medium (4 GiB) fits but leaves little
 # room for the source build, so it is warned about rather than blocked.
-TOO_SMALL_FOR_LOCAL_BGE = ("t4g.nano", "t4g.micro", "t4g.small")
-TIGHT_FOR_LOCAL_BGE = ("t4g.medium",)
+TOO_SMALL_FOR_LOCAL_BGE = (
+    "t4g.nano", "t4g.micro", "t4g.small",
+    "t3.nano", "t3.micro", "t3.small",
+    "t3a.nano", "t3a.micro", "t3a.small",
+    "t2.nano", "t2.micro", "t2.small",
+)
+# 4 GiB: fits, but leaves little room for the llama.cpp source build.
+TIGHT_FOR_LOCAL_BGE = ("t4g.medium", "t3.medium", "t3a.medium", "c7i-flex.large")
 
-# Amazon Linux 2023, arm64, resolved through the public SSM parameter rather
+# Ubuntu 26.04 LTS, resolved through Canonical's public SSM parameter rather
 # than a hardcoded AMI id: AMI ids are per-region and go stale every few weeks.
-AL2023_ARM64_SSM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+#
+# Not Amazon Linux 2023, and the reason is load-bearing. AL2023 ships glibc
+# 2.34, while the release workflow builds both Linux targets on Ubuntu 24.04
+# runners (glibc 2.39). The published binary passes its checksum and then dies
+# with `version GLIBC_2.39 not found` the moment systemd starts it. That is
+# true of the arm64 asset as well, so it is not an artefact of the instance
+# architecture. Ubuntu 26.04 is newer than the build environment, so the
+# released binary runs as shipped and the checksum verification still means
+# what it is supposed to mean.
+UBUNTU_SSM = {
+    "arm64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
+    "x86_64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+}
 
-# Graviton families. The release asset name is chosen at script level, so a
-# non-ARM instance type would download a binary the machine cannot execute and
-# the failure would only surface in the boot log.
+# Which architecture each instance family lands on. The release asset names are
+# chosen at script level, so a mismatch downloads a binary the machine cannot
+# execute and the failure would only surface in the boot log. Graviton remains
+# the better value per unit of throughput; x86_64 is supported because an AWS
+# account on the Free plan may only launch free-tier-eligible types, and the
+# only such type with enough memory for BGE-M3 FP16 is m7i-flex.large.
 ARM_FAMILIES = (
     "t4g.", "m6g.", "m7g.", "m8g.", "c6g.", "c7g.", "c8g.",
     "r6g.", "r7g.", "r8g.", "x2g", "im4g", "is4g", "g5g.",
 )
+X86_FAMILIES = (
+    "t2.", "t3.", "t3a.", "m5.", "m5a.", "m6i.", "m6a.", "m7i.", "m7i-flex.",
+    "c5.", "c5a.", "c6i.", "c6a.", "c7i.", "c7i-flex.", "r5.", "r6i.", "r7i.",
+)
+
+# Release asset naming per architecture. lambo and Caddy spell the same machine
+# differently ("x86_64" against "amd64"), which is exactly the kind of detail
+# that is silently wrong if it is written out at each use site instead of once.
+ASSET_NAMES = {
+    "arm64": {"lambo": "linux-arm64", "caddy": "linux_arm64"},
+    "x86_64": {"lambo": "linux-x86_64", "caddy": "linux_amd64"},
+}
 
 
-def arm_instance_type(value: str) -> str:
-    if not value.startswith(ARM_FAMILIES):
-        raise argparse.ArgumentTypeError(
-            f"{value!r} is not a Graviton (ARM64) instance type. User data fetches the "
-            "lambo linux-arm64 asset, so an x86_64 type would boot and then fail. Use "
-            "t4g.large, or add the family to ARM_FAMILIES and provide an x86_64 path."
-        )
+def arch_for_instance_type(value: str) -> str:
+    """Map an instance type to the architecture its assets must match."""
+    if value.startswith(ARM_FAMILIES):
+        return "arm64"
+    if value.startswith(X86_FAMILIES):
+        return "x86_64"
+    raise argparse.ArgumentTypeError(
+        f"{value!r} is not a family this script knows the architecture of. User data "
+        "picks the lambo and Caddy assets from that architecture, so guessing would "
+        "download a binary the machine cannot execute. Use t4g.large (Graviton), or "
+        "m7i-flex.large (x86_64, free-tier eligible), or add the family to "
+        "ARM_FAMILIES or X86_FAMILIES."
+    )
+
+
+def known_instance_type(value: str) -> str:
+    arch_for_instance_type(value)
     return value
 
 
@@ -173,16 +230,22 @@ SESSION="@@SESSION@@"
 SECRET_ID="@@SECRET_ID@@"
 WEB_PORT="@@WEB_PORT@@"
 
-dnf -y install tar gzip >/dev/null
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y >/dev/null
+# awscli is not in the Ubuntu base image the way it is in Amazon Linux, and the
+# service wrapper shells out to it to resolve the DSN at start. Without it
+# lambo-web restart-loops with `aws: not found` and never binds.
+apt-get install -y tar gzip curl ca-certificates awscli >/dev/null
 
 @@LLAMA_BLOCK@@
 
 # ---------------------------------------------------------------- lambo -----
-# t4g is Graviton, so this is the linux-arm64 asset. The release publishes
-# `lambo-<version>-<name>` alongside a matching `.sha256` (see
-# .github/workflows/release.yml); verify rather than trust the download.
+# The asset name carries the instance's architecture, substituted at render
+# time from the instance type. The release publishes `lambo-<version>-<name>`
+# alongside a matching `.sha256` (see .github/workflows/release.yml); verify
+# rather than trust the download.
 cd /tmp
-ASSET="lambo-${LAMBO_VERSION}-linux-arm64"
+ASSET="lambo-${LAMBO_VERSION}-@@LAMBO_ASSET_ARCH@@"
 BASE="https://github.com/${LAMBO_REPO}/releases/download/v${LAMBO_VERSION}"
 curl -fsSL --retry 5 --retry-delay 5 -o "${ASSET}"         "${BASE}/${ASSET}"
 curl -fsSL --retry 5 --retry-delay 5 -o "${ASSET}.sha256"  "${BASE}/${ASSET}.sha256"
@@ -193,12 +256,16 @@ rm -f "${ASSET}" "${ASSET}.sha256"
 /usr/local/bin/lambo --version
 
 # ---------------------------------------------------------------- caddy -----
-CADDY_TGZ="caddy_${CADDY_VERSION}_linux_arm64.tar.gz"
+CADDY_TGZ="caddy_${CADDY_VERSION}_@@CADDY_ASSET_ARCH@@.tar.gz"
 CADDY_BASE="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}"
 curl -fsSL --retry 5 --retry-delay 5 -o "${CADDY_TGZ}" "${CADDY_BASE}/${CADDY_TGZ}"
 curl -fsSL --retry 5 --retry-delay 5 -o caddy_checksums.txt \
     "${CADDY_BASE}/caddy_${CADDY_VERSION}_checksums.txt"
-grep " ${CADDY_TGZ}\$" caddy_checksums.txt | sha256sum -c -
+# Caddy publishes SHA-512, not SHA-256, so this is sha512sum. Getting it wrong
+# does not fail loudly the way a bad hash would: sha256sum rejects the 128-char
+# digests as "no properly formatted checksum lines found" and exits non-zero,
+# which under `set -e` kills the bootstrap after lambo is already installed.
+grep " ${CADDY_TGZ}\$" caddy_checksums.txt | sha512sum -c -
 tar -xzf "${CADDY_TGZ}" caddy
 install -m 0755 -o root -g root caddy /usr/local/bin/caddy
 rm -f "${CADDY_TGZ}" caddy_checksums.txt caddy
@@ -337,14 +404,27 @@ LLAMA_BLOCK = r"""# ----------------------------------------------------------- 
 # vector space the stored embeddings live in. See DEFAULT_BGE_MODEL_URL for why
 # a same-dimension substitute is not good enough.
 #
-# llama.cpp publishes no linux-arm64 release binary, so this builds from a
-# pinned tag. On two vCPUs that is several minutes of boot; the service comes up
-# when it is done, and lambo-web waits for it rather than starting broken.
+# llama.cpp now publishes prebuilt Linux binaries for both architectures, so
+# this installs the pinned release rather than building from source. The build
+# was not merely slow (several minutes on two vCPUs): the tag this script used
+# to pin predates GCC 15 and no longer compiles on a current toolchain, which
+# turned every boot into a coin toss against the distro's compiler version.
+#
+# The tarball publishes no per-asset checksum, so the hash below was computed
+# from the downloaded artefact and is pinned here. That keeps the same property
+# the lambo and Caddy fetches have: the bytes are verified before anything runs
+# them, rather than trusted because they came from the right URL.
 BGE_MODEL_URL="@@BGE_MODEL_URL@@"
 LLAMA_CPP_REF="@@LLAMA_CPP_REF@@"
+LLAMA_TARBALL="@@LLAMA_TARBALL@@"
+LLAMA_TARBALL_SHA256="@@LLAMA_TARBALL_SHA256@@"
 LLAMA_PORT="@@LLAMA_PORT@@"
 
-dnf -y install git cmake gcc-c++ make >/dev/null
+# The prebuilt llama.cpp links against the OpenMP runtime. Building from source
+# pulled it in as a g++ dependency; installing a binary does not, so it is
+# explicit here or llama-server dies with `libgomp.so.1: cannot open shared
+# object file` on every restart.
+apt-get install -y libgomp1 >/dev/null
 
 id -u llama >/dev/null 2>&1 || \
     useradd --system --home-dir /var/lib/llama --create-home --shell /sbin/nologin llama
@@ -352,14 +432,23 @@ install -d -m 0755 -o llama -g llama /var/lib/llama/models
 
 if [ ! -x /usr/local/bin/llama-server ]; then
     cd /tmp
-    rm -rf llama.cpp
-    git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggerganov/llama.cpp
-    cd llama.cpp
-    cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DGGML_NATIVE=ON
-    cmake --build build --config Release --target llama-server -j "$(nproc)"
-    install -m 0755 -o root -g root build/bin/llama-server /usr/local/bin/llama-server
-    cd /tmp && rm -rf llama.cpp
+    rm -rf "llama-${LLAMA_CPP_REF}" "${LLAMA_TARBALL}"
+    curl -fsSL --retry 5 --retry-delay 5 -o "${LLAMA_TARBALL}" \
+        "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_REF}/${LLAMA_TARBALL}"
+    echo "${LLAMA_TARBALL_SHA256}  ${LLAMA_TARBALL}" | sha256sum -c -
+    tar -xzf "${LLAMA_TARBALL}"
+    # The archive is a flat directory of executables beside the shared objects
+    # they link against, so it is installed whole and the loader is pointed at
+    # it. Copying just llama-server out would leave it unable to find libllama.
+    rm -rf /opt/llama
+    install -d -m 0755 -o root -g root /opt/llama
+    cp -a "llama-${LLAMA_CPP_REF}/." /opt/llama/
+    echo "/opt/llama" > /etc/ld.so.conf.d/llama.conf
+    ldconfig
+    ln -sf /opt/llama/llama-server /usr/local/bin/llama-server
+    cd /tmp && rm -rf "llama-${LLAMA_CPP_REF}" "${LLAMA_TARBALL}"
 fi
+/usr/local/bin/llama-server --version 2>&1 | head -2 || true
 
 MODEL=/var/lib/llama/models/bge-m3.gguf
 BGE_MODEL_SHA256="@@BGE_MODEL_SHA256@@"
@@ -461,6 +550,10 @@ def render_llama_block(args: argparse.Namespace) -> str:
     for key, value in {
         "@@BGE_MODEL_URL@@": args.bge_model_url,
         "@@LLAMA_CPP_REF@@": args.llama_cpp_ref,
+        "@@LLAMA_TARBALL@@": LLAMA_TARBALLS[arch_for_instance_type(args.instance_type)][0]
+            .format(ref=args.llama_cpp_ref),
+        "@@LLAMA_TARBALL_SHA256@@":
+            LLAMA_TARBALLS[arch_for_instance_type(args.instance_type)][1],
         "@@BGE_MODEL_SHA256@@": args.bge_model_sha256,
         "@@LLAMA_PORT@@": str(LLAMA_PORT),
     }.items():
@@ -504,6 +597,10 @@ def render_user_data(args: argparse.Namespace, caddyfile: str, lambo_toml: str) 
         "@@LAMBO_REPO@@": args.lambo_repo,
         "@@LAMBO_VERSION@@": args.lambo_version,
         "@@CADDY_VERSION@@": args.caddy_version,
+        # Both asset names are derived from the instance type's architecture, in
+        # one place, so the two spellings cannot drift apart.
+        "@@LAMBO_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["lambo"],
+        "@@CADDY_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["caddy"],
         "@@SESSION@@": args.session,
         "@@SECRET_ID@@": SECRET_NAME,
         "@@WEB_PORT@@": str(LAMBO_WEB_PORT),
@@ -612,13 +709,13 @@ def ensure_instance_profile(aws: Aws, secret_arn: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def resolve_ami(aws: Aws) -> tuple[str, str]:
-    ami_id = aws.ssm.get_parameter(Name=AL2023_ARM64_SSM)["Parameter"]["Value"]
+def resolve_ami(aws: Aws, arch: str) -> tuple[str, str]:
+    ami_id = aws.ssm.get_parameter(Name=UBUNTU_SSM[arch])["Parameter"]["Value"]
     image = aws.ec2.describe_images(ImageIds=[ami_id])["Images"][0]
-    if image["Architecture"] != "arm64":
+    if image["Architecture"] != arch:
         raise InfraError(
-            f"{ami_id} reports architecture {image['Architecture']}, expected arm64.",
-            hint="the SSM parameter path may have changed; check AL2023_ARM64_SSM.",
+            f"{ami_id} reports architecture {image['Architecture']}, expected {arch}.",
+            hint="the SSM parameter path may have changed; check UBUNTU_SSM.",
         )
     return ami_id, image.get("RootDeviceName", "/dev/xvda")
 
@@ -723,13 +820,14 @@ def _plan(args: argparse.Namespace, caddyfile: str, lambo_toml: str) -> int:
     would(
         "instance",
         EC2_NAME,
-        f"{args.instance_type} arm64 AL2023 in {SUBNET_PUBLIC_NAME}/{SG_PUBLIC_WEB_NAME}",
+        f"{args.instance_type} {arch_for_instance_type(args.instance_type)} Ubuntu 26.04 in {SUBNET_PUBLIC_NAME}/{SG_PUBLIC_WEB_NAME}",
     )
     would("volume", EC2_NAME, f"{args.volume_size}GB gp3, encrypted, delete on termination")
     if args.eip:
         would("elastic-ip", EIP_NAME, "allocated and associated")
-    note(f"lambo asset: lambo-{args.lambo_version}-linux-arm64 (+ .sha256, verified in user data)")
-    note(f"caddy asset: caddy_{args.caddy_version}_linux_arm64.tar.gz (+ checksums, verified)")
+    _a = ASSET_NAMES[arch_for_instance_type(args.instance_type)]
+    note(f"lambo asset: lambo-{args.lambo_version}-{_a['lambo']} (+ .sha256, verified in user data)")
+    note(f"caddy asset: caddy_{args.caddy_version}_{_a['caddy']}.tar.gz (+ checksums, verified)")
     note(f"key pair: {args.key_name or 'none (no SSH access will be possible)'}")
     say()
     step("embedder")
@@ -829,8 +927,8 @@ def main(args: argparse.Namespace) -> int:
         note("user data is only read at first boot; terminate and re-run to change it")
         instance_id = instance["InstanceId"]
     else:
-        ami_id, root_device = resolve_ami(aws)
-        note(f"AMI {ami_id} (Amazon Linux 2023, arm64) root {root_device}")
+        ami_id, root_device = resolve_ami(aws, arch_for_instance_type(args.instance_type))
+        note(f"AMI {ami_id} (Ubuntu 26.04 LTS, {arch_for_instance_type(args.instance_type)}) root {root_device}")
         user_data = render_user_data(args, caddyfile, lambo_toml)
         instance_id = launch_instance(
             aws, ami_id, root_device, subnet["SubnetId"], sg["GroupId"], profile_arn, user_data, args
@@ -904,7 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LAMBO_VERSION,
         help=(
             f"Release version to install (default {DEFAULT_LAMBO_VERSION}). The asset "
-            "fetched is lambo-<version>-linux-arm64, verified against its .sha256."
+            "fetched is lambo-<version>-linux-<arch>, verified against its .sha256."
         ),
     )
     parser.add_argument(
@@ -952,12 +1050,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llama-cpp-ref",
         default=DEFAULT_LLAMA_CPP_REF,
-        help=f"llama.cpp git tag to build (default {DEFAULT_LLAMA_CPP_REF}).",
+        help=f"llama.cpp release tag to install (default {DEFAULT_LLAMA_CPP_REF}). Changing it invalidates the pinned tarball hashes in LLAMA_TARBALLS.",
     )
     parser.add_argument(
         "--instance-type",
         default="t4g.large",
-        type=arm_instance_type,
+        type=known_instance_type,
         help=(
             "Graviton instance type (default t4g.large). Must be ARM64. The "
             "default is sized for the FP16 BGE-M3 with headroom; t4g.micro is "
