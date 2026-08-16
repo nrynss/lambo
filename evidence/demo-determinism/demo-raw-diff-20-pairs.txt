@@ -1,0 +1,33 @@
+commit:   00068249b7cbcb490315a46ee8d034a3f84c9405
+date:     2026-08-16T12:34:56+05:30
+binary:   ./target/debug/lambo (frozen; built by cargo build --features ship --tests --bins)
+each pair: fresh sqlite scratch store, two sequential runs of
+           lambo --config <SCRATCH>/lambo.toml demo --scenario rest-api
+----
+pair  1: changed=6 session=2 nodeid=2 cycle=2
+pair  2: changed=6 session=2 nodeid=2 cycle=2
+pair  3: changed=4 session=2 nodeid=2 cycle=0
+pair  4: changed=8 session=2 nodeid=2 cycle=4
+pair  5: changed=8 session=2 nodeid=2 cycle=4
+pair  6: changed=10 session=2 nodeid=2 cycle=6
+pair  7: changed=8 session=2 nodeid=2 cycle=4
+pair  8: changed=6 session=2 nodeid=2 cycle=2
+pair  9: changed=4 session=2 nodeid=2 cycle=0
+pair 10: changed=6 session=2 nodeid=2 cycle=2
+pair 11: changed=6 session=2 nodeid=2 cycle=2
+pair 12: changed=8 session=2 nodeid=2 cycle=4
+pair 13: changed=8 session=2 nodeid=2 cycle=4
+pair 14: changed=8 session=2 nodeid=2 cycle=4
+pair 15: changed=8 session=2 nodeid=2 cycle=4
+pair 16: changed=6 session=2 nodeid=2 cycle=2
+pair 17: changed=6 session=2 nodeid=2 cycle=2
+pair 18: changed=6 session=2 nodeid=2 cycle=2
+pair 19: changed=6 session=2 nodeid=2 cycle=2
+pair 20: changed=8 session=2 nodeid=2 cycle=4
+----
+pairs with a differing session id:      20 / 20
+pairs with a differing warning node id: 20 / 20
+pairs with a differing cycle index:     18 / 20
+pairs with any UNEXPECTED difference:   0 / 20
+pairs byte-identical overall:           0 / 20
+finished: 2026-08-16T12:35:13+05:30
