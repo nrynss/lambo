@@ -33,8 +33,13 @@ Rev 1 was reviewed against the code and priced. Five things changed:
    app-data agent provisions and Lambo dependency-tracks*, which is a true and
    defensible claim rather than a decorative one.
 4. **TLS made real.** `https://<EC2-IP>` cannot get a certificate. See §8.
-5. **Phase 5 scoped against the code.** The agent-attributed timeline is not
-   free — `WebEvent` carries no agent field today. See §9.
+5. **Per-agent timeline cut.** It carried a real cost (no agent identity exists
+   anywhere in the portal today) and, worse, the obvious implementation would have
+   attributed canonization to an agent — inventing a fact and contradicting the
+   claim that status is earned structurally. Cut in §5; Phase 5 now needs no Rust
+   change, so "zero core Rust changes" holds for the whole plan.
+6. **Two follow-ups filed as issues** rather than carried here: the
+   `Uuid::new_v4` ordering tie-break (#2) and the Bedrock embedder adapter (#3).
 
 ---
 
@@ -141,18 +146,48 @@ To satisfy the hackathon requirement for **CockroachDB Agent Skills** and make t
 
 ---
 
-## 5. Judge Web Portal: Agent Traceability & Audit Recording
+## 5. Judge Web Portal: Canonization Audit Trail
 
-To give judges full transparency into how multi-agent collaboration works in real time, the judge portal hosted on EC2 will include an **Agent Traceability & Recording** view alongside the interactive recall engine:
+The judge portal on EC2 is `lambo serve-web`, read-only, showing why the graph
+reached the state it did. It ships on the endpoints that already exist — no Rust
+change (see §9).
 
-1. **Multi-Agent Provenance Timeline**:
-   - Live stream of all interactions, derivations, and actions broken down by agent (`network-infra-agent`, `app-data-agent`).
-   - Displays exact server-stamped timestamps, causal dependencies created, and parent-child hierarchy assignments.
-2. **Deterministic Scenario Replay & Tracing**:
-   - Ability to review the pre-recorded CloudOps scenario run vs. triggering live interactive queries.
-   - Shows the exact diff proof demonstrating identical graph convergence.
-3. **Canonization Audit Trail**:
-   - Direct visibility into the CockroachDB `canonization_events` log explaining *why* `VPC-Enterprise-Prod` earned `Canonical` status (incident degree, distinct agents, survival across GC sweeps, blast radius > 5).
+1. **Canonization Audit Trail** *(primary)*:
+   - Direct visibility into the CockroachDB `canonization_events` log explaining
+     *why* `VPC-Enterprise-Prod` earned `Canonical` status: incident degree,
+     distinct agents, survival across GC sweeps, blast radius > 5.
+   - Served by `/api/events` and `/api/stats` as they stand.
+2. **Live recall against the session**:
+   - The interactive recall engine, so a judge can run the destructive query
+     themselves and watch the blast-radius warning come back.
+   - Served by `/api/recall`.
+
+### Cut from this plan: the per-agent provenance timeline
+
+Rev 1 asked for a live stream "broken down by agent". **Cut**, for two reasons.
+
+It is not free: nothing in the portal carries agent identity today — neither
+`WebEvent` nor `WebStats` has the field, and `agent` appears four times in the
+whole of `src/cli/serve_web.rs`. Building it means a new payload, read path,
+endpoint and front-end, which is the only thing in this plan that would have
+broken "zero core Rust changes".
+
+More importantly, the obvious implementation would have been **wrong**.
+`canonization_events` has no agent column (`id, session_id, node_id,
+from_status, to_status, blast_radius, last_demotion_time, occurred_at`) and that
+is correct, not an oversight: canonization is earned structurally by the daemon,
+and no agent performs it. Stamping an agent onto a promotion would invent a fact
+and would directly undercut the product's central claim — that status is earned
+from structural evidence rather than declared by an agent.
+
+If a timeline is ever wanted, the honest shape is agent-attributed
+**interactions and actions** (`Interaction` already carries `agent_id`) with
+canonization shown as *system* events on the same axis. That reads better for a
+judge in any case: two agents acting, and the system independently promoting.
+Tracked as a future enhancement, not as part of this submission.
+
+**Deterministic scenario replay** is also out for now. It depends on the
+byte-identical demo property currently under repair; see §9.
 
 ---
 
@@ -244,15 +279,25 @@ profile should be scoped to reading exactly the one secret, nothing wider.
 
 ---
 
-## 9. Phase 5 scope check — the portal is not free
+## 9. Phase 5 scope — decided: cut to what exists
 
-§5 asks for a provenance timeline "broken down by agent". Against today's code
-that is **new Rust work**, which contradicts the `execution_mode` line's "zero
-core Rust changes" if taken literally.
+**Decision (rev 2): the per-agent timeline is cut.** Rationale in §5. Phase 5
+therefore needs **no Rust change**, and `execution_mode`'s "zero core Rust
+changes" holds for the whole plan.
 
-What `lambo serve-web` exposes today is `/`, `/app.css`, `/app.js`, `/healthz`,
-`/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`
-(`src/cli/serve_web.rs:736`). The event payload is:
+What `lambo serve-web` exposes today, and what the portal ships on:
+
+```
+/  /app.css  /app.js  /healthz
+/api/session  /api/recall  /api/events  /api/stats  /api/pulse
+```
+(`src/cli/serve_web.rs:736`)
+
+The canonization audit trail comes from `/api/events` + `/api/stats`, and live
+recall from `/api/recall`. That is the substance of the exhibit.
+
+For the record, the event payload — note the absence of an agent field, and see
+§5 for why that absence is correct rather than a gap to fill:
 
 ```rust
 struct WebEvent {
@@ -266,21 +311,16 @@ struct WebEvent {
 }
 ```
 
-There is **no agent field**. So §5.1's per-agent breakdown needs either a new
-field on `WebEvent` plus the query behind it, or a different data path.
+### Still blocked: deterministic replay
 
-Two honest options, to be decided before Phase 5 starts:
+The "exact diff proof demonstrating identical graph convergence" is on hold
+regardless of scope. `binary_parity`'s byte-identical demo assertion currently
+fails about one run in ten, because time-derived `recency` in the daemon score
+varies between runs. `evidence/demo-live-diff.txt` recorded `IDENTICAL` for two
+runs that passed by luck, and warrants annotation once the fix lands.
 
-- **Cut to what exists.** The canonization audit trail (§5.3) and the replay view
-  are already served by `/api/events` and `/api/stats` — that is the substance of
-  the exhibit, and it needs no Rust. Drop the per-agent split.
-- **Accept the Rust change.** Add agent attribution to the event payload, and
-  amend `execution_mode` to say so rather than leaving the plan self-contradictory.
-
-§5.2's "exact diff proof demonstrating identical graph convergence" is on hold
-regardless: that determinism property is currently under repair, and
-`evidence/demo-live-diff.txt` recorded `IDENTICAL` for two runs that passed by
-luck. Do not put that claim in front of judges until the parity work is green.
+Do not put a determinism claim in front of judges until that is green. The fix
+is in flight; the v0.1.0 release depends on it too.
 
 ---
 
@@ -289,8 +329,8 @@ luck. Do not put that claim in front of judges until the parity work is green.
 ### Phase 0: Decisions to make before provisioning anything
 - [ ] **TLS**: pick a hostname strategy (§8). Provisioning an Elastic IP before
       this is decided risks redoing the Caddy and security-group config.
-- [ ] **Phase 5 scope**: cut to existing endpoints, or accept the Rust change and
-      amend `execution_mode` (§9). This decides whether Phase 5 is hours or days.
+- [ ] ~~Phase 5 scope~~ — **decided**: cut to existing endpoints (§5, §9). No
+      Rust change; nothing further to choose.
 
 ### Phase 1: Local Binary Validation (Prerequisite)
 - [ ] **Parity determinism must be green first.** `binary_parity`'s byte-identical
@@ -319,13 +359,13 @@ luck. Do not put that claim in front of judges until the parity work is green.
 - [ ] `02_app_data_agent.py`: Executes App Agent actions, queries Lambo, and links dependencies.
 - [ ] `03_crossover_protect.py`: Executes the destructive query, verifies Lambo's blast-radius warning, and renders outcome.
 
-### Phase 5: Judge Web Portal & Traceability Enhancements
-- [ ] Execute the Phase 0 scope decision (§9). `WebEvent` carries no agent field
-      today, so the per-agent timeline is not free.
+### Phase 5: Judge Web Portal (no Rust change)
 - [ ] Confirm the canonization audit trail renders from `/api/events` + `/api/stats`.
+- [ ] Confirm live recall works against the session through `/api/recall`.
+- [ ] Do **not** build the per-agent timeline — cut, see §5.
 
 ### Phase 6: Verification & Demo Recording
-- [ ] Verify judge URL (`https://<EC2-IP-or-Domain>`) renders live `lambo serve-web` session window with agent traceability.
+- [ ] Verify judge URL (§8 hostname) renders the live `lambo serve-web` session window and the canonization audit trail.
 - [ ] Verify Lambda Function URL returns live stats.
 - [ ] Record 3-minute video covering the multi-agent workflow and blast-radius protection.
 - [ ] Replace the README's "AWS services used: None yet" with §11's text.
@@ -336,8 +376,19 @@ luck. Do not put that claim in front of judges until the parity work is green.
 
 ## 11. AWS services used — submission text
 
-Replaces the current "None yet" in the README. Every line is a service actually
-exercised by this scenario; none is aspirational.
+**Lead with the argument, not the inventory.** The point of this scenario is not
+that it touches six AWS services. It is that autonomous agents are already
+provisioning real AWS infrastructure, and that the failure mode — one agent
+tearing down a shared security group another agent's workload depends on — is a
+production outage that flat vector memory cannot see coming. Lambo makes the
+dependency structure legible and stops the destructive action before it lands.
+
+That is a direct answer to a problem AWS customers have today, demonstrated on
+live AWS resources. A service checklist is the weaker claim, and a submission
+that leads with it invites the question "so what?". Lead instead with the
+outage that did not happen, and let the table below be supporting detail.
+
+Every line is a service actually exercised by this scenario; none is aspirational.
 
 | Service | How this project uses it |
 |---|---|
