@@ -33,6 +33,11 @@ jobs:
   build:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Each Linux matrix row sets `container: debian:bookworm`; the macOS and
+    # Windows rows deliberately omit it so they stay host-native and are never
+    # coupled to a Linux container. Leaving `container` empty is intentional —
+    # a future editor must NOT "fill it in".
+    container: ${{ matrix.container }}
     # Every `run:` step here is bash. windows-latest defaults to PowerShell, which
     # parses `VERSION=$(...)` as a module name and fails the job before it builds.
     # Git Bash ships on the Windows runner, so pinning the shell keeps one script
@@ -40,15 +45,28 @@ jobs:
     defaults:
       run:
         shell: bash
+    # Why the Linux builds run in a container: the Ubuntu 24.04 hosts ship
+    # GLIBC 2.39, so a host-linked binary requires GLIBC_2.39 and dies on
+    # Amazon Linux 2023 (GLIBC 2.34) with "version GLIBC_2.39 not found". The
+    # Linux matrix rows instead build inside `debian:bookworm`, whose toolchain
+    # links against an older glibc. Note bookworm itself ships GLIBC 2.36, so
+    # the 2.34 floor is an empirical property of the current source — the
+    # "Assert max required GLIBC <= 2.34" gate below makes it structural and
+    # fails the job if a dependency or rustc bump ever pulls in a GLIBC_2.35+
+    # symbol (which would silently re-break AL2023). debian:bookworm is a
+    # multi-arch image, so the amd64 runner pulls the amd64 variant and the
+    # arm64 runner the arm64 one; the host only supplies the container.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
+            container: debian:bookworm
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
             ext: ""
           - os: ubuntu-24.04-arm
+            container: debian:bookworm
             target: aarch64-unknown-linux-gnu
             name: linux-arm64
             ext: ""
@@ -134,6 +152,27 @@ jobs:
           fi
           # Never publish an unverifiable asset.
           test -s "${ASSET}.sha256"
+      - name: Assert max required GLIBC <= 2.34 (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          # `readelf` ships in binutils, which is not guaranteed in
+          # debian:bookworm; install it if missing (steps run as root inside
+          # the job-level `container: debian:bookworm`).
+          if ! command -v readelf >/dev/null 2>&1; then
+            apt-get update && apt-get install -y --no-install-recommends binutils
+          fi
+          BIN="dist/lambo-${VERSION}-${{ matrix.name }}"
+          max_glibc=$(readelf -V "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "max required GLIBC: $max_glibc"
+          # 2.34 is the Amazon Linux 2023 glibc floor. If $max_glibc requires a
+          # newer symbol (2.35/2.36), sort -V reports the higher of {2.34, max}
+          # and the gate fails; only a max of 2.34 or lower keeps AL2023 green.
+          req=$(printf '2.34\n%s' "${max_glibc#GLIBC_}" | sort -V | tail -1)
+          if [[ "$req" != "2.34" ]]; then
+            echo "::error::$BIN requires $max_glibc (> 2.34); exceeding the Amazon Linux 2023 glibc floor would re-break AL2023" >&2
+            exit 1
+          fi
 
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
