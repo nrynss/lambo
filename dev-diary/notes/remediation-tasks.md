@@ -736,6 +736,44 @@ Worth establishing before changing anything:
 This is the difference between the exhibit demonstrating its thesis and merely
 asserting it, and it is more valuable than any remaining P2.
 
+
+### ✅ T9 — DONE (2026-08-17, merged `7baa31a`)
+
+Recall now routes dependency questions by query kind instead of blending arms
+(`src/recall/dispatch.rs` + `Daemon::recall` routing + instrumentation in
+`candidates.rs`/`assemble.rs`). Investigation first (the doc's mandate):
+structural expansion DOES run but structural members get `relevance 0` and are
+buried below word-matches at `top_k`; the flat 0.18/0.25 is the blend's floor
+when no arm scores on identifier-shaped content.
+
+- **Instrumentation** — per-hit per-arm contribution logging
+  (`tracing::trace!`, target `lambo::recall`, default-invisible, gated on
+  `tracing::enabled!` so no eager allocation).
+- **Dispatch** — `classify` recognizes dependency phrasing; when an anchor with
+  §4.1 exclusive-single-source dependents resolves, "what depends on X" is
+  answered by traversal (structural edges only), falling through to the full
+  blend on no-anchor/no-dependents. `dependents()` shares
+  `format::inbound_sources` with the blast-radius predicate so membership and
+  the stamped field agree. Canonical-first promotion; load-bearing-pillar
+  warning rendered on structural hits.
+- **Measured (faithful local session over live Cockroach data):** "what depends
+  on SG-Base-VPC" now names `RDS-Lambo-Demo-DB` first (9.5) instead of the SG's
+  own rules; "is it safe to delete the shared security group" now returns a
+  real descending ranking instead of a flat floor.
+- **Tests** assert the dispatch, the false-positive guard (a marker-bearing but
+  non-dependency query stays General), and the refusal.
+
+**Review:** 3 rounds. R1 was REQUEST_CHANGES — the round-1 classifier was
+over-broad (bare `"depend"` matched `"independent"`) and the traversal
+membership diverged from the §4.1 blast-radius predicate; remediated (explicit
+phrasings only + anchor-gate, membership reconciled, full-blend refusal,
+instrumentation gated); R2/R3 cleared. Docs in
+`adve-review-remed-T9round{1..3}.md`.
+
+**Verify:** full `cargo test --all-features` green — **842 passed / 0 failed**.
+The `traversal_depth` one-hop and no-cache/no-hotlist decisions are documented
+at the dispatch site.
+
 ---
 
 ## T10 — The Lambda Function URL returns 403, undiagnosed
