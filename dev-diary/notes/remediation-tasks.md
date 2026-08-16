@@ -913,6 +913,29 @@ requires only 2.34 and runs everywhere, verified this session.
 This is why the exhibit moved to Ubuntu 26.04. The distro switch worked around a
 packaging defect that is still shipping to every user of the install script.
 
+
+### ✅ T12 — DONE (2026-08-17, merged `130d6d5`)
+
+`.github/workflows/release.yml` now builds both Linux targets inside a
+**Debian bookworm** container (job-level `container: ${{ matrix.container }}`),
+so the toolchain and `cargo` link against the container glibc (≤ 2.36, and the
+current pure-Rust source floors at 2.34), not the runner's 2.39. A
+"Assert max required GLIBC <= 2.34" step (`readelf -V`, `set -euo pipefail`,
+installs `binutils`) fails CI if a `GLIBC_2.35+` symbol ever appears, making the
+Amazon Linux 2023 (GLIBC 2.34) guarantee **structural** rather than empirical.
+macOS/Windows rows stay host-native (intentionally omit `container`); the
+release job stays containerless; the checksum/artifact flow is unchanged.
+
+**Review:** 3 rounds. R1 was REQUEST_CHANGES — the initial change put
+`container:` only in the matrix rows and never wired it to the job (inert; all
+steps still ran on the Ubuntu host at 2.39), and bookworm caps glibc at 2.36
+not 2.34 → remediated (job-level wiring + the readelf gate); R2/R3 cleared.
+Docs in `adve-review-remed-T12round{1..3}.md`.
+
+**Verify:** the definitive proof is a real (draft/PR) release build on the new
+runner showing `readelf` `GLIBC_2.34` (not 2.39) and the binary launching on
+AL2023 — a D2/D3 verification step, not a worktree defect.
+
 ---
 
 
