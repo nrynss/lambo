@@ -88,6 +88,28 @@ DEFAULT_LAMBO_REPO = "nrynss/lambo"
 DEFAULT_LAMBO_VERSION = "0.1.0"
 DEFAULT_CADDY_VERSION = "2.10.0"
 
+# BGE-M3 as GGUF, served by llama.cpp on the instance itself.
+#
+# This has to be the same model that wrote the vectors in the store, not merely
+# one of the same dimension. `resolve_backends` only enforces the *width*
+# (VECTOR(1024) vs embedder dim), so a mismatched model resolves cleanly and
+# then returns confident nonsense: the query lands in a different vector space
+# from the stored embeddings, and nothing errors. The live sessions were written
+# with bge_m3, so the exhibit reads with bge_m3.
+#
+# Q8_0 is near-lossless, which matters here — quantization noise keeps the query
+# in the same space, where a different model would not be.
+DEFAULT_BGE_MODEL_URL = (
+    "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf"
+)
+DEFAULT_LLAMA_CPP_REF = "b4585"
+LLAMA_PORT = 8080
+
+# Local BGE-M3 needs roughly 1 GiB resident plus headroom for llama.cpp's build
+# and the OS. Instance types known to be too small are rejected up front rather
+# than discovered when the OOM killer takes llama-server mid-demo.
+TOO_SMALL_FOR_LOCAL_BGE = ("t4g.nano", "t4g.micro", "t4g.small")
+
 # Amazon Linux 2023, arm64, resolved through the public SSM parameter rather
 # than a hardcoded AMI id: AMI ids are per-region and go stale every few weeks.
 AL2023_ARM64_SSM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
@@ -137,6 +159,8 @@ SECRET_ID="@@SECRET_ID@@"
 WEB_PORT="@@WEB_PORT@@"
 
 dnf -y install tar gzip >/dev/null
+
+@@LLAMA_BLOCK@@
 
 # ---------------------------------------------------------------- lambo -----
 # t4g.micro is Graviton, so this is the linux-arm64 asset. The release publishes
@@ -198,6 +222,21 @@ if [ -z "$LAMBO_COCKROACH_DSN" ] || [ "$LAMBO_COCKROACH_DSN" = "None" ]; then
     exit 1
 fi
 export LAMBO_COCKROACH_DSN
+# When the embedder is local, wait for it. lambo builds an embedder at startup
+# and health-checks it, so racing llama-server's model load would just crash-loop
+# under Restart=always until it happened to win. Bounded, so a genuinely broken
+# llama-server still surfaces as a failure rather than hanging forever.
+if [ -n "${LAMBO_LLAMA_HEALTH:-}" ]; then
+    i=0
+    until curl -fsS --max-time 3 "$LAMBO_LLAMA_HEALTH" >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ "$i" -ge 60 ]; then
+            echo "llama-server did not become healthy at $LAMBO_LLAMA_HEALTH" >&2
+            exit 1
+        fi
+        sleep 5
+    done
+fi
 exec /usr/local/bin/lambo --config /etc/lambo/lambo.toml serve-web \
     --session "$LAMBO_SESSION" --port "$LAMBO_PORT" --bind 127.0.0.1
 WRAPPER
@@ -206,7 +245,7 @@ chmod 0755 /usr/local/bin/lambo-serve-web
 cat >/etc/systemd/system/lambo-web.service <<UNIT
 [Unit]
 Description=lambo serve-web (read-only judge portal)
-After=network-online.target
+After=network-online.target @@LLAMA_AFTER@@
 Wants=network-online.target
 
 [Service]
@@ -218,6 +257,7 @@ Environment=LAMBO_REGION=${REGION}
 Environment=LAMBO_SECRET_ID=${SECRET_ID}
 Environment=LAMBO_SESSION=${SESSION}
 Environment=LAMBO_PORT=${WEB_PORT}
+Environment=LAMBO_LLAMA_HEALTH=@@LLAMA_HEALTH@@
 ExecStart=/usr/local/bin/lambo-serve-web
 Restart=always
 RestartSec=5
@@ -277,27 +317,130 @@ echo "=== bootstrap complete $(date -Is) ==="
 """
 
 
+LLAMA_BLOCK = r"""# ----------------------------------------------------------- llama.cpp -----
+# BGE-M3 on the instance, so /api/recall embeds the judge's query in the same
+# vector space the stored embeddings live in. See DEFAULT_BGE_MODEL_URL for why
+# a same-dimension substitute is not good enough.
+#
+# llama.cpp publishes no linux-arm64 release binary, so this builds from a
+# pinned tag. On two vCPUs that is several minutes of boot; the service comes up
+# when it is done, and lambo-web waits for it rather than starting broken.
+BGE_MODEL_URL="@@BGE_MODEL_URL@@"
+LLAMA_CPP_REF="@@LLAMA_CPP_REF@@"
+LLAMA_PORT="@@LLAMA_PORT@@"
+
+dnf -y install git cmake gcc-c++ make >/dev/null
+
+id -u llama >/dev/null 2>&1 || \
+    useradd --system --home-dir /var/lib/llama --create-home --shell /sbin/nologin llama
+install -d -m 0755 -o llama -g llama /var/lib/llama/models
+
+if [ ! -x /usr/local/bin/llama-server ]; then
+    cd /tmp
+    rm -rf llama.cpp
+    git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggerganov/llama.cpp
+    cd llama.cpp
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF -DGGML_NATIVE=ON
+    cmake --build build --config Release --target llama-server -j "$(nproc)"
+    install -m 0755 -o root -g root build/bin/llama-server /usr/local/bin/llama-server
+    cd /tmp && rm -rf llama.cpp
+fi
+
+MODEL=/var/lib/llama/models/bge-m3.gguf
+if [ ! -s "${MODEL}" ]; then
+    curl -fsSL --retry 5 --retry-delay 5 -o "${MODEL}.part" "${BGE_MODEL_URL}"
+    mv "${MODEL}.part" "${MODEL}"
+    chown llama:llama "${MODEL}"
+fi
+
+cat >/etc/systemd/system/llama-server.service <<UNIT
+[Unit]
+Description=llama.cpp embeddings server (BGE-M3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=llama
+Group=llama
+# --embeddings puts the server in embedding mode; loopback only, because Caddy
+# fronts the portal and nothing outside this host has any business calling it.
+ExecStart=/usr/local/bin/llama-server \
+    --model /var/lib/llama/models/bge-m3.gguf \
+    --embeddings --host 127.0.0.1 --port ${LLAMA_PORT} \
+    --ctx-size 8192 --threads $(nproc)
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/llama
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now llama-server.service
+"""
+
+
 def warn_fixture_embedder(embedder_kind: str) -> None:
     """Say out loud what `--embedder fixture` costs.
 
     The plan does not settle this and the code forces the question: `serve-web`
     goes through `resolve_backends`, so it constructs an embedder whether or not
     the exhibit needs one, and `/api/recall` embeds the judge's query with it. A
-    `t4g.micro` has 1 GiB of RAM and cannot host BGE-M3, so the choice is an
-    off-instance llama.cpp URL or the fixture embedder. The fixture embedder
-    starts fine and answers fine; its vectors are just unrelated to the ones in
-    the session, so the vector arm of recall returns noise while the lexical and
-    structural arms (which carry the blast-radius warning) still work. That is a
-    degradation worth stating rather than discovering during a demo.
+    The live sessions were written with `bge_m3`, so that is the default and the
+    instance hosts its own llama.cpp. `fixture` remains available and starts and
+    answers fine — its vectors are simply unrelated to the ones in the session,
+    so the vector arm of recall returns noise while the lexical and structural
+    arms (which carry the blast-radius warning) still work.
+
+    Nothing errors in that case, which is the danger: `resolve_backends` enforces
+    the vector *width* (VECTOR(1024) vs embedder dim) and not the model, so a
+    mismatch resolves cleanly and then ranks confidently against a vector space
+    the stored embeddings do not share. Worth stating rather than discovering
+    during a demo.
     """
     if embedder_kind != "fixture":
-        note(f"embedder {embedder_kind}: query embeddings match the session's contract")
+        note(f"embedder {embedder_kind}: query embeddings share the session's vector space")
         return
     warn("embedder = fixture. /api/recall's VECTOR similarity will be meaningless:")
-    warn("fixture vectors have no relationship to the session's stored embeddings.")
+    warn("fixture vectors have no relationship to the session's stored embeddings,")
+    warn("and nothing will error — only the width is checked, not the model.")
     warn("Lexical and structural recall still work, so the blast-radius and")
     warn("canonical markers the demo turns on are unaffected.")
-    warn("Pass --embedder bge_m3 --llama-url <reachable llama.cpp> for real vectors.")
+    warn("Drop --embedder fixture to get real vectors (bge_m3 is the default).")
+
+
+def local_llama(args: argparse.Namespace) -> bool:
+    """True when this instance hosts its own llama.cpp.
+
+    `--llama-url` means one is already running somewhere reachable, so we point
+    at it and build nothing.
+    """
+    return args.embedder == "bge_m3" and not args.llama_url
+
+
+def effective_llama_url(args: argparse.Namespace) -> str | None:
+    if args.embedder != "bge_m3":
+        return None
+    return args.llama_url or f"http://127.0.0.1:{LLAMA_PORT}"
+
+
+def render_llama_block(args: argparse.Namespace) -> str:
+    if not local_llama(args):
+        return ""
+    out = LLAMA_BLOCK
+    for key, value in {
+        "@@BGE_MODEL_URL@@": args.bge_model_url,
+        "@@LLAMA_CPP_REF@@": args.llama_cpp_ref,
+        "@@LLAMA_PORT@@": str(LLAMA_PORT),
+    }.items():
+        out = out.replace(key, value)
+    return out
 
 
 def render_lambo_toml(embedder_kind: str, llama_url: str | None) -> str:
@@ -341,6 +484,20 @@ def render_user_data(args: argparse.Namespace, caddyfile: str, lambo_toml: str) 
         "@@WEB_PORT@@": str(LAMBO_WEB_PORT),
         "@@CADDYFILE@@": caddyfile.rstrip("\n"),
         "@@LAMBO_TOML@@": lambo_toml.rstrip("\n"),
+        # Empty when the embedder is the fixture, or when --llama-url points at
+        # something already running elsewhere: in both cases this instance has
+        # no llama.cpp to build.
+        "@@LLAMA_BLOCK@@": render_llama_block(args),
+        # `After=` only orders start-up, it does not wait for the model to load.
+        # The wrapper's health poll is what actually gates lambo; this just stops
+        # systemd starting them in the wrong order in the first place.
+        "@@LLAMA_AFTER@@": "llama-server.service" if local_llama(args) else "",
+        # Empty disables the wrapper's poll entirely, which is what we want when
+        # the embedder is the fixture (nothing to wait for) or when the URL is
+        # off-instance (not ours to wait on).
+        "@@LLAMA_HEALTH@@": (
+            f"{effective_llama_url(args)}/health" if local_llama(args) else ""
+        ),
     }
     out = USER_DATA
     for key, value in replacements.items():
@@ -592,18 +749,24 @@ def main(args: argparse.Namespace) -> int:
                 "not automated here."
             ),
         )
-    if args.embedder == "bge_m3" and not args.llama_url:
+    if local_llama(args) and args.instance_type in TOO_SMALL_FOR_LOCAL_BGE:
         raise InfraError(
-            "--embedder bge_m3 needs --llama-url.",
+            f"{args.instance_type} is too small to host BGE-M3 locally.",
             hint=(
-                "point it at a reachable llama.cpp embeddings server. There is not "
-                "enough memory on a t4g.micro to run BGE-M3 locally, so this has to be "
-                "an off-instance URL, or use --embedder fixture."
+                "use --instance-type t4g.medium or larger, or point --llama-url at a "
+                "llama.cpp running elsewhere, or accept --embedder fixture. Sizing it "
+                "too small does not fail at launch: llama-server loads the model and "
+                "is then killed by the OOM killer, usually mid-demo."
             ),
+        )
+    if args.llama_url and args.embedder != "bge_m3":
+        raise InfraError(
+            "--llama-url only applies to --embedder bge_m3.",
+            hint=f"the embedder is {args.embedder!r}, which reaches no llama.cpp at all.",
         )
 
     caddyfile = render_caddyfile(args.hostname, args.acme_email)
-    lambo_toml = render_lambo_toml(args.embedder, args.llama_url)
+    lambo_toml = render_lambo_toml(args.embedder, effective_llama_url(args))
 
     if args.dry_run:
         return _plan(args, caddyfile, lambo_toml)
@@ -725,22 +888,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embedder",
         choices=("fixture", "bge_m3"),
-        default="fixture",
+        default="bge_m3",
         help=(
-            "Embedder kind written into /etc/lambo/lambo.toml. `fixture` needs no "
-            "external service but makes /api/recall's vector arm meaningless; "
-            "`bge_m3` needs --llama-url pointing at a reachable llama.cpp server "
-            "(a t4g.micro cannot host BGE-M3 itself)."
+            "Embedder kind written into /etc/lambo/lambo.toml (default bge_m3). "
+            "`bge_m3` is the default because the live sessions were written with "
+            "it, and /api/recall embeds the judge's query with whatever is "
+            "configured here: a different model resolves fine and then ranks by a "
+            "vector space the stored embeddings do not share. With no --llama-url, "
+            "llama.cpp and the model are installed on the instance. `fixture` needs "
+            "no service but makes the vector arm of recall meaningless."
         ),
     )
-    parser.add_argument("--llama-url", default=None, help="llama.cpp embeddings base URL for --embedder bge_m3.")
+    parser.add_argument(
+        "--llama-url",
+        default=None,
+        help=(
+            "Use an already-running llama.cpp at this base URL instead of "
+            "installing one. Only meaningful with --embedder bge_m3."
+        ),
+    )
+    parser.add_argument(
+        "--bge-model-url",
+        default=DEFAULT_BGE_MODEL_URL,
+        help="GGUF to serve when llama.cpp is installed locally. Must be BGE-M3.",
+    )
+    parser.add_argument(
+        "--llama-cpp-ref",
+        default=DEFAULT_LLAMA_CPP_REF,
+        help=f"llama.cpp git tag to build (default {DEFAULT_LLAMA_CPP_REF}).",
+    )
     parser.add_argument(
         "--instance-type",
-        default="t4g.micro",
+        default="t4g.medium",
         type=arm_instance_type,
-        help="Graviton instance type (default t4g.micro). Must be ARM64.",
+        help=(
+            "Graviton instance type (default t4g.medium). Must be ARM64. The "
+            "default is sized for local BGE-M3; t4g.micro is enough only with "
+            "--embedder fixture or an off-instance --llama-url."
+        ),
     )
-    parser.add_argument("--volume-size", type=int, default=16, help="Root gp3 volume size in GB (default 16).")
+    parser.add_argument(
+        "--volume-size",
+        type=int,
+        default=24,
+        help="Root gp3 volume size in GB (default 24: the model is ~640 MB and llama.cpp builds from source).",
+    )
     parser.add_argument(
         "--key-name",
         default=None,

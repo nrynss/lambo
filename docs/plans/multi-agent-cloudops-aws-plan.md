@@ -64,10 +64,11 @@ resources the agents provision, plus the public read-only portal judges visit.
 │ app-data-agent               │──AWS──▶│                                          │
 │   (boto3 / AWS CLI)          │  APIs  │  Public Subnet 10.0.1.0/24               │
 │                              │        │   ┌────────────────────────────────────┐ │
-│ lambo serve (SINGLE WRITER)  │        │   │ EC2-LamboWebExhibit (t4g.micro)    │ │
+│ lambo serve (SINGLE WRITER)  │        │   │ EC2-LamboWebExhibit (t4g.medium)   │ │
 │   stdio MCP + CLI verbs      │        │   │  Caddy 443 ─▶ lambo serve-web 7710 │ │
-└───────────────┬──────────────┘        │   │  READ-ONLY. Instance profile reads │ │
-                │ writes                │   │  lambo/cockroach-dsn at boot.      │ │
+└───────────────┬──────────────┘        │   │  llama.cpp BGE-M3 on 127.0.0.1:8080│ │
+                │ writes                │   │  READ-ONLY. Instance profile reads │ │
+                │                       │   │  lambo/cockroach-dsn at boot.      │ │
                 ▼                       │   └────────────────────────────────────┘ │
      ┌─────────────────────┐            │                                          │
      │  CockroachDB Cloud  │◀───reads───│  Private Subnet 10.0.2.0/24              │
@@ -225,18 +226,27 @@ EC2 instance is running and ~180 with the other credit activities. Rough
 
 | Resource | Approx. monthly |
 |---|---|
-| EC2 `t4g.micro` (exhibit, always on) | ~$6 |
+| EC2 `t4g.medium` (exhibit, always on) | ~$24.50 |
+| Root gp3 volume, 24 GB | ~$1.90 |
 | RDS `db.t4g.micro` PostgreSQL, single-AZ + 20 GB gp3 | ~$14 |
 | Secrets Manager, 1 secret | ~$0.40 |
 | Lambda + Function URL (demo traffic) | ~$0 (free tier) |
 | VPC, subnets, IGW, route tables, security groups | $0 |
 | Route 53 hosted zone (if used for TLS, §8) | ~$0.50 |
-| **Total** | **~$21/month** |
+| **Total** | **~$41/month** |
 
-At ~$21/month against ~140–180 credits, the stack runs comfortably for the
-entire hackathon period and well beyond it. **Cost is not a binding constraint
-on this design** — so do not let it drive architecture decisions, and do not
-trim the exhibit to save single-digit dollars.
+At ~$41/month the stack runs for the intended month well inside the remaining
+credit. **Cost is not a binding constraint on this design** — so do not let it
+drive architecture decisions, and do not trim the exhibit to save single-digit
+dollars.
+
+**Why `t4g.medium` rather than `t4g.micro`.** `serve-web` builds an embedder and
+`/api/recall` embeds the judge's query with it. The live sessions were written
+with `bge_m3`, and `resolve_backends` enforces only the vector *width* — so a
+`fixture` embedder resolves cleanly and then ranks against a vector space the
+stored embeddings do not share, with no error anywhere. The exhibit therefore
+runs BGE-M3 itself via llama.cpp, which does not fit in the 1 GiB of a
+`t4g.micro`. The extra ~$18/month buys the portal's semantic recall being real.
 
 Two things still matter, for reasons other than the bill:
 

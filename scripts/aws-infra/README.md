@@ -152,7 +152,8 @@ Arguments: `--session` (**required**), `--skip-rds`, `--skip-lambda`,
 |---|---|
 | `lambo-cloudops-exhibit-role` | `GetSecretValue`/`DescribeSecret` on **exactly** `lambo/cockroach-dsn`. Not `secretsmanager:*`, not a resource wildcard. |
 | `lambo-cloudops-exhibit-profile` | instance profile holding that role |
-| `EC2-LamboWebExhibit` | `t4g.micro` (Graviton/ARM64) Amazon Linux 2023 in `Subnet-Public-1a` / `SG-PublicWeb`, 16 GB encrypted gp3, IMDSv2 required |
+| `EC2-LamboWebExhibit` | `t4g.medium` (Graviton/ARM64) Amazon Linux 2023 in `Subnet-Public-1a` / `SG-PublicWeb`, 24 GB encrypted gp3, IMDSv2 required |
+| `llama-server.service` | llama.cpp built from a pinned tag, serving BGE-M3 (GGUF, Q8_0) on `127.0.0.1:8080`, loopback only |
 | `EIP-LamboWebExhibit` | Elastic IP, so the A record survives a stop/start (`--no-eip` to skip) |
 
 User data installs, as systemd services:
@@ -195,18 +196,34 @@ If Caddy has to fall back to the ACME HTTP-01 challenge, re-run
 #### Embedder
 
 `serve-web` resolves a store *and* an embedder, and `/api/recall` embeds the
-judge's query. A `t4g.micro` cannot host BGE-M3, so:
+judge's query with it. **The embedder must be the same model that wrote the
+vectors in the store**, not merely one of the same width: `resolve_backends`
+checks only that the embedder's dimension matches the store's `VECTOR(1024)`, so
+a mismatched model resolves cleanly and then ranks the judge's query against a
+vector space the stored embeddings do not share. Nothing errors. The answers just
+quietly stop meaning anything.
 
-* `--embedder fixture` (default) — starts with no external service. **The vector
-  arm of recall returns noise**, because fixture vectors have no relationship to
-  the session's stored embeddings. Lexical and structural recall still work, so
-  the blast-radius and canonical markers the demo turns on are unaffected. The
-  script warns about this every run.
-* `--embedder bge_m3 --llama-url <url>` — real vectors, if you have a reachable
-  llama.cpp embeddings server somewhere.
+The live sessions were written with `bge_m3`, so:
 
-Arguments: `--session` (**required**), one of `--hostname` / `--self-signed`
-(**required**), `--acme-email`, `--lambo-version`, `--lambo-repo`,
+* `--embedder bge_m3` (default) — installs llama.cpp and BGE-M3 on the instance
+  and serves them on loopback. This is why the default instance type is
+  `t4g.medium`: BGE-M3 does not fit in a `t4g.micro`'s 1 GiB, and sizing it too
+  small does not fail at launch — llama-server loads the model and is then killed
+  by the OOM killer, usually mid-demo. The script refuses the too-small types
+  rather than letting that happen.
+* `--embedder bge_m3 --llama-url <url>` — point at a llama.cpp already running
+  somewhere reachable and install nothing.
+* `--embedder fixture` — no external service at all. **The vector arm of recall
+  returns noise**, for the reason above. Lexical and structural recall still
+  work, so the blast-radius and canonical markers are unaffected — the demo's
+  actual punchline survives, but "recalls by meaning" does not. The script warns
+  on every run.
+
+Boot takes several minutes longer with a local llama.cpp: it is built from
+source, because upstream publishes no linux-arm64 binary. `lambo-web.service`
+waits for the embedder's health endpoint before starting, so it does not
+crash-loop under `Restart=always` while the model loads.
+
 `--caddy-version`, `--embedder`, `--llama-url`, `--instance-type` (must be
 Graviton), `--volume-size`, `--key-name`, `--no-eip`, plus the common four.
 
