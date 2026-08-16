@@ -1059,6 +1059,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            config: crate::Config::default(),
         }
     }
 

@@ -16,6 +16,9 @@ pub struct ResolvedBackends {
     pub embedder_cfg: EmbedderConfig,
     /// Contract to stamp on the session / refuse mid-session model swaps.
     pub embedding: EmbeddingContract,
+    /// Product config with any `[daemon]` cadence overrides from the file
+    /// already applied. Writers pass this to `Memory::builder().config(..)`.
+    pub config: crate::Config,
 }
 
 /// Store vector width vs embedder output dim (store is the authority when it persists vectors).
@@ -72,6 +75,7 @@ pub fn check_vector_search_contract(
 pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError> {
     let store_cfg = file.store;
     let embedder_cfg = file.embedder;
+    let daemon_cfg = file.daemon;
     let store = build_store(store_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
@@ -92,12 +96,16 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         dim: embed_dim,
     };
 
+    let mut config = crate::Config::default();
+    daemon_cfg.apply_to(&mut config);
+
     Ok(ResolvedBackends {
         store,
         embedder,
         store_cfg,
         embedder_cfg,
         embedding,
+        config,
     })
 }
 
@@ -175,6 +183,7 @@ mod tests {
                 llama_url: None,
                 llama_model: None,
             },
+            daemon: Default::default(),
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);

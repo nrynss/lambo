@@ -605,9 +605,14 @@ pub async fn build_memory(
     opts: &ServeOptions,
     backends: ResolvedBackends,
 ) -> Result<Memory, LamboError> {
+    // Cadence overrides from `[daemon]` reach the writer here. Without this the
+    // daemon always runs at Config::default() and `gc_interval` in lambo.toml
+    // would parse, validate, and then do nothing at all.
+    let config = backends.config.clone();
     Memory::builder()
         .session(opts.session.clone())
         .agent(opts.agent.clone())
+        .config(config)
         .backends(backends)
         .build()
         .await
@@ -1871,6 +1876,7 @@ mod tests {
                     model: None,
                     dim: 1024,
                 },
+                config: crate::Config::default(),
             }
         }
 

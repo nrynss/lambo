@@ -229,6 +229,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            config: crate::Config::default(),
         }
     }
 
@@ -589,6 +590,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            config: crate::Config::default(),
         };
         let out = crate::cli::recall::run(
             &backends,

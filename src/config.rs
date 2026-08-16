@@ -198,8 +198,44 @@ impl Config {
 // Level B process file — store + embedder selection
 // ---------------------------------------------------------------------------
 
+/// Daemon cadence overrides (`[daemon]` in `lambo.toml`).
+///
+/// Everything here is a *cadence*, never a threshold. The bar a concept has to
+/// clear to become Canonical lives in `canon::stage{1,2,3}` and is not settable
+/// from a file: blast radius, distinct interactions, coverage and the peer
+/// score cut are the product's judgement and stay that way.
+///
+/// This exists because the default cadence puts canonization out of reach of
+/// any ordinary session. GC runs every `gc_interval` *mutations* (default
+/// 10 000) and Stage 1 requires `gc_survived >= 3`, so a concept cannot be
+/// promoted until the session has taken 30 000 mutations. `lambo demo` only
+/// shows the state machine working because it sets `gc_interval` to 1
+/// internally. Without a way to say the same thing from a config file, a real
+/// deployment can run for weeks and never promote anything.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// Mutations between GC sweeps. Lower makes `gc_survived` accumulate sooner.
+    pub gc_interval: Option<u64>,
+    /// Seconds between canonization evaluation passes.
+    pub canonization_eval_interval_secs: Option<u64>,
+}
+
+impl DaemonConfig {
+    /// Apply the set overrides onto a [`Config`], leaving unset keys alone.
+    pub fn apply_to(&self, cfg: &mut Config) {
+        if let Some(v) = self.gc_interval {
+            cfg.gc_interval = v;
+        }
+        if let Some(secs) = self.canonization_eval_interval_secs {
+            cfg.canonization_eval_interval = std::time::Duration::from_secs(secs);
+        }
+    }
+}
+
 /// On-disk process config (`lambo.toml`). Product knobs stay on [`Config`];
-/// this file chooses which compiled adapters to run.
+/// this file chooses which compiled adapters to run, and may override daemon
+/// *cadence* (see [`DaemonConfig`]) but never a canonization threshold.
 ///
 /// Unknown keys are rejected (`deny_unknown_fields`) so typos like `knd` / `[embeder]`
 /// fail closed instead of silently using defaults.
@@ -210,6 +246,8 @@ pub struct LamboFile {
     pub store: StoreConfig,
     #[serde(default)]
     pub embedder: EmbedderConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl LamboFile {
@@ -424,6 +462,7 @@ kind = "fake"
                 llama_url: None,
                 llama_model: None,
             },
+            daemon: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();

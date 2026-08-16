@@ -91,7 +91,7 @@ pub mod store;
 pub mod test_util;
 pub mod types;
 
-pub use config::{Config, LamboFile, RecallWeights, ScoringWeights};
+pub use config::{Config, DaemonConfig, LamboFile, RecallWeights, ScoringWeights};
 #[cfg(feature = "embed-bge")]
 pub use embed::BgeM3LlamaCppEmbedder;
 
