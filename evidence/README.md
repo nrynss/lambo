@@ -46,7 +46,8 @@ reason, and the fix — rather than only the final green run.
 
 | Path | What it shows |
 |---|---|
-| `demo-live-1.txt`, `demo-live-2.txt`, `demo-live-diff.txt` | The demo scenario run twice against the live cluster, and the diff proving the two runs are identical. |
+| [`demo-determinism/`](demo-determinism/) | The demo's byte-identical OUTCOME property holding *by construction*: 100 consecutive parity runs with no failures, plus 20 classified run-pairs establishing that only three difference sites exist, all outside the asserted block. Read this before the two captures below. |
+| `demo-live-1.txt`, `demo-live-2.txt`, `demo-live-diff.txt` | The demo scenario run twice against the live cluster, and the diff proving the two runs are identical. **Captured before the determinism fix**, when identical output held about nine runs in ten rather than by construction — the result is genuine, but `demo-determinism/` is the stronger claim. |
 | `demo-live-canon-events.txt` | The canonization events the same run left behind in the database. |
 | `demo-live-saints.txt`, `demo-live-conformance.txt`, `demo-live-serveweb-cockroach.txt` | The canonical-memory listing, the conformance suite, and the read-only web surface, all against that store. |
 | [`e2e-gates-fable.txt`](e2e-gates-fable.txt) | The end-to-end gate run from an independent adversarial review. |
