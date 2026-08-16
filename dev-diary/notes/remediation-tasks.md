@@ -3,8 +3,11 @@
 Source: `adve-review-full-stack-sweep-2026-08-16.md` (4 P1 / 12 P2 / 10 P3) and
 the Tier 3 detail review beside it, plus defects found outside the review.
 
-**T1 to T14 below are tasks, numbered so that every blocker has a lower number
-than the thing it blocks.** Read top to bottom and the order works.
+**T1 to T10 below are code-fix tasks, numbered so that every blocker has a
+lower number than the thing it blocks.** Read top to bottom and the order works.
+
+Deployment, recording and submission live in `deployment-and-submission.md` as
+**D1 to D3**. Two tasks here block work over there, and say so.
 
 **Finding IDs like `T1-P1-1`, `T2-P2-3`, `T3-1-P1-1` come from the review
 documents** and refer to the review's own tier grouping. They have nothing to do
@@ -27,7 +30,7 @@ not re-reported:
 
 - Published Linux binaries need GLIBC 2.39 and cannot run on Amazon Linux 2023
   (2.34). The exhibit moved to Ubuntu 26.04. The underlying packaging defect is
-  still open as **T11**.
+  still open as **T10**.
 - Caddy publishes SHA-512 checksums; the launcher verified them with
   `sha256sum`, failing every boot after lambo was already installed. Now
   `sha512sum`.
@@ -168,7 +171,7 @@ adversarial pass at all.
 **Files:** `scripts/aws-infra/launch_exhibit_ec2.py`, `scripts/aws-infra/provision_network.py`
 **Closes:** T2-P2-1, T2-P2-2, T2-P2-3, T2-P2-4, T2-P3-1, T2-P3-2, T2-P3-3, T2-P3-4
 **Blocked by:** T5
-**Blocks:** T12
+**Blocks:** D1 (clean redeploy, deployment doc)
 
 - Port 80 closed by default breaks plain `http://` to `https://` redirects and
   the ACME HTTP-01 fallback.
@@ -238,7 +241,7 @@ Rest of the task:
 **Files:** `scripts/cloudops/03_crossover_protect.py`, `scripts/cloudops/_lambo.py`
 **Closes:** T3-2-P2-1, T3-2-P2-2
 **Blocked by:** nothing
-**Blocks:** T13, the video
+**Blocks:** D2 (video, deployment doc)
 
 - `run_guard` raises `InfraError` on an empty session because `lambo inspect`
   exits 1 with "no concept matching", so `render_unprotected()` never runs.
@@ -273,40 +276,8 @@ Open:
 
 ---
 
-## T10 — Move `drive_mcp_soak.py` to `examples/`, labelled as a demo artifact
 
-**Status: DONE.** Moved to `examples/drive_mcp_soak.py` with `examples/README.md`
-and a header on the script itself. Kept below for the reasoning.
-
-**Not a review finding**
-
-The script replays derives through the writer over MCP so the daemon accumulates
-interactions and can run a canonization pass. It produced the current Canonical
-status. It ships, in `examples/`, marked for what it is. No `examples/` directory
-exists yet, so this creates one.
-
-The label has to be specific, because a vague one is worse than none. What the
-header and the `examples/README.md` must say:
-
-- The blast radius and GC gates were met genuinely.
-- Stage 2 requires three distinct origin interactions, and **this script supplied
-  them by replaying the same derives**. The interactions are real interactions;
-  they are not real *work*.
-- It exists because the default cadence puts canonization out of reach of any
-  ordinary session: GC runs every `gc_interval` mutations (10 000 by default) and
-  Stage 1 needs `gc_survived >= 3`, so a concept needs 30 000 mutations before it
-  can be promoted. `lambo demo` sets the same knob to 1 internally for the same
-  reason.
-- Anyone reproducing the exhibit's Canonical status will have used this, and
-  should know that.
-
-Also folded in here: T3-1-P3-4 proposes a persistent MCP connection in place of
-per-call subprocess forks. This script is already that connection, so it is the
-natural place for the pattern to live.
-
----
-
-## T11 — Release workflow builds against too-new glibc
+## T10 — Release workflow builds against too-new glibc
 
 **Files:** `.github/workflows/release.yml`
 **Blocked by:** nothing
@@ -322,53 +293,8 @@ packaging defect that is still shipping to every user of the install script.
 
 ---
 
-## T12 — Clean redeploy from scratch
 
-**Blocked by:** T6
-**Blocks:** T13, T14
 
-The running instance was repaired partly by hand while the launcher was being
-fixed. It is **not** a clean product of the current script, so "rebuildable from
-the scripts alone" is a claim that cannot currently be made. A launch from zero
-is the only thing that proves it.
-
-Pipeline is a container build against Debian bookworm, `scp`, service restart,
-about four minutes.
-
-The exhibit runs x86_64 on Ubuntu 26.04 and that is the shipped path. The
-launcher's arm64 branch is not exercised and is not being validated.
-
----
-
-## T13 — Recording and video
-
-**Files:** `scripts/recording/*`
-**Blocked by:** T8 (the script has never run), T12 (a redeploy restarts the
-service mid-capture)
-
-Playwright drives the portal and records the browser context directly, which
-sidesteps this machine's broken screen capture: `ffmpeg -f x11grab` returns a
-black frame on KDE Wayland, and the xdg-desktop-portal ScreenCast request times
-out. Terminal footage uses `vhs`, which renders a scripted session to video with
-no compositor involved. Neither needs a working screen recorder.
-
----
-
-## T14 — Docs and submission text
-
-**Files:** `README.md`, `site/src/content/docs/hackathon.mdx`, `docs/plans/multi-agent-cloudops-aws-plan.md` §11
-**Blocked by:** T12, and anything in T6 that changes the stack
-
-- README still says `AWS services used: None yet`.
-- `hackathon.mdx` still carries three `Not yet` rows.
-- §11 still describes a `t4g.micro` on Graviton and a public Lambda Function
-  URL. The exhibit is an `m7i-flex.large` on x86_64 running Ubuntu 26.04, and
-  the Function URL returns 403.
-
-Draft freely. Do not land until nothing else will move, or it gets rewritten
-twice.
-
----
 
 ## Parallelism
 
@@ -383,20 +309,23 @@ T5     re-review launcher
 T7 ─┐  agents
 T8 ─┘
 T9     portal          (panel on a fixture until T3)
-T10    examples/ move
-T11    release workflow
-T14    docs            (drafting only)
+T10    release workflow
 ```
 
 The chains:
 
 ```
 T1 ──► T2
-T3 ──► T9      panel shows real data
-T5 ──► T6 ──► T12 ──► T13     redeploy, then capture
-T8 ──────────────────► T13
-T12 ─────────────────► T14    docs land last
+T3 ──► T9              panel shows real data
+T5 ──► T6              re-review before touching the launcher
 ```
 
-Critical path to a submission: **T5 → T6 → T12 → T13**, with **T8** joining
-before T13.
+Handing off to `deployment-and-submission.md`:
+
+```
+T6 ──► D1              clean redeploy needs the launcher fixed
+T8 ──► D2              the climax script must have run before any capture
+```
+
+Critical path across both documents: **T5 → T6 → D1 → D2**, with **T8** joining
+before D2.
