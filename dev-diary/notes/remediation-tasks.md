@@ -188,6 +188,47 @@ None of this changes the implementation shape. Error text and the separator
 scope call are the last things written, so it costs work already in flight
 nothing.
 
+### ✅ T1 part 2 — DONE (2026-08-17, merged `9f59e93`)
+
+All four read/write-path invariants enforced, each backed by a refusal-asserting
+test (not the happy path), with validate-then-mutate ordering:
+
+1. **Embedding contract enforced for readers too** (was writer-only).
+   `load_reader_graph_with_contract(store, session, Option<&EmbeddingContract>)`
+   wired into `recall` and serve-web `stats`/`recall`; a live embedder that
+   disagrees with the stored vector space is refused before serving, and the
+   error names the writing model/kind/dim. serve-web additionally fails fast at
+   startup on a genuine mismatch (read-only, no lease). inspect/saints/stats are
+   store-only (no embedder) so correctly skip the check.
+2. **Observation re-derivation that would split identity is refused** at the
+   derive pre-pass; first-time Observations and demote's per-sentence records
+   are unaffected (guarded seam, tested).
+3. **A second Hierarchical parent (which zeroes blast radius) is refused** at
+   the `parent_of` pre-pass, naming the claiming parent; Dependency/Causal
+   fan-in and same-parent reinforcement deliberately allowed.
+4. **`--parent-of` splits on the FIRST colon** so a colon-bearing (IPv6) parent
+   is accepted, not silently dropped; empty sides still refuse loudly.
+
+Backcheck: all four **acceptance criteria** met and judged explicitly by the
+reviewer: embedding error names the writing model; Observation floor-vs-goal
+handled honestly (refuse is the floor, deeper identity change is a spec-level
+leave for later); hierarchy error names the claiming parent; `--parent-of`
+ACCEPTS IPv6, does not refuse.
+
+**Review:** 3 rounds, all APPROVE. R1: 5 P3 + 3 nits (first-Observation
+unguarded, demote/derive asymmetry, client IPv6 deferral, cross-type fan-in
+scope, serve-web 502 UX, plus 3 nits) → remediated with tests+docs; R2 verified
+all genuine, added a startup fail-fast; R3 cleared 2 doc nits. Docs in
+`adve-review-remed-T1bround{1..3}.md`.
+
+**Deferred to T7 (documented, not a defect):** T1b-R1-3 — the launcher client
+(`scripts/cloudops/_lambo.py` `_refuse_colon`) still pre-refuses an IPv6
+`--parent-of` parent; the CLI is fixed, the client half is T7's. A
+T7-naming comment is at `_lambo.py:~304`.
+
+**Verify:** full `cargo test --all-features` green — **825 passed / 0 failed**
+(T1+T2+T1b merged). No-writer-lease serve-web test intact.
+
 ---
 
 ## T2 — Make `[daemon]` mean the same thing in every subcommand
@@ -441,6 +482,12 @@ Rest of the task:
   unhandled `PermissionError`.
 - IPv6 CIDRs are silently dropped because `--parent-of CHILD:PARENT` cannot
   carry colons.
+  > **Carries T1 part 2 deferral T1b-R1-3:** the CLI now accepts an IPv6
+  > `--parent-of` parent (first-colon split, T1 part 2 #4), but this script's
+  > `_refuse_colon` still pre-refuses it. Relax the PARENT-side `_refuse_colon`
+  > (and the pre-filter) to colon-free-child-only once the client split logic is
+  > updated, and add a regression that an IPv6 CIDR parent round-trips through
+  > the launcher. A T7-naming comment marks the site at `_lambo.py:~304`.
 - Network prerequisite check uses `inspect(depth=1)`, bounded by
   `MAX_INSPECT_NODES = 64`; past 64 nodes it spuriously reports `SG-Base-VPC`
   missing. The session is already at 113 nodes, so this is live, not theoretical.
