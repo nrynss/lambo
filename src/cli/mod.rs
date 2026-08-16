@@ -65,9 +65,21 @@ pub(crate) async fn open_writer(
     session: &str,
     agent: &str,
 ) -> Result<Memory, CliError> {
+    // Cadence overrides from `[daemon]` reach the writer here (T2), mirroring
+    // `mcp::serve::build_memory`. Every full-resolve CLI writer verb (`derive` /
+    // `record-action` / `reserve` / `release`) opens its one Memory through this
+    // site; `serve` and `demo` use their own builders. So a lowered
+    // `gc_interval` in lambo.toml is now honoured by these writer verbs too,
+    // not silently dropped to `Config::default()` (T1-R1-2: `open_writer`
+    // previously dropped `backends.config`). Resolution already validated the
+    // cadence (T1's `resolve_backends`), so this cannot resurrect a degenerate
+    // file.
+
+    let config = backends.config.clone();
     Memory::builder()
         .session(session)
         .agent(agent)
+        .config(config)
         .backends(backends)
         .build()
         .await
@@ -610,6 +622,22 @@ mod tests {
             out.contains("query embedding failed"),
             "operator must see the embed failure: {out}"
         );
+    }
+    #[tokio::test]
+    async fn open_writer_forwards_resolved_config_daemon_overrides() {
+        // T2 regression (T2-R1-1): `open_writer` must carry the resolved
+        // `[daemon]` cadence overrides into the Memory it builds. A non-default
+        // sentinel `gc_interval = 17` makes the effective config observable; if
+        // the writer ever fell back to `Config::default()` (the T1-R1-2
+        // divergence this task exists to close), the assertion would fail.
+        let store = Arc::new(MemoryStore::new());
+        let mut backends = backends_on(store);
+        backends.config.gc_interval = 17;
+        let mem = open_writer(backends, "t2-daemon-config", "agent-a")
+            .await
+            .expect("open_writer carries the resolved config");
+        assert_eq!(mem.config().gc_interval, 17);
+        mem.close().await.expect("close releases the writer lease");
     }
 }
 

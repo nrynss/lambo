@@ -449,6 +449,14 @@ impl MemoryBuilder {
     /// This is the single-construction-site path (spec §3.4): prefer it over
     /// setting the three pieces separately, and never rebuild the store or
     /// embedder with a second config pass.
+    ///
+    /// **Config is deliberately NOT applied here.** This method forwards only
+    /// the store/embedder/embedding — `backends.config` is consumed and
+    /// dropped. A writer built from a resolved backend MUST also pass
+    /// `.config(backends.config.clone())` (before or after — the two fields
+    /// commute), as `open_writer` and `serve::build_memory` do; otherwise the
+    /// `[daemon]` cadence overrides the resolver applied are silently lost and
+    /// the session behaves as `Config::default()`.
     pub fn backends(mut self, backends: ResolvedBackends) -> Self {
         self.store = Some(Arc::from(backends.store));
         self.embedder = Some(Arc::from(backends.embedder));

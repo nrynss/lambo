@@ -876,6 +876,10 @@ pub async fn run_scenario(
 
 /// Acts I–III: canonization frozen, GC at its spec default (no sweep can run),
 /// flush and daemon compressed so the build is not paced by 1s timers.
+///
+/// The demo deliberately does not honour a user `[daemon]` — its own compressed
+/// cadence and scripted clock (see [`script_clock`]) are required for the
+/// state-machine demonstration (see `config.rs`).
 pub fn build_config() -> Config {
     Config {
         match_strategy: MatchStrategy::Canonical,
