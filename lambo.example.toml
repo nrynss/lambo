@@ -26,3 +26,23 @@ url = "http://127.0.0.1:8080"
 # Optional model id sent to llama.cpp (empty => server default). Part of EmbeddingContract
 # (kind+model+dim) — do not change mid-session without re-embedding.
 # model = "bge-m3-FP16"
+
+# Daemon cadence. Optional; omit the whole section to use the defaults.
+#
+# Cadence only, never a threshold. What a concept must clear to become Canonical
+# (blast radius, distinct interactions, coverage, the peer score cut) lives in
+# canon::stage{1,2,3} and is deliberately not settable from a file.
+#
+# [daemon]
+#
+# Mutations between GC sweeps. Default 10000.
+#
+# Worth understanding before changing: Stage 1 requires gc_survived >= 3, so at
+# the default a concept needs roughly 30000 mutations before it can be promoted
+# at all. A session of a few dozen concepts never gets there, which is why
+# `lambo demo` sets this to 1 internally. Lower it if you want to watch the
+# canonization state machine work on a small session.
+# gc_interval = 1
+#
+# Seconds between canonization evaluation passes. Default 60.
+# canonization_eval_interval_secs = 5
