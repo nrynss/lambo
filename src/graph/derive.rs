@@ -88,7 +88,7 @@
 //! (or, more likely, inside the flush path that drains `MutationBatch`), and
 //! the receiver-side contract is `DaemonEvent` (already in `crate::types`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -223,12 +223,27 @@ pub fn derive(
     // GRAPH-8: content that canonicalizes to an empty key (empty, whitespace-
     // only, or stopword-only input) would collapse onto one key-"" concept with
     // a frozen arbitrary type — rejected up front, before any write.
-    for &(content, _) in concepts {
+    // T1 part 2 #2: Observations never match a canonical key (the step-5
+    // matcher filters them out), so re-deriving an Observation whose canonical
+    // key ALREADY exists as an Observation would create a brand-new node on
+    // every reference — splitting one concept in two with nothing logged. That
+    // silent identity loss is refused here, up front, before any write. A
+    // FIRST-time Observation (key not yet present) still derives normally: it
+    // is a fresh context-overflow record, exactly what demote produces.
+    for &(content, concept_type) in concepts {
         let key = match canonicalize(content, graph)? {
             CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
         };
         reject_empty_key(content, &key)?;
+        reject_repeated_observation(content, concept_type, &key, graph)?;
     }
+    // T1 part 2 #3 — a child may have at most ONE Hierarchical parent. A second
+    // one silently removes the child from EVERY parent's blast radius (blast
+    // radius counts concepts whose SOLE inbound structural edge is the parent;
+    // `scripts/cloudops/_lambo.py::check_single_source` used to guard this
+    // client-side — the engine now owns it). Checked here, up front, across
+    // both this call and any Hierarchical parent already in the graph.
+    let mut pending_hier_parents: HashMap<String, String> = HashMap::new();
     for &(parent, child) in parent_of.pairs {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -250,6 +265,13 @@ pub fn derive(
                  key ({parent_key:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
             ))));
         }
+        reject_second_hierarchical_parent(
+            child,
+            &child_key,
+            &parent_key,
+            graph,
+            &mut pending_hier_parents,
+        )?;
     }
 
     let mut outcome = DeriveOutcome::default();
@@ -513,6 +535,116 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
             content
         ))));
     }
+    Ok(())
+}
+
+/// T1 part 2 #2 — refuse re-deriving an Observation whose canonical key already
+/// exists as an Observation in the graph.
+///
+/// Observations are deliberately excluded from the step-5 matcher
+/// (`canonical::canonicalize` filters them out), so an Observation never wins
+/// a canonical-key match: re-referencing the same Observation content therefore
+/// used to create a **brand-new node every time**, silently splitting one
+/// concept in two. Deriving a fresh Observation (key not yet present) is still
+/// legitimate — a context-overflow record, the same thing `demote` writes — so
+/// this refuses only the identity-losing re-reference, up front, before any
+/// write (validate-then-mutate).
+///
+/// Two limits are deliberate anti-false-refusal choices (T1b-R1-1), not gaps:
+/// (a) a **first** Observation derive is unguarded — the guard only stops
+/// duplicate-Observation escalation, so a caller who declares a fresh
+/// identifier as Observation once still gets that node; (b) Observation-over-
+/// Entity is intentionally permitted, so an Observation whose key matches an
+/// existing non-Observation concept still derives (it is "a note about an
+/// existing concept", not a second identity record). Only a second same-key
+/// **Observation** is refused here.
+///
+/// (T1b-R1-2) `demote` is NOT subject to this refusal: demote may still produce
+/// a same-key Observation (per-sentence overflow records can repeat a key), so
+/// duplicate-key Observations remain legal at the store/model level — this
+/// guard is derive-only (caller-declared identity).
+fn reject_repeated_observation(
+    content: &str,
+    concept_type: ConceptType,
+    key: &str,
+    graph: &Graph,
+) -> Result<(), LamboError> {
+    if concept_type != ConceptType::Observation {
+        return Ok(());
+    }
+    let exists = graph
+        .concepts()
+        .any(|c| c.concept_type == ConceptType::Observation && c.canonical_key == key);
+    if exists {
+        return Err(LamboError::Store(StoreError::Invariant(format!(
+            "derive: content {content:?} is declared as an Observation, but an Observation with \
+             the same canonical key ({key:?}) already exists. Observation opts out of identity \
+             (never matched), so re-deriving it would silently split one concept in two. Refusing; \
+             use a non-Observation type (e.g. Entity/Resource) for stable identifiers."
+        ))));
+    }
+    Ok(())
+}
+
+/// T1 part 2 #3 — a concept may have at most ONE Hierarchical parent, checked
+/// at the derive `parent_of` boundary (validate-then-mutate: nothing written).
+///
+/// Blast radius counts, for a node, the concepts whose **sole** inbound
+/// structural edge comes from it (`recall::format::blast_radii`), so a second
+/// parent silently removes the child from EVERY parent's count — it can drive
+/// a pillar's blast radius to zero with nothing logged and no promotion ever
+/// admitted. `scripts/cloudops/_lambo.py::check_single_source` guarded this
+/// client-side; the engine now owns it, persisted across calls. Re-deriving
+/// the SAME containment (same parent) is fine — it reinforces, it does not
+/// add a second parent.
+///
+/// Scope is deliberately limited to a second **Hierarchical** parent
+/// (T1b-R1-4): a child given one Hierarchical + one Dependency/Causal parent —
+/// a second structural source of a *different* type — still zeroes its blast
+/// radius silently and is out of this guard's scope by design, because
+/// Dependency/Causal fan-in IS the designed multi-source case (`record-action`
+/// fans `produces`/`modifies`/`depends_on`). Refusing those would be wrong, not
+/// a gap.
+fn reject_second_hierarchical_parent(
+    child: &str,
+    child_key: &str,
+    parent_key: &str,
+    graph: &Graph,
+    pending: &mut HashMap<String, String>,
+) -> Result<(), LamboError> {
+    let second_parent = |prev_key: &str| {
+        LamboError::Store(StoreError::Invariant(format!(
+            "derive: child {child:?} already has Hierarchical parent '{prev_key}'; declaring \
+             parent '{parent_key}' would give it a second structural source. A concept has at \
+             most one structural source, because a second one silently zeroes its blast radius \
+             (it then counts toward neither parent's count). Keep the existing parent '{prev_key}' \
+             and express the other relationship as a record-action edge."
+        )))
+    };
+    // In-batch: the child was already assigned a (different) parent this call.
+    if let Some(prev) = pending.get(child_key) {
+        if prev == parent_key {
+            return Ok(()); // same containment re-declared — deduped later, fine
+        }
+        return Err(second_parent(prev));
+    }
+    // Cross-call: the child's existing concept already has a Hierarchical
+    // parent from a parent node whose canonical key differs from the new one.
+    if let Some(child_concept) = graph.concepts().find(|c| c.canonical_key == child_key) {
+        let other = graph
+            .edges()
+            .filter(|e| {
+                e.edge_type == EdgeType::Hierarchical
+                    && e.target == child_concept.id
+                    && e.source != child_concept.id
+            })
+            .filter_map(|e| graph.concepts().find(|c| c.id == e.source))
+            .find(|pc| pc.canonical_key != parent_key);
+        if let Some(prev) = other {
+            return Err(second_parent(&prev.canonical_key));
+        }
+    }
+    pending.insert(child_key.to_string(), parent_key.to_string());
     Ok(())
 }
 
@@ -784,6 +916,81 @@ mod tests {
     }
 
     #[test]
+    fn derive_second_hierarchy_parent_is_refused() {
+        // T1 part 2 #3 — a second Hierarchical parent silently removes the
+        // child from EVERY parent's blast radius (blast_radii counts concepts
+        // whose SOLE inbound structural edge is the parent). It was guarded
+        // client-side by `scripts/cloudops/_lambo.py::check_single_source`;
+        // the engine now refuses it at the derive boundary, both within one
+        // call and across calls.
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        // First call parents "api layer" under "user schema". Succeeds.
+        derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[],
+            &ParentOf::from_pairs(&[("user schema", "api layer")]),
+            10,
+        )
+        .unwrap();
+
+        // A later call parents the SAME child under a DIFFERENT parent → REFUSAL,
+        // naming the parent that already claims the child.
+        let err = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[],
+            &ParentOf::from_pairs(&[("auth middleware", "api layer")]),
+            10,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema user"),
+            "refusal must name the parent already claiming the child: {msg}"
+        );
+        assert!(
+            msg.contains("second structural source"),
+            "refusal must explain the blast-radius zeroing: {msg}"
+        );
+
+        // The child still has exactly ONE structural source — no silent zero.
+        let api = g
+            .concepts()
+            .find(|c| c.canonical_key == "api layer")
+            .map(|c| c.id)
+            .expect("api layer exists");
+        let hier = g
+            .edges()
+            .filter(|e| e.edge_type == EdgeType::Hierarchical && e.target == api)
+            .count();
+        assert_eq!(hier, 1, "only one structural source for the child");
+
+        // In-batch: the same child declared under two parents in ONE call is
+        // also refused.
+        let (mut g2, iid2) = graph_with_interaction(1, 0);
+        let err2 = derive(
+            &mut g2,
+            iid2,
+            &agent(),
+            &[],
+            &ParentOf::from_pairs(&[
+                ("user schema", "email column"),
+                ("auth middleware", "email column"),
+            ]),
+            10,
+        )
+        .unwrap_err();
+        assert!(
+            err2.to_string().contains("second structural source"),
+            "in-batch second parent must refuse: {err2}"
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
     fn derive_rederive_reinforces_edges() {
         let (mut g, iid) = graph_with_interaction(1, 0);
         let first = derive(
@@ -846,6 +1053,58 @@ mod tests {
         assert_eq!(h.reinforcements, 2);
         assert_eq!(h.weight, 0.5 + 1.0);
         g.assert_invariants().unwrap();
+    }
+
+    #[test]
+    fn reject_second_hierarchical_parent_same_parent_reinforces() {
+        // T1b-R1-7 — pin the cross-call SAME-parent reinforce branch of
+        // `reject_second_hierarchical_parent` in isolation. A child whose
+        // existing Hierarchical parent IS the one being re-declared must
+        // return Ok (reinforce), not refuse — this is what lets re-deriving an
+        // identical containment reinforce instead of error. (The cross-call
+        // refusal for a DIFFERENT parent is covered by
+        // `derive_second_hierarchy_parent_is_refused`.)
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        let parent = concept(1, iid, "user schema");
+        let parent_id = parent.id;
+        let parent_key = parent.canonical_key.clone();
+        let child = concept(2, iid, "api layer");
+        let child_id = child.id;
+        let child_key = child.canonical_key.clone();
+        g.insert_concept(parent, iid).unwrap();
+        g.insert_concept(child, iid).unwrap();
+        g.upsert_edge(Edge {
+            id: NodeId(Uuid::from_u64_pair(3, 1)),
+            session_id: sid(),
+            source: parent_id,
+            target: child_id,
+            edge_type: EdgeType::Hierarchical,
+            weight: 0.5,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        })
+        .unwrap();
+
+        // Re-declaring the SAME parent (by its actual canonical key, which is
+        // what the cross-call edge filter compares) must not refuse.
+        let mut pending = HashMap::new();
+        let res = reject_second_hierarchical_parent(
+            "api layer",
+            &child_key,
+            &parent_key,
+            &g,
+            &mut pending,
+        );
+        assert!(
+            res.is_ok(),
+            "re-deriving the same Hierarchical parent must not refuse: {res:?}"
+        );
+        assert_eq!(
+            pending.get(&child_key),
+            Some(&parent_key),
+            "the (child, parent) still tracks the containment"
+        );
     }
 
     #[test]
@@ -1083,6 +1342,89 @@ mod tests {
     }
 
     #[test]
+    fn derive_repeated_observation_refuses_identity_split() {
+        // T1 part 2 #2 — Observations never match a canonical key (the step-5
+        // matcher filters them out), so re-deriving the same Observation
+        // content used to create a brand-new node every time: silent identity
+        // loss. The FIRST derive stays legitimate (a fresh context-overflow
+        // record, what demote writes), but a re-derive whose canonical key
+        // already exists as an Observation must REFUSE, before any write.
+        // Two anti-false-refusal limits hold (T1b-R1-1): a first Observation
+        // derive is unguarded, and an Observation-over-non-Observation (e.g.
+        // over an Entity) is permitted — asserted below.
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        let first = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("Drift note", ConceptType::Observation)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(first.created.len(), 1, "first Observation derives normally");
+        let obs_id = first.created[0];
+        assert_eq!(concept_of(&g, obs_id).concept_type, ConceptType::Observation);
+
+        // Re-referencing the same content as Observation → refusal, not a node.
+        let err = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("Drift note", ConceptType::Observation)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("opts out of identity"),
+            "refusal must explain the Observation identity opt-out: {err}"
+        );
+
+        // The graph still holds exactly ONE Observation — no silent split.
+        let obs_count = g
+            .concepts()
+            .filter(|c| c.concept_type == ConceptType::Observation)
+            .count();
+        assert_eq!(obs_count, 1, "no duplicate Observation node was written");
+
+        // A non-Observation derive of a fresh key is unaffected.
+        let entity = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("UserSchema", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(entity.created.len(), 1, "Entity derive unaffected");
+        // (T1b-R1-1) A FRESH Observation whose key matches an existing
+        // non-Observation (the Entity above, canonical key "schema user") still
+        // derives Ok BY DESIGN: it is "a note about an existing concept", not a
+        // second identity record. Only a second same-key Observation is refused
+        // (asserted above). It reuses the Entity rather than creating a second
+        // same-key node.
+        derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("UserSchema", ConceptType::Observation)],
+            &ParentOf::none(),
+            10,
+        )
+        .expect("Observation-over-Entity must derive Ok, never refuse");
+        assert_eq!(
+            g.concepts()
+                .filter(|c| c.canonical_key == "schema user")
+                .count(),
+            1,
+            "Observation-over-Entity reuses the concept; no second same-key node"
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    #[test]
     fn derive_after_demote_creates_new_concept_not_observation_match() {
         // GRAPH-1 regression: demote creates an Observation keyed "schema user";
         // a later derive of an Entity with that key must create a NEW concept
@@ -1145,6 +1487,53 @@ mod tests {
             assert_eq!(g.node_count(), 4); // interaction + 2 observations + entity
             g.assert_invariants().unwrap();
         }
+    }
+
+    #[test]
+    fn demote_may_duplicate_observation_key_but_derive_still_refuses() {
+        // T1b-R1-2 — reconcile the demote/derive asymmetry at the seam. The
+        // store/model permits duplicate-key Observations (partial-UNIQUE
+        // errata), and `demote` creates per-sentence overflow records that can
+        // repeat a key — so a demote producing the SAME Observation key as one
+        // already written does NOT trip the derive refusal (demote never goes
+        // through derive's pre-pass). The guard in `reject_repeated_observation`
+        // is derive-only (caller-declared identity): re-deriving that same key
+        // AS an Observation still refuses.
+        let (mut g, iid) = graph_with_interaction(1, 0);
+        demote(&mut g, iid, &agent(), "user schema", "chunk-1").unwrap();
+        demote(&mut g, iid, &agent(), "user schema", "chunk-2").unwrap();
+        assert_eq!(
+            g.concepts()
+                .filter(|c| c.concept_type == ConceptType::Observation)
+                .count(),
+            2,
+            "demote may legally write two same-key Observations"
+        );
+
+        // ... but deriving that same key as an Observation IS refused: the
+        // guard is derive-only, so the asymmetry is deliberate.
+        let err = derive(
+            &mut g,
+            iid,
+            &agent(),
+            &[("UserSchema", ConceptType::Observation)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("opts out of identity"),
+            "derive refuses a second same-key Observation even when a demote wrote the first: {err}"
+        );
+        // The two demote Observations are untouched — the graph is unchanged.
+        assert_eq!(
+            g.concepts()
+                .filter(|c| c.concept_type == ConceptType::Observation)
+                .count(),
+            2,
+            "the refusal wrote nothing"
+        );
+        g.assert_invariants().unwrap();
     }
 
     #[test]

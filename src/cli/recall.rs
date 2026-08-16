@@ -8,7 +8,7 @@ use super::caps::{
     check_size_cli, clamp_cfg_default, require_nonempty, CliError, MAX_MAX_TOKENS, MAX_TOP_K,
     MAX_TRAVERSAL_DEPTH,
 };
-use super::load_reader_graph;
+use super::{load_reader_graph_with_contract};
 use crate::config::Config;
 use crate::daemon::{Daemon, RecallPipeline};
 use crate::recall::cache::RecallCache;
@@ -67,7 +67,12 @@ pub async fn run(
         )));
     }
 
-    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    let loaded = load_reader_graph_with_contract(
+        backends.store.as_ref(),
+        session,
+        Some(&backends.embedding),
+    )
+    .await?;
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
     let daemon = Daemon::from_config(loaded.graph, &cfg).with_index(loaded.index);

@@ -301,6 +301,11 @@ class Lambo:
         for spec in concepts or []:
             flags += ["--concept", spec]
         for parent, child in parent_of or []:
+            # T7 (deferred — see dev-diary/notes/remediation-tasks.md): the CLI
+            # already accepts a colon-bearing (IPv6) parent via first-colon split,
+            # but this client still pre-refuses BOTH ends. When T7 updates the
+            # client split logic, relax the PARENT-side `_refuse_colon` (and the
+            # pre-filter) to colon-free-child-only; keep child colon-refusal.
             _refuse_colon("parent-of", parent)
             _refuse_colon("parent-of", child)
             flags += ["--parent-of", f"{child}:{parent}"]

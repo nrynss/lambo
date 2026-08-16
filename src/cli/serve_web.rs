@@ -98,7 +98,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
-use super::load_reader_graph;
+use super::load_reader_graph_with_contract;
 use crate::graph::Graph;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
@@ -521,7 +521,12 @@ fn stats_from(
 }
 
 async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, CliError> {
-    let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
+    let loaded = load_reader_graph_with_contract(
+        state.store(),
+        state.session.as_str(),
+        Some(&state.backends.embedding),
+    )
+    .await?;
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
@@ -803,6 +808,35 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // Fail closed: a non-loopback bind with no token is a config error, not a
     // warning (same posture as `mcp::serve::authorize_bind`).
     authorize_bind_web(args.bind, auth.as_ref())?;
+
+    // T1 part 2 #1 / T1b-R1-5: fail fast at startup on an embedder-contract
+    // mismatch instead of serving a half-broken page with 502s on
+    // /api/stats, /api/pulse and /api/recall. The read-only load checks the
+    // session's stored contract against the live embedder; a fresh or absent
+    // session has no stored contract and loads fine, so this only refuses on a
+    // genuine mismatch — the loud, singular failure naming the mismatched
+    // model (kind/model/dim). Read-only: no writer, no lease, nothing stamped.
+    // This is intentionally all-or-nothing: a contract mismatch means the
+    // session's stored vectors are unusable, so serve-web refuses to start
+    // rather than serving only the structural, embedder-free surfaces. If a
+    // structural-only view of a mismatched session is ever needed, gate only
+    // the stats/pulse/recall endpoints instead.
+    // The one-time load here is deliberate redundancy: it fails before the
+    // server binds, so a mismatch is caught with a single loud startup error
+    // even though the first request would reload the session.
+    if let Err(e) = load_reader_graph_with_contract(
+        backends.store.as_ref(),
+        &args.session,
+        Some(&backends.embedding),
+    )
+    .await
+    {
+        eprintln!(
+            "lambo serve-web: refusing to start — the live embedder does not match this \
+             session's stored vectors:\n{e}"
+        );
+        return Err(e);
+    }
 
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState {

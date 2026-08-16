@@ -504,25 +504,20 @@ pub struct EmbeddingContract {
 
 impl EmbeddingContract {
     /// Error if `other` would mix embedding spaces (kind, model, or dim differ).
+    ///
+    /// The message always **names the model the session's vectors were written
+    /// with** (kind/model/dim), so the reader knows exactly which embedder
+    /// produced the stored space and why the attach is refused — not a bare
+    /// "incompatible" that leaves the operator guessing which model is right.
     pub fn ensure_compatible(&self, other: &Self) -> Result<(), LamboError> {
-        if self.dim != other.dim {
+        if self.dim != other.dim || self.kind != other.kind || self.model != other.model {
+            let sm = self.model.clone().unwrap_or_else(|| "(default)".into());
+            let om = other.model.clone().unwrap_or_else(|| "(default)".into());
             return Err(LamboError::Config(format!(
-                "session embedding dim {} != live embedder dim {} (re-embed or new session)",
-                self.dim, other.dim
-            )));
-        }
-        if self.kind != other.kind {
-            return Err(LamboError::Config(format!(
-                "session embedder kind {:?} != live {:?} — vectors are not interchangeable \
-                 (re-embed or new session)",
-                self.kind, other.kind
-            )));
-        }
-        let a = self.model.as_deref().unwrap_or("");
-        let b = other.model.as_deref().unwrap_or("");
-        if a != b {
-            return Err(LamboError::Config(format!(
-                "session embedder model {a:?} != live {b:?} — re-embed or new session"
+                "embedding contract is incompatible: this session's vectors were written by \
+                 kind={} model={:?} dim={}, but the live/attached embedder is kind={} model={:?} \
+                 dim={} — re-embed or start a new session before writing or reading",
+                self.kind, sm, self.dim, other.kind, om, other.dim
             )));
         }
         Ok(())

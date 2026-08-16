@@ -20,23 +20,23 @@ pub struct Args {
 
 /// `--parent-of CHILD:PARENT` → `(parent, child)` for [`ParentOf::from_pairs`].
 ///
-/// Exactly one colon. Both sides are free text, so a second colon is ambiguous
-/// (do **not** `rsplit_once` — that would silently invent the wrong pair).
+/// The separator is the **first** colon. The child is everything to its left
+/// (so it never contains a colon), and the parent is everything to its right —
+/// free text that MAY itself contain colons, so an IPv6 CIDR parent like
+/// `2001:db8::/32` is fully expressible. Extra colons are therefore **not**
+/// refused: they belong to the free-text parent, not to the separator, and
+/// refusing them is exactly what forced the launcher to pre-filter IPv6
+/// clientside (`scripts/cloudops/_lambo.py::_refuse_colon`). A value must
+/// still yield a non-empty child and parent.
 pub(crate) fn parse_parent_of(raw: &str) -> Result<(String, String), CliError> {
-    let colons = raw.as_bytes().iter().filter(|b| **b == b':').count();
-    if colons > 1 {
-        return Err(CliError::Usage(
-            "--parent-of is CHILD:PARENT with exactly one colon; extra colons are ambiguous \
-             because both sides are free text (unlike --concept, where KIND is a closed token)"
-                .into(),
-        ));
-    }
     match raw.split_once(':') {
         Some((child, parent)) if !child.trim().is_empty() && !parent.trim().is_empty() => {
             Ok((parent.to_string(), child.to_string()))
         }
-        _ => Err(CliError::Usage(
-            "parent-of must be CHILD:PARENT (child left of the colon, parent right)".into(),
+        Some(_) | None => Err(CliError::Usage(
+            "parent-of must be CHILD:PARENT (child left of the first colon, parent right; \
+             the parent may itself contain colons, e.g. an IPv6 CIDR like 2001:db8::/32)"
+                .into(),
         )),
     }
 }
@@ -137,20 +137,29 @@ mod tests {
     }
 
     #[test]
-    fn parent_of_with_more_than_one_colon_is_usage_naming_ambiguity() {
-        let err = parse_parent_of("foo:bar:parent").unwrap_err();
-        assert!(
-            matches!(err, CliError::Usage(_)),
-            "must refuse, not split on the first colon: {err}"
-        );
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ambiguous"),
-            "usage error must name the ambiguity: {msg}"
-        );
-        assert!(
-            msg.contains("exactly one colon"),
-            "usage error must state the one-colon rule: {msg}"
-        );
+    fn parent_of_accepts_colon_bearing_parent_ipv6_roundtrip() {
+        // T1 part 2 #4 / T3-1-P2-3 — an IPv6 CIDR parent carries colons; the
+        // separator is the FIRST colon, so the parent may itself contain
+        // colons and is never dropped or mis-parsed.
+        let (parent, child) = parse_parent_of("api node:2001:db8::/32").unwrap();
+        assert_eq!(parent, "2001:db8::/32");
+        assert_eq!(child, "api node");
+        // Round-trip the reverse (IPv6 as the parent via first-colon split).
+        let (p2, c2) = parse_parent_of("cache:fe80::1:2:3:4").unwrap();
+        assert_eq!(p2, "fe80::1:2:3:4");
+        assert_eq!(c2, "cache");
+    }
+
+    #[test]
+    fn parent_of_rejects_empty_side() {
+        // An empty child or parent is still malformed and is refused loudly.
+        assert!(matches!(
+            parse_parent_of(":parent"),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            parse_parent_of("child:"),
+            Err(CliError::Usage(_))
+        ));
     }
 }

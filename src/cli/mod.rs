@@ -26,9 +26,9 @@ use parking_lot::RwLock;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::memory::Memory;
-use crate::resolve::ResolvedBackends;
+use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::GraphStore;
-use crate::types::{LamboError, SessionId};
+use crate::types::{EmbeddingContract, LamboError, SessionId};
 
 /// Session materialized for a lease-free reader command.
 pub(crate) struct LoadedReader {
@@ -41,14 +41,36 @@ pub(crate) struct LoadedReader {
 ///
 /// Uses the async core, not the sync `load_session` wrapper (that parks a
 /// worker thread). A missing session is a first use — empty graph + index.
+/// Store-only readers attach no embedder, so there is no contract to enforce
+/// against; see [`load_reader_graph_with_contract`] for the embedder-bearing
+/// reader path.
 pub(crate) async fn load_reader_graph(
     store: &dyn GraphStore,
     session: &str,
+) -> Result<LoadedReader, CliError> {
+    load_reader_graph_with_contract(store, session, None).await
+}
+
+/// Reader variant that carries an [`EmbeddingContract`] to enforce (T1 part 2 #1).
+///
+/// `Some(contract)` refuses when the stored session disagrees with the live
+/// embedder (exactly like `assert_session_embedding_compatible`); `None`
+/// (store-only reader) attaches no embedder, so the check is skipped. A fresh
+/// session is **not** stamped here — the writer owns stamping, so a reader
+/// never mutates the session it merely reads.
+pub(crate) async fn load_reader_graph_with_contract(
+    store: &dyn GraphStore,
+    session: &str,
+    contract: Option<&EmbeddingContract>,
 ) -> Result<LoadedReader, CliError> {
     let session = SessionId::new(session);
     let loaded = crate::store::load::load_session_async(store, &session)
         .await
         .map_err(|e| CliError::Runtime(e.to_string()))?;
+    if let Some(contract) = contract {
+        assert_session_embedding_compatible(loaded.graph.embedding(), contract)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+    }
     Ok(LoadedReader {
         graph: Arc::new(RwLock::new(loaded.graph)),
         index: Arc::new(RwLock::new(loaded.index)),
@@ -638,6 +660,82 @@ mod tests {
             .expect("open_writer carries the resolved config");
         assert_eq!(mem.config().gc_interval, 17);
         mem.close().await.expect("close releases the writer lease");
+    }
+
+    #[tokio::test]
+    async fn reader_refuses_mismatched_embedding_contract() {
+        // T1 part 2 #1 — the embedding contract was enforced for writers only
+        // (`MemoryBuilder::build`); readers reached sessions through
+        // `load_reader_graph`, which never checked it, so serve-web/recall
+        // would happily attach a disagreeing embedder and return confident
+        // nonsense. The refusal must hold on the READER path too, while a
+        // store-only (None-contract) reader — which attaches no embedder —
+        // must not error.
+        let store = Arc::new(MemoryStore::new());
+        // A writer stamps the session's live contract (dim 1024 fixture).
+        {
+            let mem = Memory::builder()
+                .session("t1p2-reader-embed")
+                .agent("writer")
+                .store(store.clone() as Arc<dyn crate::store::GraphStore>)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn crate::embed::Embedder>)
+                .embedding_contract(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                })
+                .flush_interval(Duration::from_secs(3_600))
+                .build()
+                .await
+                .expect("writer build stamps the contract");
+            mem.close().await.expect("writer close persists it");
+        }
+
+        let shared = SharedMemory(store.clone(), Capabilities::empty());
+
+        // Agreeing contract → loads.
+        let agreeing = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 1024,
+        };
+        load_reader_graph_with_contract(&shared, "t1p2-reader-embed", Some(&agreeing))
+            .await
+            .expect("an agreeing embedder contract loads");
+
+        // Disagreeing contract → REFUSAL (this is the invariant that once
+        // passed silently).
+        let disagreeing = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 512,
+        };
+        let err = match load_reader_graph_with_contract(
+            &shared,
+            "t1p2-reader-embed",
+            Some(&disagreeing),
+        )
+        .await
+        {
+            Ok(_) => panic!("a disagreeing embedder contract must refuse"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("incompatible"),
+            "refusal must name the incompatibility: {msg}"
+        );
+        // Acceptance #1 (T1b-R1-6): the message must name the model that WROTE
+        // the vectors — the stored contract's dim (1024), not just "incompatible".
+        assert!(
+            msg.contains("dim=1024"),
+            "refusal must name the stored/writing contract's dim (1024): {msg}"
+        );
+
+        // Store-only reader (no contract → no embedder attached) does not error.
+        load_reader_graph(&shared, "t1p2-reader-embed")
+            .await
+            .expect("a store-only reader attaches no embedder, so no mismatch");
     }
 }
 

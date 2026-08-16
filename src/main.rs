@@ -194,12 +194,12 @@ enum Commands {
             help = "The first concept's type: entity, logic, constraint, resource, or observation."
         )]
         kind: ConceptKind,
-        /// Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf. Exactly one colon; extra colons are refused as ambiguous.
+        /// Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the FIRST colon, child left — matching MCP WireParentOf. Only the first colon is the separator, so the parent may itself contain colons (e.g. an IPv6 CIDR like 2001:db8::/32).
         #[arg(
             long = "parent-of",
             value_name = "CHILD:PARENT",
             action = ArgAction::Append,
-            help = "Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the colon, child left — matching MCP WireParentOf. Exactly one colon; extra colons are refused as ambiguous."
+            help = "Hierarchy pair CHILD:PARENT (repeatable). Parent is right of the FIRST colon, child left — matching MCP WireParentOf. Only the first colon is the separator, so the parent may itself contain colons (e.g. an IPv6 CIDR like 2001:db8::/32)."
         )]
         parent_of: Vec<String>,
         /// Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive.
