@@ -194,12 +194,12 @@ Arguments: `--action delete-security-group|revoke-ingress`, `--query`,
   `entity` when they identify something and `constraint` when they state how a
   resource is configured.
 
-* **Concept contents carry no colons.** `--parent-of CHILD:PARENT` takes exactly
-  one colon and refuses more as ambiguous, so an ARN, a URL or an IPv6 CIDR
-  cannot be a hierarchy end. That is why the secret is recorded by name and not
-  by ARN, and why an IPv6 security group rule is skipped with a line saying so
-  rather than mangled into a concept that claims something slightly different
-  from the account.
+* **The CHILD end of a concept carries no colons.** `--parent-of CHILD:PARENT`
+  splits on the first colon, so the child must be colon-free but a parent may
+  carry colons (an IPv6 CIDR works as a parent end). That is why the secret is
+  recorded by name and not by ARN, why an IPv6 security group rule is skipped
+  with a line saying so rather than mangled into a concept, and why an IPv6
+  CIDR can appear as a parent but never as a child.
 
 * **`--dry-run` constructs no client and spawns no subprocess.** Same contract as
   the sibling directory, extended to `lambo`, which is what makes the plan output

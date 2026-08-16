@@ -606,6 +606,30 @@ Rest of the task:
 - `resolve_lambo_binary` prefers a stale `target/release/lambo` over a debug
   build with newly enabled features.
 
+### ✅ T7 — DONE (2026-08-17, merged `2bd5f7f`)
+
+All 9 items closed in `scripts/cloudops/{_lambo.py,01_network_agent.py,
+02_app_data_agent.py}`:
+- **T3-1-P1-1** — `02` derives the RDS and Lambda tiers as **two separate
+  interactions**, so no false cross-tier `CoOccurrence` edge is generated. All
+  seven `skip_rds`/`skip_lambda`/`exhibit_role` combinations preserved (one
+  stricter, in the fix's direction). The already-written legacy edge persists
+  ("keep the session") but is non-structural and inert for the demo.
+- `_lambda.py` — real CLI error surfaced (`_run`), executable check on the
+  resolved binary, `_parent_of_flags` now lets an IPv6 CIDR **parent** round-trip
+  (child stays colon-free; the T1b-R1-3 deferral closes), by-name network
+  prerequisite check (no spurious `MAX_INSPECT_NODES` truncation), and newer-of-
+  release/debug binary preference.
+- `01` — `_peer_label` to module scope; child-end colon phrasing.
+- `02` — bracketed-concept-text truncation fixed (anchored metadata regex).
+
+**Review:** 2 rounds, all APPROVE. R1: 1 P3 + 4 nits (stale dry-run plan text,
+the README parent-side colon rule, two "child end" comment phrasings, the
+`assert`-based self-test) → remediated (self-test made fail-closed under `-O`);
+R2 verified all genuine, zero findings. Docs in
+`adve-review-remed-T7round{1..2}.md`. `scripts/cloudops/README.md` colon rule
+updated here (the R1-2 doc item).
+
 ---
 
 ## T8 — `03_crossover_protect.py`
