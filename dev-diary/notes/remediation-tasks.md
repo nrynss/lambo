@@ -873,6 +873,30 @@ Separately, and cheaply: a session that runs at default cadence long enough to
 promote naturally would close the one genuinely unmeasured claim here. That is
 patience, not engineering.
 
+### ✅ T11 — DONE (2026-08-17, satisfied by T3 `5a6f633`; verified `0608d32`)
+
+The rewritten T11 deliverable — surface per-concept canonization gate progress
+in `/api/inspect` — was **already implemented and merged in T3** (`src/canon/gate.rs`
++ the `/api/inspect` `gate_progress` payload, `5a6f633`). A verification pass
+confirms all five requirements are met: the payload carries `gc_survived` /
+`blast_radius` / `distinct_interactions` / `coverage` as `GateMetric`s
+(`current`/`bar`/`met`, `strictly_above` on blast radius) plus
+`in_cooldown`/`cooldown_until`; every number is *surfaced* from the
+evaluation's own sources (persisted `gc_survived`, `store.interaction_span`,
+aged `store.blast_radius`, `last_demotion_time` + cooldown) — not recomputed —
+with bars single-sourced from the stage modules' `MIN_*` constants
+(3 / 3 / 0.3 / 5); the payload is additive to the same `/api/inspect` response
+as `status` and `blast_radius`; and inspect tests exercise it (9/9 pass).
+No separate T11 code change was needed. Details:
+`dev-diary/adversarial-review/adve-review-remed-T11.md`.
+
+The one detail the projector keeps: no session has yet been observed promoting
+at the *shipped default* cadence (all captured walks used `lambo demo`'s
+`gc_interval = 1`). That is unmeasured, not broken — closing it is patience
+(let a session run at default cadence long enough), not engineering, and is out
+of scope here.
+
+
 ---
 
 ## T12 — Release workflow builds against too-new glibc
