@@ -1,0 +1,28 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:16:46Z
+# commit   : 2f4ca3f (working tree dirty)
+# region   : us-east-1
+# command  : python3 scripts/aws-infra/provision_app_data.py --session cloudops-exhibit --profile lambo-user --region us-east-1 --no-wait
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+==> data tier (the tracked workload - NOT a Lambo store, plan §6)
+  [created ] db-subnet-group        lambo-cloudops-db-subnets
+  [created ] rds-instance           rds-lambo-demo-db creating
+  . not waiting for the instance to become available (--no-wait)
+==> app tier (outside the VPC, plan §2)
+  [created ] iam-role               lambo-cloudops-stats-role
+  . lambo-cloudops-stats-role may read exactly lambo/cockroach-dsn, nothing wider
+  . vendoring pg8000>=1.30,<2 into the deployment package
+  [created ] lambda                 Lambda-LamboStats-API
+  [created ] function-url           https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/
+  . public invoke permission added to the function URL
+
+==> app and data tier ready
+  . stats endpoint: https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/
+  . it returns 503 until lambo/cockroach-dsn holds a working DSN
+  . no NAT gateway was created (plan §2)
+
+  . next: launch_exhibit_ec2.py --hostname <yours> --session <id>
+
+# exit     : 0

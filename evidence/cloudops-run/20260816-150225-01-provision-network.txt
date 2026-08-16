@@ -1,0 +1,44 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:02:25Z
+# commit   : 2f4ca3f
+# region   : us-east-1
+# command  : python3 scripts/aws-infra/provision_network.py --ssh-cidr <operator-ip>/32
+# redacted : account id, DSN, access keys, operator IP
+
+Traceback (most recent call last):
+  File "/home/nryn/work/lambo/scripts/aws-infra/provision_network.py", line 468, in <module>
+    raise SystemExit(run_main(main, build_parser()))
+                     ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nryn/work/lambo/scripts/aws-infra/_common.py", line 202, in run_main
+    return entry(args)
+  File "/home/nryn/work/lambo/scripts/aws-infra/provision_network.py", line 408, in main
+    ident = aws.whoami()
+  File "/home/nryn/work/lambo/scripts/aws-infra/_common.py", line 293, in whoami
+    return self.client("sts").get_caller_identity()
+           ~~~~~~~~~~~^^^^^^^
+  File "/home/nryn/work/lambo/scripts/aws-infra/_common.py", line 260, in client
+    self._clients[name] = self._session.client(name, region_name=self.region)
+                          ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/site-packages/boto3/session.py", line 337, in client
+    return self._session.create_client(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        service_name, **create_client_kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/usr/lib/python3.14/site-packages/botocore/context.py", line 123, in wrapper
+    return func(*args, **kwargs)
+  File "/usr/lib/python3.14/site-packages/botocore/session.py", line 986, in create_client
+    credentials = self.get_credentials()
+  File "/usr/lib/python3.14/site-packages/botocore/session.py", line 522, in get_credentials
+    ).load_credentials()
+      ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/site-packages/botocore/credentials.py", line 2239, in load_credentials
+    creds = provider.load()
+  File "/usr/lib/python3.14/site-packages/botocore/credentials.py", line 2750, in load
+    raise MissingDependencyException(
+    ...<5 lines>...
+    )
+botocore.exceptions.MissingDependencyException: Missing Dependency: Using the login credential provider requires an additional dependency. You will need to pip install "botocore[crt]" before proceeding.
+
+# exit     : 1

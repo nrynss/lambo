@@ -1,0 +1,22 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:15:12Z
+# commit   : 2f4ca3f (working tree dirty)
+# region   : us-east-1
+# command  : python3 scripts/aws-infra/launch_exhibit_ec2.py --session cloudops-exhibit --hostname lambo.nryn.dev --key-name lambo-exhibit --profile lambo-user --region us-east-1
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+==> embedder
+  . embedder bge_m3: query embeddings share the session's vector space
+==> identity
+  [created ] iam-role               lambo-cloudops-exhibit-role
+  . lambo-cloudops-exhibit-role may read exactly lambo/cockroach-dsn, nothing wider
+  [created ] instance-profile       lambo-cloudops-exhibit-profile
+  . role added to instance profile
+==> instance
+  . AMI ami-09317ccfac89b432d (Amazon Linux 2023, arm64) root /dev/xvda
+  . waiting for the instance profile to propagate to EC2
+
+error: AWS rejected the call (InvalidParameterCombination): The specified instance type is not eligible for Free Tier. For a list of Free Tier instance types, run 'describe-instance-types' with the filter 'free-tier-eligible=true'.
+
+# exit     : 2

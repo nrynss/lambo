@@ -1,0 +1,60 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:05:55Z
+# commit   : 2f4ca3f (working tree dirty)
+# region   : us-east-1
+# command  : python3 scripts/cloudops/01_network_agent.py --session cloudops-exhibit-20260816 --profile lambo-user --region us-east-1
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+  . lambo binary: /home/nryn/work/lambo/target/release/lambo
+==> discovering the network tier (read-only, tag:Project=lambo-cloudops)
+  . VPC-Enterprise-Prod = vpc-0a5179f750def07d4
+  . Subnet-Public-1a = subnet-05e2b61d3b7f6512b
+  . Subnet-Private-1a = subnet-0c7ba3596546ea381
+  . Subnet-Private-1b = subnet-059a7845f5c378552
+  . InternetGateway = igw-044bfc7ca2f671c0a
+  . RouteTable-Public = rtb-051189c465e23f315
+  . SG-Base-VPC = sg-071b52ffe5950efdf
+  . SG-PublicWeb = sg-0cf21b70c346eaa99
+  . 6 security group rule(s) discovered
+==> deriving the network tier into session cloudops-exhibit-20260816 as network-infra-agent
+  [derived ] topology               VPC-Enterprise-Prod +7 children
+  . derived 8 concept(s): 8 created, 14 matched existing
+  [derived ] account bindings       8 resources graph names mapped to live ids
+  . derived 8 concept(s): 8 created, 16 matched existing
+  [derived ] constraint             VPC-Enterprise-Prod CIDR 10.0.0.0/16
+  [derived ] constraint             VPC-Enterprise-Prod has no NAT gateway, by design
+  . derived 2 concept(s): 2 created, 4 matched existing
+  [derived ] constraint             SG-Base-VPC egress all protocols to 0.0.0.0/0 parent_of SG-Base-VPC
+  [derived ] constraint             SG-Base-VPC ingress all protocols from SG-Base-VPC parent_of SG-Base-VPC
+  [derived ] constraint             SG-Base-VPC ingress tcp/5432 from SG-PublicWeb parent_of SG-Base-VPC
+  [derived ] constraint             SG-PublicWeb egress all protocols to 0.0.0.0/0 parent_of SG-PublicWeb
+  [derived ] constraint             SG-PublicWeb ingress tcp/22 from <operator-ip>/32 parent_of SG-PublicWeb
+  [derived ] constraint             SG-PublicWeb ingress tcp/443 from 0.0.0.0/0 parent_of SG-PublicWeb
+  . derived 6 concept(s): 6 created, 12 matched existing
+  [derived ] resource               lambo/cockroach-dsn existence only; the value is never read
+  . derived 1 concept(s): 1 created, 0 matched existing
+  [skipped ] entity                 EC2-LamboWebExhibit (the exhibit instance is not running)
+==> recording what the agent did
+  [recorded] action                 network-infra-agent provisioned VPC-Enterprise-Prod produces VPC-Enterprise-Prod
+  . recorded action 'network-infra-agent provisioned VPC-Enterprise-Prod': 1 concept(s) created, 1 edge(s) added
+  [recorded] action                 network-infra-agent laid out the subnets of VPC-Enterprise-Prod depends-on VPC-Enterprise-Prod
+  . recorded action 'network-infra-agent laid out the subnets of VPC-Enterprise-Prod': 1 concept(s) created, 1 edge(s) added
+  [recorded] action                 network-infra-agent attached InternetGateway and RouteTable-Public depends-on VPC-Enterprise-Prod
+  . recorded action 'network-infra-agent attached InternetGateway and RouteTable-Public': 1 concept(s) created, 1 edge(s) added
+  [recorded] action                 network-infra-agent provisioned SG-Base-VPC and SG-PublicWeb depends-on VPC-Enterprise-Prod
+  . recorded action 'network-infra-agent provisioned SG-Base-VPC and SG-PublicWeb': 1 concept(s) created, 1 edge(s) added
+  [recorded] action                 network-infra-agent provisioned lambo/cockroach-dsn produces lambo/cockroach-dsn
+  . recorded action 'network-infra-agent provisioned lambo/cockroach-dsn': 1 concept(s) created, 1 edge(s) added
+
+==> network tier is in memory
+  . session 'cloudops-exhibit-20260816' (reader snapshot)
+nodes=40 edges=117 concepts=30 canonical=0
+epoch=0
+flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a
+note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; this is a reader process
+
+  . nothing in AWS was created, modified or deleted
+  . next: 02_app_data_agent.py --session cloudops-exhibit-20260816
+
+# exit     : 0

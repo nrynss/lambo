@@ -1,0 +1,33 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:37:56Z
+# commit   : 2f4ca3f (working tree dirty)
+# region   : us-east-1
+# command  : python3 scripts/aws-infra/launch_exhibit_ec2.py --session cloudops-exhibit --hostname lambo.nryn.dev --instance-type m7i-flex.large --key-name lambo-exhibit --profile lambo-user --region us-east-1
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+==> embedder
+  . embedder bge_m3: query embeddings share the session's vector space
+==> identity
+  [exists  ] iam-role               lambo-cloudops-exhibit-role
+  . lambo-cloudops-exhibit-role may read exactly lambo/cockroach-dsn, nothing wider
+  [exists  ] instance-profile       lambo-cloudops-exhibit-profile
+==> instance
+  . AMI ami-02ebdb11bae1b2486 (Ubuntu 26.04 LTS, x86_64) root /dev/sda1
+  [created ] instance               i-07dda1d2b2422716b
+==> address
+  [exists  ] elastic-ip             100.51.83.35
+  . 100.51.83.35 associated with i-07dda1d2b2422716b
+
+==> exhibit launched
+  . instance i-07dda1d2b2422716b at 100.51.83.35
+  . boot log: sudo tail -f /var/log/lambo-bootstrap.log  (takes 2 to 4 minutes)
+
+==> finish the TLS setup
+    Create an A record:   lambo.nryn.dev  ->  100.51.83.35
+    Caddy retries the ACME order until the record resolves, so the
+    portal comes up on its own at https://lambo.nryn.dev/ once it does.
+
+  . port 443 is the only public ingress unless provision_network.py ran with --open-http
+
+# exit     : 0

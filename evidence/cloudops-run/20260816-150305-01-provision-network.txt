@@ -1,0 +1,54 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:03:05Z
+# commit   : 2f4ca3f
+# region   : us-east-1
+# command  : python3 scripts/aws-infra/provision_network.py --profile lambo-user --ssh-cidr <operator-ip>/32
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+==> network foundation
+  [created ] vpc                    vpc-0a5179f750def07d4 10.0.0.0/16
+  [created ] subnet                 subnet-05e2b61d3b7f6512b Subnet-Public-1a 10.0.1.0/24 us-east-1a
+  . Subnet-Public-1a: auto-assign public IPv4 enabled
+  [created ] subnet                 subnet-0c7ba3596546ea381 Subnet-Private-1a 10.0.2.0/24 us-east-1a
+  [created ] subnet                 subnet-059a7845f5c378552 Subnet-Private-1b 10.0.3.0/24 us-east-1b
+  [created ] internet-gateway       igw-044bfc7ca2f671c0a
+  . internet gateway attached to vpc-0a5179f750def07d4
+  [created ] route-table            rtb-051189c465e23f315 RouteTable-Public
+  . default route 0.0.0.0/0 -> internet gateway added
+  . RouteTable-Public associated with Subnet-Public-1a
+==> security groups
+  [created ] security-group         sg-071b52ffe5950efdf SG-Base-VPC
+  [created ] security-group         sg-0cf21b70c346eaa99 SG-PublicWeb
+  . ingress added: SG-PublicWeb world ingress
+  . ingress added: SG-PublicWeb SSH from <operator-ip>/32
+  . ingress added: SG-Base-VPC self-referential mesh
+  . ingress added: SG-Base-VPC 5432 from SG-PublicWeb
+==> secrets
+  [created ] secret                 arn:aws:secretsmanager:us-east-1:<account-id>:secret:lambo/cockroach-dsn-j65twy lambo/cockroach-dsn
+
+  ! The DSN is NOT set by this script, and must never be passed to it.
+
+    Set it once, from a shell whose history you control:
+
+        read -rs LAMBO_DSN            # paste the DSN; it is not echoed
+        aws secretsmanager put-secret-value \
+            --region us-east-1 --secret-id lambo/cockroach-dsn \
+            --secret-string "$LAMBO_DSN"
+        unset LAMBO_DSN
+
+    The DSN must carry sslmode=verify-full&sslrootcert=system (AGENTS.md).
+    Nothing in this repo reads the value back: the exhibit instance and the
+    stats Lambda each resolve it themselves at runtime through an IAM policy
+    scoped to this one secret ARN.
+
+
+==> network foundation ready
+  . VPC-Enterprise-Prod = vpc-0a5179f750def07d4
+  . SG-Base-VPC = sg-071b52ffe5950efdf   SG-PublicWeb = sg-0cf21b70c346eaa99
+  . no NAT gateway was created (plan §2)
+  . port 80 is closed; judges must reach the portal over https://
+
+  . next: provision_app_data.py, then launch_exhibit_ec2.py
+
+# exit     : 0

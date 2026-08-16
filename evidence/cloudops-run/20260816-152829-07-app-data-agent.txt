@@ -1,0 +1,54 @@
+# lambo cloudops run capture
+# utc      : 2026-08-16T15:28:29Z
+# commit   : 2f4ca3f (working tree dirty)
+# region   : us-east-1
+# command  : python3 scripts/cloudops/02_app_data_agent.py --session cloudops-exhibit --profile lambo-user --region us-east-1
+# redacted : account id, DSN, access keys, operator IP
+
+==> region us-east-1, identity arn:aws:iam::<account-id>:user/lambo-user
+  . lambo binary: /home/nryn/work/lambo/target/release/lambo
+==> discovering the app and data tier (read-only, tag:Project=lambo-cloudops)
+  . rds-lambo-demo-db endpoint rds-lambo-demo-db.cm3yke2423t5.us-east-1.rds.amazonaws.com
+  . Lambda-LamboStats-API python3.12 on arm64
+==> asking Lambo what network-infra-agent recorded in session cloudops-exhibit
+  [queried ] inspect                VPC-Enterprise-Prod 10 structural dependent(s)
+  . InternetGateway
+  . SG-PublicWeb
+  . Subnet-Private-1a
+  . Subnet-Private-1b
+  . Subnet-Public-1a
+  . RouteTable-Public
+  . SG-Base-VPC
+  . VPC-Enterprise-Prod = vpc-0a5179f750def07d4
+  . VPC-Enterprise-Prod CIDR 10.0.0.0/16
+  . VPC-Enterprise-Prod has no NAT gateway, by design
+==> deriving the app and data tier as app-data-agent
+  [derived ] topology               lambo-cloudops-db-subnets +4 concept(s), 2 hierarchy edge(s)
+  . derived 5 concept(s): 5 created, 4 matched existing
+  [derived ] fact                   RDS-Lambo-Demo-DB = rds-lambo-demo-db.cm3yke2423t5.us-east-1.rds.amazonaws.com parent_of RDS-Lambo-Demo-DB
+  [derived ] fact                   RDS-Lambo-Demo-DB is not publicly accessible parent_of RDS-Lambo-Demo-DB
+  [derived ] fact                   RDS-Lambo-Demo-DB runs postgres on db.t4g.micro parent_of RDS-Lambo-Demo-DB
+  [derived ] fact                   lambo-cloudops-db-subnets spans Subnet-Private-1a and Subnet-Private-1b parent_of lambo-cloudops-db-subnets
+  [derived ] fact                   Lambda-LamboStats-API runs outside VPC-Enterprise-Prod parent_of Lambda-LamboStats-API
+  [derived ] fact                   Lambda-LamboStats-API runs python3.12 on arm64 parent_of Lambda-LamboStats-API
+  . derived 6 concept(s): 6 created, 12 matched existing
+==> recording the cross-tier dependency edges
+  [recorded] action                 app-data-agent provisioned RDS-Lambo-Demo-DB in Subnet-Private-1a depends-on VPC-Enterprise-Prod, Subnet-Private-1a, SG-Base-VPC
+  . recorded action 'app-data-agent provisioned RDS-Lambo-Demo-DB in Subnet-Private-1a': 1 concept(s) created, 3 edge(s) added
+  [recorded] action                 app-data-agent deployed Lambda-LamboStats-API outside VPC-Enterprise-Prod produces Lambda-LamboStats-API, lambo-cloudops-stats-role, lambo-cloudops-exhibit-role; depends-on lambo/cockroach-dsn
+  . recorded action 'app-data-agent deployed Lambda-LamboStats-API outside VPC-Enterprise-Prod': 1 concept(s) created, 4 edge(s) added
+  [recorded] action                 app-data-agent bound the workloads into VPC-Enterprise-Prod depends-on VPC-Enterprise-Prod, Subnet-Private-1a, SG-Base-VPC
+  . recorded action 'app-data-agent bound the workloads into VPC-Enterprise-Prod': 1 concept(s) created, 3 edge(s) added
+
+==> app and data tier is in memory
+  . session 'cloudops-exhibit' (reader snapshot)
+nodes=59 edges=179 concepts=44 canonical=0
+epoch=0
+flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a
+note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; this is a reader process
+
+  . nothing in AWS was created, modified or deleted
+  . RDS-Lambo-Demo-DB is the tracked workload, not a Lambo store (plan §6)
+  . next: 03_crossover_protect.py --session cloudops-exhibit
+
+# exit     : 0
