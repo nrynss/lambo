@@ -1,0 +1,20 @@
+--- evidence/demo-determinism/demo-run-a.txt	2026-08-16 12:35:31.164345570 +0530
++++ evidence/demo-determinism/demo-run-b.txt	2026-08-16 12:35:31.164391120 +0530
+@@ -1,7 +1,7 @@
+ ════════════════════════════════════════════════════════════════════════
+   lambo demo — scenario rest-api   (spec §13: two agents, one REST API)
+ ════════════════════════════════════════════════════════════════════════
+-  session      demo-rest-api-ab3404be-1bc5-4eb2-a3bf-a7ec3594c308   (fresh per run — P6 R3-1)
++  session      demo-rest-api-9d5084ba-e594-4e2c-8f92-f0355f070dde   (fresh per run — P6 R3-1)
+   capabilities Capabilities(0x0)
+   agents       agent-a (builds the API) · agent-b (separate feature)
+ 
+@@ -51,7 +51,7 @@
+   user schema [Entity, canonical] (score 2.27, blast radius 9)
+   ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+   Agent A wrote to it 0 seconds ago
+-  High-risk modification: high-value node 9ef63bee-8c66-44f7-8abc-8c4c56fc61df (Canonical, blast radius 9) modified within 30s
++  High-risk modification: high-value node 0049aa68-caf7-49e1-8fb4-9d9192e749e5 (Canonical, blast radius 9) modified within 30s
+   
+   add oauth_id to user schema [Resource] (score 1.50)
+   
