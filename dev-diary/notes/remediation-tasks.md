@@ -190,6 +190,26 @@ lowered `gc_interval` to apply.
 > task, rather than being pre-emptively done in T1. See
 > `dev-diary/adversarial-review/adve-review-remed-T1round1.md`.
 
+### ✅ T2 — DONE (2026-08-17, merged `b89d060`)
+
+`open_writer()` now passes `.config(backends.config.clone())` before
+`.backends(backends)`, mirroring `serve::build_memory` — so `derive` /
+`record-action` / `reserve` / `release` read the same `[daemon]` block as
+`serve`. Closes **T1-R1-2** (the `backends()` config-drop / `open_writer` never
+applying `[daemon]`). `MemoryBuilder::backends()` doc states the config-drop
+invariant; `demo.rs` notes its deliberate non-honouring of a user `[daemon]`.
+
+Regression test `open_writer_forwards_resolved_config_daemon_overrides` (sentinel
+`gc_interval = 17` must survive `open_writer`, not fall back to `10_000`).
+
+**Review:** 3 rounds, all APPROVE. R1: 2 P3 + 2 nits (missing regression test,
+call-site-vs-root-cause note, two comment nits) → remediated; R2 caught a
+garbled comment clause from the R1-3 reword (T2-R2-1 P3) → fixed; R3 cleared the
+comment. Docs in `adve-review-remed-T2round{1..3}.md`.
+
+**Verify:** full `cargo test --all-features` green — **819 passed / 0 failed**
+(T1+T2 merged); the new test passes under `cargo test --lib`.
+
 ---
 
 ## T3 — `/api/graph` and `/api/inspect`, and the token comparator
