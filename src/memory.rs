@@ -559,6 +559,10 @@ impl MemoryBuilder {
             config.scoring = weights;
         }
         let config = config;
+        // Fail closed before any side effect: a zero cadence would panic
+        // tokio::interval inside the spawned tasks, so validate the merged
+        // config (named setters included) before the lease is even acquired.
+        config.validate()?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(Utc::now));
 
         // (0) Single-writer lease (spec §2.2, T8.6) — the store-enforced gate,
@@ -3447,6 +3451,56 @@ mod tests {
         // After a clean close the lease is released, so a new writer attaches.
         first.close().await.unwrap();
         let second = memory_on(store, "leased").await;
+        second.close().await.unwrap();
+    }
+
+    /// A degenerate cadence must fail `build()` with a `Config` error BEFORE
+    /// the single-writer lease is ever acquired, AND without leaking a held
+    /// lease. `validate()` runs at the runtime entry (memory.rs build) on the
+    /// merged config ahead of `store.acquire_lease`, so a zero cadence can
+    /// neither reach a spawned `tokio::interval` nor leave a lease held. The
+    /// follow-up build on the same store/session/agent with a valid config
+    /// must therefore succeed: a validate-after-lease regression would have
+    /// leaked a held lease and wedged it (`acquire_lease` -> `Held`).
+    #[tokio::test]
+    async fn build_rejects_zero_cadence_before_acquiring_the_lease() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let bad = Config {
+            gc_interval: 0,
+            ..Config::default()
+        };
+        let err = Memory::builder()
+            .session("bad-cadence")
+            .agent("agent-a")
+            .config(bad)
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect_err("a zero cadence must fail build()");
+        // A Config error — not Conflict/Store/Held — is consistent with validate()
+        // rejecting before the lease; the second build below is what proves no
+        // lease was leaked.
+        assert!(
+            matches!(&err, LamboError::Config(_)),
+            "must fail closed as a Config error before the lease, got: {err:?}"
+        );
+
+        // Follow-up build on the same store/session/agent with a VALID config.
+        // If validate()-after-lease had leaked a held lease for this session
+        // ("bad-cadence"), acquire_lease would return Held and wedge this
+        // build — so its success genuinely proves no lease was leaked.
+        let second = Memory::builder()
+            .session("bad-cadence")
+            .agent("agent-a")
+            .config(Config::default())
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect("a valid second build must succeed; a leaked lease would wedge it");
         second.close().await.unwrap();
     }
 

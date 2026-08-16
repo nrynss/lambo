@@ -190,6 +190,33 @@ impl Config {
                 crate::store::MAX_VECTOR_CANDIDATE_LIMIT
             )));
         }
+        // The three `Duration` cadences feed `tokio::interval`, which panics on
+        // a zero period; `gc_interval` is a mutation counter where 0 means GC
+        // every cycle — both must fail closed.
+        if self.gc_interval == 0 {
+            return Err(LamboError::Config(format!(
+                "gc_interval must be >= 1 (a mutation counter), got {}",
+                self.gc_interval
+            )));
+        }
+        if self.daemon_tick_interval == Duration::ZERO {
+            return Err(LamboError::Config(format!(
+                "daemon_tick_interval must be > 0, got {:?}",
+                self.daemon_tick_interval
+            )));
+        }
+        if self.backend_flush_interval == Duration::ZERO {
+            return Err(LamboError::Config(format!(
+                "backend_flush_interval must be > 0, got {:?}",
+                self.backend_flush_interval
+            )));
+        }
+        if self.canonization_eval_interval == Duration::ZERO {
+            return Err(LamboError::Config(format!(
+                "canonization_eval_interval must be > 0, got {:?}",
+                self.canonization_eval_interval
+            )));
+        }
         Ok(())
     }
 }
@@ -385,6 +412,90 @@ mod tests {
     }
 
     #[test]
+    fn cadence_validation_fails_closed() {
+        // Defaults must still validate Ok — the happy path stays intact.
+        Config::default().validate().unwrap();
+
+        let zero_gc = Config {
+            gc_interval: 0,
+            ..Config::default()
+        };
+        assert!(zero_gc.validate().is_err(), "gc_interval == 0 must fail");
+
+        let zero_tick = Config {
+            daemon_tick_interval: Duration::ZERO,
+            ..Config::default()
+        };
+        assert!(
+            zero_tick.validate().is_err(),
+            "daemon_tick_interval == 0 must fail"
+        );
+
+        let zero_flush = Config {
+            backend_flush_interval: Duration::ZERO,
+            ..Config::default()
+        };
+        assert!(
+            zero_flush.validate().is_err(),
+            "backend_flush_interval == 0 must fail"
+        );
+
+        let zero_canon = Config {
+            canonization_eval_interval: Duration::ZERO,
+            ..Config::default()
+        };
+        assert!(
+            zero_canon.validate().is_err(),
+            "canonization_eval_interval == 0 must fail"
+        );
+    }
+
+    #[test]
+    fn daemon_config_zero_cadence_override_rejected() {
+        // A `[daemon]` section turning a cadence to zero must fail validate()
+        // rather than reach tokio::interval (which panics on `Duration::ZERO`).
+        let mut cfg = Config::default();
+        DaemonConfig {
+            gc_interval: Some(0),
+            canonization_eval_interval_secs: Some(0),
+        }
+        .apply_to(&mut cfg);
+        assert!(cfg.validate().is_err(), "zero overrides must fail");
+
+        // Each override alone is also rejected.
+        let mut only_canon = Config::default();
+        DaemonConfig {
+            gc_interval: None,
+            canonization_eval_interval_secs: Some(0),
+        }
+        .apply_to(&mut only_canon);
+        assert!(
+            only_canon.validate().is_err(),
+            "zero canonization_eval_interval_secs override must fail"
+        );
+        // gc alone.
+        let mut only_gc = Config::default();
+        DaemonConfig {
+            gc_interval: Some(0),
+            canonization_eval_interval_secs: None,
+        }
+        .apply_to(&mut only_gc);
+        assert!(
+            only_gc.validate().is_err(),
+            "zero gc_interval override must fail"
+        );
+
+        // Sanity: a non-zero cadence override still validates.
+        let mut ok = Config::default();
+        DaemonConfig {
+            gc_interval: Some(1),
+            canonization_eval_interval_secs: Some(60),
+        }
+        .apply_to(&mut ok);
+        ok.validate().unwrap();
+    }
+
+    #[test]
     fn lambo_file_example_parses() {
         let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
         // Strip comments is fine; toml crate accepts full file with comments.
@@ -405,6 +516,45 @@ mod tests {
         assert_eq!(f.store.kind, StoreKind::Memory);
         assert_eq!(f.embedder.kind, EmbedderKind::BgeM3);
         assert_eq!(f.embedder.dim, 1024);
+    }
+
+    /// Wire-visible `[daemon]` field names, parsed from real TOML text, must
+    /// reach `validate()` and reject a zero cadence — pinning the file boundary
+    /// that `resolve_backends` now fails closed on.
+    #[test]
+    fn lambo_file_zero_daemon_cadences_fail_validate() {
+        // Both cadences zero in the file.
+        let both = LamboFile::from_toml_str(
+            "[daemon]\ngc_interval = 0\ncanonization_eval_interval_secs = 0\n\n[store]\n[embedder]\n",
+        )
+        .unwrap();
+        let mut cfg = Config::default();
+        both.daemon.apply_to(&mut cfg);
+        assert!(cfg.validate().is_err(), "both zero [daemon] cadences must fail");
+
+        // Each override alone: gc only.
+        let gc_only = LamboFile::from_toml_str(
+            "[daemon]\ngc_interval = 0\n\n[store]\n[embedder]\n",
+        )
+        .unwrap();
+        let mut cfg_gc = Config::default();
+        gc_only.daemon.apply_to(&mut cfg_gc);
+        assert!(
+            cfg_gc.validate().is_err(),
+            "zero gc_interval alone must fail"
+        );
+
+        // Each override alone: canonization eval only.
+        let canon_only = LamboFile::from_toml_str(
+            "[daemon]\ncanonization_eval_interval_secs = 0\n\n[store]\n[embedder]\n",
+        )
+        .unwrap();
+        let mut cfg_canon = Config::default();
+        canon_only.daemon.apply_to(&mut cfg_canon);
+        assert!(
+            cfg_canon.validate().is_err(),
+            "zero canonization_eval_interval_secs alone must fail"
+        );
     }
 
     #[test]

@@ -76,6 +76,12 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let store_cfg = file.store;
     let embedder_cfg = file.embedder;
     let daemon_cfg = file.daemon;
+    // Fail closed at the file boundary: every file-driven command rejects a
+    // degenerate cadence here, uniformly and BEFORE any store/embedder build
+    // (an embedder build may load a model, so we reject the file first).
+    let mut config = crate::Config::default();
+    daemon_cfg.apply_to(&mut config);
+    config.validate()?;
     let store = build_store(store_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
@@ -96,9 +102,6 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         dim: embed_dim,
     };
 
-    let mut config = crate::Config::default();
-    daemon_cfg.apply_to(&mut config);
-
     Ok(ResolvedBackends {
         store,
         embedder,
@@ -118,6 +121,9 @@ pub fn resolve_from_config_path(
 }
 
 /// Store-only resolution (provision / reader tools that do not embed).
+/// Deliberately does NOT call `config.validate()`: store-only commands never
+/// run a daemon `[daemon]` interval, so a degenerate cadence is rejected only
+/// at the full `resolve_backends` boundary, not here.
 pub fn resolve_store_only(
     explicit: Option<&std::path::Path>,
 ) -> Result<Box<dyn GraphStore>, LamboError> {
