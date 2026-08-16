@@ -56,6 +56,7 @@ use crate::daemon::hotlist::{Condition, HotList};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::recall::cache::{CacheKey, RecallCache};
+use crate::recall::dispatch::{self, RecallKind};
 use crate::recall::{assemble, candidates, expand};
 use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId};
 
@@ -359,14 +360,37 @@ impl Daemon {
                 )],
             };
         }
+        // T9: route by query kind. A structural/dependency question is answered
+        // by traversal below; the gather and the blended pipeline are skipped
+        // only for a DISPATCHED structural query (N2) - one that actually resolves
+        // an anchor with structural dependents.
+        let structural =
+            dispatch::classify(&query.query) == RecallKind::Structural;
+
+        // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
+        // does the query resolve an anchor WITH structural dependents? Only then
+        // can the (async, vector-I/O) gather be skipped (T9-R1-3); a structural
+        // phrasing that does not dispatch falls through to the FULL blend below,
+        // never a degraded keyword-only answer.
+        let dispatch_ready = if structural {
+            let g = self.graph.read();
+            dispatch::fits_structural(&g, &query.query)
+        } else {
+            false
+        };
 
         // Gather store I/O BEFORE any lock (the vector leg is async). Uses the
-        // graph's authoritative session as the vector namespace (P2-8).
-        let input = match candidates::gather(store, &graph_session, embedding, query.top_k).await {
-            Ok(input) => input,
-            Err(err) => {
-                tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
-                candidates::Phase1Input::default()
+        // graph's authoritative session as the vector namespace (P2-8). Skipped
+        // only when the traversal dispatch is about to fire (T9-R1-3).
+        let input = if dispatch_ready {
+            candidates::Phase1Input::default()
+        } else {
+            match candidates::gather(store, &graph_session, embedding, query.top_k).await {
+                Ok(input) => input,
+                Err(err) => {
+                    tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
+                    candidates::Phase1Input::default()
+                }
             }
         };
 
@@ -374,6 +398,31 @@ impl Daemon {
         // in the cache key identifies the exact graph snapshot the context is
         // built from (P1-1). Lock order: graph read -> index read -> hot write.
         let graph = self.graph.read();
+
+        // T9 dispatch: answer a structural question by traversal when the graph has
+        // an anchor with dependents; otherwise fall through to the blended pipeline
+        // (refusal), which is the honest full-blend outcome (T9-R1-3 - the gather
+        // is skipped only when this dispatch fires).
+        //
+        // T9-R1-7: structural results are intentionally NOT cached, and the hotlist
+        // is not refreshed. The recall cache stores the blended RecallPipeline to
+        // amortize the expensive async phase-1 gather I/O, which a dispatched
+        // structural query skips entirely (the traversal is a cheap in-memory scan),
+        // so caching buys nothing and would risk a stale traversal after graph
+        // mutation. The daemon HotList tracks conflict/condition entries, not recall
+        // recency - neither the blend nor this path bumps recall recency - so there
+        // is no recency to refresh here.
+        if structural {
+            if let Some(result) = dispatch::try_structural(
+                &graph,
+                &query.query,
+                query.top_k,
+                query.max_tokens,
+            ) {
+                return result;
+            }
+        }
+
         let scores = self.scores.read().clone();
         let index = self.index.as_ref().map(|i| i.read());
         let mut hot = self.hot.write();

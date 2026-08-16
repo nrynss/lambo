@@ -86,7 +86,7 @@ pub const STRUCTURAL_EDGE_TYPES: [EdgeType; 3] = [
 /// graph pass building `inbound_sources`, so formatting many canonical hits
 /// under a lock is O(concepts + edges), not O(hits * concepts * edges)
 /// (GPT5.6sol P2-7). Pure and lock-safe.
-fn inbound_sources(graph: &Graph) -> HashMap<NodeId, Vec<NodeId>> {
+pub fn inbound_sources(graph: &Graph) -> HashMap<NodeId, Vec<NodeId>> {
     let concept_ids: HashSet<NodeId> = graph.concepts().map(|c| c.id).collect();
     let mut sources: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for e in graph.edges() {

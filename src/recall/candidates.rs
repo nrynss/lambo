@@ -132,20 +132,39 @@ pub fn candidates(
     // and the union is returned unreduced.
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
     let mut merged: HashMap<NodeId, f64> = HashMap::new();
+    // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
+    // trace-enabled run can say whether the lexical (keyword), recent, or
+    // vector arm produced an identifier-shaped hit. Default-invisible trace:
+    // the per-leg map is only allocated when a trace subscriber is present
+    // (T9-R1-4) - never in a hot loop with no subscriber.
+    let mut legs: Option<HashMap<NodeId, Vec<&'static str>>> = tracing::enabled!(
+        target: "lambo::recall",
+        tracing::Level::TRACE,
+    )
+    .then(HashMap::new);
     for s in index.search(query, keyword_cap) {
         merged.insert(s.item, s.score);
+        if let Some(legs) = legs.as_mut() {
+            legs.entry(s.item).or_default().push("keyword");
+        }
     }
     for id in recent_concepts(graph) {
         merged
             .entry(id)
             .and_modify(|v| *v = v.max(RECENT_SCORE))
             .or_insert(RECENT_SCORE);
+        if let Some(legs) = legs.as_mut() {
+            legs.entry(id).or_default().push("recent");
+        }
     }
     for s in input.vector {
         merged
             .entry(s.item)
             .and_modify(|v| *v = v.max(s.score))
             .or_insert(s.score);
+        if let Some(legs) = legs.as_mut() {
+            legs.entry(s.item).or_default().push("vector");
+        }
     }
     let mut out: Vec<Scored<NodeId>> = merged
         .into_iter()
@@ -156,6 +175,25 @@ pub fn candidates(
             .total_cmp(&a.score)
             .then_with(|| a.item.0.cmp(&b.item.0))
     });
+    if let Some(mut legs) = legs {
+        for s in &out {
+            let mut arm_vec = legs.remove(&s.item).unwrap_or_default();
+            arm_vec.sort_unstable();
+            arm_vec.dedup();
+            tracing::trace!(
+                target: "lambo::recall",
+                phase = "candidates",
+                node = %s.item,
+                score = s.score,
+                query = %query,
+                arms = ?arm_vec,
+                "phase-1 candidate arms={:?} score={} query={}",
+                arm_vec,
+                s.score,
+                query
+            );
+        }
+    }
     out
 }
 

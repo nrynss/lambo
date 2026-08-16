@@ -152,6 +152,39 @@ where
         let d = sane_weight(daemon.get(&s.item).copied().unwrap_or(0.0));
         let r = sane_weight(relevance.get(&s.item).copied().unwrap_or(0.0));
         s.score = d * w_daemon + r * w_query;
+        // T9 instrumentation (default-invisible trace): attribute the final
+        // score to its arms. A member with `r == 0` was never a phase-1
+        // candidate — it reached the assembled block purely by structural
+        // expansion (BFS over structural edges / chunk-group siblings), so it
+        // contributes `d*w_daemon` (the structural arm) and nothing to the
+        // query arm. A member with `r > 0` carries a query-relevance arm
+        // (lexical keyword BM25 / vector similarity / recent flat score).
+        // The arm/content formatting and the `graph.node` lookup run only when
+        // a trace subscriber is present (T9-R1-4) - never per-member with
+        // tracing disabled.
+        if tracing::enabled!(target: "lambo::recall", tracing::Level::TRACE) {
+            let arm = if r > 0.0 { "lexical/vector" } else { "structural" };
+            let content = match graph.node(s.item) {
+                Some(Node::Concept(c)) => c.content.as_str(),
+                _ => "<non-concept>",
+            };
+            tracing::trace!(
+                target: "lambo::recall",
+                phase = "assemble",
+                node = %s.item,
+                content = %content,
+                arm = arm,
+                daemon = d,
+                relevance = r,
+                w_daemon = w_daemon,
+                w_query = w_query,
+                contrib_daemon = d * w_daemon,
+                contrib_query = r * w_query,
+                final = s.score,
+                "recall arm {arm}: {content} daemon={d}*{w_daemon} relevance={r}*{w_query} final={}",
+                s.score
+            );
+        }
     }
     // Spec §10 "always promoted first": Canonical members are partitioned
     // ahead of the rest, score order applies inside each group. See the
