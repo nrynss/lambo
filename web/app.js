@@ -5,7 +5,7 @@
  * record an action, or reserve a node.
  *
  * Server text (the recall context block, concept content) is written with
- * .textContent, never innerHTML — the context block is agent-authored memory
+ * .textContent, never innerHTML. The context block is agent-authored memory
  * and is rendered as the literal characters the agent would have received. */
 
 (function () {
@@ -32,7 +32,13 @@
     meta:     document.getElementById("recall-meta"),
     out:      document.getElementById("recall-out"),
     status:   document.getElementById("link-status"),
-    version:  document.getElementById("version")
+    version:  document.getElementById("version"),
+    factStore:    document.getElementById("fact-store"),
+    factEmbedder: document.getElementById("fact-embedder"),
+    factSearch:   document.getElementById("fact-search"),
+    strip:        document.getElementById("livestrip"),
+    liveHead:     document.getElementById("live-headline"),
+    liveDetail:   document.getElementById("live-detail")
   };
 
   function get(path) {
@@ -73,21 +79,33 @@
   // ---- session identity ----------------------------------------------
 
   function applySession(info) {
-    document.title = "lambo — " + info.session;
+    document.title = "lambo session " + info.session;
     el.session.textContent = info.session;
     el.version.textContent = "lambo " + info.version;
 
+    // Same facts the chips used to carry, written so they can be read cold.
+    var STORE_NAMES = { cockroach: "CockroachDB", sqlite: "SQLite", memory: "memory (this process)" };
+    var MODEL_NAMES = { bge_m3: "BGE-M3", bedrock: "Amazon Titan", fixture: "fixture (test only)" };
+    if (el.factStore) { el.factStore.textContent = STORE_NAMES[info.store] || info.store; }
+    if (el.factEmbedder) {
+      el.factEmbedder.textContent =
+        (MODEL_NAMES[info.embedder] || info.embedder) + ", " + info.embedding_dim + " dimensions";
+    }
+    if (el.factSearch) {
+      el.factSearch.textContent = info.vector_search
+        ? "meaning, keyword and structure"
+        : "keyword and structure";
+    }
+
     el.chips.textContent = "";
-    el.chips.appendChild(text("span", "chip", "store: " + info.store));
-    el.chips.appendChild(text("span", "chip", "embedder: " + info.embedder + " / " + info.embedding_dim + "d"));
-    el.chips.appendChild(text("span", "chip", info.vector_search ? "hybrid recall" : "keyword recall"));
+    el.chips.appendChild(text("span", "chip", info.read_only ? "reader process, holds no write lease" : "writer"));
 
     if (info.poll_interval_ms) { POLL_MS = info.poll_interval_ms; }
 
     if (info.store_is_process_local) {
       banner(
         "The in-RAM store is process-local.",
-        "This reader has its own empty copy — it cannot see writes made by another " +
+        "This reader has its own empty copy, so it cannot see writes made by another " +
         "process. Point both at a sqlite or cockroach store to watch the session move."
       );
     }
@@ -103,12 +121,14 @@
 
   // ---- stats ----------------------------------------------------------
 
+  // "nodes" and "edges" are what the graph calls them and mean nothing to a
+  // reader arriving cold, so each tile says what it actually counts.
   var TILES = [
-    { key: "nodes",      label: "nodes" },
-    { key: "edges",      label: "edges" },
-    { key: "concepts",   label: "concepts" },
-    { key: "canonical",  label: "canonical" },
-    { key: "canonization_events", label: "transitions" }
+    { key: "concepts",  label: "things remembered", hint: "distinct facts, resources and rules" },
+    { key: "nodes",     label: "records",           hint: "those, plus every action and interaction" },
+    { key: "edges",     label: "connections",       hint: "recorded links between records" },
+    { key: "canonical", label: "load-bearing",      hint: "proven enough that changing them is risky" },
+    { key: "canonization_events", label: "status changes", hint: "promotions and demotions recorded" }
   ];
 
   function applyStats(s) {
@@ -118,6 +138,7 @@
       var tile = text("div", "tile" + (lastCounts[t.key] !== undefined && lastCounts[t.key] !== v ? " bumped" : ""));
       tile.appendChild(text("span", "k", t.label));
       tile.appendChild(text("span", "v", v));
+      if (t.hint) { tile.appendChild(text("span", "h", t.hint)); }
       el.tiles.appendChild(tile);
       lastCounts[t.key] = v;
     });
@@ -125,22 +146,16 @@
     // Flush stats come from the writer's FlushTask, published into the shared
     // store (T85-3). When a live writer has published them, show the real
     // numbers; when absent (no writer yet / store without support) show the
-    // honest n/a with a writer-only tooltip — never a fabricated 0.
+    // honest n/a with a writer-only tooltip, never a fabricated 0.
+    // Flush lag and log depth are writer diagnostics. They were tiles, which gave
+    // them the same visual weight as the numbers the page is actually about.
     var hasFlush = s.flush_lag_ms !== null && s.flush_lag_ms !== undefined;
-    [["flush lag", s.flush_lag_ms], ["log depth", s.log_depth]].forEach(function (pair) {
-      var tile = text("div", "tile" + (hasFlush ? "" : " na"));
-      tile.appendChild(text("span", "k", pair[0]));
-      tile.appendChild(text("span", "v", pair[1] === null || pair[1] === undefined ? "n/a" : pair[1]));
-      tile.title = hasFlush ? "" : (s.writer_only || "");
-      el.tiles.appendChild(tile);
-    });
-
     var age = Math.round((s.durable_change_age_ms || 0) / 1000);
     el.statsNote.textContent =
-      "Last durable change seen by this reader: " + age + "s ago. " +
+      "Last change seen " + age + "s ago. " +
       (hasFlush
-        ? "Flush lag and log depth are the writer's latest published values."
-        : "Flush lag and log depth are writer-only — this reader cannot observe them until the writer publishes them.");
+        ? "The writing process reports " + s.flush_lag_ms + "ms behind, with " + s.log_depth + " pending."
+        : "Write timings are only visible to the writing process, so they are not shown here.");
   }
 
   // ---- canonization feed ----------------------------------------------
@@ -151,12 +166,57 @@
     return d.toLocaleTimeString([], { hour12: false });
   }
 
+  // The API publishes transitions, not a status roll-call, so the current
+  // population of each rung is replayed from the event stream. Keyed by node id
+  // rather than content: content can repeat, node identity cannot.
+  var statusBy = {};
+  var RUNGS = ["Candidate", "Venerable", "Canonical"];
+
+  function renderLadder() {
+    var buckets = { Candidate: [], Venerable: [], Canonical: [] };
+    Object.keys(statusBy).forEach(function (id) {
+      var e = statusBy[id];
+      if (buckets[e.status]) { buckets[e.status].push(e); }
+    });
+
+    RUNGS.forEach(function (r) {
+      var countEl = document.getElementById("n-" + r);
+      var listEl = document.getElementById("list-" + r);
+      if (!countEl || !listEl) { return; }
+
+      var items = buckets[r].sort(function (a, b) {
+        return (b.blast || 0) - (a.blast || 0) || a.name.localeCompare(b.name);
+      });
+      countEl.textContent = items.length;
+      listEl.textContent = "";
+
+      items.forEach(function (e) {
+        var li = document.createElement("li");
+        li.appendChild(text("span", "rl-name", e.name));
+        if (e.blast !== null && e.blast !== undefined) {
+          li.appendChild(text("span", "rl-blast", e.blast + " depend on it"));
+        }
+        listEl.appendChild(li);
+      });
+      if (!items.length) {
+        listEl.appendChild(text("li", "rl-none", "none yet"));
+      }
+    });
+  }
+
   function appendEvents(payload, animate) {
     if (payload.total < seen) {   // session reset underneath us
       el.list.textContent = "";
+      statusBy = {};
       seen = 0;
     }
     payload.events.forEach(function (ev) {
+      statusBy[ev.node_id] = {
+        name: ev.content === null ? "(node " + ev.node_id.slice(0, 8) + ")" : ev.content,
+        status: ev.to_status,
+        blast: ev.blast_radius
+      };
+
       var li = document.createElement("li");
       if (animate) { li.className = "fresh"; }
       li.appendChild(text("span", "at", clock(ev.occurred_at)));
@@ -174,13 +234,29 @@
     seen = payload.total;
     el.count.textContent = seen;
     el.empty.className = seen > 0 ? "empty hidden" : "empty";
+    renderLadder();
   }
 
   // ---- polling ---------------------------------------------------------
 
+  var STRIP = {
+    live:    ["Live", "reading this session as it changes"],
+    stale:   ["Reconnecting", "the last read did not come back"],
+    dead:    ["Not connected", "this page is not reading anything right now"]
+  };
+
   function link(state, detail) {
     el.status.className = "status " + state;
     el.status.textContent = detail;
+
+    // Said once, at the top, in words. The footer line was the only signal that
+    // the page was live and it was the least prominent thing on screen.
+    if (!el.strip) { return; }
+    var copy = STRIP[state] || STRIP.dead;
+    el.strip.className = "livestrip " + state;
+    el.liveHead.textContent = copy[0];
+    el.liveDetail.textContent =
+      copy[1] + (state === "live" ? ", checking every " + (POLL_MS / 1000).toFixed(1) + " seconds" : "");
   }
 
   function poll(animate) {
@@ -203,6 +279,15 @@
   }
 
   // ---- recall ----------------------------------------------------------
+
+  // A suggested query fills the box and runs it, so the first thing a reader
+  // does is see a real answer rather than guess at the vocabulary.
+  Array.prototype.forEach.call(document.querySelectorAll(".chip-q"), function (b) {
+    b.addEventListener("click", function () {
+      el.query.value = b.getAttribute("data-q") || "";
+      el.form.dispatchEvent(new Event("submit", { cancelable: true }));
+    });
+  });
 
   el.form.addEventListener("submit", function (e) {
     e.preventDefault();
