@@ -83,7 +83,7 @@
 //! [`Memory`]: crate::memory::Memory
 //! [`Memory::events`]: crate::memory::Memory::events
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -97,13 +97,18 @@ use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::caps::{check_size_cli, require_nonempty, CliError};
+use super::caps::{check_size_cli, require_nonempty, CliError, MAX_INSPECT_NODES};
 use super::load_reader_graph_with_contract;
+use crate::canon::{gate_progress, GateProgress};
+use crate::cli::inspect::{resolve_focus, Focus};
 use crate::graph::Graph;
 use crate::mcp::AUTH_TOKEN_ENV;
+use crate::recall::format::blast_radii;
 use crate::resolve::ResolvedBackends;
 use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreKind};
-use crate::types::{CanonizationStatus, GraphSnapshot, NodeId, SessionId, StoreError};
+use crate::types::{
+    CanonizationStatus, ConceptType, EdgeType, GraphSnapshot, Node, NodeId, SessionId, StoreError,
+};
 
 // ---------------------------------------------------------------------------
 // Embedded assets — the whole client, compiled into the binary (P9/AWS).
@@ -124,6 +129,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_500);
 /// shutdown loses **nothing** — the bound exists purely so Ctrl-C always exits
 /// rather than blocking behind a client that will not let go.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Upper bound on the concepts `/api/graph` returns. The tree view marks
+/// load-bearing nodes, and the exhibit stays well under it; the cap exists so
+/// a pathological session cannot balloon the payload. When it is hit the
+/// handler says so with `"truncated": true` rather than cutting silently.
+const MAX_GRAPH_NODES: usize = 4_096;
+
+/// Upper bound on the structural edges `/api/graph` returns. Same rationale
+/// as [`MAX_GRAPH_NODES`], and surfaced the same way.
+const MAX_GRAPH_EDGES: usize = 16_384;
 
 // ---------------------------------------------------------------------------
 // Args
@@ -191,12 +206,18 @@ impl std::str::FromStr for AuthToken {
     }
 }
 
-/// Compare `presented` against `expected` without an early exit.
+/// Compare `presented` against `expected` without an early exit and with a
+/// loop count independent of the presented input's length.
 ///
-/// Mirrors `mcp::serve`'s `tokens_match`: the accumulate-then-test shape keeps
-/// the time independent of where the first differing byte falls, and
+/// Mirrors `mcp::serve`'s `tokens_match`: the accumulate-then-test shape
+/// keeps the time independent of where the first differing byte falls, and
 /// [`std::hint::black_box`] stops the optimiser from proving the accumulator
-/// can be short-circuited.
+/// can be short-circuited. The loop runs over **`expected`** (the secret,
+/// whose length is fixed per deployment) and every byte of `expected` is
+/// consumed on every call — the number of iterations depends only on the
+/// secret, never on `presented`'s length, so the input cannot leak its length
+/// through the loop count. A length change is folded into `diff` via the XOR
+/// below, so a truncated or padded `presented` is still refused.
 fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
     if expected.is_empty() {
         // Unreachable via `AuthToken::new`, which rejects empty tokens; a
@@ -204,8 +225,13 @@ fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
         return false;
     }
     let mut diff = (presented.len() ^ expected.len()) as u64;
-    for (i, byte) in presented.iter().enumerate() {
-        diff |= u64::from(byte ^ expected[i % expected.len()]);
+    for (i, exp_byte) in expected.iter().enumerate() {
+        let presented_byte = if presented.is_empty() {
+            0
+        } else {
+            presented[i % presented.len()]
+        };
+        diff |= u64::from(exp_byte ^ presented_byte);
     }
     std::hint::black_box(diff) == 0
 }
@@ -406,6 +432,146 @@ struct SinceParams {
 
 const WRITER_ONLY: &str = "flush_lag / log_depth / daemon_cycles live in the writer process; \
                            this is a lease-free reader and cannot observe them";
+// ---------------------------------------------------------------------------
+// /api/inspect structure
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct InspectParams {
+    focus: String,
+    /// Accepted for CLI parity but deliberately ignored (treated as 1): the
+    /// page needs hop 1 only, per the /api/inspect contract.
+    #[allow(dead_code)]
+    depth: Option<usize>,
+}
+
+/// One hop-1 structural neighbour of the focus — a thing the focus stands
+/// behind, or a thing behind it. Structural edges only
+/// (`Dependency`/`Causal`/`Hierarchical`), which is what keeps the false
+/// `CoOccurrence` edge off the page (T7).
+#[derive(Debug, Serialize)]
+struct InspectDependent {
+    content: String,
+    concept_type: ConceptType,
+    edge: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectResponse {
+    focus: String,
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    blast_radius: u64,
+    dependents: Vec<InspectDependent>,
+    /// `true` when the dependents array hit the bound; always present (a miss
+    /// already says so via `found: false`).
+    truncated: bool,
+    /// T11: which gates this concept meets, additive beside status/radius.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate_progress: Option<GateProgress>,
+}
+
+impl InspectResponse {
+    /// A miss is a 200 with `found: false` — never a non-2xx (the page says
+    /// "nothing depends on this" without rendering an error).
+    fn missing(focus: String) -> Self {
+        Self {
+            focus,
+            found: false,
+            status: None,
+            blast_radius: 0,
+            dependents: Vec::new(),
+            truncated: false,
+            gate_progress: None,
+        }
+    }
+}
+
+
+/// The structural edge types the page may show. Mirrors
+/// `STRUCTURAL_EDGE_IN` in `src/store/sqlite.rs`: blast radius,
+/// interaction span and this page all exclude `CoOccurrence`/`Semantic`.
+fn is_structural(ty: EdgeType) -> bool {
+    matches!(
+        ty,
+        EdgeType::Dependency | EdgeType::Causal | EdgeType::Hierarchical
+    )
+}
+
+/// Hop-1 structural neighbours of `node`, bounded to [`MAX_INSPECT_NODES`]
+/// with the bound reported rather than cut silently.
+fn structural_dependents(g: &Graph, node: NodeId) -> (Vec<InspectDependent>, bool) {
+    let mut deps: Vec<InspectDependent> = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut truncated = false;
+    // incident_edges returns id-ascending (deterministic); the first
+    // structural edge naming a neighbour decides its edge label.
+    for edge in g.incident_edges(node) {
+        if !is_structural(edge.edge_type) {
+            continue;
+        }
+        let other = if edge.source == node {
+            edge.target
+        } else {
+            edge.source
+        };
+        if !seen.insert(other) {
+            continue;
+        }
+        // Only a structural, unique Concept neighbour counts toward the bound:
+        // a CoOccurrence/duplicate/interaction incident edge must not set
+        // `truncated` when the structural list is actually complete.
+        let Some(Node::Concept(c)) = g.node(other) else {
+            continue;
+        };
+        if deps.len() >= MAX_INSPECT_NODES {
+            truncated = true;
+            break;
+        }
+        deps.push(InspectDependent {
+            content: c.content.clone(),
+            concept_type: c.concept_type,
+            edge: format!("{:?}", edge.edge_type),
+        });
+    }
+    (deps, truncated)
+}
+
+#[derive(Debug, Serialize)]
+struct GraphEdge {
+    parent: String,
+    child: String,
+    edge: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphNode {
+    content: String,
+    concept_type: ConceptType,
+    status: &'static str,
+    /// The live dependent count (same helper `/api/inspect` uses), so the
+    /// tree marks load-bearing Candidates/Venerables — not just promoted
+    /// Canonicals whose frozen `blast_radius` column happens to be `Some`.
+    blast_radius: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphResponse {
+    session: String,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    truncated: bool,
+}
+
+fn structural_rank(ty: EdgeType) -> u8 {
+    match ty {
+        EdgeType::Causal => 0,
+        EdgeType::Dependency => 1,
+        EdgeType::Hierarchical => 2,
+        _ => 3,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -690,6 +856,163 @@ async fn api_recall(
         Err(e) => fail(e),
     }
 }
+/// Who stands behind a focus, structurally — `/api/inspect`'s answer to
+/// "what depends on this". Read-only: loads the graph as a reader and never
+/// takes the writer lease. `depth` is accepted for CLI parity and treated as
+/// 1 (the page needs hop 1 only).
+async fn api_inspect(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<InspectParams>,
+) -> Response {
+    if params.focus.trim().is_empty() {
+        // A blank focus is a miss, not an error — the page says "nothing
+        // depends on this" without rendering an error (contract #2).
+        return json(StatusCode::OK, InspectResponse::missing(params.focus));
+    }
+    let loaded = match load_reader_graph_with_contract(
+        state.store(),
+        state.session.as_str(),
+        Some(&state.backends.embedding),
+    )
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => return fail(e),
+    };
+    // Scoped so the (`!Send`) read guard provably never spans the await for
+    // the gate-progress query below.
+    let found = {
+        let g = loaded.graph.read();
+        match resolve_focus(&g, params.focus.trim()) {
+            Focus::Exact(id) | Focus::Fuzzy { id, .. } => match g.node(id) {
+                Some(Node::Concept(c)) => {
+                    let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
+                    let (dependents, truncated) = structural_dependents(&g, id);
+                    Some((c.clone(), blast, dependents, truncated))
+                }
+                _ => None,
+            },
+            // Ambiguous / missing / oversized all read as a miss (200, not
+            // an error): there is no single canonical concept to describe.
+            Focus::Ambiguous(_) | Focus::Missing | Focus::Oversized { .. } => None,
+        }
+    };
+    let resp = match found {
+        Some((concept, blast, dependents, truncated)) => {
+            // T11: surface the concept's gate progress by re-running the
+            // evaluation's own queries (`blast_radius` + `interaction_span`,
+            // both with the eval's min_edge_age, plus the re-promotion
+            // cooldown) against the store, with the concept's persisted
+            // gc_survived. This is surfacing — the same numbers the eval
+            // reaches — not a shadow calculation. A read failure degrades
+            // this additive payload to null rather than failing the endpoint
+            // the page loads on.
+            let gate_progress = match gate_progress(
+                state.store(),
+                &state.session,
+                &concept,
+                state.backends.config.canonization_edge_min_age,
+                state.backends.config.canonization_repromotion_cooldown,
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(error = %e, "gate_progress for /api/inspect failed; omitted");
+                    None
+                }
+            };
+            InspectResponse {
+                focus: params.focus,
+                found: true,
+                status: Some(status_str(concept.canonization_status)),
+                blast_radius: blast,
+                dependents,
+                truncated,
+                gate_progress,
+            }
+        }
+        None => InspectResponse::missing(params.focus),
+    };
+    json(StatusCode::OK, resp)
+}
+
+/// The session's structural skeleton, for the tree view. Read-only: no writer
+/// lease. Ships only `Dependency`/`Causal`/`Hierarchical` edges — the false
+/// `CoOccurrence` edge stays out of the visible claim.
+async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
+    let loaded = match load_reader_graph_with_contract(
+        state.store(),
+        state.session.as_str(),
+        Some(&state.backends.embedding),
+    )
+    .await
+    {
+        Ok(l) => l,
+        Err(e) => return fail(e),
+    };
+    let (nodes, edges, truncated) = {
+        let g = loaded.graph.read();
+        // One in-memory pass for every node's dependent count, matching
+        // /api/inspect's live semantics (not the frozen concepts-row column,
+        // which is `None` until promotion), so the tree marks load-bearing
+        // Candidates/Venerables and the two endpoints agree.
+        let radii = blast_radii(&g);
+        let mut nodes: Vec<GraphNode> = g
+            .concepts()
+            .map(|c| GraphNode {
+                content: c.content.clone(),
+                concept_type: c.concept_type,
+                status: status_str(c.canonization_status),
+                blast_radius: radii.get(&c.id).copied().unwrap_or(0),
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.content.cmp(&b.content).then_with(|| a.status.cmp(b.status)));
+        let nodes_trunc = nodes.len() > MAX_GRAPH_NODES;
+        nodes.truncate(MAX_GRAPH_NODES);
+
+        // Structural edges only, both endpoints concepts, ordered like the
+        // reference SQL so the payload is deterministic.
+        let mut raw: Vec<(u8, String, String, String)> = g
+            .edges()
+            .filter(|e| is_structural(e.edge_type))
+            .filter_map(|e| {
+                let (Some(Node::Concept(s)), Some(Node::Concept(t))) =
+                    (g.node(e.source), g.node(e.target))
+                else {
+                    return None;
+                };
+                Some((
+                    structural_rank(e.edge_type),
+                    s.content.clone(),
+                    t.content.clone(),
+                    format!("{:?}", e.edge_type),
+                ))
+            })
+            .collect();
+        raw.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2))
+        });
+        let edges_trunc = raw.len() > MAX_GRAPH_EDGES;
+        let edges: Vec<GraphEdge> = raw
+            .into_iter()
+            .take(MAX_GRAPH_EDGES)
+            .map(|(_, parent, child, edge)| GraphEdge { parent, child, edge })
+            .collect();
+
+        (nodes, edges, nodes_trunc || edges_trunc)
+    };
+    json(
+        StatusCode::OK,
+        GraphResponse {
+            session: state.session.as_str().to_string(),
+            nodes,
+            edges,
+            truncated,
+        },
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Router
@@ -743,6 +1066,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/app.js", get(script))
         .route("/healthz", get(healthz))
         .route("/api/session", get(api_session))
+        .route("/api/inspect", get(api_inspect))
+        .route("/api/graph", get(api_graph))
         .route("/api/recall", get(api_recall))
         .route("/api/events", get(api_events))
         .route("/api/stats", get(api_stats))
@@ -949,7 +1274,8 @@ mod tests {
     use crate::embed::{EmbedderConfig, EmbedderKind, FixtureEmbedder};
     use crate::store::{StoreConfig, StoreKind};
     use crate::types::{
-        CanonizationEvent, CanonizationStatus, EmbeddingContract, MutationBatch, NodeId, Scored,
+        AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
+        EmbeddingContract, Interaction, Mutation, MutationBatch, Node, NodeId, Scored, SessionId,
     };
     use crate::MemoryStore;
     use async_trait::async_trait;
@@ -966,6 +1292,8 @@ mod tests {
         "/app.js",
         "/healthz",
         "/api/session",
+        "/api/inspect",
+        "/api/graph",
         "/api/recall",
         "/api/events",
         "/api/stats",
@@ -1188,6 +1516,192 @@ mod tests {
                 .await
                 .expect("record canonization");
         }
+    }
+
+    fn concept(
+        sid: SessionId,
+        id: NodeId,
+        origin: NodeId,
+        content: &str,
+        created: DateTime<Utc>,
+    ) -> Concept {
+        Concept {
+            id,
+            session_id: sid,
+            content: content.to_string(),
+            canonical_key: content.to_string(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::from("agent-a"),
+            created_at: created,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            chunk_group_id: None,
+        }
+    }
+
+    fn edge(
+        id: NodeId,
+        sid: SessionId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: EdgeType,
+        created: DateTime<Utc>,
+    ) -> Edge {
+        Edge {
+            id,
+            session_id: sid,
+            source,
+            target,
+            edge_type,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: created,
+            last_reinforced: created,
+        }
+    }
+
+    /// A session shaped like `focus` standing behind `dependents` leaves,
+    /// each a structural (Dependency) edge `focus -> dep_i`, plus one
+    /// interaction to root the concepts on. No canonization runs, so
+    /// `focus` stays status `None` — a load-bearing non-canonical node.
+    async fn seed_chain_around(
+        session: &str,
+        focus: &str,
+        dependents: usize,
+    ) -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        let sid = SessionId::new(session);
+        let iid = NodeId::new();
+        let focus_id = NodeId::new();
+        let now = Utc::now();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some(focus.to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(concept(sid.clone(), focus_id, iid, focus, now)),
+        });
+        // §5.7: every concept must have a Derives edge from an interaction.
+        batch.push(Mutation::UpsertEdge {
+            edge: edge(NodeId::new(), sid.clone(), iid, focus_id, EdgeType::Derives, now),
+        });
+        for i in 0..dependents {
+            let cid = NodeId::new();
+            batch.push(Mutation::UpsertNode {
+                node: Node::Concept(concept(sid.clone(), cid, iid, &format!("dep{i}"), now)),
+            });
+            batch.push(Mutation::UpsertEdge {
+                edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+            });
+            batch.push(Mutation::UpsertEdge {
+                edge: edge(
+                    NodeId::new(),
+                    sid.clone(),
+                    focus_id,
+                    cid,
+                    EdgeType::Dependency,
+                    now,
+                ),
+            });
+        }
+        store.flush(&batch, None).await.expect("seed chain");
+        store
+    }
+
+    /// A session of `n` plain concepts (and one interaction to root them),
+    /// with no canonization — for driving `/api/graph` past its node bound.
+    async fn seed_many_concepts(session: &str, n: usize) -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        let sid = SessionId::new(session);
+        let iid = NodeId::new();
+        let now = Utc::now();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("root".to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        for i in 0..n {
+            let cid = NodeId::new();
+            batch.push(Mutation::UpsertNode {
+                node: Node::Concept(concept(
+                    sid.clone(),
+                    cid,
+                    iid,
+                    &format!("concept {i:05}"),
+                    now,
+                )),
+            });
+            // §5.7: every concept must have a Derives edge from an interaction.
+            batch.push(Mutation::UpsertEdge {
+                edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+            });
+        }
+        store.flush(&batch, None).await.expect("seed many");
+        store
+    }
+
+    /// A session of `concepts` plain concepts with a Dependency edge between
+    /// *every increasing* pair (`source_i -> source_j` for `i < j`) — exactly
+    /// `concepts * (concepts - 1) / 2` structural edges, all acyclic — for
+    /// driving `/api/graph` past its edge bound without crossing the node
+    /// bound. The `i < j` ordering keeps the structural edges a DAG (the graph
+    /// builder rejects Dependency cycles), and every natural key
+    /// (source, target, Dependency) is distinct, so MemoryStore (which dedupes
+    /// edges by that triple) keeps them all.
+    async fn seed_many_structural_edges(session: &str, concepts: usize) -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::new());
+        let sid = SessionId::new(session);
+        let iid = NodeId::new();
+        let now = Utc::now();
+        let ids: Vec<NodeId> = (0..concepts).map(|_| NodeId::new()).collect();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("root".to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        for (i, &cid) in ids.iter().enumerate() {
+            batch.push(Mutation::UpsertNode {
+                node: Node::Concept(concept(sid.clone(), cid, iid, &format!("concept {i:05}"), now)),
+            });
+            // §5.7: every concept must have a Derives edge from an interaction.
+            batch.push(Mutation::UpsertEdge {
+                edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+            });
+        }
+        for (i, &src) in ids.iter().enumerate() {
+            for &dst in ids.iter().skip(i + 1) {
+                batch.push(Mutation::UpsertEdge {
+                    edge: edge(NodeId::new(), sid.clone(), src, dst, EdgeType::Dependency, now),
+                });
+            }
+        }
+        store.flush(&batch, None).await.expect("seed many structural edges");
+        store
     }
 
     // ---- a minimal HTTP/1.1 client -------------------------------------
@@ -1518,6 +2032,282 @@ mod tests {
         handle.abort();
     }
 
+    // ---- /api/inspect ---------------------------------------------------
+
+    /// Focus on a real concept: the page gets its status, its blast radius,
+    /// its structural dependents (never a `CoOccurrence` edge), and — the T11
+    /// add-on — its canonization gate progress.
+    #[tokio::test]
+    async fn inspect_endpoint_reports_a_focus_and_its_structural_dependents() {
+        let store = seed("t93-inspect").await;
+        let (addr, handle) = spawn(state_on(store, "t93-inspect")).await;
+
+        let hit = get_json(addr, "/api/inspect?focus=user%20schema").await;
+        assert_eq!(hit["found"], true, "{hit}");
+        assert_eq!(hit["status"], "Canonical", "{hit}");
+        assert!(hit["blast_radius"].as_u64().is_some(), "{hit}");
+
+        // Structural edges only: the false CoOccurrence edge (T7) must never
+        // appear on the page.
+        let deps = hit["dependents"].as_array().expect("dependents");
+        for dep in deps {
+            let edge = dep["edge"].as_str().expect("edge");
+            assert!(
+                matches!(edge, "Dependency" | "Causal" | "Hierarchical"),
+                "non-structural edge '{edge}' leaked onto the inspect page: {hit}"
+            );
+            assert!(dep["content"].as_str().is_some(), "{hit}");
+            assert!(dep["concept_type"].as_str().is_some(), "{hit}");
+        }
+
+        // T11: the payload explains the concept with its gate bars.
+        let gp = &hit["gate_progress"];
+        assert_eq!(gp["gc_survived"]["bar"], 3.0, "{hit}");
+        assert_eq!(gp["blast_radius"]["bar"], 5.0, "{hit}");
+        assert!(gp["blast_radius"]["strictly_above"] == true, "{hit}");
+        assert_eq!(gp["distinct_interactions"]["bar"], 3.0, "{hit}");
+        assert!(gp["coverage"]["bar"].as_f64().is_some(), "{hit}");
+
+        handle.abort();
+    }
+
+    /// A miss is a `200` with `found: false` — never a non-2xx — and carries
+    /// the empty dependents shape from the contract.
+    #[tokio::test]
+    async fn inspect_endpoint_miss_is_a_200_with_found_false() {
+        let store = seed("t93-inspect-miss").await;
+        let (addr, handle) = spawn(state_on(store, "t93-inspect-miss")).await;
+
+        let r = request(addr, "GET", "/api/inspect?focus=no-such-concept").await;
+        assert_eq!(
+            r.status, 200,
+            "a miss must be 200, never non-2xx: {}",
+            r.body
+        );
+        let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["found"], false, "{v}");
+        assert_eq!(v["blast_radius"], 0, "{v}");
+        assert!(v["dependents"].as_array().unwrap().is_empty(), "{v}");
+        // status / gate_progress are omitted on a miss (no concept to explain).
+        assert!(v["status"].is_null(), "{v}");
+        assert!(v["gate_progress"].is_null(), "{v}");
+
+        // A blank focus is the same miss, not an error.
+        let blank = request(addr, "GET", "/api/inspect?focus=").await;
+        assert_eq!(blank.status, 200, "blank focus must be a 200 miss");
+
+        handle.abort();
+    }
+
+    // ---- /api/graph -----------------------------------------------------
+
+    /// The tree view ships the structural skeleton: concepts with their row
+    /// status + blast radius, and structural edges only.
+    #[tokio::test]
+    async fn graph_endpoint_returns_the_structural_skeleton() {
+        let store = seed("t93-graph").await;
+        let (addr, handle) = spawn(state_on(store, "t93-graph")).await;
+
+        let g = get_json(addr, "/api/graph").await;
+        assert_eq!(g["session"], "t93-graph", "{g}");
+        assert_eq!(g["truncated"], false, "{g}");
+
+        let nodes = g["nodes"].as_array().expect("nodes");
+        assert!(!nodes.is_empty(), "{g}");
+        for n in nodes {
+            assert!(n["content"].as_str().is_some(), "{g}");
+            assert!(n["concept_type"].as_str().is_some(), "{g}");
+            assert!(n["status"].as_str().is_some(), "{g}");
+            assert!(n["blast_radius"].as_i64().is_some(), "{g}");
+        }
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n["content"] == "user schema" && n["status"] == "Canonical"),
+            "the canonical concept with its row status must be a node: {g}"
+        );
+
+        let edges = g["edges"].as_array().expect("edges");
+        for e in edges {
+            let ty = e["edge"].as_str().expect("edge");
+            assert!(
+                matches!(ty, "Dependency" | "Causal" | "Hierarchical"),
+                "non-structural edge '{ty}' in the tree: {g}"
+            );
+            assert!(e["parent"].as_str().is_some(), "{g}");
+            assert!(e["child"].as_str().is_some(), "{g}");
+        }
+
+        handle.abort();
+    }
+
+    /// A non-canonical (here status `None`) node with dependents must report a
+    /// nonzero `blast_radius` on BOTH `/api/graph` and `/api/inspect` — the
+    /// live dependent count from the same helper, not the frozen
+    /// concepts-row column (which is `None` until promotion), so the tree
+    /// foregrounds load-bearing Candidates/Venerables (T3-R1-2).
+    #[tokio::test]
+    async fn graph_and_inspect_agree_on_a_live_blast_radius_for_non_canonical() {
+        // The seed's `create user` action is never promoted (status `None`)
+        // but stands behind a dependent, so format::blast_radii counts it.
+        let store = seed("t93-graph-live").await;
+        let (addr, handle) = spawn(state_on(store, "t93-graph-live")).await;
+
+        let g = get_json(addr, "/api/graph").await;
+        let pillar = g["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|n| n["content"] == "create user")
+            .expect("create user node");
+        assert_ne!(pillar["status"], "Canonical", "{g}");
+        let graph_radius = pillar["blast_radius"].as_u64().expect("radius");
+        assert!(
+            graph_radius >= 1,
+            "a non-canonical node with a dependent must report a nonzero live radius: {g}"
+        );
+
+        let hit = get_json(addr, "/api/inspect?focus=create%20user").await;
+        assert_eq!(hit["found"], true, "{hit}");
+        assert_eq!(
+            hit["blast_radius"].as_u64().unwrap(),
+            graph_radius,
+            "/api/inspect and /api/graph must report the same live blast radius: {hit} {g}"
+        );
+        handle.abort();
+    }
+
+    /// Drive `/api/inspect` past `MAX_INSPECT_NODES` structural dependents:
+    /// `truncated` is true and the payload pins at the cap. This also pins the
+    /// T3-R1-3 fix — a non-structural/duplicate incident edge alone must not
+    /// set `truncated` when the structural list is complete.
+    #[tokio::test]
+    async fn inspect_truncates_and_reports_at_the_dependents_bound() {
+        let n = MAX_INSPECT_NODES + 1;
+        let store = seed_chain_around("t93-inspect-cap", "hub", n).await;
+        let (addr, handle) = spawn(state_on(store, "t93-inspect-cap")).await;
+
+        let hit = get_json(addr, "/api/inspect?focus=hub").await;
+        assert_eq!(hit["found"], true, "{hit}");
+        assert_eq!(hit["truncated"], true, "{hit}");
+        assert_eq!(
+            hit["dependents"].as_array().expect("dependents").len(),
+            MAX_INSPECT_NODES,
+            "at the bound the payload must be pinned at the cap: {hit}"
+        );
+        handle.abort();
+    }
+
+    /// Drive `/api/graph` past `MAX_GRAPH_NODES` concepts: `truncated` is true
+    /// and the payload pins at the cap (T3-R1-5).
+    #[tokio::test]
+    async fn graph_truncates_and_reports_at_the_nodes_bound() {
+        let store = seed_many_concepts("t93-graph-cap", MAX_GRAPH_NODES + 1).await;
+        let (addr, handle) = spawn(state_on(store, "t93-graph-cap")).await;
+
+        let g = get_json(addr, "/api/graph").await;
+        assert_eq!(g["truncated"], true, "{g}");
+        assert_eq!(
+            g["nodes"].as_array().expect("nodes").len(),
+            MAX_GRAPH_NODES,
+            "at the bound the payload must be pinned at the cap: {g}"
+        );
+        handle.abort();
+    }
+
+    /// Drive `/api/graph` past `MAX_GRAPH_EDGES` structural edges: `truncated`
+    /// is true and the payload pins at the edge cap, while the node count
+    /// stays under its own bound so the edge branch fires in isolation.
+    #[tokio::test]
+    async fn graph_truncates_and_reports_at_the_edges_bound() {
+        // 182 concepts => 182 * 181 / 2 = 16471 Dependency edges >
+        // MAX_GRAPH_EDGES (16384), but 182 concepts < MAX_GRAPH_NODES (4096)
+        // keeps the node side untruncated. The i < j ordering keeps the
+        // structural edges a DAG (the graph builder rejects cycles).
+        let concepts = 182;
+        let store = seed_many_structural_edges("t93-graph-edge-cap", concepts).await;
+        let (addr, handle) = spawn(state_on(store, "t93-graph-edge-cap")).await;
+
+        let g = get_json(addr, "/api/graph").await;
+        assert_eq!(g["truncated"], true, "{g}");
+        assert_eq!(
+            g["edges"].as_array().expect("edges").len(),
+            MAX_GRAPH_EDGES,
+            "at the edge bound the payload must be pinned at the cap: {g}"
+        );
+        assert_eq!(
+            g["nodes"].as_array().expect("nodes").len(),
+            concepts,
+            "nodes stay under their own bound and must not be cut: {g}"
+        );
+        handle.abort();
+    }
+
+    /// The `depth` query parameter is accepted for CLI parity but deliberately
+    /// treated as 1: any depth value returns the same hop-1 shape, never
+    /// rejected (T3-R1-N3).
+    #[tokio::test]
+    async fn inspect_ignores_the_depth_parameter() {
+        let store = seed("t93-inspect-depth").await;
+        let (addr, handle) = spawn(state_on(store, "t93-inspect-depth")).await;
+
+        let d1 = get_json(addr, "/api/inspect?focus=user%20schema&depth=1").await;
+        let d3 = get_json(addr, "/api/inspect?focus=user%20schema&depth=3").await;
+        assert_eq!(d1["found"], true, "{d1}");
+        assert_eq!(d3["found"], true, "{d3}");
+        assert_eq!(
+            d1["dependents"], d3["dependents"],
+            "depth must be ignored (treated as 1), not change the shape: {d1} {d3}"
+        );
+        handle.abort();
+    }
+
+    /// A concept demoted within the re-promotion cooldown must surface
+    /// `in_cooldown: true` + `cooldown_until` in its gate progress — the
+    /// fifth (non-threshold) reason a Venerable that clears all four gates
+    /// still does not promote (T3-R1-4).
+    #[tokio::test]
+    async fn inspect_surfaces_a_cooling_concepts_repromotion_cooldown() {
+        let store = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("t93-cooldown");
+        let iid = NodeId::new();
+        let cid = NodeId::new();
+        let now = Utc::now();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("hot".to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        // Demoted 5s ago: inside the default 300s cooldown.
+        let mut c = concept(sid.clone(), cid, iid, "hot", now);
+        c.last_demotion_time = Some(now - chrono::Duration::seconds(5));
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c),
+        });
+        // §5.7: every concept must have a Derives edge from an interaction.
+        batch.push(Mutation::UpsertEdge {
+            edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+        });
+        store.flush(&batch, None).await.expect("seed cooldown");
+        let (addr, handle) = spawn(state_on(store, "t93-cooldown")).await;
+
+        let hit = get_json(addr, "/api/inspect?focus=hot").await;
+        assert_eq!(hit["found"], true, "{hit}");
+        let gp = &hit["gate_progress"];
+        assert_eq!(gp["in_cooldown"], true, "{hit}");
+        assert!(
+            gp["cooldown_until"].is_string(),
+            "a cooling concept must carry cooldown_until: {hit}"
+        );
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn an_unwritten_session_is_an_empty_window_not_an_error() {
         let store = Arc::new(MemoryStore::new());
@@ -1666,6 +2456,48 @@ mod tests {
         assert!(!bearer_ok(Some("s3cret"), &expected), "no scheme at all");
         assert!(!bearer_ok(Some("Bearer"), &expected));
         assert!(!bearer_ok(Some(""), &expected));
+    }
+
+    /// The comparator performs a full scan over the secret's length on every
+    /// call — there is no early return on a mismatch, and the loop count does
+    /// not depend on the presented input's length. Boolean results alone
+    /// cannot tell a short-circuited compare from a full scan, so this pins
+    /// the full-scan *semantics* (every position is compared, a late-only
+    /// difference is caught, exact input matches, and a length change is a
+    /// refusal even when the shorter input is an exact prefix — the case a
+    /// naive `zip`-style short-circuit would wrongly accept) and the fixed
+    /// loop bound is a property of the code, guarded by `black_box`.
+    #[test]
+    fn tokens_match_scans_the_full_length_without_short_circuiting() {
+        let token = b"s3cret".as_slice();
+
+        // Exact match across the whole length -> true.
+        assert!(tokens_match(b"s3cret", token), "correct token matches");
+
+        // A difference at a single position is caught wherever it falls:
+        // first, middle, or last. (These alone do not prove a full scan — a
+        // short-circuit catches a first divergence at any depth too.)
+        assert!(!tokens_match(b"x3cret", token), "first byte differs");
+        assert!(!tokens_match(b"s3xret", token), "middle byte differs");
+        assert!(!tokens_match(b"s3crex", token), "last byte differs");
+
+        // The genuine non-short-circuit guard is the truncated-prefix refusal
+        // below: a naive `zip`-style compare would stop at the common 4 bytes,
+        // find them equal, and wrongly accept `"s3cr"`. Requiring `false` here
+        // proves the accumulator folds the length difference and the scan
+        // commits no early-return on the secret bytes.
+
+        // A longer presented value whose prefix matches must refuse: the scan
+        // and the length fold both see the trailing bytes.
+        assert!(!tokens_match(b"s3cret-extra", token), "padded token refuses");
+
+        // A shorter presented value that is an exact prefix must refuse: a
+        // naive full-scan-equal-length or zip-short-circuit implementation
+        // would accept the common prefix and return true.
+        assert!(!tokens_match(b"s3cr", token), "truncated prefix refuses");
+
+        // Empty presented input is refused.
+        assert!(!tokens_match(b"", token));
     }
 
     /// When a token is configured, every route — API, asset, healthz — refuses

@@ -48,7 +48,7 @@ use crate::types::Node;
 use crate::types::{CanonizationStatus, NodeId};
 
 /// Stage 1 survival floor (spec §10).
-const MIN_GC_SURVIVED: i32 = 3;
+pub(super) const MIN_GC_SURVIVED: i32 = 3;
 /// Percentile of the non-Canonical peer distribution (spec §10).
 const PEER_PERCENTILE: f64 = 0.90;
 

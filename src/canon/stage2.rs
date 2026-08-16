@@ -32,9 +32,9 @@ use crate::store::GraphStore;
 use crate::types::{NodeId, SessionId, StoreError};
 
 /// Distinct-origin floor (spec §10).
-const MIN_DISTINCT: u64 = 3;
+pub(super) const MIN_DISTINCT: u64 = 3;
 /// Session-extent coverage floor (spec §10).
-const MIN_COVERAGE: f64 = 0.3;
+pub(super) const MIN_COVERAGE: f64 = 0.3;
 
 /// Whether `node` currently clears Stage 2 on `store`.
 pub async fn stage2_passes(

@@ -54,7 +54,7 @@ use crate::types::{Node, NodeId, SessionId, StoreError};
 
 /// Blast-radius floor (spec §10). Pass iff the store count is **strictly**
 /// greater than this `u64` (CON-6: do not narrow to `i32`).
-const MIN_BLAST_RADIUS: u64 = 5;
+pub(super) const MIN_BLAST_RADIUS: u64 = 5;
 
 /// Whether `node` currently clears Stage 3, and by how much.
 ///
