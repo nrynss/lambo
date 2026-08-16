@@ -3,7 +3,7 @@
 Source: `adve-review-full-stack-sweep-2026-08-16.md` (4 P1 / 12 P2 / 10 P3) and
 the Tier 3 detail review beside it, plus defects found outside the review.
 
-**T1 to T14 below are code-fix tasks, numbered so that every blocker has a
+**T1 to T12 below are code-fix tasks, numbered so that every blocker has a
 lower number than the thing it blocks.** Read top to bottom and the order works.
 
 Deployment, recording and submission live in `deployment-and-submission.md` as
@@ -30,7 +30,7 @@ not re-reported:
 
 - Published Linux binaries need GLIBC 2.39 and cannot run on Amazon Linux 2023
   (2.34). The exhibit moved to Ubuntu 26.04. The underlying packaging defect is
-  still open as **T14**.
+  still open as **T12**.
 - Caddy publishes SHA-512 checksums; the launcher verified them with
   `sha256sum`, failing every boot after lambo was already installed. Now
   `sha512sum`.
@@ -90,7 +90,8 @@ lowered `gc_interval` to apply.
 **Files:** `src/cli/serve_web.rs`
 **Closes:** T1-P3-1
 **Blocked by:** nothing
-**Blocks:** T9, the portal's dependents panel showing real data
+**Blocks:** the UI pass. See `ui-pass-plan.md`; the tree renderer is
+already written and stays hidden until this endpoint answers.
 
 The exhibit's headline claim is that Lambo names the workloads that would break.
 `/api/recall` does not do that. Measured against the live exhibit:
@@ -104,7 +105,7 @@ The exhibit's headline claim is that Lambo names the workloads that would break.
 `lambo inspect` produces the right answer. `serve-web` exposes no equivalent, so
 the page cannot show the thing the submission is about.
 
-Contract, so T9 can be built against it before this lands:
+Contract. The portal's renderer is already built against this shape:
 
 ```
 GET /api/inspect?focus=<string>&depth=1
@@ -316,37 +317,8 @@ the thing the video depends on. Running it is part of the task, not a follow-up.
 
 ---
 
-## T9 — Portal — PARKED until remediation is done
 
-**Files:** `web/index.html`, `web/app.css`, `web/app.js`
-**Status:** parked deliberately. Do not spend agent time here.
-**Blocked by:** T3, and by the decision to finish backend work first
-
-Done and deployed: labelled header facts, live strip, trust ladder, audit trail,
-plain-English stat tiles.
-
-Landed so far: labelled header facts, live strip, trust ladder, plain-English
-stat tiles, audit trail spanning the grid, a CSS pass, the chat-shaped Ask box
-replaced with a component lookup, and a tree renderer that stays hidden unless
-`/api/graph` answers.
-
-Left for the UI pass, after remediation:
-- Wire the tree to real data once **T3** lands. The renderer is written and the
-  panel hides itself when the endpoint is absent, so nothing on the page claims
-  structure it cannot see.
-- Revisit the intro copy against whatever T3 and T11 actually deliver.
-- **The intro copy currently over-promises.** It says Lambo "names the workloads
-  that would break and counts them", which `/api/recall` does not do. **T3** makes
-  it true, so the copy stays and the dependents panel gets wired to
-  `/api/inspect`. The copy is correct only once that panel is live, so the two
-  land together or not at all.
-- The panel is pure `web/*` and is built against a fixture payload before **T3**
-  exists, so **T3** does not hold up the UI work itself.
-
----
-
-
-## T11 — Recall does not answer dependency questions
+## T9 — Recall does not answer dependency questions
 
 **Files:** `src/recall/*`
 **Blocked by:** nothing
@@ -389,7 +361,7 @@ asserting it, and it is more valuable than any remaining P2.
 
 ---
 
-## T12 — The Lambda Function URL returns 403, undiagnosed
+## T10 — The Lambda Function URL returns 403, undiagnosed
 
 **Files:** `scripts/aws-infra/provision_app_data.py`, AWS-side config
 **Blocked by:** nothing
@@ -418,7 +390,7 @@ Lambda as IAM-invoked. Either is honest; the claim just has to match.
 
 ---
 
-## T13 — Canonization is unreachable at the default cadence
+## T11 — Canonization is unreachable at the default cadence
 
 **Files:** `src/config.rs`, `src/daemon/mod.rs`, `src/canon/*`
 **Blocked by:** T1
@@ -437,7 +409,7 @@ only two sessions which have ever canonized both did so by overriding the knob.
 
 ---
 
-## T14 — Release workflow builds against too-new glibc
+## T12 — Release workflow builds against too-new glibc
 
 **Files:** `.github/workflows/release.yml`
 **Blocked by:** nothing
@@ -468,15 +440,16 @@ T4 ─┘
 T5     re-review launcher
 T7 ─┐  agents
 T8 ─┘
-T9     portal          (panel on a fixture until T3)
-T14    release workflow
+T9     recall quality
+T10    lambda 403
+T12    release workflow
 ```
 
 The chains:
 
 ```
 T1 ──► T2
-T3 ──► T9              panel shows real data
+T1 ──► T11             cadence needs validation first
 T5 ──► T6              re-review before touching the launcher
 ```
 

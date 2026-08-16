@@ -4,7 +4,7 @@ Written as a handoff to whoever picks the portal back up, which will probably be
 me with none of this in my head. There is no Lambo instance holding my working
 memory, which is a joke I am obliged to notice.
 
-**The UI pass is parked until T1 to T14 in `remediation-tasks.md` are done.**
+**The UI pass is parked until T1 to T12 in `remediation-tasks.md` are done.**
 The portal's remaining problems are not rendering problems. Every one of them is
 waiting on data the backend does not currently expose.
 
@@ -83,7 +83,7 @@ The single biggest change, and the renderer is already written.
   tree should be the lookup. Two controls doing one job is how the page got
   confusing the first time.
 
-### T11 lands (recall answers dependency questions)
+### T9 lands (recall answers dependency questions)
 
 Today `what depends on SG-Base-VPC` returns the security group and its own
 ingress rules, and a prose question returns five results all scored `0.18`.
@@ -95,12 +95,12 @@ interaction, because they always return something meaningful.
 Also revisit the score display. Showing `(score 2.94)` next to `(score 2.72)`
 tells a reader nothing; it is only worth surfacing if the numbers discriminate.
 
-### T12 resolves (the Function URL 403)
+### T10 resolves (the Function URL 403)
 
 Decides whether the page can link a public stats endpoint at all. If it stays
 403, do not link it, and make sure §11 describes the Lambda as IAM-invoked.
 
-### T13 resolves (canonization cadence)
+### T11 resolves (canonization cadence)
 
 If the default cadence changes, the trust ladder starts moving on its own during
 a demo rather than sitting still. Worth checking the ladder animates sensibly
@@ -156,7 +156,7 @@ second one by hiding the panel.
 2. Tree node click drives the lookup, replacing the separate control.
 3. Dependents panel, with the sentence the exhibit exists to say.
 4. Copy strengthened back to match, once 1 to 3 are real.
-5. Score display revisited, only if T11 made the numbers mean something.
+5. Score display revisited, only if T9 made the numbers mean something.
 6. Whatever the layout needs once the tree is occupying real estate. Do this
    last, because the tree changes the page's proportions more than anything
    else on the list.

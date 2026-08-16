@@ -4,7 +4,7 @@ The path from a remediated tree to a thing judges can look at. Code fixes live
 in `remediation-tasks.md`; nothing here changes behaviour.
 
 **Tasks are D1 to D3.** They are numbered separately from the remediation tasks
-(T1 to T10) because the two lists run on different clocks and cross-reference
+(T1 to T12) because the two lists run on different clocks and cross-reference
 each other. Where a D task waits on a T task, it says so.
 
 ---
