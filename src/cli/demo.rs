@@ -31,12 +31,24 @@
 //!    audit-trail length, a `gc_survived` floor, a daemon event, a completed
 //!    canonization cycle. Nothing in this file sleeps for a fixed duration and
 //!    then assumes progress happened.
-//! 3. **The canonization state machine is driven to a unique fixed point.**
+//! 3. **No wall-clock *measurement* decides anything either.** The scoring
+//!    formula's `recency` dimension is a concept's position inside the
+//!    session's temporal extent, so for as long as that extent was measured by
+//!    the wall clock, every composite score carried the scheduler's jitter in
+//!    its low decimals — enough to swap two near-tied concepts in the rendered
+//!    order about one run in ten. The demo therefore stamps its interactions
+//!    from a monotone script clock ([`script_clock`]): interaction *k* lands
+//!    exactly `k ×` [`STEP_PACING`] into the session, so the extent is the
+//!    script's and the score table is a pure function of the graph. This
+//!    changes which clock the *process* reads, not who may supply a timestamp
+//!    — the no-caller-timestamps invariant (F18) is untouched and the seam is
+//!    crate-private.
+//! 4. **The canonization state machine is driven to a unique fixed point.**
 //!    See "Why the fixed point is unique" below — this is the part that a
 //!    naive scripted demo gets wrong, and it is why the demo settles
 //!    `gc_survived` and then quiesces instead of stopping the moment
 //!    `user schema` turns Canonical.
-//! 4. **The one genuinely time-derived value is normalized, not faked.** The
+//! 5. **The one genuinely time-derived value is normalized, not faked.** The
 //!    conflict line renders the true age of agent A's write. On a laptop the
 //!    whole session replays in well under a second, so that age reads `0` or
 //!    `1`; spec §13's "eleven seconds" is the age at the instant the video's
@@ -65,8 +77,10 @@
 //!
 //! With the graph frozen, every scoring dimension is session-relative
 //! (`src/daemon/score.rs`: recency, session activity and density are all
-//! measured against the session, never against the wall clock), so the score
-//! table is a pure function of the graph. `user schema` is the only concept in
+//! measured against the session, never against the wall clock) *and* the
+//! session's own temporal extent is the script's rather than the scheduler's
+//! ([`script_clock`]), so the score table is a pure function of the graph.
+//! `user schema` is the only concept in
 //! the session with a Stage-3 blast radius above the floor, so it is the only
 //! concept that can leave the non-Canonical peer set; removing the single
 //! highest scorer can only lower the P90 cut, so any concept admitted earlier
@@ -196,23 +210,25 @@ pub const STEP_DEADLINE: Duration = Duration::from_secs(60);
 /// Poll period inside `wait_until`.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
-/// Spacing between scripted interactions.
+/// Spacing between scripted interactions — in **both** clocks.
 ///
-/// This is the one deliberate delay in the file, and it is **not** a wait for
-/// progress — it paces the script. Two reasons, both load-bearing:
+/// It is the step of [`script_clock`] (the interval every interaction's
+/// `created_at` advances by, exactly) and the real delay `play` sleeps
+/// between writes. Two separate reasons, both load-bearing:
 ///
-/// * **Determinism.** Interactions are server-stamped from the process clock
-///   (`Memory`: deliberately no API to supply one), and the `recency` scoring
-///   dimension is each concept's position within the session's temporal
-///   extent. Twelve writes issued back to back land microseconds apart, so
-///   their *interior spacing* is scheduler jitter — which moves every
-///   `recency` value, and with it GC's eviction margins and Stage 1's
-///   ordering, run to run. Pacing the script makes the extent a property of
-///   the script instead: 10ms between writes dominates the jitter by three
-///   orders of magnitude, so the same interaction lands at the same relative
-///   position every run.
-/// * **It is a video.** Twelve interactions in 300µs is a flicker; a human has
-///   to be able to read the narration as it scrolls.
+/// * **Determinism** — the script clock. The `recency` scoring dimension is
+///   each concept's position within the session's temporal extent, so if that
+///   extent is measured by the wall clock then every score carries the
+///   scheduler's jitter, and two concepts whose composites sit within that
+///   margin swap places run to run. Advancing the stamp by a fixed step makes
+///   the extent a property of the script: interaction *k* is always exactly
+///   `k × STEP_PACING` into the session, so `recency` — and every score, cut
+///   and ordering downstream of it — is a pure function of the graph.
+/// * **It is a video** — the real sleep. Twelve interactions in 300µs is a
+///   flicker; a human has to be able to read the narration as it scrolls.
+///
+/// Sleeping the same amount the stamp advances is what keeps the script clock
+/// *behind* the wall clock (see [`script_clock`]).
 ///
 /// The whole script costs [`EXPECT_INTERACTIONS`] × this — about a tenth of a
 /// second, comfortably inside the 30s conflict-recency window agent B's
@@ -685,6 +701,11 @@ pub async fn run_scenario(
     let mut n = Narrator::new(echo);
     header(&mut n, &scenario, &session, store.as_ref());
 
+    // The seam that makes the OUTCOME reproducible. Minted once and shared by
+    // every handle below, so the session's temporal extent is the script's and
+    // not the scheduler's — see `script_clock`.
+    let clock = script_clock();
+
     store.init_schema().await.map_err(|e| {
         CliError::Runtime(format!(
             "init_schema: {e}; provision the store first (`lambo provision`)"
@@ -700,6 +721,7 @@ pub async fn run_scenario(
         &session,
         AGENT_A,
         build_config(),
+        &clock,
     )
     .await?;
     play(&mem, ACT_I, &mut n, 1).await?;
@@ -716,6 +738,7 @@ pub async fn run_scenario(
         &session,
         AGENT_B,
         build_config(),
+        &clock,
     )
     .await?;
     play(&mem, ACT_II, &mut n, ACT_I.len() + 1).await?;
@@ -732,6 +755,7 @@ pub async fn run_scenario(
         &session,
         AGENT_A,
         build_config(),
+        &clock,
     )
     .await?;
     play(&mem, ACT_III, &mut n, ACT_I.len() + ACT_II.len() + 1).await?;
@@ -753,6 +777,7 @@ pub async fn run_scenario(
         &session,
         AGENT_A,
         canonization_config(),
+        &clock,
     )
     .await?;
 
@@ -793,6 +818,7 @@ pub async fn run_scenario(
         &session,
         AGENT_B,
         canonization_config(),
+        &clock,
     )
     .await?;
     await_conflict(&mem, &mut n).await?;
@@ -875,10 +901,57 @@ pub fn fresh_session_id() -> String {
     format!("demo-{SCENARIO_REST_API}-{}", uuid::Uuid::new_v4())
 }
 
+/// The demo's interaction clock: stamp *k* is `base + k ×` [`STEP_PACING`].
+///
+/// Interactions are server-stamped and there is deliberately no way for a
+/// *caller* to supply a timestamp — this does not change that (see
+/// `MemoryBuilder::clock`, which is crate-private). It changes which clock the
+/// **process** reads, once, before the first write, and it is what makes the
+/// OUTCOME block reproducible: `recency` is a concept's position inside the
+/// session's temporal extent, so measuring that extent with the wall clock
+/// stirred a few hundred microseconds of scheduler jitter into every composite
+/// score, and any two concepts closer than that margin — `redis backend` and
+/// `handlers/login.rs`, in practice — traded places between runs.
+///
+/// Three properties are deliberate:
+///
+/// * **Anchored to real time, not to a fixed epoch.** `base` is a real
+///   `Utc::now`, so the session is genuinely as old as it looks. Only the
+///   *interior spacing* is synthetic, and every consumer of absolute age —
+///   `canonization_edge_min_age`, the 30s conflict-recency window, the lease
+///   TTL — still sees an honest session. Pinning `base` to a constant would
+///   have made the whole graph decades old and turned the Stage 2 / Stage 3
+///   age floors into no-ops, which is exactly the guard the compressed knob
+///   table promises is still live.
+/// * **Monotone, and never ahead of the wall clock.** `play` sleeps
+///   `STEP_PACING` *before* each write, so real elapsed time at stamp *k* is
+///   always at least `k × STEP_PACING`. The script clock therefore trails the
+///   wall clock; it never claims a write happened in the future.
+/// * **Shared across the acts.** Agent A, agent B and agent A again each open
+///   their own [`Memory`], and the counter runs across all of them, so the
+///   twelve interactions of the one session are `base + 0ms … base + 110ms`
+///   regardless of how the handles were split.
+///
+/// The counter is only ever advanced by `Memory::begin_interaction`, which the
+/// script calls exactly [`EXPECT_INTERACTIONS`] times (`declare_synonym` and
+/// `recall` open no interaction).
+pub fn script_clock() -> crate::daemon::Clock {
+    let base = chrono::Utc::now();
+    let stamps = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let step = STEP_PACING.as_millis() as i64;
+    Arc::new(move || {
+        let k = stamps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        base + chrono::Duration::milliseconds(k * step)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Playing the script
 // ---------------------------------------------------------------------------
 
+/// Attach one act's handle. Every handle of a run shares the same
+/// [`script_clock`], so the session's twelve interactions are evenly spaced
+/// however the acts split them.
 async fn open(
     store: &Arc<dyn GraphStore>,
     embedder: &Arc<dyn Embedder>,
@@ -886,6 +959,7 @@ async fn open(
     session: &str,
     agent: &str,
     config: Config,
+    clock: &crate::daemon::Clock,
 ) -> Result<Memory, CliError> {
     Memory::builder()
         .session(session)
@@ -894,6 +968,7 @@ async fn open(
         .embedder(embedder.clone())
         .embedding_contract(embedding.clone())
         .config(config)
+        .clock(clock.clone())
         .build()
         .await
         .map_err(|e| CliError::Runtime(format!("{agent}: {e}")))
@@ -1389,13 +1464,14 @@ fn is_uuid_at(bytes: &[u8], i: usize) -> bool {
 
 /// Replace `(score X.XX` with `(score <s>`.
 ///
-/// The composite's `recency` dimension is each concept's position inside the
-/// session's real temporal extent, and interactions are server-stamped from
-/// the process clock. [`STEP_PACING`] makes that extent the script's rather
-/// than the scheduler's, which pins the *ordering* — the meaningful part, and
-/// the part the context block's line order still asserts — but the second
-/// decimal of a score is a wall-clock measurement and replaying it bit for bit
-/// would be a claim the system does not make.
+/// Kept after [`script_clock`] made the composites reproducible, and
+/// deliberately: the demo's claim is that the *outcome* — which concepts are
+/// canonical, in which order they are handed back, what the warnings say — is
+/// a fixed point of the engine, not that a floating-point composite replays
+/// bit for bit on every platform. The rendered scores do in fact match across
+/// runs on one machine (`lambo demo` twice, diffed, agrees to the printed
+/// decimal); making the ×2 assertion depend on that would be asserting the
+/// f64 summation order of the scoring loop, which is a different claim.
 pub fn normalize_score(text: &str) -> String {
     const HEAD: &str = "(score ";
     let mut out = String::with_capacity(text.len());

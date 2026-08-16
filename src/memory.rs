@@ -60,6 +60,17 @@
 //! caller-supplied timestamp would propagate to every concept and edge below it
 //! and backdating by 61s would neuter the whole `canonization_edge_min_age`
 //! inflation guard (P6 review F18). There is deliberately no API to pass one.
+//!
+//! **The clock behind that stamp is a crate-private seam** —
+//! `MemoryBuilder::clock`, `pub(crate)` — and that is not a hole in the rule
+//! above. The rule is about *callers*: no library method, no CLI flag and no
+//! MCP tool argument accepts a timestamp, and every one of them still gets the
+//! process clock. Swapping the clock is a decision the process makes about
+//! itself at construction, once, for every write it will ever make; it cannot
+//! be reached across the MCP boundary, cannot be set per call, and cannot
+//! backdate one interaction relative to its neighbours. `lambo demo` is the
+//! only user: it installs a monotone script clock so the OUTCOME block is
+//! reproducible run to run (see `crate::cli::demo::script_clock`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,7 +84,7 @@ use tokio::task::JoinHandle;
 
 use crate::canon::CanonizationTask;
 use crate::config::{Config, ScoringWeights};
-use crate::daemon::{Daemon, RecallPipeline};
+use crate::daemon::{Clock, Daemon, RecallPipeline};
 use crate::embed::Embedder;
 use crate::graph::action::{record_action as graph_record_action, Action, ActionOutcome};
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
@@ -395,6 +406,8 @@ pub struct MemoryBuilder {
     match_strategy: Option<MatchStrategy>,
     flush_interval: Option<Duration>,
     scoring_weights: Option<ScoringWeights>,
+    // Crate-private, and not a knob: see `MemoryBuilder::clock`.
+    clock: Option<Clock>,
 }
 
 impl MemoryBuilder {
@@ -463,6 +476,27 @@ impl MemoryBuilder {
         self
     }
 
+    /// The process clock every interaction this handle opens is stamped from.
+    /// Defaults to [`Utc::now`].
+    ///
+    /// **`pub(crate)` on purpose, and it stays that way.** The invariant this
+    /// crate enforces is that no *caller* supplies a timestamp (F18: the MCP
+    /// params are `deny_unknown_fields`, `lambo_derive` refuses a `timestamp`
+    /// argument by name, and no CLI verb takes one). That invariant is about
+    /// the trust boundary, not about the identity of the function that reads
+    /// the clock: a process may decide, once, at construction, what "now"
+    /// means for every write it will make. It may not let a caller decide it
+    /// per write, which is why this is a builder setter and not a `derive`
+    /// argument, and why it is not reachable from outside the crate at all.
+    ///
+    /// The one caller is `lambo demo`, which needs the session's temporal
+    /// extent to be a property of its script rather than of the scheduler —
+    /// see [`crate::cli::demo::script_clock`].
+    pub(crate) fn clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Base [`Config`] for every knob the named setters do not cover.
     ///
     /// Order-independent: `match_strategy` / `flush_interval` /
@@ -525,6 +559,7 @@ impl MemoryBuilder {
             config.scoring = weights;
         }
         let config = config;
+        let clock = self.clock.unwrap_or_else(|| Arc::new(Utc::now));
 
         // (0) Single-writer lease (spec §2.2, T8.6) — the store-enforced gate,
         // taken BEFORE the startup load (T86-1). Claiming the session first means
@@ -672,6 +707,7 @@ impl MemoryBuilder {
             lease_token,
             lease_released: AtomicBool::new(false),
             lease_lost,
+            clock,
         })
     }
 }
@@ -852,6 +888,10 @@ pub struct Memory {
     /// where two writers flush divergent graphs into one session into a loud,
     /// safe stop. Shared (`Arc`) with the heartbeat and the flush task.
     lease_lost: Arc<AtomicBool>,
+    /// Where [`Memory::begin_interaction`] takes its stamp. [`Utc::now`] unless
+    /// the *process* replaced it at construction ([`MemoryBuilder::clock`],
+    /// crate-private) — never something a caller can reach or vary per write.
+    clock: Clock,
 }
 
 impl Memory {
@@ -1710,13 +1750,15 @@ impl Memory {
     /// `created_at` is stamped **here**, from the process clock — never from a
     /// caller (P6 review F18: every concept and edge below this interaction
     /// inherits the timestamp, and backdating by 61s would neuter the
-    /// `canonization_edge_min_age` inflation guard).
+    /// `canonization_edge_min_age` inflation guard). `self.clock` *is* that
+    /// process clock: [`Utc::now`] everywhere except `lambo demo`, which pins
+    /// it at construction (see [`MemoryBuilder::clock`]).
     ///
     /// Reading the chain tail and inserting happen under one write lock, so two
     /// concurrent writers cannot both claim the same predecessor.
     fn begin_interaction(&self, prompt: Option<String>) -> Result<NodeId, LamboError> {
         let id = NodeId::new();
-        let created_at = Utc::now();
+        let created_at = (self.clock)();
         let mut g = self.graph.write();
         let previous_id = g.temporal_chain().last().copied();
         g.insert_interaction(Interaction {
