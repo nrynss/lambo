@@ -24,3 +24,7 @@ spikes/*/Cargo.lock
 
 # local MCP client config (carries a cluster id)
 .mcp.json
+
+# Python bytecode from scripts/ (gen-fixtures.py, scripts/aws-infra/*.py)
+__pycache__/
+*.pyc
