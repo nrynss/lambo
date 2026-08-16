@@ -86,10 +86,14 @@ from _common import (  # noqa: E402
     would,
 )
 
-# Caddy reaches ACME over TLS-ALPN-01 on 443 alone, so 80 stays shut by default
-# (plan §8: "Port 443 is the only thing the public needs"). --open-http opens it
-# for the HTTP-01 fallback, at the cost of one more world-reachable port.
-PUBLIC_INGRESS = [(443, "HTTPS - the judge portal, via Caddy")]
+# Plan §8 specifies 443 as the public surface, but Caddy also needs 80 for the
+# plain-http -> https redirect and, when a DNS-01/TLS-ALPN path is unavailable,
+# the ACME HTTP-01 challenge fallback. Both are world-open by default so a fresh
+# provision_(network|app|launch) run just works.
+PUBLIC_INGRESS = [
+    (80, "HTTP - Caddy http->https redirect and ACME HTTP-01 fallback"),
+    (443, "HTTPS - the judge portal, via Caddy"),
+]
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -105,7 +109,7 @@ def _plan(args: argparse.Namespace) -> int:
     would("internet-gateway", IGW_NAME, f"attached to {VPC_NAME}")
     would("route-table", ROUTE_TABLE_PUBLIC_NAME, f"0.0.0.0/0 -> {IGW_NAME}, assoc {SUBNET_PUBLIC_NAME}")
     would("security-group", SG_BASE_NAME, "self-referential mesh + 5432 from SG-PublicWeb")
-    ports = ", ".join(str(p) for p, _ in PUBLIC_INGRESS) + (", 80" if args.open_http else "")
+    ports = ", ".join(str(p) for p, _ in PUBLIC_INGRESS)
     would("security-group", SG_PUBLIC_WEB_NAME, f"{ports} from 0.0.0.0/0; 22 from {args.ssh_cidr}")
     would("secret", SECRET_NAME, "created with NO value; operator sets it separately")
     say()
@@ -250,8 +254,7 @@ def authorize(aws: Aws, group_id: str, permissions: list[dict], label: str) -> N
         else:
             raise
 
-
-def ensure_security_groups(aws: Aws, vpc_id: str, ssh_cidr: str, open_http: bool) -> tuple[str, str]:
+def ensure_security_groups(aws: Aws, vpc_id: str, ssh_cidr: str) -> tuple[str, str]:
     base_id = ensure_sg(
         aws,
         vpc_id,
@@ -276,17 +279,6 @@ def ensure_security_groups(aws: Aws, vpc_id: str, ssh_cidr: str, open_http: bool
         }
         for port, desc in PUBLIC_INGRESS
     ]
-    if open_http:
-        public_perms.append(
-            {
-                "IpProtocol": "tcp",
-                "FromPort": 80,
-                "ToPort": 80,
-                "IpRanges": [
-                    {"CidrIp": "0.0.0.0/0", "Description": "ACME HTTP-01 challenge and redirect"}
-                ],
-            }
-        )
     authorize(aws, web_id, public_perms, f"{SG_PUBLIC_WEB_NAME} world ingress")
 
     authorize(
@@ -419,7 +411,7 @@ def main(args: argparse.Namespace) -> int:
     ensure_public_route_table(aws, vpc_id, igw_id, public_id)
 
     step("security groups")
-    base_id, web_id = ensure_security_groups(aws, vpc_id, args.ssh_cidr, args.open_http)
+    base_id, web_id = ensure_security_groups(aws, vpc_id, args.ssh_cidr)
 
     step("secrets")
     ensure_secret(aws)
@@ -429,8 +421,7 @@ def main(args: argparse.Namespace) -> int:
     note(f"{VPC_NAME} = {vpc_id}")
     note(f"{SG_BASE_NAME} = {base_id}   {SG_PUBLIC_WEB_NAME} = {web_id}")
     note("no NAT gateway was created (plan §2)")
-    if not args.open_http:
-        note("port 80 is closed; judges must reach the portal over https://")
+    note("port 80 and 443 are open from 0.0.0.0/0: 80 for the HTTP->HTTPS redirect and ACME HTTP-01")
     say()
     note("next: provision_app_data.py, then launch_exhibit_ec2.py")
     return 0
@@ -450,15 +441,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Source CIDR allowed to SSH to the exhibit instance. REQUIRED, with no "
             "default, and 0.0.0.0/0 is rejected. Typically "
             "$(curl -s https://checkip.amazonaws.com)/32."
-        ),
-    )
-    parser.add_argument(
-        "--open-http",
-        action="store_true",
-        help=(
-            "Also open port 80 to the world. Only needed if Caddy has to fall back "
-            "to the ACME HTTP-01 challenge, or if you want the plain-http redirect. "
-            "Off by default: plan §8 wants 443 to be the only public port."
         ),
     )
     return parser

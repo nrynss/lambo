@@ -7,7 +7,9 @@ loopback:8080 beside it, all as systemd services.
 
 Four constraints shape everything below.
 
-**t4g is Graviton, so the machine is ARM64.** User data fetches the
+**The instance type picks the release assets, not the reverse.** The default
+`t4g.large` is Graviton (arm64); `--instance-type` also accepts x86_64 families
+(e.g. `m7i-flex.large`, the free-tier option). User data fetches the
 `lambo-<version>-linux-<arch>` release asset matching the instance type, and verifies it against
 the `.sha256` published beside it rather than trusting the download. Same for
 Caddy, against the release's `checksums.txt`.
@@ -39,12 +41,14 @@ Usage:
 
 Prerequisite: provision_network.py has run and the secret holds a DSN.
 """
-
 from __future__ import annotations
 
 import argparse
+import base64
+import http.client
 import json
 import pathlib
+import ssl
 import sys
 import time
 
@@ -70,6 +74,7 @@ from _common import (  # noqa: E402
     find_instance,
     note,
     one_or_none,
+    poll,
     project_filters,
     require_boto3,
     require_secret_arn,
@@ -107,8 +112,9 @@ DEFAULT_CADDY_VERSION = "2.10.0"
 # available here, so the exact file is used instead.
 #
 # GGUF is architecture-independent: the same file gives the same vectors on
-# Graviton as on the x86 box that wrote them. The instance stays ARM because
-# that is cheaper per unit of throughput, not because the model differs.
+# Graviton as on the x86 box that wrote them. The default instance is Graviton
+# (the better value per unit of throughput); x86_64 is supported for accounts
+# that can only launch free-tier families.
 DEFAULT_BGE_MODEL_URL = (
     "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf"
 )
@@ -117,32 +123,39 @@ DEFAULT_BGE_MODEL_SHA256 = (
 )
 DEFAULT_LLAMA_CPP_REF = "b10453"
 
-# Prebuilt llama.cpp, per architecture, pinned by a hash computed from the
-# downloaded artefact. Upstream publishes no checksum file beside these, so the
-# pin is what makes the download verifiable at all.
+# Prebuilt llama.cpp, per release ref and per architecture, each pinned by a hash
+# computed from the downloaded artefact. Upstream publishes no checksum file beside
+# these, so the pin is what makes the download verifiable at all. Both the tarball
+# name and the hash are keyed by ref (not just arch), so an `--llama-cpp-ref` that
+# is absent from this table is refused at parse time - a non-default ref can never
+# silently pull the default ref's hash, which would fail sha256sum -c at boot after
+# the instance was already reported running.
 LLAMA_TARBALLS = {
-    "x86_64": (
-        "llama-{ref}-bin-ubuntu-x64.tar.gz",
-        "550eb155a09c3051c7add5becf6d0badc3a4c33416807985963036b27b859fb4",
-    ),
-    "arm64": (
-        "llama-{ref}-bin-ubuntu-arm64.tar.gz",
-        "b164e72dfb69c711275178e0d0fae54748042f039e4fe7386f1c0ea7019c109c",
-    ),
+    "b10453": {
+        "x86_64": (
+            "llama-b10453-bin-ubuntu-x64.tar.gz",
+            "550eb155a09c3051c7add5becf6d0badc3a4c33416807985963036b27b859fb4",
+        ),
+        "arm64": (
+            "llama-b10453-bin-ubuntu-arm64.tar.gz",
+            "b164e72dfb69c711275178e0d0fae54748042f039e4fe7386f1c0ea7019c109c",
+        ),
+    },
 }
 LLAMA_PORT = 8080
 
 # The FP16 model is ~1.2 GiB resident before llama.cpp's own allocations and the
 # KV cache, so these are rejected up front rather than discovered when the OOM
 # killer takes llama-server mid-demo. t4g.medium (4 GiB) fits but leaves little
-# room for the source build, so it is warned about rather than blocked.
+# headroom, so it is warned about rather than blocked. There is no source build
+# any more - llama.cpp ships as a prebuilt binary (see DEFAULT_LLAMA_CPP_REF).
 TOO_SMALL_FOR_LOCAL_BGE = (
     "t4g.nano", "t4g.micro", "t4g.small",
     "t3.nano", "t3.micro", "t3.small",
     "t3a.nano", "t3a.micro", "t3a.small",
     "t2.nano", "t2.micro", "t2.small",
 )
-# 4 GiB: fits, but leaves little room for the llama.cpp source build.
+# 4 GiB: fits the FP16 model + the prebuilt llama.cpp with little headroom.
 TIGHT_FOR_LOCAL_BGE = ("t4g.medium", "t3.medium", "t3a.medium", "c7i-flex.large")
 
 # Ubuntu 26.04 LTS, resolved through Canonical's public SSM parameter rather
@@ -160,6 +173,22 @@ UBUNTU_SSM = {
     "arm64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
     "x86_64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
 }
+#
+# NEW-5 (T6): VERIFY BEFORE D1 (clean redeploy). Neither parameter path above has
+# been confirmed against a live plumbing account - AWS creds were expired when T6
+# landed, and `aws ssm get-parameter` could not be run. Confirm, in us-east-1, that
+# BOTH of these return a value (the canonical Ubuntu 26.04 AMI id). The 24.04
+# convention strongly implies the {arm64,amd64}/hvm/ebs-gp3 paths exist as written,
+# but that is an inference, not a verified fact:
+#   aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id --region us-east-1
+#   aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id --region us-east-1
+# If either 404s, correct the path in UBUNTU_SSM before shipping.
+#
+# The `stable/current` path rotates: the AMI id resolved here is logged on launch
+# (see resolve_ami / the "AMI ..." note in main), but is deliberately not pinned.
+# Pinning a specific AMI id would sacrifice Canonical's own security/notch fixes;
+# the resolved id is recorded in the run output and the SSM lookup is re-evaluated
+# on every launch. Accept that tradeoff explicitly when you audit a deploy.
 
 # Which architecture each instance family lands on. The release asset names are
 # chosen at script level, so a mismatch downloads a binary the machine cannot
@@ -167,13 +196,20 @@ UBUNTU_SSM = {
 # the better value per unit of throughput; x86_64 is supported because an AWS
 # account on the Free plan may only launch free-tier-eligible types, and the
 # only such type with enough memory for BGE-M3 FP16 is m7i-flex.large.
+# Fail closed: an unlisted family is rejected at parse time (see
+# arch_for_instance_type), so a missing entry costs a clear error, never a
+# wrong-architecture download.
 ARM_FAMILIES = (
-    "t4g.", "m6g.", "m7g.", "m8g.", "c6g.", "c7g.", "c8g.",
-    "r6g.", "r7g.", "r8g.", "x2g", "im4g", "is4g", "g5g.",
+    "a1.", "t4g.", "m6g.", "m7g.", "m8g.", "c6g.", "c7g.", "c8g.",
+    "r6g.", "r7g.", "r8g.", "x2g.", "x2gd.", "im4g.", "im4gn.", "is4g.",
+    "is4gen.", "g5g.", "mac2.", "mac2-m2.",
 )
 X86_FAMILIES = (
-    "t2.", "t3.", "t3a.", "m5.", "m5a.", "m6i.", "m6a.", "m7i.", "m7i-flex.",
-    "c5.", "c5a.", "c6i.", "c6a.", "c7i.", "c7i-flex.", "r5.", "r6i.", "r7i.",
+    "t2.", "t3.", "t3a.", "m3.", "m4.", "m5.", "m5a.", "m6i.", "m6a.",
+    "m7i.", "m7i-flex.", "c3.", "c4.", "c5.", "c5a.", "c6i.", "c6a.",
+    "c7i.", "c7i-flex.", "r3.", "r4.", "r5.", "r6i.", "r7i.", "d2.",
+    "h1.", "i3.", "i3en.", "g3.", "g3s.", "g4dn.", "g5.", "p3.", "p3dn.",
+    "inf1.", "inf2.", "trn1.", "x1.", "x1e.", "z1d.", "u-", "mac1.",
 )
 
 # Release asset naming per architecture. lambo and Caddy spell the same machine
@@ -203,6 +239,43 @@ def arch_for_instance_type(value: str) -> str:
 def known_instance_type(value: str) -> str:
     arch_for_instance_type(value)
     return value
+
+
+def llama_tarball(ref: str, arch: str) -> tuple[str, str]:
+    """(tarball filename, sha256) for a pinned llama.cpp release ref + arch.
+
+    Keyed by ref so a custom `--llama-cpp-ref` resolves to *its* hash (and its
+    tarball name), never the default ref's. The caller must already have checked
+    `known_llama_cpp_ref`; a missing ref here is a programming error.
+    """
+    return LLAMA_TARBALLS[ref][arch]
+
+
+def known_llama_cpp_ref(value: str) -> str:
+    """Refuse a `--llama-cpp-ref` that has no pinned tarball hash (NEW-1).
+
+    Without this the URL, the extraction dir and the sha256 all drift apart for a
+    non-default ref and the bootstrap aborts at `sha256sum -c` after the instance
+    is already reported running. Fail here, in Python, before any AWS work.
+    """
+    if value not in LLAMA_TARBALLS:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a llama.cpp ref this script pins a tarball hash for. "
+            f"Supported: {', '.join(sorted(LLAMA_TARBALLS))}. Add the ref (and its "
+            "per-architecture sha256, computed from the downloaded artifact) to "
+            "LLAMA_TARBALLS to use it."
+        )
+    return value
+
+
+def effective_bge_model_sha256(args: argparse.Namespace) -> str:
+    """The hash to verify the model against: the explicit one, or the default.
+
+    `--bge-model-sha256` has no default value (it is `None` unless given), so we
+    can tell a supplied hash from an omitted one and enforce that a custom
+    `--bge-model-url` demands a custom hash (T2-P2-2).
+    """
+    return args.bge_model_sha256 or DEFAULT_BGE_MODEL_SHA256
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +310,32 @@ apt-get update -y >/dev/null
 # lambo-web restart-loops with `aws: not found` and never binds.
 apt-get install -y tar gzip curl ca-certificates awscli >/dev/null
 
+
+# Static system UIDs for the lambo/caddy/llama service accounts keep their data
+# dirs and the systemd units' Protect rules stable across re-boots. They assume
+# a fresh image: on a reused/heterogeneous one an unrelated account may already
+# hold the UID. Creating a new static-UID user then must fail loudly with the
+# conflict named, not abort under a bare useradd error. Existing accounts pass
+# straight through, so idempotent re-runs are untouched.
+ensure_system_user() {
+    local name="$1" uid="$2" home="$3"
+    if id -u "$name" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! getent group "$name" >/dev/null 2>&1; then
+        if getent group "$uid" >/dev/null 2>&1; then
+            echo "cannot create system group '$name': GID $uid is already taken by '$(getent group "$uid" | cut -d: -f1)'" >&2
+            exit 1
+        fi
+        groupadd --system --gid "$uid" "$name"
+    fi
+    if getent passwd "$uid" >/dev/null 2>&1; then
+        echo "cannot create system user '$name': UID $uid is already taken by '$(getent passwd "$uid" | cut -d: -f1)'" >&2
+        exit 1
+    fi
+    useradd --system --uid "$uid" --gid "$uid" --home-dir "$home" \
+        --create-home --shell /sbin/nologin "$name"
+}
 @@LLAMA_BLOCK@@
 
 # ---------------------------------------------------------------- lambo -----
@@ -271,11 +370,8 @@ install -m 0755 -o root -g root caddy /usr/local/bin/caddy
 rm -f "${CADDY_TGZ}" caddy_checksums.txt caddy
 /usr/local/bin/caddy version
 
-# ---------------------------------------------------------------- users -----
-id -u lambo >/dev/null 2>&1 || \
-    useradd --system --home-dir /var/lib/lambo --create-home --shell /sbin/nologin lambo
-id -u caddy >/dev/null 2>&1 || \
-    useradd --system --home-dir /var/lib/caddy --create-home --shell /sbin/nologin caddy
+ensure_system_user lambo 901 /var/lib/lambo
+ensure_system_user caddy 902 /var/lib/caddy
 install -d -m 0755 -o root  -g root  /etc/lambo /etc/caddy
 install -d -m 0750 -o lambo -g lambo /var/lib/lambo
 install -d -m 0750 -o caddy -g caddy /var/lib/caddy
@@ -307,14 +403,29 @@ export LAMBO_COCKROACH_DSN
 # When the embedder is local, wait for it. lambo builds an embedder at startup
 # and health-checks it, so racing llama-server's model load would just crash-loop
 # under Restart=always until it happened to win. Bounded, so a genuinely broken
-# llama-server still surfaces as a failure rather than hanging forever.
+# llama-server still surfaces as a failure rather than hanging forever. It also
+# stops polling the moment llama-server is no longer active (T2-P3-4): with
+# Restart=always a dead server flips in and out of `active`, so we only give up
+# after several consecutive inactive checks rather than on the first transient.
 if [ -n "${LAMBO_LLAMA_HEALTH:-}" ]; then
     i=0
+    down=0
     until curl -fsS --max-time 3 "$LAMBO_LLAMA_HEALTH" >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -ge 60 ]; then
             echo "llama-server did not become healthy at $LAMBO_LLAMA_HEALTH" >&2
             exit 1
+        fi
+        if [ -n "${LAMBO_LLAMA_SERVICE:-}" ] && \
+           ! systemctl is-active --quiet "${LAMBO_LLAMA_SERVICE}"; then
+            down=$((down + 1))
+            if [ "$down" -ge 3 ]; then
+                echo "${LAMBO_LLAMA_SERVICE} is not active (${down} consecutive " \
+                     "checks); aborting instead of polling $LAMBO_LLAMA_HEALTH for 5 min." >&2
+                exit 1
+            fi
+        else
+            down=0
         fi
         sleep 5
     done
@@ -339,6 +450,7 @@ Environment=LAMBO_REGION=${REGION}
 Environment=LAMBO_SECRET_ID=${SECRET_ID}
 Environment=LAMBO_SESSION=${SESSION}
 Environment=LAMBO_PORT=${WEB_PORT}
+Environment=LAMBO_LLAMA_SERVICE=@@LLAMA_SERVICE@@
 Environment=LAMBO_LLAMA_HEALTH=@@LLAMA_HEALTH@@
 ExecStart=/usr/local/bin/lambo-serve-web
 Restart=always
@@ -377,7 +489,7 @@ Environment=XDG_DATA_HOME=/var/lib/caddy
 Environment=XDG_CONFIG_HOME=/var/lib/caddy
 ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=5s
 LimitNOFILE=1048576
@@ -421,13 +533,12 @@ LLAMA_TARBALL_SHA256="@@LLAMA_TARBALL_SHA256@@"
 LLAMA_PORT="@@LLAMA_PORT@@"
 
 # The prebuilt llama.cpp links against the OpenMP runtime. Building from source
-# pulled it in as a g++ dependency; installing a binary does not, so it is
-# explicit here or llama-server dies with `libgomp.so.1: cannot open shared
-# object file` on every restart.
+# pulled it in transitively as a g++ dependency; installing a binary does not,
+# and libgomp1 is not in the base Ubuntu cloud image, so it is installed
+# explicitly here. Without it llama-server fails at exec with
+# `libgomp.so.1: cannot open shared object file` and the bootstrap aborts.
 apt-get install -y libgomp1 >/dev/null
-
-id -u llama >/dev/null 2>&1 || \
-    useradd --system --home-dir /var/lib/llama --create-home --shell /sbin/nologin llama
+ensure_system_user llama 903 /var/lib/llama
 install -d -m 0755 -o llama -g llama /var/lib/llama/models
 
 if [ ! -x /usr/local/bin/llama-server ]; then
@@ -440,13 +551,25 @@ if [ ! -x /usr/local/bin/llama-server ]; then
     # The archive is a flat directory of executables beside the shared objects
     # they link against, so it is installed whole and the loader is pointed at
     # it. Copying just llama-server out would leave it unable to find libllama.
+    # The hash above guarantees the *bytes*, not the layout, so verify the
+    # expected tree before relying on it (NEW-3): a wrong top-level dir or a
+    # missing libllama would otherwise produce a dangling /usr/local/bin symlink.
+    LLAMA_DIR="llama-${LLAMA_CPP_REF}"
+    if [ ! -d "${LLAMA_DIR}" ] || [ ! -x "${LLAMA_DIR}/llama-server" ]; then
+        echo "llama tarball ${LLAMA_TARBALL} did not extract a usable ${LLAMA_DIR}/llama-server" >&2
+        exit 1
+    fi
+    if ! ls "${LLAMA_DIR}"/libllama.so* >/dev/null 2>&1; then
+        echo "llama tarball ${LLAMA_TARBALL} has no libllama.so* in ${LLAMA_DIR}" >&2
+        exit 1
+    fi
     rm -rf /opt/llama
     install -d -m 0755 -o root -g root /opt/llama
-    cp -a "llama-${LLAMA_CPP_REF}/." /opt/llama/
+    cp -a "${LLAMA_DIR}/." /opt/llama/
     echo "/opt/llama" > /etc/ld.so.conf.d/llama.conf
     ldconfig
     ln -sf /opt/llama/llama-server /usr/local/bin/llama-server
-    cd /tmp && rm -rf "llama-${LLAMA_CPP_REF}" "${LLAMA_TARBALL}"
+    cd /tmp && rm -rf "${LLAMA_DIR}" "${LLAMA_TARBALL}"
 fi
 /usr/local/bin/llama-server --version 2>&1 | head -2 || true
 
@@ -542,19 +665,19 @@ def effective_llama_url(args: argparse.Namespace) -> str | None:
         return None
     return args.llama_url or f"http://127.0.0.1:{LLAMA_PORT}"
 
-
 def render_llama_block(args: argparse.Namespace) -> str:
     if not local_llama(args):
         return ""
     out = LLAMA_BLOCK
+    tarball, tarball_sha = llama_tarball(
+        args.llama_cpp_ref, arch_for_instance_type(args.instance_type)
+    )
     for key, value in {
         "@@BGE_MODEL_URL@@": args.bge_model_url,
         "@@LLAMA_CPP_REF@@": args.llama_cpp_ref,
-        "@@LLAMA_TARBALL@@": LLAMA_TARBALLS[arch_for_instance_type(args.instance_type)][0]
-            .format(ref=args.llama_cpp_ref),
-        "@@LLAMA_TARBALL_SHA256@@":
-            LLAMA_TARBALLS[arch_for_instance_type(args.instance_type)][1],
-        "@@BGE_MODEL_SHA256@@": args.bge_model_sha256,
+        "@@LLAMA_TARBALL@@": tarball,
+        "@@LLAMA_TARBALL_SHA256@@": tarball_sha,
+        "@@BGE_MODEL_SHA256@@": effective_bge_model_sha256(args),
         "@@LLAMA_PORT@@": str(LLAMA_PORT),
     }.items():
         out = out.replace(key, value)
@@ -620,6 +743,8 @@ def render_user_data(args: argparse.Namespace, caddyfile: str, lambo_toml: str) 
         "@@LLAMA_HEALTH@@": (
             f"{effective_llama_url(args)}/health" if local_llama(args) else ""
         ),
+        # The local service the wrapper watches; empty when there is none.
+        "@@LLAMA_SERVICE@@": "llama-server.service" if local_llama(args) else "",
     }
     out = USER_DATA
     for key, value in replacements.items():
@@ -718,6 +843,23 @@ def resolve_ami(aws: Aws, arch: str) -> tuple[str, str]:
             hint="the SSM parameter path may have changed; check UBUNTU_SSM.",
         )
     return ami_id, image.get("RootDeviceName", "/dev/xvda")
+def _iam_propagation_error(exc: ClientError) -> bool:
+    """True only when a RunInstances failure looks like IAM->EC2 eventual
+    consistency, so the launch retry loop does not mask real config errors
+    (T2-P2-3).
+
+    EC2 has no dedicated code for "profile not yet propagated": it surfaces as
+    `InvalidParameterValue` whose message mentions the instance profile. A
+    malformed ARN is unambiguous. Anything else (wrong instance type, bad
+    subnet, tenancy) raises immediately.
+    """
+    code = exc.response["Error"]["Code"]
+    if code == "InvalidIamInstanceProfileArn.Malformed":
+        return True
+    if code != "InvalidParameterValue":
+        return False
+    msg = (exc.response.get("Error", {}).get("Message") or "").lower()
+    return any(tok in msg for tok in ("instance profile", "iam instance profile", "iaminstanceprofile"))
 
 
 def launch_instance(
@@ -765,18 +907,21 @@ def launch_instance(
         kwargs["KeyName"] = args.key_name
 
     # Instance profiles are eventually consistent from IAM to EC2; RunInstances
-    # immediately after creating one routinely fails for a few seconds.
+    # immediately after creating one routinely fails for a few seconds. Narrow the
+    # retry to errors that are actually IAM-propagation-shaped (T2-P2-3): a broad
+    # `InvalidParameterValue` can also be a real config mistake (bad instance
+    # type, bad subnet) and must surface immediately, not after 12 silent retries
+    # wearing an IAM hint.
     last: ClientError | None = None
     for attempt in range(12):
         try:
             return aws.ec2.run_instances(**kwargs)["Instances"][0]["InstanceId"]
         except ClientError as exc:
-            code = exc.response["Error"]["Code"]
-            if code not in ("InvalidParameterValue", "InvalidIamInstanceProfileArn.Malformed"):
+            if not _iam_propagation_error(exc):
                 raise
             last = exc
             if attempt == 0:
-                note("waiting for the instance profile to propagate to EC2")
+                note("instance profile not yet visible to EC2; waiting for IAM propagation")
             time.sleep(5)
     raise InfraError(
         f"EC2 kept rejecting the instance profile: {last.response['Error']['Message'] if last else ''}",
@@ -808,6 +953,150 @@ def ensure_eip(aws: Aws, instance_id: str) -> str:
         )
         note(f"{address['PublicIp']} associated with {instance_id}")
     return address["PublicIp"]
+
+def _check_port_80_open(sg: dict) -> None:
+    """Warn (not fail) if the public web SG lacks tcp/80.
+
+    Port 80 is open by default in provision_network.py; a missing rule means that
+    script ran before this change (or the SG was hand-edited). The HTTP->HTTPS
+    redirect and ACME HTTP-01 fallback silently stop working without it, so say so
+    rather than let the operator discover the redirect is dead later (T2-P2-1).
+    """
+    for perm in sg.get("IpPermissions", []):
+        if (
+            perm.get("IpProtocol") == "tcp"
+            and perm.get("FromPort") == 80
+            and perm.get("ToPort") == 80
+        ):
+            return
+    warn(
+        f"{SG_PUBLIC_WEB_NAME} has no tcp/80 ingress. The http->https redirect and "
+        "ACME HTTP-01 fallback will not work. Re-run provision_network.py, which "
+        "opens port 80 by default."
+    )
+
+
+def _instance_state(aws: Aws, instance_id: str) -> str:
+    return aws.ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0][
+        "Instances"
+    ][0]["State"]["Name"]
+
+
+def _ephemeral_ip(aws: Aws, instance_id: str, timeout: int = 120) -> str:
+    """Wait for a public IPv4 on a non-EIP instance (T2-P3-1).
+
+    The address is only assigned once the instance is running, so a re-adopted
+    `pending` instance has no PublicIpAddress yet; reading it immediately yields
+    None and the launcher prints "at None". Poll until it appears.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        ip = _instance_state_public_ip(aws, instance_id)
+        if ip:
+            return ip
+        if time.monotonic() > deadline:
+            raise InfraError(
+                f"no public IPv4 appeared on {instance_id}.",
+                hint="check the instance is in a public subnet with auto-assign public IPv4 enabled.",
+            )
+        time.sleep(10)
+
+
+def _instance_state_public_ip(aws: Aws, instance_id: str) -> str | None:
+    inst = aws.ec2.describe_instances(InstanceIds=[instance_id])["Reservations"][0][
+        "Instances"
+    ][0]
+    return inst.get("PublicIpAddress")
+
+
+def _status_checks_ok(aws: Aws, instance_id: str) -> bool:
+    """True once EC2 reports both status checks 2/2 passed."""
+    resp = aws.ec2.describe_instance_status(InstanceIds=[instance_id])
+    statuses = resp.get("InstanceStatuses", [])
+    return bool(statuses) and all(
+        s.get("SystemStatus", {}).get("Status") == "ok"
+        and s.get("InstanceStatus", {}).get("Status") == "ok"
+        for s in statuses
+    )
+
+
+def _caddy_up(public_ip: str) -> bool:
+    """Probe :443 with a TLS handshake; any server answering counts as up.
+
+    We deliberately treat a completed TLS handshake (even mid-ACME with a
+    temporary/self-signed cert) as Caddy being alive - the point of NEW-2 is to
+    detect a bootstrap that never installed Caddy, which shows up as a refused
+    connection, not a certificate warning.
+    """
+    ctx = ssl._create_unverified_context()
+    try:
+        conn = http.client.HTTPSConnection(public_ip, 443, timeout=10, context=ctx)
+        try:
+            conn.request("HEAD", "/")
+            conn.getresponse().read()
+        finally:
+            conn.close()
+        return True
+    except ssl.SSLError:
+        return True  # a mid-ACME temporary cert can upset the probe; still a live Caddy
+    except (ConnectionRefusedError, TimeoutError, OSError):
+        return False
+
+
+def wait_for_bootstrap(
+    aws: Aws, instance_id: str, public_ip: str, timeout: int = 600, interval: int = 15
+) -> None:
+    """Wait until the bootstrap demonstrably finished (NEW-2).
+
+    `get_waiter("instance_running")` only reports the EC2 state machine; user-data
+    can still abort on a checksum and leave a running, portal-less instance. Here
+    we require both status checks 2/2 AND a live Caddy endpoint before returning.
+    On timeout we print the tail of the EC2 console output and fail, so a green
+    "exhibit launched" is never printed for a dead bootstrap. The bootstrap
+    script redirects its stdout/stderr to /var/log/lambo-bootstrap.log, so the
+    console tail is kernel/systemd/cloud-init meta, not the failing step. That
+    real log lives on the instance; this launcher does not install the SSM agent
+    nor grant ssm:SendCommand, so it cannot be fetched from here - pull it from
+    the host directly (recovery console / SSM shell) to see the failing line.
+    """
+    deadline = time.monotonic() + timeout
+    saw_status = False
+    while time.monotonic() < deadline:
+        if public_ip and _status_checks_ok(aws, instance_id):
+            saw_status = True
+        if public_ip and saw_status and _caddy_up(public_ip):
+            note(f"bootstrap ready: status checks 2/2, {public_ip} answers on :443")
+            return
+        time.sleep(interval)
+
+    tail = _console_tail(aws, instance_id)
+    raise InfraError(
+        f"the exhibit did not become healthy on {public_ip} within {timeout}s "
+        "(status checks and/or the :443 probe never passed).",
+        hint="console output (the bootstrap script redirects to "
+        "/var/log/lambo-bootstrap.log, so the failing step may not appear "
+        "here; pull the real log from the host directly):\n"
+        + "\n".join(tail),
+    )
+
+
+def _console_tail(aws: Aws, instance_id: str, lines: int = 30) -> list[str]:
+    """Tail of the EC2 console output (best-effort; not the bootstrap log).
+
+    USER_DATA redirects stdout/stderr to /var/log/lambo-bootstrap.log, so this
+    shows kernel/systemd/cloud-init meta, not the failing step. Kept as a final
+    diagnostic signal only; it never errors the launch path.
+    """
+    try:
+        out = aws.ec2.get_console_output(InstanceId=instance_id).get("Output", "")
+        if not out:
+            return ["<console output is empty>"]
+        text = base64.b64decode(out).decode("utf-8", errors="replace")
+        return text.strip().splitlines()[-lines:] or ["<console output empty>"]
+    except ClientError as exc:
+        return [
+            f"<could not read console output: {exc.response['Error'].get('Code', 'error')}>"
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -883,12 +1172,22 @@ def main(args: argparse.Namespace) -> int:
             ),
         )
     if local_llama(args) and args.instance_type in TIGHT_FOR_LOCAL_BGE:
-        warn(f"{args.instance_type} fits the FP16 model but leaves little headroom for")
-        warn("llama.cpp's source build. t4g.large is the tested size.")
+        warn(f"{args.instance_type} fits the FP16 model but leaves little headroom.")
+        warn("llama.cpp ships as a prebuilt binary; t4g.large is the tested size.")
     if args.llama_url and args.embedder != "bge_m3":
         raise InfraError(
             "--llama-url only applies to --embedder bge_m3.",
             hint=f"the embedder is {args.embedder!r}, which reaches no llama.cpp at all.",
+        )
+    if args.bge_model_url != DEFAULT_BGE_MODEL_URL and not args.bge_model_sha256:
+        raise InfraError(
+            "--bge-model-sha256 is required when --bge-model-url is customized.",
+            hint=(
+                "changing the URL changes the bytes, so the pinned default hash no "
+                "longer matches and the boot would fail sha256sum -c on the model. "
+                "Pass --bge-model-sha256 of the new file (and re-embed the store "
+                "with the new model, since the vectors must match)."
+            ),
         )
 
     caddyfile = render_caddyfile(args.hostname, args.acme_email)
@@ -905,8 +1204,8 @@ def main(args: argparse.Namespace) -> int:
     require_vpc(aws)
     subnet = require_subnet(aws, SUBNET_PUBLIC_NAME)
     sg = require_sg(aws, SG_PUBLIC_WEB_NAME)
+    _check_port_80_open(sg)
     secret_arn = require_secret_arn(aws)
-
     secret_desc = aws.secrets.describe_secret(SecretId=SECRET_NAME)
     if not secret_desc.get("VersionIdsToStages"):
         # Not fatal: the instance boots, lambo-web fails, systemd retries, and it
@@ -926,6 +1225,12 @@ def main(args: argparse.Namespace) -> int:
         existing("instance", instance["InstanceId"], instance["State"]["Name"])
         note("user data is only read at first boot; terminate and re-run to change it")
         instance_id = instance["InstanceId"]
+        state = instance["State"]["Name"]
+        if state in ("stopping", "stopped"):
+            raise InfraError(
+                f"{EC2_NAME} is {state}; a stopped exhibit serves nothing.",
+                hint=f"start it (aws ec2 start-instances --instance-ids {instance_id}) then re-run this script.",
+            )
     else:
         ami_id, root_device = resolve_ami(aws, arch_for_instance_type(args.instance_type))
         note(f"AMI {ami_id} (Ubuntu 26.04 LTS, {arch_for_instance_type(args.instance_type)}) root {root_device}")
@@ -934,17 +1239,34 @@ def main(args: argparse.Namespace) -> int:
             aws, ami_id, root_device, subnet["SubnetId"], sg["GroupId"], profile_arn, user_data, args
         )
         created("instance", instance_id)
-        aws.ec2.get_waiter("instance_running").wait(InstanceIds=[instance_id])
+
+    # A freshly launched instance, or a re-adopted `pending` one, needs to reach
+    # running before a public IP exists or anything can be probed (T2-P3-1).
+    poll(
+        lambda: _instance_state(aws, instance_id),
+        lambda s: s == "running",
+        "instance to reach running",
+        timeout=600,
+        interval=10,
+    )
 
     public_ip = None
     if args.eip:
         step("address")
         public_ip = ensure_eip(aws, instance_id)
     else:
-        described = aws.ec2.describe_instances(InstanceIds=[instance_id])
-        public_ip = described["Reservations"][0]["Instances"][0].get("PublicIpAddress")
+        note("waiting for the ephemeral public IP (it is only assigned once the instance is running)")
+        public_ip = _ephemeral_ip(aws, instance_id)
         note(f"using the ephemeral public IP {public_ip}; it changes on stop/start")
 
+    # NEW-2: a green `instance_running` does not mean the bootstrap finished. All
+    # the new download-and-verify steps (llama tarball, BGE model) can abort
+    # user-data with set -e, leaving a running instance with no portal. Wait for
+    # both status checks 2/2 AND the Caddy endpoint to answer before claiming
+    # "exhibit launched"; on failure, print the console tail (console meta, NOT
+    # the boot log — the bootstrap redirects to /var/log/lambo-bootstrap.log).
+    step("bootstrap")
+    wait_for_bootstrap(aws, instance_id, public_ip)
     say()
     step("exhibit launched")
     note(f"instance {instance_id} at {public_ip}")
@@ -961,7 +1283,7 @@ def main(args: argparse.Namespace) -> int:
         say("    visitor, judges included. Plan §8: public CAs do not issue for bare")
         say("    IP addresses. Re-run with --hostname once you have a name.")
     say()
-    note("port 443 is the only public ingress unless provision_network.py ran with --open-http")
+    note("port 80 and 443 are open from 0.0.0.0/0: 80 exists for the http->https redirect and ACME HTTP-01")
     return 0
 
 
@@ -1040,33 +1362,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--bge-model-sha256",
-        default=DEFAULT_BGE_MODEL_SHA256,
+        default=None,
         help=(
             "Expected sha256 of the GGUF, checked on download and on every boot. "
-            "Change it only alongside --bge-model-url, and only if you have "
-            "re-embedded the store with the new model."
+            "Defaults to the hash of the DEFAULT_BGE_MODEL_URL file. Required "
+            "(T2-P2-2) once you change --bge-model-url: the new file's bytes will "
+            "not match the default hash, so the check is enforced rather than "
+            "hinted, and you must also re-embed the store with the new model."
         ),
     )
     parser.add_argument(
         "--llama-cpp-ref",
         default=DEFAULT_LLAMA_CPP_REF,
-        help=f"llama.cpp release tag to install (default {DEFAULT_LLAMA_CPP_REF}). Changing it invalidates the pinned tarball hashes in LLAMA_TARBALLS.",
+        type=known_llama_cpp_ref,
+        help=(
+            f"llama.cpp release tag to install (default {DEFAULT_LLAMA_CPP_REF}). "
+            "Must be a ref this script pins a tarball sha256 for (see "
+            "LLAMA_TARBALLS); anything else is refused at parse time so a "
+            "bootstrap never fails a checksum it could not have passed."
+        ),
     )
     parser.add_argument(
         "--instance-type",
         default="t4g.large",
         type=known_instance_type,
         help=(
-            "Graviton instance type (default t4g.large). Must be ARM64. The "
-            "default is sized for the FP16 BGE-M3 with headroom; t4g.micro is "
-            "enough only with --embedder fixture or an off-instance --llama-url."
+            "Instance type (default t4g.large, Graviton/arm64). Must be a family "
+            "this script maps to an architecture; m7i-flex.large is the x86_64 "
+            "free-tier option. The default is sized for the FP16 BGE-M3 with "
+            "headroom; t4g.micro is enough only with --embedder fixture or an "
+            "off-instance --llama-url."
         ),
     )
     parser.add_argument(
         "--volume-size",
         type=int,
         default=32,
-        help="Root gp3 volume size in GB (default 32: the FP16 model is ~1.2 GB and llama.cpp builds from source).",
+        help=(
+            "Root gp3 volume size in GB (default 32: the FP16 model is ~1.2 GB, "
+            "plus room for the prebuilt llama.cpp, Caddy and lambo)."
+        ),
     )
     parser.add_argument(
         "--key-name",
