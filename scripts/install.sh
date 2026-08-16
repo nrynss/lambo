@@ -81,13 +81,25 @@ echo "downloading checksum ${SHA_URL}"
 curl -fsSL "${SHA_URL}" -o "${TMP_DIR}/${ASSET}.sha256"
 
 # --- Verify SHA-256 ---------------------------------------------------------
-# The published checksum file is `sha256sum` output: "<hash>  <filename>".
+# The published checksum file is "<hash>  <filename>", which is the shared
+# output format of GNU `sha256sum` and BSD/macOS `shasum -a 256`.
 EXPECTED="$(sed -n 's/^\([0-9a-fA-F]\{64\}\).*/\1/p' "${TMP_DIR}/${ASSET}.sha256" | head -1)"
 if [ -z "$EXPECTED" ]; then
   echo "error: checksum file for ${ASSET} is empty or malformed" >&2
   exit 1
 fi
-ACTUAL="$(sha256sum "${BIN_PATH}" | sed -n 's/^\([0-9a-fA-F]\{64\}\).*/\1/p')"
+# macOS ships neither `sha256sum` nor GNU coreutils, so a hardcoded call to it
+# fails on exactly the platform the macOS release assets exist for. `shasum` is
+# in the base install there; Linux has `sha256sum`. Accept either.
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL="$(sha256sum "${BIN_PATH}" | sed -n 's/^\([0-9a-fA-F]\{64\}\).*/\1/p')"
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL="$(shasum -a 256 "${BIN_PATH}" | sed -n 's/^\([0-9a-fA-F]\{64\}\).*/\1/p')"
+else
+  echo "error: need sha256sum or shasum to verify the download; install either and retry" >&2
+  echo "  refusing to install an unverified binary" >&2
+  exit 1
+fi
 if [ "$EXPECTED" != "$ACTUAL" ]; then
   echo "error: checksum mismatch for ${ASSET}" >&2
   echo "  expected ${EXPECTED}" >&2
