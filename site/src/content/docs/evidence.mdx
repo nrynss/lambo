@@ -45,6 +45,12 @@ IDENTICAL - T8.4 x2 met
 
 You get identical outcomes across both runs.
 
+**Update — 2026-08-16.** That capture is genuine, but when it was taken identical output was not yet *guaranteed*. A time-derived term in the daemon score (`recency`, measured against the session's wall-clock temporal extent) varied slightly between runs, so roughly one run in ten rendered two near-tied concepts in the opposite order. The run above passed at about nine attempts in ten rather than by construction.
+
+That is now fixed. The demo stamps its interactions from a script clock, so a session's temporal extent is a property of the script rather than of the scheduler, and the ordering no longer depends on how the OS happened to schedule a sleep. The byte-identical assertion in `binary_parity` was never weakened to accommodate the bug — it is the test that caught it.
+
+So the claim on this page holds, and now holds for the right reason. The earlier capture is left exactly as recorded rather than re-taken, because a capture edited after the fact stops being evidence.
+
 - Exactly 12 interactions and 27 concepts created.
 - Exactly 114 graph edges established.
 - Exactly 5 canonization events recorded in CockroachDB.
