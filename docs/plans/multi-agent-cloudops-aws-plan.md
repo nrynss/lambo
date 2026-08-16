@@ -2,11 +2,39 @@
 
 ```yaml
 status: PROPOSED / READY FOR EXECUTION POST-BINARY-VALIDATION
+revision: 2 (hardened 2026-08-16 — see §0)
 owner: nryn
 target_hackathon: CockroachDB AI Hackathon on Devpost
 target_services: AWS (EC2, Lambda, RDS, Secrets Manager, VPC) + CockroachDB Cloud
-execution_mode: External scripts driving Lambo as a CLI/MCP binary (Zero core Rust changes)
+execution_mode: >
+  Agents and `lambo serve` run on the operator's own machine and act on AWS
+  through the AWS APIs. AWS hosts the resources being provisioned and the
+  public read-only judge portal. Lambo itself is not hosted in AWS, apart from
+  `lambo serve-web` on the exhibit EC2 instance.
 ```
+
+---
+
+## 0. Revision 2 — what changed and why
+
+Rev 1 was reviewed against the code and priced. Five things changed:
+
+1. **Topology corrected.** Rev 1 read as though Lambo ran in AWS. It does not: the
+   agents and the single-writer `lambo serve` run locally, and AWS is the *subject*
+   the agents act on plus the *host* of the judge portal. Everything below is
+   rewritten to that shape.
+2. **Lambda moved out of the VPC.** Rev 1 put the stats Lambda in the VPC alongside
+   RDS. A VPC-attached Lambda has no route to the internet, so it could not have
+   reached CockroachDB Cloud without a NAT gateway — about **$32/month**, over half
+   the credit budget, for a demo that lasts days. The Lambda reads CockroachDB, not
+   RDS, so it belongs outside the VPC and needs no NAT. See §7.
+3. **RDS reframed honestly.** RDS cannot be a Lambo store — see §6 for the proof and
+   the trap that makes it look like it could be. It stays, but as the *workload the
+   app-data agent provisions and Lambo dependency-tracks*, which is a true and
+   defensible claim rather than a decorative one.
+4. **TLS made real.** `https://<EC2-IP>` cannot get a certificate. See §8.
+5. **Phase 5 scoped against the code.** The agent-attributed timeline is not
+   free — `WebEvent` carries no agent field today. See §9.
 
 ---
 
@@ -21,40 +49,44 @@ Multi-agent autonomous systems managing cloud infrastructure (CDK, Terraform, Cl
 
 ## 2. Real AWS Infrastructure Architecture (`us-east-1`)
 
-This architecture earns the remaining **$60 in AWS Promotional Credits** while maintaining a real, functional cloud stack for the judge exhibit and demo video.
+The operator's machine runs the agents and the single writer. AWS holds the
+resources the agents provision, plus the public read-only portal judges visit.
 
 ```
-                                  AWS CLOUD (us-east-1)
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│  VPC: VPC-Enterprise-Prod (10.0.0.0/16)                                                │
-│                                                                                        │
-│   ┌──────────────────────────────────┐      ┌──────────────────────────────────────┐   │
-│   │ Public Subnet (10.0.1.0/24)      │      │ Private Subnet (10.0.2.0/24)         │   │
-│   │                                  │      │                                      │   │
-│   │  ┌────────────────────────────┐  │      │  ┌────────────────────────────────┐  │   │
-│   │  │ EC2-LamboWebExhibit        │  │      │  │ RDS-Lambo-Demo-DB              │  │   │
-│   │  │ (t4g.micro - ARM64)        │  │      │  │ (db.t4g.micro Postgres)        │  │   │
-│   │  │ • Caddy Reverse Proxy (443)│  │      │  │ • Data store tier              │  │   │
-│   │  │ • lambo serve-web (7710)   │  │      │  │ • [$20 Credit Activity]        │  │   │
-│   │  │ • [$20 Credit Activity]    │  │      │  └────────────────────────────────┘  │   │
-│   │  └──────────────┬─────────────┘  │      │                 ▲                    │   │
-│   └─────────────────┼────────────────┘      └─────────────────┼────────────────────┘   │
-│                     │ SG-PublicWeb (80/443/22)                │ SG-Base-VPC (Internal) │
-│                     │                                         │                        │
-│   ┌─────────────────┴─────────────────────────────────────────┴────────────────────┐   │
-│   │ Serverless App Tier: Lambda-LamboStats-API (Python 3.12 + Function URL)        │   │
-│   │ • Read-only CockroachDB & AWS Cloud health dashboard                           │   │
-│   │ • [$20 Credit Activity]                                                        │   │
-│   └─────────────────────────────────┬──────────────────────────────────────────────┘   │
-│                                     │                                                  │
-│   ┌─────────────────────────────────┴──────────────────────────────────────────────┐   │
-│   │ AWS Secrets Manager: lambo/cockroach-dsn                                       │   │
-│   │ • Runtime secure credential resolution via asm-exec                            │   │
-│   └────────────────────────────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+   OPERATOR MACHINE (local)                        AWS CLOUD (us-east-1)
+┌──────────────────────────────┐        ┌──────────────────────────────────────────┐
+│ network-infra-agent          │        │ VPC-Enterprise-Prod (10.0.0.0/16)        │
+│ app-data-agent               │──AWS──▶│                                          │
+│   (boto3 / AWS CLI)          │  APIs  │  Public Subnet 10.0.1.0/24               │
+│                              │        │   ┌────────────────────────────────────┐ │
+│ lambo serve (SINGLE WRITER)  │        │   │ EC2-LamboWebExhibit (t4g.micro)    │ │
+│   stdio MCP + CLI verbs      │        │   │  Caddy 443 ─▶ lambo serve-web 7710 │ │
+└───────────────┬──────────────┘        │   │  READ-ONLY. Instance profile reads │ │
+                │ writes                │   │  lambo/cockroach-dsn at boot.      │ │
+                ▼                       │   └────────────────────────────────────┘ │
+     ┌─────────────────────┐            │                                          │
+     │  CockroachDB Cloud  │◀───reads───│  Private Subnet 10.0.2.0/24              │
+     │  (durable store)    │            │   ┌────────────────────────────────────┐ │
+     └─────────────────────┘            │   │ RDS-Lambo-Demo-DB (db.t4g.micro)   │ │
+                ▲                       │   │  The tracked workload. NOT a Lambo │ │
+                │ reads                 │   │  store — see §6. No public access. │ │
+                │                       │   └────────────────────────────────────┘ │
+     ┌──────────┴──────────┐            │                                          │
+     │ Lambda-LamboStats   │            │  Secrets Manager: lambo/cockroach-dsn    │
+     │ Function URL,       │            │  IGW + public route table. NO NAT.       │
+     │ OUTSIDE the VPC     │            └──────────────────────────────────────────┘
+     └─────────────────────┘
 ```
 
----
+**Why the Lambda sits outside the VPC.** It reads CockroachDB Cloud, which is on
+the public internet. A VPC-attached Lambda has no internet route without a NAT
+gateway. It has no reason to reach RDS, so attaching it to the VPC would buy
+nothing and add a failure mode. Outside the VPC it gets internet egress with no
+extra component in the path.
+
+**There is deliberately no NAT gateway anywhere in this design.** Credits are
+not the reason — if a future step seems to need one, that is a signal something
+has been placed in the wrong tier. Re-check the placement before provisioning it.
 
 ## 3. Two-Agent Execution Workflow
 
@@ -124,9 +156,148 @@ To give judges full transparency into how multi-agent collaboration works in rea
 
 ---
 
-## 6. Implementation Checklist
+## 6. RDS: what it is, and what it is not
+
+RDS is provisioned by `app-data-agent` as the **workload whose dependencies Lambo
+tracks**. That is its honest role, and it is a real one: it is the node that gives
+`SG-Base-VPC` and `Subnet-Private-1a` their blast radius, and therefore the reason
+the climax in §3 has any stakes at all. Delete the shared SG and the database
+loses its network. That is the outage the demo prevents.
+
+**RDS is not, and cannot be, a Lambo store.** `migrations/cockroach/001_init.sql`
+is CockroachDB-specific by construction — `embedding VECTOR(1024)` and
+`CREATE VECTOR INDEX` — so the schema will not apply to stock PostgreSQL.
+
+There is a trap worth naming, because it will look like it works:
+`StoreKind::from_str` accepts `"postgres"` and `"pg"` as **aliases for Cockroach**
+(`src/store/mod.rs:403`). Pointing `lambo.toml` at an RDS DSN therefore connects
+cleanly and only then fails applying the schema. Nobody should spend an afternoon
+on that. If a Postgres-compatible store is ever wanted, it is a new adapter with a
+non-vector migration, not a config change.
+
+**How to describe it in the submission.** "Amazon RDS for PostgreSQL — provisioned
+by the app-data agent as the private-tier workload; its dependency on the shared
+security group and private subnet is what Lambo's blast-radius warning protects."
+That is accurate. Do not write "data store tier" or imply Lambo persists to it.
+
+---
+
+## 7. Cost model and teardown
+
+Credit position: **~140 promotional credits already held**, rising to ~160 once an
+EC2 instance is running and ~180 with the other credit activities. Rough
+`us-east-1` on-demand estimates for this stack:
+
+| Resource | Approx. monthly |
+|---|---|
+| EC2 `t4g.micro` (exhibit, always on) | ~$6 |
+| RDS `db.t4g.micro` PostgreSQL, single-AZ + 20 GB gp3 | ~$14 |
+| Secrets Manager, 1 secret | ~$0.40 |
+| Lambda + Function URL (demo traffic) | ~$0 (free tier) |
+| VPC, subnets, IGW, route tables, security groups | $0 |
+| Route 53 hosted zone (if used for TLS, §8) | ~$0.50 |
+| **Total** | **~$21/month** |
+
+At ~$21/month against ~140–180 credits, the stack runs comfortably for the
+entire hackathon period and well beyond it. **Cost is not a binding constraint
+on this design** — so do not let it drive architecture decisions, and do not
+trim the exhibit to save single-digit dollars.
+
+Two things still matter, for reasons other than the bill:
+
+- **Keep the Lambda outside the VPC anyway.** With this budget a NAT gateway is
+  affordable, but it would still be the wrong call: the Lambda reads CockroachDB
+  Cloud over the internet and has no reason to reach RDS, so a NAT would add a
+  failure mode and a moving part in exchange for nothing. The argument is
+  architectural, not financial.
+- **Still write the teardown script.** Not to protect credits, but so the exhibit
+  can be rebuilt from scratch on demand and so nothing is left half-deleted by
+  hand after the event. Write `scripts/aws-infra/teardown.py` alongside the
+  provisioning scripts, deleting in dependency order — Lambda, EC2, RDS (skip
+  final snapshot), security groups, subnets, route tables, IGW, VPC, then the
+  secret. Tag every resource `Project=lambo-cloudops` at creation so teardown can
+  find them, and verify with a tag-filtered `describe-*` sweep that comes back
+  empty.
+
+## 8. TLS for the judge URL
+
+`https://<EC2-Public-IP>` cannot be served with a trusted certificate: public CAs
+do not issue for bare IP addresses, so Caddy's automatic HTTPS has nothing to
+work with and judges would meet a browser warning on the exhibit's front door.
+
+Pick one before provisioning:
+
+- **A hostname you control** (existing domain, or a Route 53 hosted zone at
+  ~$0.50/month) with an A record to the instance's Elastic IP. Caddy then issues
+  and renews automatically. Recommended, and the cost is already in §7.
+- **Cloudflare Tunnel** — gives a public HTTPS hostname with no inbound ports and
+  no certificate handling, so the security group needs no 80/443 ingress at all.
+  Free, at the cost of one more moving part.
+
+Whichever is chosen, restrict SSH ingress to the operator's own address rather
+than `0.0.0.0/0`. Port 443 is the only thing the public needs.
+
+Exposure is otherwise sound: `lambo serve-web` is read-only, and that is
+test-enforced — `serve_web.rs` greps its own production source for
+`Memory::builder`, `open_writer`, `acquire_lease` and `.spawn()`. The instance
+profile should be scoped to reading exactly the one secret, nothing wider.
+
+---
+
+## 9. Phase 5 scope check — the portal is not free
+
+§5 asks for a provenance timeline "broken down by agent". Against today's code
+that is **new Rust work**, which contradicts the `execution_mode` line's "zero
+core Rust changes" if taken literally.
+
+What `lambo serve-web` exposes today is `/`, `/app.css`, `/app.js`, `/healthz`,
+`/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`
+(`src/cli/serve_web.rs:736`). The event payload is:
+
+```rust
+struct WebEvent {
+    seq: usize,
+    occurred_at: String,
+    node_id: String,
+    content: Option<String>,
+    from_status: &'static str,
+    to_status: &'static str,
+    blast_radius: Option<i32>,
+}
+```
+
+There is **no agent field**. So §5.1's per-agent breakdown needs either a new
+field on `WebEvent` plus the query behind it, or a different data path.
+
+Two honest options, to be decided before Phase 5 starts:
+
+- **Cut to what exists.** The canonization audit trail (§5.3) and the replay view
+  are already served by `/api/events` and `/api/stats` — that is the substance of
+  the exhibit, and it needs no Rust. Drop the per-agent split.
+- **Accept the Rust change.** Add agent attribution to the event payload, and
+  amend `execution_mode` to say so rather than leaving the plan self-contradictory.
+
+§5.2's "exact diff proof demonstrating identical graph convergence" is on hold
+regardless: that determinism property is currently under repair, and
+`evidence/demo-live-diff.txt` recorded `IDENTICAL` for two runs that passed by
+luck. Do not put that claim in front of judges until the parity work is green.
+
+---
+
+## 10. Implementation Checklist
+
+### Phase 0: Decisions to make before provisioning anything
+- [ ] **TLS**: pick a hostname strategy (§8). Provisioning an Elastic IP before
+      this is decided risks redoing the Caddy and security-group config.
+- [ ] **Phase 5 scope**: cut to existing endpoints, or accept the Rust change and
+      amend `execution_mode` (§9). This decides whether Phase 5 is hours or days.
 
 ### Phase 1: Local Binary Validation (Prerequisite)
+- [ ] **Parity determinism must be green first.** `binary_parity`'s byte-identical
+      demo assertion currently fails ~1 run in 10 (time-derived `recency` in the
+      daemon score varies between runs). Fix is in flight; §5.2's replay claim and
+      the v0.1.0 release both depend on it. Do not start Phase 6 recording until
+      100 consecutive runs pass.
 - [ ] Run full unit and integration test suite: `cargo test --all-features`.
 - [ ] Verify `lambo serve`, `lambo serve-web`, `lambo derive`, `lambo record-action`, and `lambo recall` against local SQLite & live CockroachDB.
 - [ ] Ensure binary build outputs are clean and ready for packaging.
@@ -138,6 +309,10 @@ To give judges full transparency into how multi-agent collaboration works in rea
 - [ ] `provision_network.py` (VPC, Subnets, Gateways, Route Tables, SGs, Secrets Manager).
 - [ ] `provision_app_data.py` (RDS instance, Lambda function with Function URL).
 - [ ] `launch_exhibit_ec2.py` (EC2 `t4g.micro` with Caddy + `lambo serve-web` systemd service).
+- [ ] Tag every resource `Project=lambo-cloudops` at creation, so teardown can find it.
+- [ ] EC2 instance profile scoped to reading exactly `lambo/cockroach-dsn` — no wider.
+- [ ] SSH ingress restricted to the operator address, not `0.0.0.0/0`.
+- [ ] `teardown.py` (§7), written in this pass, not after the event.
 
 ### Phase 4: CloudOps Multi-Agent Orchestration (`scripts/cloudops/`)
 - [ ] `01_network_agent.py`: Executes Network Agent actions and feeds derivations into Lambo.
@@ -145,9 +320,36 @@ To give judges full transparency into how multi-agent collaboration works in rea
 - [ ] `03_crossover_protect.py`: Executes the destructive query, verifies Lambo's blast-radius warning, and renders outcome.
 
 ### Phase 5: Judge Web Portal & Traceability Enhancements
-- [ ] Ensure `lambo serve-web` exposes the agent interaction timeline and canonization history for judges.
+- [ ] Execute the Phase 0 scope decision (§9). `WebEvent` carries no agent field
+      today, so the per-agent timeline is not free.
+- [ ] Confirm the canonization audit trail renders from `/api/events` + `/api/stats`.
 
 ### Phase 6: Verification & Demo Recording
 - [ ] Verify judge URL (`https://<EC2-IP-or-Domain>`) renders live `lambo serve-web` session window with agent traceability.
 - [ ] Verify Lambda Function URL returns live stats.
 - [ ] Record 3-minute video covering the multi-agent workflow and blast-radius protection.
+- [ ] Replace the README's "AWS services used: None yet" with §11's text.
+- [ ] Run `teardown.py` in a scratch region or account once, to prove it works
+      before it is ever needed for real.
+
+---
+
+## 11. AWS services used — submission text
+
+Replaces the current "None yet" in the README. Every line is a service actually
+exercised by this scenario; none is aspirational.
+
+| Service | How this project uses it |
+|---|---|
+| **Amazon EC2** | Hosts the public judge portal: `lambo serve-web` behind Caddy on a `t4g.micro`, serving the read-only view of a live session. Read-only is test-enforced, not merely intended. |
+| **Amazon VPC** (subnets, route tables, internet gateway, security groups) | The network the two agents provision and that Lambo tracks as graph nodes. The shared security group and private subnet are the load-bearing pillars whose blast radius the demo protects. |
+| **AWS Secrets Manager** | Stores the CockroachDB DSN. The exhibit instance resolves it at boot through an instance profile, so no connection string is baked into user data, an AMI, or the repo. |
+| **AWS Lambda** (Function URL) | A public read-only stats endpoint over the live CockroachDB session. Runs outside the VPC, since it reads an internet-facing database. |
+| **Amazon RDS for PostgreSQL** | Provisioned by the app-data agent as the private-tier workload. Its dependency on the shared security group and private subnet is precisely what the blast-radius warning protects. It is not a Lambo store — see §6. |
+| **AWS IAM** | Instance profile and Lambda execution role, each scoped to the one thing it needs. |
+
+**If Bedrock access clears**, add Amazon Titan Text Embeddings V2 as the dense
+embedder behind the reserved `embed-bedrock` feature — that would be the only
+entry in this table where AWS runs inside Lambo rather than around it, and it is
+worth the upgrade. Until the account's model-access form is approved it stays out
+of the table; `evidence/bedrock-blocked.txt` records the refusal.
