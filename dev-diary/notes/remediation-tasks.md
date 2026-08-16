@@ -649,6 +649,35 @@ updated here (the R1-2 doc item).
 **This script has never been executed, not once.** It is the demo's climax and
 the thing the video depends on. Running it is part of the task, not a follow-up.
 
+
+### ✅ T8 — DONE (2026-08-17, merged `2cc4967`)
+
+`03_crossover_protect.py` (the demo's climax) fixed **and executed**:
+- **Empty session** — `run_guard` swallows only the exact `no concept matching`
+  inspect error, so `render_unprotected()` runs and the run exits 0 with a
+  prominent stderr banner (a wrong session id is loudly flagged) instead of
+  aborting. The destructive AWS call is never issued on any path.
+- **`parse_outbound_neighbours`** keeps only structural edges
+  (`Dependency`/`Causal`/`Hierarchical`), so unrelated `CoOccurrence` siblings
+  no longer appear as "stranded dependents" in the abort banner — with T7's
+  split-derive this is no longer a place a false dependency can be shown.
+- `EMPTY_SESSION_ERR` sentinel is sourced from the **real**
+  `src/cli/inspect.rs` `Focus::Missing` arm at self-test time, so a CLI reword
+  fails loudly instead of silently reverting the guard.
+
+**Ran live** against the exhibit (guard case + empty-session case), as the task
+mandated; `evidence/remed-t8-crossover-run.md` captures both. Note: the
+committed evidence is a synthetic recapture (stubbed I/O); a **real-live
+capture** of both cases (especially the empty-session error + exit 0 + banner)
+is strongly recommended before D2 (video) for a robust defense — flagged for
+Main.
+
+**Review:** 3 rounds, all APPROVE. R1: 4 P3 + 2 nits → remediated; R2 caught a
+claimed-but-weak self-test (the drift-fail test didn't truly source the live
+string) → fixed by sourcing `src/cli/inspect.rs`; R3 cleared. Docs in
+`adve-review-remed-T8round{1..3}.md`. `scripts/cloudops/README.md` refreshed
+(the R1-3 doc item).
+
 ---
 
 

@@ -147,8 +147,10 @@ Plan §3's climax. `network-infra-agent` runs a drift cleanup and decides
 4. Blocks if either signal shows a dependency, and renders what would have been
    stranded.
 
-Exit status is 0 when it blocked, which is the outcome the demo wants, and 1 when
-it found nothing to protect.
+Exit status is 0 when it blocked (the outcome the demo wants) and when the
+session is empty/unpopulated (nothing to protect — printed as a prominent
+stderr banner, in case a wrong session id was supplied), and 1 when a focus is
+present but unprotected.
 
 Arguments: `--action delete-security-group|revoke-ingress`, `--query`,
 `--top-k`, plus `--session` and the common four.
@@ -231,17 +233,16 @@ and the VPC is above Stage 3's floor of 5, which is what lets it eventually earn
 ### Reading `inspect` output back
 
 `02` and `03` parse `lambo inspect`, because neither `recall` nor `inspect` has a
-JSON mode on the CLI today. One trap is worth naming, because the obvious
-implementation gets it wrong: **do not filter the neighbour list to the
-structural edge headings.** `render_neighbourhood` marks each neighbour seen the
-first time it reaches it and renders it exactly once, under whichever edge type
-came first in the incident-edge walk. Two concepts derived in the same call also
-share a `CoOccurrence` edge, so a hierarchy child frequently appears under
-`CoOccurrence` and never under `Hierarchical` at all. Filtering on the heading
-therefore drops roughly half the dependents, and which half depends on iteration
-order. `parse_outbound_neighbours` keeps everything except the pure provenance
-kinds, which makes it a superset of the blast-radius dependents; the
-authoritative count is the `blast radius:` line.
+JSON mode on the CLI today. `parse_outbound_neighbours` keeps only the
+**structural** edge headings — `Dependency` / `Causal` / `Hierarchical` —
+matching the engine's structural-edge definition (the CLI's `is_structural`), so
+the banner names genuine dependents only. `CoOccurrence` (and the interaction
+provenance kinds) are deliberately excluded and never appear as a stranded
+dependent; a hierarchy child carries a `Hierarchical` edge, not a
+`CoOccurrence` one, because concepts derived in the same interaction no longer
+co-add a cross-tier `CoOccurrence` edge (each tier is derived separately). The
+authoritative blast-radius count remains the `blast radius:` line, which counts
+the same structural set.
 
 ## Files
 
