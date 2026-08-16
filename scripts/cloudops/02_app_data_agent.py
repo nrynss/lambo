@@ -87,7 +87,6 @@ from _lambo import (  # noqa: E402
     derived,
     find_secret,
     note,
-    parse_outbound_neighbours,
     queried,
     recorded,
     require_boto3,

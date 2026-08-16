@@ -51,7 +51,9 @@ Usage:
     python3 scripts/cloudops/03_crossover_protect.py --session <id> --action revoke-ingress
 
 Exit status is 0 when the guard blocked the action, which is the outcome the
-demo wants, and 1 when it found nothing to protect.
+demo wants, and when the session has nothing to protect because the focus is
+not in the graph at all (a valid, protected outcome). It is 1 only when the
+focus is present but unprotected — the "found nothing to protect" warning.
 """
 
 from __future__ import annotations
@@ -61,9 +63,9 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
 from _lambo import (  # noqa: E402
     AGENT_NETWORK,
+    EMPTY_SESSION_ERR,
     PROJECT,
     PROJECT_TAG_KEY,
     RDS_INSTANCE_ID,
@@ -71,6 +73,7 @@ from _lambo import (  # noqa: E402
     SG_BASE_NAME,
     Aws,
     ClientError,
+    InfraError,
     Lambo,
     add_common_args,
     add_lambo_args,
@@ -207,6 +210,7 @@ class Verdict:
         self.dependents: list[str] = []
         self.recall_text: str = ""
         self.inspect_text: str = ""
+        self.concept_missing: bool = False
 
     @property
     def blocked(self) -> bool:
@@ -245,8 +249,20 @@ def run_guard(lam: Lambo, query: str, top_k: int) -> Verdict:
     # Depth 1, not 2. Blast radius is a one-hop measure with no recursion
     # (`src/recall/format.rs`), so hop 2 adds nothing the verdict reads and a
     # great deal the operator has to scroll past, including every interaction
-    # node in the session. The outcome has to be legible to be worth rendering.
-    verdict.inspect_text = lam.inspect(SG_BASE_NAME, depth=1)
+    try:
+        verdict.inspect_text = lam.inspect(SG_BASE_NAME, depth=1)
+    except InfraError as exc:
+        if EMPTY_SESSION_ERR not in str(exc):
+            # Any other inspect failure is a real problem and stays loud.
+            raise
+        # Empty session: SG-Base-VPC is not in the graph at all, so there is
+        # nothing to protect. That is a valid, protected outcome, not a failure
+        # — lambo inspect exits 1 with "no concept matching", and swallowing
+        # that specific condition is what lets render_unprotected() run instead
+        # of aborting here.
+        verdict.concept_missing = True
+        verdict.inspect_text = ""
+        warn(f"{SG_BASE_NAME} is not in session {lam.session!r}; nothing to protect")
     say()
     say(indent(verdict.inspect_text))
     say()
@@ -305,6 +321,28 @@ def render_unprotected(verdict: Verdict, target: Target, action: str) -> None:
     note("this script refuses the action regardless of the verdict; nothing was deleted")
 
 
+def _flag_empty_session(session: str) -> None:
+    """T8-R1-1: an empty/wrong session exits 0 (a valid, protected outcome whose
+    exit code D2's demo expects), but it must never be *silent* — otherwise a
+    mistyped or unpopulated session id reads as green success to any pipeline or
+    operator scanning the run. `render_unprotected` already writes a normal
+    stdout note; this prints an unmissable banner to *stderr* as well, so it
+    survives even when stdout is captured to a log. Exit code stays 0 — this is
+    a warning, not an error; the guard refused the action either way.
+    """
+    rule = "!" * 62
+    lines = [
+        "EMPTY OR WRONG SESSION: nothing to protect",
+        f"double-check --session {session!r}, and that agents 01/02 have",
+        "run against THIS session id, not a different one",
+    ]
+    width = max(len(line) for line in lines)
+    print(rule, file=sys.stderr)
+    for line in lines:
+        print(f"!! {line.ljust(width)} !!", file=sys.stderr)
+    print(rule, file=sys.stderr, flush=True)
+
+
 # --------------------------------------------------------------------------
 
 
@@ -330,7 +368,13 @@ def main(args: argparse.Namespace) -> int:
         render_blocked(verdict, target, args.action)
         return 0
     render_unprotected(verdict, target, args.action)
-    return 1
+    if verdict.concept_missing:
+        _flag_empty_session(args.session)
+    # A session with nothing to protect — SG-Base-VPC not in the graph at all —
+    # is a valid, protected outcome: the guard resolved cleanly and exits 0.
+    # Only a focus that is present-but-unprotected keeps the documented
+    # "found nothing to protect -> exit 1" signal.
+    return 0 if verdict.concept_missing else 1
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -97,12 +97,34 @@ AGENT_APP_DATA = "app-data-agent"
 # file while still recognising the line wherever it is rendered.
 PILLAR_WARNING_PREFIX = "⚑ Load-bearing pillar"
 
-# Edge kinds `lambo inspect` renders that carry no dependency at all: `Derives`
-# is interaction-to-concept provenance and `Temporal` is interaction ordering.
-# Neither endpoint pair means "this would break if that went away", so neither
-# may appear in a blast-radius report. See `parse_outbound_neighbours` for why
-# the remaining kinds are not filtered further.
-PROVENANCE_EDGE_LABELS = ("Derives", "Temporal")
+# Edge kinds `lambo inspect` renders that mean "this would be stranded if the
+# focus went away": an outbound Causal, Dependency or Hierarchical edge. Only
+# these may name a dependent. `CoOccurrence` pairs two concepts merely because
+# one interaction wrote both (it decays, spec §5) and `Semantic` because they
+# are close in embedding space (it decays too) — neither means "one depends on
+# the other" — and `Derives`/`Temporal` are interaction provenance. See
+# `parse_outbound_neighbours` for why only the structural kinds survive.
+#
+# This tuple is the Python mirror of the CLI's structural edge set — the Rust
+# `is_structural` at `src/cli/serve_web.rs` (used by the inspect page) and
+# `DRIFT_EDGE_TYPES` at `src/daemon/drift.rs` both treat exactly
+# `{Dependency, Causal, Hierarchical}` as structural. The other four rendered
+# kinds (`CoOccurrence`, `Semantic`, `Derives`, `Temporal`) are correctly
+# non-structural here. If the Rust side ever adds or renames a structural edge
+# type, update this tuple AND the `_self_test_structural_whitelist` synthetic
+# banner so the drift fails loudly rather than silently re-widening the
+# blast-radius report.
+STRUCTURAL_EDGE_LABELS = ("Causal", "Dependency", "Hierarchical")
+
+# `lambo inspect` emits this exact phrase when the focus concept is not in the
+# session at all — the `Focus::Missing` arm at `src/cli/inspect.rs` produces
+# `no concept matching '{focus}' in session '{session}'` and exits 1 — which is
+# the one condition `03_crossover_protect.py` treats as "nothing to protect".
+# The sentinel lives here (beside the reader-verb contract) rather than inline
+# in 03 so re-using it is a named constant, and `_self_test_empty_session_sentinel`
+# pins it to the real error string: a future reword of the CLI fails loudly
+# instead of silently reverting the empty-session guard to a hard abort.
+EMPTY_SESSION_ERR = "no concept matching"
 
 # `inspect` renders a neighbour as `content [Type{, status}]`, where the
 # bracketed tail is render metadata (ConceptType plus optional canonization
@@ -526,20 +548,17 @@ def parse_outbound_neighbours(inspect_text: str) -> list[str]:
     prefixes each neighbour with `->` when the focus is the edge's source and
     `<-` when it is the target. Only the `->` direction is a dependent; a `<-`
     is something that points *at* the focus, and listing those would name the
-    wrong resources in a blast-radius report.
-
-    **Do not filter this to the structural edge headings.** It is the obvious
-    thing to do and it silently loses roughly half the dependents.
-    `render_neighbourhood` marks each neighbour `seen` the first time it reaches
-    it and renders it exactly once, under whichever edge type came first in the
-    incident-edge walk. Two concepts derived in the same call also get a
-    `CoOccurrence` edge, so a hierarchy child frequently surfaces under
-    `CoOccurrence` and never appears under `Hierarchical` at all. Filtering on
-    the heading therefore reports a subset that depends on iteration order.
-    Everything except the pure provenance kinds is kept instead, which makes
-    this a superset of the blast-radius dependents rather than an arbitrary
-    subset of them. The authoritative *count* is `parse_blast_radius`; this is
-    the list of names to show beside it.
+    **Keep only the structural headings, and only their `->` rows.** A
+    dependent is a concept with an outbound `Causal`, `Dependency` or
+    `Hierarchical` edge from the focus — the shapes that mean "this would be
+    stranded if the focus went away". `CoOccurrence` (two concepts written by
+    the same interaction) and `Semantic` (near in embedding space) are
+    co-occurrence, not dependence, and naming them would show a judge a false
+    "stranded dependent"; `Derives`/`Temporal` are interaction provenance.
+    With T7 removing the cross-tier edge at its source, the hierarchy children
+    render under `Hierarchical`, so restricting to structural headings no
+    longer loses them. The authoritative *count* is `parse_blast_radius`; this
+    is the list of names to show beside it.
 
     Parsing text is not free of risk, and the risk is taken knowingly: neither
     `recall` nor `inspect` has a JSON mode on the CLI today (`inspect` builds a
@@ -572,7 +591,7 @@ def parse_outbound_neighbours(inspect_text: str) -> list[str]:
                 # ` [` ([`NEIGHBOUR_METADATA_RE`]).
                 names.append(NEIGHBOUR_METADATA_RE.sub("", stripped[3:]).strip())
         elif raw.startswith("  "):
-            counts = stripped not in PROVENANCE_EDGE_LABELS
+            counts = stripped in STRUCTURAL_EDGE_LABELS
         else:
             counts = False
     return names
@@ -615,6 +634,98 @@ def _self_test_ipv6_parent() -> None:
         raise SystemExit("self-test FAILED: a colon-bearing child must still be refused")
 
 
+def _self_test_structural_whitelist() -> None:
+    """Regression for T8 (T3-2-P2-2; review T8-R1-4): the outbound neighbour
+    list must name exactly the *structural* dependents — Causal, Dependency,
+    Hierarchical — and none of the decaying/provenance kinds, mirroring the Rust
+    set `is_structural` (`src/cli/serve_web.rs`) / `DRIFT_EDGE_TYPES`
+    (`src/daemon/drift.rs`). The synthetic banner below mixes all seven rendered
+    edge kinds in hop 1 plus a hop-2 row; if a structural heading were renamed,
+    dropped, or an excluded kind started counting, the assertion fails.
+    """
+    banner = (
+        "focus: RDS-Lambo-Demo-DB [Resource]\n"
+        "\n"
+        "hop 1:\n"
+        "  CoOccurrence\n"
+        "    -> coincident-peer [Entity]\n"
+        "  Semantic\n"
+        "    -> embedding-neighbour [Entity]\n"
+        "  Derives\n"
+        "    -> <interaction d3659f27-fdfe-4e55-8eaa-f56f0019e0c9>\n"
+        "  Temporal\n"
+        "    -> ordering-peer [Entity]\n"
+        "  Causal\n"
+        "    -> causal-dependent [Entity]\n"
+        "  Dependency\n"
+        "    -> resource-dependent [Resource]\n"
+        "  Hierarchical\n"
+        "    -> child-concept [Entity]\n"
+        "\n"
+        "hop 2:\n"
+        "  Causal\n"
+        "    -> hop-two-ignored [Resource]\n"
+    )
+    names = parse_outbound_neighbours(banner)
+    expected = ["causal-dependent", "resource-dependent", "child-concept"]
+    if names != expected:
+        raise SystemExit(
+            "self-test FAILED: parse_outbound_neighbours returned "
+            f"{names!r}, expected only the three structural dependents {expected!r}"
+        )
+
+
+def _source_focus_missing_text() -> str:
+    """Return the live `Focus::Missing` error-formatting source from the Rust
+    CLI, so `EMPTY_SESSION_ERR` is pinned to the real string rather than a
+    duplicated copy. Reads `src/cli/inspect.rs` (resolved against REPO_ROOT)
+    and returns the text of the `Focus::Missing` match arm. Fails loudly —
+    raising SystemExit — if the source can't be found or read, or if the arm
+    is no longer present, so this self-test never silently vacates.
+    """
+    inspect_rs = REPO_ROOT / "src" / "cli" / "inspect.rs"
+    try:
+        text = inspect_rs.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(
+            "self-test FAILED: could not read the live CLI error source "
+            f"{inspect_rs} to pin EMPTY_SESSION_ERR: {exc}"
+        ) from exc
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        # Target the *error-formatting* arm (`Focus::Missing => Err(...)`) —
+        # not the unrelated `return Focus::Missing;` in `resolve_focus` — so we
+        # pin against the actual runtime message source.
+        if "Focus::Missing" in line and "=> Err(" in line:
+            # This arm spans this line and the following ones; collect a bounded
+            # window so a reword that drops or renames the phrase still fails
+            # the assertion below.
+            return "\n".join(lines[i : i + 12])
+    raise SystemExit(
+        "self-test FAILED: `Focus::Missing` arm not found in the live CLI "
+        f"source {inspect_rs}; EMPTY_SESSION_ERR can no longer be pinned"
+    )
+
+
+def _self_test_empty_session_sentinel() -> None:
+    """Regression for T8-R1-2: `EMPTY_SESSION_ERR` must still match the live
+    `lambo inspect` empty-session error — the `Focus::Missing` arm at
+    `src/cli/inspect.rs` emits `no concept matching '{focus}' in session
+    '{session}'`. This sources the actual Rust source at self-test time (see
+    `_source_focus_missing_text`), so a reword of the CLI fails loudly instead
+    of a stale sentinel silently reverting 03_crossover_protect.py's guard to
+    a hard abort on empty sessions (the original T3-2-P2-1 bug).
+    """
+    live = _source_focus_missing_text()
+    if EMPTY_SESSION_ERR not in live:
+        raise SystemExit(
+            "self-test FAILED: EMPTY_SESSION_ERR no longer matches the live "
+            f"lambo Focus::Missing error source; got {live!r}"
+        )
+
+
 if __name__ == "__main__":
     _self_test_ipv6_parent()
-    print("self-test: IPv6 --parent-of parent round-trips; child colon-refusal kept")
+    _self_test_structural_whitelist()
+    _self_test_empty_session_sentinel()
+    print("self-test: IPv6 --parent-of; structural whitelist; empty-session sentinel — all pass")
