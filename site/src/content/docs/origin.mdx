@@ -1,0 +1,32 @@
+---
+title: "Origin"
+description: "Where Lambo came from, and what the hackathon actually contributed"
+---
+
+Lambo is not a hackathon project that grew a design. It is a design that finally got built during a hackathon.
+
+## The problem came first
+
+The idea Lambo implements had been worked out over months before any of this code existed: that agents working on the same codebase need memory with structure, and that the useful signal is not similarity but dependency. A concept matters because other things rest on it. Editing something load-bearing is a different act from editing something isolated, and a retrieval layer that returns both with the same confidence is hiding the distinction that mattered.
+
+That thinking predates the repository. It existed as a design document, written by the same author, with no code attached.
+
+## What the hackathon gave
+
+A deadline, and a reason to stop designing.
+
+It also fixed a decision that had been open. Building against CockroachDB meant the graph and the vectors could live in one store rather than a database plus a retrieval sidecar, and that concepts could earn canonical status through a background process reading the same tables everything else reads. The design had assumed something like that was possible. The hackathon is where it became a thing that runs.
+
+So the implementation is recent and the ideas are not. The parts a reader might expect to be rushed — the canonization rules, the single-writer constraint, the shape of the recall contract — are the parts that had the most thought behind them, because they were settled long before there was a deadline.
+
+## What was actually written here
+
+All of it. No code from the prior design document was incorporated, because there was none to incorporate: it described behaviour, not implementation. The document is credited for honesty rather than because anything was lifted from it.
+
+What that means in practice is that everything in this repository was built and reviewed in the open. The [dev diary](https://github.com/nrynss/lambo/tree/main/dev-diary) records the phase handoffs and the adversarial reviews, including the ones that found real defects. The [evidence directory](https://github.com/nrynss/lambo/tree/main/evidence) holds the raw captures behind the claims, including the runs that failed before they passed, kept as recorded rather than re-taken.
+
+## How to read the rest of these docs
+
+Nothing here is written to be judged. The [Demo](/lambo/demo/) shows the memory layer working and says plainly what it compresses. [Evidence and evaluation](/lambo/evidence/) states what was measured, on what, and what the measurement does not cover.
+
+Where something is unverified, the docs say so. That is the more useful thing to read than a claim with nothing behind it.

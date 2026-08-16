@@ -162,6 +162,8 @@ GitHub Pages from `main`.
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Lambo was written during the hackathon submission period. It draws on a prior design
-document by the same author, credited here for honesty. No code from that document was
-incorporated.
+Lambo implements a design its author worked out over months. The implementation in this
+repository was written during a hackathon, which supplied the deadline rather than the
+idea. No code from the prior design document was incorporated — it described behaviour,
+not implementation — and it is credited here for honesty rather than because anything was
+lifted from it. [Origin](https://nrynss.github.io/lambo/origin/) has the longer version.
