@@ -281,6 +281,15 @@
 
   // ---- structure -------------------------------------------------------
 
+  // E2E-R1-1: this pane is driven by /api/graph (the whole session's structural
+  // skeleton). /api/inspect additionally carries `gate_progress` for a focused
+  // concept, but it is surfaced via the API only and is NOT called here. The
+  // focus-driven detail panel — tree-node click → /api/inspect → dependents
+  // list + the four canonization gates — is part of the parked UI pass (see
+  // dev-diary/notes/ui-pass-plan.md, "Rough order" items 2-3), so it
+  // intentionally does not render yet. gate_progress stays correct and tested
+  // at the API level; the panel render lands when the UI pass resumes.
+
   // Built from /api/graph when the build serving this page has it. On any
   // failure the panel stays hidden: showing a placeholder tree would mean the
   // page is describing infrastructure it cannot see.

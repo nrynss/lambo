@@ -19,6 +19,11 @@
 //! let mem = Memory::builder()
 //!     .session("demo")
 //!     .agent("agent-a")
+//!     // Cloned before `backends` is moved into `.backends()` below: a writer
+//!     // built from a resolved backend MUST pass the config, or the [daemon]
+//!     // cadence overrides the resolver applied are silently lost (see
+//!     // `MemoryBuilder::backends`).
+//!     .config(backends.config.clone())
 //!     .backends(backends)
 //!     .build()
 //!     .await?;

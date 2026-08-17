@@ -161,28 +161,28 @@ TIGHT_FOR_LOCAL_BGE = ("t4g.medium", "t3.medium", "t3a.medium", "c7i-flex.large"
 # Ubuntu 26.04 LTS, resolved through Canonical's public SSM parameter rather
 # than a hardcoded AMI id: AMI ids are per-region and go stale every few weeks.
 #
-# Not Amazon Linux 2023, and the reason is load-bearing. AL2023 ships glibc
-# 2.34, while the release workflow builds both Linux targets on Ubuntu 24.04
-# runners (glibc 2.39). The published binary passes its checksum and then dies
-# with `version GLIBC_2.39 not found` the moment systemd starts it. That is
-# true of the arm64 asset as well, so it is not an artefact of the instance
-# architecture. Ubuntu 26.04 is newer than the build environment, so the
-# released binary runs as shipped and the checksum verification still means
-# what it is supposed to mean.
+# Not Amazon Linux 2023. That choice used to be a glibc workaround: AL2023
+# ships glibc 2.34, while the release workflow then built both Linux targets on
+# Ubuntu 24.04 runners (glibc 2.39), so the published binary passed its checksum
+# and then died with `version GLIBC_2.39 not found` the moment systemd started
+# it — true of the arm64 asset as well, so it was not an artefact of the
+# instance architecture. Release builds now run inside a `debian:bookworm`
+# container (T12), whose older toolchain keeps the shipped binary below the
+# AL2023 glibc floor; a repo-side "Assert max required GLIBC <= 2.34" CI gate
+# makes that structural (see .github/workflows/release.yml). So the binary runs
+# on AL2023 too, and Ubuntu 26.04 is no longer chosen as a glibc workaround —
+# it is a newer, well-maintained platform, newer than the build environment, so
+# the checksum verification still means what it is supposed to mean.
 UBUNTU_SSM = {
     "arm64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
     "x86_64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
 }
 #
-# NEW-5 (T6): VERIFY BEFORE D1 (clean redeploy). Neither parameter path above has
-# been confirmed against a live plumbing account - AWS creds were expired when T6
-# landed, and `aws ssm get-parameter` could not be run. Confirm, in us-east-1, that
-# BOTH of these return a value (the canonical Ubuntu 26.04 AMI id). The 24.04
-# convention strongly implies the {arm64,amd64}/hvm/ebs-gp3 paths exist as written,
-# but that is an inference, not a verified fact:
-#   aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id --region us-east-1
-#   aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id --region us-east-1
-# If either 404s, correct the path in UBUNTU_SSM before shipping.
+# NEW-5 (T6) DISCHARGED by the E2E round-1 recheck: both UBUNTU_SSM parameter
+# paths above were confirmed against a live plumbing account to resolve in
+# us-east-1 — `aws ssm get-parameter --name
+# /aws/service/canonical/ubuntu/server/26.04/stable/current/{arm64,amd64}/hvm/ebs-gp3/ami-id`
+# each returned the canonical Ubuntu 26.04 AMI id. No path correction needed.
 #
 # The `stable/current` path rotates: the AMI id resolved here is logged on launch
 # (see resolve_ami / the "AMI ..." note in main), but is deliberately not pinned.
