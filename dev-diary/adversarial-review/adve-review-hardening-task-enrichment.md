@@ -189,3 +189,98 @@ reviewer's verdict or claim that the result is clean.
   `no-store` only for session-memory/API responses.
 - **HENR-5:** Remediated. H6 requires `truncated` only on successful inspect and
   graph payloads and explicitly preserves existing error response semantics.
+
+## Round-2 independent re-review (2026-08-17)
+
+- **Reviewer:** `hardening_docs_review` (independent; implementation source
+  read-only)
+- **Reviewed remediation:**
+  `e6b77eb009df72a37ec70655eb775519e30476c8`
+- **Verdict:** **REQUEST_CHANGES** - 1 P2 / 2 P3
+
+HENR-2's main-scope boundary, HENR-3's dispatch order, HENR-4's route/cache
+wording, and HENR-5's successful-payload qualification are closed. H1 remains
+byte-identical to the CLEAN head. No text authorizes importing or reconciling
+`origin/main` commit `5ccd48f`: both external-warning sections expressly forbid
+it on this branch and require a separate future orchestration instruction.
+
+HENR-1 is not fully closed. The response schema is much more precise, but its
+portal truncation rule does not represent the existing renderer's warning
+behavior. Two smaller schema/verification contradictions also remain.
+
+### HENR-R2-1 (P2) - Excluded-hit warnings remain in agent context but disappear from the default cards view
+
+- **Evidence:** H3 sets `included_in_context` only for hits whose complete
+  blocks fit, keeps hit-owned warnings attached to their hits, renders cards
+  only for the included prefix, and displays only `response_annotations`
+  separately (`hardening-tasks.md:388-424,452-456`). In the existing assembly,
+  however, every hit's canonical/hot/reservation lines are copied into
+  `RecallResult.warnings` before token truncation; the source explicitly says a
+  block cut from context still reports its conditions
+  (`src/recall/assemble.rs:263-315`). `render_recall_text` then prepends every
+  such warning absent from the truncated block context
+  (`src/cli/recall.rs:121-145`). A tiny budget can therefore yield a hit with
+  `included_in_context: false` whose load-bearing, conflict, hot, or reservation
+  warning is nevertheless present in the exact agent `context`.
+- **Impact:** the pinned default cards view hides that warning: it suppresses
+  the false hit's card, and the warning is correctly hit-owned so it is absent
+  from `response_annotations`. This can hide the most safety-relevant text while
+  the UI claims to structure the agent's answer. The sentence "a ranked hit the
+  agent did not receive" is also inaccurate for this split case: the agent
+  receives the warning but not the complete hit block.
+- **Required fix:** pin one representation that keeps those warnings visible
+  without parsing text. For example, render all ranked hit cards with an honest
+  included/excluded marker, or add a visible structured overflow-warning area
+  sourced from the excluded hits' typed annotations. Preserve the existing
+  context and token-budget behavior. Add a tiny-budget regression where an
+  excluded Canonical or conflict hit contributes a warning to `context`, and
+  prove the cards view surfaces that same warning.
+
+### HENR-R2-2 (P3) - The claimed additive HTTP shape omits two existing fields
+
+- **Evidence:** `hardening-tasks.md:388-397` enumerates existing `context` and
+  `elapsed_ms` plus new `hits` and `response_annotations`, but the current
+  `RecallResponse` also has `session` and `query`
+  (`src/cli/serve_web.rs:467-475`). "Additive" suggests preservation, but the
+  supposedly pinned shape and acceptance criteria never say those fields
+  remain.
+- **Impact:** an implementer following the enumerated schema can accidentally
+  remove legacy response metadata while still satisfying the written checks.
+- **Required fix:** include `session` and `query` in the preserved success
+  shape and assert all four existing fields remain compatible.
+
+### HENR-R2-3 (P3) - H6's fallback test still requires a nonexistent inspect notice
+
+- **Evidence:** H6 now correctly says inspect notices apply only to consumers
+  present on the claimed head, and records that this branch has no inspect
+  consumer (`hardening-tasks.md:641-642,655-661`). Its no-browser fallback still
+  requires an embedded-asset contract test binding "both response flags to both
+  notice elements" (`:671-679`). The current branch has only the graph consumer
+  and no inspect notice; H6 explicitly excludes implementing the focus/detail
+  panel.
+- **Impact:** the fallback either demands a dead, vacuous inspect element or
+  silently expands H6 into the parked focus UI, undoing the branch-local
+  correction.
+- **Required fix:** bind the graph flag to the graph notice and bind an inspect
+  flag only to each inspect consumer/notice that actually exists on the claimed
+  head. Do not require a placeholder inspect element.
+
+### Round-2 checks
+
+- H1 prefix SHA-256 remains
+  `8e33ec7d93f41980d401308cacc706629e55f91c6f72cf524da3454294ad8d30`,
+  identical at `46ca7be` and the remediation head.
+- The remediation diff changes only the hardening task document and its
+  disposition record. `git show --check e6b77eb` and
+  `git diff --check 46ca7be..e6b77eb` passed.
+- `node --check web/app.js` passed.
+- `cargo package --list --allow-dirty --no-verify` still lists exactly 103
+  paths.
+- The review index remains accurate at 57 rows for 57 records; every indexed
+  Markdown target resolves. It correctly remains **OPEN** while this round has
+  findings, so no index edit was necessary.
+
+**Round-2 verdict: REQUEST_CHANGES.** Close the excluded-warning presentation
+gap and the two narrow schema/test contradictions, then re-review the task
+document only. No implementation, integration, main reconciliation, or push is
+authorized by this review.
