@@ -1,12 +1,13 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (56 records).
+Complete index of the review records in this directory (57 records).
 
 | File | Scope | Status |
 |------|-------|--------|
 | [adve-review-hardening-H1round1.md](adve-review-hardening-H1round1.md) | Hardening H1 - embedding-contract enforcement, round 1 | **CLOSED** (REQUEST_CHANGES - 2 P1 / 1 P2 / 1 P3; remediated `c72acf5`, disposition `298af97`) |
 | [adve-review-hardening-H1round2.md](adve-review-hardening-H1round2.md) | Hardening H1 - post-round-1 remediation, round 2 | **CLOSED** (REQUEST_CHANGES - 1 P2 / 1 P3; remediated `7cd8194`, disposition `de3b4b7`) |
 | [adve-review-hardening-H1round3.md](adve-review-hardening-H1round3.md) | Hardening H1 - post-round-2 remediation, round 3 | **CLOSED** (CLEAN / APPROVE - zero findings, 2026-08-17) |
+| [adve-review-hardening-task-enrichment.md](adve-review-hardening-task-enrichment.md) | Hardening H2-H7 task-description enrichment | **OPEN** (REQUEST_CHANGES - 3 P2 / 2 P3, 2026-08-17) |
 | **[adve-review-t8.1-memory-fable.md](adve-review-t8.1-memory-fable.md)** | phase/p8-surface — T8.1 `Memory` builder & assembly, fable deep | **CLOSED** (1 P1 / 2 P2 / 6 P3 + 9 follow-on findings across rounds; 3 opus remediation rounds, R4 verify CLEAN 2026-08-14; COH-6 all 15 clauses PASS; merged c6576f7) |
 | [adve-review-t8.2-mcp.md](adve-review-t8.2-mcp.md) | phase/p8-surface — T8.2 MCP server (`serve`/`server`), R5-verify | **CLOSED** (CLEAN, 2026-08-14) |
 | [adve-review-t8.2-mcp-r2.md](adve-review-t8.2-mcp-r2.md) | phase/p8-surface — T8.2 re-verify at `596f40f` post-hardening | **CLOSED** (CLEAN, 0 P1 / 0 P2 / 0 P3, 2026-08-15) |
