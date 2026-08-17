@@ -136,7 +136,7 @@ the wire contract, or any consumer.
 ## Remediation disposition
 
 - **Remediation agent:** `H2RemediationR1`
-- **Remediation commit:** `0000000000000000000000000000000000000000` (filled after commit)
+- **Remediation commit:** `cbf7f2461baa1cf9e28a3e6cc7edc46815762b25`
 - **Disposition:** H2-R1-1 (P3) ACCEPTED with documentation; no code
   change. The original CLEAN / APPROVE verdict above is unchanged, and no
   round-2 review is required for a docs-only disposition.
