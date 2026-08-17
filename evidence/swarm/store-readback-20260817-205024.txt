@@ -1,0 +1,4 @@
+interactions=164
+concepts=487
+edges=1522
+lease_rows=0

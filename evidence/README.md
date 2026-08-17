@@ -51,4 +51,11 @@ reason, and the fix — rather than only the final green run.
 | `demo-live-canon-events.txt` | The canonization events the same run left behind in the database. |
 | `demo-live-saints.txt`, `demo-live-conformance.txt`, `demo-live-serveweb-cockroach.txt` | The canonical-memory listing, the conformance suite, and the read-only web surface, all against that store. |
 | [`e2e-gates-fable.txt`](e2e-gates-fable.txt) | The end-to-end gate run from an independent adversarial review. |
+
+## Concurrency capture (C1–C5)
+
+| Path | What it shows |
+|---|---|
+| [`concurrency/`](concurrency/) | The T8.2 N1/N2 closure capture: K=12 load driver against a scratch SQLite store, SIGTERM mid-burst with the exact `lambo serve: session closed, tail durable` line (signal→exit 1419 ms, exit 0), and the GC-accounted durability comparison (interactions AHEAD by 21; concept shortfall 107 = one daemon GC sweep, collected==gap). Runbook in [`concurrency/README.md`](concurrency/README.md). |
+| [`swarm/`](swarm/) | The real-model swarm (C5, T9.6's scale half): LFM2-350M on llama.cpp `:8081`. The finding: a 350M model cannot emit tool calls (probed under OMP and the raw OpenAI tools API), so the spec's fallback LLM loop ran — 3961 derive-calls/hour, dedup rate 0.183, 0 model errors — with portal screenshots of the LFM2-derived concepts. Runbook in [`swarm/README.md`](swarm/README.md). |
 | [`bedrock-blocked.txt`](bedrock-blocked.txt) | The Bedrock authorization refusal — why the AWS embedder path is reserved but unimplemented. |

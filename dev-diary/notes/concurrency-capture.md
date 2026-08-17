@@ -138,11 +138,19 @@ explained.
 **Hardware caveat to write down:** the criterion says *runs on the MBP*. If it
 runs on the Linux box (16 cores, 2560x1440 display, CachyOS) the starvation
 threshold differs, so say which machine produced the numbers.
-
 ## C5 — Optional: drive it with real local models
 
 **Requires:** C2 green
-**Status:** not-started, optional
+**Status:** DONE-with-finding — 2026-08-18. The specified swarm (OMP + MCP +
+LFM2-350M) is **not feasible with this model**: LFM2-350M cannot emit tool
+calls (probed under OMP's harness — garbled pseudo-tool text — and under
+llama.cpp's OpenAI tools API — prose, `finish_reason=stop`, no `tool_calls`).
+The spec's fallback ran instead: a minimal LLM loop (llama.cpp
+`/v1/chat/completions` + the MCP client pattern, `scripts/loadtest/mcp_swarm.py`).
+3 agents × 150 s: **3961 derive-calls/hour**, **dedup rate 0.183** (109 of
+596 concept references matched existing), 0 model errors, store ledger-exact
+after clean SIGTERM. Evidence and the full OMP-config record:
+`evidence/swarm/` (+ runbook, + portal screenshots).
 **Relates to:** T9.6 (the LFM2 swarm, P9's cut-order #2)
 
 C1's driver is synthetic: deterministic, fast, and precise about what it sent.
