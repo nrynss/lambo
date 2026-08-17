@@ -956,7 +956,10 @@ capped array length as the apparent total.
 
 ### H7 - One session per process
 
-**Status:** **PARKED / NEEDS DESIGN**
+**Status:** **PARKED / NEEDS DESIGN** — tracked publicly as
+[issue #4](https://github.com/nrynss/lambo/issues/4) (filed 2026-08-17, owner's
+call: not for this cycle). The issue carries the same six decisions and the
+recommended allowlist scope; this section stays the fuller record
 **Severity:** low current product pressure; high architectural and security
 risk if implemented casually
 **Do not claim for implementation until:** selection, discovery, URL and auth
