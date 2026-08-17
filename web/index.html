@@ -61,7 +61,7 @@
 
   <section aria-labelledby="ladder-heading">
     <h2 id="ladder-heading">The trust ladder</h2>
-    <p class="section-sub">Most memories never reach Canonical, and that is normal. Status is earned from evidence, not declared by an agent.</p>
+    <p class="section-sub">Most concepts never reach Canonical, and that is normal. Status is earned from evidence, not declared by an agent.</p>
     <div id="ladder"></div>
   </section>
 
@@ -69,11 +69,11 @@
     <h2 id="history-heading">What changed</h2>
     <p class="section-sub">Every status change, in order.</p>
     <div class="audit" id="audit"></div>
-    <div class="empty-note hidden" id="audit-empty">No status changes yet in this session. Memories are accumulating; none has reached Canonical.</div>
+    <div class="empty-note hidden" id="audit-empty">No status changes yet in this session. Concepts are being recorded; none has reached Canonical.</div>
   </section>
 
-  <section class="legend" aria-label="Kinds of memory">
-    <div class="legend-label">Kinds of memory</div>
+  <section class="legend" aria-label="Kinds of concept">
+    <div class="legend-label">Kinds of concept</div>
     <div class="legend-items" id="legend"></div>
   </section>
 
@@ -125,11 +125,11 @@
         <input class="combo-input" id="lookup-input" type="text"
                role="combobox" aria-expanded="false" aria-haspopup="listbox"
                aria-controls="lookup-listbox" aria-autocomplete="list"
-               aria-label="Look up a memory"
+               aria-label="Look up a concept"
                placeholder="users table, login handler, rate limiting…" autocomplete="off">
         <button class="lookup-btn" id="lookup-btn" type="button">Look up</button>
       </div>
-      <div class="listbox hidden" id="lookup-listbox" role="listbox" aria-label="Matching memories"></div>
+      <div class="listbox hidden" id="lookup-listbox" role="listbox" aria-label="Matching concepts"></div>
     </div>
 
     <div class="lookup-loading hidden" id="lookup-loading" role="status">

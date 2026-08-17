@@ -24,20 +24,20 @@
     Constraint: 'A rule the work must keep following, like "passwords must be hashed."',
     Resource: "Something the agents built or changed, like a file they wrote.",
     Logic: "A decision the agents made and why, like why they picked this approach.",
-    Observation: "Something an agent happened to notice. It is dropped first when memories are cleaned up."
+    Observation: "Something an agent happened to notice. It is dropped first when concepts are cleaned up."
   };
 
   var STATUS_TOOLTIP = {
-    Candidate: "Recorded, and holding up so far. Most memories stay here.",
-    Venerable: "Survived repeated cleanup passes while other memories were dropped.",
+    Candidate: "Recorded, and holding up so far. Surviving cleanups is what earns the next rung.",
+    Venerable: "Survived repeated cleanup passes while other concepts were dropped.",
     Canonical: "Enough other work depends on this that changing it is dangerous. Lambo warns any agent that touches it."
   };
 
   var LADDER = [
     { key: "Canonical", desc: "Enough depends on these that changing one is risky. Agents get warned." },
     { key: "Venerable", desc: "Kept through cleanups that dropped others." },
-    { key: "Candidate", desc: "Recorded and still here." },
-    { key: "none", desc: "Never promoted. Where most memories stay." }
+    { key: "Candidate", desc: "Recorded, and holding up so far." },
+    { key: "none", desc: "Never promoted. Most concepts stay here." }
   ];
 
   // Phrased from the dependent's side, because that is whose name the label is
