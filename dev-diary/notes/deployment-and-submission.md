@@ -47,10 +47,13 @@ portal now matches the recorded footage.
 
 Two residuals, neither blocking:
 
-- The launcher warned `SG-PublicWeb has no tcp/80 ingress`, so the http→https
-  redirect and the ACME HTTP-01 fallback do not work. The certificate came
-  through over TLS-ALPN on 443, but a judge typing `http://lambo.nryn.dev` gets
-  nothing rather than a redirect. `provision_network.py` opens port 80.
+- ~~The launcher warned `SG-PublicWeb has no tcp/80 ingress`~~ **CLOSED
+  2026-08-18.** tcp/80 from `0.0.0.0/0` added to `sg-0cf21b70c346eaa99` as rule
+  `sgr-0f2ba9d545226d4bd`, described as "http to https redirect and ACME HTTP-01
+  fallback". Verified: `http://lambo.nryn.dev` now answers **308** to
+  `https://lambo.nryn.dev/`, and https `/healthz` still returns 200. The
+  certificate had already come through over TLS-ALPN on 443; this only fixes the
+  redirect for a judge who types the bare hostname.
 - **Scope, stated honestly:** this rebuilds the *host*. It does not prove the
   whole stack rebuilds from scripts, because `teardown.py` has no target
   selection (see the correction below) and tearing the rest down would mint new
