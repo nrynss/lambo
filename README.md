@@ -45,6 +45,11 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 The script verifies a SHA-256 checksum and installs to `~/.local/bin`. Windows binaries sit
 on the [releases page](https://github.com/nrynss/lambo/releases).
 
+`cargo install lambo` is a leaner channel: it builds the crate's default
+features (`memory` store, `fixture` and `bge_m3` embedders). The prebuilt
+binaries above carry the full adapter set (`ship` profile); build from source
+with `cargo build --release --features ship` for the same.
+
 See the memory layer work before you configure anything. This needs no config file, runs
 against the in-memory store, and finishes in seconds.
 

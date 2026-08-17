@@ -9,7 +9,7 @@
 # standard tools found on any macOS or Linux box.
 #
 # Overrides (all optional):
-#   LAMBO_VERSION    the release version to install, e.g. "0.1.0" (default:
+#   LAMBO_VERSION    the release version to install, e.g. "0.2.0" (default:
 #                    the latest release). Use it to pin a specific version.
 #   LAMBO_INSTALL_DIR  install directory (default ~/.local/bin). Must be
 #                    writable by the current user.

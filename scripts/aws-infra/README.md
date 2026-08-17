@@ -161,7 +161,7 @@ User data installs, as systemd services:
 * `lambo-web.service` — fetches `lambo-<version>-linux-arm64` from the GitHub
   release and **verifies it against the `.sha256` published beside it** before
   installing. `t4g` is ARM, so this is the `linux-arm64` asset; an x86_64 build
-  would boot and then fail. The version is `--lambo-version` (default `0.1.0`).
+  would boot and then fail. The version is `--lambo-version` (default `0.2.0`).
 * `caddy.service` — same treatment: the `caddy_<v>_linux_arm64.tar.gz` release
   asset, verified against the release's `checksums.txt`.
 

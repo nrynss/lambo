@@ -9,12 +9,12 @@ That is the whole deployment model. The released binary carries every adapter. Y
 
 ## Install the binary
 
-Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, macOS x86_64, and Windows x86_64, with the full adapter feature set compiled in.
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full adapter feature set compiled in.
 
 <Steps>
   <Step title="Run the install script">
     ```bash
-    curl -fsSL https://github.com/nrynss/releaseslatest/download/install.sh | sh
+    curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
     ```
     The script detects your OS and architecture, downloads the matching binary, verifies its SHA-256 against the published checksum, and installs it to `~/.local/bin`.
   </Step>
@@ -28,8 +28,8 @@ Each release carries one `lambo` binary per platform plus a SHA-256 checksum fil
 To pin a version or choose the install directory:
 
 ```bash
-LAMBO_VERSION=0.1.0 LAMBO_INSTALL_DIR=/usr/local/bin \
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/mainscripts/install.sh)"
+LAMBO_VERSION=0.2.0 LAMBO_INSTALL_DIR=/usr/local/bin \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
 ```
 
 On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file from the [releases page](https://github.com/nrynss/lambo/releases) and verify the checksum yourself.

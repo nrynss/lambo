@@ -12,7 +12,7 @@ That is the whole deployment model. The released binary carries every adapter. Y
 
 ## Install the binary
 
-Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, macOS x86_64, and Windows x86_64, with the full adapter feature set compiled in.
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full adapter feature set compiled in.
 
 <Steps>
   <Step title="Run the install script">
@@ -31,7 +31,7 @@ Each release carries one `lambo` binary per platform plus a SHA-256 checksum fil
 To pin a version or choose the install directory:
 
 ```bash
-LAMBO_VERSION=0.1.0 LAMBO_INSTALL_DIR=/usr/local/bin \
+LAMBO_VERSION=0.2.0 LAMBO_INSTALL_DIR=/usr/local/bin \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
 ```
 

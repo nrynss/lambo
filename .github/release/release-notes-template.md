@@ -1,7 +1,8 @@
-# Lambo vVERSION
+# Lambo v{{VERSION}}
 
-> Maintainer: replace `VERSION` with the tag number (for example `0.1.0`) and trim
-> the checklists below to the actual release contents before publishing.
+> Maintainer: trim the checklists below to the actual release contents before
+> publishing. The version is substituted automatically by the release
+> workflow; do not hand-edit it here.
 
 Lambo is agentic graph memory. This single binary carries the MCP server
 (`lambo serve`) and the CLI verbs (`lambo recall`, `lambo derive`, `lambo
@@ -27,18 +28,22 @@ The one caveat: the adapter code is compiled in, but its backing service must be
 reachable at runtime. BGE embeddings need a local `llama-server`. CockroachDB
 needs a reachable cluster.
 
+`cargo install lambo` is a leaner channel: it builds the crate's default
+features (the `memory` store, `fixture` + `bge_m3` embedders) rather than the
+full `ship` set the prebuilt binaries carry. Use the prebuilt binaries above,
+or build from source with `--features ship`, for the complete adapter set.
+
 ## Binary checksums
 
 Each platform release has a binary and a `.sha256` file, for example
-`lambo-0.1.0-linux-x86_64.sha256`. Use `sha256sum` to verify a download.
+`lambo-{{VERSION}}-linux-x86_64.sha256`. Use `sha256sum` to verify a download.
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `lambo-0.1.0-linux-x86_64` |
-| Linux arm64 | `lambo-0.1.0-linux-arm64` |
-| macOS arm64 | `lambo-0.1.0-macos-arm64` |
-| macOS x86_64 | `lambo-0.1.0-macos-x86_64` |
-| Windows x86_64 | `lambo-0.1.0-windows-x86_64.exe` |
+| Linux x86_64 | `lambo-{{VERSION}}-linux-x86_64` |
+| Linux arm64 | `lambo-{{VERSION}}-linux-arm64` |
+| macOS arm64 | `lambo-{{VERSION}}-macos-arm64` |
+| Windows x86_64 | `lambo-{{VERSION}}-windows-x86_64.exe` |
 
 ## Install
 
@@ -51,7 +56,7 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 Or pin a version and add the install directory:
 
 ```bash
-LAMBO_VERSION=0.1.0 curl -fsSL https://github.com/nrynss/lambo/releases/download/v0.1.0/install.sh | sh
+LAMBO_VERSION={{VERSION}} curl -fsSL https://github.com/nrynss/lambo/releases/download/v{{VERSION}}/install.sh | sh
 ```
 
 ## Known limits

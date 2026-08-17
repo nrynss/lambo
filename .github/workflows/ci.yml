@@ -85,7 +85,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: test
-        run: cargo test --all
+        # fixtures is deliberately NOT in `default` (v020-R1-P3-3 — test-only
+        # profile); enable it explicitly so the fixtures-gated behavior tests
+        # (canon goldens, recall goldens, GC, stage1-3, daemon loops,
+        # tests/rebuild_session.rs) keep running on the default path.
+        run: cargo test --all --features fixtures
 
   # Feature-gated adapter tier (TEST-2): the default-features `check` job above
   # never compiles sqlite/cockroach. Every non-default combo that must stay
@@ -96,9 +100,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # sqlite behavior tests (T3.6 matrix) on default features + sqlite.
+          # sqlite behavior tests (T3.6 matrix) on default features + sqlite
+          # + fixtures. fixtures is test-only, not in `default`; the sqlite
+          # fixtures tests (seed contract, mutations-batch round-trip,
+          # structural agreement matrix) need it.
           - name: sqlite
-            command: cargo test --features store-sqlite
+            command: cargo test --features store-sqlite,fixtures
           # sqlite WITHOUT store-memory: the ungated MemoryStore import in the
           # test module (CON-4) must never regress.
           - name: sqlite-minimal

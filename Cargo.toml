@@ -1,6 +1,6 @@
 [package]
 name = "lambo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Agentic graph memory — bipartite graph, canonization, MCP serve"
@@ -8,6 +8,23 @@ readme = "README.md"
 repository = "https://github.com/nrynss/lambo"
 keywords = ["memory", "agents", "mcp", "graph"]
 categories = ["asynchronous"]
+# crates.io tarball whitelist (v020-R1-P2-1): ONLY these paths ship. Internal
+# trees (dev-diary/, evidence/, scripts/, docs/, site/, demo/, .grok/,
+# .github/, AGENTS.md, .env.example) and tests/ (consumer builds don't need
+# our integration suite) stay out. Cargo.toml, Cargo.lock (bin crate),
+# Cargo.toml.orig and .cargo_vcs_info.json are auto-added by cargo.
+include = [
+    "src/**",
+    "web/**",            # include_str! into cli/serve_web.rs (index.html/app.css/app.js)
+    "migrations/**",     # include_str! into store/cockroach.rs + store/sqlite.rs
+    "fixtures/**",       # include_str! (mutations-batch.json) + golden files at test time
+    "examples/**",
+    "lambo.example.toml",  # include_str! in config.rs — a tested contract
+    "rust-toolchain.toml", # deliberately kept: governs consumer-side cargo-install toolchain
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+]
 
 [dependencies]
 async-trait = "0.1"
@@ -51,7 +68,7 @@ aws-config = { version = "1", optional = true, features = ["credentials-login"] 
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 
 [features]
-default = ["store-memory", "embed-bge", "embed-fixture", "fixtures"]
+default = ["store-memory", "embed-bge", "embed-fixture"]
 
 # Stores (GraphStore adapters)
 store-memory = []
@@ -67,6 +84,9 @@ embed-bge = ["dep:reqwest"]
 embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
+# Test-only: deliberately NOT in `default` (v020-R1-P3-3) — `cargo install
+# lambo` must not pull test scaffolding. CI enables it explicitly where the
+# fixtures-gated tests run (ci.yml check job + sqlite matrix row + demo row).
 fixtures = ["store-memory"]
 # Ship profile (T8.9): the FULL adapter set carried by released prebuilt
 # binaries. One `lambo` binary holds every adapter; `[store] kind` /

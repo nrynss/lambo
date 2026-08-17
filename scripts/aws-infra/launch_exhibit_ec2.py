@@ -35,7 +35,7 @@ Usage:
 
     python3 scripts/aws-infra/launch_exhibit_ec2.py \\
         --session <lambo-session-id> --hostname lambo.example.com \\
-        --key-name my-keypair --lambo-version 0.1.0
+        --key-name my-keypair --lambo-version 0.2.0
 
     python3 scripts/aws-infra/launch_exhibit_ec2.py --session <id> --hostname h --dry-run
 
@@ -91,7 +91,7 @@ from _common import (  # noqa: E402
 )
 
 DEFAULT_LAMBO_REPO = "nrynss/lambo"
-DEFAULT_LAMBO_VERSION = "0.1.0"
+DEFAULT_LAMBO_VERSION = "0.2.0"
 DEFAULT_CADDY_VERSION = "2.10.0"
 
 # BGE-M3 as GGUF, served by llama.cpp on the instance itself.

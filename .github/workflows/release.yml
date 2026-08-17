@@ -1,8 +1,9 @@
 name: release
 
 # Builds a `lambo` prebuilt binary for each target platform on a `v*` tag,
-# computes SHA-256 checksums, and attaches everything to the GitHub release
-# for that tag. See .github/release/release-notes-template.md for the notes.
+# computes SHA-256 checksums, attaches everything to the GitHub release for
+# that tag, then publishes the crate to crates.io (so `cargo install lambo`
+# keeps working). See .github/release/release-notes-template.md for the notes.
 #
 # Third-party actions are pinned to full 40-char commit SHAs (same convention
 # as ci.yml). The release itself is published with the preinstalled `gh` CLI,
@@ -206,6 +207,15 @@ jobs:
           pattern: lambo-*
           merge-multiple: true
           path: dist
+      - name: Render release notes
+        run: |
+          set -euo pipefail
+          # The template carries a literal {{VERSION}} placeholder (P3-2);
+          # substitute the version derived from Cargo.toml above (already
+          # asserted to match the tag). GitHub Actions only parses `${{` as an
+          # expression, so the bare braces are inert in this script.
+          sed "s/{{VERSION}}/$VERSION/g" \
+            .github/release/release-notes-template.md > /tmp/notes-$VERSION.md
 
       - name: Publish release
         env:
@@ -219,6 +229,27 @@ jobs:
           cp scripts/install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" \
             --title "Lambo v$VERSION" \
-            --notes-file .github/release/release-notes-template.md \
+            --notes-file /tmp/notes-$VERSION.md \
             --verify-tag \
             dist/lambo-* dist/install.sh
+
+  publish-crate:
+    name: publish-crate
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        # No `toolchain:` input (v020-R1-P3-1): the committed rust-toolchain.toml
+        # (1.97.1) governs this job, matching ci.yml and the build job above.
+        # The `# 1.97.1` comment pins the dtolnay action code revision, not the
+        # toolchain.
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
