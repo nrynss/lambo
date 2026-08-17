@@ -21,6 +21,15 @@ which of these are actually needed:
 Everything below was verified against the source or a running instance during
 the redesign brief, not inferred.
 
+**Reconciliation note (2026-08-17, merge `95179b8`).** The H2 to H7 sections
+were enriched by a code sweep against the H1 branch head `46ca7be`. That sweep
+is accurate for the tree it read, but `main` moved five commits underneath it:
+the portal was rebuilt (`5ccd48f`) and then corrected four times, and `0.2.1`
+shipped. Three tasks were closed by that work and one description now discusses
+a page that no longer exists. Statuses below are corrected; the sweep's own
+findings are left intact, because its analysis of the server contracts is still
+the authority.
+
 ---
 
 ## Tier 1: correctness
@@ -242,9 +251,20 @@ suite. H1 is CLEAN and ready for integration.
 `api_inspect` at lines 946-1015 on `46ca7be`)
 **Severity:** visible correctness bug
 **Blocked by:** nothing
-**Status:** **OPEN**
+**Status:** **OPEN**, and still worth doing. The portal rebuild stopped the
+page rendering the contradiction, but that is a mitigation in one consumer, not
+the fix.
 **Owns:** `src/cli/serve_web.rs`, this H2 section, and H2
 adversarial-review/disposition records
+
+**What changed on main, and why it does not close this.** `web/app.js` now
+suppresses the gate block whenever `status === "Canonical"`, so a reader no
+longer sees "Canonical, blast radius 9" beside "blast radius 0.0 of 5, not
+met". The endpoint still computes and emits `gate_progress` unconditionally at
+`api_inspect`, so every other consumer, the CLI, the MCP surface and anything
+built later, still receives the self-contradicting payload and has to know to
+suppress it. Doing it server-side makes every consumer correct by default and
+saves two store queries per inspect on Canonical concepts.
 
 **The problem.** For a concept that has already reached Canonical, the endpoint
 returns the status and the blast radius, and then, in the same object, gate
@@ -499,9 +519,20 @@ it.
 at lines 451-455 on `46ca7be`)
 **Blocked by:** nothing
 **Needed by:** the portal being a product surface rather than a demo page
-**Status:** **OPEN**
+**Status:** **DONE** (2026-08-17, closed by the portal rebuild `5ccd48f` on
+`main`, not by a dedicated H4 task)
 **Owns:** `web/app.js`, narrowly necessary portal test/evidence files, this H4
 section, and H4 adversarial-review/disposition records
+
+**How it was closed.** `web/app.js` now calls `setInterval(loadGraph, 20000)`
+after the first successful load, so the structure re-reads every 20 seconds
+while the counts keep their 1.5s cadence. The rebuild also invalidates the
+"Current branch reality" paragraph below: the tree is no longer a static list
+of divs. It has per-node collapse and expand with `aria-expanded`, a selected
+row, and click-to-focus wiring into the details panel, so the earlier concern
+about preserving interaction state across a redraw is now live rather than
+hypothetical. Expanded state is held in `state.expanded` keyed by path and
+survives the refresh.
 
 **The problem.** `loadGraph()` is called once at startup, with the comment
 "structure is static for the session, fetched once". That is true for a finished
@@ -582,10 +613,16 @@ still need H4's overlap, stale-response and interaction-state audit.
 
 **Files:** `Cargo.toml`
 **Blocked by:** nothing
-**Status:** **OPEN**
+**Status:** **DONE** (2026-08-17, shipped in `0.2.1`, commit `a7a9cb5`)
 **Severity:** low today; future disclosure risk
-**Release policy:** land before the next crates.io release, but do not cut a
-release for this alone
+**Release policy:** landed with the release that carried the portal rebuild,
+exactly as this policy asked: it did not cause a release of its own
+
+**How it was closed.** The three root-file patterns are anchored as
+`/README.md`, `/LICENSE` and `/NOTICE`. Verified by packaging before tagging:
+89 files, 2.9 MiB, and the only README below the root is `examples/README.md`,
+which ships deliberately through `examples/**`. All fourteen internal READMEs
+the sweep identified are gone from the tarball.
 **Owns:** `Cargo.toml`, this H5 section, and H5
 adversarial-review/disposition records
 
@@ -654,7 +691,8 @@ process notes that were never intended as crate API.
 
 **Files:** `web/app.js`, `web/index.html`, optionally `web/app.css`, and
 `src/cli/serve_web.rs` for narrowly scoped portal regression tests
-**Status:** **OPEN** on the reviewed H1 branch
+**Status:** **DONE** (2026-08-17, closed by the portal rebuild `5ccd48f` on
+`main`; the sweep's "browser half is missing" was true of `46ca7be` only)
 **Severity:** low-frequency visible correctness bug
 **Blocked by:** nothing; inspect notices apply to every inspect consumer that
 exists on the claimed deliverable head
@@ -670,7 +708,15 @@ neighbours (`src/cli/caps.rs:38`), 4,096 graph nodes and 16,384 structural edges
 their caps and assert both the flag and the bounded length
 (`src/cli/serve_web.rs:2283-2344`). Do not change those contracts to solve H6.
 
-**The browser half is missing on this branch.** `loadGraph` fetches the response
+**Closed on main.** `loadGraph` now reads `g.truncated` and reveals
+`#tree-truncated` ("More was recorded than is shown here"), and the details
+panel reads `d.truncated` and reveals `#details-truncated` ("More are connected
+than shown here"). The second one matters because the sweep's other premise has
+also changed: the portal *does* call `/api/inspect` now, so the consumer the
+sweep worried might repeat the bug exists, and it surfaces the flag. The server
+contracts the sweep says not to touch were not touched.
+
+**The browser half was missing on the reviewed branch.** `loadGraph` fetches the response
 at `web/app.js:320-347`, renders its nodes and edges and discards
 `g.truncated`. `web/index.html:84-94` has no partial-result notice. The current
 portal does not call `/api/inspect` at all; `web/app.js:308-315` explicitly
@@ -824,16 +870,23 @@ the work that must happen before code.
 
 ## Order
 
-H1 is **DONE / CLEAN** and must not be selected again. H2 is the next
-correctness task. H3 and H4 are then independently claimable against the
-deliverable head; both touch the portal, so integrate one clean task before
-claiming the other to keep ownership and review boundaries unambiguous. H5 and
-H6 remain open and independent, with H6 applying to the browser consumers that
-exist when it is claimed. H7 is **PARKED / NEEDS DESIGN** and is not an
-implementation task until its selection, discovery, URL and authorization
-decisions are recorded and reviewed.
+**Corrected after merge `95179b8`.** H1, H4, H5 and H6 are all done and must
+not be selected again. H4, H5 and H6 were closed by portal and release work on
+`main` rather than by dedicated tasks, which is why the dispatch order written
+against `46ca7be` listed them as pending.
 
-Current dispatch order is therefore H2, H3, H4, H5, H6. Complete each task's
+**Two remain.** H2 is the next correctness task: server-side suppression of
+`gate_progress` for concepts that already reached Canonical, so every consumer
+is correct rather than only the page. H3 is the structured recall payload,
+whose contract is already pinned in the portal design brief and which the page
+is already written to consume the moment `hits` appears.
+
+H7 is **PARKED / NEEDS DESIGN** and is not an implementation task until its
+selection, discovery, URL and authorization decisions are recorded and
+reviewed.
+
+Dispatch order is therefore **H2, then H3**. Complete each task's
 implementation -> adversarial review -> remediation loop before integrating it
-and moving to the next. Re-audit line references and consumers at claim time,
-because earlier integrations can move or expand the named surfaces.
+and moving to the next. Re-audit line references at claim time: `serve_web.rs`
+and `web/app.js` both moved substantially in the rebuild, so any line number
+recorded against `46ca7be` is stale.
