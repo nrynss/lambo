@@ -25,7 +25,7 @@ asynchronously to the durable store.
 
 Any number of readers query the store directly and see eventually consistent state.
 Dashboards and the CockroachDB managed MCP server work this way. Readers never write.
-Multi-writer coordination stays out of scope for v0.1.
+Multi-writer coordination stays out of scope for v0.2.
 
 Real agents drive this. Claude Code and the Cursor Agent CLI each connect over stdio and
 list all seven tools, and two different models have driven the tools autonomously: DeepSeek
@@ -147,13 +147,31 @@ flowchart LR
 
 ## AWS services used
 
-None yet. Lambo v0.1 runs entirely on CockroachDB plus a local embedder, and no released
-build calls an AWS API.
+The point is not that this touches six services. It is that two autonomous agents
+provisioned real AWS infrastructure, one of them moved to delete a shared security group
+the other agent's database was sitting behind, and Lambo stopped it, because the
+dependency was recorded structure, not a similar-looking sentence in a vector store. That
+failure mode is a production outage flat memory cannot see coming. The table is supporting
+detail.
 
-The `Embedder` trait was designed so Amazon Titan Text Embeddings V2 on Bedrock can drop in
-as the dense path, and `embed-bedrock` is reserved as a Cargo feature. The adapter behind
-that feature is not implemented, so selecting `kind = "bedrock"` fails at startup with that
-message. BGE-M3 served by a local `llama-server` is the only real embedder today.
+The live portal reading that session is at **[lambo.nryn.dev](https://lambo.nryn.dev)**,
+read-only and test-enforced. Every service below is exercised by it; none is aspirational.
+
+| Service | How this project uses it |
+|---|---|
+| **Amazon EC2** | Hosts the public portal: `lambo serve-web` bound to loopback behind Caddy on an `m7i-flex.large` running Ubuntu 26.04, with an Elastic IP so the A record survives a stop/start, and IMDSv2 required. |
+| **Amazon VPC** | Subnets, route tables, internet gateway and security groups: the network the two agents provisioned and that Lambo tracks as graph nodes. The shared security group and the private subnet are the load-bearing pillars whose blast radius the demo protects. No NAT gateway anywhere, by design. |
+| **AWS Secrets Manager** | Holds the CockroachDB DSN. A wrapper resolves it at service start and `exec`s `lambo`, so the value exists only in the running process's environment: no `EnvironmentFile`, nothing in user data, nothing in an AMI or a snapshot. |
+| **AWS Lambda** | A public read-only stats endpoint over the live session, `python3.12` on arm64 behind a Function URL, deliberately outside the VPC because it reads an internet-facing database and has no reason to reach RDS. |
+| **Amazon RDS for PostgreSQL** | The private-tier workload the app-data agent provisioned: `db.t4g.micro`, encrypted, not publicly accessible. Its dependency on the shared security group and private subnet is precisely what the blast-radius warning protects. It is **not** a Lambo store: `VECTOR(1024)` and `CREATE VECTOR INDEX` do not apply to stock PostgreSQL. |
+| **AWS IAM** | An instance profile and a Lambda execution role, each scoped to the single secret ARN it needs rather than to `secretsmanager:*`. |
+
+One honest boundary: AWS runs *around* Lambo here, not inside it. The released binary calls
+no AWS API. The `Embedder` trait was designed so Amazon Titan Text Embeddings V2 on Bedrock
+can drop in as the dense path, and `embed-bedrock` is reserved as a Cargo feature, but the
+adapter behind it is not implemented, and selecting `kind = "bedrock"` fails at startup saying
+so. BGE-M3 served by a local `llama-server` is the only real embedder today, and the
+account's model-access request is still unapproved ([capture](evidence/bedrock-blocked.txt)).
 
 ## Development
 

@@ -942,9 +942,89 @@ steps still ran on the Ubuntu host at 2.39), and bookworm caps glibc at 2.36
 not 2.34 → remediated (job-level wiring + the readelf gate); R2/R3 cleared.
 Docs in `adve-review-remed-T12round{1..3}.md`.
 
-**Verify:** the definitive proof is a real (draft/PR) release build on the new
-runner showing `readelf` `GLIBC_2.34` (not 2.39) and the binary launching on
-AL2023 — a D2/D3 verification step, not a worktree defect.
+**Verify:** discharged by the real release below, not by a draft build. The
+AL2023 launch check is moot: the GLIBC 2.34 floor was dropped with the
+container, so there is nothing left to prove on that distro.
+
+
+### ✅ v0.2.0 SHIPPED (2026-08-17, tag `v0.2.0` = `35c86fb`)
+
+The release workflow T12 rewrote is no longer theoretical. Both channels are
+live and verified.
+
+**GitHub release** `v0.2.0`, published 05:13 UTC, `draft: false`,
+`prerelease: false`. Nine assets: four binaries (`linux-x86_64`, `linux-arm64`,
+`macos-arm64`, `windows-x86_64.exe`), their four `.sha256` files, and
+`install.sh`. The tag, `origin/main` and local `HEAD` all point at the same
+commit, so no dangling tag survived the three failed attempts.
+
+**crates.io** `lambo 0.2.0`, published 05:14 UTC, not yanked. It is the only
+version on the registry (0.1.0 was never published), so `max_version` is
+correct and `cargo install lambo` resolves it.
+
+**install.sh** resolves the latest release through the GitHub API, honours
+`LAMBO_VERSION` for pinning, and verifies the `.sha256` with a `sed` extraction
+that tolerates both GNU `sha256sum` and BSD `shasum -a 256` output.
+
+#### Four failures on the way there
+
+Each one is worth keeping because each was diagnosed wrong at least once.
+
+1. **The crates.io tarball would have shipped the whole repo.** The version
+   bump added a `publish-crate` job, and the reviewer caught that the package
+   had no `include`: 6.4 MiB carrying `dev-diary/` and `evidence/`, the latter
+   holding live Cockroach and AWS identifiers. A `[package] include` whitelist
+   took it to 3.0 MiB with no internal content. See the leak note below: the
+   whitelist is *nearly* airtight, not airtight.
+2. **Workflow validation failed on a comment.** A literal `${{` inside a
+   run-block comment trips GitHub's expression parser before any step executes.
+   The first diagnosis blamed a nearby `sed` line; the reviewer pulled the
+   actual error out of the run logs and it was the comment. Worth remembering
+   that a `${{` in a `run:` block is parsed even where it reads as prose.
+3. **The bookworm container could not bootstrap itself.** `debian:bookworm`
+   ships without `curl`, so rustup's installer exited 127, and once that was
+   fixed the image also had no C compiler for `sqlx` and `rustls`. Adding
+   `curl` and `build-essential` cleared both.
+4. **Container parity tests were flaky, so the container went away.** Tests
+   spawning `lambo` subprocesses over stdio stalled 60s or more inside the
+   container against roughly 1s on the host. Rather than chase it, the AL2023
+   glibc 2.34 floor was dropped as a deliberate scope decision: Linux builds
+   run natively on Ubuntu 24.04, the assertion gate relaxed to
+   `GLIBC <= 2.39`, and the container is gone entirely. The gate still exists,
+   so it still catches creep above the build host. It just no longer promises
+   AL2023.
+
+The fifth run was clean: every job green, release published, crate published.
+
+#### Open, low severity: the include whitelist leaks 14 READMEs
+
+Verified against the published `.crate` (769 KiB compressed), not against
+intent. These shipped despite the whitelist:
+
+```
+demo/README.md, site/README.md,
+scripts/{aws-infra,cloudops}/README.md,
+dev-diary/README.md, dev-diary/adversarial-review/README.md,
+dev-diary/evidence/{,demo-determinism/,mcp-client-interop/,mcp-client-stdio/}README.md,
+evidence/{,demo-determinism/,mcp-client-interop/,mcp-client-stdio/}README.md
+```
+
+**Cause:** cargo `include` patterns are gitignore-style globs, so the entry
+`"README.md"` is unanchored and matches at every depth rather than at the
+package root. `LICENSE` and `NOTICE` share the flaw but have only one match
+each in the repo.
+
+**Why it is low and not urgent:** the reviewer's actual concern did not
+materialise. A scan of all fourteen for ARNs, twelve-digit account ids,
+`cockroachlabs.cloud` hosts, `sg-`/`vpc-`/`i-`/`subnet-` ids, EIP allocations,
+`AKIA` keys and public IPs returns nothing resolvable: every hit is an RFC1918
+CIDR, a loopback address, or a resource *name* like `VPC-Enterprise-Prod` that
+is already public in the README. What did ship is internal process
+documentation, not credentials.
+
+**Fix, whenever something else forces a patch release:** anchor the three
+root-file patterns as `/README.md`, `/LICENSE`, `/NOTICE`. Not worth a 0.2.1 on
+its own.
 
 
 ### ✅ E2E — DONE (2026-08-17; integrated `5db0b90`, ready to push)
@@ -974,10 +1054,9 @@ Docs: `adve-review-remed-E2Eround{1..2}.md`. **Verify:** full
 `cargo test --all-features` green — **842 passed / 0 failed**.
 
 **Remaining for D1/D2/D3 (deployment, not this task):** T6's NEW-5 SSM check
-discharged above; a **real-live capture** of `03_crossover_protect.py` (T8)
-before the video; a **draft/PR release build** on the native-host (Ubuntu
-24.04) release workflow (T12 — see the supersede note above); the D1 clean
-redeploy.
+discharged above; the T12 release build discharged by the shipped v0.2.0 above.
+What is left is a **real-live capture** of `03_crossover_protect.py` (T8)
+before the video, and the D1 clean redeploy.
 
 ---
 

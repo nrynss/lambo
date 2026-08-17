@@ -406,10 +406,10 @@ Every line is a service actually exercised by this scenario; none is aspirationa
 
 | Service | How this project uses it |
 |---|---|
-| **Amazon EC2** | Hosts the public judge portal: `lambo serve-web` behind Caddy on a `t4g.micro`, serving the read-only view of a live session. Read-only is test-enforced, not merely intended. |
+| **Amazon EC2** | Hosts the public judge portal: `lambo serve-web` behind Caddy, serving the read-only view of a live session at [lambo.nryn.dev](https://lambo.nryn.dev). Read-only is test-enforced, not merely intended. **As built:** an `m7i-flex.large` on x86_64 running Ubuntu 26.04, not the `t4g.micro` this plan first assumed, because BGE-M3 does not fit in 1 GiB. The arm64 branch of the launcher is not exercised. |
 | **Amazon VPC** (subnets, route tables, internet gateway, security groups) | The network the two agents provision and that Lambo tracks as graph nodes. The shared security group and private subnet are the load-bearing pillars whose blast radius the demo protects. |
 | **AWS Secrets Manager** | Stores the CockroachDB DSN. The exhibit instance resolves it at boot through an instance profile, so no connection string is baked into user data, an AMI, or the repo. |
-| **AWS Lambda** (Function URL) | A public read-only stats endpoint over the live CockroachDB session. Runs outside the VPC, since it reads an internet-facing database. |
+| **AWS Lambda** (Function URL) | A public read-only stats endpoint over the live CockroachDB session, [live and answering 200](https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/). Runs outside the VPC, since it reads an internet-facing database. It 403d until T10 found that a public Function URL has required both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` in its resource policy since October 2025. |
 | **Amazon RDS for PostgreSQL** | Provisioned by the app-data agent as the private-tier workload. Its dependency on the shared security group and private subnet is precisely what the blast-radius warning protects. It is not a Lambo store — see §6. |
 | **AWS IAM** | Instance profile and Lambda execution role, each scoped to the one thing it needs. |
 

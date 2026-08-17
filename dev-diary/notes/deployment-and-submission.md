@@ -55,10 +55,20 @@ Sequence:
 
 Notes:
 
-- The binary the instance runs is built natively by the release workflow on
-  the Ubuntu 24.04 runners (glibc 2.39); the instance's Ubuntu 26.04 (glibc
-  2.41) is newer than the build environment, so the shipped binary runs. Use
-  the release artifact; build, `scp`, restart: about four minutes.
+- **There is no binary step any more.** v0.2.0 shipped, so the launcher's own
+  user data does the install: it fetches `lambo-0.2.0-<arch>` from the GitHub
+  release and verifies it against the published `.sha256` before installing.
+  `DEFAULT_LAMBO_VERSION` in `launch_exhibit_ec2.py` is already `0.2.0`, and
+  the asset arch is chosen from the instance type, so an `m7i-flex.large`
+  pulls `linux-x86_64` without being told. Nothing to build, nothing to `scp`,
+  nothing to restart by hand, which is exactly the "clean product of the
+  current script" claim D1 exists to establish. The old four-minute
+  build-and-copy loop is gone; drop it from the sequence rather than doing it
+  out of habit.
+- The binary is built natively by the release workflow on the Ubuntu 24.04
+  runners (glibc 2.39). The instance's Ubuntu 26.04 carries glibc 2.41, newer
+  than the build environment, so the shipped binary runs. That direction is the
+  one that works; the reverse is what T12 was about.
 - The exhibit runs x86_64 on Ubuntu 26.04 and that is the shipped path. The
   launcher's arm64 branch is not exercised and is not being validated.
 - Do not redeploy while a capture is running. D2 depends on the service staying
@@ -96,35 +106,56 @@ supporting detail.
 
 ---
 
-## D3 — Docs and submission text
+## ✅ D3 done: docs and submission text (2026-08-17)
 
-**Blocked by:** D1, and anything in remediation **T6** that changes the stack
+Landed ahead of D1 rather than after it, on the reasoning that the stack it
+describes is not going to move: D1 rebuilds the same stack from the same
+script, so the instance id changes and nothing in the copy does. The one thing
+that would have forced a rewrite, the Elastic IP and therefore the hostname,
+is allocated separately and re-associated, so `lambo.nryn.dev` survives the
+redeploy. If D1 somehow lands on a different address, the only edit needed is
+the A record, not these pages.
 
-Every one of these is currently contradicted by what is running:
+Every claim below was checked against the running exhibit before it was
+written, not against the plan.
 
-- `README.md` says `AWS services used: None yet`. Six services are live.
-- `site/src/content/docs/hackathon.mdx` carries three `Not yet` rows: demo URL,
-  video, AWS services. The demo URL exists.
-- `docs/plans/multi-agent-cloudops-aws-plan.md` §11 describes a `t4g.micro` on
-  Graviton and a public Lambda Function URL. The exhibit is an `m7i-flex.large`
-  on x86_64 running Ubuntu 26.04, and the Function URL returns 403 with a
-  correct resource policy and no Organization to explain it.
+**Verified live first:**
 
-Two things to get right rather than fast:
+- `https://lambo.nryn.dev/` → 200, `/healthz` → `ok`, `/api/stats` → session
+  `cloudops-exhibit`, 113 nodes / 485 edges / 41 concepts / 1 canonical / 7
+  canonization events, `mode: reader`.
+- The Lambda Function URL → 200, same session, with
+  `VPC-Enterprise-Prod` reported Canonical at blast radius 7.
 
-- **The Function URL.** The Lambda works: invoked directly it returns live
-  counts read from CockroachDB through the scoped secret. The public URL
-  previously 403d because (post-Oct-2025) a public function URL requires BOTH
-  `lambda:InvokeFunctionUrl` AND `lambda:InvokeFunction` in its resource
-  policy; the missing second statement was added (remediation T10) and the URL
-  now returns HTTP 200. §11 should describe it as the live public endpoint at
-  the URL shown on deploy, per the T10 resolution.
-- **The portal's own copy.** It currently promises that Lambo "names the
-  workloads that would break". `/api/recall` does not do that; remediation T3
-  makes it true. If T3 does not land, that sentence comes down before the URL is
-  submitted. This is a hard cutover, not something to discover late.
+**Changed:**
 
-Draft freely, land last. Anything written before D1 gets rewritten.
+- `README.md`: the `None yet` section is now a six-service table that leads
+  with the outage that did not happen and keeps the table as supporting detail,
+  per §11's instruction. The `v0.1` scope line is now `v0.2`.
+- `site/src/content/docs/hackathon.mdx`: demo URL and AWS services flip to
+  **Met** with the two live URLs; a new "AWS, and what is actually running"
+  section carries the argument and the table; the `No demo URL` and
+  `No AWS services` paragraphs are gone.
+- `docs/plans/multi-agent-cloudops-aws-plan.md` §11: the EC2 row now records
+  what was actually built (`m7i-flex.large`, x86_64, Ubuntu 26.04) against what
+  the plan first assumed, and the Lambda row records the URL as live with the
+  T10 root cause named.
+- `site/src/content/docs/{demo,cli}.mdx`: `only one in v0.1` → `v0.2`.
+
+**Deliberately left saying `Not yet`:** the video row. D2 has not happened, and
+a submission page that claimed otherwise would break the exact habit the page's
+closing note is about.
+
+**Checked, no change needed:** the portal's own copy. The sentence this note
+worried about, Lambo "names the workloads that would break", is not in
+`web/index.html`. What is there is "marks which memories other work depends on,
+so an agent knows what is dangerous to change", which T3 makes literally true.
+The hard cutover this note was holding open never became necessary.
+
+One honest boundary is stated in both README and hackathon page rather than
+blurred: AWS runs *around* Lambo, not inside it, because the released binary
+still calls no AWS API. Bedrock would be the entry that changes that, and it
+stays out of the table while the model-access request is unapproved.
 
 ---
 
@@ -133,8 +164,9 @@ Draft freely, land last. Anything written before D1 gets rewritten.
 ```
 T6 ──► D1 ──► D2      redeploy, then capture
 T8 ──────────► D2      the climax script must have run
-       D1 ──► D3      docs land after the stack stops moving
+       D3            done; landed early, see the note in that section
 ```
 
-Critical path to a submission: **T6 → D1 → D2**, with **T8** joining before D2,
-and **D3** trailing D1.
+Critical path to a submission is now just **D1 → D2**, with **T8** joining
+before D2. T6 and T12 are done, and D3 is done. The only row on the hackathon
+page still reading `Not yet` is the video, and D2 is what clears it.

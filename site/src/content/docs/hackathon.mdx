@@ -17,9 +17,9 @@ This page maps the submission conditions to the specific artefact that satisfies
 | Single-writer constraint stated | **Met** | Stated in the README's Deployment model, and on [End to end](/lambo/end-to-end/) |
 | Architecture diagram | **Met** | In the README, and the topology on [End to end](/lambo/end-to-end/) |
 | CockroachDB tools identified | **Met** | The table below, and the raw captures in [Evidence](/lambo/evidence/) |
-| Functional demo URL | **Not yet** | Not deployed. See below. |
+| Functional demo URL | **Met** | [lambo.nryn.dev](https://lambo.nryn.dev), the read-only portal on a live CockroachDB session, plus a [stats endpoint](https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/) on AWS Lambda reading the same session |
 | Video under three minutes | **Not yet** | Not recorded. See below. |
-| AWS services identified | **Not yet** | Nothing is provisioned, so there is nothing to claim. See below. |
+| AWS services identified | **Met** | Six, in [the table below](#aws-and-what-is-actually-running) and in the README. Each one is exercised by the running exhibit. |
 
 ## CockroachDB, and what was actually exercised
 
@@ -31,15 +31,28 @@ Two capabilities, both with transcripts behind them rather than assertions.
 
 Both are covered on [Evidence and evaluation](/lambo/evidence/), with the raw logs in the repository.
 
+## AWS, and what is actually running
+
+This section used to say `None yet`. It changed because resources were created, not because the deadline got closer.
+
+The argument first, because the inventory is the weaker claim. Two autonomous agents provisioned real infrastructure in `us-east-1`: a VPC with public and private subnets, a shared security group, a private RDS instance, and a stats function. One agent then moved to delete the security group the other agent's database was sitting behind. Lambo stopped it, because the dependency was recorded structure with a measured blast radius rather than a similar-sounding sentence in a vector store. That is a production outage that did not happen, on live resources, and it is the reason the service table below is supporting detail rather than the point.
+
+| Service | How this project uses it |
+|---|---|
+| **Amazon EC2** | The public portal: `lambo serve-web` bound to loopback behind Caddy on an `m7i-flex.large` running Ubuntu 26.04, with an Elastic IP and IMDSv2 required. |
+| **Amazon VPC** | Subnets, route tables, internet gateway and security groups: the network the agents provisioned and that Lambo tracks as graph nodes. No NAT gateway anywhere, by design. |
+| **AWS Secrets Manager** | The CockroachDB DSN, resolved at service start into the running process's environment. No `EnvironmentFile`, nothing in user data, nothing in a snapshot. |
+| **AWS Lambda** | The public read-only stats endpoint over the live session, on arm64 behind a Function URL, outside the VPC because it reads an internet-facing database. |
+| **Amazon RDS for PostgreSQL** | The private-tier workload, encrypted and not publicly accessible. Its dependency on the shared security group is what the blast-radius warning protects. It is not a Lambo store. |
+| **AWS IAM** | An instance profile and a Lambda execution role, each scoped to the single secret ARN it needs. |
+
+One boundary worth stating rather than blurring: AWS runs *around* Lambo here, not inside it. The released binary still calls no AWS API. Amazon Titan Text Embeddings V2 on Bedrock would be the one entry where that stops being true, and it stays out of the table because the account's model-access request is still unapproved. The refusal is captured in the repository.
+
 ## What is not done yet
 
 Stating these plainly is more useful than a page that implies otherwise.
 
-**No demo URL.** The read-only portal is `lambo serve-web`, and it runs, but it is not deployed anywhere public yet. Until it is, there is no URL to give.
-
-**No video.** Not recorded.
-
-**No AWS services.** The README says `None yet`, and that remains accurate: the released build calls no AWS API. Provisioning scripts exist in the repository and have been validated offline, but nothing has been created in an account, so there is nothing to identify. When that changes, this page and the README change with it, and not before.
+**No video.** Not recorded. The portal and terminal capture tooling is built and working, but a take needs the exhibit rebuilt from the launch script alone rather than the hand-repaired instance currently serving, and that rebuild has not happened yet.
 
 <Note>
 The pattern above is deliberate. Everything in these docs marks what was measured and what was not, including [Evidence and evaluation](/lambo/evidence/), which dates a determinism claim to when it became a guarantee rather than presenting an earlier capture as stronger than it was. A submission page that broke that habit would be the least trustworthy page on the site.
