@@ -135,4 +135,21 @@ the wire contract, or any consumer.
 
 ## Remediation disposition
 
-(Empty — awaiting remediation.)
+- **Remediation agent:** `H2RemediationR1`
+- **Remediation commit:** `0000000000000000000000000000000000000000` (filled after commit)
+- **Disposition:** H2-R1-1 (P3) ACCEPTED with documentation; no code
+  change. The original CLEAN / APPROVE verdict above is unchanged, and no
+  round-2 review is required for a docs-only disposition.
+
+### H2-R1-1 (P3) - accepted (documentation only)
+
+The finding concerns stale test line references in the implementer's final
+report only; the committed spec handoff paragraph carries no line numbers,
+so nothing in-repo was wrong. The correct references are already recorded
+in the finding body of this record: the canonical gate-absence assertions
+at `src/cli/serve_web.rs:2302-2334` (H2 key-absence assertion at
+`:2326-2331`) and the cooldown regression
+`inspect_surfaces_a_cooling_concepts_repromotion_cooldown` at
+`src/cli/serve_web.rs:2623-2667`. No code change was required or
+performed. The review verdict remains CLEAN / APPROVE; no round-2 review
+is required for a docs-only disposition.
