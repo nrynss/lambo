@@ -125,9 +125,16 @@
     painted: false,
     embeddingKey: null,
     lookupSeq: 0,
+    heroSeq: 0,           // sequence token for the hero deps /api/inspect fetch
     showFallback: false,
     lastResult: null
   };
+
+  // E2E-3: the stage timer for the in-flight lookup. Module-level so a new
+  // `runLookup` can clear the previous lookup's interval — the Enter key is
+  // not gated on the in-flight flag, so a second lookup can start while the
+  // first is still awaiting.
+  var lookupTimer = null;
 
   // ---- theme -----------------------------------------------------------
   // Three states: system (default, no attribute), light, dark.
@@ -394,16 +401,25 @@
         : "More depends on this than on anything else in the session.";
 
     // Dependents come from the focus endpoint; until it answers we show what
-    // the structure payload already knows.
+    // the structure payload already knows. E2E-4: a sequence token makes a
+    // stale pillar's response a no-op — an overlapping render for an older
+    // graph must not fill hero-deps for the newer pillar.
+    var seq = ++state.heroSeq;
     get("/api/inspect?focus=" + encodeURIComponent(pillar.content))
-      .then(function (d) { fillHeroDeps(pillar, d.dependents || [], d.dependents ? d.dependents.length : 0); })
-      .catch(function () { fillHeroDeps(pillar, [], pillar.blast_radius); });
+      .then(function (d) {
+        if (seq !== state.heroSeq) return;
+        fillHeroDeps(pillar, d.dependents || [], d.dependents ? d.dependents.length : 0);
+      })
+      .catch(function () {
+        if (seq !== state.heroSeq) return;
+        fillHeroDeps(pillar, [], pillar.blast_radius);
+      });
   }
-
   function fillHeroDeps(pillar, deps, total) {
     var wrap = $("hero-deps");
     clear(wrap);
     deps.slice(0, 6).forEach(function (d) {
+
       var chip = el("div", "chip");
       chip.appendChild(el("span", "shape k-" + d.concept_type));
       chip.appendChild(el("span", "chip-name", d.content));
@@ -573,8 +589,10 @@
   // The gates answer "why is this not Canonical yet", which is not a question
   // about something that already is. They also measure against aged
   // connections while the blast radius above counts live ones, so on a young
-  // session the two disagree and the pairing reads as a bug. Suppressed here
-  // until the server stops sending it (H2 in the hardening notes).
+  // session the two disagree and the pairing reads as a bug. The server has
+  // suppressed gate_progress for Canonical since H2, so this guard is
+  // defense-in-depth for older payloads; it must stay so the page renders a
+  // key-less Canonical payload identically.
   function renderGates(d) {
     var gp = d.gate_progress;
     var applicable = gp && d.status !== "Canonical";
@@ -726,14 +744,27 @@
     var started = Date.now();
     var stage = 0;
 
+    // E2E-3: every previous lookup's interval dies here. The Enter handler
+    // is not gated on the in-flight flag, so a lookup superseded while in
+    // flight would otherwise leak its timer — firing every 1.3 s, advancing
+    // its own closure counter and overwriting #lookup-stage with the FIRST
+    // query's stale text during the second lookup's loading.
+    if (lookupTimer !== null) { clearInterval(lookupTimer); lookupTimer = null; }
+
     show($("lookup-results"), false);
     show($("lookup-loading"), true);
     $("lookup-stage").textContent = STAGES[0];
     $("lookup-btn").disabled = true;
 
     // Roughly four seconds in production, so the wait is designed rather than
-    // left to a bare spinner.
-    var timer = setInterval(function () {
+    // left to a bare spinner. The interval also self-cleans: once this lookup
+    // is superseded it stops writing #lookup-stage and releases itself.
+    lookupTimer = setInterval(function () {
+      if (seq !== state.lookupSeq) {
+        clearInterval(lookupTimer);
+        lookupTimer = null;
+        return;
+      }
       stage = Math.min(stage + 1, STAGES.length - 1);
       $("lookup-stage").textContent = STAGES[stage];
     }, 1300);
@@ -752,7 +783,7 @@
       })
       .then(function () {
         if (seq !== state.lookupSeq) return;
-        clearInterval(timer);
+        if (lookupTimer !== null) { clearInterval(lookupTimer); lookupTimer = null; }
         show($("lookup-loading"), false);
         $("lookup-btn").disabled = false;
       });
@@ -975,6 +1006,15 @@
       });
   }
 
+  // E2E-4: schedule the next poll from THIS request's completion, so
+  // /api/graph requests never overlap and a slow (older) response cannot
+  // commit stale state over a newer one. The catch above resolves, so a
+  // failed poll still schedules the next one — same resilience as the old
+  // `setInterval`, minus the overlap.
+  function scheduleGraph() {
+    setTimeout(function () { loadGraph().then(scheduleGraph); }, 20000);
+  }
+
   // ---- boot ------------------------------------------------------------
 
   function boot() {
@@ -988,11 +1028,11 @@
     });
 
     loadGraph().then(function () {
-      setInterval(loadGraph, 20000);
       try {
         var focus = new URLSearchParams(window.location.search).get("focus");
         if (focus) setFocus(focus);
       } catch (e) { /* ignore */ }
+      scheduleGraph();
     });
 
     poll().then(schedule);

@@ -568,11 +568,13 @@ fn backend<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
-/// STORE-7 — session-row embedding-contract parsing, mirroring sqlite's XOR
-/// corruption handling. A row with exactly one of `embedding_kind` /
-/// `embedding_dim` set (as direct SQL can manufacture) is a corruption error,
-/// never a silent `None`; `embedding_model` alone is inert (model without a
-/// kind has nothing to label).
+/// STORE-7 — session-row embedding-contract parsing. A row with exactly one
+/// of `embedding_kind` / `embedding_dim` set (as direct SQL can manufacture)
+/// is a corruption error, never a silent `None`; `embedding_model` alone is
+/// inert (model without a kind has nothing to label). The kind-XOR-dim arms
+/// classify as [`StoreError::Invariant`] (E2E-2): the corruption is
+/// deterministic, so `tx_retry` must not replay it — both consumers (the
+/// checked vector read and the load path) go through this helper.
 fn session_embedding_from_parts(
     kind: Option<String>,
     model: Option<String>,
@@ -590,10 +592,17 @@ fn session_embedding_from_parts(
             })?,
         })),
         (None, None) => Ok(None),
-        (Some(_), None) => Err(StoreError::Backend(format!(
+        // E2E-2: a kind-XOR-dim row is DETERMINISTIC corruption — replaying
+        // the transaction cannot change the parse, so classifying it as
+        // `Backend` made `tx_retry` replay it 5× with backoff (~500 ms)
+        // before surfacing (STORE-4: deterministic failures are never
+        // replayed). `Invariant` returns on the first attempt. Same class on
+        // the load path: both consumers (load_session and the checked read)
+        // go through this helper.
+        (Some(_), None) => Err(StoreError::Invariant(format!(
             "sessions row for {session_id} has embedding_kind without embedding_dim"
         ))),
-        (None, Some(_)) => Err(StoreError::Backend(format!(
+        (None, Some(_)) => Err(StoreError::Invariant(format!(
             "sessions row for {session_id} has embedding_dim without embedding_kind"
         ))),
     }
@@ -3104,7 +3113,9 @@ mod tests {
         let sid = "session-store7";
         // The old silent-None shape (kind absent, dim present) — the STORE-7 bug.
         let err = session_embedding_from_parts(None, None, Some(1024), sid).unwrap_err();
-        assert!(matches!(err, StoreError::Backend(_)), "{err:?}");
+        // E2E-2: deterministic corruption classifies as `Invariant`, so
+        // `tx_retry` returns on the first attempt instead of replaying it 5×.
+        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
         assert!(
             err.to_string()
                 .contains("embedding_dim without embedding_kind"),
@@ -3112,6 +3123,7 @@ mod tests {
         );
         // Mirror image: kind present, dim absent — sqlite errors here too.
         let err = session_embedding_from_parts(Some("bge_m3".into()), None, None, sid).unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
         assert!(
             err.to_string()
                 .contains("embedding_kind without embedding_dim"),

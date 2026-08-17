@@ -56,10 +56,10 @@ use crate::daemon::hotlist::{Condition, HotList};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::recall::cache::{CacheKey, RecallCache};
-use crate::recall::detail::DetailedRecall;
+use crate::recall::detail::{Annotation, AnnotationKind, DetailedRecall};
 use crate::recall::dispatch::{self, RecallKind};
 use crate::recall::{assemble, candidates, expand};
-use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId};
+use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId, StoreError};
 
 /// Default daemon poll interval (XP-7).
 ///
@@ -412,6 +412,11 @@ impl Daemon {
         // Gather store I/O BEFORE any lock (the vector leg is async). Uses the
         // graph's authoritative session as the vector namespace (P2-8). Skipped
         // only when the traversal dispatch is about to fire (T9-R1-3).
+        // E2E-6: annotations for a vector leg refused mid-flight (checked
+        // read `Invariant` on an embedding-contract race). Gathered before
+        // the lock, appended to the result's response annotations below.
+        let mut vector_leg_refused: Vec<Annotation> = Vec::new();
+
         let input = if dispatch_ready {
             candidates::Phase1Input::default()
         } else {
@@ -419,6 +424,25 @@ impl Daemon {
                 Ok(input) => input,
                 Err(err) => {
                     tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
+                    // E2E-6: a mid-flight refusal of the checked vector read
+                    // (H1's `Invariant` when the durable embedding contract
+                    // changed between the reader's load and its vector query)
+                    // is a client-visible degradation, not just a log line:
+                    // attach the `vector_degraded` annotation so both the CLI
+                    // header and the portal's card/verbatim views say the
+                    // results are keyword-only. Ranking stays fail-closed —
+                    // only the explanation is new. Distinct from the
+                    // CLI-side embed-failure annotation (that path has no
+                    // query embedding, so `gather` returns early and never
+                    // reaches the store), so the two never duplicate.
+                    if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
+                    {
+                        vector_leg_refused.push(Annotation::new(
+                            AnnotationKind::VectorDegraded,
+                            "recall: vector leg refused because the embedding contract changed \
+                             mid-query; results are keyword-only",
+                        ));
+                    }
                     candidates::Phase1Input::default()
                 }
             }
@@ -510,6 +534,12 @@ impl Daemon {
                     .to_string(),
             );
         }
+        // E2E-6: the refused-leg note lands in producer order after the
+        // pipeline's own response annotations (assembled above). The only
+        // other response annotation on this path is `traversal`, which is
+        // produced by a dispatched structural query that skips `gather`
+        // entirely — the two never coexist.
+        result.response_annotations.extend(vector_leg_refused);
         result
     }
 
@@ -3099,6 +3129,188 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("refusing to mix")),
             "refusal names the namespace mix"
+        );
+    }
+
+    /// E2E-6: a contract-race `Invariant` from the checked vector read
+    /// mid-flight must surface a client-visible `vector_degraded` annotation
+    /// on the detailed result (both the CLI header and the portal's card /
+    /// verbatim views render `response_annotations`), instead of degrading to
+    /// a silent keyword-only recall. The vector leg stays fail-closed — the
+    /// annotation is explanation, not a fallback ranking.
+    #[tokio::test]
+    async fn gather_contract_race_annotates_vector_degraded() {
+        use crate::config::RecallWeights;
+        use crate::recall::cache::RecallCache;
+        use crate::recall::detail::AnnotationKind;
+        use crate::store::Capabilities;
+        use crate::types::{EmbeddingContract, MutationBatch};
+        use async_trait::async_trait;
+
+        // The only trait items recall_detailed touches: the capability probe
+        // and the checked read. Everything else is unreachable on this path.
+        struct ContractRaceStore;
+        #[async_trait]
+        impl crate::store::GraphStore for ContractRaceStore {
+            async fn init_schema(&self) -> Result<(), StoreError> {
+                panic!("E2E-6 stub: init_schema")
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::VECTOR_SEARCH
+            }
+            fn vector_dimensions(&self) -> Option<usize> {
+                Some(1024)
+            }
+            async fn flush(
+                &self,
+                _batch: &MutationBatch,
+                _token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                panic!("E2E-6 stub: flush")
+            }
+            async fn load_session(
+                &self,
+                _session: &SessionId,
+            ) -> Result<crate::types::GraphSnapshot, StoreError> {
+                panic!("E2E-6 stub: load_session")
+            }
+            async fn keyword_candidates(
+                &self,
+                _session: &SessionId,
+                _tokens: &[String],
+                _limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                panic!("E2E-6 stub: keyword_candidates")
+            }
+            async fn vector_candidates(
+                &self,
+                _session: &SessionId,
+                _embedding: &[f32],
+                _limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                panic!("E2E-6 stub: vector_candidates")
+            }
+            async fn vector_candidates_checked(
+                &self,
+                _session: &SessionId,
+                _embedding: &[f32],
+                _expected_contract: &EmbeddingContract,
+                _limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                Err(StoreError::Invariant(
+                    "vector candidate lookup refused after embedding contract changed: \
+                     durable kind=bge_m3 vs live kind=bge_m3"
+                        .to_string(),
+                ))
+            }
+            async fn blast_radius(
+                &self,
+                _session: &SessionId,
+                _node: NodeId,
+                _min_edge_age: Duration,
+                _now: DateTime<Utc>,
+            ) -> Result<u64, StoreError> {
+                panic!("E2E-6 stub: blast_radius")
+            }
+            async fn interaction_span(
+                &self,
+                _session: &SessionId,
+                _node: NodeId,
+                _min_age: Duration,
+                _now: DateTime<Utc>,
+            ) -> Result<crate::types::InteractionSpan, StoreError> {
+                panic!("E2E-6 stub: interaction_span")
+            }
+            async fn record_canonization(
+                &self,
+                _event: &crate::types::CanonizationEvent,
+                _token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                panic!("E2E-6 stub: record_canonization")
+            }
+            async fn acquire_lease(
+                &self,
+                _session: &SessionId,
+                _holder: &crate::store::lease::LeaseHolder,
+                _ttl: Duration,
+            ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+                panic!("E2E-6 stub: acquire_lease")
+            }
+            async fn refresh_lease(
+                &self,
+                _session: &SessionId,
+                _holder: &crate::store::lease::LeaseHolder,
+                _ttl: Duration,
+            ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+                panic!("E2E-6 stub: refresh_lease")
+            }
+            async fn release_lease(
+                &self,
+                _session: &SessionId,
+                _holder: &crate::store::lease::LeaseHolder,
+            ) -> Result<(), StoreError> {
+                panic!("E2E-6 stub: release_lease")
+            }
+            async fn write_flush_stats(
+                &self,
+                _session: &SessionId,
+                _stats: &crate::store::SessionFlushStats,
+            ) -> Result<(), StoreError> {
+                panic!("E2E-6 stub: write_flush_stats")
+            }
+            async fn read_flush_stats(
+                &self,
+                _session: &SessionId,
+            ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
+                panic!("E2E-6 stub: read_flush_stats")
+            }
+        }
+
+        let (graph, _cid) = locked_graph_with_one_concept();
+        let daemon = Daemon::new(graph, ScoringWeights::default(), Duration::from_secs(3600));
+        let mut cache = RecallCache::new();
+        let query = RecallQuery {
+            query: "user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 2,
+        };
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 1024,
+        };
+        let result = daemon
+            .recall_detailed(
+                &sid(),
+                query,
+                &ContractRaceStore,
+                Some((&vec![0.0; 1024], &contract)),
+                RecallWeights::default(),
+                &mut cache,
+            )
+            .await;
+
+        let degraded: Vec<&crate::recall::detail::Annotation> = result
+            .response_annotations
+            .iter()
+            .filter(|a| a.kind == AnnotationKind::VectorDegraded)
+            .collect();
+        assert_eq!(degraded.len(), 1, "exactly one vector_degraded annotation");
+        assert!(
+            degraded[0].text.contains("embedding contract changed"),
+            "the annotation names the refusal: {}",
+            degraded[0].text
+        );
+        assert!(
+            degraded[0].text.contains("keyword-only"),
+            "the annotation states the fail-closed outcome: {}",
+            degraded[0].text
+        );
+        assert!(
+            result.response_annotations.len() == 1,
+            "no other response annotations on this path: {:?}",
+            result.response_annotations
         );
     }
 }
