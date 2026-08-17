@@ -48,3 +48,22 @@
   - Tests: `FixtureEmbedder` (`embed-fixture`). Never mix model vectors in one session
     without re-embed — use `EmbeddingContract` on `GraphSnapshot`.
   - Never commit `models/` weights.
+
+## Consulting memory before infrastructure work
+
+If a Lambo MCP server is attached, treat it as the record of what other agents
+have already built, and consult it **before** advising on or performing any
+change to shared infrastructure.
+
+- Before deleting, detaching, renaming or reconfiguring a resource, call
+  `lambo_recall` with the resource name, and `lambo_inspect` on it when the
+  answer is not obvious. Do this first, before reading code or searching the
+  filesystem: the graph records what other agents actually provisioned, which
+  source files do not.
+- A load-bearing warning or a non-zero blast radius means other work depends on
+  the resource. Say so plainly and name the dependents rather than proceeding.
+- Recorded dependents are authoritative for the question "would this break
+  something another agent built". They are not a substitute for verifying live
+  provider state, so say which of the two you checked.
+- After doing the work, write it back with `lambo_derive` and
+  `lambo_record_action` so the next agent inherits it.

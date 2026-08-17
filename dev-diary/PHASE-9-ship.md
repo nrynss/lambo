@@ -97,20 +97,21 @@ aspirations), including feature-gated adapters.
 requires:   T8.4 (rehearsed), T8.5
 fixture-ok: n/a
 owns:       evidence/video/, demo/script.md
-status:     NOT STARTED. The only unmet §12.4 deliverable besides the submission
-            itself, and the critical path runs through it.
-            Blocked by D1 (clean redeploy) and tracked as D2 in
-            notes/deployment-and-submission.md; read that section, not this one, for
-            the tooling. Capture is Playwright (scripts/recording/capture-portal.mjs)
-            plus vhs for the terminal. Screen capture on this machine fails silently
-            and must not be attempted again.
-            Recommended before recording: a real-live run of `03_crossover_protect.py`.
-            T8 executed both cases live, but the committed capture
-            (evidence/remed-t8-crossover-run.md) is a synthetic recapture with stubbed
-            read verbs, which is thin footing for the video's climax.
-            Material that already exists: evidence/cloudops-run/ (the ten agent
-            transcripts, including the blocked deletion) and evidence/cloudops-video/
-            (portal webm + stills from 2026-08-16).
+status:     FOOTAGE CAPTURED 2026-08-17, not yet cut. Eight raw takes in
+            `evidence/video-raw/` (gitignored); see notes/video-shoot.md for the
+            shot list, the three things the narration must not overclaim, and the
+            capture rig. Editing, voiceover and upload remain.
+            CORRECTION 2026-08-17: "screen capture fails silently on this machine"
+            was true of the XWayland/x11grab path only. OBS on the KDE PipeWire
+            portal works; the takes above were shot that way. See
+            notes/video-shoot.md for the four rules that make it reliable, chiefly
+            "pick the window, not the screen" and "verify frames by looking at them".
+            `05-guard.mkv` is a real live run of `03_crossover_protect.py` against
+            the exhibit, which closes the note that the committed capture
+            (evidence/remed-t8-crossover-run.md) was a synthetic recapture.
+            Still to do: cut to under 3:00, record voiceover, upload, test the link
+            logged out. D1 is not a blocker for editing, but the portal take shows a
+            newer build than the deployed site (see the note).
 ```
 Under 3 minutes, memory layer visibly at work (spec §12.4). Script beats (spec §13): the
 derive montage → `canonization_events` filling → Agent B's recall with the ⚑ warning →

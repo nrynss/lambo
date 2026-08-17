@@ -31,6 +31,7 @@ __pycache__/
 lambo.toml
 scripts/recording/node_modules/
 evidence/cloudops-video/
+evidence/video-raw/
 
 # Container build tree (scripts/aws-infra deploy pipeline)
 target-docker/
