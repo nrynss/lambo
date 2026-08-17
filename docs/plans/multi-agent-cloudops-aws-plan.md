@@ -357,7 +357,7 @@ is in flight; the v0.1.0 release depends on it too.
 - [ ] Ensure binary build outputs are clean and ready for packaging.
 
 ### Phase 2: CockroachDB Agent Skill (`skills/lambo-cloudops/`)
-- [ ] Create `skills/lambo-cloudops/SKILL.md` defining the Lambo Memory & CockroachDB safety rules for agents.
+- [x] Create `skills/lambo-cloudops/SKILL.md` defining the Lambo Memory & CockroachDB safety rules for agents (landed 2026-08-17; pre-flight recall, provenance/derivation, and Cockroach inspection protocols, CLI + MCP surfaces).
 
 ### Phase 3: AWS Resource Provisioning Scripts (`scripts/aws-infra/`)
 - [ ] `provision_network.py` (VPC, Subnets, Gateways, Route Tables, SGs, Secrets Manager).
