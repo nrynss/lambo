@@ -1,0 +1,37 @@
+==============================================================================
+C3 durability check — ledger vs store
+==============================================================================
+ledger : evidence/concurrency/ledger-20260817-204139.jsonl
+db     : evidence/concurrency/c-load-20260818.db
+session: c-load-20260818
+
+ledger accounting (successful calls only)
+------------------------------------------------------------------------------
+  calls recorded               : 3423
+  calls ok (no tool error)     : 1311
+  successful lambo_derive      : 468
+  successful lambo_record_action: 373
+  successful write calls       : 841
+  derive created / matched     : 555 / 815
+  record_action created / edges: 911 / 5506
+  refused (tool-level)         : 310
+  rate-limit 429s              : 1682
+  transport failures           : 120
+  daemon GC collected concepts : 107 (from stderr transcript)
+
+store readback
+------------------------------------------------------------------------------
+  interactions   : 862
+  concepts       : 1359
+  edges          : 9279
+  canon_events   : 0
+  lease row      : —
+  session row    : created=2026-08-17T20:41:40.341Z closed=—
+
+comparison
+------------------------------------------------------------------------------
+  expected interactions == store interactions: store AHEAD by 21 (in-flight calls flushed by the close drain)
+  expected concepts     == store concepts    : shortfall 107 — EXPLAINED: daemon GC collected 107 concept(s) this run (spec §9 housekeeping; created − store == collected within tolerance)
+  record_action edges   <= store edges       : OK (store 9279 >= ledger 5506; derive edges add more, unreported)
+
+verdict: tail durable — no ledger-successful write is missing from the store

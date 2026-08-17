@@ -1,0 +1,46 @@
+{
+  "run_id": "20260817-204139",
+  "session": "c-load-20260818",
+  "date_utc": "2026-08-17T20:42:52Z",
+  "started_at": "2026-08-17T20:41:39Z",
+  "machine": {
+    "host": "cachyos-x8664",
+    "os": "Linux 7.1.8-1-cachyos x86_64",
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "threads": "12",
+    "note": "Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md"
+  },
+  "server": {
+    "binary": "/home/nryn/work/lambo/worktrees/c-series/target/debug/lambo",
+    "features": "store-sqlite (+ default embed-bge, embed-fixture, store-memory)",
+    "cmd": "/home/nryn/work/lambo/worktrees/c-series/target/debug/lambo serve --config <cfg> --session c-load-20260818 --agent c-load --transport http --port 7700 --bind 127.0.0.1 (auth via LAMBO_AUTH_TOKEN env)",
+    "auth_token": "<SCRATCH-TOKEN>",
+    "rate_limit_rps": 50,
+    "max_sessions": 32
+  },
+  "load": {
+    "workers": 12,
+    "seed": 0,
+    "main_rps_aggregate": 40,
+    "burst_rps_aggregate": 45,
+    "overdrive_secs": 2,
+    "overdrive_calls_per_worker": 120,
+    "adversarial_fraction": 0.2
+  },
+  "sigterm": {
+    "delay_after_burst_start_secs": 5,
+    "signal_to_exit_ms": 1419,
+    "exit_code": "0",
+    "assertion_line": "lambo serve: session closed, tail durable",
+    "assertion_met": "true",
+    "tail_lost_present": "false"
+  },
+  "artifacts": {
+    "stderr": "stderr-20260817-204139.log",
+    "ledger": "ledger-20260817-204139.jsonl",
+    "durability": "durability-20260817-204139.txt",
+    "driver_stdout": "driver-20260817-204139.stdout",
+    "config": "lambo.sqlite.toml",
+    "store_db": "c-load-20260818.db"
+  }
+}
