@@ -30,9 +30,33 @@ audit trail, and know where the interaction count came from.
 
 ---
 
-## D1 — Clean redeploy from scratch
+## ✅ D1 done: clean redeploy (2026-08-18)
 
-**Blocked by:** remediation **T6** (launcher fixes)
+**Done.** The exhibit host is now a clean product of `launch_exhibit_ec2.py`,
+not a hand-patched instance. Old host `i-0a800cfcc44fb17ce` terminated, new host
+`i-090ca2900d989d581` launched from zero, and the Elastic IP
+`eipalloc-090c4b60c122485c8` (100.51.83.35) re-associated, so `lambo.nryn.dev`
+needed no DNS change. Evidence: `evidence/d1-redeploy/redeploy-2026-08-18.txt`.
+
+Verified against the running host: `/healthz` → `ok` about 20s after launch;
+`/api/session` reports **version 0.2.2** and an `embedding_contract` block
+(H1, which 0.2.1 does not have); `/api/stats` shows the session intact at 113
+nodes / 485 edges / 41 concepts / **canonical 1** / 7 canonization events; and
+the served page carries the H3 `excluded-warnings` markers, so the deployed
+portal now matches the recorded footage.
+
+Two residuals, neither blocking:
+
+- The launcher warned `SG-PublicWeb has no tcp/80 ingress`, so the http→https
+  redirect and the ACME HTTP-01 fallback do not work. The certificate came
+  through over TLS-ALPN on 443, but a judge typing `http://lambo.nryn.dev` gets
+  nothing rather than a redirect. `provision_network.py` opens port 80.
+- **Scope, stated honestly:** this rebuilds the *host*. It does not prove the
+  whole stack rebuilds from scripts, because `teardown.py` has no target
+  selection (see the correction below) and tearing the rest down would mint new
+  resource ids the recorded graph does not know.
+
+**Blocked by:** remediation **T6** (launcher fixes) — satisfied
 **Blocks:** D2, D3
 
 The running instance was repaired by hand while the launcher was being fixed:

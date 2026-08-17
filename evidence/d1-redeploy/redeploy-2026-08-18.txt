@@ -1,0 +1,55 @@
+# D1 clean redeploy — captured 2026-08-17T19:14:41Z
+# redacted: account id, DSN, key material (none appear below)
+
+# D1 clean redeploy — 2026-08-17T19:09:23Z
+# terminating the exhibit host only; EIP/network/RDS/Lambda/secret untouched
+{
+    "id": "i-0a800cfcc44fb17ce",
+    "from": "running",
+    "to": "shutting-down"
+}
+--- waiting for termination ---
+terminated
+--- EIP still allocated? ---
+[
+    {
+        "alloc": "eipalloc-090c4b60c122485c8",
+        "ip": "100.51.83.35",
+        "assoc": null
+    }
+]
+--- launching from clean ---
+==> region us-east-1, identity arn:aws:iam::<AWS_ACCOUNT_ID>:user/lambo-user
+  ! SG-PublicWeb has no tcp/80 ingress. The http->https redirect and ACME HTTP-01 fallback will not work. Re-run provision_network.py, which opens port 80 by default.
+==> embedder
+  . embedder bge_m3: query embeddings share the session's vector space
+==> identity
+  [exists  ] iam-role               lambo-cloudops-exhibit-role
+  . lambo-cloudops-exhibit-role may read exactly lambo/cockroach-dsn, nothing wider
+  [exists  ] instance-profile       lambo-cloudops-exhibit-profile
+==> instance
+  . AMI ami-02ebdb11bae1b2486 (Ubuntu 26.04 LTS, x86_64) root /dev/sda1
+  [created ] instance               i-090ca2900d989d581
+  . waiting for instance to reach running (up to 600s)
+==> address
+  [exists  ] elastic-ip             100.51.83.35
+  . 100.51.83.35 associated with i-090ca2900d989d581
+==> bootstrap
+  . bootstrap ready: status checks 2/2, 100.51.83.35 answers on :443
+
+==> exhibit launched
+  . instance i-090ca2900d989d581 at 100.51.83.35
+  . boot log: sudo tail -f /var/log/lambo-bootstrap.log  (takes 2 to 4 minutes)
+
+==> finish the TLS setup
+    Create an A record:   lambo.nryn.dev  ->  100.51.83.35
+    Caddy retries the ACME order until the record resolves, so the
+    portal comes up on its own at https://lambo.nryn.dev/ once it does.
+
+  . port 80 and 443 are open from 0.0.0.0/0: 80 exists for the http->https redirect and ACME HTTP-01
+
+## verification against the redeployed host
+healthz: ok
+session: {"session":"cloudops-exhibit","store":"cockroach","embedder":"bge_m3","embedding_dim":1024,"vector_search":true,"embedding_contract":{"status":"compatible","stored":{"kind":"bge_m3","dim":1024},"configured":{"kind":"bge_m3","dim":1024}},"mode":"reader","read_only":true,"store_is_process_local":false,"exposed_beyond_loopback":false,"poll_interval_ms":1500,"version":"0.2.2"}
+stats:   {"session":"cloudops-exhibit","nodes":113,"edges":485,"concepts":41,"canonical":1,"canonization_events":7,"flush_lag_ms":0,"log_depth":0,"durable_change_age_ms":42426,"mode":"reader","writer_only":"flush_lag / log_depth / daemon_cycles live in the writer process; this is a lease-free reader and cannot observe them"}
+H3 marker count in served page: 1
