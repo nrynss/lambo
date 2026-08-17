@@ -16,14 +16,6 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// DANGEROUS: let a writer attach when the stored embedding model differs
-    /// from the configured model at the same dimension. This relabels existing
-    /// vectors; use only for a verified same-kind model identifier rename, or
-    /// after a migration has atomically removed old vectors. Cross-kind changes
-    /// with vectors and all dimension changes are always refused.
-    #[arg(long, global = true)]
-    allow_embedding_mismatch: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -63,6 +55,9 @@ enum Commands {
         /// 0 to disable the limit.
         #[arg(long, default_value_t = lambo::mcp::DEFAULT_RATE_LIMIT_RPS)]
         rate_limit_rps: u32,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
     /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
     ///
@@ -111,6 +106,9 @@ enum Commands {
             help = "Session to write. Defaults to a fresh id per run; the scenario is not re-runnable into a used session (canonization state is not restored over one)."
         )]
         session: Option<String>,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
     /// Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines).
     Recall {
@@ -218,6 +216,9 @@ enum Commands {
             help = "Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive."
         )]
         concept: Vec<String>,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
     /// Record an action the agent took, with what it produces, modifies and depends on. Timestamps are stamped server-side; do not send one.
     RecordAction {
@@ -242,6 +243,9 @@ enum Commands {
         /// Things this action depends on (Dependency edges). Repeatable.
         #[arg(long = "depends-on", action = ArgAction::Append, help = "Things this action depends on (Dependency edges). Repeatable.")]
         depends_on: Vec<String>,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
     /// Take a soft lock on a memory node before editing it. On the CLI the reservation ends when this process exits; it is not durable.
     Reserve {
@@ -266,6 +270,9 @@ enum Commands {
             help = "Soft-lock lifetime in seconds (default 30, max 3600). On the CLI the reservation still ends when this process exits."
         )]
         ttl_seconds: Option<u64>,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
     /// Release a soft lock previously taken with reserve. On the CLI a prior reserve already ended when that process exited.
     Release {
@@ -281,6 +288,9 @@ enum Commands {
         /// Node to release, as a UUID string.
         #[arg(long, help = "Node to release, as a UUID string.")]
         node: String,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
     },
 }
 
@@ -309,16 +319,34 @@ impl Commands {
         )
     }
 
-    fn allows_embedding_mismatch_override(&self) -> bool {
-        matches!(
-            self,
-            Self::Serve { .. }
-                | Self::Demo { .. }
-                | Self::Derive { .. }
-                | Self::RecordAction { .. }
-                | Self::Reserve { .. }
-                | Self::Release { .. }
-        )
+    fn allow_embedding_mismatch(&self) -> bool {
+        match self {
+            Self::Serve {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::Demo {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::Derive {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::RecordAction {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::Reserve {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::Release {
+                allow_embedding_mismatch,
+                ..
+            } => *allow_embedding_mismatch,
+            _ => false,
+        }
     }
 }
 
@@ -390,13 +418,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    if cli.allow_embedding_mismatch && !cmd.allows_embedding_mismatch_override() {
-        eprintln!(
-            "lambo {}: --allow-embedding-mismatch is a writer-only migration override",
-            cmd.name()
-        );
-        return ExitCode::from(2);
-    }
+    let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
 
     // Construct once; when Memory/serve land, pass `Resolved` into the command body.
     let mut resolved = match resolve_for_command(&cmd, config) {
@@ -411,7 +433,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if cli.allow_embedding_mismatch {
+    if allow_embedding_mismatch {
         match &mut resolved {
             Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
             Resolved::StoreOnly { .. } => unreachable!("writer override requires full backends"),
@@ -429,6 +451,7 @@ fn main() -> ExitCode {
                 auth_token,
                 max_sessions,
                 rate_limit_rps,
+                allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
         ) => {
@@ -517,7 +540,14 @@ fn main() -> ExitCode {
                 },
             ),
         ),
-        (Commands::Demo { scenario, session }, Resolved::Full(backends)) => run_async(
+        (
+            Commands::Demo {
+                scenario,
+                session,
+                allow_embedding_mismatch: _,
+            },
+            Resolved::Full(backends),
+        ) => run_async(
             "demo",
             lambo::cli::demo::run(*backends, lambo::cli::demo::Args { scenario, session }),
         ),
@@ -569,6 +599,7 @@ fn main() -> ExitCode {
                 kind,
                 parent_of,
                 concept,
+                allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -593,6 +624,7 @@ fn main() -> ExitCode {
                 produces,
                 modifies,
                 depends_on,
+                allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -615,6 +647,7 @@ fn main() -> ExitCode {
                 agent,
                 node,
                 ttl_seconds,
+                allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -634,6 +667,7 @@ fn main() -> ExitCode {
                 session,
                 agent,
                 node,
+                allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -675,12 +709,7 @@ mod tests {
             "--allow-embedding-mismatch",
         ])
         .unwrap();
-        assert!(parsed.allow_embedding_mismatch);
-        assert!(parsed
-            .command
-            .as_ref()
-            .unwrap()
-            .allows_embedding_mismatch_override());
+        assert!(parsed.command.as_ref().unwrap().allow_embedding_mismatch());
 
         let reader = Cli::try_parse_from([
             "lambo",
@@ -690,17 +719,36 @@ mod tests {
             "--query",
             "q",
             "--allow-embedding-mismatch",
-        ])
-        .unwrap();
-        assert!(reader.allow_embedding_mismatch);
+        ]);
         assert!(
-            !reader
-                .command
-                .as_ref()
-                .unwrap()
-                .allows_embedding_mismatch_override(),
-            "main must reject the dangerous override on readers"
+            reader.is_err(),
+            "clap must reject the dangerous override on readers"
         );
+
+        let mut writer_help = Vec::new();
+        Cli::command()
+            .find_subcommand_mut("serve")
+            .unwrap()
+            .write_long_help(&mut writer_help)
+            .unwrap();
+        assert!(String::from_utf8(writer_help)
+            .unwrap()
+            .contains("--allow-embedding-mismatch"));
+
+        for reader in ["recall", "serve-web", "saints", "inspect", "stats"] {
+            let mut help = Vec::new();
+            Cli::command()
+                .find_subcommand_mut(reader)
+                .unwrap()
+                .write_long_help(&mut help)
+                .unwrap();
+            assert!(
+                !String::from_utf8(help)
+                    .unwrap()
+                    .contains("--allow-embedding-mismatch"),
+                "{reader} help must not advertise a writer-only override"
+            );
+        }
     }
 
     #[test]

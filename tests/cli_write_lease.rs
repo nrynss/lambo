@@ -226,3 +226,74 @@ fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
     let _ = reader.join();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn h1_mismatch_refusal_releases_lease_for_immediate_cross_process_retries() {
+    let dir = std::env::temp_dir().join(format!(
+        "lambo-h1-lease-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let db = dir.join("h1.sqlite");
+    let db_str = db.to_str().unwrap();
+    let config = |model: &str| {
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{db_str}\"\n\n\
+             [embedder]\nkind = \"fixture\"\ndim = 1024\nmodel = \"{model}\"\n"
+        )
+    };
+    let v1 = dir.join("v1.toml");
+    let v2 = dir.join("v2.toml");
+    std::fs::write(&v1, config("fixture-model-v1")).unwrap();
+    std::fs::write(&v2, config("fixture-model-v2")).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let store = SqliteStore::connect(db_str).expect("connect");
+        store.init_schema().await.expect("init_schema");
+    });
+
+    let first = derive_cmd(&v1, "writer-v1").output().unwrap();
+    assert!(
+        first.status.success(),
+        "initial v1 writer failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let refusal = derive_cmd(&v2, "writer-v2-refused").output().unwrap();
+    assert!(!refusal.status.success());
+    assert!(
+        String::from_utf8_lossy(&refusal.stderr).contains("fixture-model-v1"),
+        "expected contract refusal: {}",
+        String::from_utf8_lossy(&refusal.stderr)
+    );
+
+    // A new process with the correct model must acquire immediately; a leaked
+    // refusal lease would block this with the 45-second holder conflict.
+    let correct_retry = derive_cmd(&v1, "writer-v1-retry").output().unwrap();
+    assert!(
+        correct_retry.status.success(),
+        "correct retry was lease-blocked: {}",
+        String::from_utf8_lossy(&correct_retry.stderr)
+    );
+
+    let second_refusal = derive_cmd(&v2, "writer-v2-refused-again").output().unwrap();
+    assert!(!second_refusal.status.success());
+
+    // The advertised operator flow is a separate invocation and therefore a
+    // distinct LeaseHolder (PID). It must not wait for LEASE_TTL.
+    let mut override_retry = derive_cmd(&v2, "writer-v2-override");
+    override_retry.arg("--allow-embedding-mismatch");
+    let override_retry = override_retry.output().unwrap();
+    assert!(
+        override_retry.status.success(),
+        "override retry was lease-blocked: {}",
+        String::from_utf8_lossy(&override_retry.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

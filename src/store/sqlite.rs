@@ -888,6 +888,7 @@ impl GraphStore for SqliteStore {
         &self,
         _session: &SessionId,
         _embedding: &[f32],
+        _expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         validate_vector_candidate_limit(limit)?;
@@ -2038,11 +2039,16 @@ mod tests {
     #[tokio::test]
     async fn vector_candidates_capability_error_and_no_dimensions() {
         let store = test_store();
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 8,
+        };
         store.init_schema().await.unwrap();
         assert!(store.capabilities().is_empty());
         assert_eq!(store.vector_dimensions(), None);
         let err = store
-            .vector_candidates(&SessionId::from("x"), &[0.0; 8], 5)
+            .vector_candidates(&SessionId::from("x"), &[0.0; 8], &contract, 5)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
@@ -2051,6 +2057,7 @@ mod tests {
                 .vector_candidates(
                     &SessionId::from("x"),
                     &[],
+                    &contract,
                     crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
                 )
                 .await

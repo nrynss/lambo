@@ -599,15 +599,6 @@ fn session_embedding_from_parts(
     }
 }
 
-fn vector_contract_allows_query(
-    kind: Option<String>,
-    model: Option<String>,
-    dim: Option<i64>,
-    session_id: &str,
-) -> Result<bool, StoreError> {
-    Ok(session_embedding_from_parts(kind, model, dim, session_id)?.is_some())
-}
-
 /// CockroachDB serializable transactions abort with SQLSTATE 40001
 /// (`restart transaction: ... RETRY_SERIALIZABLE ...`) when they conflict with a
 /// concurrent commit; sqlx does not auto-retry, so the client must replay the whole
@@ -1405,29 +1396,6 @@ impl CockroachStore {
         .await
     }
 
-    /// Return whether vector candidates are trusted for this session. Missing
-    /// and fully unstamped rows are safe empty-search states: hybrid first use
-    /// must gather before its atomic commit emits `SetEmbedding`. Partial
-    /// metadata remains a hard corruption error.
-    async fn has_vector_contract(&self, session: &SessionId) -> Result<bool, StoreError> {
-        let pool = self.pool().await?;
-        let Some(row) = sqlx::query(SELECT_SESSION_SQL)
-            .bind(session.as_str())
-            .fetch_optional(pool)
-            .await
-            .map_err(backend)?
-        else {
-            return Ok(false);
-        };
-        let trusted = vector_contract_allows_query(
-            row.try_get("embedding_kind").map_err(backend)?,
-            row.try_get("embedding_model").map_err(backend)?,
-            row.try_get("embedding_dim").map_err(backend)?,
-            session.as_str(),
-        )?;
-        Ok(trusted)
-    }
-
     /// Normalized keyword tokens (MemoryStore parity: trim + lowercase, drop empties).
     fn normalize_tokens(tokens: &[String]) -> Vec<String> {
         tokens
@@ -2113,6 +2081,7 @@ impl GraphStore for CockroachStore {
         &self,
         session: &SessionId,
         embedding: &[f32],
+        expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         validate_vector_candidate_limit(limit)?;
@@ -2120,11 +2089,35 @@ impl GraphStore for CockroachStore {
             return Ok(Vec::new());
         }
         check_embedding_dim(embedding, self.vector_dim)?;
-        if !self.has_vector_contract(session).await? {
-            return Ok(Vec::new());
-        }
         let pool = self.pool().await?;
         let probe = encode_vector(embedding)?;
+        // One serializable read transaction binds contract validation to every
+        // candidate statement. A concurrent SetEmbedding + vector rewrite is
+        // therefore observed wholly before or wholly after this read; rankings
+        // from a new space can never escape after validating an old contract.
+        let mut tx = pool.begin().await.map_err(backend)?;
+        let Some(contract_row) = sqlx::query(SELECT_SESSION_SQL)
+            .bind(session.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?
+        else {
+            return Ok(Vec::new());
+        };
+        let stored = session_embedding_from_parts(
+            contract_row.try_get("embedding_kind").map_err(backend)?,
+            contract_row.try_get("embedding_model").map_err(backend)?,
+            contract_row.try_get("embedding_dim").map_err(backend)?,
+            session.as_str(),
+        )?;
+        let Some(stored) = stored else {
+            return Ok(Vec::new());
+        };
+        stored.ensure_compatible(expected_contract).map_err(|err| {
+            StoreError::Invariant(format!(
+                "vector candidate lookup refused after embedding contract changed: {err}"
+            ))
+        })?;
 
         // DECISION D1: GLOBAL index-backed top-k (`concepts@concepts_embedding_idx`),
         // then Rust-side session filter. `k` starts generous (limit × multiplier) and
@@ -2141,7 +2134,7 @@ impl GraphStore for CockroachStore {
             let rows = sqlx::query(VECTOR_CANDIDATES_SQL)
                 .bind(&probe)
                 .bind(fetch)
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(backend)?;
 
@@ -2171,10 +2164,10 @@ impl GraphStore for CockroachStore {
                     .bind(&probe)
                     .bind(session.as_str())
                     .bind(exact_limit)
-                    .fetch_all(pool)
+                    .fetch_all(&mut *tx)
                     .await
                     .map_err(backend)?;
-                return fallback_rows
+                let hits = fallback_rows
                     .iter()
                     .map(|row| {
                         let id: String = row.try_get("id").map_err(backend)?;
@@ -2187,13 +2180,16 @@ impl GraphStore for CockroachStore {
                         }
                         Ok(Scored::new(parse_node_id(&id)?, score))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, StoreError>>()?;
+                tx.commit().await.map_err(backend)?;
+                return Ok(hits);
             }
             match next_fetch_k(in_session.len(), has_more, k, limit) {
                 None => {
                     // Query returns rows in dist-asc (= score-desc); filter preserves that
                     // order (filter_session_rows). Truncate to the requested limit.
                     in_session.truncate(limit);
+                    tx.commit().await.map_err(backend)?;
                     return Ok(in_session);
                 }
                 Some(next) => {
@@ -3083,22 +3079,6 @@ mod tests {
             None
         );
     }
-
-    #[test]
-    fn vector_contract_gate_distinguishes_unstamped_trusted_and_corrupt() {
-        assert!(!vector_contract_allows_query(None, None, None, "fresh").unwrap());
-        assert!(vector_contract_allows_query(
-            Some("fixture".into()),
-            Some("fixture-v1".into()),
-            Some(1024),
-            "trusted",
-        )
-        .unwrap());
-        assert!(vector_contract_allows_query(None, None, Some(1024), "corrupt").is_err());
-        assert!(
-            vector_contract_allows_query(Some("fixture".into()), None, None, "corrupt",).is_err()
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3546,17 +3526,18 @@ mod conformance {
         let b = NodeId::new();
         let ts = Utc::now();
         let probe = embed(0.17);
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: store.vector_dim,
+        };
         store
             .flush(
                 &MutationBatch {
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid.clone(),
-                            embedding: Some(EmbeddingContract {
-                                kind: "fixture".into(),
-                                model: Some("fixture-v1".into()),
-                                dim: store.vector_dim,
-                            }),
+                            embedding: Some(contract.clone()),
                         },
                         plant_interaction(&sid, i1, ts),
                         plant_concept(&sid, a, i1, "alpha concept", ts, Some(probe.clone())),
@@ -3568,7 +3549,10 @@ mod conformance {
             .await
             .unwrap();
 
-        let hits = store.vector_candidates(&sid, &probe, 3).await.unwrap();
+        let hits = store
+            .vector_candidates(&sid, &probe, &contract, 3)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].item, a, "identical embedding must rank first");
         assert!(
@@ -3608,17 +3592,18 @@ mod conformance {
         let (a, c, b) = (NodeId::new(), NodeId::new(), NodeId::new());
         let ts = Utc::now();
         let probe = embed(0.11);
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: store.vector_dim,
+        };
         store
             .flush(
                 &MutationBatch {
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid_a.clone(),
-                            embedding: Some(EmbeddingContract {
-                                kind: "fixture".into(),
-                                model: Some("fixture-v1".into()),
-                                dim: store.vector_dim,
-                            }),
+                            embedding: Some(contract.clone()),
                         },
                         plant_interaction(&sid_a, i1, ts),
                         plant_concept(&sid_a, a, i1, "register user", ts, Some(probe.clone())),
@@ -3637,11 +3622,7 @@ mod conformance {
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid_b.clone(),
-                            embedding: Some(EmbeddingContract {
-                                kind: "fixture".into(),
-                                model: Some("fixture-v1".into()),
-                                dim: store.vector_dim,
-                            }),
+                            embedding: Some(contract.clone()),
                         },
                         plant_interaction(&sid_b, i2, ts),
                         plant_concept(&sid_b, b, i2, "foreign closer", ts, Some(probe.clone())),
@@ -3652,7 +3633,10 @@ mod conformance {
             .await
             .unwrap();
 
-        let hits = store.vector_candidates(&sid_a, &probe, 10).await.unwrap();
+        let hits = store
+            .vector_candidates(&sid_a, &probe, &contract, 10)
+            .await
+            .unwrap();
         let items: Vec<_> = hits.iter().map(|h| h.item).collect();
         assert!(
             !items.contains(&b),
@@ -4562,9 +4546,14 @@ mod conformance {
         store: &CockroachStore,
     ) {
         let probe = embed(0.23);
+        let expected = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: store.vector_dim,
+        };
         let missing = SessionId::from(format!("conformance-vector-fresh-{}", Uuid::new_v4()));
         assert!(store
-            .vector_candidates(&missing, &probe, 5)
+            .vector_candidates(&missing, &probe, &expected, 5)
             .await
             .unwrap()
             .is_empty());
@@ -4593,16 +4582,12 @@ mod conformance {
             .await
             .unwrap();
         assert!(store
-            .vector_candidates(&legacy, &probe, 5)
+            .vector_candidates(&legacy, &probe, &expected, 5)
             .await
             .unwrap()
             .is_empty());
 
-        let contract = EmbeddingContract {
-            kind: "fixture".into(),
-            model: Some("fixture-v1".into()),
-            dim: store.vector_dim,
-        };
+        let contract = expected.clone();
         store
             .flush(
                 &MutationBatch {
@@ -4619,7 +4604,7 @@ mod conformance {
         assert_eq!(loaded.embedding, Some(contract));
         assert!(loaded.concepts[0].embedding.is_none());
         assert!(store
-            .vector_candidates(&legacy, &probe, 5)
+            .vector_candidates(&legacy, &probe, &expected, 5)
             .await
             .unwrap()
             .is_empty());
@@ -4630,7 +4615,10 @@ mod conformance {
             .execute(store.pool().await.unwrap())
             .await
             .unwrap();
-        assert!(store.vector_candidates(&corrupt, &probe, 5).await.is_err());
+        assert!(store
+            .vector_candidates(&corrupt, &probe, &expected, 5)
+            .await
+            .is_err());
     }
 
     /// P4 residual closure: `SET_ROOT_GOAL_SQL` (the UPDATE path) was

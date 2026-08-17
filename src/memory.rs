@@ -609,9 +609,10 @@ impl MemoryBuilder {
         // lease is a concurrency gate, not a completeness guarantee; the startup
         // load is what makes the new holder correct.
         //
-        // A build step after this point that fails (a broken load, a model-mix
-        // refusal) leaves the lease held with no heartbeat, so it lapses at the
-        // TTL — the same crash-shaped expiry a mid-startup crash would produce.
+        // Every ordinary startup error after acquisition explicitly releases
+        // this holder-scoped lease below. A process crash can still only be
+        // recovered by TTL, but a clean refusal must never look like a crash to
+        // the next invocation.
         let lease_holder = LeaseHolder::for_this_process(&agent);
         let lease_token = match store
             .acquire_lease(&session, &lease_holder, LEASE_TTL)
@@ -641,39 +642,56 @@ impl MemoryBuilder {
         // would block a runtime worker from inside this async fn. The lease is
         // already ours (step 0), so this load is the winner replaying durable
         // state — never a loser contending on the store's write lock.
-        let loaded = load_session_async(store.as_ref(), &session).await?;
-        let existing = !loaded.graph.is_empty();
-        let mut graph = loaded.graph;
+        let startup = async {
+            let loaded = load_session_async(store.as_ref(), &session).await?;
+            let existing = !loaded.graph.is_empty();
+            let mut graph = loaded.graph;
 
-        // (2) Level B / STORE-1 — the model-mixing refusal's second half. The
-        // persistence half (seed write path + load materialization) shipped in
-        // Wave 5; this is the attach-time check. `None` on a fresh session is
-        // not a mismatch — it is an unstamped space, so stamp it.
-        match session_embedding_compatibility(graph.embedding(), &embedding) {
-            SessionEmbeddingCompatibility::Unrecorded => {
-                graph.stamp_embedding(embedding.clone())?;
-            }
-            SessionEmbeddingCompatibility::Compatible => {}
-            SessionEmbeddingCompatibility::Mismatch { stored, live } => {
-                if !self.allow_embedding_mismatch || stored.dim != live.dim {
-                    return Err(embedding_mismatch_error(&stored, &live));
+            // (2) Level B / STORE-1 — the model-mixing refusal's second half.
+            // `None` on a fresh session is not a mismatch — it is an unstamped
+            // space, so stamp it.
+            match session_embedding_compatibility(graph.embedding(), &embedding) {
+                SessionEmbeddingCompatibility::Unrecorded => {
+                    graph.stamp_embedding(embedding.clone())?;
                 }
-                tracing::warn!(
-                    session = %session,
-                    stored_kind = %stored.kind,
-                    stored_model = ?stored.model,
-                    live_kind = %live.kind,
-                    live_model = ?live.model,
-                    dim = live.dim,
-                    "operator allowed an embedding contract mismatch; relabeling the session's \
-                     existing vectors with the configured live contract"
-                );
-                graph.replace_embedding_with_operator_override(live)?;
+                SessionEmbeddingCompatibility::Compatible => {}
+                SessionEmbeddingCompatibility::Mismatch { stored, live } => {
+                    if !self.allow_embedding_mismatch || stored.dim != live.dim {
+                        return Err(embedding_mismatch_error(&stored, &live));
+                    }
+                    tracing::warn!(
+                        session = %session,
+                        stored_kind = %stored.kind,
+                        stored_model = ?stored.model,
+                        live_kind = %live.kind,
+                        live_model = ?live.model,
+                        dim = live.dim,
+                        "operator allowed an embedding contract mismatch; relabeling the session's \
+                         existing vectors with the configured live contract"
+                    );
+                    graph.replace_embedding_with_operator_override(live)?;
+                }
             }
+            Ok::<_, LamboError>((existing, graph, loaded.index))
         }
+        .await;
+        let (existing, graph, index) = match startup {
+            Ok(startup) => startup,
+            Err(startup_error) => {
+                if let Err(release_error) = store.release_lease(&session, &lease_holder).await {
+                    tracing::warn!(
+                        session = %session,
+                        holder = %lease_holder,
+                        error = %release_error,
+                        "could not release writer lease after startup refusal; it will lapse at TTL"
+                    );
+                }
+                return Err(startup_error);
+            }
+        };
 
         let graph = Arc::new(RwLock::new(graph));
-        let index = Arc::new(RwLock::new(loaded.index));
+        let index = Arc::new(RwLock::new(index));
 
         // (3) Daemon first — the canonization task borrows its score table and
         // event sender, so it must exist before `CanonizationTask::from_daemon`.
@@ -1350,7 +1368,7 @@ impl Memory {
                 &self.session,
                 query,
                 self.store.as_ref(),
-                embedding.as_deref(),
+                embedding.as_deref().map(|vector| (vector, &self.embedding)),
                 self.config.recall_weights,
                 &mut cache,
             )
@@ -2493,10 +2511,11 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, limit)
+                .vector_candidates(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -2622,10 +2641,11 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, limit)
+                .vector_candidates(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -2951,10 +2971,11 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, limit)
+                .vector_candidates(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -3074,11 +3095,12 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.park(ParkPoint::VectorCandidates).await;
             self.inner
-                .vector_candidates(session, embedding, limit)
+                .vector_candidates(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -3169,6 +3191,7 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            _expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             crate::store::validate_vector_candidate_limit(limit)?;

@@ -375,6 +375,7 @@ mod tests {
             &self,
             _session: &crate::types::SessionId,
             _embedding: &[f32],
+            _expected_contract: &crate::types::EmbeddingContract,
             _limit: usize,
         ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, crate::types::StoreError>
         {

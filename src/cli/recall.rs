@@ -108,7 +108,9 @@ pub async fn run(
             &loaded.session,
             rq,
             backends.store.as_ref(),
-            embedding.as_deref(),
+            embedding
+                .as_deref()
+                .map(|vector| (vector, &backends.embedding)),
             cfg.recall_weights,
             &mut cache,
         )

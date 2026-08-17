@@ -512,7 +512,12 @@ pub async fn derive(
                             attempted_embed = true;
                             match tokio::time::timeout_at(
                                 io_deadline,
-                                store.vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT),
+                                store.vector_candidates(
+                                    &session_id,
+                                    &emb,
+                                    embedding,
+                                    VECTOR_CANDIDATE_LIMIT,
+                                ),
                             )
                             .await
                             {
@@ -1077,6 +1082,7 @@ mod tests {
             &self,
             _session: &SessionId,
             _embedding: &[f32],
+            _expected_contract: &EmbeddingContract,
             _limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.vector_calls.fetch_add(1, Ordering::SeqCst);

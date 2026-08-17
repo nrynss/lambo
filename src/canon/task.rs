@@ -482,10 +482,11 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &crate::types::EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, crate::types::StoreError> {
             self.inner
-                .vector_candidates(session, embedding, limit)
+                .vector_candidates(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(

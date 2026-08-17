@@ -56,8 +56,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::types::{
-    CanonizationEvent, GraphSnapshot, InteractionSpan, MutationBatch, NodeId, Scored, SessionId,
-    StoreError,
+    CanonizationEvent, EmbeddingContract, GraphSnapshot, InteractionSpan, MutationBatch, NodeId,
+    Scored, SessionId, StoreError,
 };
 
 /// Maximum caller-requested vector result count. This bounds adapter queries,
@@ -155,10 +155,18 @@ pub trait GraphStore: Send + Sync {
     /// Requires [`Capabilities::VECTOR_SEARCH`]; adapters without it return
     /// [`StoreError::Capability`]. `limit` must not exceed
     /// [`MAX_VECTOR_CANDIDATE_LIMIT`].
+    ///
+    /// `expected_contract` is the contract that produced `embedding`. A
+    /// vector-capable adapter must compare it to the session's durable contract
+    /// in the same transactional snapshot as candidate retrieval and refuse a
+    /// mismatch. A check performed earlier by a reader is not sufficient: a
+    /// concurrent writer may replace the contract and vectors while the reader
+    /// awaits its query embedder.
     async fn vector_candidates(
         &self,
         session: &SessionId,
         embedding: &[f32],
+        expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError>;
 

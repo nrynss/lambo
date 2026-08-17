@@ -308,7 +308,6 @@ struct AppState {
     /// Optional bearer token. When set, every route requires it.
     auth: Option<AuthToken>,
     freshness: Mutex<Freshness>,
-    embedding_status: EmbeddingStatus,
 }
 
 impl AppState {
@@ -456,6 +455,13 @@ struct WebStats {
 struct Pulse {
     stats: WebStats,
     events: EventsPayload,
+    embedding_contract: EmbeddingStatus,
+    vector_search: bool,
+}
+
+struct StatsRead {
+    stats: WebStats,
+    embedding_status: EmbeddingStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -736,8 +742,12 @@ fn stats_from(
     }
 }
 
-async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, CliError> {
+async fn read_stats(state: &AppState, event_total: usize) -> Result<StatsRead, CliError> {
     let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
+    let embedding_status = {
+        let g = loaded.graph.read();
+        EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding)
+    };
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
@@ -757,7 +767,10 @@ async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, Cl
         let g = loaded.graph.read();
         stats_from(state, &g, event_total, flush)
     };
-    Ok(stats)
+    Ok(StatsRead {
+        stats,
+        embedding_status,
+    })
 }
 
 async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
@@ -808,6 +821,14 @@ async fn healthz() -> Response {
 }
 
 async fn api_session(State(state): State<Arc<AppState>>) -> Response {
+    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
+        Ok(loaded) => loaded,
+        Err(err) => return fail(err),
+    };
+    let embedding_status = {
+        let graph = loaded.graph.read();
+        EmbeddingStatus::inspect(graph.embedding(), &state.backends.embedding)
+    };
     json(
         StatusCode::OK,
         SessionInfo {
@@ -820,8 +841,8 @@ async fn api_session(State(state): State<Arc<AppState>>) -> Response {
                 .store
                 .capabilities()
                 .contains(Capabilities::VECTOR_SEARCH)
-                && state.embedding_status.vector_search_trusted(),
-            embedding_contract: state.embedding_status.clone(),
+                && embedding_status.vector_search_trusted(),
+            embedding_contract: embedding_status,
             mode: "reader",
             read_only: true,
             store_is_process_local: state.backends.store_cfg.kind == StoreKind::Memory,
@@ -849,7 +870,7 @@ async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
         Err(e) => return fail(e),
     };
     match read_stats(&state, total).await {
-        Ok(stats) => json(StatusCode::OK, stats),
+        Ok(read) => json(StatusCode::OK, read.stats),
         Err(e) => fail(e),
     }
 }
@@ -864,7 +885,22 @@ async fn api_pulse(
         Err(e) => return fail(e),
     };
     match read_stats(&state, events.total).await {
-        Ok(stats) => json(StatusCode::OK, Pulse { stats, events }),
+        Ok(read) => {
+            let vector_search = state
+                .store()
+                .capabilities()
+                .contains(Capabilities::VECTOR_SEARCH)
+                && read.embedding_status.vector_search_trusted();
+            json(
+                StatusCode::OK,
+                Pulse {
+                    stats: read.stats,
+                    events,
+                    embedding_contract: read.embedding_status,
+                    vector_search,
+                },
+            )
+        }
         Err(e) => fail(e),
     }
 }
@@ -1209,7 +1245,6 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             fingerprint: 0,
             observed_at: Instant::now(),
         }),
-        embedding_status,
     });
 
     let addr = SocketAddr::new(args.bind, args.port);
@@ -1371,9 +1406,12 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-            self.0.vector_candidates(session, embedding, limit).await
+            self.0
+                .vector_candidates(session, embedding, expected_contract, limit)
+                .await
         }
         async fn blast_radius(
             &self,
@@ -1481,14 +1519,6 @@ mod tests {
                 fingerprint: 0,
                 observed_at: Instant::now(),
             }),
-            embedding_status: EmbeddingStatus::inspect(
-                None,
-                &EmbeddingContract {
-                    kind: "fixture".into(),
-                    model: None,
-                    dim: 1024,
-                },
-            ),
         })
     }
 
@@ -2611,8 +2641,6 @@ mod tests {
         backends.store_cfg.dsn = Some("postgresql://demo:hunter2@crdb.internal:26257/lambo".into());
         backends.store_cfg.path = Some("/var/lib/lambo/private.sqlite".into());
         backends.embedder_cfg.llama_url = Some("http://embed.internal:8080".into());
-        let embedding_status = EmbeddingStatus::inspect(None, &backends.embedding);
-
         let state = Arc::new(AppState {
             session: SessionId::new("t85-secrets"),
             backends,
@@ -2622,7 +2650,6 @@ mod tests {
                 fingerprint: 0,
                 observed_at: Instant::now(),
             }),
-            embedding_status,
         });
         let (addr, handle) = spawn(state).await;
 
@@ -2652,7 +2679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn h1_mismatch_is_loud_in_session_info_while_structural_routes_stay_available() {
+    async fn h1_live_contract_changes_update_session_pulse_and_keep_recall_fail_closed() {
         let store = Arc::new(MemoryStore::new());
         let stored = EmbeddingContract {
             kind: "fixture".into(),
@@ -2670,10 +2697,9 @@ mod tests {
             .unwrap();
         mem.close().await.unwrap();
 
-        let mut backends = backends_on(store);
-        backends.embedding.model = Some("fixture-model-v2".into());
+        let mut backends = backends_on(store.clone());
+        backends.embedding.model = Some("fixture-model-v1".into());
         backends.embedder_cfg.llama_model = backends.embedding.model.clone();
-        let embedding_status = EmbeddingStatus::inspect(Some(&stored), &backends.embedding);
         let state = Arc::new(AppState {
             session: SessionId::new("h1-web-mismatch"),
             backends,
@@ -2683,9 +2709,31 @@ mod tests {
                 fingerprint: 0,
                 observed_at: Instant::now(),
             }),
-            embedding_status,
         });
         let (addr, handle) = spawn(state).await;
+
+        let raw = request(addr, "GET", "/api/session").await;
+        assert_eq!(raw.status, 200);
+        let info: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        assert_eq!(info["embedding_contract"]["status"], "compatible");
+
+        let changed = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-v2".into()),
+            dim: 1024,
+        };
+        store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetEmbedding {
+                        session_id: SessionId::new("h1-web-mismatch"),
+                        embedding: Some(changed),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
 
         let raw = request(addr, "GET", "/api/session").await;
         assert_eq!(raw.status, 200);
@@ -2693,16 +2741,21 @@ mod tests {
         assert_eq!(info["embedding_contract"]["status"], "mismatch");
         assert_eq!(
             info["embedding_contract"]["stored"]["model"],
-            "fixture-model-v1"
+            "fixture-model-v2"
         );
         assert_eq!(
             info["embedding_contract"]["configured"]["model"],
-            "fixture-model-v2"
+            "fixture-model-v1"
         );
         let message = info["embedding_contract"]["message"].as_str().unwrap();
-        assert!(message.contains("fixture-model-v1"), "{message}");
         assert!(message.contains("fixture-model-v2"), "{message}");
+        assert!(message.contains("fixture-model-v1"), "{message}");
         assert_eq!(info["vector_search"], false);
+
+        let pulse = request(addr, "GET", "/api/pulse").await;
+        assert_eq!(pulse.status, 200);
+        let pulse: serde_json::Value = serde_json::from_str(&pulse.body).unwrap();
+        assert_eq!(pulse["embedding_contract"]["status"], "mismatch");
 
         for path in ["/api/stats", "/api/graph", "/api/inspect?focus=missing"] {
             let response = request(addr, "GET", path).await;
@@ -2714,12 +2767,29 @@ mod tests {
         }
         let recall = request(addr, "GET", "/api/recall?q=anything").await;
         assert_eq!(recall.status, 502, "mismatched vector recall must refuse");
-        assert!(recall.body.contains("fixture-model-v1"), "{}", recall.body);
         assert!(recall.body.contains("fixture-model-v2"), "{}", recall.body);
+        assert!(recall.body.contains("fixture-model-v1"), "{}", recall.body);
+
+        store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetEmbedding {
+                        session_id: SessionId::new("h1-web-mismatch"),
+                        embedding: Some(stored),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let pulse = request(addr, "GET", "/api/pulse").await;
+        let pulse: serde_json::Value = serde_json::from_str(&pulse.body).unwrap();
+        assert_eq!(pulse["embedding_contract"]["status"], "compatible");
         assert!(
             APP_JS.contains("Vector recall is disabled")
-                && APP_JS.contains("embedding_contract.status === \"mismatch\""),
-            "the page must render the /api/session mismatch as a banner"
+                && APP_JS.contains("applyEmbeddingStatus(p.embedding_contract")
+                && APP_JS.contains("embeddingBanner.remove()"),
+            "the page must reconcile the polled mismatch banner in both directions"
         );
 
         handle.abort();

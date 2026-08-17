@@ -16,6 +16,8 @@
   var seen = 0;                // canonization events already rendered
   var lastCounts = {};
   var failures = 0;
+  var embeddingBanner = null;
+  var embeddingStatusKey = null;
 
   var el = {
     session:  document.getElementById("session-id"),
@@ -74,6 +76,31 @@
     }
     b.appendChild(body);
     el.banners.appendChild(b);
+    return b;
+  }
+
+  function applyEmbeddingStatus(contract, vectorSearch) {
+    if (el.factSearch) {
+      el.factSearch.textContent = vectorSearch
+        ? "meaning, keyword and structure"
+        : "keyword and structure";
+    }
+    var nextKey = contract
+      ? contract.status + "\n" + (contract.message || "")
+      : "missing";
+    if (nextKey === embeddingStatusKey) { return; }
+    embeddingStatusKey = nextKey;
+    if (embeddingBanner) {
+      embeddingBanner.remove();
+      embeddingBanner = null;
+    }
+    if (contract && contract.status === "mismatch") {
+      embeddingBanner = banner(
+        "Vector recall is disabled: this session was embedded by a different model.",
+        contract.message ||
+          "The stored and configured embedding contracts differ. Structural views remain available."
+      );
+    }
   }
 
   // ---- session identity ----------------------------------------------
@@ -91,24 +118,12 @@
       el.factEmbedder.textContent =
         (MODEL_NAMES[info.embedder] || info.embedder) + ", " + info.embedding_dim + " dimensions";
     }
-    if (el.factSearch) {
-      el.factSearch.textContent = info.vector_search
-        ? "meaning, keyword and structure"
-        : "keyword and structure";
-    }
+    applyEmbeddingStatus(info.embedding_contract, info.vector_search);
 
     el.chips.textContent = "";
     el.chips.appendChild(text("span", "chip", info.read_only ? "reader process, holds no write lease" : "writer"));
 
     if (info.poll_interval_ms) { POLL_MS = info.poll_interval_ms; }
-
-    if (info.embedding_contract && info.embedding_contract.status === "mismatch") {
-      banner(
-        "Vector recall is disabled: this session was embedded by a different model.",
-        info.embedding_contract.message ||
-          "The stored and configured embedding contracts differ. Structural views remain available."
-      );
-    }
 
     if (info.store_is_process_local) {
       banner(
@@ -272,6 +287,7 @@
     return get("/api/pulse?since=" + seen).then(function (p) {
       applyStats(p.stats);
       appendEvents(p.events, animate);
+      applyEmbeddingStatus(p.embedding_contract, p.vector_search);
       failures = 0;
       link("live", "live · polling every " + (POLL_MS / 1000).toFixed(1) + "s");
     }).catch(function (e) {
