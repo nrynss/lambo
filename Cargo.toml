@@ -1,6 +1,6 @@
 [package]
 name = "lambo"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Agentic graph memory — bipartite graph, canonization, MCP serve"
@@ -21,9 +21,13 @@ include = [
     "examples/**",
     "lambo.example.toml",  # include_str! in config.rs — a tested contract
     "rust-toolchain.toml", # deliberately kept: governs consumer-side cargo-install toolchain
-    "README.md",
-    "LICENSE",
-    "NOTICE",
+    # Anchored with a leading slash (H5). Cargo `include` patterns are
+    # gitignore-style, so a bare "README.md" is unanchored and matched at every
+    # depth: 0.2.0 shipped 14 internal READMEs from dev-diary/, evidence/,
+    # scripts/, site/ and demo/ despite this whitelist.
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
 ]
 
 [dependencies]
