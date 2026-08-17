@@ -61,13 +61,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # debian:bookworm pinned to a digest so the base image (and the
+          # glibc floor the T12 gate measures) is reproducible. The pin covers
+          # the base image only; apt packages still float, and the readelf
+          # glibc gate remains the enforcement. Multi-arch OCI index, so the
+          # amd64 and arm64 runners each pull their own variant.
           - os: ubuntu-24.04
-            container: debian:bookworm
+            container: debian:bookworm@sha256:813017f3d62be4b5891a7acca6a01bdcd4b8513daa81b1ab99d3a50385b26931
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
             ext: ""
           - os: ubuntu-24.04-arm
-            container: debian:bookworm
+            container: debian:bookworm@sha256:813017f3d62be4b5891a7acca6a01bdcd4b8513daa81b1ab99d3a50385b26931
             target: aarch64-unknown-linux-gnu
             name: linux-arm64
             ext: ""
@@ -90,6 +95,22 @@ jobs:
             ext: ".exe"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The Linux rows build inside `debian:bookworm` (GLIBC floor, T12).
+      # bookworm's minimal image lacks the tools the build needs: curl (for
+      # dtolnay/rust-toolchain's `curl https://sh.rustup.rs | sh` rustup
+      # bootstrap - without it the step dies with exit 127), ca-certificates
+      # (TLS to sh.rustup.rs - curl exits 77 without it), and build-essential
+      # (rustc's default linker driver is `cc`, and the ship profile compiles
+      # C: sqlx bundled SQLite -> libsqlite3-sys, rustls -> aws-lc-sys + ring).
+      # macOS/Windows rows are host-native and already ship all of these.
+      - name: Prepare container (install build toolchain)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl ca-certificates build-essential
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
