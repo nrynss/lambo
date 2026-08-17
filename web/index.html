@@ -3,181 +3,159 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>Lambo session window</title>
+<title>Lambo, session memory</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 
-<!-- The header carries real information, so every value gets a label that says
-     what it is rather than what it is called internally. `bge_m3 / 1024d` means
-     nothing to a reader; "Meaning model: BGE-M3, 1024 dimensions" does. -->
-<header class="bar">
-  <div class="brand">
-    <span class="mark">lambo</span>
-    <span class="sub">memory for coding agents</span>
-  </div>
-  <div class="facts" id="facts">
-    <div class="fact">
-      <span class="fact-k">Session</span>
-      <span class="fact-v" id="session-id">…</span>
-    </div>
-    <div class="fact">
-      <span class="fact-k">Memory stored in</span>
-      <span class="fact-v" id="fact-store">…</span>
-    </div>
-    <div class="fact">
-      <span class="fact-k">Meaning model</span>
-      <span class="fact-v" id="fact-embedder">…</span>
-    </div>
-    <div class="fact">
-      <span class="fact-k">Search</span>
-      <span class="fact-v" id="fact-search">…</span>
-    </div>
-  </div>
-  <span class="badge readonly" title="This page only reads. It cannot derive, record, reserve or delete anything.">reads only, never writes</span>
-</header>
+<!-- Structure only. Every list and value is filled by app.js from the API, and
+     panels whose endpoint does not answer are hidden rather than shown empty:
+     a page drawing infrastructure it cannot see is worse than one with no
+     tree. -->
 
-<!-- Connection state, said once and loudly. Someone arriving should know within
-     a second whether this is live data or a dead page. -->
-<div class="livestrip" id="livestrip">
-  <span class="dot"></span>
-  <strong id="live-headline">Connecting…</strong>
-  <span class="live-detail" id="live-detail"></span>
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="brand">Lambo</span>
+    <span class="brand-divider" aria-hidden="true">/</span>
+    <!-- Named, not selectable: one session per process. -->
+    <span class="session-name" id="session-name">connecting…</span>
+    <span class="readonly-tag">READ-ONLY</span>
+  </div>
+  <div class="topbar-right">
+    <span class="conn" id="conn"><span class="conn-dot"></span><span id="conn-label">connecting</span></span>
+    <span class="muted-small" id="refresh-note"></span>
+    <button class="theme-btn" id="theme-btn" type="button" aria-live="polite">theme: system</button>
+  </div>
 </div>
-
-<div id="banners"></div>
 
 <main>
 
-  <section class="panel intro">
-    <h1>A live window onto what one set of agents remembers.</h1>
-    <p class="lede">
-      Coding agents forget everything when a session ends, and they cannot see what
-      another agent already worked out. Lambo keeps that knowledge as a graph, gives
-      it back by meaning rather than by keyword, and marks which memories other work
-      depends on, so an agent knows what is dangerous to change.
-    </p>
-    <div class="cols">
-      <div>
-        <h3>What happened here</h3>
-        <p>
-          Two agents built real AWS infrastructure: a network with subnets and
-          shared security groups, a private database, and a stats function. They
-          recorded what they did as they went. Everything on this page is read live
-          from that session.
-        </p>
+  <section class="hero" id="hero" aria-labelledby="hero-heading">
+    <div class="hero-label">what other work relies on right now</div>
+
+    <div id="hero-filled" class="hidden">
+      <div class="hero-title-row">
+        <h1 id="hero-heading"></h1>
+        <span class="kind" id="hero-kind"></span>
+        <span class="status" id="hero-status"></span>
       </div>
-      <div>
-        <h3>The thing worth looking at</h3>
-        <p>
-          Open <code>VPC-Enterprise-Prod</code>. Lambo marks it load-bearing and
-          says how many things depend on it, because the agents recorded those
-          dependencies as they built. That count is what makes an agent stop
-          before deleting something another agent is sitting behind, and it is not
-          something plain vector search can produce.
-        </p>
+      <p class="hero-sub" id="hero-sentence"></p>
+      <div class="hero-big">
+        <div class="hero-big-num" id="hero-blast"></div>
+        <div class="hero-big-caption">other pieces of work would be affected if this changed</div>
+      </div>
+      <div class="col-label" id="hero-deps-label"></div>
+      <div class="chip-grid" id="hero-deps"></div>
+      <button class="link-btn" id="hero-inspect" type="button"></button>
+    </div>
+
+    <div id="hero-empty" class="hidden">
+      <h1>Nothing relied on yet</h1>
+      <p class="hero-sub" id="hero-empty-msg"></p>
+    </div>
+  </section>
+
+  <section class="facts" id="facts" aria-label="Session facts"></section>
+
+  <section aria-labelledby="counts-heading">
+    <h2 id="counts-heading">Live counts</h2>
+    <div class="counts" id="counts"></div>
+  </section>
+
+  <section aria-labelledby="ladder-heading">
+    <h2 id="ladder-heading">The trust ladder</h2>
+    <p class="section-sub">Most memories never reach Canonical, and that is normal. Status is earned from evidence, not declared by an agent.</p>
+    <div id="ladder"></div>
+  </section>
+
+  <section aria-labelledby="history-heading">
+    <h2 id="history-heading">What changed</h2>
+    <p class="section-sub">Every status change, in order.</p>
+    <div class="audit" id="audit"></div>
+    <div class="empty-note hidden" id="audit-empty">No status changes yet in this session. Memories are accumulating; none has reached Canonical.</div>
+  </section>
+
+  <section class="legend" aria-label="Kinds of memory">
+    <div class="legend-label">Kinds of memory</div>
+    <div class="legend-items" id="legend"></div>
+  </section>
+
+  <!-- Hidden until /api/graph answers. Never a placeholder. -->
+  <section id="structure" class="hidden" aria-labelledby="structure-heading">
+    <h2 id="structure-heading">Structure</h2>
+    <p class="section-sub">What the agents actually built. Shows what contains what; other relationships show up in Details below.</p>
+    <div class="tree" id="tree"></div>
+    <p class="muted-small hidden" id="tree-truncated">More was recorded than is shown here.</p>
+  </section>
+
+  <section aria-labelledby="details-heading">
+    <h2 id="details-heading">Details</h2>
+    <div class="details" id="details">
+      <div class="empty-note" id="details-empty">Select something from the structure list, a result below, or the panel above to see details here.</div>
+
+      <div id="details-filled" class="hidden">
+        <div class="details-header">
+          <div>
+            <span class="details-title" id="details-name"></span>
+            <span class="kind" id="details-kind"></span>
+            <span class="status" id="details-status"></span>
+          </div>
+          <button class="clear-btn" id="details-clear" type="button">clear ✕</button>
+        </div>
+
+        <div class="details-blast">
+          <span class="details-blast-num" id="details-blast"></span>
+          <span class="muted-small">depend on this right now</span>
+        </div>
+
+        <div class="col-label" id="details-deps-label"></div>
+        <div class="chip-grid" id="details-deps"></div>
+        <div class="empty-note hidden" id="details-deps-empty">Nothing depends on this. That is a normal answer, not an error.</div>
+        <p class="muted-small hidden" id="details-truncated">More depend on it than shown here.</p>
+
+        <div id="details-gates-wrap" class="hidden">
+          <div class="col-label">why nothing relies on this yet</div>
+          <div class="gates" id="details-gates"></div>
+          <div class="cooldown hidden" id="details-cooldown"></div>
+        </div>
       </div>
     </div>
   </section>
 
-  <!-- Rendered only when /api/graph answers. A structure view built from a
-       fixture would be a page inventing infrastructure, so absence hides it. -->
-  <section class="panel tree hidden" id="tree-panel">
-    <h2>What these agents built</h2>
-    <p class="note">
-      The components in this session and how they contain each other, read from
-      the recorded graph. Nothing here is a diagram someone drew: it is the
-      structure the agents wrote down as they provisioned.
-    </p>
-    <div id="tree-out" class="tree-out"></div>
-  </section>
+  <section aria-labelledby="lookup-heading">
+    <h2 id="lookup-heading">Look up anything the agents worked on</h2>
+    <p class="section-sub">Type the name of a file, a table, a rule, or a piece of work. You will get back what the agents recorded about it, and a warning if other work depends on it.</p>
 
-  <section class="panel recall">
-    <h2>Look up a component</h2>
-    <p class="note">
-      Pick a resource from this session. What comes back is the block of memory
-      Lambo hands an agent that is about to touch it, character for character.
-      Nothing is rewritten for display, and nothing here is a conversation.
-    </p>
-    <div class="suggest">
-      <button type="button" class="chip-q" data-q="SG-Base-VPC">SG-Base-VPC</button>
-      <button type="button" class="chip-q" data-q="RDS-Lambo-Demo-DB">RDS-Lambo-Demo-DB</button>
-      <button type="button" class="chip-q" data-q="VPC-Enterprise-Prod">VPC-Enterprise-Prod</button>
-      <button type="button" class="chip-q" data-q="EC2-LamboWebExhibit">EC2-LamboWebExhibit</button>
-      <button type="button" class="chip-q" data-q="Lambda-LamboStats-API">Lambda-LamboStats-API</button>
+    <div class="combo">
+      <div class="combo-row">
+        <input class="combo-input" id="lookup-input" type="text"
+               role="combobox" aria-expanded="false" aria-haspopup="listbox"
+               aria-controls="lookup-listbox" aria-autocomplete="list"
+               aria-label="Look up a memory"
+               placeholder="users table, login handler, rate limiting…" autocomplete="off">
+        <button class="lookup-btn" id="lookup-btn" type="button">Look up</button>
+      </div>
+      <div class="listbox hidden" id="lookup-listbox" role="listbox" aria-label="Matching memories"></div>
     </div>
-    <form id="recall-form" autocomplete="off">
-      <label class="field-label" for="recall-query">or name another resource</label>
-      <input type="text" id="recall-query" name="q" placeholder="Subnet-Private-1a" aria-label="Resource name" spellcheck="false">
-      <button type="submit" id="recall-go">Look up</button>
-    </form>
-    <div class="meta" id="recall-meta"></div>
-    <pre id="recall-out" class="context" aria-live="polite">Choose a resource above.</pre>
-  </section>
 
-  <aside class="side">
+    <div class="lookup-loading hidden" id="lookup-loading" role="status">
+      <span class="spinner spin"></span><span id="lookup-stage"></span>
+    </div>
 
-    <section class="panel ladder">
-      <h2>How a memory earns trust</h2>
-      <p class="note">
-        Nothing is marked important because an agent said so. A memory climbs these
-        three rungs on evidence, and every step is recorded.
-      </p>
-      <ol class="rungs">
-        <li class="rung" data-status="Candidate">
-          <div class="rung-head">
-            <span class="rung-n" id="n-Candidate">0</span>
-            <span class="rung-name">Candidate</span>
-          </div>
-          <p class="rung-why">Recorded, and holding up so far. Most memories stop here.</p>
-          <ul class="rung-list" id="list-Candidate"></ul>
-        </li>
-        <li class="rung" data-status="Venerable">
-          <div class="rung-head">
-            <span class="rung-n" id="n-Venerable">0</span>
-            <span class="rung-name">Venerable</span>
-          </div>
-          <p class="rung-why">Survived repeated cleanup passes while other memories were dropped.</p>
-          <ul class="rung-list" id="list-Venerable"></ul>
-        </li>
-        <li class="rung" data-status="Canonical">
-          <div class="rung-head">
-            <span class="rung-n" id="n-Canonical">0</span>
-            <span class="rung-name">Canonical</span>
-          </div>
-          <p class="rung-why">Load-bearing. Enough other work depends on it that changing it is dangerous, and Lambo now warns any agent that touches it.</p>
-          <ul class="rung-list" id="list-Canonical"></ul>
-        </li>
-      </ol>
-    </section>
-
-    <section class="panel stats">
-      <h2>What is in this session</h2>
-      <div class="tiles" id="stat-tiles"></div>
-      <p class="note" id="stats-note"></p>
-      <div class="chips" id="backend-chips"></div>
-    </section>
-
-  </aside>
-
-  <section class="panel feed">
-    <h2>How it got here <span class="count" id="event-count">0</span></h2>
-    <p class="note">
-      Every promotion and demotion, newest first. This is the audit trail: when a
-      memory became load-bearing, and how far its blast radius reached at that moment.
-    </p>
-    <ol id="event-list" class="events" aria-live="polite"></ol>
-    <p class="empty" id="event-empty">Nothing has been promoted yet in this session.</p>
+    <div id="lookup-results" class="hidden">
+      <div class="results-header">
+        <span class="muted-small" id="lookup-timing"></span>
+        <button class="fallback-toggle hidden" id="fallback-toggle" type="button"></button>
+      </div>
+      <div class="traversal-banner hidden" id="traversal-banner"></div>
+      <div class="cards hidden" id="lookup-cards"></div>
+      <pre class="fallback-pre" id="lookup-fallback"></pre>
+    </div>
   </section>
 
 </main>
 
-<footer class="bar foot">
-  <span id="link-status" class="status">connecting…</span>
-  <span class="spacer"></span>
-  <span class="muted" id="version"></span>
-</footer>
+<footer id="footer"></footer>
 
 <script src="/app.js"></script>
 </body>
