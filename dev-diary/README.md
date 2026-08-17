@@ -177,6 +177,7 @@ the only place the board points at them.
 |---|---|---|
 | **T1–T12** remediation | [notes/remediation-tasks.md](notes/remediation-tasks.md) | **ALL DONE**, plus the whole-tree **E2E** review: R1 APPROVE with 3 P3 remediated (`5db0b90`), R2 APPROVE, then a further E2E round merged as `1dd5b48`. `v0.2.0` (`35c86fb`) and `v0.2.1` shipped from it |
 | **H1–H7** hardening | [notes/hardening-tasks.md](notes/hardening-tasks.md) | **ALL IMPLEMENTATION TASKS CLOSED.** H1, H2, H3 each ran implement → adversarial review → remediation to CLEAN; H4, H5, H6 were closed by the portal rebuild `5ccd48f` and the `0.2.1` release. **H7 is PARKED / NEEDS DESIGN** and is not claimable until its selection/discovery/URL/auth decisions are recorded |
+| **C1–C5** concurrency capture | [notes/concurrency-capture.md](notes/concurrency-capture.md) | **NOT STARTED, optional.** Closes P8's last exit box (T8.2 N1/N2). The code for both findings is in `main` with tests; what is missing is the K-concurrent-client capture the criterion named. C5 optionally drives it with local models, which is T9.6's territory |
 | **D1–D3** deployment & submission | [notes/deployment-and-submission.md](notes/deployment-and-submission.md) | **D3 done** (docs + submission text, landed early). **D1 clean redeploy NOT STARTED**. The live instance was repaired by hand, so "rebuildable from the scripts alone" is not yet a supportable claim. **D2 recording NOT STARTED**, blocked on D1 |
 
 **Critical path to submission:** D1 → D2/T9.3 → T9.5, with T9.2 already met. A

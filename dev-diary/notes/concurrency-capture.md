@@ -1,0 +1,157 @@
+# Concurrency capture (C1 to C5) — closing P8's last exit box
+
+**Tasks are C1 to C5.** Numbered separately from remediation (T1 to T12),
+hardening (H1 to H7) and deployment (D1 to D3), same as those are numbered apart
+from each other.
+
+This closes the one unchecked box in [PHASE-8's exit criteria](../PHASE-8-surface.md):
+*surface holds under concurrency (T8.2 N1/N2 closure)*. It is the last open item
+in P8 and it is **optional for the hackathon submission** — no §12.4 deliverable
+depends on it. Do it because the claim "the MCP surface holds under load" is
+currently unevidenced, not because the deadline needs it.
+
+---
+
+## What is already done, so nobody re-fixes it
+
+N1 and N2 were findings from the T8.2 MCP review (round 3, 2026-08-14). The
+review's verdict was that the surface was well hardened against string attacks
+and weakly hardened against cardinality and lifecycle. **Both are fixed in
+`main`:**
+
+| Finding | The harm | Fix, verified in source |
+|---|---|---|
+| **N1 cardinality** | `produces`/`modifies`/`depends_on` had no cap; 50k entries took 116.8s | `MAX_ACTION_TARGETS` enforced at `src/mcp/server.rs:793` |
+| **N1 starvation** | `record_action` ran synchronously on a Tokio worker; 12 concurrent 6k-entry calls starved every worker, `shutdown_signal()` could not be polled, SIGTERM sat for 300s | `tokio::task::spawn_blocking` at `src/mcp/server.rs:833`, with the SIGTERM reason in the comment |
+| **N2 control chars** | A NUL in `lambo_derive` content was accepted, echoed by recall, then rejected by Cockroach `STRING`; the SQLSTATE mapped to a *retryable* `StoreError::Other`, so the flush loop kept the batch forever and the session went degraded | Refusal at the MCP layer, with a test at `src/mcp/server.rs:2229` covering bidi, zero-width and tag characters, including `("rtl override", "user\u{202E}schema")` |
+
+The 2026-08-14 live pass found two residuals, **L82-1** (a close that blows its
+deadline is dropped, so the lease release never runs) and **L82-2** (U+202E
+accepted and landed in Cockroach). Both were subsequently remediated: the close
+budget is now split (`CLOSE_GRACE` = `CLOSE_FLUSH_GRACE` + `LEASE_RELEASE_GRACE`,
+documented at `src/mcp/serve.rs:50-70`), and the control-character refusal was
+widened past the original ask.
+
+**So the open box is not "N1/N2 were never fixed". It is "nobody captured the
+concurrent-client proof the exit criterion named."**
+
+---
+
+## The criterion, restated as acceptance
+
+K concurrent clients, K at or above the worker count (~12 to 32), issuing a mix
+of valid and adversarial tool calls, and:
+
+1. The process does not starve: SIGTERM still prints
+   `lambo serve: session closed, tail durable` (`src/mcp/serve.rs:756`) rather
+   than either `tail lost on exit` line (`:752`, `:824`, `:836`).
+2. An oversized `record_action` gets the honest cap refusal, not a hang.
+3. No internal detail crosses the wire: no DSN fragments, no
+   `cockroachlabs.cloud` host, no sqlx/driver text, no internal URLs in any
+   response body or error message.
+4. Evidence lands in `evidence/`.
+
+---
+
+## C1 — Load driver
+
+**Owns:** `scripts/loadtest/mcp_load.py` (new), `scripts/loadtest/README.md`
+**Status:** not-started
+
+Drive `lambo serve --transport http --bind 127.0.0.1 --port 7700 --auth-token <tok>`
+against a **scratch** session (`--session c-load-<date>`), never `cloudops-exhibit`.
+
+Each of K workers loops a weighted mix:
+
+- valid: `lambo_derive` (a few concepts, some with `parent_of`),
+  `lambo_record_action`, `lambo_recall`
+- adversarial: `record_action` exceeding `MAX_ACTION_TARGETS`; content carrying
+  NUL and `U+202E`; content over `MAX_CONTENT_BYTES`; an unknown tool name;
+  malformed params
+
+Record every response. The HTTP surface has a documented rate limit
+(`DEFAULT_RATE_LIMIT_RPS = 50`, burst ×2) and a session cap
+(`DEFAULT_MAX_SESSIONS = 32`) from T8.7 — a refusal from either is a **correct**
+observation, not a failure, but the run should be shaped so refusals do not
+crowd out the thing being measured.
+
+## C2 — Run it, and pull the SIGTERM
+
+**Owns:** `evidence/concurrency/` (new)
+**Requires:** C1
+**Status:** not-started
+
+Start the server, ramp K to target, and send SIGTERM **while load is in flight**
+with a non-trivial tail pending. Capture the server's stderr in full, the exit
+code, and wall-clock time from signal to exit.
+
+The assertion is the exact line, not a vibe: `session closed, tail durable`.
+
+## C3 — Prove the tail is actually durable
+
+**Requires:** C2
+**Status:** not-started
+
+The review never did this half. After the process exits, reconnect to the store
+and count what should have survived. A reassuring log line is not durability.
+
+Compare against what the driver believes it wrote (successful tool calls only).
+A shortfall here is the real finding, and it would be about the budget rather
+than a bug: `CLOSE_GRACE` is 10s, split with the lease release, so a large tail
+against a live cluster may simply not clear it. If that happens, the honest
+resolution is a decision about the number, recorded in this note, not a silent
+bump.
+
+## C4 — Disposition and docs
+
+**Requires:** C3
+**Status:** not-started
+**Owns:** this note, `dev-diary/PHASE-8-surface.md` exit criteria, `dev-diary/README.md` status board
+
+Tick the P8 box, or record precisely why it stays open. Either way the diary
+should stop describing this as "concurrency-on-MBP" with no further detail: the
+missing thing was always the capture, and after C3 it is either captured or
+explained.
+
+**Hardware caveat to write down:** the criterion says *runs on the MBP*. If it
+runs on the Linux box (16 cores, 2560x1440 display, CachyOS) the starvation
+threshold differs, so say which machine produced the numbers.
+
+## C5 — Optional: drive it with real local models
+
+**Requires:** C2 green
+**Status:** not-started, optional
+**Relates to:** T9.6 (the LFM2 swarm, P9's cut-order #2)
+
+C1's driver is synthetic: deterministic, fast, and precise about what it sent.
+That is the right instrument for the correctness half. The scale half wants real
+agents.
+
+This box already has the pieces:
+
+- `llama-server` is installed and already serving BGE-M3 on `:8080` for
+  embeddings, so a second instance on another port can serve a chat model.
+- Local weights in `~/models/`: `LiquidAI_LFM2.5-350M` (the model T9.6 names),
+  `kat-E2B-Q4_K_M`, `kat-E4B-Q6_K`, `gemma-4-E4B-it`, `Qwen3-30B-A3B-Q4_K_M`.
+- The MCP surface is already proven with real agents: see
+  [notes/video-shoot.md](video-shoot.md) and the `agent-skill` page for a model
+  calling `lambo_recall` and `lambo_inspect` unprompted.
+
+Smallest useful version: N instances of LFM2.5-350M through an MCP-capable
+client, each given a task that requires a derive then a recall, run against one
+session. Measure sustained tasks/hour and the canonization dedup rate. If it
+fails, the failure is the finding and it is cut per P9's cut order without
+touching the submission.
+
+---
+
+## Where things live
+
+| Artifact | Path |
+|---|---|
+| Driver | `scripts/loadtest/mcp_load.py` |
+| Run transcripts, server stderr, durability counts | `evidence/concurrency/` |
+| Swarm evidence, if C5 happens | `evidence/swarm/` (the path T9.6 reserves) |
+
+Scratch sessions only. Never point a load test at `cloudops-exhibit`: it is the
+session the portal, the video and the submission all read from.
