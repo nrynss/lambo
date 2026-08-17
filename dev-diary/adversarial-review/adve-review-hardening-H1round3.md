@@ -131,3 +131,47 @@ were inspected directly and their non-live suites pass.
 
 **CLEAN / APPROVE.** H1 is ready for integration. No remediation round is
 required after this review.
+
+## Closeout verification - 2026-08-17
+
+- **Closeout reviewed:**
+  `9712333334071120b122c9e18c8957036ba9ae99`
+- **Verification verdict:** **CLEAN / APPROVE** - no material false claim and
+  no review-index correction required
+
+The H1 `DONE / CLEAN` completion record preserves the original problem,
+historical handoffs, claim history, ownership expansion, and accepted
+limitations. Its commit chain exactly matches the linear worktree history:
+
+1. implementation `1a3accf9d1349dde7ce01cc41538fa755275436c`;
+2. round-1 `REQUEST_CHANGES` review
+   `ce0c441de4172f158a4cb3719631ae96a2703dcf` with 2 P1 / 1 P2 / 1 P3;
+3. remediation `c72acf5fb1abd0f909d8bc2ef15f6d579df0d2fd` and disposition
+   `298af97a4049e6ff4e642ec7be54dcec0373bc39`;
+4. round-2 `REQUEST_CHANGES` review
+   `14c2d52f7ac3cb734778ec13576b5ad658b0e002` with 1 P2 / 1 P3;
+5. remediation `7cd81943398cd4c7c8249e8605560c62074bb6a4` and disposition
+   `de3b4b7aa862597a929dcfccf4e1f19c13d06790`;
+6. round-3 `CLEAN / APPROVE` review
+   `c57395eda2ce1864e4cc1542e729691ffcf27abe` with zero findings;
+7. docs-only closeout `9712333334071120b122c9e18c8957036ba9ae99`.
+
+The completion record's test names, counts, feature matrices, and results match
+the contemporaneous Round-3 record above. It also retains all accepted
+residuals without upgrading them into false guarantees: the dangerous
+same-kind/same-width relabel remains an operator attestation; the frozen
+unchecked API remains externally callable while in-repo production uses the
+checked path; `model: None` cannot detect a changed unnamed server default;
+and no live Cockroach or SQLSTATE 40001 reproduction is claimed because
+`LAMBO_COCKROACH_DSN` was unset. The separately ignored two calibration tests
+remain distinguished from the eight ignored live Cockroach library tests.
+
+`dev-diary/adversarial-review/README.md` satisfies its stated count discipline:
+the header says 56 records and the table has exactly 56 record rows. All 56
+Markdown targets resolve to files. The three H1 rows accurately report the two
+closed `REQUEST_CHANGES` rounds, their remediation/disposition SHAs and
+severity counts, followed by the dated zero-finding `CLEAN / APPROVE` round.
+
+**Closeout remains CLEAN / APPROVE.** The task document and review index are
+accurate for integration; no production or index file was changed by this
+verification.
