@@ -936,6 +936,38 @@ Docs in `adve-review-remed-T12round{1..3}.md`.
 runner showing `readelf` `GLIBC_2.34` (not 2.39) and the binary launching on
 AL2023 — a D2/D3 verification step, not a worktree defect.
 
+
+### ✅ E2E — DONE (2026-08-17; integrated `5db0b90`, ready to push)
+
+End-to-end review of the whole integrated T1–T12 surface (29 commits from
+`26c4d71` to HEAD, 68 files / +9258). Two adversarial rounds:
+
+- **R1 (APPROVE, 3 P3 + 2 informational nits):** verified all cross-task seams
+  — shared files coexist (`ResolvedBackends` `#[non_exhaustive]` breaks no
+  construction site; `open_writer` + reader-contract + T3 routes agree; the
+  `_lambo.py` structural whitelist matches both Rust structural authorities;
+  validation precedes the lease); forward contracts honored (IPv6 first-colon
+  `--parent-of`; structural closure consistent across T3/T8/T9; single-sourced
+  gate bars); documented guarantees hold (no-writer-lease, structural-only
+  edges); T6/T10 AWS and T12's release don't conflict; 217 seam tests pass.
+  Three P3s remediated (merged `5db0b90`):
+  - **E2E-R1-1** — `/api/inspect` gate_progress is API-only; documented in
+    `web/app.js` (the focus-driven panel lands in the parked UI pass).
+  - **E2E-R1-2** — launcher comment refreshed for T12 (bookworm + glibc gate);
+    NEW-5 **discharged** (both `UBUNTU_SSM` paths verified live in `us-east-1`).
+  - **E2E-R1-3** — lib.rs crate-doc example now passes `.config(backends.config)`
+    before `.backends()`, honoring the T2 `[daemon]` contract.
+- **R2 (APPROVE):** all three remediations verified genuine; the integrated
+  whole is clean and **ready to push**.
+
+Docs: `adve-review-remed-E2Eround{1..2}.md`. **Verify:** full
+`cargo test --all-features` green — **842 passed / 0 failed**.
+
+**Remaining for D1/D2/D3 (deployment, not this task):** T6's NEW-5 SSM check
+discharged above; a **real-live capture** of `03_crossover_protect.py` (T8)
+before the video; a **draft/PR release build** on the new bookworm runner
+(T12); the D1 clean redeploy.
+
 ---
 
 
