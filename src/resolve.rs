@@ -23,6 +23,10 @@ pub struct ResolvedBackends {
     pub embedder_cfg: EmbedderConfig,
     /// Contract to stamp on the session / refuse mid-session model swaps.
     pub embedding: EmbeddingContract,
+    /// Deliberate operator escape hatch for a same-width embedding-space
+    /// rename/migration. `false` is the safe default from every resolver.
+    /// CLI parsing may set this only for writer commands.
+    pub allow_embedding_mismatch: bool,
     /// Product config with any `[daemon]` cadence overrides from the file
     /// already applied. Writers pass this to `Memory::builder().config(..)`.
     pub config: crate::Config,
@@ -115,6 +119,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         store_cfg,
         embedder_cfg,
         embedding,
+        allow_embedding_mismatch: false,
         config,
     })
 }
@@ -145,10 +150,71 @@ pub fn assert_session_embedding_compatible(
     session: Option<&EmbeddingContract>,
     live: &EmbeddingContract,
 ) -> Result<(), LamboError> {
-    match session {
-        None => Ok(()),
-        Some(existing) => existing.ensure_compatible(live),
+    match session_embedding_compatibility(session, live) {
+        SessionEmbeddingCompatibility::Unrecorded | SessionEmbeddingCompatibility::Compatible => {
+            Ok(())
+        }
+        SessionEmbeddingCompatibility::Mismatch { stored, live } => {
+            Err(embedding_mismatch_error(&stored, &live))
+        }
     }
+}
+
+/// Classification used by readers that need to report an incompatibility
+/// without pretending vector recall is safe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionEmbeddingCompatibility {
+    /// Nullable snapshot metadata from an older/un-stamped session.
+    Unrecorded,
+    /// Stored and live contracts identify the same embedding space.
+    Compatible,
+    /// The stored vectors and live embedder identify different spaces.
+    Mismatch {
+        stored: EmbeddingContract,
+        live: EmbeddingContract,
+    },
+}
+
+/// Compare the nullable stored contract with the resolved live embedder.
+pub fn session_embedding_compatibility(
+    session: Option<&EmbeddingContract>,
+    live: &EmbeddingContract,
+) -> SessionEmbeddingCompatibility {
+    match session {
+        None => SessionEmbeddingCompatibility::Unrecorded,
+        Some(stored) if stored == live => SessionEmbeddingCompatibility::Compatible,
+        Some(stored) => SessionEmbeddingCompatibility::Mismatch {
+            stored: stored.clone(),
+            live: live.clone(),
+        },
+    }
+}
+
+/// Actionable fail-closed message for a session/live mismatch.
+///
+/// The override is intentionally named in the error, but is only lawful for
+/// equal dimensions; callers enforce that restriction before replacing a
+/// contract. A different width is never a model-rename migration.
+pub fn embedding_mismatch_error(
+    stored: &EmbeddingContract,
+    live: &EmbeddingContract,
+) -> LamboError {
+    let stored_model = stored.model.as_deref().unwrap_or("(default)");
+    let live_model = live.model.as_deref().unwrap_or("(default)");
+    let reason = if stored.dim == live.dim {
+        "equal dimensions do not make model vector spaces compatible"
+    } else {
+        "the stored and configured vector widths differ"
+    };
+    LamboError::Config(format!(
+        "embedding contract is incompatible (mismatch): this session's vectors were written by \
+         kind={} model={} dim={}, but the configured embedder is kind={} model={} dim={}. \
+         Refusing because {reason}. \
+         A writer may use --allow-embedding-mismatch only for a verified same-kind, same-width \
+         model-identifier rename, or after a controlled migration has atomically removed the old \
+         vectors; readers remain fail-closed",
+        stored.kind, stored_model, stored.dim, live.kind, live_model, live.dim
+    ))
 }
 
 /// Human-readable label for logs (never include secrets).
@@ -226,6 +292,42 @@ mod tests {
             dim: 1024,
         };
         assert!(a.ensure_compatible(&c).is_err());
+    }
+
+    #[test]
+    fn h1_session_contract_classifies_legacy_match_and_same_width_model_mismatch() {
+        let stored = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("bge-m3-old.gguf".into()),
+            dim: 1024,
+        };
+        let live = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("bge-m3-new.gguf".into()),
+            dim: 1024,
+        };
+
+        assert_eq!(
+            session_embedding_compatibility(None, &live),
+            SessionEmbeddingCompatibility::Unrecorded
+        );
+        assert_session_embedding_compatible(None, &live)
+            .expect("a legacy session with no contract must still open");
+        assert_eq!(
+            session_embedding_compatibility(Some(&stored), &stored),
+            SessionEmbeddingCompatibility::Compatible
+        );
+
+        let err = assert_session_embedding_compatible(Some(&stored), &live).unwrap_err();
+        let text = err.to_string();
+        for expected in [
+            "bge-m3-old.gguf",
+            "bge-m3-new.gguf",
+            "dim=1024",
+            "--allow-embedding-mismatch",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
     }
 
     /// Minimal `GraphStore` stub for Level B consistency checks (CON-5): only

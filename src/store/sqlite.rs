@@ -2168,6 +2168,15 @@ mod tests {
             .unwrap()
             .ensure_compatible(&incompatible)
             .is_err());
+        let err = crate::resolve::assert_session_embedding_compatible(
+            reloaded.embedding(),
+            &incompatible,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("fixture-v1"), "{text}");
+        assert!(text.contains("amazon.titan-embed-text-v2:0"), "{text}");
+        assert!(text.contains("--allow-embedding-mismatch"), "{text}");
 
         #[cfg(feature = "store-memory")]
         {

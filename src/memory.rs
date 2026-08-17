@@ -95,7 +95,10 @@ use crate::graph::reserve::{release as graph_release, reserve as graph_reserve};
 use crate::graph::{hybrid, Graph};
 use crate::recall::cache::RecallCache;
 use crate::recall::format;
-use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
+use crate::resolve::{
+    embedding_mismatch_error, session_embedding_compatibility, ResolvedBackends,
+    SessionEmbeddingCompatibility,
+};
 use crate::store::flush::{
     panic_message, CatchUnwindPoll, FlushParams, FlushTask, FLUSH_ATTEMPT_TIMEOUT,
 };
@@ -399,6 +402,7 @@ pub struct MemoryBuilder {
     store: Option<Arc<dyn GraphStore>>,
     embedder: Option<Arc<dyn Embedder>>,
     embedding: Option<EmbeddingContract>,
+    allow_embedding_mismatch: bool,
     config: Config,
     // Held as overrides rather than written straight into `config`, so
     // `.config(..)` and the named setters commute — calling them in either
@@ -443,6 +447,19 @@ impl MemoryBuilder {
         self
     }
 
+    /// Explicitly allow a same-width stored/live embedding-contract mismatch.
+    ///
+    /// This is a dangerous migration escape hatch, not a compatibility mode.
+    /// With vectors present, it only permits a same-kind model-identifier
+    /// rename and the caller must know those identifiers denote the same
+    /// vector space. Cross-kind migration requires the old vectors to have
+    /// been atomically cleared/re-embedded first. Different dimensions remain
+    /// a hard error.
+    pub fn allow_embedding_mismatch(mut self, allow: bool) -> Self {
+        self.allow_embedding_mismatch = allow;
+        self
+    }
+
     /// Level B: take store + embedder + contract from **one**
     /// `resolve_backends` / `resolve_from_config_path` call.
     ///
@@ -461,6 +478,7 @@ impl MemoryBuilder {
         self.store = Some(Arc::from(backends.store));
         self.embedder = Some(Arc::from(backends.embedder));
         self.embedding = Some(backends.embedding);
+        self.allow_embedding_mismatch = backends.allow_embedding_mismatch;
         self
     }
 
@@ -519,7 +537,7 @@ impl MemoryBuilder {
     ///
     /// 1. `load_session` — a missing session is a first use, not an error.
     /// 2. **Level B contract check**: if the loaded session carries an
-    ///    [`EmbeddingContract`], [`assert_session_embedding_compatible`]
+    ///    [`EmbeddingContract`], [`session_embedding_compatibility`]
     ///    refuses a kind / model / dim mismatch (the model-mixing refusal —
     ///    STORE-1). A fresh session is stamped with the live contract instead.
     /// 3. Spawn the daemon, the flush task and the **canonization task**.
@@ -631,9 +649,27 @@ impl MemoryBuilder {
         // persistence half (seed write path + load materialization) shipped in
         // Wave 5; this is the attach-time check. `None` on a fresh session is
         // not a mismatch — it is an unstamped space, so stamp it.
-        assert_session_embedding_compatible(graph.embedding(), &embedding)?;
-        if graph.embedding().is_none() {
-            graph.stamp_embedding(embedding.clone())?;
+        match session_embedding_compatibility(graph.embedding(), &embedding) {
+            SessionEmbeddingCompatibility::Unrecorded => {
+                graph.stamp_embedding(embedding.clone())?;
+            }
+            SessionEmbeddingCompatibility::Compatible => {}
+            SessionEmbeddingCompatibility::Mismatch { stored, live } => {
+                if !self.allow_embedding_mismatch || stored.dim != live.dim {
+                    return Err(embedding_mismatch_error(&stored, &live));
+                }
+                tracing::warn!(
+                    session = %session,
+                    stored_kind = %stored.kind,
+                    stored_model = ?stored.model,
+                    live_kind = %live.kind,
+                    live_model = ?live.model,
+                    dim = live.dim,
+                    "operator allowed an embedding contract mismatch; relabeling the session's \
+                     existing vectors with the configured live contract"
+                );
+                graph.replace_embedding_with_operator_override(live)?;
+            }
         }
 
         let graph = Arc::new(RwLock::new(graph));
@@ -3343,6 +3379,65 @@ mod tests {
         // The matching contract still attaches.
         let ok = attach(contract("fixture", 1024)).await.unwrap();
         ok.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn h1_same_width_model_change_refuses_by_default_and_explicit_override_persists() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let old = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-v1".into()),
+            dim: 1024,
+        };
+        let live = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-renamed".into()),
+            dim: 1024,
+        };
+
+        let first = Memory::builder()
+            .session("h1-model-rename")
+            .agent("operator")
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(old)
+            .flush_interval(Duration::from_secs(3_600))
+            .build()
+            .await
+            .unwrap();
+        first.close().await.unwrap();
+
+        let attach = |allow| {
+            let store = store.clone();
+            let live = live.clone();
+            async move {
+                Memory::builder()
+                    .session("h1-model-rename")
+                    .agent("operator")
+                    .store(store)
+                    .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                    .embedding_contract(live)
+                    .allow_embedding_mismatch(allow)
+                    .flush_interval(Duration::from_secs(3_600))
+                    .build()
+                    .await
+            }
+        };
+
+        let err = attach(false).await.unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("fixture-model-v1"), "{text}");
+        assert!(text.contains("fixture-model-renamed"), "{text}");
+        assert!(text.contains("--allow-embedding-mismatch"), "{text}");
+
+        let migrated = attach(true).await.unwrap();
+        assert_eq!(migrated.embedding_contract(), &live);
+        migrated.close().await.unwrap();
+        let stored = store
+            .load_session(&SessionId::new("h1-model-rename"))
+            .await
+            .unwrap();
+        assert_eq!(stored.embedding, Some(live));
     }
 
     fn live_handles(session: &str) -> usize {

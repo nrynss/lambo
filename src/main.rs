@@ -16,6 +16,14 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// DANGEROUS: let a writer attach when the stored embedding model differs
+    /// from the configured model at the same dimension. This relabels existing
+    /// vectors; use only for a verified same-kind model identifier rename, or
+    /// after a migration has atomically removed old vectors. Cross-kind changes
+    /// with vectors and all dimension changes are always refused.
+    #[arg(long, global = true)]
+    allow_embedding_mismatch: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -300,6 +308,18 @@ impl Commands {
             Self::Provision | Self::Saints { .. } | Self::Inspect { .. } | Self::Stats { .. }
         )
     }
+
+    fn allows_embedding_mismatch_override(&self) -> bool {
+        matches!(
+            self,
+            Self::Serve { .. }
+                | Self::Demo { .. }
+                | Self::Derive { .. }
+                | Self::RecordAction { .. }
+                | Self::Reserve { .. }
+                | Self::Release { .. }
+        )
+    }
 }
 
 /// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
@@ -370,8 +390,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
+    if cli.allow_embedding_mismatch && !cmd.allows_embedding_mismatch_override() {
+        eprintln!(
+            "lambo {}: --allow-embedding-mismatch is a writer-only migration override",
+            cmd.name()
+        );
+        return ExitCode::from(2);
+    }
+
     // Construct once; when Memory/serve land, pass `Resolved` into the command body.
-    let resolved = match resolve_for_command(&cmd, config) {
+    let mut resolved = match resolve_for_command(&cmd, config) {
         Ok(r) => r,
         Err(e) => {
             let what = if cmd.needs_embedder() {
@@ -383,6 +411,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if cli.allow_embedding_mismatch {
+        match &mut resolved {
+            Resolved::Full(backends) => backends.allow_embedding_mismatch = true,
+            Resolved::StoreOnly { .. } => unreachable!("writer override requires full backends"),
+        }
+    }
 
     match (cmd, resolved) {
         (
@@ -629,6 +663,44 @@ mod tests {
     #[test]
     fn cli_parses_help_structure() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn h1_embedding_mismatch_override_is_explicit_and_writer_only() {
+        let parsed = Cli::try_parse_from([
+            "lambo",
+            "serve",
+            "--session",
+            "s",
+            "--allow-embedding-mismatch",
+        ])
+        .unwrap();
+        assert!(parsed.allow_embedding_mismatch);
+        assert!(parsed
+            .command
+            .as_ref()
+            .unwrap()
+            .allows_embedding_mismatch_override());
+
+        let reader = Cli::try_parse_from([
+            "lambo",
+            "recall",
+            "--session",
+            "s",
+            "--query",
+            "q",
+            "--allow-embedding-mismatch",
+        ])
+        .unwrap();
+        assert!(reader.allow_embedding_mismatch);
+        assert!(
+            !reader
+                .command
+                .as_ref()
+                .unwrap()
+                .allows_embedding_mismatch_override(),
+            "main must reject the dangerous override on readers"
+        );
     }
 
     #[test]

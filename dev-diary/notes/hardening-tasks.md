@@ -30,6 +30,19 @@ the redesign brief, not inferred.
 **Files:** `src/resolve.rs`, `src/store/sqlite.rs`, `src/store/cockroach.rs`
 **Severity:** highest in this document
 **Blocked by:** nothing
+**Status:** claimed:h1-implementation
+**Worktree:** `worktrees/hardening-h1` (detached from `main` at `f32af2d`)
+**Owns:** `src/resolve.rs`, `src/memory.rs`, `src/graph/graph.rs`, `src/cli/mod.rs`,
+`src/cli/serve_web.rs`, `src/cli/demo.rs`, `src/mcp/serve.rs`, `src/main.rs`,
+`src/store/sqlite.rs`, `src/store/cockroach.rs`, `web/app.js`, this H1 section
+
+Implementation note: writer attach refuses by default and has a deliberately
+named CLI/library override. The read-only `serve-web` process follows the task
+author's preference: it opens structural surfaces, exposes the mismatch in
+`/api/session`, renders a prominent page banner, and keeps recall fail-closed.
+Other embedder-bearing readers continue to refuse rather than return untrusted
+rankings. A session with no recorded contract remains compatible for legacy
+use.
 
 **The problem.** `resolve_backends` checks that the embedder's output dimension
 matches the store's vector width, and nothing else. So pointing Lambo at a
@@ -76,6 +89,43 @@ and on read surface it hard in `/api/session` so the page can say so.
 configured for a different model at the same width, and confirm it now refuses
 instead of resolving. Confirm an unset contract still opens. Confirm the
 override flag works.
+
+**Implementation handoff (awaiting adversarial review).** The implementation
+is complete in the claimed worktree but is intentionally not marked done or
+clean here. Writer commands and `MemoryBuilder` refuse a stored/live mismatch
+by default with both contracts named. `--allow-embedding-mismatch` is
+writer-only and limited to equal dimensions. With stored vectors present it
+also requires the same embedder kind, so it can attest a verified model-id
+rename but cannot silently bless a cross-kind migration; a real re-embedding
+migration must atomically clear/rewrite its old vectors first. The replacement
+contract is an ordered durable mutation. `serve-web` starts in structural-only
+mode on mismatch, reports `unrecorded|compatible|mismatch` plus stored and
+configured contracts in `/api/session`, renders a warning banner, and leaves
+recall fail-closed. Other embedder-bearing readers still refuse. A nullable
+legacy contract still opens and is stamped by the next writer.
+
+Verification run in `worktrees/hardening-h1`:
+
+- `cargo test`: **695 passed, 1 ignored** in the library, plus all default
+  binary, integration and doc tests passed.
+- `env -u RUST_LOG cargo test --no-default-features --features
+  store-sqlite,embed-fixture`: **509 passed** in the library plus all SQLite
+  binary, durability, integration and doc tests passed. (`RUST_LOG=warn` in
+  the parent environment suppresses the INFO synchronization line one existing
+  subprocess test waits for, so this matrix deliberately unsets it.)
+- `cargo test --features ship h1_` and the Cockroach contract parser test:
+  all targeted H1/store tests passed under the full ship feature set.
+- `cargo clippy --all-targets -- -D warnings` and `cargo clippy --all-targets
+  --features ship -- -D warnings`: passed.
+- `cargo check --all-targets --features ship`, `cargo fmt --all -- --check`,
+  and `git diff --check`: passed.
+
+Review focus: prove the override cannot create a mixed-vector window, challenge
+whether same-kind model-id renames are sufficiently explicit, and check the
+reader policy end to end. A configured model of `None` still means "server
+default" in the pre-existing contract format; Lambo cannot distinguish two
+different server defaults when neither has an identifier, so operators who
+need detection must configure a model id.
 
 ---
 

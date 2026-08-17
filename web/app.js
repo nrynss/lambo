@@ -102,6 +102,14 @@
 
     if (info.poll_interval_ms) { POLL_MS = info.poll_interval_ms; }
 
+    if (info.embedding_contract && info.embedding_contract.status === "mismatch") {
+      banner(
+        "Vector recall is disabled: this session was embedded by a different model.",
+        info.embedding_contract.message ||
+          "The stored and configured embedding contracts differ. Structural views remain available."
+      );
+    }
+
     if (info.store_is_process_local) {
       banner(
         "The in-RAM store is process-local.",

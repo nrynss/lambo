@@ -823,6 +823,48 @@ impl Graph {
         }
         Ok(())
     }
+
+    /// Replace a same-width contract after an operator explicitly declares
+    /// the stored vectors compatible with a renamed model identifier, or
+    /// after a migration has already removed every old vector.
+    ///
+    /// This is crate-private because ordinary graph callers must never relabel
+    /// an existing vector space. The only production caller is the
+    /// `--allow-embedding-mismatch` writer attach path, which checks equal
+    /// dimensions, permits vectors only for a same-kind identifier rename,
+    /// emits a warning, and records the replacement durably. A cross-kind
+    /// migration must clear/rewrite its vectors before this point.
+    pub(crate) fn replace_embedding_with_operator_override(
+        &mut self,
+        contract: crate::types::EmbeddingContract,
+    ) -> Result<(), LamboError> {
+        if let Some(existing) = &self.embedding {
+            if existing.dim != contract.dim {
+                return Err(invariant(format!(
+                    "cannot override embedding contract width {} with width {}; \
+                     --allow-embedding-mismatch is only for same-width migrations",
+                    existing.dim, contract.dim
+                )));
+            }
+            if self.concepts().any(|concept| concept.embedding.is_some())
+                && existing.kind != contract.kind
+            {
+                return Err(invariant(format!(
+                    "cannot relabel {} vectors as {} while stored concept vectors remain; \
+                     atomically clear/re-embed the vectors before changing embedder kind",
+                    existing.kind, contract.kind
+                )));
+            }
+        }
+        if self.embedding.as_ref() != Some(&contract) {
+            self.embedding = Some(contract.clone());
+            self.append_mutation(Mutation::SetEmbedding {
+                session_id: self.session_id.clone(),
+                embedding: Some(contract),
+            });
+        }
+        Ok(())
+    }
     /// Advisory soft lock (spec §11). Same-agent re-reservation extends; cross-agent
     /// denial is T2.7's policy — this stores what it is given.
     pub fn set_reservation(&mut self, r: Reservation) {
@@ -2633,6 +2675,66 @@ mod tests {
         assert!(g.replace_embedding_without_vectors(None).is_err());
         assert_eq!(g.snapshot(), before);
         assert!(g.drain_log().is_empty());
+    }
+
+    #[test]
+    fn h1_operator_override_is_limited_to_same_width_same_kind_vector_aliases() {
+        let (mut g, interaction, _) = small_graph();
+        let old = crate::types::EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("old-alias.gguf".into()),
+            dim: 1024,
+        };
+        g.stamp_embedding(old).unwrap();
+        let mut vector_concept = concept(100, interaction, "vector-bearing override");
+        vector_concept.embedding = Some(vec![0.0; 1024]);
+        g.insert_concept(vector_concept, interaction).unwrap();
+        g.drain_log();
+
+        let cross_kind = crate::types::EmbeddingContract {
+            kind: "bedrock".into(),
+            model: Some("titan-v2".into()),
+            dim: 1024,
+        };
+        let before = g.snapshot();
+        let err = g
+            .replace_embedding_with_operator_override(cross_kind)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("stored concept vectors remain"),
+            "{err}"
+        );
+        assert_eq!(g.snapshot(), before, "a refused override must be atomic");
+
+        let wrong_width = crate::types::EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("new-alias.gguf".into()),
+            dim: 512,
+        };
+        assert!(g
+            .replace_embedding_with_operator_override(wrong_width)
+            .is_err());
+        assert_eq!(
+            g.snapshot(),
+            before,
+            "a refused width change must be atomic"
+        );
+
+        let alias = crate::types::EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("new-alias.gguf".into()),
+            dim: 1024,
+        };
+        g.replace_embedding_with_operator_override(alias.clone())
+            .unwrap();
+        assert_eq!(g.embedding(), Some(&alias));
+        assert!(matches!(
+            g.drain_log().mutations.as_slice(),
+            [Mutation::SetEmbedding {
+                embedding: Some(contract),
+                ..
+            }] if contract == &alias
+        ));
     }
 
     #[test]

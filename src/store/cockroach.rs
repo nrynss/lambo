@@ -3061,14 +3061,23 @@ mod tests {
             sid,
         )
         .unwrap();
-        assert_eq!(
-            got,
-            Some(EmbeddingContract {
-                kind: "bge_m3".into(),
-                model: Some("BAAI/bge-m3".into()),
-                dim: 1024,
-            })
-        );
+        let stored = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("BAAI/bge-m3".into()),
+            dim: 1024,
+        };
+        assert_eq!(got, Some(stored.clone()));
+        let live = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("renamed-bge-m3.gguf".into()),
+            dim: 1024,
+        };
+        let err =
+            crate::resolve::assert_session_embedding_compatible(Some(&stored), &live).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("BAAI/bge-m3"), "{text}");
+        assert!(text.contains("renamed-bge-m3.gguf"), "{text}");
+        assert!(text.contains("--allow-embedding-mismatch"), "{text}");
         assert_eq!(
             session_embedding_from_parts(None, None, None, sid).unwrap(),
             None
