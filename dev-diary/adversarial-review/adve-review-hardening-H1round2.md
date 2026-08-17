@@ -199,3 +199,92 @@ expanded frozen-contract ownership/handoff, and apply Cockroach's established
 bounded SERIALIZABLE retry protocol to the new multi-statement read. Re-review
 should compile an old-signature external adapter unchanged and exercise a
 retryable candidate-read attempt in addition to re-running the H1 matrices.
+
+---
+
+## Round-2 remediation disposition
+
+- **Remediator:** `h1_remediation_r2` (fresh remediation agent)
+- **Code/task handoff commit:**
+  `7cd81943398cd4c7c8249e8605560c62074bb6a4`
+- **Original verdict preserved above:** **REQUEST_CHANGES**
+- **Disposition:** both round-2 findings remediated; ready for independent
+  round-3 adversarial review
+
+### H1-R2-1 (P2) - remediated
+
+The released three-argument
+`GraphStore::vector_candidates(session, embedding, limit)` method is restored
+as the required v0.2.0 surface. `vector_candidates_checked` is additive and
+carries the expected `EmbeddingContract`. Its default is deliberately
+fail-closed: if an old adapter advertises `VECTOR_SEARCH` without overriding
+the checked method, Lambo returns `Capability` rather than performing an
+unchecked ranking. A non-vector adapter delegates to its original method and
+therefore retains its adapter-specific capability refusal.
+
+Cockroach overrides the checked method with the atomic contract/candidate
+transaction. Memory and SQLite keep their original three-argument capability
+implementation and coherently reach it through the safe default. Every in-repo
+production vector lookup is now through `vector_candidates_checked`: phase-1
+recall in `src/recall/candidates.rs` and hybrid matching in
+`src/graph/hybrid.rs`. Their store spies make the old method panic, so existing
+behavioral suites also pin that routing. Forwarding test wrappers implement
+both surfaces to preserve their intended behavior.
+
+`resolve::tests::legacy_vector_adapter_compiles_unchanged_and_checked_default_fails_closed`
+uses a `GraphStore` implementation that supplies only the old vector method. It
+compiles, invokes the original call unchanged, then proves the inherited
+checked method refuses because the adapter advertises vector search. The H1
+claim now enumerates the complete trait ripple, including store core/adapters,
+recall, hybrid, daemon/CLI/MCP paths, canon and store test wrappers, and the
+cross-process lease regression. This records why the frozen contract was
+restored and why the new boundary is additive.
+
+### H1-R2-2 (P3) - remediated
+
+Cockroach's checked lookup wraps the whole serializable operation in the
+existing bounded `tx_retry` helper: transaction open, durable contract read,
+global ANN growth loop, boundary/crowd-out exact-session fallback, and commit.
+An attempt aborted as `StoreError::Backend` (including mapped SQLSTATE 40001)
+is replayed from the contract read. A durable/query contract mismatch maps to
+`StoreError::Invariant`, so it returns immediately and is never retried.
+
+`store::cockroach::tests::checked_vector_transaction_retries_backend_but_not_contract_mismatch`
+pins both closure behaviors without a live database: a simulated SQLSTATE
+40001 first attempt runs the whole closure twice and succeeds; a simulated
+checked-read contract mismatch runs once and returns `Invariant`. Existing SQL
+shape/parser tests and checked Cockroach conformance calls remain intact.
+
+### Remediation verification
+
+| Command/check | Result |
+|---|---|
+| `cargo test --all-features legacy_vector_adapter_compiles_unchanged_and_checked_default_fails_closed -- --nocapture` | pass: old-only adapter compiles/calls unchanged; checked default refuses |
+| `cargo test --all-features checked_vector_transaction_retries_backend_but_not_contract_mismatch -- --nocapture` | pass: retryable attempt replayed twice; mismatch attempted once |
+| `env -u RUST_LOG cargo test --all-features h1_ -- --nocapture` | pass: 6 library H1 tests, 1 binary parser test, 1 real subprocess lease test |
+| `env -u RUST_LOG cargo test --no-default-features --features store-sqlite,embed-fixture h1_` | pass: 4 library H1 tests, 1 binary parser test, 1 real subprocess lease test |
+| `cargo test --all-features store::cockroach::tests::` | pass: 24 non-live Cockroach unit tests |
+| `env -u RUST_LOG cargo test --all-features` | pass: library 827 passed / 8 live ignored; every binary, integration and doc harness passed; 2 live calibration tests ignored |
+| `cargo check --all-targets --no-default-features --features store-cockroach,embed-fixture` | pass |
+| `cargo check --all-targets --no-default-features --features store-sqlite,embed-fixture` | pass |
+| `cargo check --all-targets --all-features` | pass |
+| `cargo clippy --all-targets --all-features -- -D warnings` | pass |
+| `cargo fmt --all -- --check`; `git diff --check` | pass |
+| Production call-site trace with `rg` | recall/hybrid are the only production entry points; other checked calls are adapter/test forwarding, and old calls are compatibility forwarding or the explicit source-compat regression |
+
+### Residual risks for round 3
+
+- No live Cockroach run was possible: `LAMBO_COCKROACH_DSN` was unavailable.
+  The live conformance tests remain ignored and are not reported as passed.
+- The old unchecked method remains callable by external library consumers
+  because source compatibility is the finding's requirement. Lambo production
+  does not call it, and old vector-capable adapters fail closed on the new
+  checked surface until they implement atomic validation.
+- A configured model of `None` still denotes a server default. Two changed
+  server defaults with no model identifiers remain indistinguishable in the
+  pre-existing `EmbeddingContract`; operators needing detection must name the
+  model.
+- `tx_retry` retains its pre-existing bounded policy that classifies all
+  `StoreError::Backend` values as retryable, not only SQLSTATE 40001. H1 uses
+  that established helper unchanged; deterministic contract mismatch is typed
+  `Invariant` and therefore does not enter the retry ladder.
