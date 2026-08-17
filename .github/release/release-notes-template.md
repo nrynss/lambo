@@ -1,4 +1,4 @@
-# Lambo v{{VERSION}}
+# Lambo v__LAMBO_VERSION__
 
 > Maintainer: trim the checklists below to the actual release contents before
 > publishing. The version is substituted automatically by the release
@@ -36,14 +36,14 @@ or build from source with `--features ship`, for the complete adapter set.
 ## Binary checksums
 
 Each platform release has a binary and a `.sha256` file, for example
-`lambo-{{VERSION}}-linux-x86_64.sha256`. Use `sha256sum` to verify a download.
+`lambo-__LAMBO_VERSION__-linux-x86_64.sha256`. Use `sha256sum` to verify a download.
 
 | Platform | Asset |
 |---|---|
-| Linux x86_64 | `lambo-{{VERSION}}-linux-x86_64` |
-| Linux arm64 | `lambo-{{VERSION}}-linux-arm64` |
-| macOS arm64 | `lambo-{{VERSION}}-macos-arm64` |
-| Windows x86_64 | `lambo-{{VERSION}}-windows-x86_64.exe` |
+| Linux x86_64 | `lambo-__LAMBO_VERSION__-linux-x86_64` |
+| Linux arm64 | `lambo-__LAMBO_VERSION__-linux-arm64` |
+| macOS arm64 | `lambo-__LAMBO_VERSION__-macos-arm64` |
+| Windows x86_64 | `lambo-__LAMBO_VERSION__-windows-x86_64.exe` |
 
 ## Install
 
@@ -56,7 +56,7 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 Or pin a version and add the install directory:
 
 ```bash
-LAMBO_VERSION={{VERSION}} curl -fsSL https://github.com/nrynss/lambo/releases/download/v{{VERSION}}/install.sh | sh
+LAMBO_VERSION=__LAMBO_VERSION__ curl -fsSL https://github.com/nrynss/lambo/releases/download/v__LAMBO_VERSION__/install.sh | sh
 ```
 
 ## Known limits
