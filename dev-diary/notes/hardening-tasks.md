@@ -251,9 +251,10 @@ suite. H1 is CLEAN and ready for integration.
 `api_inspect` at lines 946-1015 on `46ca7be`)
 **Severity:** visible correctness bug
 **Blocked by:** nothing
-**Status:** **OPEN**, and still worth doing. The portal rebuild stopped the
-page rendering the contradiction, but that is a mitigation in one consumer, not
-the fix.
+**Status:** **DONE / CLEAN** (2026-08-17)
+**Claim history:** `claimed:h2-implementation` -> `claimed:h2-review-r1-clean` ->
+`claimed:h2-closeout`
+**Worktree:** `worktrees/hardening-h2` (branch `codex/hardening-h2`)
 **Owns:** `src/cli/serve_web.rs`, this H2 section, and H2
 adversarial-review/disposition records
 
@@ -382,8 +383,57 @@ Verification run in `worktrees/hardening-h2`:
 Review focus: confirm the current-status predicate is the right key (versus
 `last_demotion_time` or has-ever-been-Canonical), that the query-count
 regression proves store-surface absence rather than mere JSON omission, and
-that no consumer of the HTTP contract depended on a Canonical payload
-carrying gate bars. Status stays **OPEN** until the adversarial review lands.
+carrying gate bars. Status was left **OPEN** here until the adversarial review
+landed; see the completion record below.
+
+**Completion record (2026-08-17 - DONE / CLEAN).** The original problem,
+decision record, implementation handoff, and ownership record above are
+preserved. H2 completed the repository's implementation -> adversarial review
+-> remediation cycle in this worktree:
+
+1. Implementation: `2af8b86922cb2f62225cf3c6fd37b602389df72b`.
+2. Round-1 review, **CLEAN / APPROVE** (1 P3, report-documentation only):
+   `f793495a1c55c68a568b8d216b1eba84438a8d6c`.
+3. Round-1 P3 disposition, docs-only with no code change:
+   `cbf7f2461baa1cf9e28a3e6cc7edc46815762b25` ->
+   `e1f554b752f5a6f37e268ff0b97b63fe0ae7274e`.
+4. Docs-only closeout (this record): follows the disposition chain above.
+
+What landed: `api_inspect` computes `gate_progress` only when
+`concept.canonization_status != CanonizationStatus::Canonical`, keyed on the
+concept's current status. A Canonical hit ships `status`, `blast_radius`,
+`dependents` and `truncated` at HTTP 200 with no `gate_progress` key and runs
+neither gate-only store query. Candidate, Venerable and status-None hits keep
+the identical T11 gate shape and thresholds; a recently demoted status-None
+concept keeps `in_cooldown` and `cooldown_until`. Misses, error shapes and
+gate-read-failure degradation are unchanged. CLI and MCP inspect surfaces are
+untouched because they have their own implementations and do not consume this
+HTTP response.
+
+The round-1 reviewer independently verified all five acceptance criteria with
+evidence (counting-store wrapper wired into the served router proving zero
+gate-only queries; key-absence asserted on the parsed wire JSON; the
+non-Canonical fixture exercising Candidate/Venerable/status-None; cooldown
+regression at `src/cli/serve_web.rs:2623-2667`; miss and failure paths
+unchanged) and reproduced every gate:
+
+- `cargo test`: **699 passed, 1 ignored** in the library, plus all binary,
+  integration and doc tests passed.
+- `cargo test --no-default-features --features store-memory,embed-fixture`:
+  **686 passed** plus all binary, integration and doc tests passed.
+- `cargo test --all-features`: **829 passed, 8 ignored** (live Cockroach legs,
+  `LAMBO_COCKROACH_DSN` unset) plus every binary, integration and doc harness.
+- Both `cargo clippy --all-targets -- -D warnings` gates (default and
+  `--all-features`), `cargo fmt --all -- --check` and `git diff --check`:
+  passed.
+
+The single finding, H2-R1-1 (P3), concerned stale test line references in the
+implementer's ephemeral final report, not the committed tree; the correct
+references are recorded in the review record itself
+(`adve-review-hardening-H2round1.md`). It was dispositioned as accepted with
+documentation; no code change was required. No live Cockroach result is
+claimed because `LAMBO_COCKROACH_DSN` was unset. H2 is CLEAN and ready for
+integration.
 
 ---
 
