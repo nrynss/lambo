@@ -30,7 +30,8 @@ the redesign brief, not inferred.
 **Files:** `src/resolve.rs`, `src/store/sqlite.rs`, `src/store/cockroach.rs`
 **Severity:** highest in this document
 **Blocked by:** nothing
-**Status:** claimed:h1-remediation-r2
+**Status:** **DONE / CLEAN** (2026-08-17)
+**Claim history:** `claimed:h1-implementation` -> `claimed:h1-remediation-r2`
 **Worktree:** `worktrees/hardening-h1` (detached from `main` at `f32af2d`)
 **Owns:** `src/resolve.rs`, `src/memory.rs`, `src/graph/{graph,hybrid}.rs`,
 `src/recall/candidates.rs`, `src/cli/{mod,demo,recall,serve_web}.rs`,
@@ -154,6 +155,84 @@ Cockroach retry seam proves a first retryable attempt is replayed and a
 deterministic contract mismatch is attempted once. No live Cockroach result is
 claimed because `LAMBO_COCKROACH_DSN` was not available; non-live adapter tests
 and both minimal feature checks passed.
+
+**Completion record (2026-08-17 - DONE / CLEAN).** The original problem,
+decision record, implementation handoff, claim history, and ownership record
+above are preserved. H1 completed the repository's implementation -> adversarial
+review -> remediation cycle in this detached worktree:
+
+1. Implementation: `1a3accf9d1349dde7ce01cc41538fa755275436c`.
+2. Round-1 review, **REQUEST_CHANGES** (2 P1 / 1 P2 / 1 P3):
+   `ce0c441de4172f158a4cb3719631ae96a2703dcf`.
+3. Round-1 remediation and disposition:
+   `c72acf5fb1abd0f909d8bc2ef15f6d579df0d2fd` ->
+   `298af97a4049e6ff4e642ec7be54dcec0373bc39`.
+4. Round-2 review, **REQUEST_CHANGES** (1 P2 / 1 P3):
+   `14c2d52f7ac3cb734778ec13576b5ad658b0e002`.
+5. Round-2 remediation and disposition:
+   `7cd81943398cd4c7c8249e8605560c62074bb6a4` ->
+   `de3b4b7aa862597a929dcfccf4e1f19c13d06790`.
+6. Round-3 review, **CLEAN / APPROVE** (zero findings):
+   `c57395eda2ce1864e4cc1542e729691ffcf27abe`.
+
+What landed: exact kind/model/dimension checks now protect writer attach and
+reader vector lookup. Writers refuse mismatches by default and release their
+lease on clean startup failure. The writer-only override is an explicit
+same-width attestation, not a re-embedding operation. Readers carry the query's
+contract into an atomic checked candidate read; in-repo production never uses
+the legacy unchecked lookup. `serve-web` keeps structural access available,
+reloads compatibility for `/api/session` and `/api/pulse`, updates its warning
+in both directions, and keeps recall fail-closed. Sessions with no recorded
+contract remain loadable; their unattested vectors are quarantined before the
+next writer stamps a contract. The released three-argument `GraphStore` method
+remains source-compatible, while its additive checked surface fails closed for
+a legacy vector-capable adapter until that adapter implements atomic checking.
+Cockroach runs the contract read, both candidate paths, and commit in one
+bounded-retry serializable transaction.
+
+The clean round-3 reviewer independently verified:
+
+- `cargo test --all-features
+  legacy_vector_adapter_compiles_unchanged_and_checked_default_fails_closed
+  -- --nocapture`: passed; the old adapter/caller compiles unchanged and the
+  checked default returns `Capability`.
+- `cargo test --all-features
+  checked_vector_transaction_retries_backend_but_not_contract_mismatch
+  -- --nocapture`: passed; the retryable attempt ran twice and the mismatch
+  once.
+- `env -u RUST_LOG cargo test --all-features h1_ -- --nocapture`: passed - 6
+  library tests, 1 parser test, and 1 real subprocess lease test.
+- `env -u RUST_LOG cargo test --no-default-features --features
+  store-sqlite,embed-fixture h1_ -- --nocapture`: passed - 4 library tests, 1
+  parser test, and 1 real subprocess lease test.
+- `env -u RUST_LOG cargo test --all-features store::cockroach::tests::`:
+  passed - 24 non-live Cockroach unit tests.
+- `env -u RUST_LOG cargo test --all-features`: passed - 827 library tests, 8
+  live tests ignored; every binary, integration, and doc harness passed, with 2
+  calibration tests ignored.
+- `cargo check --all-targets --no-default-features --features
+  store-cockroach,embed-fixture`, the corresponding
+  `store-sqlite,embed-fixture` check, and
+  `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo fmt --all -- --check` and `git diff --check f32af2d..HEAD`: passed.
+
+Accepted residual behavior is explicit. Same-kind, same-width relabeling while
+vectors exist is permitted only through the dangerous writer override and is
+an operator attestation that the change is a model-id alias; using it for an
+actual model migration would bless old vectors and is unsupported. Dimension
+changes and cross-kind relabeling with vectors are refused atomically; a real
+migration must clear/rewrite vectors before committing the replacement
+contract. The frozen unchecked adapter method remains callable by external
+library consumers, but Lambo production uses only the checked method. A
+configured `model: None` still cannot distinguish two changed server defaults;
+operators who require that detection must record a model id.
+
+The only unclosed verification limitation is environmental, not a source
+finding: `LAMBO_COCKROACH_DSN` was unset throughout review. The eight live
+Cockroach legs therefore remained explicitly ignored, and no live SQLSTATE
+40001 conflict was reproduced. The transaction/retry boundary and both
+candidate branches were source-inspected and covered by the passing non-live
+suite. H1 is CLEAN and ready for integration.
 
 ---
 
