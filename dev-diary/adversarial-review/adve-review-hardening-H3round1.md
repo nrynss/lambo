@@ -195,4 +195,65 @@ duplicate warning texts.
 
 ## Remediation disposition
 
-*(left empty — filled by the remediation agent's disposition record)*
+- **Remediation agent:** `H3RemediationR1`
+- **Remediation commit:** `f84fb6759ebabcfa453735e790c70b858042193c`
+- **Disposition:** both round-1 findings remediated; awaiting independent
+  re-review. The original `REQUEST_CHANGES` verdict above is unchanged.
+
+### H3-R1-1 (P2) - remediated
+
+`scripts/recording/capture-portal.mjs` no longer captures a region that sits
+below the 900px fold, and no longer accepts a stale render as proof of
+output:
+
+- **Real-render waits.** Each query now waits for its query-SPECIFIC content
+  to be laid out and visible before capture — the Canonical pillar card with
+  its score track and blast-radius note (blended), the traversal banner in
+  `#response-annotations` (structural), the `#excluded-warnings` area
+  populated with the typed load-bearing warning and collapsed `.is-excluded`
+  cards (tiny-budget), and the XSS marker rendered inside a real card (xss).
+  The old `#lookup-cards` textContent check could pass on leftover DOM text
+  from the previous query while the request was still in flight — the
+  mechanism that produced the byte-identical blended/tiny-budget captures.
+- **Scroll before capture.** Each cards screenshot pins the results region
+  (`#lookup-results`) to the viewport top with
+  `scrollIntoView({block: 'start'})` before the shot (mirroring the existing
+  `#audit` scroll), so the cards view — not the legend/structure tree — is on
+  camera; the tiny-budget capture additionally brings `#excluded-warnings`
+  into the viewport.
+- **Re-captured evidence.** The runbook was re-run exactly as documented
+  against a fresh local SQLite writer session (`/tmp/h3-evidence`,
+  `demo --scenario rest-api --session h3-evidence`, the two `derive` seeds)
+  and a local `serve-web` (port 7799), using the installed
+  `chromium-1234` build. All four cards PNGs now show the H3 results region,
+  and the four `cards-*.png` md5s are all distinct (previously
+  `cards-blended` == `cards-tiny-budget`, both `b5708803…`).
+  OCR + pixel verification of each new PNG: blended shows the pillar card
+  with its `Canonical` status badge (white-on-amber chip), teal score bar,
+  `Score 2.09 · 9 depend on it`, the `load_bearing` annotation
+  ("⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.")
+  and the plain cards below; structural shows the traversal banner
+  ("recall: dependency question answered by graph traversal (1 dependents)")
+  prominently above the `RDS-Lambo-Demo-DB` card; tiny-budget shows the
+  collapsed "Outside the context budget" bars and the persistent
+  "Warnings from results outside the context budget" area listing the
+  excluded `user schema` hit's load-bearing warning with its owning-hit
+  label; xss shows "malicious markup <img src=x onerror=window.__h3xss=1>"
+  rendered as text; `verbatim-context.png` shows the exact `lambo recall`
+  block with the `[Entity, canonical]` marker and the ⚑ line;
+  `audit-feed.png` shows the canonization feed. The runbook statements in
+  `evidence/h3-recall-cards/README.md` now match what the artifacts show; no
+  wording changes were needed.
+
+### H3-R1-2 (P3) - remediated
+
+`src/cli/serve_web.rs:2334-2371` (`recall_endpoint_payload_carries_typed_hits_and_warning_parity`)
+no longer asserts each annotation text occurs exactly once in `context`.
+It now asserts per-text occurrence parity: for each distinct annotation
+text, the number of `context` lines equal to that text (or to its `⚑ `-
+prefixed header form, which `render_cli_text`'s `push_header` produces for
+non-⚑ texts rendered outside an included block) must equal the number of
+annotations carrying that text. Two hits sharing an identical warning line
+(e.g. two canonical hits with the same blast radius) are spec-valid and
+count 2 on both sides; the losslessness property is per warning line, not
+per distinct text.
