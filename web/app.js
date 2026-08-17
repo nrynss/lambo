@@ -34,10 +34,10 @@
   };
 
   var LADDER = [
-    { key: "Canonical", desc: "Enough other work depends on this that changing it is dangerous. Lambo warns any agent that touches it." },
-    { key: "Venerable", desc: "Survived repeated cleanup passes while other memories were dropped." },
-    { key: "Candidate", desc: "Recorded, and holding up so far. Most memories stay here." },
-    { key: "none", desc: "Most memories stay here, and that is normal." }
+    { key: "Canonical", desc: "Enough depends on these that changing one is risky. Agents get warned." },
+    { key: "Venerable", desc: "Kept through cleanups that dropped others." },
+    { key: "Candidate", desc: "Recorded and still here." },
+    { key: "none", desc: "Never promoted. Where most memories stay." }
   ];
 
   // Phrased from the dependent's side, because that is whose name the label is
@@ -52,12 +52,14 @@
     coverage: "Spread across the session"
   };
 
+  // A node is either a Concept or an Interaction, so `nodes` is both together.
+  // "Things remembered" hid that; these name what each number counts.
   var COUNT_LABEL = [
-    ["nodes", "Things remembered"],
-    ["concepts", "Distinct memories"],
-    ["edges", "Connections"],
-    ["canonical", "Canonical"],
-    ["canonization_events", "Status changes"]
+    ["concepts", "Concepts", "Distinct pieces of remembered meaning, after duplicates were merged."],
+    ["nodes", "Records", "Every concept, plus every interaction that produced one."],
+    ["edges", "Connections", "Recorded links between records."],
+    ["canonical", "Canonical", "Concepts that reached the top of the ladder."],
+    ["canonization_events", "Status changes", "Times a concept moved up or down the ladder."]
   ];
 
   // Live in the writer process. A reader cannot observe them, so they are shown
@@ -70,7 +72,14 @@
 
   // ---- tiny DOM helpers ------------------------------------------------
 
-  function $(id) { return document.getElementById(id); }
+  // Loud on a missing id. A null returned here and then assigned to silently
+  // aborted renderHero mid-function once, which left the caption, the
+  // dependents list and the ladder unrendered with nothing in the console.
+  function $(id) {
+    var n = document.getElementById(id);
+    if (!n && window.console) console.error("lambo: no element #" + id);
+    return n;
+  }
   function show(el, on) { if (el) el.classList.toggle("hidden", !on); }
   function clear(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
 
@@ -180,6 +189,7 @@
     clear(wrap);
     COUNT_LABEL.forEach(function (c) {
       var card = el("div", "count-card");
+      card.title = c[2];
       card.appendChild(el("div", "count-num", stats[c[0]] === undefined ? "0" : stats[c[0]]));
       card.appendChild(el("div", "count-label", c[1]));
       wrap.appendChild(card);
@@ -267,7 +277,7 @@
       // legitimately absent, so nothing is rendered rather than a zero.
       if (e.blast_radius !== null && e.blast_radius !== undefined) {
         row.appendChild(el("span", "audit-blast",
-          e.blast_radius + " " + plural(e.blast_radius, "thing", "things") + " depended on it"));
+          e.blast_radius + " " + plural(e.blast_radius, "concept", "concepts") + " depended on it"));
       }
       wrap.appendChild(row);
     });
@@ -305,7 +315,7 @@
 
     if (!pillar) {
       $("hero-empty-msg").textContent = state.graph
-        ? "Nothing here has enough depending on it yet. Memories are being recorded; status has to be earned."
+        ? "No concept here has enough depending on it yet. They are being recorded; status has to be earned."
         : "Waiting for the session's structure.";
       return;
     }
@@ -327,9 +337,11 @@
     }
 
     $("hero-blast").textContent = pillar.blast_radius;
+    $("hero-big").title = "Blast radius: records whose only structural source is this one. " +
+      "The connected list below is wider: it includes both directions.";
     $("hero-blast-caption").textContent = pillar.blast_radius === 1
-      ? "other thing depends on this"
-      : "other things depend on this";
+      ? "other concept depends on this"
+      : "other concepts depend on this";
     $("hero-sentence").textContent =
       pillar.status === "Canonical"
         ? "Lambo marks this Canonical, so any agent that moves to change it is warned first."
@@ -355,11 +367,11 @@
     if (deps.length > 6) {
       wrap.appendChild(el("div", "chip", "+" + (deps.length - 6) + " more"));
     }
-    $("hero-deps-label").textContent = "What depends on it (" + (total || deps.length) + ")";
+    $("hero-deps-label").textContent = "Directly connected (" + (total || deps.length) + ")";
 
     var btn = $("hero-inspect");
     show(btn, deps.length > 0);
-    btn.textContent = "Inspect all " + (total || deps.length) + " " + plural(total || deps.length, "dependent", "dependents") + " →";
+    btn.textContent = "See all " + (total || deps.length) + " →";
     btn.onclick = function () { setFocus(pillar.content); };
   }
 
@@ -491,11 +503,11 @@
 
     $("details-blast").textContent = d.blast_radius;
     $("details-blast-caption").textContent = d.blast_radius === 1
-      ? "thing depends on this right now"
-      : "things depend on this right now";
+      ? "concept depends on this right now"
+      : "concepts depend on this right now";
 
     var deps = d.dependents || [];
-    $("details-deps-label").textContent = "What depends on it (" + deps.length + ")";
+    $("details-deps-label").textContent = "Directly connected (" + deps.length + ")";
     var wrap = $("details-deps");
     clear(wrap);
     deps.forEach(function (x) {
