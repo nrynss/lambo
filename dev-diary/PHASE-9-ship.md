@@ -18,13 +18,23 @@ Nothing here is optional except where marked; the checklist *is* the phase.
 requires:   T8.1; soft T8.8   # links into the reference docs T8.8 produces
 fixture-ok: n/a
 owns:       README.md, docs/  EXCEPT docs/reference/ (owned by T8.8)
-status:     MERGED to main 2026-08-15 as 7b0a9f8 (branch task/t9.1-docs, 5 commits).
+status:     DONE. Merged to main 2026-08-15 as 7b0a9f8 (branch task/t9.1-docs, 5 commits)
+            and long since pushed; main == origin/main.
             README + site rewritten binary-first; `lambo demo` promoted to a documented
             front door; license corrected to Apache-2.0; the false AWS/Bedrock claim
-            removed. NOT PUSHED — see the release blocker in the Handoff Log before
-            pushing, because the docs deploy fires on push to main.
-            Outstanding "Done when": clean-machine/container repro, and the GitHub About
-            license confirmation (Apache-2.0, NOT MIT — spec and this doc were stale).
+            removed.
+            THE "DO NOT PUSH" BLOCKER IS DISCHARGED (2026-08-17): v0.1.0, v0.2.0 and
+            v0.2.1 are published on GitHub Releases, so the install path the docs
+            describe resolves. The Handoff Log section that records the blocker is
+            history, not current state.
+            GitHub About license CONFIRMED 2026-08-17: `gh repo view` reports
+            isPrivate=false and licenseInfo=apache-2.0. Spec §12.4's "MIT" is stale.
+            The AWS half of the README is no longer "None yet": D3 replaced it with a
+            six-service table (deployment-and-submission.md).
+            No residuals. The clean-machine / container reproduction in "Done when" was
+            retired 2026-08-17 (owner's call): the install path is exercised by the
+            published releases, so re-verifying it in a container tracks nothing. Do not
+            re-open it from the "Done when" wording below.
             Crossed into T8.8's docs/reference/ and into site/ — see Handoff Log.
 ```
 Setup and run instructions (clone → provision → serve → demo, verified on a clean machine
@@ -59,7 +69,18 @@ config), and the About section shows the license.  **The repo is Apache-2.0, not
 requires:   nothing hard (spec §2 is stable) — final polish after T8.1
 fixture-ok: n/a
 owns:       docs/architecture.*
-status:     not-started
+status:     DONE (2026-08-17 reconciliation), but NOT at the path this task reserved.
+            The diagram shipped inside T9.1's README rewrite instead: a mermaid
+            flowchart in README.md §Architecture (agent surfaces → single-writer
+            process → write-behind → memory/sqlite/cockroach, with serve-web's
+            read-only path drawn separately), mirrored on the site's End-to-end page.
+            `docs/architecture.*` does not exist and is not needed.
+            The submission page already claims this condition Met
+            (site/src/content/docs/hackathon.mdx).
+            Known residual, deliberately not chased: the diagram does not draw the
+            Level B feature → registry → `dyn Trait` fan-out. That is carried in prose
+            in README §Pluggable backends. If the video wants it visual, that is the
+            one edit worth making.
 ```
 Spec §12.4: "optional, cheap, do it." One diagram: RAM tier (graph, daemon, recall) over
 the write-behind boundary, `GraphStore` / `Embedder` adapters fanning out (Level B:
@@ -76,7 +97,20 @@ aspirations), including feature-gated adapters.
 requires:   T8.4 (rehearsed), T8.5
 fixture-ok: n/a
 owns:       evidence/video/, demo/script.md
-status:     not-started
+status:     NOT STARTED. The only unmet §12.4 deliverable besides the submission
+            itself, and the critical path runs through it.
+            Blocked by D1 (clean redeploy) and tracked as D2 in
+            notes/deployment-and-submission.md; read that section, not this one, for
+            the tooling. Capture is Playwright (scripts/recording/capture-portal.mjs)
+            plus vhs for the terminal. Screen capture on this machine fails silently
+            and must not be attempted again.
+            Recommended before recording: a real-live run of `03_crossover_protect.py`.
+            T8 executed both cases live, but the committed capture
+            (evidence/remed-t8-crossover-run.md) is a synthetic recapture with stubbed
+            read verbs, which is thin footing for the video's climax.
+            Material that already exists: evidence/cloudops-run/ (the ten agent
+            transcripts, including the blocked deletion) and evidence/cloudops-video/
+            (portal webm + stills from 2026-08-16).
 ```
 Under 3 minutes, memory layer visibly at work (spec §12.4). Script beats (spec §13): the
 derive montage → `canonization_events` filling → Agent B's recall with the ⚑ warning →
@@ -94,7 +128,13 @@ record the terminal, not slides.
 requires:   T3.2, T6.4
 fixture-ok: no
 owns:       lambda/
-status:     not-started
+status:     not-started, and still cut-order #1, so it stays that way while T9.3 and
+            T9.5 are open.
+            **Do not read the exhibit's Lambda as this task.** A `python3.12` arm64
+            Function URL serving read-only stats over the live session was built under
+            remediation T10 and is listed in the README's AWS table. It is a stats
+            endpoint. It runs no canonization predicate and writes no
+            `canonization_events` row, so T9.4's "Done when" is untouched by it.
 ```
 Spec §12.2 optional: scheduled sweep against the store for sessions with no active writer.
 **#1 in the cut order — do not start while anything above is open.** If built: a small
@@ -110,7 +150,11 @@ logged in `canonization_events`.
 requires:   T8.2 (R4 CLEAN), P8 exit "surface holds under concurrency"; soft: T8.5
 fixture-ok: yes (fixture embedder; store = memory or live)
 owns:       evidence/swarm/, bench/
-status:     not-started
+status:     not-started. Cut-order #2, behind T9.4.
+            Worth knowing when it is scheduled or cut: P8's one open exit criterion is
+            the concurrency leg (T8.2 N1/N2), which has no evidence capture. That is
+            the correctness half and T9.6 is the scale half, so cutting T9.6 leaves the
+            correctness box open too, so cut it with that stated, not silently.
 parallel:   yes — separate hardware, off the submission critical path
 ```
 The headline "lambo beyond coding agents" evidence: a swarm of small local agents
@@ -138,7 +182,14 @@ and tasks/hour figure captured, OR it is deliberately cut with the diagnosis log
 requires:   T9.1, T9.3
 fixture-ok: n/a
 owns:       dev-diary/notes/devpost.md
-status:     not-started
+status:     not-started. `dev-diary/notes/devpost.md` does not exist.
+            The *content* is largely written and verified live: D3 (2026-08-17) put the
+            condition-by-condition table on site/src/content/docs/hackathon.mdx and the
+            CockroachDB-tools and six-service AWS identification in README.md. T9.5 is
+            now the act of drafting that into the form's own fields and submitting it,
+            not fresh writing.
+            `requires: T9.1, T9.3` still binds: T9.1 is done, T9.3 is not, so the video
+            link is the one field that cannot be filled today.
 ```
 The form itself, drafted in-repo first: repo URL (public, Apache-2.0 About-visible — NOT MIT, see Handoff Log), demo app URL
 (T8.5, live), video link, written CockroachDB-tools + AWS-services identification (lift
@@ -152,19 +203,86 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 
 ## Exit criteria — the spec §12.4 checklist, verbatim
 
-- [ ] Public repo, license detectable in About  ·  **Apache-2.0, not MIT (Handoff Log)**
-- [ ] README with setup/run instructions + single-writer constraint stated
-- [ ] Functional demo app URL
-- [ ] Video under 3 minutes showing the memory layer at work
-- [ ] Written identification of CockroachDB tools and AWS services used  ·  **AWS count is currently ZERO — §12.2 requires one (Handoff Log)**
-- [ ] Architecture diagram
-- [ ] **Submitted before Tue Aug 18, 5:00 pm ET**
+Checked against the repo and the running exhibit on **2026-08-17**, not against
+the plan. Each box names what was verified, so the next reader can re-check it
+rather than trust it.
+
+- [x] Public repo, license detectable in About  ·  `gh repo view` → `isPrivate: false`,
+      `licenseInfo: apache-2.0`. **Apache-2.0, not MIT. Spec §12.4 is stale here**
+- [x] README with setup/run instructions + single-writer constraint stated  ·  T9.1;
+      install → `lambo demo` → `lambo.toml`, and the constraint is stated in
+      README §Deployment model and on the site's End-to-end page
+- [x] Functional demo app URL  ·  `https://lambo.nryn.dev` → 200, `/healthz` → `ok`,
+      `/api/stats` → session `cloudops-exhibit`, 113 nodes / 485 edges / 41 concepts /
+      1 canonical / 7 canonization events, `mode: reader`. Re-verified 2026-08-17.
+      A Lambda Function URL serves the same session
+- [ ] Video under 3 minutes showing the memory layer at work  ·  **the open one.**
+      T9.3 / D2, blocked on D1
+- [x] Written identification of CockroachDB tools and AWS services used  ·  README
+      §CockroachDB tools used, and §AWS services used, which is **six** services
+      (EC2, VPC, Secrets Manager, Lambda, RDS for PostgreSQL, IAM), each exercised by
+      the running exhibit. The earlier "AWS count is ZERO" note below is history:
+      it was true on 2026-08-15 and was closed by the CloudOps build on 2026-08-16
+- [x] Architecture diagram  ·  T9.2, mermaid in README §Architecture plus the site
+      topology. Not at `docs/architecture.*`; that path was never created
+- [ ] **Submitted before Tue Aug 18, 5:00 pm ET**  ·  T9.5, not started; gated on the
+      video link
 
 ---
 
 ## Handoff Log
 
 > _Fill on completion. Last entry in this diary: what would v0.7.0's first day want to know?_
+
+### Reconciliation of this doc against the tree (2026-08-17, at `1dd5b48`)
+
+This phase doc had gone stale in a specific and dangerous way: the parts that
+were *wrong* were the parts a reader treats as current state, while the parts
+that were *right* were the dated history below. Statuses, the exit checklist and
+the T9.1 block are now corrected. **Nothing dated below this entry was
+rewritten.** Those entries record what was true when they were written, which
+is the whole point of keeping them.
+
+Two sections below are superseded and must not be acted on:
+
+- **"BLOCKER — the documented install path does not exist yet"** is closed.
+  `gh release list` shows `v0.1.0` (2026-08-16), `v0.2.0` and `v0.2.1`
+  (2026-08-17); `Cargo.toml` is at `0.2.1`; `main` is pushed and equals
+  `origin/main`. The install line the docs print resolves.
+- **"Zero AWS services are used"** is closed, though not the way that section
+  predicted. It recommended hosting `serve-web` on AWS to satisfy §12.2, and
+  that is roughly what happened, but larger: two autonomous agents provisioned
+  real `us-east-1` infrastructure on 2026-08-16, one moved to delete the
+  security group behind the other's RDS instance, and Lambo blocked it. Six
+  services are now identified in the README. **Bedrock is still not implemented**:
+  `src/embed/` has no adapter and T7.1 remains blocked on the authorization
+  request, so the honest boundary both the README and the hackathon page state
+  is that AWS runs *around* Lambo, not inside it. Do not soften that.
+
+What changed in the status lines: T9.1 **DONE**, no residuals (pushed; About
+license confirmed Apache-2.0 by `gh repo view`; the clean-machine repro was
+retired as noise, owner's call). T9.2 **DONE**, but delivered as a mermaid
+diagram in `README.md`
+rather than at the reserved `docs/architecture.*` path, which does not exist.
+T9.3 and T9.5 remain **not started** and are the only two open §12.4 boxes.
+T9.4 and T9.6 remain cut-order #1 and #2.
+
+Three things a cold reader would otherwise get wrong:
+
+1. **The exhibit's Lambda is not T9.4.** It is remediation T10's read-only stats
+   Function URL. The canonization sweep does not exist.
+2. **T9.5's writing is mostly done, filed elsewhere.** D3 put the
+   condition-by-condition table on the site's hackathon page and the tool/service
+   identification in the README. `dev-diary/notes/devpost.md`, which T9.5 owns,
+   has still never been created.
+3. **`site/` still has no owner in any phase doc.** T9.1's entry below asked P9
+   to assign it and P9 never did. It has since been edited by D3 as well. Anyone
+   claiming a task that touches it is crossing into unowned ground and should say
+   so in their handoff rather than assume.
+
+The work that closed between P8 and here is not in this doc at all, by design:
+remediation T1–T12 plus the E2E review, hardening H1–H7, and deployment D1–D3
+live in `notes/`. The dev-diary README's status board now points at all three.
 
 ### Evidence promoted to top level, three-client MCP agreement (2026-08-15, `67d5064` on `main`)
 
