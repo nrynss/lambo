@@ -349,6 +349,42 @@ plus all gate measurements. The existing read can race a writer between graph
 load and gate queries; solving that broader consistency problem is not required
 to stop pairing a Canonical status with an inapplicable promotion explanation.
 
+**Implementation handoff (awaiting adversarial review).** The implementation
+is complete in the claimed worktree but is intentionally not marked done or
+clean here. `api_inspect` now computes `gate_progress` only when
+`concept.canonization_status != CanonizationStatus::Canonical`, so a Canonical
+hit ships `status`, `blast_radius`, `dependents` and `truncated` with no
+`gate_progress` key on the wire, and never runs either gate-only store query
+(`blast_radius` + `interaction_span`). The predicate keys on the concept's
+*current* status, not `last_demotion_time` and not has-ever-been-Canonical:
+budget demotion resets status to `None`, and a cooling concept's progress is
+genuinely useful, so Candidate, Venerable and status-None hits keep the full
+T11 gate block with the same bars, thresholds, `in_cooldown` and
+`cooldown_until`. CLI and MCP inspect surfaces are untouched (they have their
+own implementations and do not consume this HTTP response); miss behaviour,
+error shapes and gate-read-failure degradation are unchanged; and the change
+does not take a transactional snapshot (the cut line is respected).
+
+Verification run in `worktrees/hardening-h2`:
+
+- `cargo test`: **699 passed, 1 ignored** in the library, plus all binary,
+  integration and doc tests passed.
+- `cargo test --no-default-features --features store-memory,embed-fixture`:
+  **686 passed** in the library plus all binary, integration and doc tests
+  passed.
+- `cargo test --all-features`: **829 passed, 8 ignored** (the eight live
+  Cockroach legs, `LAMBO_COCKROACH_DSN` unset) in the library, plus every
+  binary, integration and doc harness passed.
+- `cargo clippy --all-targets -- -D warnings` and `cargo clippy --all-targets
+  --all-features -- -D warnings`: passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Review focus: confirm the current-status predicate is the right key (versus
+`last_demotion_time` or has-ever-been-Canonical), that the query-count
+regression proves store-surface absence rather than mere JSON omission, and
+that no consumer of the HTTP contract depended on a Canonical payload
+carrying gate bars. Status stays **OPEN** until the adversarial review lands.
+
 ---
 
 ## Tier 2: needed by decisions already taken

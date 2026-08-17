@@ -525,6 +525,9 @@ struct InspectResponse {
     /// already says so via `found: false`).
     truncated: bool,
     /// T11: which gates this concept meets, additive beside status/radius.
+    /// H2: omitted for Canonical concepts — a promoted fact has no promotion
+    /// gates left to explain, and the block's aged-basis figures contradicted
+    /// the live status/blast_radius.
     #[serde(skip_serializing_if = "Option::is_none")]
     gate_progress: Option<GateProgress>,
 }
@@ -976,29 +979,45 @@ async fn api_inspect(
     };
     let resp = match found {
         Some((concept, blast, dependents, truncated)) => {
-            // T11: surface the concept's gate progress by re-running the
+            // T11 surfaces the concept's gate progress by re-running the
             // evaluation's own queries (`blast_radius` + `interaction_span`,
             // both with the eval's min_edge_age, plus the re-promotion
             // cooldown) against the store, with the concept's persisted
             // gc_survived. This is surfacing — the same numbers the eval
-            // reaches — not a shadow calculation. A read failure degrades
-            // this additive payload to null rather than failing the endpoint
-            // the page loads on.
-            let gate_progress = match gate_progress(
-                state.store(),
-                &state.session,
-                &concept,
-                state.backends.config.canonization_edge_min_age,
-                state.backends.config.canonization_repromotion_cooldown,
-                chrono::Utc::now(),
-            )
-            .await
-            {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    tracing::warn!(error = %e, "gate_progress for /api/inspect failed; omitted");
-                    None
+            // reaches — not a shadow calculation.
+            //
+            // H2: those gates deliberately read against connections older
+            // than `canonization_edge_min_age`, so on a young session a
+            // Canonical concept can read zero bars beside a live radius of
+            // nine. Pairing a Canonical status with gate figures saying it
+            // does not qualify was a self-contradicting payload; the fix is
+            // to stop shipping the pairing. A Canonical concept has no
+            // promotion left to explain, so skip the gate block entirely —
+            // and with it the two store queries that exist only to build it.
+            // Keyed on the concept's CURRENT status, not `last_demotion_time`
+            // and not has-ever-been-Canonical: budget demotion resets status
+            // to `None`, and a cooling concept's progress is genuinely
+            // useful. A read failure still degrades this additive payload to
+            // null rather than failing the endpoint the page loads on.
+            let gate_progress = if concept.canonization_status != CanonizationStatus::Canonical {
+                match gate_progress(
+                    state.store(),
+                    &state.session,
+                    &concept,
+                    state.backends.config.canonization_edge_min_age,
+                    state.backends.config.canonization_repromotion_cooldown,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "gate_progress for /api/inspect failed; omitted");
+                        None
+                    }
                 }
+            } else {
+                None
             };
             InspectResponse {
                 focus: params.focus,
@@ -1353,6 +1372,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Every path `router` answers. The read-only method sweep iterates this,
@@ -1483,10 +1503,140 @@ mod tests {
             self.0.read_flush_stats(session).await
         }
     }
+    /// A `GraphStore` that counts the two gate-only reads while delegating
+    /// everything else. H2's query-count regression wraps a seeded store in
+    /// this to prove a Canonical hit never reaches `blast_radius` /
+    /// `interaction_span` — JSON omission alone would be vacuous.
+    struct Counting {
+        inner: Shared,
+        blast_radius_calls: Arc<AtomicUsize>,
+        interaction_span_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl GraphStore for Counting {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        fn vector_dimensions(&self) -> Option<usize> {
+            self.inner.vector_dimensions()
+        }
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.inner.flush(batch, token).await
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            expected_contract: &EmbeddingContract,
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.blast_radius_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            self.interaction_span_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
+        }
+        async fn acquire_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+            self.inner.acquire_lease(session, holder, ttl).await
+        }
+        async fn refresh_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+            self.inner.refresh_lease(session, holder, ttl).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+        ) -> Result<(), StoreError> {
+            self.inner.release_lease(session, holder).await
+        }
+        async fn write_flush_stats(
+            &self,
+            session: &SessionId,
+            stats: &crate::store::SessionFlushStats,
+        ) -> Result<(), StoreError> {
+            self.inner.write_flush_stats(session, stats).await
+        }
+        async fn read_flush_stats(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
+            self.inner.read_flush_stats(session).await
+        }
+    }
 
     fn backends_on(store: Arc<MemoryStore>) -> ResolvedBackends {
+        backends_with_store(Box::new(Shared(store)))
+    }
+
+    /// [`backends_on`] for a pre-wrapped store, so the query-count regression
+    /// can serve a counting wrapper without duplicating the embedder config.
+    fn backends_with_store(store: Box<dyn GraphStore>) -> ResolvedBackends {
         ResolvedBackends {
-            store: Box::new(Shared(store)),
+            store,
             embedder: Box::new(FixtureEmbedder::new()),
             store_cfg: StoreConfig {
                 kind: StoreKind::Memory,
@@ -1518,9 +1668,17 @@ mod tests {
         session: &str,
         auth: Option<AuthToken>,
     ) -> Arc<AppState> {
+        state_from_backends(backends_on(store), session, auth)
+    }
+
+    fn state_from_backends(
+        backends: ResolvedBackends,
+        session: &str,
+        auth: Option<AuthToken>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             session: SessionId::new(session),
-            backends: backends_on(store),
+            backends,
             exposed: auth.is_some(),
             auth,
             freshness: Mutex::new(Freshness {
@@ -2137,9 +2295,10 @@ mod tests {
 
     // ---- /api/inspect ---------------------------------------------------
 
-    /// Focus on a real concept: the page gets its status, its blast radius,
-    /// its structural dependents (never a `CoOccurrence` edge), and — the T11
-    /// add-on — its canonization gate progress.
+    /// Focus on a real concept: the page gets its status, its blast radius
+    /// and its structural dependents (never a `CoOccurrence` edge). H2: the
+    /// T11 gate block is NOT part of a Canonical hit — a promoted fact has no
+    /// promotion left to explain.
     #[tokio::test]
     async fn inspect_endpoint_reports_a_focus_and_its_structural_dependents() {
         let store = seed("t93-inspect").await;
@@ -2149,6 +2308,7 @@ mod tests {
         assert_eq!(hit["found"], true, "{hit}");
         assert_eq!(hit["status"], "Canonical", "{hit}");
         assert!(hit["blast_radius"].as_u64().is_some(), "{hit}");
+        assert_eq!(hit["truncated"], false, "{hit}");
 
         // Structural edges only: the false CoOccurrence edge (T7) must never
         // appear on the page.
@@ -2163,13 +2323,108 @@ mod tests {
             assert!(dep["concept_type"].as_str().is_some(), "{hit}");
         }
 
-        // T11: the payload explains the concept with its gate bars.
-        let gp = &hit["gate_progress"];
-        assert_eq!(gp["gc_survived"]["bar"], 3.0, "{hit}");
-        assert_eq!(gp["blast_radius"]["bar"], 5.0, "{hit}");
-        assert!(gp["blast_radius"]["strictly_above"] == true, "{hit}");
-        assert_eq!(gp["distinct_interactions"]["bar"], 3.0, "{hit}");
-        assert!(gp["coverage"]["bar"].as_f64().is_some(), "{hit}");
+        // H2: the serialized Canonical object must NOT carry a gate_progress
+        // key at all. `get()` proves key absence on the wire JSON — indexing
+        // would not, since a `null` also reads as "absent" while a real key
+        // breaks the contract that no Canonical payload pairs its status with
+        // gate figures saying it does not qualify.
+        assert!(hit.get("gate_progress").is_none(), "{hit}");
+
+        handle.abort();
+    }
+    /// H2: Candidate, Venerable and status-None hits keep the T11 gate block —
+    /// the same shape and the same thresholds — because their promotion is
+    /// still in question. Only a Canonical hit drops it.
+    #[tokio::test]
+    async fn inspect_keeps_the_gate_block_for_every_non_canonical_status() {
+        let store = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("t93-inspect-gate-statuses");
+        let iid = NodeId::new();
+        let now = Utc::now();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("gate fixture".to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        for (content, status) in [
+            ("candidate concept", CanonizationStatus::Candidate),
+            ("venerable concept", CanonizationStatus::Venerable),
+            ("plain concept", CanonizationStatus::None),
+        ] {
+            let cid = NodeId::new();
+            let mut c = concept(sid.clone(), cid, iid, content, now);
+            c.canonization_status = status;
+            batch.push(Mutation::UpsertNode {
+                node: Node::Concept(c),
+            });
+            // §5.7: every concept must have a Derives edge from an interaction.
+            batch.push(Mutation::UpsertEdge {
+                edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+            });
+        }
+        store.flush(&batch, None).await.expect("seed gate statuses");
+        let (addr, handle) = spawn(state_on(store, "t93-inspect-gate-statuses")).await;
+
+        for (focus, status) in [
+            ("candidate%20concept", "Candidate"),
+            ("venerable%20concept", "Venerable"),
+            ("plain%20concept", "None"),
+        ] {
+            let hit = get_json(addr, &format!("/api/inspect?focus={focus}")).await;
+            assert_eq!(hit["status"], status, "{hit}");
+            // Same gate shape and thresholds the T11 payload always shipped:
+            // gc survival >= 3, blast radius strictly > 5, distinct
+            // interactions >= 3, coverage >= 0.3.
+            let gp = &hit["gate_progress"];
+            assert_eq!(gp["gc_survived"]["bar"], 3.0, "{hit}");
+            assert_eq!(gp["blast_radius"]["bar"], 5.0, "{hit}");
+            assert!(gp["blast_radius"]["strictly_above"] == true, "{hit}");
+            assert_eq!(gp["distinct_interactions"]["bar"], 3.0, "{hit}");
+            assert_eq!(gp["coverage"]["bar"], 0.3, "{hit}");
+            assert_eq!(gp["in_cooldown"], false, "{hit}");
+        }
+        handle.abort();
+    }
+    /// H2: a Canonical hit must not run either gate-only store query. The
+    /// counting wrapper proves it on the store surface — key absence in the
+    /// JSON alone would be vacuous, because an implementation that computed
+    /// the block and then dropped it would still pass a pure key-absence test.
+    #[tokio::test]
+    async fn inspect_canonical_hit_runs_neither_gate_only_store_query() {
+        let seeded = seed("t93-inspect-query-count").await;
+        let blast_calls = Arc::new(AtomicUsize::new(0));
+        let span_calls = Arc::new(AtomicUsize::new(0));
+        let counted = Counting {
+            inner: Shared(seeded),
+            blast_radius_calls: blast_calls.clone(),
+            interaction_span_calls: span_calls.clone(),
+        };
+        let state = state_from_backends(
+            backends_with_store(Box::new(counted)),
+            "t93-inspect-query-count",
+            None,
+        );
+        let (addr, handle) = spawn(state).await;
+
+        let hit = get_json(addr, "/api/inspect?focus=user%20schema").await;
+        assert_eq!(hit["status"], "Canonical", "{hit}");
+        assert!(hit.get("gate_progress").is_none(), "{hit}");
+        assert_eq!(
+            blast_calls.load(Ordering::SeqCst),
+            0,
+            "a Canonical hit must not query blast_radius"
+        );
+        assert_eq!(
+            span_calls.load(Ordering::SeqCst),
+            0,
+            "a Canonical hit must not query interaction_span"
+        );
 
         handle.abort();
     }
