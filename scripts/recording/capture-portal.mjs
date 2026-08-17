@@ -20,7 +20,8 @@
 // Output: evidence/h3-recall-cards/cards-<utc>.png (+ full-page stills and a
 // webm video). Captures are written unedited; no DSNs or keys are read here.
 
-import { chromium } from '@playwright/test';
+import pw from '/home/nryn/.hermes/hermes-agent/node_modules/playwright/index.js';
+const { chromium } = pw;
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +49,11 @@ const BEAT = 1800;
 
 mkdirSync(OUT, { recursive: true });
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(
+  process.env.PLAYWRIGHT_EXECUTABLE
+    ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE }
+    : {},
+);
 const context = await browser.newContext({
   viewport: { width: 1600, height: 900 },
   deviceScaleFactor: 2,
@@ -57,9 +62,18 @@ const context = await browser.newContext({
 const page = await context.newPage();
 
 const problems = [];
-page.on('console', (m) => m.type() === 'error' && problems.push(`console: ${m.text()}`));
+page.on('console', (m) => {
+  if (m.type() !== 'error') return;
+  if (m.text().includes('favicon')) return; // the browser always 404s /favicon.ico on this server
+  const loc = m.location();
+  if (loc.url.includes('favicon')) return; // this server serves no favicon
+  problems.push(`console: ${m.text()} @ ${loc.url}`);
+});
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.method()} ${r.url()}`));
+page.on('response', (r) => {
+  if (r.status() >= 400 && !r.url().includes('/favicon')) problems.push(`http ${r.status()}: ${r.url()}`);
+});
 
 console.log(`portal: ${PORTAL}`);
 await page.goto(PORTAL, { waitUntil: 'networkidle', timeout: 60_000 });
@@ -118,10 +132,12 @@ for (const q of QUERIES) {
     }
     const collapsedBodies = await page
       .locator('#lookup-cards .card.is-excluded .card-body')
-      .count();
+      .evaluateAll((els) => els.filter((el) => el.offsetParent !== null).length);
     if (collapsedBodies !== 0) {
-      problems.push(`excluded cards must be collapsed by default (found ${collapsedBodies} bodies)`);
+      problems.push(`excluded cards must be collapsed by default (found ${collapsedBodies} visible bodies)`);
     }
+    const expanded = await page.locator('#lookup-cards .card.is-excluded.is-open').count();
+    if (expanded !== 0) problems.push('excluded cards must start collapsed');
   }
 
   if (q.label === 'xss') {
