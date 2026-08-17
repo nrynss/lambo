@@ -101,11 +101,10 @@ use crate::daemon::hotlist::{HotList, HotListPayload};
 use crate::daemon::ScoreTable;
 use crate::graph::reserve::active_reservation;
 use crate::graph::Graph;
+use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
-use crate::types::{
-    CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, RecallResult, Scored,
-};
+use crate::types::{CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, Scored};
 
 /// The built-in token estimator (see [`crate::recall::format`]).
 pub use crate::recall::format::default_token_count;
@@ -119,7 +118,7 @@ pub use crate::recall::format::default_token_count;
 /// for every other time-sensitive read in the recall (hot-list re-validation
 /// and reservations).
 #[allow(clippy::too_many_arguments)] // pipeline deps; bundled into the recall entry at Wave D
-pub fn assemble<F>(
+pub(crate) fn assemble<F>(
     graph: &Graph,
     expanded: &ExpandedSet,
     phase1: &[Scored<NodeId>],
@@ -129,7 +128,7 @@ pub fn assemble<F>(
     weights: RecallWeights,
     now: DateTime<Utc>,
     token_fn: F,
-) -> RecallResult
+) -> DetailedRecall
 where
     F: Fn(&str) -> usize,
 {
@@ -235,6 +234,7 @@ where
     let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut detailed: Vec<DetailedHit> = Vec::new();
     let mut hit_blocks: Vec<String> = Vec::new(); // block per emitted hit, score order
     let mut emitted = 0usize; // valid non-forced hits accepted toward top_k
     for s in members {
@@ -259,22 +259,48 @@ where
                 None
             },
         };
+        // H3: the full status comes from the SAME graph snapshot the hit was
+        // assembled from (never reconstructed from `is_canonical` or a later
+        // store read), and each typed warning is attached here, where its
+        // producer is still known, BEFORE the flat `warnings` extend below.
+        // Status `None` is carried as absent (the wire contract).
+        let mut detailed_hit = DetailedHit::new(
+            &hit,
+            (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
+        );
 
         // Warning lines for this hit: ⚑ (canonical), hot-list conditions,
-        // then the active reservation (soft lock).
+        // then the active reservation (soft lock). Each line carries its
+        // pinned kind alongside the rendered text.
         let mut lines: Vec<String> = Vec::new();
         if canonical {
-            lines.push(format::blast_radius_warning(
-                hit.blast_radius.unwrap_or_default(),
-            ));
+            let text = format::blast_radius_warning(hit.blast_radius.unwrap_or_default());
+            detailed_hit
+                .annotations
+                .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
+            lines.push(text);
         }
         if let Some(payloads) = hot_payloads.get(&c.id) {
             for p in payloads {
-                lines.push(format::hot_warning(p));
+                let kind = match p {
+                    HotListPayload::Conflict { .. } => AnnotationKind::Conflict,
+                    HotListPayload::HighRisk { .. }
+                    | HotListPayload::Drift { .. }
+                    | HotListPayload::Stale { .. } => AnnotationKind::Hot,
+                };
+                let text = format::hot_warning(p);
+                detailed_hit
+                    .annotations
+                    .push(Annotation::new(kind, text.clone()));
+                lines.push(text);
             }
         }
         if let Some(r) = active_reservation(graph, c.id, now) {
-            lines.push(format::reservation_warning(r));
+            let text = format::reservation_warning(r);
+            detailed_hit
+                .annotations
+                .push(Annotation::new(AnnotationKind::Reservation, text.clone()));
+            lines.push(text);
         }
 
         // Warning lines reflect the included hit set, independent of the token
@@ -287,6 +313,7 @@ where
             emitted += 1;
         }
         hits.push(hit);
+        detailed.push(detailed_hit);
     }
 
     // Context: ranked-prefix over the hit blocks in score order, stopping at
@@ -309,10 +336,22 @@ where
         blocks.push(block);
     }
 
-    RecallResult {
+    // H3: `included_in_context` is recorded AT the token-budget cut — true
+    // exactly for the longest ranked prefix of hits whose complete rendered
+    // blocks appear in the context. Every hit stays in `hits`; later ones
+    // report `false` (their annotations remain, token exclusion never
+    // discards them).
+    let kept = blocks.len();
+    for (i, d) in detailed.iter_mut().enumerate() {
+        d.included_in_context = i < kept;
+    }
+
+    DetailedRecall {
         hits,
         context: format::render_context(&blocks),
         warnings,
+        detailed,
+        response_annotations: Vec::new(),
     }
 }
 
@@ -397,7 +436,7 @@ mod tests {
         g
     }
 
-    fn ids_of(result: &RecallResult) -> Vec<NodeId> {
+    fn ids_of(result: &DetailedRecall) -> Vec<NodeId> {
         result.hits.iter().map(|h| h.node_id).collect()
     }
 
@@ -1347,5 +1386,215 @@ mod tests {
 
     fn byte_len(s: &str) -> usize {
         s.len()
+    }
+
+    // -----------------------------------------------------------------------
+    // H3 — structured recall payload golden (blended pipeline)
+    // -----------------------------------------------------------------------
+
+    /// Walk `id` through the audited transition path and stop at `to` (the
+    /// state machine forbids skipping stages, so partial promotions must be
+    /// walked hop by hop).
+    fn promote_to(g: &mut Graph, id: u64, to: CanonizationStatus) {
+        use crate::types::CanonizationEvent;
+        for (from, target) in [
+            (CanonizationStatus::None, CanonizationStatus::Candidate),
+            (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+            (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+        ] {
+            g.apply_canonization_transition(CanonizationEvent {
+                id: NodeId::new(),
+                session_id: sid(),
+                node_id: uid(id),
+                from_status: from,
+                to_status: target,
+                blast_radius: None,
+                last_demotion_time: None,
+                occurred_at: ts(0),
+            })
+            .unwrap();
+            if target == to {
+                break;
+            }
+        }
+    }
+
+    fn dep_edge(src: u64, dst: u64) -> crate::types::Edge {
+        crate::types::Edge {
+            id: NodeId::new(),
+            session_id: sid(),
+            source: uid(src),
+            target: uid(dst),
+            edge_type: crate::types::EdgeType::Dependency,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        }
+    }
+
+    /// The H3 blended golden — one result carrying the full annotation family:
+    /// a Canonical load-bearing hit, a Candidate, a conflict, a non-conflict
+    /// hot condition, a reservation, and an annotation-free hit. The payload
+    /// is pinned byte-for-byte in `fixtures/recall-h3-goldens.json`.
+    #[test]
+    fn h3_blended_payload_matches_golden() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1);
+        g.insert_interaction(i1.clone()).unwrap();
+        let contents = [
+            (1u64, "user schema"),
+            (2, "auth middleware"),
+            (3, "rate limiter"),
+            (4, "caching layer"),
+            (5, "logging config"),
+            (6, "ping endpoint"),
+        ];
+        for (id, content) in contents {
+            g.insert_concept(concept(id, i1.id, content), i1.id)
+                .unwrap();
+        }
+        promote_to(&mut g, 1, CanonizationStatus::Canonical);
+        promote_to(&mut g, 2, CanonizationStatus::Candidate);
+
+        // Two structural dependents for the canonical pillar (blast radius 2);
+        // they are never candidates, so they never become hits.
+        for id in [7u64, 8] {
+            g.insert_concept(concept(id, i1.id, &format!("dep {id}")), i1.id)
+                .unwrap();
+            g.upsert_edge(dep_edge(1, id)).unwrap();
+        }
+
+        // A soft lock another agent holds on the reservation hit.
+        g.set_reservation(Reservation {
+            session_id: sid(),
+            node_id: uid(5),
+            agent_id: AgentId::from("agent-c"),
+            expires_at: ts(60) + chrono::Duration::seconds(3600),
+        });
+
+        // Hot entries, re-validated at the pinned `now`: a conflict on uid(3)
+        // (written 11s ago, the spec §13 sentence) and a HighRisk condition on
+        // uid(4) (the non-conflict hot kind).
+        let mut hot = HotList::new();
+        let agents = vec![AgentId::from("agent-a"), AgentId::from("agent-b")];
+        let writer = AgentId::from("agent-a");
+        let write_at = ts(60) - chrono::Duration::seconds(11);
+        let conflict_agents = agents.clone();
+        let conflict_writer = writer.clone();
+        let _ = hot.insert(HotListEntry::new(
+            uid(3),
+            Condition::Conflict,
+            HotListPayload::Conflict {
+                agents: agents.clone(),
+                writer: writer.clone(),
+                seconds_ago: 999, // stale sentinel: revalidate must rebuild
+            },
+            move |_, now| {
+                let secs = (now - write_at).num_seconds();
+                if (0..=30).contains(&secs) {
+                    Some(HotListPayload::Conflict {
+                        agents: conflict_agents.clone(),
+                        writer: conflict_writer.clone(),
+                        seconds_ago: secs as u64,
+                    })
+                } else {
+                    None
+                }
+            },
+        ));
+        let high_risk = HotListPayload::HighRisk {
+            reason: "8 dependents share this pillar".into(),
+        };
+        let _ = hot.insert(HotListEntry::new(
+            uid(4),
+            Condition::HighRiskModification,
+            high_risk.clone(),
+            move |_, _| Some(high_risk.clone()),
+        ));
+
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![
+                Scored::new(uid(1), 1.0),
+                Scored::new(uid(2), 0.9),
+                Scored::new(uid(3), 0.8),
+                Scored::new(uid(4), 0.7),
+                Scored::new(uid(5), 0.6),
+                Scored::new(uid(6), 0.5),
+            ],
+        };
+        let expanded = ExpandedSet {
+            required: (1u64..=6).map(|i| Scored::new(uid(i), 0.0)).collect(),
+            siblings: Vec::new(),
+        };
+        let now = ts(60);
+        let result = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &mut hot,
+            &query(10, 10_000),
+            RecallWeights::default(),
+            now,
+            default_token_count,
+        );
+
+        // The six required kinds, from typed producers:
+        let hit = |content: &str| {
+            result
+                .detailed
+                .iter()
+                .find(|h| h.content == content)
+                .unwrap_or_else(|| panic!("hit {content} present"))
+        };
+        assert_eq!(
+            hit("user schema").status,
+            Some(CanonizationStatus::Canonical)
+        );
+        assert_eq!(
+            hit("user schema").annotations[0].kind,
+            AnnotationKind::LoadBearing
+        );
+        assert_eq!(
+            hit("auth middleware").status,
+            Some(CanonizationStatus::Candidate)
+        );
+        assert_eq!(
+            hit("rate limiter").annotations[0].kind,
+            AnnotationKind::Conflict
+        );
+        assert_eq!(
+            hit("caching layer").annotations[0].kind,
+            AnnotationKind::Hot
+        );
+        assert_eq!(
+            hit("logging config").annotations[0].kind,
+            AnnotationKind::Reservation
+        );
+        assert!(hit("ping endpoint").annotations.is_empty());
+        assert!(
+            result.detailed.iter().all(|h| h.included_in_context),
+            "a 10k budget includes every block"
+        );
+        // Status came from the graph snapshot, never `is_canonical`: the
+        // Candidate is not canonical yet still carries its full status.
+        assert!(!result.hits[1].is_canonical);
+
+        // The wire shape is the golden.
+        let actual = serde_json::to_value(&result).expect("payload serializes");
+        let golden_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/recall-h3-goldens.json"
+        );
+        let golden: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(golden_path).expect("golden fixture present"),
+        )
+        .expect("golden parses");
+        assert_eq!(
+            actual, golden["blended"],
+            "blended structured payload must match the golden"
+        );
     }
 }

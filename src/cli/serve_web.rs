@@ -469,9 +469,17 @@ struct RecallResponse {
     session: String,
     query: String,
     /// The T5.3 context block **verbatim** — canonical markers, `⚑` warnings
-    /// and conflict lines exactly as an agent would receive them.
+    /// and conflict lines exactly as an agent would receive them. Byte-equal
+    /// to `lambo recall` for the same execution (H3: both project from the
+    /// same `run_detailed` call).
     context: String,
     elapsed_ms: u64,
+    /// H3: every ranked hit, with full status, `included_in_context` and the
+    /// hit's typed annotations.
+    hits: Vec<crate::recall::detail::DetailedHit>,
+    /// H3: response-global explanations (`traversal`, `vector_degraded`) in
+    /// producer order.
+    response_annotations: Vec<crate::recall::detail::Annotation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -908,18 +916,20 @@ async fn api_pulse(
     }
 }
 
-/// Recall, straight through [`crate::cli::recall::run`].
+/// Recall, straight through [`crate::cli::recall::run_detailed`].
 ///
 /// Reusing the CLI reader verbatim is the point: the page cannot show a
 /// prettier or staler context block than the one an agent receives, because it
-/// is running the same code with the same validators and the same caps.
+/// is running the same code with the same validators and the same caps. H3:
+/// the payload's `context` and its structured `hits` /
+/// `response_annotations` all come from that ONE execution.
 async fn api_recall(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RecallParams>,
 ) -> Response {
     let query = params.q.unwrap_or_default();
     let started = Instant::now();
-    let result = super::recall::run(
+    let result = super::recall::run_detailed(
         &state.backends,
         state.session.as_str(),
         query.trim(),
@@ -930,18 +940,21 @@ async fn api_recall(
     .await;
 
     match result {
-        Ok(context) => json(
+        Ok(cli) => json(
             StatusCode::OK,
             RecallResponse {
                 session: state.session.as_str().to_string(),
                 query,
-                context,
+                context: cli.context,
                 elapsed_ms: started.elapsed().as_millis() as u64,
+                hits: cli.hits,
+                response_annotations: cli.response_annotations,
             },
         ),
         Err(e) => fail(e),
     }
 }
+
 /// Who stands behind a focus, structurally — `/api/inspect`'s answer to
 /// "what depends on this". Read-only: loads the graph as a reader and never
 /// takes the writer lease. `depth` is accepted for CLI parity and treated as
@@ -1404,6 +1417,119 @@ mod tests {
         }
         fn capabilities(&self) -> Capabilities {
             self.0.capabilities()
+        }
+        fn vector_dimensions(&self) -> Option<usize> {
+            self.0.vector_dimensions()
+        }
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.0.flush(batch, token).await
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.0.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0.vector_candidates(session, embedding, limit).await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            expected_contract: &EmbeddingContract,
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.0.blast_radius(session, node, min_edge_age, now).await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            self.0.interaction_span(session, node, min_age, now).await
+        }
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.0.record_canonization(event, token).await
+        }
+        async fn acquire_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+            self.0.acquire_lease(session, holder, ttl).await
+        }
+        async fn refresh_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::lease::LeaseOutcome, StoreError> {
+            self.0.refresh_lease(session, holder, ttl).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::lease::LeaseHolder,
+        ) -> Result<(), StoreError> {
+            self.0.release_lease(session, holder).await
+        }
+        async fn write_flush_stats(
+            &self,
+            session: &SessionId,
+            stats: &crate::store::SessionFlushStats,
+        ) -> Result<(), StoreError> {
+            self.0.write_flush_stats(session, stats).await
+        }
+        async fn read_flush_stats(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::SessionFlushStats>, StoreError> {
+            self.0.read_flush_stats(session).await
+        }
+    }
+
+    /// [`Shared`] that also claims `VECTOR_SEARCH`, so a failing embedder
+    /// actually runs on the reader path (a plain `MemoryStore` claims no
+    /// capabilities, and the embed would be skipped entirely).
+    #[derive(Clone)]
+    struct VectorSearch(Shared);
+
+    #[async_trait]
+    impl GraphStore for VectorSearch {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.0.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities() | Capabilities::VECTOR_SEARCH
         }
         fn vector_dimensions(&self) -> Option<usize> {
             self.0.vector_dimensions()
@@ -2125,18 +2251,20 @@ mod tests {
         let body = get_json(addr, "/api/recall?q=update%20user%20schema").await;
         let context = body["context"].as_str().expect("context string");
 
-        // Same reader path the CLI runs — the page must not be able to show a
-        // different answer than `lambo recall`.
-        let expected = crate::cli::recall::run(
-            &backends_on(store),
-            "t85-recall",
-            "update user schema",
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("cli recall");
+        // H3 single-execution parity: the CLI string is derived from THIS
+        // payload's own structured data through the same pub(crate) renderer
+        // the CLI uses — no second recall run as an oracle. The endpoint ran
+        // recall exactly once; `run_detailed` rendered `context` from the
+        // presentation model that `hits` / `response_annotations` serialize,
+        // and re-rendering those fields here must reproduce it byte-for-byte.
+        let detail: crate::recall::detail::DetailedRecall =
+            serde_json::from_value(body.clone()).expect("payload deserializes into the seam");
+        let expected = crate::cli::recall::render_cli_text(&detail);
+        assert_eq!(
+            context, expected,
+            "the page's context must equal the CLI renderer's output for the same run\
+             \npage:\n{context}\nrenderer:\n{expected}"
+        );
 
         assert!(
             context.contains("user schema"),
@@ -2150,21 +2278,197 @@ mod tests {
             context.contains('⚑'),
             "the ⚑ blast-radius warning must survive to the page verbatim: {context}"
         );
-        // Same hit set, same order. Scores carry a recency term that ticks
-        // between the two calls, so the comparison is on the concept lines
-        // rather than the floating-point suffix.
-        let hits = |s: &str| -> Vec<String> {
-            s.lines()
-                .filter(|l| !l.trim().is_empty() && !l.starts_with('⚑') && !l.contains(" ago"))
-                .filter_map(|l| l.split(" [").next().map(|c| c.trim().to_string()))
-                .filter(|c| !c.is_empty())
-                .collect()
-        };
+        // The structured payload rides beside the verbatim block: every hit
+        // the renderer used is present as a card source.
+        let hits = body["hits"].as_array().expect("hits array");
+        assert!(
+            !hits.is_empty(),
+            "structured hits must accompany the context"
+        );
+        for h in hits {
+            assert!(
+                h["included_in_context"].as_bool().is_some(),
+                "every hit carries included_in_context: {h}"
+            );
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_payload_carries_typed_hits_and_warning_parity() {
+        let store = seed("t85-recall-h3").await;
+        let (addr, handle) = spawn(state_on(store, "t85-recall-h3")).await;
+
+        let body = get_json(addr, "/api/recall?q=update%20user%20schema").await;
+        let context = body["context"].as_str().expect("context");
+        let hits = body["hits"].as_array().expect("hits").clone();
+        let response_annotations = body["response_annotations"]
+            .as_array()
+            .expect("response_annotations");
+        assert!(
+            response_annotations.is_empty(),
+            "a blended recall has no response-global annotations: {response_annotations:?}"
+        );
+
+        // The canonical seeded hit ranks first with its full status and the
+        // load-bearing annotation — status from the graph snapshot, never a
+        // `is_canonical` reconstruction.
+        let top = &hits[0];
+        assert_eq!(top["status"], "Canonical", "{top}");
+        assert!(
+            top["included_in_context"].as_bool().unwrap_or(false),
+            "{top}"
+        );
+        let kinds: Vec<&str> = top["annotations"]
+            .as_array()
+            .expect("annotations")
+            .iter()
+            .map(|a| a["kind"].as_str().expect("kind"))
+            .collect();
+        assert!(
+            kinds.contains(&"load_bearing"),
+            "the canonical hit owns a load_bearing annotation: {top}"
+        );
+
+        // Warning parity (one direction): every typed annotation text appears
+        // verbatim in the context — included hits inside their block, response
+        // annotations as header lines.
+        let mut ann_texts: Vec<String> = Vec::new();
+        for h in &hits {
+            for a in h["annotations"].as_array().expect("annotations") {
+                ann_texts.push(a["text"].as_str().expect("text").to_string());
+            }
+        }
+        for a in response_annotations {
+            ann_texts.push(a["text"].as_str().expect("text").to_string());
+        }
+        assert!(!ann_texts.is_empty(), "seeded recall must carry warnings");
+        for text in &ann_texts {
+            assert!(
+                context.contains(text.as_str()),
+                "every annotation text must appear in context; missing {text:?}\n{context}"
+            );
+            assert_eq!(
+                context.matches(text.as_str()).count(),
+                1,
+                "each annotation text appears exactly once in context (lossless, no dup): {text:?}"
+            );
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_tiny_budget_excludes_block_but_keeps_its_warning() {
+        let store = seed("t85-recall-tiny").await;
+        let (addr, handle) = spawn(state_on(store, "t85-recall-tiny")).await;
+
+        // A deliberately tiny budget: no complete block fits, so every hit is
+        // excluded — but the Canonical hit's load-bearing warning must still
+        // render in the header and stay visible as a typed annotation.
+        let body = get_json(addr, "/api/recall?q=update%20user%20schema&max_tokens=1").await;
+        let context = body["context"].as_str().expect("context");
+        let hits = body["hits"].as_array().expect("hits").clone();
+
+        assert!(!hits.is_empty(), "hits remain present under a tiny budget");
+        let top = &hits[0];
         assert_eq!(
-            hits(context),
-            hits(&expected),
-            "the page must render the CLI's context block, not a reformatted one\
-             \npage:\n{context}\ncli:\n{expected}"
+            top["included_in_context"].as_bool(),
+            Some(false),
+            "the canonical hit's complete block must be excluded: {top}"
+        );
+        let annotations = top["annotations"].as_array().expect("annotations");
+        let bearing: Vec<&serde_json::Value> = annotations
+            .iter()
+            .filter(|a| a["kind"].as_str() == Some("load_bearing"))
+            .collect();
+        assert_eq!(
+            bearing.len(),
+            1,
+            "exclusion discards the block, not the annotation: {top}"
+        );
+        let warning = bearing[0]["text"].as_str().expect("text");
+        assert!(
+            context.contains(warning),
+            "the excluded hit's warning must remain in context:\n{context}"
+        );
+        assert!(
+            context.contains("Load-bearing pillar"),
+            "the ⚑ line is the retained warning: {context}"
+        );
+
+        handle.abort();
+    }
+
+    struct FailingEmbedder;
+
+    #[async_trait]
+    impl crate::embed::Embedder for FailingEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Err(crate::embed::EmbedError::Unavailable("down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_reports_vector_degradation_as_response_annotation() {
+        let store = seed("t85-recall-degraded").await;
+        let mut backends = backends_on(store.clone());
+
+        backends.embedder = Box::new(FailingEmbedder);
+        backends.store = Box::new(VectorSearch(Shared(store.clone())));
+        let (addr, handle) =
+            spawn(state_from_backends(backends, "t85-recall-degraded", None)).await;
+        let body = get_json(addr, "/api/recall?q=update%20user%20schema").await;
+        let context = body["context"].as_str().expect("context");
+        let annotations = body["response_annotations"]
+            .as_array()
+            .expect("response_annotations");
+        assert_eq!(annotations.len(), 1, "{annotations:?}");
+        assert_eq!(annotations[0]["kind"], "vector_degraded", "{annotations:?}");
+        assert!(
+            context.contains("vector leg skipped"),
+            "the degradation must still render in context: {context}"
+        );
+        assert_eq!(
+            annotations[0]["text"],
+            "recall: query embedding failed (embedder unavailable: down); vector leg skipped"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_structural_payload_carries_traversal_response_annotation() {
+        // A structural query that dispatches: seed a dependency chain so
+        // "what depends on X" resolves an anchor with dependents.
+        let store = seed_chain_around("t85-recall-structural", "the anchor", 3).await;
+        let (addr, handle) = spawn(state_on(store, "t85-recall-structural")).await;
+
+        let body = get_json(addr, "/api/recall?q=what%20depends%20on%20the%20anchor").await;
+        let context = body["context"].as_str().expect("context");
+        let annotations = body["response_annotations"]
+            .as_array()
+            .expect("response_annotations");
+        assert_eq!(
+            annotations.len(),
+            1,
+            "one response-global explanation: {annotations:?}"
+        );
+        assert_eq!(annotations[0]["kind"], "traversal", "{annotations:?}");
+        assert!(
+            context.contains("answered by graph traversal"),
+            "the traversal explanation renders in context: {context}"
+        );
+        let hits = body["hits"].as_array().expect("hits");
+        assert!(!hits.is_empty(), "structural hits ride in the payload");
+        assert!(
+            hits.iter()
+                .all(|h| h["included_in_context"].as_bool().unwrap_or(false)),
+            "all structural hits fit the default budget: {hits:?}"
         );
 
         handle.abort();
@@ -3032,6 +3336,21 @@ mod tests {
         assert_eq!(recall.status, 502, "mismatched vector recall must refuse");
         assert!(recall.body.contains("fixture-model-v2"), "{}", recall.body);
         assert!(recall.body.contains("fixture-model-v1"), "{}", recall.body);
+        // H3: the fail-closed response carries no success payload — no
+        // `context`, no `hits`, no `response_annotations` (the error shape
+        // renders `error`, never the additive fields).
+        for absent in [
+            "\"hits\"",
+            "\"response_annotations\"",
+            "\"included_in_context\"",
+            "\"context\":",
+        ] {
+            assert!(
+                !recall.body.contains(absent),
+                "mismatch response must not carry '{absent}': {}",
+                recall.body
+            );
+        }
 
         store
             .flush(

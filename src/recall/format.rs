@@ -216,6 +216,25 @@ pub fn render_block(hit: &RecallHit, warnings: &[String]) -> String {
     lines.join("\n")
 }
 
+/// One hit's full block from the H3 presentation model: the label line
+/// (content, type marker, score, blast radius) followed by its annotation
+/// warning lines. Reuses [`concept_label`] / [`render_block`] by projecting
+/// the presentation hit onto a [`RecallHit`], so the CLI-rendered blocks and
+/// the pipeline's own blocks cannot drift (node_id is unused by the
+/// renderers; a nil id is a placeholder, never emitted).
+pub(crate) fn render_detailed_block(h: &crate::recall::detail::DetailedHit) -> String {
+    let hit = RecallHit {
+        node_id: NodeId(uuid::Uuid::nil()),
+        content: h.content.clone(),
+        concept_type: h.concept_type,
+        score: h.score,
+        is_canonical: h.status == Some(crate::types::CanonizationStatus::Canonical),
+        blast_radius: h.blast_radius,
+    };
+    let lines: Vec<String> = h.annotations.iter().map(|a| a.text.clone()).collect();
+    render_block(&hit, &lines)
+}
+
 /// The full context: rendered blocks in final-score order, separated by one
 /// blank line. No trailing newline, so the string is stable as a payload and
 /// as golden text.

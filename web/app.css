@@ -417,16 +417,32 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
   background: var(--bg-alt); border: 1px solid var(--border);
 }
 
-.traversal-banner {
-  padding: 9px 13px; border-radius: 7px; margin-bottom: 10px;
+.response-annotations {
+  display: grid; gap: 8px; margin-bottom: 12px;
+  padding: 11px 13px; border-radius: 8px;
   background: var(--bg-alt); border: 1px solid var(--border);
-  font-size: 13px; color: var(--text-muted);
 }
+.response-annotations .annotation { margin-top: 0; background: var(--card); }
 
 .cards { display: grid; gap: 10px; }
 
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 13px 16px; }
 .card.is-pillar { border-color: var(--warn); border-width: 2px; }
+
+/* H3: a hit whose complete block is outside the context budget collapses by
+   default; the excluded-warnings area below still shows its annotations. */
+.card.is-excluded { border-style: dashed; opacity: 0.9; }
+.card.is-excluded .card-body { display: none; }
+.card.is-excluded.is-open .card-body { display: block; }
+.card-excluded-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  flex-wrap: wrap; margin-bottom: 2px;
+}
+.card-expand {
+  font: inherit; font-size: 12px; background: none; cursor: pointer;
+  color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
+}
+.card-expand:hover { color: var(--text); border-color: var(--accent); }
 
 .card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-content { font-weight: 600; overflow-wrap: anywhere; }
@@ -434,6 +450,19 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 .card-score { display: flex; align-items: center; gap: 9px; margin-top: 9px; flex-wrap: wrap; }
 .score-track { width: 90px; height: 5px; border-radius: 999px; background: var(--track); flex: none; overflow: hidden; }
 .score-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* H3: the persistent excluded-hit warnings area. */
+.excluded-warnings {
+  margin-top: 14px; padding: 12px 14px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--bg-alt);
+}
+.excluded-warnings-title { font-weight: 600; font-size: 13.5px; }
+.excluded-warnings > .muted-small { margin: 3px 0 10px; }
+.excluded-hit { margin-top: 10px; }
+.excluded-hit-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.excluded-hit .annotation { margin-top: 6px; background: var(--card); }
+
+
 
 /* Annotations differ in purpose, not only in severity, so they are not one
    treatment with a colour ramp. */

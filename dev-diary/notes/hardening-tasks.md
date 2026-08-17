@@ -597,6 +597,32 @@ reinterpret scores, or alter MCP merely to make two serializers look alike.
 It preserves the verbatim agent contract and adds a presentation model beside
 it.
 
+**Implementation handoff (awaiting adversarial review).** Implemented on
+`codex/hardening-h3` (base `5eed73c`). The seam lives in the new
+`src/recall/detail.rs` (`pub(crate)`: `AnnotationKind` with the six pinned
+wire kinds, `Annotation`, `DetailedHit`, `DetailedRecall`) plus
+`crate::recall::format::render_detailed_block`; `assemble` and
+`try_structural` now return the detailed result (status + typed annotations
+attached where the producers exist, `included_in_context` marked AT the
+token-budget cut), `Daemon::recall_detailed` (new `pub(crate)`) is the single
+execution entry, and the public `Daemon::recall` projects it onto
+`RecallResult` unchanged. `cli::recall::run` is a thin wrapper over the new
+`pub(crate) run_detailed`, and `render_cli_text` renders the CLI string from
+the presentation model — so `/api/recall`'s `context` and its `hits` /
+`response_annotations` come from ONE execution, and the single-execution
+parity test re-renders the payload's own structured fields through that
+renderer instead of running recall twice. MCP and `src/types/mod.rs` are
+untouched. Verification: blended + structural goldens in
+`fixtures/recall-h3-goldens.json` (pinned by assemble/dispatch tests),
+tiny-budget exclusion keeps the typed warning, failing-embedder
+`vector_degraded` response annotation, mismatch fails closed with no success
+fields, warning parity, XSS/browser evidence under `evidence/h3-recall-cards/`
+(captured with the updated `scripts/recording/capture-portal.mjs` against a
+local serve-web). Review focus: the renderer's per-hit (not per-text)
+excluded-warning skip (spec-correct when two hits share identical warning
+text — the old `context.contains` skip could drop the excluded hit's line),
+the daemon seam, and the additive wire shape.
+
 ---
 
 ### H4 - The structure tree is fetched once and never refreshes
