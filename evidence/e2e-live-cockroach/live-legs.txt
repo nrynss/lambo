@@ -1,0 +1,30 @@
+E2E live CockroachDB legs — gate output (redacted; no credentials)
+
+Command: ( set -a; source .env; set +a; cargo test --all-features -- --ignored )
+Environment: LAMBO_COCKROACH_DSN set (value never printed); LAMBO_REQUIRE_LIVE /
+LAMBO_REQUIRE_VECTOR_INDEX / LAMBO_LLAMA_EMBED_URL unset.
+
+test embed::bge_m3::tests::live_smoke_against_llama_server ... ok            (env-gated skip by design)
+test store::cockroach::conformance::vector_explain_camera_proof ... ok       (env-gated skip by design)
+test store::cockroach::conformance::build_store_returns_working_adapter ... ok
+test store::cockroach::conformance::vector_beam_size_reaches_the_server_and_keeps_statement_timeout ... ok
+test cli::saints::live::saints_and_stats_against_live_cockroach ... ok
+test canon::eval::tests::fixture::cockroach_three_hop_progression_matches_memory ... ok
+test store::cockroach::conformance::single_writer_lease_is_enforced_across_pools ... ok
+test store::cockroach::conformance::conformance_suite ... ok   (65 s; all 24 live checks)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 835 filtered out; finished in 65.17s
+
+Integration tests/live_calibration.rs (real BGE-M3 against local llama.cpp):
+test context_embedding_separation ... ok
+test report_bge3_cosine_distribution ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+All-features without DSN (baseline, for the gate table):
+test result: ok. 835 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out
+
+Default (no features) baseline:
+test result: ok. 705 passed; 0 failed; 1 ignored (the bge live smoke)
+
+Feature combos:
+--no-default-features --features store-memory,embed-fixture:  692 passed (lib) + harnesses
+--no-default-features --features store-sqlite,embed-fixture:  513 passed (lib) + harnesses

@@ -1,9 +1,10 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (60 records).
+Complete index of the review records in this directory (61 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| [adve-review-e2e-integration-h1h3.md](adve-review-e2e-integration-h1h3.md) | Main — E2E whole-platform integration (H1+H2+H3 + portal rebuild), incl. LIVE CockroachDB legs | **CONDITIONAL** (1 P2 live-reproduced / 7 P3; no P0/P1; all gates green incl. 8/8 live legs executed, 2026-08-17) |
 | [adve-review-hardening-H3round2.md](adve-review-hardening-H3round2.md) | Hardening H3 - post-round-1 remediation (evidence re-capture + per-text warning parity), round 2 | **CLEAN / APPROVE** (zero findings, 2026-08-17) |
 | [adve-review-hardening-H3round1.md](adve-review-hardening-H3round1.md) | Hardening H3 - structured recall results beside the verbatim block, round 1 | **REQUEST_CHANGES** (1 P2 evidence / 1 P3; verdict 2026-08-17) |
 | [adve-review-hardening-H2round1.md](adve-review-hardening-H2round1.md) | Hardening H2 - /api/inspect Canonical gate-pairing, round 1 | **CLEAN / APPROVE** (1 P3 report-doc; zero code findings, 2026-08-17) |

@@ -1,0 +1,86 @@
+E2E live CockroachDB manual exercises — redacted transcript (no credentials)
+
+All commands ran with the DSN sourced from .env inside a subshell and never
+echoed. Binary: target/debug/lambo (--all-features). Config: /tmp/e2e-live.toml
+(store kind=cockroach; embedder kind=bge_m3 dim=1024 url=http://127.0.0.1:8080
+model=bge-m3-FP16.gguf) and /tmp/e2e-live-mismatch.toml (same, model
+bge-m3-FP16-renamed.gguf).
+
+=== 1. Full write path with real embeddings (demo) ===
+$ lambo --config /tmp/e2e-live.toml demo --scenario rest-api --session e2e-live-r1
+  capabilities Capabilities(VECTOR_SEARCH)
+  graph complete: 12 interactions, 27 concepts, 'user schema' blast radius 9
+  CANONIZATION: user schema → Candidate → Venerable → Canonical
+  daemon event: Conflict on 'user schema' — contesting agents: agent-a, agent-b
+  (no errors; every agent released its lease)
+
+=== 2. H1 checked candidate read live (CLI recall) ===
+$ lambo --config /tmp/e2e-live.toml recall --session e2e-live-r1 --query "update user schema"
+user schema [Entity, canonical] (score 1.92, blast radius 9)
+⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+[+ 4 more hits with semantic scores]
+
+=== 3. H1 reader fail-closed live (renamed model id) ===
+$ lambo --config /tmp/e2e-live-mismatch.toml recall --session e2e-live-r1 --query "user schema"
+lambo recall: config: embedding contract is incompatible (mismatch): this session's vectors
+were written by kind=bge_m3 model=bge-m3-FP16.gguf dim=1024, but the configured embedder is
+kind=bge_m3 model=bge-m3-FP16-renamed.gguf dim=1024. Refusing because equal dimensions do not
+make model vector spaces compatible. A writer may use --allow-embedding-mismatch only for a
+verified same-kind, same-width model-identifier rename, or after a controlled migration has
+atomically removed the old vectors; readers remain fail-closed
+
+serve-web (same mismatch config, port 7800):
+  GET /api/session  → embedding_contract.status=mismatch, vector_search=false,
+                      stored.model=bge-m3-FP16.gguf, configured.model=bge-m3-FP16-renamed.gguf
+  GET /api/pulse    → embedding_contract.status=mismatch, vector_search=false
+  GET /api/recall?q=user schema → HTTP 502; body is {"error": ...} only:
+      absent "hits"               true
+      absent "response_annotations" true
+      absent "included_in_context" true
+      absent "context":            true
+  GET /api/stats → 200 ; GET /api/graph → 200   (structural routes stay up)
+
+=== 4. H1 writer refusal + override live (session e2e-live-r2) ===
+$ lambo --config /tmp/e2e-live.toml derive --session e2e-live-r2 --agent operator \
+    --content "live contract stamp A" --kind observation
+derived 1 concept(s): 1 created, 0 matched existing          (contract A stamped)
+
+$ lambo --config /tmp/e2e-live-mismatch.toml derive --session e2e-live-r2 --agent operator \
+    --content "must refuse" --kind observation
+lambo derive: config: embedding contract is incompatible (mismatch): ... bge-m3-FP16.gguf ...
+but the configured embedder is ... bge-m3-FP16-renamed.gguf ... Refusing because equal
+dimensions do not make model vector spaces compatible. ... readers remain fail-closed
+
+$ lambo --config /tmp/e2e-live-mismatch.toml derive --session e2e-live-r2 --agent operator \
+    --content "verified model alias" --kind observation --allow-embedding-mismatch
+lambo derive: invariant violated: vector candidate lookup refused after embedding contract
+changed: config: embedding contract is incompatible: this session's vectors were written by
+kind=bge_m3 model="bge-m3-FP16.gguf" dim=1024, but the live/attached embedder is kind=bge_m3
+model="bge-m3-FP16-renamed.gguf" dim=1024 — re-embed or start a new session before writing or
+reading
+   → FINDING E2E-1: the override's relabel is write-behind; the first hybrid write's checked
+     candidate read compares the not-yet-durable relabel against the durable contract and
+     refuses. The relabel lands only at close (the next run succeeds).
+   → subsequent recall with the mismatch config works; recall with the original config now
+     refuses in the other direction (both named).
+
+=== 5. H2 live (serve-web on e2e-live-r1) ===
+GET /api/inspect?focus=user schema
+  found: True status: Canonical blast: 9 deps: 16 gate_progress key present: False
+GET /api/inspect?focus=auth%20middleware
+  found: True status: None gate_progress key present: True
+  gate bars: gc_survived {current 7.0, bar 3.0, met true}, blast_radius {current 0.0,
+  bar 5.0, met false, strictly_above true}, distinct_interactions, coverage present
+
+=== 6. H3 parity live ===
+$ lambo --config /tmp/e2e-live.toml recall --session e2e-live-r1 --query "update user schema"
+  (313 bytes, captured)
+GET /api/recall?q=update%20user%20schema (same session/query)
+  context bytes: 312; hits: 5; response_annotations: 0
+  hit0: content=user schema status=Canonical score=1.916 included_in_context=true
+        annotations=[load_bearing]
+  cmp: HTTP context + "\n" == CLI output byte-for-byte   → BYTE-IDENTICAL
+
+Every live leg and exercise completed; zero unexpected failures. The only
+live-observed defect is E2E-1 (override first-write refusal), recorded in the
+review record.
