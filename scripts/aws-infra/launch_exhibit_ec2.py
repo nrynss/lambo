@@ -166,13 +166,14 @@ TIGHT_FOR_LOCAL_BGE = ("t4g.medium", "t3.medium", "t3a.medium", "c7i-flex.large"
 # Ubuntu 24.04 runners (glibc 2.39), so the published binary passed its checksum
 # and then died with `version GLIBC_2.39 not found` the moment systemd started
 # it — true of the arm64 asset as well, so it was not an artefact of the
-# instance architecture. Release builds now run inside a `debian:bookworm`
-# container (T12), whose older toolchain keeps the shipped binary below the
-# AL2023 glibc floor; a repo-side "Assert max required GLIBC <= 2.34" CI gate
-# makes that structural (see .github/workflows/release.yml). So the binary runs
-# on AL2023 too, and Ubuntu 26.04 is no longer chosen as a glibc workaround —
-# it is a newer, well-maintained platform, newer than the build environment, so
-# the checksum verification still means what it is supposed to mean.
+# instance architecture. The AL2023 target was later dropped: Linux release
+# builds run natively on the Ubuntu 24.04 runners (glibc 2.39), and a repo-side
+# "Assert max required GLIBC <= 2.39" CI gate keeps the shipped floor from
+# creeping above the build host (see .github/workflows/release.yml). So the
+# binary does not run on AL2023 (2.34 < 2.39), and Ubuntu 26.04 is not chosen
+# as a glibc workaround — it is a newer, well-maintained platform, newer than
+# the build environment, so the checksum verification still means what it is
+# supposed to mean.
 UBUNTU_SSM = {
     "arm64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
     "x86_64": "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id",

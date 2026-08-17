@@ -55,9 +55,10 @@ Sequence:
 
 Notes:
 
-- The binary the instance runs is built in a Debian bookworm container, because
-  a locally built one needs a newer glibc than the instance has. Build, `scp`,
-  restart: about four minutes.
+- The binary the instance runs is built natively by the release workflow on
+  the Ubuntu 24.04 runners (glibc 2.39); the instance's Ubuntu 26.04 (glibc
+  2.41) is newer than the build environment, so the shipped binary runs. Use
+  the release artifact; build, `scp`, restart: about four minutes.
 - The exhibit runs x86_64 on Ubuntu 26.04 and that is the shipped path. The
   launcher's arm64 branch is not exercised and is not being validated.
 - Do not redeploy while a capture is running. D2 depends on the service staying

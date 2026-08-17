@@ -926,6 +926,16 @@ Amazon Linux 2023 (GLIBC 2.34) guarantee **structural** rather than empirical.
 macOS/Windows rows stay host-native (intentionally omit `container`); the
 release job stays containerless; the checksum/artifact flow is unchanged.
 
+> **Superseded (2026-08-17, later in the same day):** the `debian:bookworm`
+> container was removed. The in-container parity tests (which spawn `lambo`
+> subprocesses over stdio) were flaky — the full suite stalled >60s per test
+> in the container while the identical tests run in ~1s on the host — and the
+> Amazon Linux 2023 (GLIBC 2.34) floor was deliberately dropped. Linux
+> release builds now run natively on the Ubuntu 24.04 runners (glibc 2.39),
+> with the gate relaxed to "Assert max required GLIBC <= 2.39" (still
+> preventing silent creep above the build host). See
+> `adve-review-remed-ubunround1.md`.
+
 **Review:** 3 rounds. R1 was REQUEST_CHANGES — the initial change put
 `container:` only in the matrix rows and never wired it to the job (inert; all
 steps still ran on the Ubuntu host at 2.39), and bookworm caps glibc at 2.36
@@ -965,8 +975,9 @@ Docs: `adve-review-remed-E2Eround{1..2}.md`. **Verify:** full
 
 **Remaining for D1/D2/D3 (deployment, not this task):** T6's NEW-5 SSM check
 discharged above; a **real-live capture** of `03_crossover_protect.py` (T8)
-before the video; a **draft/PR release build** on the new bookworm runner
-(T12); the D1 clean redeploy.
+before the video; a **draft/PR release build** on the native-host (Ubuntu
+24.04) release workflow (T12 — see the supersede note above); the D1 clean
+redeploy.
 
 ---
 
