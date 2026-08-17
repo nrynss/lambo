@@ -15,8 +15,8 @@ use std::time::Duration;
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
-    CanonizationEvent, EdgeType, EmbeddingContract, GraphSnapshot, InteractionSpan, Mutation,
-    MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
+    CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
+    NodeId, Scored, SessionId, StoreError,
 };
 
 /// One session's lease row (T8.6). In-process analogue of the sqlite/cockroach
@@ -581,7 +581,6 @@ impl GraphStore for MemoryStore {
         &self,
         _session: &SessionId,
         _embedding: &[f32],
-        _expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         validate_vector_candidate_limit(limit)?;
@@ -758,7 +757,9 @@ impl GraphStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentId, CanonizationStatus, Concept, ConceptType, Edge, Interaction};
+    use crate::types::{
+        AgentId, CanonizationStatus, Concept, ConceptType, Edge, EmbeddingContract, Interaction,
+    };
     use chrono::TimeZone;
     use std::sync::Arc;
 
@@ -1370,14 +1371,14 @@ mod tests {
             dim: 1024,
         };
         let err = store
-            .vector_candidates(&SessionId::from("x"), &[0.0; 1024], &contract, 5)
+            .vector_candidates_checked(&SessionId::from("x"), &[0.0; 1024], &contract, 5)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
         assert!(store.capabilities().is_empty());
         assert!(matches!(
             store
-                .vector_candidates(
+                .vector_candidates_checked(
                     &SessionId::from("x"),
                     &[],
                     &contract,

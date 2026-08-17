@@ -8,7 +8,7 @@
 //!    (ties broken by node id ascending). The temporal chain order is NOT
 //!    consulted: the contract is "3 most recent by `created_at`" (handoff
 //!    T5.1), and a chain ordered by insertion may carry arbitrary timestamps.
-//! 3. **Vector** — [`GraphStore::vector_candidates`], only when the store
+//! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
 //!    advertises [`Capabilities::VECTOR_SEARCH`]. The call is async I/O, so it
 //!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
 //!    itself is pure and lock-safe.
@@ -110,7 +110,7 @@ pub async fn gather(
         return Ok(Phase1Input::default());
     };
     let vector = store
-        .vector_candidates(session, emb, expected_contract, limit)
+        .vector_candidates_checked(session, emb, expected_contract, limit)
         .await?;
     Ok(Phase1Input { vector })
 }
@@ -346,7 +346,7 @@ mod tests {
 
     /// `GraphStore` double: counts every async trait call and returns canned
     /// vector hits when the capability is advertised. Any async method other
-    /// than `vector_candidates` that gets called is a contract violation and
+    /// than `vector_candidates_checked` that gets called is a contract violation and
     /// panics (the count is asserted independently).
     struct SpyVectorStore {
         caps: Capabilities,
@@ -385,7 +385,7 @@ mod tests {
 
     impl SpyVectorStore {
         /// Count the call and fail the test: gather must never reach any async
-        /// trait method other than `vector_candidates`.
+        /// trait method other than `vector_candidates_checked`.
         fn unexpected_call(&self) -> ! {
             self.async_calls.fetch_add(1, Ordering::SeqCst);
             panic!("SpyVectorStore: unexpected async store call");
@@ -426,6 +426,14 @@ mod tests {
             self.unexpected_call()
         }
         async fn vector_candidates(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.unexpected_call()
+        }
+        async fn vector_candidates_checked(
             &self,
             _session: &SessionId,
             _embedding: &[f32],

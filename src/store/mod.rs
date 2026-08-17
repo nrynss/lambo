@@ -152,23 +152,48 @@ pub trait GraphStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError>;
 
+    /// Unchecked vector lookup retained as the frozen v0.2.0 adapter surface.
+    ///
     /// Requires [`Capabilities::VECTOR_SEARCH`]; adapters without it return
     /// [`StoreError::Capability`]. `limit` must not exceed
     /// [`MAX_VECTOR_CANDIDATE_LIMIT`].
     ///
-    /// `expected_contract` is the contract that produced `embedding`. A
-    /// vector-capable adapter must compare it to the session's durable contract
-    /// in the same transactional snapshot as candidate retrieval and refuse a
-    /// mismatch. A check performed earlier by a reader is not sufficient: a
-    /// concurrent writer may replace the contract and vectors while the reader
-    /// awaits its query embedder.
+    /// New Lambo production code must call [`GraphStore::vector_candidates_checked`]
+    /// instead. This method cannot bind the query's embedding contract to the
+    /// durable candidate read and therefore cannot prevent a concurrent model
+    /// replacement from making a ranking meaningless.
     async fn vector_candidates(
         &self,
         session: &SessionId,
         embedding: &[f32],
-        expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError>;
+
+    /// Race-safe vector lookup for query embeddings produced under
+    /// `expected_contract`.
+    ///
+    /// A vector-capable adapter must compare the expected contract to the
+    /// session's durable contract in the same transactional snapshot as every
+    /// candidate query and refuse a mismatch. The fail-closed default preserves
+    /// source compatibility for third-party v0.2.0 adapters without silently
+    /// weakening H1: adapters that advertise vector search must explicitly add
+    /// an atomic implementation before Lambo's production recall paths use it.
+    /// Non-vector adapters retain their original capability refusal.
+    async fn vector_candidates_checked(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        _expected_contract: &EmbeddingContract,
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        if self.capabilities().contains(Capabilities::VECTOR_SEARCH) {
+            return Err(StoreError::Capability(
+                "store advertises VECTOR_SEARCH but does not implement atomic embedding-contract validation"
+                    .into(),
+            ));
+        }
+        self.vector_candidates(session, embedding, limit).await
+    }
 
     /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
     ///

@@ -888,7 +888,6 @@ impl GraphStore for SqliteStore {
         &self,
         _session: &SessionId,
         _embedding: &[f32],
-        _expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         validate_vector_candidate_limit(limit)?;
@@ -2048,13 +2047,13 @@ mod tests {
         assert!(store.capabilities().is_empty());
         assert_eq!(store.vector_dimensions(), None);
         let err = store
-            .vector_candidates(&SessionId::from("x"), &[0.0; 8], &contract, 5)
+            .vector_candidates_checked(&SessionId::from("x"), &[0.0; 8], &contract, 5)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
         assert!(matches!(
             store
-                .vector_candidates(
+                .vector_candidates_checked(
                     &SessionId::from("x"),
                     &[],
                     &contract,

@@ -375,11 +375,10 @@ mod tests {
             &self,
             _session: &crate::types::SessionId,
             _embedding: &[f32],
-            _expected_contract: &crate::types::EmbeddingContract,
             _limit: usize,
         ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, crate::types::StoreError>
         {
-            unreachable!("resolve never queries")
+            Ok(Vec::new())
         }
         async fn blast_radius(
             &self,
@@ -443,5 +442,41 @@ mod tests {
             StoreKind::Memory,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_vector_adapter_compiles_unchanged_and_checked_default_fails_closed() {
+        // StubStore intentionally implements only v0.2.0's required three-argument
+        // vector_candidates method. This pins source compatibility for external
+        // adapters while proving that Lambo's additive checked surface cannot
+        // silently trust a vector-capable adapter that has not implemented it.
+        let store = StubStore {
+            capabilities: Capabilities::VECTOR_SEARCH,
+            vector_dim: Some(3),
+        };
+        assert!(store
+            .vector_candidates(&crate::types::SessionId::from("legacy"), &[0.0; 3], 1)
+            .await
+            .unwrap()
+            .is_empty());
+        let expected = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: 3,
+        };
+        let err = store
+            .vector_candidates_checked(
+                &crate::types::SessionId::from("legacy"),
+                &[0.0; 3],
+                &expected,
+                1,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::types::StoreError::Capability(_)));
+        assert!(
+            err.to_string().contains("atomic embedding-contract"),
+            "{err}"
+        );
     }
 }

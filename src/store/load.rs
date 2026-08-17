@@ -595,11 +595,22 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
             expected_contract: &crate::types::EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, expected_contract, limit)
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
                 .await
         }
 

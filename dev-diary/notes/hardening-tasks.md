@@ -30,11 +30,14 @@ the redesign brief, not inferred.
 **Files:** `src/resolve.rs`, `src/store/sqlite.rs`, `src/store/cockroach.rs`
 **Severity:** highest in this document
 **Blocked by:** nothing
-**Status:** claimed:h1-implementation
+**Status:** claimed:h1-remediation-r2
 **Worktree:** `worktrees/hardening-h1` (detached from `main` at `f32af2d`)
-**Owns:** `src/resolve.rs`, `src/memory.rs`, `src/graph/graph.rs`, `src/cli/mod.rs`,
-`src/cli/serve_web.rs`, `src/cli/demo.rs`, `src/mcp/serve.rs`, `src/main.rs`,
-`src/store/sqlite.rs`, `src/store/cockroach.rs`, `web/app.js`, this H1 section
+**Owns:** `src/resolve.rs`, `src/memory.rs`, `src/graph/{graph,hybrid}.rs`,
+`src/recall/candidates.rs`, `src/cli/{mod,demo,recall,serve_web}.rs`,
+`src/daemon/mod.rs`, `src/mcp/serve.rs`, `src/main.rs`,
+`src/store/{mod,memory,sqlite,cockroach,flush,load}.rs`,
+`src/canon/{eval,task}.rs`, `tests/cli_write_lease.rs`, `web/app.js`, this H1
+section, and the H1 adversarial-review/disposition records
 
 Implementation note: writer attach refuses by default and has a deliberately
 named CLI/library override. The read-only `serve-web` process follows the task
@@ -126,6 +129,31 @@ reader policy end to end. A configured model of `None` still means "server
 default" in the pre-existing contract format; Lambo cannot distinguish two
 different server defaults when neither has an identifier, so operators who
 need detection must configure a model id.
+
+**Round-2 remediation handoff (awaiting round-3 adversarial review).** H1's
+race-free read initially changed the frozen `GraphStore::vector_candidates`
+signature. That was broader than necessary and source-breaking for released
+Level B adapters. The original required three-argument method is restored
+exactly. H1 now adds `vector_candidates_checked` instead: its default delegates
+only for stores without `VECTOR_SEARCH`, while an old vector-capable adapter
+fails closed until it supplies an atomic contract check. Every production
+recall and hybrid lookup uses the checked method; the old method exists solely
+as the v0.2.0 compatibility surface. Cockroach overrides the checked method and
+keeps the contract read, global ANN growth loop, exact-session fallback, and
+commit inside one serializable transaction. The entire transaction is replayed
+with the existing bounded `tx_retry` policy after SQLSTATE 40001; a contract
+mismatch is an `Invariant` and returns without retry.
+
+The expanded `Owns` list above records the complete frozen-contract ripple:
+production readers/writers, both checked call sites, adapter implementations,
+test wrappers, and mocks. A regression compiles an adapter that implements only
+the old method, invokes that method unchanged, and proves its inherited checked
+surface fails closed. Existing recall and hybrid spies make the unchecked
+method panic, pinning production routing through the checked method. The
+Cockroach retry seam proves a first retryable attempt is replayed and a
+deterministic contract mismatch is attempted once. No live Cockroach result is
+claimed because `LAMBO_COCKROACH_DSN` was not available; non-live adapter tests
+and both minimal feature checks passed.
 
 ---
 

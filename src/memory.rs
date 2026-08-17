@@ -2511,11 +2511,21 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
             expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, expected_contract, limit)
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -2641,11 +2651,21 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
             expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, expected_contract, limit)
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -2971,11 +2991,21 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
             expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.inner
-                .vector_candidates(session, embedding, expected_contract, limit)
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -3095,12 +3125,22 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
             expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.park(ParkPoint::VectorCandidates).await;
             self.inner
-                .vector_candidates(session, embedding, expected_contract, limit)
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
                 .await
         }
         async fn blast_radius(
@@ -3188,6 +3228,14 @@ mod tests {
             self.inner.keyword_candidates(session, tokens, limit).await
         }
         async fn vector_candidates(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            panic!("VectorSearchStore: unchecked vector lookup")
+        }
+        async fn vector_candidates_checked(
             &self,
             session: &SessionId,
             embedding: &[f32],
