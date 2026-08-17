@@ -123,6 +123,7 @@
     events: [],
     failures: 0,
     painted: false,
+    embeddingKey: null,
     lookupSeq: 0,
     showFallback: false,
     lastResult: null
@@ -175,11 +176,56 @@
       wrap.appendChild(d);
     });
 
+    applyEmbeddingStatus(info.embedding_contract);
+
     $("refresh-note").textContent = "Every " + (state.pollMs / 1000).toFixed(1) + "s";
     $("footer").textContent =
       "This view reads a copy of the memory and cannot write to it. Nothing here can pin, " +
       "promote, edit or delete. Refreshes every " + (state.pollMs / 1000).toFixed(1) +
       "s. Lambo " + (info.version || "") + ".";
+  }
+
+  // ---- embedding contract (H1) -----------------------------------------
+  // The session records which model wrote its vectors. If the configured
+  // embedder is a different model at the same width, every vector ranking is
+  // computed against a space the stored embeddings do not share: no error, no
+  // wrong-looking output, just confident answers that mean nothing. The server
+  // fails recall closed and reports the mismatch here so the page can say so
+  // rather than looking healthy.
+
+  function applyEmbeddingStatus(contract) {
+    var key = contract ? contract.status + "\n" + (contract.message || "") : "absent";
+    if (key === state.embeddingKey) { return; }   // do not re-paint every poll
+    state.embeddingKey = key;
+
+    var box = $("embedding-warning");
+    var mismatch = contract && contract.status === "mismatch";
+    show(box, !!mismatch);
+    if (!mismatch) { return; }
+
+    clear(box);
+    box.appendChild(el("strong", null,
+      "Search by meaning is off: this session was written by a different model."));
+    // Deliberately not contract.message: that is the server's diagnostic, and
+    // it names CLI flags and config keys a reader of this page cannot act on.
+    // It stays in /api/session for whoever is debugging the deployment.
+    box.appendChild(el("p", null,
+      "Ranking by meaning would compare your words against vectors written by another " +
+      "model, which produces confident answers that mean nothing. Lambo has switched it " +
+      "off rather than return them. Structure and keyword recall are unaffected, so " +
+      "everything else on this page is accurate."));
+
+    if (contract.stored && contract.configured) {
+      var pair = el("p", "muted-small");
+      pair.textContent = "Stored: " + describeContract(contract.stored) +
+        ". Configured: " + describeContract(contract.configured) + ".";
+      box.appendChild(pair);
+    }
+  }
+
+  function describeContract(c) {
+    return (c.kind || "unknown") + (c.model ? " / " + c.model : " / server default") +
+      (c.dim ? ", " + c.dim + " dimensions" : "");
   }
 
   // ---- counts ----------------------------------------------------------
@@ -814,6 +860,7 @@
         state.failures = 0;
         setConn("live", "Live");
         renderCounts(p.stats);
+        applyEmbeddingStatus(p.embedding_contract);
         var fresh = p.events && p.events.events && p.events.events.length;
         if (fresh) {
           state.events = state.events.concat(p.events.events);

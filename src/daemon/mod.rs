@@ -333,7 +333,7 @@ impl Daemon {
         session: &SessionId,
         query: RecallQuery,
         store: &dyn crate::store::GraphStore,
-        embedding: Option<&[f32]>,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> RecallResult {
@@ -2932,12 +2932,17 @@ mod tests {
 
         // embedding=Some (vector leg participates) -> NEVER cached.
         let emb = vec![0.1f32; 8];
+        let contract = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 8,
+        };
         let _ = daemon
             .recall(
                 &session,
                 query.clone(),
                 &store,
-                Some(&emb),
+                Some((&emb, &contract)),
                 RecallWeights::default(),
                 &mut cache,
             )

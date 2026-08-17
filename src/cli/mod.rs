@@ -193,6 +193,17 @@ mod tests {
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.0.vector_candidates(session, embedding, limit).await
         }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            expected_contract: &EmbeddingContract,
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
+                .await
+        }
         async fn blast_radius(
             &self,
             session: &SessionId,
@@ -263,6 +274,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            allow_embedding_mismatch: false,
             config: crate::Config::default(),
         }
     }
@@ -624,6 +636,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            allow_embedding_mismatch: false,
             config: crate::Config::default(),
         };
         let out = crate::cli::recall::run(
@@ -921,6 +934,116 @@ mod sqlite_tests {
             released.is_err(),
             "release after a closed reserve must not invent a lock: {released:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn h1_sqlite_reopen_checks_models_allows_explicit_rename_and_accepts_legacy() {
+        let (dir, cfg) = scratch();
+        let store = resolve_clean(&cfg).store;
+        crate::cli::provision::run(store, StoreKind::Sqlite)
+            .await
+            .expect("provision");
+
+        let mut first = resolve_clean(&cfg);
+        first.embedding.model = Some("fixture-model-v1".into());
+        first.embedder_cfg.llama_model = first.embedding.model.clone();
+        crate::cli::derive::run(
+            first,
+            crate::cli::derive::Args {
+                session: "h1-sqlite-model".into(),
+                agent: "operator".into(),
+                content: "stored with model v1".into(),
+                kind: ConceptKind::Observation,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .expect("initial writer");
+
+        let mut changed = resolve_clean(&cfg);
+        changed.embedding.model = Some("fixture-model-renamed".into());
+        changed.embedder_cfg.llama_model = changed.embedding.model.clone();
+        let err = crate::cli::derive::run(
+            changed,
+            crate::cli::derive::Args {
+                session: "h1-sqlite-model".into(),
+                agent: "operator".into(),
+                content: "must refuse".into(),
+                kind: ConceptKind::Observation,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("fixture-model-v1"), "{text}");
+        assert!(text.contains("fixture-model-renamed"), "{text}");
+        assert!(text.contains("--allow-embedding-mismatch"), "{text}");
+
+        let mut override_backends = resolve_clean(&cfg);
+        override_backends.embedding.model = Some("fixture-model-renamed".into());
+        override_backends.embedder_cfg.llama_model = override_backends.embedding.model.clone();
+        override_backends.allow_embedding_mismatch = true;
+        crate::cli::derive::run(
+            override_backends,
+            crate::cli::derive::Args {
+                session: "h1-sqlite-model".into(),
+                agent: "operator".into(),
+                content: "verified model alias".into(),
+                kind: ConceptKind::Observation,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .expect("explicit same-kind, same-width rename");
+
+        let after = resolve_clean(&cfg);
+        let loaded = load_reader_graph(after.store.as_ref(), "h1-sqlite-model")
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded
+                .graph
+                .read()
+                .embedding()
+                .and_then(|c| c.model.as_deref()),
+            Some("fixture-model-renamed")
+        );
+
+        // A pre-contract session is legacy metadata, not a mismatch. Create a
+        // durable session row without SetEmbedding, then attach normally.
+        let legacy = resolve_clean(&cfg);
+        legacy
+            .store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetRootGoal {
+                        session_id: SessionId::new("h1-sqlite-legacy"),
+                        goal: Some(serde_json::json!("legacy session")),
+                    }],
+                },
+                None,
+            )
+            .await
+            .expect("create legacy session row");
+        crate::cli::derive::run(
+            resolve_clean(&cfg),
+            crate::cli::derive::Args {
+                session: "h1-sqlite-legacy".into(),
+                agent: "operator".into(),
+                content: "legacy opens".into(),
+                kind: ConceptKind::Observation,
+                parent_of: vec![],
+                concept: vec![],
+            },
+        )
+        .await
+        .expect("unset contract still opens");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

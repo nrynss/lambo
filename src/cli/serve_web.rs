@@ -98,16 +98,20 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::caps::{check_size_cli, require_nonempty, CliError, MAX_INSPECT_NODES};
-use super::load_reader_graph_with_contract;
+use super::load_reader_graph;
 use crate::canon::{gate_progress, GateProgress};
 use crate::cli::inspect::{resolve_focus, Focus};
 use crate::graph::Graph;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::recall::format::blast_radii;
-use crate::resolve::ResolvedBackends;
+use crate::resolve::{
+    embedding_mismatch_error, session_embedding_compatibility, ResolvedBackends,
+    SessionEmbeddingCompatibility,
+};
 use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreKind};
 use crate::types::{
-    CanonizationStatus, ConceptType, EdgeType, GraphSnapshot, Node, NodeId, SessionId, StoreError,
+    CanonizationStatus, ConceptType, EdgeType, EmbeddingContract, GraphSnapshot, Node, NodeId,
+    SessionId, StoreError,
 };
 
 // ---------------------------------------------------------------------------
@@ -331,18 +335,24 @@ impl AppState {
 // Wire types
 // ---------------------------------------------------------------------------
 
-/// Session identity and backend *kinds*.
+/// Session identity, backend kinds, and embedding-space compatibility.
 ///
-/// Deliberately kind-only: `StoreConfig::dsn`, `StoreConfig::path` and
-/// `EmbedderConfig::llama_url` are credentials or internal topology and never
-/// appear here. `StoreConfig`'s own `Debug` redacts the DSN for the same reason.
-#[derive(Debug, Serialize)]
+/// Backend connectivity remains deliberately hidden: `StoreConfig::dsn`,
+/// `StoreConfig::path` and `EmbedderConfig::llama_url` are credentials or
+/// internal topology and never appear here. H1 intentionally includes the
+/// stored and configured model identifiers because a mismatch warning that
+/// cannot name the two spaces is not actionable. `StoreConfig`'s own `Debug`
+/// redacts the DSN for the same reason.
+#[derive(Clone, Debug, Serialize)]
 struct SessionInfo {
     session: String,
     store: String,
     embedder: String,
     embedding_dim: usize,
     vector_search: bool,
+    /// Stored-vs-configured embedding identity. A mismatch leaves structural
+    /// routes available but makes vector recall fail closed.
+    embedding_contract: EmbeddingStatus,
     /// Always `"reader"` — this process holds no writer lease.
     mode: &'static str,
     /// Always `true`. The router registers `GET` routes only.
@@ -356,6 +366,46 @@ struct SessionInfo {
     exposed_beyond_loopback: bool,
     poll_interval_ms: u64,
     version: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct EmbeddingStatus {
+    /// `unrecorded`, `compatible`, or `mismatch`.
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored: Option<EmbeddingContract>,
+    configured: EmbeddingContract,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl EmbeddingStatus {
+    fn inspect(stored: Option<&EmbeddingContract>, configured: &EmbeddingContract) -> Self {
+        match session_embedding_compatibility(stored, configured) {
+            SessionEmbeddingCompatibility::Unrecorded => Self {
+                status: "unrecorded",
+                stored: None,
+                configured: configured.clone(),
+                message: None,
+            },
+            SessionEmbeddingCompatibility::Compatible => Self {
+                status: "compatible",
+                stored: stored.cloned(),
+                configured: configured.clone(),
+                message: None,
+            },
+            SessionEmbeddingCompatibility::Mismatch { stored, live } => Self {
+                status: "mismatch",
+                message: Some(embedding_mismatch_error(&stored, &live).to_string()),
+                stored: Some(stored),
+                configured: live,
+            },
+        }
+    }
+
+    fn vector_search_trusted(&self) -> bool {
+        self.status != "mismatch"
+    }
 }
 
 /// One canonization transition, as the writer durably recorded it.
@@ -405,6 +455,13 @@ struct WebStats {
 struct Pulse {
     stats: WebStats,
     events: EventsPayload,
+    embedding_contract: EmbeddingStatus,
+    vector_search: bool,
+}
+
+struct StatsRead {
+    stats: WebStats,
+    embedding_status: EmbeddingStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -685,13 +742,12 @@ fn stats_from(
     }
 }
 
-async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, CliError> {
-    let loaded = load_reader_graph_with_contract(
-        state.store(),
-        state.session.as_str(),
-        Some(&state.backends.embedding),
-    )
-    .await?;
+async fn read_stats(state: &AppState, event_total: usize) -> Result<StatsRead, CliError> {
+    let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
+    let embedding_status = {
+        let g = loaded.graph.read();
+        EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding)
+    };
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
@@ -711,7 +767,10 @@ async fn read_stats(state: &AppState, event_total: usize) -> Result<WebStats, Cl
         let g = loaded.graph.read();
         stats_from(state, &g, event_total, flush)
     };
-    Ok(stats)
+    Ok(StatsRead {
+        stats,
+        embedding_status,
+    })
 }
 
 async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
@@ -762,6 +821,14 @@ async fn healthz() -> Response {
 }
 
 async fn api_session(State(state): State<Arc<AppState>>) -> Response {
+    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
+        Ok(loaded) => loaded,
+        Err(err) => return fail(err),
+    };
+    let embedding_status = {
+        let graph = loaded.graph.read();
+        EmbeddingStatus::inspect(graph.embedding(), &state.backends.embedding)
+    };
     json(
         StatusCode::OK,
         SessionInfo {
@@ -773,7 +840,9 @@ async fn api_session(State(state): State<Arc<AppState>>) -> Response {
                 .backends
                 .store
                 .capabilities()
-                .contains(Capabilities::VECTOR_SEARCH),
+                .contains(Capabilities::VECTOR_SEARCH)
+                && embedding_status.vector_search_trusted(),
+            embedding_contract: embedding_status,
             mode: "reader",
             read_only: true,
             store_is_process_local: state.backends.store_cfg.kind == StoreKind::Memory,
@@ -801,7 +870,7 @@ async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
         Err(e) => return fail(e),
     };
     match read_stats(&state, total).await {
-        Ok(stats) => json(StatusCode::OK, stats),
+        Ok(read) => json(StatusCode::OK, read.stats),
         Err(e) => fail(e),
     }
 }
@@ -816,7 +885,22 @@ async fn api_pulse(
         Err(e) => return fail(e),
     };
     match read_stats(&state, events.total).await {
-        Ok(stats) => json(StatusCode::OK, Pulse { stats, events }),
+        Ok(read) => {
+            let vector_search = state
+                .store()
+                .capabilities()
+                .contains(Capabilities::VECTOR_SEARCH)
+                && read.embedding_status.vector_search_trusted();
+            json(
+                StatusCode::OK,
+                Pulse {
+                    stats: read.stats,
+                    events,
+                    embedding_contract: read.embedding_status,
+                    vector_search,
+                },
+            )
+        }
         Err(e) => fail(e),
     }
 }
@@ -868,13 +952,7 @@ async fn api_inspect(
         // depends on this" without rendering an error (contract #2).
         return json(StatusCode::OK, InspectResponse::missing(params.focus));
     }
-    let loaded = match load_reader_graph_with_contract(
-        state.store(),
-        state.session.as_str(),
-        Some(&state.backends.embedding),
-    )
-    .await
-    {
+    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
         Ok(l) => l,
         Err(e) => return fail(e),
     };
@@ -941,13 +1019,7 @@ async fn api_inspect(
 /// lease. Ships only `Dependency`/`Causal`/`Hierarchical` edges — the false
 /// `CoOccurrence` edge stays out of the visible claim.
 async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
-    let loaded = match load_reader_graph_with_contract(
-        state.store(),
-        state.session.as_str(),
-        Some(&state.backends.embedding),
-    )
-    .await
-    {
+    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
         Ok(l) => l,
         Err(e) => return fail(e),
     };
@@ -1143,33 +1215,24 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // warning (same posture as `mcp::serve::authorize_bind`).
     authorize_bind_web(args.bind, auth.as_ref())?;
 
-    // T1 part 2 #1 / T1b-R1-5: fail fast at startup on an embedder-contract
-    // mismatch instead of serving a half-broken page with 502s on
-    // /api/stats, /api/pulse and /api/recall. The read-only load checks the
-    // session's stored contract against the live embedder; a fresh or absent
-    // session has no stored contract and loads fine, so this only refuses on a
-    // genuine mismatch — the loud, singular failure naming the mismatched
-    // model (kind/model/dim). Read-only: no writer, no lease, nothing stamped.
-    // This is intentionally all-or-nothing: a contract mismatch means the
-    // session's stored vectors are unusable, so serve-web refuses to start
-    // rather than serving only the structural, embedder-free surfaces. If a
-    // structural-only view of a mismatched session is ever needed, gate only
-    // the stats/pulse/recall endpoints instead.
-    // The one-time load here is deliberate redundancy: it fails before the
-    // server binds, so a mismatch is caught with a single loud startup error
-    // even though the first request would reload the session.
-    if let Err(e) = load_reader_graph_with_contract(
-        backends.store.as_ref(),
-        &args.session,
-        Some(&backends.embedding),
-    )
-    .await
-    {
+    // H1 reader policy: keep the structural portal available, but never let a
+    // model mismatch look healthy. `/api/session` carries the stored and live
+    // contracts plus a loud message, the page renders it as a banner, and the
+    // recall route remains fail-closed through `cli::recall`. Structural
+    // stats/graph/inspect deliberately load without an embedder contract.
+    let startup = load_reader_graph(backends.store.as_ref(), &args.session).await?;
+    let embedding_status = {
+        let graph = startup.graph.read();
+        EmbeddingStatus::inspect(graph.embedding(), &backends.embedding)
+    };
+    if embedding_status.status == "mismatch" {
         eprintln!(
-            "lambo serve-web: refusing to start — the live embedder does not match this \
-             session's stored vectors:\n{e}"
+            "lambo serve-web: WARNING — vector recall is disabled for this session: {}",
+            embedding_status
+                .message
+                .as_deref()
+                .unwrap_or("stored and configured embedding contracts differ")
         );
-        return Err(e);
     }
 
     let exposed = !args.bind.is_loopback();
@@ -1347,6 +1410,17 @@ mod tests {
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.0.vector_candidates(session, embedding, limit).await
         }
+        async fn vector_candidates_checked(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            expected_contract: &EmbeddingContract,
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0
+                .vector_candidates_checked(session, embedding, expected_contract, limit)
+                .await
+        }
         async fn blast_radius(
             &self,
             session: &SessionId,
@@ -1430,6 +1504,7 @@ mod tests {
                 model: None,
                 dim: 1024,
             },
+            allow_embedding_mismatch: false,
             config: crate::Config::default(),
         }
     }
@@ -2574,7 +2649,6 @@ mod tests {
         backends.store_cfg.dsn = Some("postgresql://demo:hunter2@crdb.internal:26257/lambo".into());
         backends.store_cfg.path = Some("/var/lib/lambo/private.sqlite".into());
         backends.embedder_cfg.llama_url = Some("http://embed.internal:8080".into());
-
         let state = Arc::new(AppState {
             session: SessionId::new("t85-secrets"),
             backends,
@@ -2608,6 +2682,134 @@ mod tests {
         assert_eq!(info["embedder"], "fixture");
         assert_eq!(info["read_only"], true);
         assert_eq!(info["mode"], "reader");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn h1_live_contract_changes_update_session_pulse_and_keep_recall_fail_closed() {
+        let store = Arc::new(MemoryStore::new());
+        let stored = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-v1".into()),
+            dim: 1024,
+        };
+        let mem = crate::Memory::builder()
+            .session("h1-web-mismatch")
+            .agent("writer")
+            .store(store.clone() as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn crate::embed::Embedder>)
+            .embedding_contract(stored.clone())
+            .build()
+            .await
+            .unwrap();
+        mem.close().await.unwrap();
+
+        let mut backends = backends_on(store.clone());
+        backends.embedding.model = Some("fixture-model-v1".into());
+        backends.embedder_cfg.llama_model = backends.embedding.model.clone();
+        let state = Arc::new(AppState {
+            session: SessionId::new("h1-web-mismatch"),
+            backends,
+            exposed: false,
+            auth: None,
+            freshness: Mutex::new(Freshness {
+                fingerprint: 0,
+                observed_at: Instant::now(),
+            }),
+        });
+        let (addr, handle) = spawn(state).await;
+
+        let raw = request(addr, "GET", "/api/session").await;
+        assert_eq!(raw.status, 200);
+        let info: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        assert_eq!(info["embedding_contract"]["status"], "compatible");
+
+        let changed = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-v2".into()),
+            dim: 1024,
+        };
+        store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetEmbedding {
+                        session_id: SessionId::new("h1-web-mismatch"),
+                        embedding: Some(changed),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let raw = request(addr, "GET", "/api/session").await;
+        assert_eq!(raw.status, 200);
+        let info: serde_json::Value = serde_json::from_str(&raw.body).unwrap();
+        assert_eq!(info["embedding_contract"]["status"], "mismatch");
+        assert_eq!(
+            info["embedding_contract"]["stored"]["model"],
+            "fixture-model-v2"
+        );
+        assert_eq!(
+            info["embedding_contract"]["configured"]["model"],
+            "fixture-model-v1"
+        );
+        let message = info["embedding_contract"]["message"].as_str().unwrap();
+        assert!(message.contains("fixture-model-v2"), "{message}");
+        assert!(message.contains("fixture-model-v1"), "{message}");
+        assert_eq!(info["vector_search"], false);
+
+        let pulse = request(addr, "GET", "/api/pulse").await;
+        assert_eq!(pulse.status, 200);
+        let pulse: serde_json::Value = serde_json::from_str(&pulse.body).unwrap();
+        assert_eq!(pulse["embedding_contract"]["status"], "mismatch");
+
+        for path in ["/api/stats", "/api/graph", "/api/inspect?focus=missing"] {
+            let response = request(addr, "GET", path).await;
+            assert_eq!(
+                response.status, 200,
+                "structural route {path} remains available: {}",
+                response.body
+            );
+        }
+        let recall = request(addr, "GET", "/api/recall?q=anything").await;
+        assert_eq!(recall.status, 502, "mismatched vector recall must refuse");
+        assert!(recall.body.contains("fixture-model-v2"), "{}", recall.body);
+        assert!(recall.body.contains("fixture-model-v1"), "{}", recall.body);
+
+        store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetEmbedding {
+                        session_id: SessionId::new("h1-web-mismatch"),
+                        embedding: Some(stored),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let pulse = request(addr, "GET", "/api/pulse").await;
+        let pulse: serde_json::Value = serde_json::from_str(&pulse.body).unwrap();
+        assert_eq!(pulse["embedding_contract"]["status"], "compatible");
+        // The page was rebuilt after this test was written, so these assert the
+        // same three properties against the current implementation rather than
+        // the previous one's identifiers: it reads the contract off the poll,
+        // it says so on a mismatch, and it clears the banner when the contract
+        // becomes compatible again instead of leaving a stale warning up.
+        assert!(
+            APP_JS.contains("applyEmbeddingStatus(p.embedding_contract"),
+            "the page must re-read the embedding contract on every poll"
+        );
+        assert!(
+            APP_JS.contains("Search by meaning is off"),
+            "the page must state that ranking by meaning is disabled"
+        );
+        assert!(
+            APP_JS.contains("show(box, !!mismatch)"),
+            "the banner must clear in the compatible direction, not only appear"
+        );
 
         handle.abort();
     }

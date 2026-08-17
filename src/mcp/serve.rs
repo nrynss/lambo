@@ -1876,6 +1876,7 @@ mod tests {
                     model: None,
                     dim: 1024,
                 },
+                allow_embedding_mismatch: false,
                 config: crate::Config::default(),
             }
         }

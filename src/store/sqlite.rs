@@ -2038,19 +2038,25 @@ mod tests {
     #[tokio::test]
     async fn vector_candidates_capability_error_and_no_dimensions() {
         let store = test_store();
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 8,
+        };
         store.init_schema().await.unwrap();
         assert!(store.capabilities().is_empty());
         assert_eq!(store.vector_dimensions(), None);
         let err = store
-            .vector_candidates(&SessionId::from("x"), &[0.0; 8], 5)
+            .vector_candidates_checked(&SessionId::from("x"), &[0.0; 8], &contract, 5)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
         assert!(matches!(
             store
-                .vector_candidates(
+                .vector_candidates_checked(
                     &SessionId::from("x"),
                     &[],
+                    &contract,
                     crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
                 )
                 .await
@@ -2168,6 +2174,15 @@ mod tests {
             .unwrap()
             .ensure_compatible(&incompatible)
             .is_err());
+        let err = crate::resolve::assert_session_embedding_compatible(
+            reloaded.embedding(),
+            &incompatible,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("fixture-v1"), "{text}");
+        assert!(text.contains("amazon.titan-embed-text-v2:0"), "{text}");
+        assert!(text.contains("--allow-embedding-mismatch"), "{text}");
 
         #[cfg(feature = "store-memory")]
         {

@@ -757,7 +757,9 @@ impl GraphStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentId, CanonizationStatus, Concept, ConceptType, Edge, Interaction};
+    use crate::types::{
+        AgentId, CanonizationStatus, Concept, ConceptType, Edge, EmbeddingContract, Interaction,
+    };
     use chrono::TimeZone;
     use std::sync::Arc;
 
@@ -1363,17 +1365,23 @@ mod tests {
     #[tokio::test]
     async fn vector_candidates_capability_error() {
         let store = MemoryStore::new();
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 1024,
+        };
         let err = store
-            .vector_candidates(&SessionId::from("x"), &[0.0; 1024], 5)
+            .vector_candidates_checked(&SessionId::from("x"), &[0.0; 1024], &contract, 5)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Capability(_)));
         assert!(store.capabilities().is_empty());
         assert!(matches!(
             store
-                .vector_candidates(
+                .vector_candidates_checked(
                     &SessionId::from("x"),
                     &[],
+                    &contract,
                     crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
                 )
                 .await

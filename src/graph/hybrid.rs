@@ -3,7 +3,7 @@
 //! On a canonical-key miss ([`CanonicalizeResult::Unmatched`]) under
 //! `MatchStrategy::Hybrid`, this module embeds the concept **with context**
 //! (name + origin interaction text — the live BGE-M3 calibration rule; see
-//! `dev-diary/PHASE-7-embeddings.md`), queries [`GraphStore::vector_candidates`],
+//! `dev-diary/PHASE-7-embeddings.md`), queries [`GraphStore::vector_candidates_checked`],
 //! and — when a candidate sits at or above `semantic_match_threshold` — records
 //! the merge as a decaying [`EdgeType::Semantic`] edge to the matched concept.
 //! Below the threshold, or when the capability / embedder is unavailable, it
@@ -13,7 +13,7 @@
 //! # The seam (design decision of record)
 //!
 //! The sync twin [`crate::graph::derive::derive`] takes `&mut Graph` and cannot
-//! host the async hybrid step: embedding + `vector_candidates` are I/O, and the
+//! host the async hybrid step: embedding + `vector_candidates_checked` are I/O, and the
 //! graph lock must **never** be held across an `.await` (spec §6.4; see
 //! `src/graph/mod.rs`). This module is the async twin the session owner
 //! (T8.1's `Memory`) calls in place of `derive` while `MatchStrategy::Hybrid` is
@@ -26,7 +26,7 @@
 //!    ([`EmbeddingContract::ensure_compatible`]) **before** any embedding — a
 //!    kind/model/dim swap is refused without re-embedding. Release the lock.
 //! 2. **Gather (async, no lock).** For each `Unmatched` concept: build the
-//!    context, `embedder.embed`, `store.vector_candidates`. The store call goes
+//!    context, `embedder.embed`, `store.vector_candidates_checked`. The store call goes
 //!    through the [`GraphStore`] trait only. A capability-miss or embed failure
 //!    marks the concept for the canonical fallback (logged once per session); a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates.
@@ -55,7 +55,7 @@
 //! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
 //! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept for which no
 //! vector was ever produced (capability-absent, embed failure/timeout, a store
-//! that refuses `vector_candidates` after advertising the capability, or an
+//! that refuses `vector_candidates_checked` after advertising the capability, or an
 //! invalid non-Concept merge target — see the commit-time validation) is written
 //! with `embedding: None`; a failed embed likewise never stamps the session's
 //! embedding contract (MINOR-2). See "Vector persistence for fresh concepts"
@@ -80,7 +80,7 @@
 //!
 //! ## The chosen semantic: **threshold-preserving** (recall-visible, merge bar unchanged)
 //!
-//! A persisted vector is read by [`GraphStore::vector_candidates`], which serves
+//! A persisted vector is read by [`GraphStore::vector_candidates_checked`], which serves
 //! two callers: recall's vector leg (read-only ranking, T5.1) and this module's
 //! merge step. The precision-bias / anti-over-merge law (MAJOR-1) survives as
 //! three properties, each pinned by a test:
@@ -109,7 +109,7 @@
 //!
 //! Once flushed, a fresh vector **is** a legal merge *target* for a later derive
 //! (`Resolution::HybridMerge { target }`). That is unavoidable here:
-//! `vector_candidates` is a single query over `embedding IS NOT NULL` and cannot
+//! the checked candidate read targets `embedding IS NOT NULL` and cannot
 //! tell the merge leg from the recall leg apart. A strict target-exclusion would
 //! need durable per-vector provenance (a new `concepts` column plus a migration
 //! in every adapter) and — because after this change *every* organic concept is
@@ -512,7 +512,12 @@ pub async fn derive(
                             attempted_embed = true;
                             match tokio::time::timeout_at(
                                 io_deadline,
-                                store.vector_candidates(&session_id, &emb, VECTOR_CANDIDATE_LIMIT),
+                                store.vector_candidates_checked(
+                                    &session_id,
+                                    &emb,
+                                    embedding,
+                                    VECTOR_CANDIDATE_LIMIT,
+                                ),
                             )
                             .await
                             {
@@ -1002,8 +1007,8 @@ mod tests {
 
     /// Store double advertising configurable capabilities and returning canned
     /// vector hits (mirrors recall's `SpyVectorStore`). A non-`Capability`
-    /// backend error from `vector_candidates` can be forced for the propagate
-    /// case. Any async method other than `vector_candidates` panics so a test
+    /// backend error from `vector_candidates_checked` can be forced for the propagate
+    /// case. Any async method other than `vector_candidates_checked` panics so a test
     /// cannot silently reach the store through the wrong surface.
     struct SpyStore {
         caps: Capabilities,
@@ -1041,7 +1046,7 @@ mod tests {
             self.vector_calls.load(Ordering::SeqCst)
         }
         fn unexpected(&self) -> ! {
-            panic!("SpyStore: unexpected async store call (only vector_candidates allowed)")
+            panic!("SpyStore: unexpected async store call (only vector_candidates_checked allowed)")
         }
     }
     #[async_trait]
@@ -1077,6 +1082,15 @@ mod tests {
             &self,
             _session: &SessionId,
             _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.unexpected()
+        }
+        async fn vector_candidates_checked(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            _expected_contract: &EmbeddingContract,
             _limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.vector_calls.fetch_add(1, Ordering::SeqCst);
@@ -1768,7 +1782,7 @@ mod tests {
     }
 
     /// L82-4 property 3: a vector minted during a call can never drive a merge
-    /// *inside* that call. Every `vector_candidates` query is issued in the
+    /// *inside* that call. Every checked vector-candidate query is issued in the
     /// gather phase, before a single node is written, so a sibling concept of
     /// the same derive is structurally invisible as a candidate — no
     /// self-referential merging on the strength of a just-minted vector.

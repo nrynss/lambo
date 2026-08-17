@@ -8,7 +8,7 @@
 //!    (ties broken by node id ascending). The temporal chain order is NOT
 //!    consulted: the contract is "3 most recent by `created_at`" (handoff
 //!    T5.1), and a chain ordered by insertion may carry arbitrary timestamps.
-//! 3. **Vector** — [`GraphStore::vector_candidates`], only when the store
+//! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
 //!    advertises [`Capabilities::VECTOR_SEARCH`]. The call is async I/O, so it
 //!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
 //!    itself is pure and lock-safe.
@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::store::{validate_vector_candidate_limit, Capabilities, GraphStore};
-use crate::types::{NodeId, Scored, SessionId, StoreError};
+use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
 /// Number of most-recent interactions whose concepts join phase 1 (spec §8).
 pub const RECENT_INTERACTIONS: usize = 3;
@@ -91,7 +91,7 @@ pub struct Phase1Input {
 pub async fn gather(
     store: &dyn GraphStore,
     session: &SessionId,
-    embedding: Option<&[f32]>,
+    embedding: Option<(&[f32], &EmbeddingContract)>,
     limit: usize,
 ) -> Result<Phase1Input, StoreError> {
     validate_vector_candidate_limit(limit)?;
@@ -102,14 +102,16 @@ pub async fn gather(
         );
         return Ok(Phase1Input::default());
     }
-    let Some(emb) = embedding else {
+    let Some((emb, expected_contract)) = embedding else {
         tracing::debug!(
             target: "lambo::recall",
             "phase-1 vector leg skipped: no query embedding available"
         );
         return Ok(Phase1Input::default());
     };
-    let vector = store.vector_candidates(session, emb, limit).await?;
+    let vector = store
+        .vector_candidates_checked(session, emb, expected_contract, limit)
+        .await?;
     Ok(Phase1Input { vector })
 }
 
@@ -255,6 +257,7 @@ mod tests {
     use crate::test_util::capture_logs;
     use chrono::{DateTime, TimeZone, Utc};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -329,18 +332,27 @@ mod tests {
         results.into_iter().map(|s| s.item).collect()
     }
 
+    fn contract() -> EmbeddingContract {
+        EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-v1".into()),
+            dim: 8,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Spy store
     // -----------------------------------------------------------------------
 
     /// `GraphStore` double: counts every async trait call and returns canned
     /// vector hits when the capability is advertised. Any async method other
-    /// than `vector_candidates` that gets called is a contract violation and
+    /// than `vector_candidates_checked` that gets called is a contract violation and
     /// panics (the count is asserted independently).
     struct SpyVectorStore {
         caps: Capabilities,
         vector_hits: Vec<Scored<NodeId>>,
         async_calls: AtomicUsize,
+        current_contract: Mutex<EmbeddingContract>,
     }
 
     impl SpyVectorStore {
@@ -349,6 +361,7 @@ mod tests {
                 caps: Capabilities::HISTORY,
                 vector_hits: Vec::new(),
                 async_calls: AtomicUsize::new(0),
+                current_contract: Mutex::new(contract()),
             }
         }
 
@@ -357,17 +370,22 @@ mod tests {
                 caps: Capabilities::VECTOR_SEARCH | Capabilities::HISTORY,
                 vector_hits: hits,
                 async_calls: AtomicUsize::new(0),
+                current_contract: Mutex::new(contract()),
             }
         }
 
         fn async_calls(&self) -> usize {
             self.async_calls.load(Ordering::SeqCst)
         }
+
+        fn change_contract(&self, model: &str) {
+            self.current_contract.lock().unwrap().model = Some(model.into());
+        }
     }
 
     impl SpyVectorStore {
         /// Count the call and fail the test: gather must never reach any async
-        /// trait method other than `vector_candidates`.
+        /// trait method other than `vector_candidates_checked`.
         fn unexpected_call(&self) -> ! {
             self.async_calls.fetch_add(1, Ordering::SeqCst);
             panic!("SpyVectorStore: unexpected async store call");
@@ -391,9 +409,13 @@ mod tests {
         }
         async fn load_session(
             &self,
-            _session: &SessionId,
+            session: &SessionId,
         ) -> Result<crate::types::GraphSnapshot, StoreError> {
-            self.unexpected_call()
+            Ok(crate::types::GraphSnapshot {
+                session_id: session.clone(),
+                embedding: Some(self.current_contract.lock().unwrap().clone()),
+                ..crate::types::GraphSnapshot::default()
+            })
         }
         async fn keyword_candidates(
             &self,
@@ -409,7 +431,21 @@ mod tests {
             _embedding: &[f32],
             _limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.unexpected_call()
+        }
+        async fn vector_candidates_checked(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            expected_contract: &EmbeddingContract,
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             self.async_calls.fetch_add(1, Ordering::SeqCst);
+            self.current_contract
+                .lock()
+                .unwrap()
+                .ensure_compatible(expected_contract)
+                .map_err(|err| StoreError::Invariant(err.to_string()))?;
             Ok(self.vector_hits.clone())
         }
         async fn blast_radius(
@@ -448,7 +484,8 @@ mod tests {
         let store = SpyVectorStore::without_vector();
         let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
-        let input = gather(&store, &sid(), Some(&[0.5; 8]), 5)
+        let contract = contract();
+        let input = gather(&store, &sid(), Some((&[0.5; 8], &contract)), 5)
             .await
             .expect("absent capability degrades, not errors");
         assert!(input.vector.is_empty());
@@ -471,7 +508,8 @@ mod tests {
         let store = SpyVectorStore::with_vector(vec![Scored::new(c2, 0.8)]);
         let (logs, _guard) = capture_logs(tracing::Level::TRACE);
 
-        let input = gather(&store, &sid(), Some(&[0.5; 8]), 5)
+        let contract = contract();
+        let input = gather(&store, &sid(), Some((&[0.5; 8], &contract)), 5)
             .await
             .expect("capability present");
         assert_eq!(input.vector.len(), 1);
@@ -487,6 +525,26 @@ mod tests {
         assert_eq!(ids(out.clone()), vec![c2, c1, c3]);
         let s = out[0].score;
         assert!(s > 0.8, "max-merge keeps the higher BM25 score, got {s}");
+    }
+
+    #[tokio::test]
+    async fn h1_contract_change_between_initial_load_and_candidate_read_returns_no_rankings() {
+        let hit = Scored::new(NodeId(Uuid::from_u64_pair(9, 1)), 0.99);
+        let store = SpyVectorStore::with_vector(vec![hit]);
+
+        // This is the reader's startup snapshot/check at contract A.
+        let loaded = store.load_session(&sid()).await.unwrap();
+        let expected = loaded.embedding.unwrap();
+        assert_eq!(expected.model.as_deref(), Some("fixture-v1"));
+
+        // Deterministically model the writer's atomic A -> B contract/vector
+        // commit while the reader is awaiting query embedding.
+        store.change_contract("fixture-v2");
+        let err = gather(&store, &sid(), Some((&[0.5; 8], &expected)), 5)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("fixture-v2"), "{err}");
+        assert_eq!(store.async_calls(), 1);
     }
 
     #[tokio::test]
@@ -511,10 +569,11 @@ mod tests {
     #[tokio::test]
     async fn gather_rejects_oversized_top_k_before_store_io() {
         let store = SpyVectorStore::with_vector(Vec::new());
+        let contract = contract();
         let err = gather(
             &store,
             &sid(),
-            Some(&[0.5; 8]),
+            Some((&[0.5; 8], &contract)),
             crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
         )
         .await

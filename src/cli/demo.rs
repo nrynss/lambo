@@ -659,11 +659,20 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         store,
         embedder,
         embedding,
+        allow_embedding_mismatch,
         ..
     } = backends;
     let store: Arc<dyn GraphStore> = Arc::from(store);
     let embedder: Arc<dyn Embedder> = Arc::from(embedder);
-    let run = run_scenario(store, embedder, embedding, args, true).await?;
+    let run = run_scenario_with_override(
+        store,
+        embedder,
+        embedding,
+        allow_embedding_mismatch,
+        args,
+        true,
+    )
+    .await?;
     Ok(run.outcome.render())
 }
 
@@ -675,6 +684,17 @@ pub async fn run_scenario(
     store: Arc<dyn GraphStore>,
     embedder: Arc<dyn Embedder>,
     embedding: EmbeddingContract,
+    args: Args,
+    echo: bool,
+) -> Result<DemoRun, CliError> {
+    run_scenario_with_override(store, embedder, embedding, false, args, echo).await
+}
+
+async fn run_scenario_with_override(
+    store: Arc<dyn GraphStore>,
+    embedder: Arc<dyn Embedder>,
+    embedding: EmbeddingContract,
+    allow_embedding_mismatch: bool,
     args: Args,
     echo: bool,
 ) -> Result<DemoRun, CliError> {
@@ -717,7 +737,7 @@ pub async fn run_scenario(
     let mem = open(
         &store,
         &embedder,
-        &embedding,
+        (&embedding, allow_embedding_mismatch),
         &session,
         AGENT_A,
         build_config(),
@@ -734,7 +754,7 @@ pub async fn run_scenario(
     let mem = open(
         &store,
         &embedder,
-        &embedding,
+        (&embedding, allow_embedding_mismatch),
         &session,
         AGENT_B,
         build_config(),
@@ -751,7 +771,7 @@ pub async fn run_scenario(
     let mem = open(
         &store,
         &embedder,
-        &embedding,
+        (&embedding, allow_embedding_mismatch),
         &session,
         AGENT_A,
         build_config(),
@@ -773,7 +793,7 @@ pub async fn run_scenario(
     let mem = open(
         &store,
         &embedder,
-        &embedding,
+        (&embedding, allow_embedding_mismatch),
         &session,
         AGENT_A,
         canonization_config(),
@@ -814,7 +834,7 @@ pub async fn run_scenario(
     let mem = open(
         &store,
         &embedder,
-        &embedding,
+        (&embedding, allow_embedding_mismatch),
         &session,
         AGENT_B,
         canonization_config(),
@@ -959,7 +979,7 @@ pub fn script_clock() -> crate::daemon::Clock {
 async fn open(
     store: &Arc<dyn GraphStore>,
     embedder: &Arc<dyn Embedder>,
-    embedding: &EmbeddingContract,
+    embedding: (&EmbeddingContract, bool),
     session: &str,
     agent: &str,
     config: Config,
@@ -970,7 +990,8 @@ async fn open(
         .agent(agent)
         .store(store.clone())
         .embedder(embedder.clone())
-        .embedding_contract(embedding.clone())
+        .embedding_contract(embedding.0.clone())
+        .allow_embedding_mismatch(embedding.1)
         .config(config)
         .clock(clock.clone())
         .build()
