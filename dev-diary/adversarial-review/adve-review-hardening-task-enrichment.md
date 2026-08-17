@@ -304,3 +304,68 @@ declare the task clean.
   to the graph notice. Inspect flag-to-notice coverage is required only when a
   claimed change adds or edits an inspect consumer; a placeholder inspect
   notice is expressly forbidden.
+
+## Round-3 final clearance (2026-08-17)
+
+- **Reviewer:** `hardening_docs_review` (independent; implementation source
+  read-only)
+- **Reviewed remediation:**
+  `53c5af43d583c2814f7c730dc826a039bc2ad74b`
+- **Verdict:** **CLEAN / APPROVE** - 0 P0 / 0 P1 / 0 P2 / 0 P3
+
+All original and Round-2 findings are closed. The task document now provides a
+single satisfiable H3 success schema, preserves the existing error behavior,
+keeps every warning visible in both the verbatim and structured presentations,
+and scopes H6 to branch-local consumers. No new factual contradiction or scope
+expansion was found.
+
+### Finding closure
+
+- **HENR-1 / HENR-R2-1:** closed. H3 preserves `session`, `query`, `context`
+  and `elapsed_ms`, then adds every ranked hit plus ordered response-global
+  annotations. `included_in_context` identifies complete blocks in the ranked
+  prefix without erasing the existing independent warning channel. Every
+  warning rendered into `context` has one typed owner. When a hit block is
+  outside the token budget, its typed safety annotations remain visible in a
+  persistent, labelled overflow area even if its card is hidden. The required
+  tiny-budget golden pins the exact edge case that Round 2 found. Successful
+  context remains byte-identical to the CLI renderer; H1 contract mismatch
+  remains an error with no success fields.
+- **HENR-R2-2:** closed. Both the pinned schema and compatibility criterion name
+  all four legacy HTTP fields. Public Rust signatures and MCP fields remain
+  outside incidental change.
+- **HENR-2:** closed. Both `5ccd48f` paragraphs are warnings only, explicitly
+  prohibit porting/reconciliation on this branch, and require a separate future
+  orchestration instruction before any import. H3, H4 and H6 are scoped to
+  their claimed deliverable heads.
+- **HENR-3:** closed. H1 is DONE/CLEAN, H2-H6 have a serial dispatch order with
+  per-task review/integration boundaries, and H7 remains PARKED behind its
+  reviewed design gate.
+- **HENR-4:** closed. H7 distinguishes session-data APIs from assets and
+  `/healthz`, preserves GET/auth middleware globally, and limits `no-store` to
+  session-memory/API responses.
+- **HENR-5 / HENR-R2-3:** closed. H6 qualifies `truncated` as a successful
+  response field and preserves error shapes. Its fallback binds the graph flag
+  to the graph notice on this branch; inspect coverage is required only for an
+  actual claimed inspect consumer, and a placeholder is forbidden.
+
+### Final checks
+
+- The H1 prefix SHA-256 is still
+  `8e33ec7d93f41980d401308cacc706629e55f91c6f72cf524da3454294ad8d30`
+  at both `46ca7be` and `53c5af4`.
+- `git diff --check 46ca7be..53c5af4` and `git show --check 53c5af4`
+  passed. The remediation changes only the hardening task document and its
+  disposition record.
+- `node --check web/app.js` passed.
+- `cargo package --list --allow-dirty --no-verify` still reports exactly 103
+  paths and the same fourteen accidental internal README paths documented by
+  H5.
+- The review index has 57 rows for 57 records and every Markdown target
+  resolves. The existing row is now closed with this Round-3 verdict; the record
+  count does not change because this clearance is appended in place.
+
+**Final verdict: CLEAN / APPROVE.** The H2-H7 handoffs are coherent and ready
+for the orchestrated serial implementation/review loops described by the task
+document. This clearance does not implement, integrate, reconcile, or push any
+hardening task.
