@@ -34,8 +34,9 @@
 use std::collections::HashMap;
 
 use crate::graph::Graph;
+use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
-use crate::types::{CanonizationStatus, NodeId, RecallHit, RecallResult, Scored};
+use crate::types::{CanonizationStatus, NodeId, RecallHit, Scored};
 
 /// What kind of question a recall query is, for routing (T9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,15 +249,15 @@ fn max_structural_strength(graph: &Graph, a: NodeId, b: NodeId) -> f64 {
 
 /// Answer a structural query by traversal when possible.
 ///
-/// Returns `Some(RecallResult)` only when the query is structural AND an anchor
-/// resolves AND it has at least one dependent. Otherwise `None` (refusal —
-/// caller falls through to the blended pipeline).
-pub fn try_structural(
+/// Returns `Some(DetailedRecall)` only when the query is structural AND an
+/// anchor resolves AND it has at least one dependent. Otherwise `None`
+/// (refusal — caller falls through to the blended pipeline).
+pub(crate) fn try_structural(
     graph: &Graph,
     query: &str,
     top_k: usize,
     max_tokens: usize,
-) -> Option<RecallResult> {
+) -> Option<DetailedRecall> {
     if !matches!(classify(query), RecallKind::Structural) {
         return None;
     }
@@ -268,6 +269,7 @@ pub fn try_structural(
 
     let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
+    let mut detailed: Vec<DetailedHit> = Vec::new();
     let mut blocks: Vec<String> = Vec::new();
     for s in deps.into_iter().take(top_k) {
         let crate::types::Node::Concept(c) = graph.node(s.item)? else {
@@ -286,18 +288,28 @@ pub fn try_structural(
                 None
             },
         };
+        // H3: status from the same graph snapshot, typed annotation attached
+        // where its producer is known (mirrors assemble). Status `None` is
+        // carried as absent (the wire contract).
+        let mut detailed_hit = DetailedHit::new(
+            &hit,
+            (c.canonization_status != CanonizationStatus::None).then_some(c.canonization_status),
+        );
         // T9-R1-5: canonical structural hits render the §13 load-bearing-pillar
         // warning exactly as the blended pipeline does (assemble), so the
         // structural and blend surfaces look identical.
         let mut lines: Vec<String> = Vec::new();
         if canonical {
-            lines.push(format::blast_radius_warning(
-                hit.blast_radius.unwrap_or_default(),
-            ));
+            let text = format::blast_radius_warning(hit.blast_radius.unwrap_or_default());
+            detailed_hit
+                .annotations
+                .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
+            lines.push(text);
         }
         let block = format::render_block(&hit, &lines);
         blocks.push(block);
         hits.push(hit);
+        detailed.push(detailed_hit);
     }
     if hits.is_empty() {
         return None;
@@ -326,12 +338,21 @@ pub fn try_structural(
     // T9-R1-N4: headline names only the dependents the context actually
     // renders (kept whole blocks), not the pre-truncation hit set.
     let count = kept.len();
-    Some(RecallResult {
+    let mut warnings = Vec::new();
+    let traversal =
+        format!("recall: dependency question answered by graph traversal ({count} dependents)");
+    warnings.push(traversal.clone());
+    // H3: included_in_context at the cut; the traversal explanation is
+    // response-global — one annotation, never attached to a hit.
+    for (i, d) in detailed.iter_mut().enumerate() {
+        d.included_in_context = i < count;
+    }
+    Some(DetailedRecall {
         hits,
         context: format::render_context(&kept),
-        warnings: vec![format!(
-            "recall: dependency question answered by graph traversal ({count} dependents)"
-        )],
+        warnings,
+        detailed,
+        response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })
 }
 
@@ -677,6 +698,109 @@ mod tests {
         assert!(
             contents.contains(&"RDS-Lambo-Demo-DB"),
             "Daemon::recall must dispatch the dependency question, got {contents:?}"
+        );
+    }
+
+    /// A dedicated structural graph: `app router` is the sole structural
+    /// source of a canonical `users handler` and a plain `payments handler`,
+    /// so the traversal answer exercises a load-bearing annotation and a
+    /// full status on structural hits.
+    fn structural_exhibit() -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = NodeId(uuid::Uuid::from_u64_pair(1, 1));
+        g.insert_interaction(Interaction {
+            id: i1,
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("route the API".into()),
+            previous_id: None,
+            created_at: ts(0),
+        })
+        .unwrap();
+        for (id, content) in [
+            (1u64, "app router"),
+            (2, "users handler"),
+            (3, "payments handler"),
+        ] {
+            g.insert_concept(concept(id, content, ConceptType::Entity), i1)
+                .unwrap();
+        }
+        // Walk the users handler to Canonical through the audited path.
+        for (from, to) in [
+            (CanonizationStatus::None, CanonizationStatus::Candidate),
+            (CanonizationStatus::Candidate, CanonizationStatus::Venerable),
+            (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+        ] {
+            g.apply_canonization_transition(crate::types::CanonizationEvent {
+                id: NodeId::new(),
+                session_id: sid(),
+                node_id: NodeId(uuid::Uuid::from_u64_pair(2, 2)),
+                from_status: from,
+                to_status: to,
+                blast_radius: None,
+                last_demotion_time: None,
+                occurred_at: ts(0),
+            })
+            .unwrap();
+        }
+        g.upsert_edge(edge(1, 1, 2, EdgeType::Dependency, 5.0))
+            .unwrap();
+        g.upsert_edge(edge(2, 1, 3, EdgeType::Dependency, 3.0))
+            .unwrap();
+        g
+    }
+
+    /// The H3 structural golden — a dispatched dependency question carries
+    /// one hit with a `load_bearing` annotation (its Canonical status from
+    /// the same graph snapshot), one annotation-free hit, and the traversal
+    /// explanation as a single response-global annotation.
+    #[test]
+    fn h3_structural_payload_matches_golden() {
+        let g = structural_exhibit();
+        let result = try_structural(&g, "what depends on app router", 5, 500)
+            .expect("structural question must dispatch");
+
+        assert_eq!(result.response_annotations.len(), 1);
+        assert_eq!(
+            result.response_annotations[0].kind,
+            AnnotationKind::Traversal
+        );
+        assert_eq!(
+            result.response_annotations[0].text,
+            "recall: dependency question answered by graph traversal (2 dependents)"
+        );
+        let users = result
+            .detailed
+            .iter()
+            .find(|h| h.content == "users handler")
+            .unwrap();
+        assert_eq!(users.status, Some(CanonizationStatus::Canonical));
+        assert_eq!(users.annotations[0].kind, AnnotationKind::LoadBearing);
+        let payments = result
+            .detailed
+            .iter()
+            .find(|h| h.content == "payments handler")
+            .unwrap();
+        assert!(payments.annotations.is_empty());
+        assert!(result.detailed.iter().all(|h| h.included_in_context));
+        // Response-global explanations never appear as hit annotations.
+        assert!(result.detailed.iter().all(|h| !h
+            .annotations
+            .iter()
+            .any(|a| a.kind == AnnotationKind::Traversal)));
+
+        let actual = serde_json::to_value(&result).expect("payload serializes");
+        let golden_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/recall-h3-goldens.json"
+        );
+        let golden: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(golden_path).expect("golden fixture present"),
+        )
+        .expect("golden parses");
+        assert_eq!(
+            actual, golden["structural"],
+            "structural structured payload must match the golden"
         );
     }
 }

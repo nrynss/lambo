@@ -767,7 +767,8 @@
       $("lookup-timing").textContent = "";
       show($("lookup-cards"), false);
       show($("fallback-toggle"), false);
-      show($("traversal-banner"), false);
+      show($("response-annotations"), false);
+      show($("excluded-warnings"), false);
       var pre = $("lookup-fallback");
       show(pre, true);
       pre.textContent = "The lookup did not complete: " + r.error;
@@ -779,7 +780,8 @@
       (ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s");
 
     // Structured results when the payload carries them, the verbatim block
-    // otherwise. Today it is always the block: the structured array is H3.
+    // otherwise (H3: `/api/recall` now always carries `hits`, but the
+    // fallback path stays for older payloads and error states).
     var hits = r.hits && r.hits.length ? r.hits : null;
 
     show($("fallback-toggle"), !!hits);
@@ -792,33 +794,70 @@
     show($("lookup-fallback"), !useCards);
 
     if (!useCards) {
-      show($("traversal-banner"), false);
+      show($("response-annotations"), false);
+      show($("excluded-warnings"), false);
       $("lookup-fallback").textContent = r.context || "(no answer)";
       return;
     }
 
+    renderResponseAnnotations(r.response_annotations || []);
     renderCards(hits);
+    renderExcludedWarnings(hits);
+  }
+
+  // H3: response-global explanations, prominent above the cards. Every kind
+  // renders through the same annotation block; textContent only.
+  function renderResponseAnnotations(annotations) {
+    var wrap = $("response-annotations");
+    clear(wrap);
+    if (!annotations.length) {
+      show(wrap, false);
+      return;
+    }
+    annotations.forEach(function (a) {
+      var box = el("div", "annotation is-response a-" + a.kind);
+      box.appendChild(el("span", "annotation-label", a.kind.replace(/_/g, " ")));
+      box.appendChild(el("span", null, a.text));
+      wrap.appendChild(box);
+    });
+    show(wrap, true);
   }
 
   function renderCards(hits) {
-    var banner = $("traversal-banner");
-    var traversal = null;
     var wrap = $("lookup-cards");
     clear(wrap);
 
     hits.forEach(function (h) {
       var anns = h.annotations || [];
-      anns.forEach(function (a) { if (a.kind === "traversal") traversal = a.text; });
-
       var isPillar = anns.some(function (a) { return a.kind === "load_bearing"; });
-      var card = el("div", "card" + (isPillar ? " is-pillar" : ""));
+      // H3: cards whose complete blocks are outside the context budget are
+      // collapsed by default; their warnings stay visible in the persistent
+      // excluded-warnings area regardless (never hidden behind the expander).
+      var included = h.included_in_context !== false;
+      var card = el("div", "card" + (isPillar ? " is-pillar" : "") + (included ? "" : " is-excluded"));
 
+      if (!included) {
+        var bar = el("div", "card-excluded-bar");
+        bar.appendChild(el("span", "muted-small", "Outside the context budget"));
+        var toggle = el("button", "card-expand", "Show content");
+        toggle.type = "button";
+        toggle.addEventListener("click", function () {
+          var open = card.classList.toggle("is-open");
+          toggle.textContent = open ? "Hide content" : "Show content";
+          bar.setAttribute("aria-expanded", open ? "true" : "false");
+        });
+        bar.setAttribute("aria-expanded", "false");
+        bar.appendChild(toggle);
+        card.appendChild(bar);
+      }
+
+      var body = el("div", "card-body");
       var top = el("div", "card-top");
       top.appendChild(el("span", "card-content", h.content));
       if (h.concept_type) top.appendChild(kindBadge(h.concept_type));
       var sb = statusBadge(h.status);
       if (sb) top.appendChild(sb);
-      card.appendChild(top);
+      body.appendChild(top);
 
       var scoreRow = el("div", "card-score");
       var track = el("div", "score-track");
@@ -830,20 +869,51 @@
       if (h.blast_radius) {
         scoreRow.appendChild(el("span", "muted-small", "· " + h.blast_radius + " depend on it"));
       }
-      card.appendChild(scoreRow);
+      body.appendChild(scoreRow);
 
-      anns.filter(function (a) { return a.kind !== "traversal"; }).forEach(function (a) {
+      anns.forEach(function (a) {
         var box = el("div", "annotation a-" + a.kind);
         box.appendChild(el("span", "annotation-label", a.kind.replace(/_/g, " ")));
         box.appendChild(el("span", null, a.text));
-        card.appendChild(box);
+        body.appendChild(box);
       });
 
+      card.appendChild(body);
       wrap.appendChild(card);
     });
+  }
 
-    show(banner, !!traversal);
-    if (traversal) banner.textContent = traversal;
+  // H3: the persistent "warnings from results outside the context budget"
+  // area. Sourced from the excluded hits' typed annotations and labelled
+  // with the owning hit, so safety warnings are never gated behind an
+  // expander.
+  function renderExcludedWarnings(hits) {
+    var wrap = $("excluded-warnings");
+    clear(wrap);
+    var excluded = hits.filter(function (h) {
+      return h.included_in_context === false && (h.annotations || []).length;
+    });
+    if (!excluded.length) {
+      show(wrap, false);
+      return;
+    }
+    wrap.appendChild(el("div", "excluded-warnings-title",
+      "Warnings from results outside the context budget"));
+    wrap.appendChild(el("p", "muted-small",
+      "These results' complete blocks did not fit the token budget, but their " +
+      "warnings still matter."));
+    excluded.forEach(function (h) {
+      var row = el("div", "excluded-hit");
+      row.appendChild(el("div", "excluded-hit-name", h.content));
+      (h.annotations || []).forEach(function (a) {
+        var box = el("div", "annotation a-" + a.kind);
+        box.appendChild(el("span", "annotation-label", a.kind.replace(/_/g, " ")));
+        box.appendChild(el("span", null, a.text));
+        row.appendChild(box);
+      });
+      wrap.appendChild(row);
+    });
+    show(wrap, true);
   }
 
   // ---- polling ---------------------------------------------------------

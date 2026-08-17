@@ -1,9 +1,11 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (58 records).
+Complete index of the review records in this directory (60 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| [adve-review-hardening-H3round2.md](adve-review-hardening-H3round2.md) | Hardening H3 - post-round-1 remediation (evidence re-capture + per-text warning parity), round 2 | **CLEAN / APPROVE** (zero findings, 2026-08-17) |
+| [adve-review-hardening-H3round1.md](adve-review-hardening-H3round1.md) | Hardening H3 - structured recall results beside the verbatim block, round 1 | **REQUEST_CHANGES** (1 P2 evidence / 1 P3; verdict 2026-08-17) |
 | [adve-review-hardening-H2round1.md](adve-review-hardening-H2round1.md) | Hardening H2 - /api/inspect Canonical gate-pairing, round 1 | **CLEAN / APPROVE** (1 P3 report-doc; zero code findings, 2026-08-17) |
 | [adve-review-hardening-H1round1.md](adve-review-hardening-H1round1.md) | Hardening H1 - embedding-contract enforcement, round 1 | **CLOSED** (REQUEST_CHANGES - 2 P1 / 1 P2 / 1 P3; remediated `c72acf5`, disposition `298af97`) |
 | [adve-review-hardening-H1round2.md](adve-review-hardening-H1round2.md) | Hardening H1 - post-round-1 remediation, round 2 | **CLOSED** (REQUEST_CHANGES - 1 P2 / 1 P3; remediated `7cd8194`, disposition `de3b4b7`) |

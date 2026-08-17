@@ -446,7 +446,10 @@ integration.
 `src/recall/{assemble,dispatch,format}.rs`, and the portal assets
 **Blocked by:** nothing
 **Needed by:** the portal redesign, if it goes card-per-result
-**Status:** **OPEN**
+**Status:** **DONE / CLEAN** (2026-08-17)
+**Claim history:** `claimed:h3-implementation` -> `claimed:h3-remediation-r1` ->
+`claimed:h3-review-r2-clean`
+**Worktree:** `worktrees/hardening-h3` (branch `codex/hardening-h3`)
 **Owns:** `src/cli/serve_web.rs`, `src/cli/recall.rs`,
 `src/recall/{assemble,dispatch,format}.rs`, narrowly required internal
 presentation types, `web/{app.js,index.html,app.css}`, this H3 section, and H3
@@ -596,6 +599,94 @@ gates.
 reinterpret scores, or alter MCP merely to make two serializers look alike.
 It preserves the verbatim agent contract and adds a presentation model beside
 it.
+
+**Implementation handoff (awaiting adversarial review).** Implemented on
+`codex/hardening-h3` (base `5eed73c`). The seam lives in the new
+`src/recall/detail.rs` (`pub(crate)`: `AnnotationKind` with the six pinned
+wire kinds, `Annotation`, `DetailedHit`, `DetailedRecall`) plus
+`crate::recall::format::render_detailed_block`; `assemble` and
+`try_structural` now return the detailed result (status + typed annotations
+attached where the producers exist, `included_in_context` marked AT the
+token-budget cut), `Daemon::recall_detailed` (new `pub(crate)`) is the single
+execution entry, and the public `Daemon::recall` projects it onto
+`RecallResult` unchanged. `cli::recall::run` is a thin wrapper over the new
+`pub(crate) run_detailed`, and `render_cli_text` renders the CLI string from
+the presentation model — so `/api/recall`'s `context` and its `hits` /
+`response_annotations` come from ONE execution, and the single-execution
+parity test re-renders the payload's own structured fields through that
+renderer instead of running recall twice. MCP and `src/types/mod.rs` are
+untouched. Verification: blended + structural goldens in
+`fixtures/recall-h3-goldens.json` (pinned by assemble/dispatch tests),
+tiny-budget exclusion keeps the typed warning, failing-embedder
+`vector_degraded` response annotation, mismatch fails closed with no success
+fields, warning parity, XSS/browser evidence under `evidence/h3-recall-cards/`
+(captured with the updated `scripts/recording/capture-portal.mjs` against a
+local serve-web). Review focus: the renderer's per-hit (not per-text)
+excluded-warning skip (spec-correct when two hits share identical warning
+text — the old `context.contains` skip could drop the excluded hit's line),
+the daemon seam, and the additive wire shape.
+
+**Completion record (2026-08-17 - DONE / CLEAN).** The original problem,
+wire-contract decision, implementation handoff, and ownership record above are
+preserved. H3 completed the repository's implementation -> adversarial review
+-> remediation cycle in this worktree:
+
+1. Implementation: `1bfe55ce999e228c6bbdb2c601ee857f9ee23e48`; browser
+   evidence: `93631ef51967666c521e2e4a5728feadc90f342c`.
+2. Round-1 review, **REQUEST_CHANGES** (1 P2 / 1 P3):
+   `0480b30978a55fb2823cbaaf392f9e031dfa2119`.
+3. Round-1 remediation: `f84fb6759ebabcfa453735e790c70b858042193c` (capture
+   script scrolls the results region into view and waits for real renders;
+   warning-parity assertion now per-text) -> `07be5aff9137c192f62ce10f9a97b238081d97ca`
+   (re-captured cards evidence, all captures distinct) ->
+   `a5eb8028ced331a7cfc94b994b2464b23e6839c2` (disposition).
+4. Round-2 review, **CLEAN / APPROVE** (zero findings):
+   `94a2ded5309d61de0ff6923718acb2cfef1b0022`.
+
+What landed: `/api/recall` now returns the byte-identical verbatim `context`
+beside additive `hits` (content, concept_type, status absent only for `None`,
+score, blast_radius when present, `included_in_context`, ordered typed
+`annotations`) and ordered `response_annotations`, all from ONE recall
+execution via the `pub(crate)` seam in `src/recall/detail.rs`. The public
+`RecallHit`, `RecallResult` and `cli::recall::run` surfaces, the MCP wire, and
+`src/types/mod.rs` / `src/memory.rs` are unchanged. Annotation kinds are pinned
+at their typed producers (hit-owned `load_bearing`/`conflict`/`hot`/
+`reservation`; response-global `traversal`/`vector_degraded`, never duplicated
+onto hits). `included_in_context` is recorded at the token-budget cut and every
+ranked hit remains in `hits`. Warning losslessness holds per warning line: the
+renderer skips header duplication per owning hit, so two hits sharing identical
+warning text both keep their lines (the old `context.contains` skip could drop
+the excluded hit's line). The portal renders cards per included hit with score
+bars/status badges/load-bearing styling, keeps the verbatim view, shows
+response-global annotations prominently, and surfaces excluded-hit warnings in
+a persistent budget area labelled with the owning hit; all text through
+`textContent`.
+
+The clean round-2 reviewer independently verified both round-1 closures and
+re-ran the regression sweep (single execution, same-snapshot status, prefix
+semantics, pinned kinds, additive wire, mismatch fail-closed, untouched public
+surfaces, textContent-only portal, goldens derived from scenario arithmetic)
+plus every gate:
+
+- `cargo test`: **705 passed, 1 ignored** in the library plus binary,
+  integration and doc harnesses (6 + 2 + 2).
+- `cargo test --no-default-features --features store-memory,embed-fixture`:
+  **692 passed** plus binary, integration and doc harnesses.
+- `cargo test --no-default-features --features store-sqlite,embed-fixture`:
+  **513 passed** plus binary, integration and doc harnesses.
+- `cargo test --all-features`: **835 passed, 8 ignored** (live Cockroach legs,
+  `LAMBO_COCKROACH_DSN` unset) plus every binary, integration and doc harness.
+- Both `cargo clippy --all-targets -- -D warnings` gates, `cargo fmt --all --
+  --check`, `git diff --check`, `node --check web/app.js` and `node --check
+  scripts/recording/capture-portal.mjs`: passed.
+
+Browser evidence under `evidence/h3-recall-cards/` (blended cards, structural
+traversal, tiny-budget collapsed cards + excluded-warnings area, XSS-as-text,
+verbatim view, audit feed, plus webm) was re-captured after round 1 against a
+real local `serve-web` + SQLite writer session; every capture was independently
+OCR/pixel-verified, and the capture script asserts its DOM checks fail on any
+console error. No live Cockroach result is claimed because
+`LAMBO_COCKROACH_DSN` was unset. H3 is CLEAN and ready for integration.
 
 ---
 
@@ -961,18 +1052,19 @@ not be selected again. H4, H5 and H6 were closed by portal and release work on
 `main` rather than by dedicated tasks, which is why the dispatch order written
 against `46ca7be` listed them as pending.
 
-**Two remain.** H2 is the next correctness task: server-side suppression of
-`gate_progress` for concepts that already reached Canonical, so every consumer
-is correct rather than only the page. H3 is the structured recall payload,
-whose contract is already pinned in the portal design brief and which the page
-is already written to consume the moment `hits` appears.
+**H2 and H3 are complete** (2026-08-17). H2 (server-side suppression of
+`gate_progress` for Canonical concepts) merged as `5eed73c`; H3 (structured
+recall results beside the verbatim block) is integrated by the merge of
+`codex/hardening-h3` that carries this closeout. Both completed the full
+implementation -> adversarial review -> remediation loop (H2: one CLEAN review
+round plus a docs disposition; H3: one REQUEST_CHANGES round plus one CLEAN
+round). Neither task may be selected again.
 
 H7 is **PARKED / NEEDS DESIGN** and is not an implementation task until its
 selection, discovery, URL and authorization decisions are recorded and
 reviewed.
 
-Dispatch order is therefore **H2, then H3**. Complete each task's
-implementation -> adversarial review -> remediation loop before integrating it
-and moving to the next. Re-audit line references at claim time: `serve_web.rs`
-and `web/app.js` both moved substantially in the rebuild, so any line number
-recorded against `46ca7be` is stale.
+All hardening implementation tasks are therefore closed; the remaining
+hardening work is the H7 design note. Re-audit line references at claim time:
+`serve_web.rs` and `web/app.js` both moved substantially in the rebuild, so any
+line number recorded against `46ca7be` is stale.

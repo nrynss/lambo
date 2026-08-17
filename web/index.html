@@ -145,8 +145,15 @@
         <span class="muted-small" id="lookup-timing"></span>
         <button class="fallback-toggle hidden" id="fallback-toggle" type="button"></button>
       </div>
-      <div class="traversal-banner hidden" id="traversal-banner"></div>
+      <!-- H3: response-global explanations (traversal, vector degradation)
+           rendered prominently above the cards. -->
+      <div class="response-annotations hidden" id="response-annotations"></div>
       <div class="cards hidden" id="lookup-cards"></div>
+      <!-- H3: persistent warnings from hits whose complete blocks are outside
+           the context budget. Sourced from those hits' typed annotations,
+           labelled with the owning hit; expanding an excluded card is never
+           required to discover its safety warnings. -->
+      <div class="excluded-warnings hidden" id="excluded-warnings"></div>
       <pre class="fallback-pre" id="lookup-fallback"></pre>
     </div>
   </section>

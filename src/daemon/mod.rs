@@ -56,6 +56,7 @@ use crate::daemon::hotlist::{Condition, HotList};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::recall::cache::{CacheKey, RecallCache};
+use crate::recall::detail::DetailedRecall;
 use crate::recall::dispatch::{self, RecallKind};
 use crate::recall::{assemble, candidates, expand};
 use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, SessionId};
@@ -328,6 +329,9 @@ impl Daemon {
     /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
     /// A store error during `gather` degrades to an empty vector leg with a
     /// warning rather than failing the read.
+    /// Three-phase recall (spec §8; P5), projected onto the public flattened
+    /// [`RecallResult`] from the same single execution that builds the H3
+    /// presentation model ([`Self::recall_detailed`]).
     pub async fn recall(
         &self,
         session: &SessionId,
@@ -337,12 +341,43 @@ impl Daemon {
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> RecallResult {
+        self.recall_detailed(session, query, store, embedding, weights, cache)
+            .await
+            .into()
+    }
+
+    /// The H3 detailed recall: one execution producing the rendered context
+    /// block AND the presentation model (status + typed annotations captured
+    /// at assembly/dispatch). Store I/O happens in
+    /// [`crate::recall::candidates::gather`] BEFORE any lock: the vector leg
+    /// is async and must not run while the graph lock is held. The pipeline
+    /// then runs under the documented lock order (graph read -> hot write).
+    /// The daemon's inverted index must be installed via
+    /// [`Daemon::with_index`]; without it recall returns an empty hit list
+    /// with a warning (P8 wires the owner's index).
+    ///
+    /// `cache` is session-scoped: spec §8's key carries no session id, so the
+    /// caller owns one [`RecallCache`] per session and hands it over by
+    /// `&mut` (the cache has no interior synchronization). The cache stores
+    /// the epoch-stable [`RecallPipeline`]; phase-3 assembly, hot-list
+    /// re-validation and context rendering run on EVERY call with the
+    /// caller's current `now`, so warning lines are always fresh.
+    ///
+    /// `embedding` is the query embedding when an embedder is configured;
+    /// `None` degrades to the keyword + recent-interactions legs (spec §3.2).
+    /// A store error during `gather` degrades to an empty vector leg with a
+    /// warning rather than failing the read.
+    pub(crate) async fn recall_detailed(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        store: &dyn crate::store::GraphStore,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+    ) -> DetailedRecall {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
-            return RecallResult {
-                hits: Vec::new(),
-                context: String::new(),
-                warnings: vec![format!("recall: {err}")],
-            };
+            return DetailedRecall::warn_only(format!("recall: {err}"));
         }
         // P2-8: the caller's `session` must match the graph's authoritative
         // session — the keyword/recent/expansion legs come from the daemon's
@@ -351,14 +386,10 @@ impl Daemon {
         // vector-session B. On mismatch, refuse (warn), never mix.
         let graph_session = self.graph.read().session_id().clone();
         if session != &graph_session {
-            return RecallResult {
-                hits: Vec::new(),
-                context: String::new(),
-                warnings: vec![format!(
-                    "recall: caller session {session} != graph session {graph_session}; \
-                     refusing to mix graph and vector namespaces"
-                )],
-            };
+            return DetailedRecall::warn_only(format!(
+                "recall: caller session {session} != graph session {graph_session}; \
+                 refusing to mix graph and vector namespaces"
+            ));
         }
         // T9: route by query kind. A structural/dependency question is answered
         // by traversal below; the gather and the blended pipeline are skipped

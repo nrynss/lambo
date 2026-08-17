@@ -1,0 +1,104 @@
+{
+  "note": "H3 structured recall payloads, pinned byte-for-byte by src/recall/assemble.rs h3_blended_payload_matches_golden (blended: Canonical load-bearing hit, Candidate, conflict, non-conflict hot condition, reservation, annotation-free hit) and src/recall/dispatch.rs h3_structural_payload_matches_golden (dispatched dependency question: canonical dependent + plain dependent + one traversal response annotation). Wire shape: hits[] with content/concept_type/status (absent only for None)/score/blast_radius (when present)/included_in_context/annotations[{kind,text}], plus response_annotations[{kind,text}].",
+  "blended": {
+    "hits": [
+      {
+        "annotations": [
+          {
+            "kind": "load_bearing",
+            "text": "⚑ Load-bearing pillar — 2 nodes depend on this. Modify with caution."
+          }
+        ],
+        "blast_radius": 2,
+        "concept_type": "Entity",
+        "content": "user schema",
+        "included_in_context": true,
+        "score": 0.5,
+        "status": "Canonical"
+      },
+      {
+        "annotations": [],
+        "concept_type": "Entity",
+        "content": "auth middleware",
+        "included_in_context": true,
+        "score": 0.45,
+        "status": "Candidate"
+      },
+      {
+        "annotations": [
+          {
+            "kind": "conflict",
+            "text": "Agent A wrote to it 11 seconds ago"
+          }
+        ],
+        "concept_type": "Entity",
+        "content": "rate limiter",
+        "included_in_context": true,
+        "score": 0.4
+      },
+      {
+        "annotations": [
+          {
+            "kind": "hot",
+            "text": "High-risk modification: 8 dependents share this pillar"
+          }
+        ],
+        "concept_type": "Entity",
+        "content": "caching layer",
+        "included_in_context": true,
+        "score": 0.35
+      },
+      {
+        "annotations": [
+          {
+            "kind": "reservation",
+            "text": "Reserved by agent-c until 2025-07-08T20:40:00Z"
+          }
+        ],
+        "concept_type": "Entity",
+        "content": "logging config",
+        "included_in_context": true,
+        "score": 0.3
+      },
+      {
+        "annotations": [],
+        "concept_type": "Entity",
+        "content": "ping endpoint",
+        "included_in_context": true,
+        "score": 0.25
+      }
+    ],
+    "response_annotations": []
+  },
+  "structural": {
+    "hits": [
+      {
+        "annotations": [
+          {
+            "kind": "load_bearing",
+            "text": "⚑ Load-bearing pillar — 0 nodes depend on this. Modify with caution."
+          }
+        ],
+        "blast_radius": 0,
+        "concept_type": "Entity",
+        "content": "users handler",
+        "included_in_context": true,
+        "score": 5.0,
+        "status": "Canonical"
+      },
+      {
+        "annotations": [],
+        "concept_type": "Entity",
+        "content": "payments handler",
+        "included_in_context": true,
+        "score": 3.0
+      }
+    ],
+    "response_annotations": [
+      {
+        "kind": "traversal",
+        "text": "recall: dependency question answered by graph traversal (2 dependents)"
+      }
+    ]
+  }
+}
