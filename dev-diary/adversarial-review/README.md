@@ -1,9 +1,11 @@
 # Adversarial reviews
 
-Complete index of the review records in this directory (62 records).
+# Complete index of the review records in this directory (64 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| [adve-review-c-series-round1.md](adve-review-c-series-round1.md) | codex/c-series — C1–C5 concurrency capture (load driver, SIGTERM capture, durability accounting, real-model swarm), round 1 | **REQUEST_CHANGES** (1 P1 / 2 P2 / 5 P3; evidence-doc integrity — see the record, 2026-08-18) |
+| [adve-review-c-series-round2.md](adve-review-c-series-round2.md) | codex/c-series — C1–C5 concurrency capture, round 2 re-review of the round-1 remediation (all 8 findings closed) | **CLEAN / APPROVE** (1 P1 / 2 P2 / 5 P3 all verified closed against artifacts; regression sweep green; zero new findings, 2026-08-18) |
 | [adve-review-e2e-integration-h1h3-r2.md](adve-review-e2e-integration-h1h3-r2.md) | Main — E2E round-2 re-review of the remediation branch (E2E-1..8 closure re-verification + regression sweep) | **CLEAN / APPROVE** (all 8 findings closed incl. LIVE first-run override success; zero new findings, 2026-08-17) |
 | [adve-review-e2e-integration-h1h3.md](adve-review-e2e-integration-h1h3.md) | Main — E2E whole-platform integration (H1+H2+H3 + portal rebuild), incl. LIVE CockroachDB legs | **CONDITIONAL** (1 P2 live-reproduced / 7 P3; no P0/P1; all gates green incl. 8/8 live legs executed, 2026-08-17) |
 | [adve-review-hardening-H3round2.md](adve-review-hardening-H3round2.md) | Hardening H3 - post-round-1 remediation (evidence re-capture + per-text warning parity), round 2 | **CLEAN / APPROVE** (zero findings, 2026-08-17) |

@@ -1,0 +1,48 @@
+{
+  "run_id": "gcproof-20260817-2038",
+  "session": "c-load-gcproof",
+  "purpose": "gc_interval=1 control run: prove the daemon GC's concepts_collected sums equal the ledger-created minus store-concepts gap",
+  "date_utc": "2026-08-17",
+  "window_from_artifacts": {
+    "first_gc_sweep_log": "2026-08-17T20:38:13.639398Z",
+    "last_gc_sweep_log": "2026-08-17T20:38:25.830042Z",
+    "first_call_in_ledger": "2026-08-17T20:38:15Z",
+    "last_call_in_ledger": "2026-08-17T20:38:25Z"
+  },
+  "machine": {
+    "host": "cachyos-x8664",
+    "os": "Linux 7.1.8-1-cachyos x86_64",
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "threads": "12",
+    "note": "Linux box, NOT the MBP the P8 criterion names. Control-run scratch artifacts lived in /tmp/c-series-scratch on this same box alongside the main run's (run-20260817-204139.json)."
+  },
+  "config": {
+    "file": "gcproof.toml",
+    "store": { "kind": "sqlite", "path": "gcproof.db" },
+    "embedder": { "kind": "fixture", "dim": 1024 },
+    "daemon": { "gc_interval": 1 }
+  },
+  "driver": {
+    "workers": 2,
+    "seed": "deterministic per worker (mcp_load.py random.Random(seed*1000+worker))",
+    "phases_in_ledger": ["cap-probe", "overdrive", "main", "burst"],
+    "note": "Short bounded run (~10 s) using the same load driver and phase shape as the main C2 capture."
+  },
+  "result": {
+    "ledger_created_concepts": 217,
+    "store_concepts": 206,
+    "gap": 11,
+    "gc_collected_sum": 11,
+    "gap_equals_collected": true,
+    "interactions_ledger": 76,
+    "interactions_store": 76,
+    "interactions_match": true
+  },
+  "artifacts": {
+    "stderr_gc_sweeps": "gcproof.log",
+    "ledger": "gcproof-ledger.jsonl",
+    "durability": "durability-gcproof.txt",
+    "config": "gcproof.toml",
+    "store_db": "gcproof.db"
+  }
+}

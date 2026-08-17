@@ -1,0 +1,7 @@
+[store]
+kind = "sqlite"
+path = "evidence/concurrency/c-load-20260818.db"
+
+[embedder]
+kind = "fixture"
+dim = 1024
