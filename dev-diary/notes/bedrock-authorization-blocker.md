@@ -1,6 +1,6 @@
 # Bedrock authorization blocker — wait 24h then retry
 
-**Account:** `542468167736`  
+**Account:** `<AWS_ACCOUNT_ID>`  
 **Status:** blocked at Bedrock **service backend** (`authorizationStatus: NOT_AUTHORIZED`)  
 **Lambo impact:** T0.4 Bedrock path blocked. **Hybrid embeddings proceed via portable BGE-M3
 (HF + llama.cpp)** — see [`embeddings-portable.md`](embeddings-portable.md). Bedrock Titan
@@ -52,8 +52,8 @@ For **Amazon first-party** models (e.g. Titan Text Embeddings V2), no Marketplac
 
 **Diagnostic resources left in account (no live access keys):**
 
-- User: `arn:aws:iam::542468167736:user/lambo-bedrock-test`  
-- Role: `arn:aws:iam::542468167736:role/LamboBedrockTestRole`  
+- User: `arn:aws:iam::<AWS_ACCOUNT_ID>:user/lambo-bedrock-test`  
+- Role: `arn:aws:iam::<AWS_ACCOUNT_ID>:role/LamboBedrockTestRole`  
 - Inline policy name: `LamboBedrockInvoke` (InvokeModel, list/availability)
 
 ---
@@ -142,7 +142,7 @@ Bedrock foundation models blocked: authorizationStatus NOT_AUTHORIZED / playgrou
 Follow-up: completed all self-service troubleshooting from prior guidance.
 Bedrock remains blocked after wait / retries.
 
-Account: 542468167736
+Account: <AWS_ACCOUNT_ID>
 Region under test: us-east-1 only (no region mixing)
 
 1) get-foundation-model-availability (us-east-1, amazon.titan-embed-text-v2:0)
@@ -183,7 +183,7 @@ Region under test: us-east-1 only (no region mixing)
 Request:
 Please perform backend account-level Bedrock authorization remediation so
 authorizationStatus becomes AUTHORIZED for amazon.titan-embed-text-v2:0
-(and foundation model playground / InvokeModel works) on account 542468167736.
+(and foundation model playground / InvokeModel works) on account <AWS_ACCOUNT_ID>.
 
 Use case: hackathon agentic memory (Lambo) needing Titan Text Embeddings V2 (1024-dim).
 ```
