@@ -164,3 +164,28 @@ authority to reconcile the independent portal commit, align the order with the
 actual statuses, and narrow the route/cache and success-payload claims. Re-review
 the documentation only; no hardening implementation is authorized by this
 record.
+
+## Remediation disposition (2026-08-17)
+
+The original verdict above is preserved. Documentation-only remediation was
+applied for independent re-review; this disposition does not change the
+reviewer's verdict or claim that the result is clean.
+
+- **HENR-1:** Remediated. H3 now pins one additive success schema: every ranked
+  hit carries `included_in_context`, hit-owned annotations use four fixed kinds,
+  and traversal/vector degradation live in `response_annotations`. H3 includes
+  the portal card consumer and pins it to the included prefix. Successful
+  `context` remains byte-identical to the CLI rendering; an H1 contract mismatch
+  remains an error with no success fields.
+- **HENR-2:** Remediated. H4 and H6 describe `5ccd48f` only as external overlap
+  context, explicitly forbid porting or reconciling it on this branch, and
+  require work against the claimed deliverable head. H6 is no longer blocked by
+  reconciliation.
+- **HENR-3:** Remediated. The dispatch order records H1 as DONE/CLEAN, sequences
+  the remaining claimable H2-H6 work, and keeps H7 parked behind its reviewed
+  design gate.
+- **HENR-4:** Remediated. H7 now limits the single-session statement to
+  session-data APIs, calls out static assets and `/healthz`, and preserves
+  `no-store` only for session-memory/API responses.
+- **HENR-5:** Remediated. H6 requires `truncated` only on successful inspect and
+  graph payloads and explicitly preserves existing error response semantics.

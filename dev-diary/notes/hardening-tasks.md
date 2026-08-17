@@ -386,16 +386,28 @@ render from the same single recall execution. Calling recall twice would be
 slower and could combine different graph/store instants.
 
 **The compatible wire contract.** Add fields beside `context`; do not replace
-or reformat it. Per hit: `content`, `concept_type`, `status` (absent only for
-status `None`), `score`, `blast_radius` when present, and `annotations` as zero
-or more `{kind, text}` pairs. Derive kinds from the typed producers, never text
-patterns:
+or reformat it. Every successful `/api/recall` response has this additive
+shape: the existing `context` and `elapsed_ms`; `hits`, containing every ranked
+hit; and `response_annotations`, containing response-global explanations. Each
+hit carries `content`, `concept_type`, `status` (absent only for status `None`),
+`score`, `blast_radius` when present, `included_in_context`, and `annotations`
+as zero or more `{kind, text}` pairs. `included_in_context` is `true` exactly
+for the longest ranked prefix whose complete rendered blocks appear in
+`context`; hits after the token-budget cut remain in `hits` with `false`.
+Derive annotation kinds from typed producers, never text patterns.
+
+Hit-owned kinds are:
 
 - `load_bearing` - the Canonical blast warning;
 - `conflict` - `HotListPayload::Conflict`;
 - `hot` - HighRisk, Drift or Stale;
-- `reservation` - the active reservation;
-- `traversal` - the structural-dispatch explanation.
+- `reservation` - the active reservation.
+
+Response-global kinds are `traversal` for the structural-dispatch explanation
+and `vector_degraded` when query embedding fails and the vector leg is skipped.
+Neither is attached to an arbitrary hit or duplicated across hits. The
+`response_annotations` text is also rendered through the existing CLI renderer
+into `context`, preserving the warning/header order already visible to agents.
 
 Lambo 0.2.0 has already published the public `RecallHit`, `RecallResult` and
 `cli::recall::run` surfaces. Adding required fields to their public struct
@@ -406,22 +418,12 @@ break. MCP already serializes basic hits at `src/mcp/server.rs:652-674`; if H3
 shares that presenter, its additive changes and text/structured parity must be
 reviewed rather than changed incidentally.
 
-**Decisions required before implementation.**
-
-1. `RecallResult.hits` deliberately includes hits whose whole block did not fit
-   `max_tokens` (`src/recall/assemble.rs:280-315`). Decide whether the HTTP hit
-   array is every ranked hit, the rendered prefix, or every hit with an explicit
-   `included_in_context` flag. "The two stay consistent" is not testable until
-   this is pinned. Prefer an explicit flag or a documented rendered-prefix
-   policy over silently showing cards the agent did not receive.
-2. Traversal and query-embedding/vector degradation describe the response, not
-   one hit. Prefer a response-level `annotations`/`warnings` array for them;
-   otherwise document exactly which hit owns traversal and do not duplicate it
-   across every card. A cards view must not hide a degraded vector leg merely
-   because the verbatim block is collapsed.
-3. Decide whether the portal consumes structured hits immediately in this task
-   or H3 stops at the additive API. If it renders cards, untrusted concept and
-   annotation text must continue through `textContent`, never `innerHTML`.
+**Portal boundary.** H3 includes consuming this schema in the portal: render
+one card for each hit whose `included_in_context` is true, keep the verbatim
+`context` view available, and show `response_annotations` prominently in the
+cards view. Do not show a card for a ranked hit the agent did not receive.
+Untrusted concept and annotation text must continue through `textContent`,
+never `innerHTML`.
 
 **One thing to get right.** The annotations are a family, not a single warning
 type. At least three kinds appear, and they differ in purpose:
@@ -441,25 +443,28 @@ treat them differently instead of pattern-matching on the string.
 
 - Existing callers see the same public Rust signatures and MCP fields, and old
   HTTP consumers can continue reading only `context`.
-- HTTP `context` is byte-identical to `lambo recall`, including Canonical
-  markers, warnings, H1's fail-closed mismatch, traversal explanation and
-  visible vector-leg degradation.
+- On every successful recall, HTTP `context` is byte-identical to the output of
+  `lambo recall`, including Canonical markers, warnings, traversal explanation
+  and visible vector-leg degradation. An H1 embedding-contract mismatch remains
+  an error response with no hits, `response_annotations` or `context` payload.
 - Candidate and Venerable status comes from the same graph snapshot as the hit;
   it is not reconstructed from `is_canonical` or a later store read.
 - Every hit-owned annotation is attached before flattening and uses the pinned
-  kind. Response-global warnings remain prominent in both card and verbatim
-  views.
-- The chosen token-truncation policy is explicit in the JSON and tests.
+  kind. Response-global annotations remain prominent in both card and verbatim
+  views, and never appear as hit-owned annotations.
+- Every ranked hit carries the correct `included_in_context` value; the portal
+  renders cards only for the included prefix.
 - The browser renders all returned text as text, not markup.
 
 **Non-vacuous verification.** Golden a blended result containing a Canonical
 load-bearing hit, a Candidate or Venerable, a conflict, a non-conflict hot
 condition, a reservation and an annotation-free hit. Golden a dispatched
 structural query separately. Exercise a deliberately tiny `max_tokens`, a
-failing embedder, and an embedding-contract mismatch. Assert the HTTP context
-equals the established CLI renderer without running recall twice. If cards
-land, add a malicious-content/XSS regression and live/browser evidence under
-`evidence/`. Run default, minimal `store-memory,embed-fixture`, minimal
+failing embedder, and an embedding-contract mismatch. Assert successful HTTP
+context equals the established CLI renderer without running recall twice, and
+assert the mismatch remains an error without success fields. Add a
+malicious-content/XSS regression and live/browser evidence under `evidence/`.
+Run default, minimal `store-memory,embed-fixture`, minimal
 `store-sqlite,embed-fixture`, `--all-features`, fmt, clippy and diff-check
 gates.
 
@@ -543,14 +548,13 @@ cross-process refresh.
 pulse, implement the focus/detail panel, or absorb H6's truncation UI unless
 the claim is explicitly widened.
 
-**Out-of-branch integration context, not completion evidence.** The independent
-`origin/main` portal commit `5ccd48f` contains a basic 20-second graph interval,
-client-side H2 suppression and an H3-ready card consumer. None of that code is
-in the reviewed H1 chain at `46ca7be`. Before claiming H3 or H4, record whether
-that commit will be ported or reconciled so an agent does not duplicate or
-silently overwrite substantial `web/*` work. If it is integrated first, audit
-its `setInterval` for overlap/stale-response hazards and its full DOM rebuild
-for interaction-state loss before treating H4 as satisfied.
+**External warning only.** Independent `origin/main` commit `5ccd48f` contains
+overlapping portal work, but it is not in this deliverable chain and is not
+completion evidence. This branch must not port or reconcile that commit. H3
+and H4 must be implemented against their claimed deliverable head. A separate
+future orchestration instruction would be required before importing any of the
+external work; if that ever happens, its interval and full DOM rebuild would
+still need H4's overlap, stale-response and interaction-state audit.
 
 ---
 
@@ -634,15 +638,16 @@ process notes that were never intended as crate API.
 `src/cli/serve_web.rs` for narrowly scoped portal regression tests
 **Status:** **OPEN** on the reviewed H1 branch
 **Severity:** low-frequency visible correctness bug
-**Blocked by:** the focused-inspect half should land with or after portal
-redesign reconciliation
+**Blocked by:** nothing; inspect notices apply to every inspect consumer that
+exists on the claimed deliverable head
 **Owns:** the files above, this H6 section, and H6
 adversarial-review/disposition records
 
-**The server half is already complete.** `/api/inspect` always returns a
-`truncated` boolean (`src/cli/serve_web.rs:517-529`) and `/api/graph` does the
-same. The bounds are 200 unique structural Concept neighbours
-(`src/cli/caps.rs:38`), 4,096 graph nodes and 16,384 structural edges
+**The server half is already complete.** Every successful `/api/inspect` and
+`/api/graph` payload carries a `truncated` boolean
+(`src/cli/serve_web.rs:517-529`). Error payloads retain their existing error
+shape and are outside H6. The bounds are 200 unique structural Concept
+neighbours (`src/cli/caps.rs:38`), 4,096 graph nodes and 16,384 structural edges
 (`src/cli/serve_web.rs:137-145`). Existing tests drive all three branches past
 their caps and assert both the flag and the bounded length
 (`src/cli/serve_web.rs:2283-2344`). Do not change those contracts to solve H6.
@@ -694,14 +699,13 @@ cadence, or implement H3's structured recall. The bounds protect response size;
 surfacing them must not weaken that denial-of-service control. A later graph
 refresh must also clear stale warnings, but implementing refresh remains H4.
 
-**Out-of-branch context, not completion evidence.** The independent
-`origin/main` portal commit `5ccd48f` added graph and details notices
-(`web/index.html:88,114`) and toggles them from `g.truncated` / `d.truncated`
-(`web/app.js:413,493`). It is not part of the reviewed H1 chain and cannot make
-H6 done here. When reconciled, audit every inspect consumer: that commit's hero
-path at `web/app.js:326-328` discards `d.truncated` and passes the capped array
-length as its apparent total. Reuse the useful work, but close that gap and add
-non-vacuous client evidence before marking H6 clean.
+**External warning only.** Independent `origin/main` commit `5ccd48f` contains
+overlapping graph/details notices, but it is not part of this deliverable chain
+and cannot make H6 done here. This branch must not port or reconcile it. Work
+only from the consumers present on the claimed deliverable head. If a separate
+future orchestration instruction imports that commit, re-audit every inspect
+consumer: its hero path was observed discarding `d.truncated` and presenting a
+capped array length as the apparent total.
 
 ### H7 - One session per process
 
@@ -712,9 +716,11 @@ risk if implemented casually
 decisions below are recorded
 
 `serve-web` takes exactly one required `--session` (`src/main.rs:68-74`), and
-`AppState` owns one `SessionId` (`src/cli/serve_web.rs:302-311`). Every unscoped
-route resolves through that state (`src/cli/serve_web.rs:1135-1158`). The public
-store contract has `load_session(id)` but no session discovery/list operation
+`AppState` owns one `SessionId` (`src/cli/serve_web.rs:302-311`). Every
+session-data API resolves through that state (`src/cli/serve_web.rs:1135-1158`);
+static assets and `/healthz` are not session-data APIs, and `/healthz`
+deliberately avoids the store. The public store contract has `load_session(id)`
+but no session discovery/list operation
 (`src/store/mod.rs:101-146`), the CLI guide promises one session
 (`docs/reference/cli.mdx:272-287`), and the AWS service carries one
 `LAMBO_SESSION` (`scripts/aws-infra/launch_exhibit_ec2.py:434-456`). This is not
@@ -762,9 +768,11 @@ chosen. The eventual claim must enumerate the exact paths rather than treating
 this list as blanket ownership.
 
 **Compatibility and security constraints.** Preserve the existing one-session
-command and response behaviour. Keep every route GET-only, `no-store` and under
-the existing bearer middleware. Encode untrusted session and concept text as
-data, not markup. Never allow a session selection to escape the configured
+command and response behaviour. Keep every route GET-only and under the
+existing bearer middleware; preserve `no-store` for session-memory/API
+responses. Static assets and `/healthz` need not acquire session-scoped cache
+semantics. Encode untrusted session and concept text as data, not markup. Never
+allow a session selection to escape the configured
 allowlist, reveal whether another session exists, or reuse another client's
 cursor/freshness/embedding state. One bearer covering multiple sessions is a
 material expansion of read authority and must be explicit. Arbitrary switching
@@ -794,9 +802,16 @@ the work that must happen before code.
 
 ## Order
 
-Nothing here blocks anything else here. H1 and H2 are independent, H3 and H4 are
-independent, and Tier 3 is opportunistic.
+H1 is **DONE / CLEAN** and must not be selected again. H2 is the next
+correctness task. H3 and H4 are then independently claimable against the
+deliverable head; both touch the portal, so integrate one clean task before
+claiming the other to keep ownership and review boundaries unambiguous. H5 and
+H6 remain open and independent, with H6 applying to the browser consumers that
+exist when it is claimed. H7 is **PARKED / NEEDS DESIGN** and is not an
+implementation task until its selection, discovery, URL and authorization
+decisions are recorded and reviewed.
 
-If only one thing gets done, do **H1**: it is the only item on this list where
-the product gives a confidently wrong answer with no visible sign anything is
-wrong.
+Current dispatch order is therefore H2, H3, H4, H5, H6. Complete each task's
+implementation -> adversarial review -> remediation loop before integrating it
+and moving to the next. Re-audit line references and consumers at claim time,
+because earlier integrations can move or expand the named surfaces.
