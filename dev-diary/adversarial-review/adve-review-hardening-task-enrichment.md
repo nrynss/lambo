@@ -284,3 +284,23 @@ behavior. Two smaller schema/verification contradictions also remain.
 gap and the two narrow schema/test contradictions, then re-review the task
 document only. No implementation, integration, main reconciliation, or push is
 authorized by this review.
+
+## Round-2 remediation disposition (2026-08-17)
+
+The original and Round-2 verdicts above are preserved. This documentation-only
+disposition records remediation for independent Round-3 review; it does not
+declare the task clean.
+
+- **HENR-R2-1:** Remediated. H3 now requires every warning rendered in
+  `context` to have exactly one typed counterpart in the ordered hit-owned or
+  response-global annotations. Excluding a complete hit block does not discard
+  its annotations. The portal must keep excluded-hit annotations visible in a
+  persistent, labelled overflow-warning area even when the corresponding cards
+  are hidden or collapsed. Acceptance and tiny-budget goldens now prove the
+  excluded warning remains present in both verbatim context and structured UI.
+- **HENR-R2-2:** Remediated. The pinned additive success shape and compatibility
+  criterion explicitly preserve `session`, `query`, `context` and `elapsed_ms`.
+- **HENR-R2-3:** Remediated. H6's branch-local fallback now binds the graph flag
+  to the graph notice. Inspect flag-to-notice coverage is required only when a
+  claimed change adds or edits an inspect consumer; a placeholder inspect
+  notice is expressly forbidden.

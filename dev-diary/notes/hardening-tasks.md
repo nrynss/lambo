@@ -387,14 +387,15 @@ slower and could combine different graph/store instants.
 
 **The compatible wire contract.** Add fields beside `context`; do not replace
 or reformat it. Every successful `/api/recall` response has this additive
-shape: the existing `context` and `elapsed_ms`; `hits`, containing every ranked
-hit; and `response_annotations`, containing response-global explanations. Each
-hit carries `content`, `concept_type`, `status` (absent only for status `None`),
-`score`, `blast_radius` when present, `included_in_context`, and `annotations`
-as zero or more `{kind, text}` pairs. `included_in_context` is `true` exactly
-for the longest ranked prefix whose complete rendered blocks appear in
-`context`; hits after the token-budget cut remain in `hits` with `false`.
-Derive annotation kinds from typed producers, never text patterns.
+shape: the existing `session`, `query`, `context` and `elapsed_ms`; `hits`,
+containing every ranked hit; and `response_annotations`, containing
+response-global explanations. Each hit carries `content`, `concept_type`,
+`status` (absent only for status `None`), `score`, `blast_radius` when present,
+`included_in_context`, and `annotations` as zero or more `{kind, text}` pairs.
+`included_in_context` is `true` exactly for the longest ranked prefix whose
+complete rendered blocks appear in `context`; hits after the token-budget cut
+remain in `hits` with `false`. Derive annotation kinds from typed producers,
+never text patterns.
 
 Hit-owned kinds are:
 
@@ -408,6 +409,12 @@ and `vector_degraded` when query embedding fails and the vector leg is skipped.
 Neither is attached to an arbitrary hit or duplicated across hits. The
 `response_annotations` text is also rendered through the existing CLI renderer
 into `context`, preserving the warning/header order already visible to agents.
+The structured payload is lossless for warnings: every warning line rendered
+in `context` has exactly one typed counterpart, either in its owning hit's
+ordered `annotations` or, when it has no hit owner, in ordered
+`response_annotations`. Token exclusion changes only the complete hit block;
+it does not discard that hit's annotations. Preserve the producer order within
+both arrays so clients can present the same warnings without parsing text.
 
 Lambo 0.2.0 has already published the public `RecallHit`, `RecallResult` and
 `cli::recall::run` surfaces. Adding required fields to their public struct
@@ -419,11 +426,16 @@ shares that presenter, its additive changes and text/structured parity must be
 reviewed rather than changed incidentally.
 
 **Portal boundary.** H3 includes consuming this schema in the portal: render
-one card for each hit whose `included_in_context` is true, keep the verbatim
-`context` view available, and show `response_annotations` prominently in the
-cards view. Do not show a card for a ranked hit the agent did not receive.
-Untrusted concept and annotation text must continue through `textContent`,
-never `innerHTML`.
+one normal card for each hit whose `included_in_context` is true, keep the
+verbatim `context` view available, and show `response_annotations` prominently
+in the cards view. Cards for `included_in_context: false` may be hidden or
+collapsed by default because their complete blocks are outside the context
+budget. Their annotations must nevertheless remain visible in a persistent
+"warnings from results outside the context budget" area, sourced directly from
+those hits' typed annotations and labelled with the owning hit. Expanding an
+excluded card may reveal its content but must not be required to discover its
+safety warnings. Untrusted concept and annotation text must continue through
+`textContent`, never `innerHTML`.
 
 **One thing to get right.** The annotations are a family, not a single warning
 type. At least three kinds appear, and they differ in purpose:
@@ -441,8 +453,9 @@ treat them differently instead of pattern-matching on the string.
 
 **Acceptance criteria.**
 
-- Existing callers see the same public Rust signatures and MCP fields, and old
-  HTTP consumers can continue reading only `context`.
+- Existing callers see the same public Rust signatures and MCP fields. Existing
+  HTTP `session`, `query`, `context` and `elapsed_ms` fields remain compatible,
+  and old consumers can continue reading only those fields.
 - On every successful recall, HTTP `context` is byte-identical to the output of
   `lambo recall`, including Canonical markers, warnings, traversal explanation
   and visible vector-leg degradation. An H1 embedding-contract mismatch remains
@@ -452,17 +465,22 @@ treat them differently instead of pattern-matching on the string.
 - Every hit-owned annotation is attached before flattening and uses the pinned
   kind. Response-global annotations remain prominent in both card and verbatim
   views, and never appear as hit-owned annotations.
-- Every ranked hit carries the correct `included_in_context` value; the portal
-  renders cards only for the included prefix.
+- Every warning line in `context` has one structured typed counterpart. Every
+  ranked hit carries the correct `included_in_context` value; excluded-hit
+  annotations remain visible even when their cards are hidden or collapsed.
 - The browser renders all returned text as text, not markup.
 
 **Non-vacuous verification.** Golden a blended result containing a Canonical
 load-bearing hit, a Candidate or Venerable, a conflict, a non-conflict hot
 condition, a reservation and an annotation-free hit. Golden a dispatched
 structural query separately. Exercise a deliberately tiny `max_tokens`, a
-failing embedder, and an embedding-contract mismatch. Assert successful HTTP
-context equals the established CLI renderer without running recall twice, and
-assert the mismatch remains an error without success fields. Add a
+failing embedder, and an embedding-contract mismatch. The tiny-budget golden
+must exclude a Canonical or conflict hit's complete block while retaining its
+warning in `context`, and prove the same typed warning remains visible in the
+excluded-hit warning area. Assert successful HTTP context equals the
+established CLI renderer without running recall twice, and assert warning
+parity between that context and the combined ordered hit/response annotations.
+Assert the mismatch remains an error without success fields. Add a
 malicious-content/XSS regression and live/browser evidence under `evidence/`.
 Run default, minimal `store-memory,embed-fixture`, minimal
 `store-sqlite,embed-fixture`, `--all-features`, fmt, clippy and diff-check
@@ -673,10 +691,12 @@ and for every UI location that consumes `/api/inspect`. Prove the visible,
 accessible sentence appears and clears; checking only that the JSON flag or a
 DOM id exists is insufficient. Existing endpoint cap tests remain green. If no
 browser harness is available at implementation time, add a focused
-embedded-asset contract test binding both response flags to both notice
-elements and record a manual runtime/browser capture; prefer the repository's
-existing Playwright tooling under `scripts/recording` over a second browser
-stack.
+embedded-asset contract test binding the graph flag to the graph notice and
+record a manual runtime/browser capture. Only a change that adds or edits an
+`/api/inspect` browser consumer must also bind that consumer's inspect flag to
+its notice; do not add a placeholder inspect notice to this branch. Prefer the
+repository's existing Playwright tooling under `scripts/recording` over a
+second browser stack.
 
 Targeted Rust checks already available are:
 
@@ -690,8 +710,10 @@ git diff --check
 ```
 
 Add and run a client regression with the equivalent of
-`embedded_page_surfaces_every_truncation_flag`, plus the normal minimal
-`store-sqlite,embed-fixture` and all-features gates.
+`embedded_page_surfaces_graph_truncation_flag`. If the claimed change adds or
+edits an inspect consumer, add the corresponding non-vacuous inspect-notice
+regression too. Run the normal minimal `store-sqlite,embed-fixture` and
+all-features gates.
 
 **Cut lines and risks.** H6 does not add pagination or "load more", raise or
 remove safety caps, change `/api/graph` or `/api/inspect`, absorb H4's refresh
