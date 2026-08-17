@@ -28,9 +28,11 @@ Phases, in order (all written to the ledger as `phase` records):
 1. sessions   — every worker opens its own MCP session (initialize + notified).
 2. cap-probe  — a probe mints sessions until the server refuses with 503, then
                 releases them with DELETE /mcp. Proves the session cap is live.
-3. overdrive  — workers free-run against the fresh, fast server (bounded to
-                `--overdrive-calls` each), so the rate limit's 429s are
-                genuinely observed without flooding it.
+3. overdrive  — workers free-run against the fresh, fast server for the
+                first `--overdrive-calls` calls each, then pace at ~20 rps
+                per worker (0.05 s sleep) for the rest of the phase, so the
+                rate limit's 429s are genuinely observed without flooding
+                it.
 4. main       — paced valid+adversarial mix at `--rate` rps aggregate.
 5. burst      — at-cap record_action calls paced at `--burst-rate`, building a
                 large un-flushed tail. The harness sends SIGTERM here.
@@ -459,9 +461,10 @@ class Worker:
         """Emit calls until the run event clears.
 
         Pacing by phase:
-        * `overdrive` — free-run against the fresh server, bounded per worker
-          by `--overdrive-calls`, so the rate limit's 429s are genuinely
-          observed without flooding; then idle until the controller moves on.
+        * `overdrive` — free-run against the fresh server for the first
+          `--overdrive-calls` calls per worker, then pace at ~20 rps
+          (0.05 s sleep) for the rest of the phase, so the rate limit's 429s
+          are genuinely observed without flooding it.
         * `main` — `main_rate` per worker, valid + adversarial mix.
         * `burst` — `burst_rate` per worker, at-cap record_action calls, so a
           large un-flushed tail keeps building for the SIGTERM capture.

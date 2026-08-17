@@ -59,9 +59,13 @@ of valid and adversarial tool calls, and:
 **Status:** DONE — 2026-08-18. Stdlib-only driver, deterministic seed, K workers
 (default 12), weighted valid + adversarial mix, every response to a JSONL
 ledger. Phases shaped so refusals never crowd out the measurement:
-cap-probe (503s at the 32-session ceiling) → overdrive (bounded free-run;
-1682 rate-limit 429s observed) → paced main window (40 rps, zero refusals)
-→ paced at-cap burst (the SIGTERM tail).
+cap-probe (503s at the 32-session ceiling) → overdrive (free-run for the
+first `--overdrive-calls` calls per worker, then paced ~20 rps; 1682
+rate-limit 429s observed, 1673 of them inside the overdrive window) → paced
+main window (40 rps; zero rate-limit refusals — 9 429s straddle into the
+window's opening as boundary carryover, and 21 in-window `lambo_derive`
+calls returned tool-level `store error` responses) → paced at-cap burst (the
+SIGTERM tail).
 Drive `lambo serve --transport http --bind 127.0.0.1 --port 7700 --auth-token <tok>`
 against a **scratch** session (`--session c-load-<date>`), never `cloudops-exhibit`.
 
@@ -88,9 +92,12 @@ K=12, SIGTERM 5 s into the burst. Exact line present, `tail lost on exit`
 absent, **signal→exit 1419 ms, exit 0**. Stderr transcript, ledger, run
 metadata and the SQLite store are in `evidence/concurrency/` with a runbook.
 
-Start the server, ramp K to target, and send SIGTERM **while load is in flight**
-with a non-trivial tail pending. Capture the server's stderr in full, the exit
-code, and wall-clock time from signal to exit.
+Start the server, ramp K to target, and send SIGTERM **while load is in
+flight**. Capture the server's stderr in full, the exit code, and wall-clock
+time from signal to exit. (The run did land SIGTERM mid-burst with load in
+flight — 120 transport failures and 11 `ok` responses after the SIGTERM
+timestamp — though the close-time tail turned out to be empty; see the
+honest number in C3.)
 
 The assertion is the exact line, not a vibe: `session closed, tail durable`.
 
@@ -99,17 +106,21 @@ The assertion is the exact line, not a vibe: `session closed, tail durable`.
 
 | Metric | Ledger expected | Store | Verdict |
 |---|---|---|---|
-| interactions (1:1 per write call; append-only) | 830 ok writes | 862 | **AHEAD by 21** — in-flight calls flushed by the close drain |
-| concepts (created) | 1454 | 1359 | shortfall 107 — **fully explained**: one daemon GC sweep collected 107 (`concepts_collected=107`; spec §9 housekeeping). Created − store == collected exactly |
+| interactions (1:1 per write call; append-only) | 841 ok writes | 862 | **AHEAD by 21** — in-flight calls landed after the SIGTERM timestamp (11 `ok` responses arrived after it; transport-failure calls' mutations landed too), flushed by the daemon's 1 s flush loop |
+| concepts (created) | 1466 | 1359 | shortfall 107 — **fully explained**: one daemon GC sweep collected 107 (`concepts_collected=107`; spec §9 housekeeping). Created − store == collected exactly |
 | edges (record_action lower bound) | ≥ 5506 | 9279 | OK |
 
 **The honest number:** 0 shortfall on the interaction yardstick; 0
-*unexplained* concept shortfall. The `CLOSE_GRACE` 10 s budget was not
-tested to its limit on SQLite — the 332-mutation final drain flushed in
-~1.4 s. The concept-count comparison is GC-confounded by design; the
-durable-tail claim rests on interactions (append-only, never GC'd). The GC
-accounting is proven by the `gc_interval=1` control run (collected == gap
-exactly) — recorded in the runbook, not hand-waved.
+*unexplained* concept shortfall. The `CLOSE_GRACE` 10 s budget was **not**
+tested to its limit on SQLite — the close-time tail was empty (no `Memory
+session closed (tail flushed)` line in the transcript), so the close drain
+was a no-op; the verified surplus is the 21 interactions that landed beyond
+the ledger-ok set (11 `ok` responses arrived after the SIGTERM timestamp).
+The concept-count comparison is GC-confounded by design; the durable-tail
+claim rests on interactions (append-only, never GC'd). The GC accounting is
+proven by the `gc_interval=1` control run (collected == gap exactly —
+11 == 11), whose artifacts are committed under
+`evidence/concurrency/control-gc/`.
 **Status:** DONE — 2026-08-18 (see the table above).
 
 The review never did this half. After the process exits, reconnect to the store

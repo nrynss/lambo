@@ -1,0 +1,10 @@
+[store]
+kind = "sqlite"
+path = "/tmp/c-series-scratch/gcproof.db"
+
+[embedder]
+kind = "fixture"
+dim = 1024
+
+[daemon]
+gc_interval = 1

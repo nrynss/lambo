@@ -25,14 +25,16 @@ edge observations:
 1. **sessions** — every worker opens its own MCP session.
 2. **cap-probe** — a probe mints sessions until the server refuses with 503,
    then releases them via `DELETE /mcp`. Proves the session cap is live.
-3. **main** — paced at `--rate` (default 40 rps aggregate, below the 50 rps
+3. **overdrive** — free-run for the first `--overdrive-calls` calls per
+   worker, then paced at ~20 rps per worker for the rest of the phase, so the
+   rate limit's 429s are genuinely observed against a fresh, fast server.
+4. **main** — paced at `--rate` (default 40 rps aggregate, below the 50 rps
    limit), valid + adversarial mix at `--adversarial-fraction` (default 0.2).
-   Expected: zero transport refusals here.
-4. **burst** — at-cap `record_action` calls building a large un-flushed tail.
-   The first `--overdrive` seconds free-run (bounded to
-   `--overdrive-calls` per worker) to observe 429s; then workers pace at
-   `--burst-rate` (default 45 rps) so most calls land. The harness SIGTERMs
-   the server during this phase; when the server dies, workers record the
+   Expected: zero rate-limit refusals (the 429s that straddle into the main
+   window's opening are the overdrive's burst-budget carryover).
+5. **burst** — at-cap `record_action` calls paced at `--burst-rate` (default
+   45 rps), building a large un-flushed tail. The harness SIGTERMs the
+   server during this phase; when the server dies, workers record the
    transport failures and stop after 10 consecutive ones (`server-unreachable`
    phase marker) instead of hammering a dead socket.
 

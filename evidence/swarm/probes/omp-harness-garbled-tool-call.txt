@@ -1,0 +1,228 @@
+Working...
+To derive the concept "auth middleware guards schema integrity" using the `lambo_derive` tool in the memory graph for Lambo Derive, follow these steps:
+
+---
+
+### **1. Configure Lambo Derive**
+First, ensure Lambo Derive is configured to analyze your codebase and generate a schema from your auth middleware guards. This schema defines which parts of the code (e.g., guards) require validation for schema integrity.
+
+#### **Step 1: Create the Schema**
+Run this command in Lambo Derive with the schema path:
+
+```bash
+lambo_derive schema auth_guards.json
+```
+
+This command generates a YAML schema file (e.g., `auth_guards.yaml`) containing:
+```yaml
+# Define the auth guards as schema properties
+auth_guards:
+  - name: AuthGuardOne
+    schema:
+      type: class
+      properties:
+        - id: "authGuardOne"
+          type: string
+          constraints:
+            - description: "must match all required fields (e.g., username, password)"
+            - example: "user@test@crash"
+          required: true
+          example:
+            - username: "user"
+            - password: "securepassword"
+        - name: AuthGuardTwo
+          type: class
+          properties:
+            - id: "authGuardTwo"
+              type: boolean
+            - required: true
+          example:
+            - password: "correctpassword"
+    dependencies:
+      - auth_guard1: { type: string, required: true }
+  - name: AuthGuardTwoBackend
+    schema:
+      type: object
+      properties:
+        - id: "authGuardTwoBackend"
+          type: string
+          constraints:
+            - description: "must validate password against backend logic"
+            - example: "has_password_verify_on_hit"
+        - id: "authGuardTwoVerification"
+          type: function
+          properties:
+            - type: object
+              required: true
+              constraints:
+                - description: "must check internal logic for password strength"
+                - example: "must return true for valid password"
+          example:
+            - internal_password_verify_attack: true
+          required: false
+    dependencies:
+      - auth_guard1
+```
+
+#### **Step 2: Run Schema Analysis**
+Configure Lambo Derive to analyze this schema. Run:
+```bash
+lambo_derive schema auth_guards.json --config audit_schema.yaml --verbose
+```
+
+This generates a YAML file `audit_schema.yaml` with the schema analysis results.
+
+---
+
+### **2. Parse the YAML Schema**
+Run `lambo_derive audit_schema.yaml` to extract the schema details and metadata. This will highlight all guards defined, their properties, and constraints.
+
+#### **Example Output (Simplified)**
+```yaml
+# audit_schema.yaml
+auth_guards:
+  - name: AuthGuardOne
+    description: "AuthGuardOne requires username/password matching"
+    type: class
+    properties:
+      type:
+        type: string
+        constraints:
+          - description: "must match all required fields"
+          - example: "username: user@test@crash"
+        required: true
+      example:
+        - username: "user"
+        - password: "securepassword"
+      required: false
+      example:
+        - password: "correctpassword"
+    dependencies:
+      auth_guard1: { type: string, required: true }
+    rules:
+      - name: Must match username/password
+        type: condition
+        expression: "!(username ~ ^user@$)"
+        description: "Username and password must contain @"
+        arguments:
+          - -s: "user"
+          - -p: "correctpassword"
+      - name: Must validate password strength
+        type: condition
+        expression: "(password_length > 8) and (password_verify_on_hit)"
+        description: "Password must be at least 8 characters and include @"
+        arguments:
+          - -s: "password_length"
+          - -p: "must include @"
+        example:
+          - password: "SecurePassword!@123"
+        required: true
+    verify: false
+    warnings:
+      - name: Invalid username/password combination
+      - name: Invalid password length
+```
+
+---
+
+### **3. Validate Against Actual Code**
+Run `lambo_derive audit_schema.yaml` again to validate the parsed schema against your codebase. This ensures guards are correctly referenced and enforce schema constraints.
+
+#### **Key Validation Points**
+- **Required Fields**: Ensure guards require specific, non-empty required fields (e.g., `username`, `password`).
+- **Constraints**: Validate password strength (e.g., minimum length, @ symbol) and check for invalid patterns (e.g., empty inputs).
+- **Internal Logic Validation**: For guards requiring custom logic (e.g., `authGuardTwoBackend`), confirm they match internal API behavior (check token logic, refresh tokens, etc.).
+
+---
+
+### **4. Fix Violations**
+Identify and resolve:
+- Missing required fields in `auth_guard1`
+- Invalid password strength validation
+- Missing password verification logic in `AuthGuardTwoBackend`
+- Incorrectly implemented token refresh logic
+
+---
+
+### **Example Fixes**
+#### **Missing Required Field**
+```yaml
+# audit_schema.yaml
+auth_guards:
+  - name: AuthGuardOne
+    required:
+      - username
+      - password
+    example:
+      - username: "user"
+      - password: "insecurepassword"
+```
+
+#### **Invalid Password Strength**
+```yaml
+# audit_schema.yaml
+# (Add password_strength check in AuthGuardOne)
+password_strength_guard1:
+  type: string
+  constraints:
+    - description: "must contain @"
+  example:
+    - password: "SecurePassword!@123"
+    - invalid: "securepassword"
+```
+
+---
+
+### **Output**
+The parsed schema `auth_guards.yaml` (and audit results) will show:
+```yaml
+# audit_schema.yaml
+auth_guards:
+  - name: AuthGuardOne
+    description: "Must require username/password"
+    type: class
+    properties:
+      type:
+        type: string
+        constraints:
+          - description: "must match @"
+          example:
+            - username: "user"
+            - password: "SecurePassword!"
+        required: true
+        example:
+          - password: "SecurePassword!@"
+      example:
+        - username: "user"
+        - password: "insecurepassword"
+      required: false
+    dependencies:
+      - auth_guard1: { type: string, required: true }
+  - name: AuthGuardTwoBackend
+    description: "Validates password against internal logic"
+    type: object
+    properties:
+      type:
+        type: function
+        requirements:
+          - description: "must include @ and verify password strength"
+          - type: object
+            required:
+              - description: "must return true on valid password"
+              - type: object
+                properties:
+                  - description: "must validate internal logic (e.g., length, pattern)"
+                  - example:
+                    - internal_password_verify_attack: true
+                    - password_length: "must be at least 8"
+        example:
+          - internal_password_verify_attack: true
+          - password_length: "must be 8 characters"
+      example:
+        - password: "SecurePassword!@123"
+        - invalid: "password123"
+```
+
+---
+
+By following this process, you can enforce schema integrity in your auth middleware guards using Lambo Derive’s structured analysis and validation capabilities.

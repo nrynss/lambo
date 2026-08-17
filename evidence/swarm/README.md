@@ -20,12 +20,16 @@ feasible with this model, and that failure is the finding:**
   The harness loaded the MCP server (`.mcp.json` → `:7701`, `Bearer` header,
   `lifecycle: eager` — the config is gitignored, carries the scratch token).
   **LFM2-350M cannot emit tool calls**: its reply to the derive instruction
-  was garbled pseudo-tool text (`lambo_derive lambo_derive lambo_derive
-  _agent_id=' + 'swarm-probe' + …`), not the tool-call JSON OMP needs.
+  was garbled pseudo-tool text — prose fabricating a `lambo_derive` CLI
+  (`lambo_derive schema auth_guards.json`, `lambo_derive audit_schema.yaml`,
+  …) instead of the tool-call JSON OMP needs; the probe server logged zero
+  `tools/call` requests and the probe store read back 0 interactions.
+  Transcript committed under `probes/omp-harness-garbled-tool-call.txt`.
 * **The raw OpenAI tools API was probed next** (`/v1/chat/completions` with a
   `tools` array for `lambo_derive`): the model returned prose with
-  `finish_reason=stop` and **no `tool_calls`**. Confirmed at the protocol
-  level: a 350M model cannot drive a tool-calling loop.
+  `finish_reason=stop` and **no `tool_calls`** — response committed under
+  `probes/raw-tools-probe.json`. Confirmed at the protocol level: a 350M
+  model cannot drive a tool-calling loop.
 
 So the spec's fallback applied: **a minimal LLM loop** of
 llama.cpp `/v1/chat/completions` + the streamable-HTTP MCP client pattern
@@ -45,16 +49,23 @@ LFM2-350M prose, delivered over the real MCP wire.
 | Window | 149 s of derives |
 | Derive calls (tasks) | 164 — **3961 derive-calls/hour** (7922 MCP calls/hour with recalls) |
 | Recall calls | 164 |
-| Model errors | 0 |
+| Model errors | 0 — no `model_error` ledger records (exceptions only); see footnote † |
 | Concepts created / matched | 487 / 109 |
 | **Canonization dedup rate** | **0.183** (109 matched existing of 596 concept references) — the swarm re-derived overlapping concepts onto existing canonical keys; the rate is low because LFM2-350M's concept texts drift between turns (verbose prose), so most derives create fresh nodes |
+
+† **Model errors** counts HTTP/transport failures on the model call (0). It
+does **not** count unparseable model replies: 54 of 218 model turns (25%)
+returned text that parsed to 0 concepts and were recorded as `model_reply`
+records with `parsed_concepts: 0` (they simply produced no derive that
+turn) — material to reading "the model supplies the content".
 
 Store readback after clean SIGTERM (`store-readback-20260817-205024.txt`):
 interactions 164, concepts 487, edges 1522, **lease rows 0** — the ledger's
 164 derives map 1:1 to store interactions and created == store concepts
 exactly, and the server exited with the exact line
-`lambo serve: session closed, tail durable` (signal→exit 133 ms), releasing
-the single-writer lease.
+`lambo serve: session closed, tail durable` — `shutdown signal received` at
+20:50:24.561330Z → `session closed, tail durable` at 20:50:24.562066Z, a
+~0.7 ms transcript gap — releasing the single-writer lease.
 
 ## Artifacts
 
@@ -63,8 +74,8 @@ the single-writer lease.
 | `ledger-20260817-205024.jsonl` | Every swarm turn: model replies, parsed concepts, `lambo_derive` / `lambo_recall` results with the server's own created/matched counts |
 | `stderr-serve-20260817-205024.log` | The lambo server's stderr: `session attached`, hybrid-degradation warning (SQLite has no VECTOR_SEARCH), the exact shutdown line |
 | `store-readback-20260817-205024.txt` | Post-exit SQLite counts — ledger-exact, lease released |
-| `lambo.swarm.toml` | The config: SQLite store + BGE-M3 embedder (`:8080`) |
-| `portal-auth-middleware-*.png`, `portal-billing-retries-*.png` | **The visual**: `lambo serve-web` on the swarm session, recall queries answered by real LFM2-350M-derived concepts — first cards read "auth middleware guards schema integrity by validating the user schema before data access" (Score 4.13) and "billing service retries failed charges" (Score 3.73), rendered as cards with score tracks (3200×1800, captured by `scripts/recording/capture-swarm-portal.mjs`, which waits for the query-specific content to render and fails on browser errors) |
+| `portal-auth-middleware-*.png`, `portal-billing-retries-*.png` | **The visual**: `lambo serve-web` on the swarm session, recall queries answered by real LFM2-350M-derived concepts — first cards read "auth middleware guards schema integrity by validating the user schema before data access" and "billing service retries failed charges" (both strings verbatim in the swarm ledger's derive concepts), rendered as cards with score tracks (3200×1800, captured by `scripts/recording/capture-swarm-portal.mjs`, which waits for the query-specific content to render and fails on browser errors). The per-card numeric scores shown at capture time were read from the live DOM and appear in no committed artifact, so they are not quoted here. |
+| `probes/` | Committed transcripts of the two tool-calling probes: `omp-harness-garbled-tool-call.txt` (the OMP-harness reply, prose + fabricated `lambo_derive` CLI, zero tool calls) and `raw-tools-probe.json` (raw `/v1/chat/completions` with a `tools` array: prose, `finish_reason=stop`, no `tool_calls`) — see `probes/README.md` |
 
 ## What was tried for OMP model configuration (the record)
 
@@ -74,9 +85,9 @@ the single-writer lease.
    ("the OpenAI-compatible endpoint anywhere").
 2. `omp --model lfm2-350m -p --no-pty` in the workspace whose `.mcp.json`
    points at lambo `:7701`: harness booted, MCP tools discovered, model
-   garbled the tool call.
+   garbled the tool call (transcript committed under `probes/`).
 3. Raw `POST /v1/chat/completions` with a `tools` array: no `tool_calls`
-   emitted.
+   emitted (response committed under `probes/raw-tools-probe.json`).
 
 Steps 1–2 are OMP-config-feasible (the switch itself works; the model
 cannot). This is the cut per P9's order: the swarm benchmark is optional,
