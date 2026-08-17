@@ -670,6 +670,32 @@ impl MemoryBuilder {
                          existing vectors with the configured live contract"
                     );
                     graph.replace_embedding_with_operator_override(live)?;
+                    // E2E-1: the override relabel must be durable BEFORE the
+                    // first write — the checked candidate read compares the
+                    // *durable* contract against the expected one, so a
+                    // write-behind relabel (flush at interval / close) would
+                    // refuse the very first hybrid write on a vector-capable
+                    // store (live-reproduced on Cockroach: the documented
+                    // `--allow-embedding-mismatch` workflow failed its first
+                    // run and only succeeded on the second). Flush the queued
+                    // `SetEmbedding` synchronously here, armored exactly like
+                    // the close-time final flush; it stays an ordered durable
+                    // mutation (later writes append after it in the log). A
+                    // failed relabel flush refuses the attach: the writer
+                    // would otherwise hit the same E2E-1 refusal on its first
+                    // write, and the startup-error path below releases the
+                    // freshly acquired lease.
+                    let relabel = graph.drain_log();
+                    if !relabel.mutations.is_empty() {
+                        final_flush(store.as_ref(), &relabel, Some(lease_token))
+                            .await
+                            .map_err(|e| {
+                                LamboError::Store(StoreError::Backend(format!(
+                                    "session {session}: the operator override relabel could not \
+                                     be made durable before the first write: {e}"
+                                )))
+                            })?;
+                    }
                 }
             }
             Ok::<_, LamboError>((existing, graph, loaded.index))
@@ -3239,7 +3265,7 @@ mod tests {
             &self,
             session: &SessionId,
             embedding: &[f32],
-            _expected_contract: &EmbeddingContract,
+            expected_contract: &EmbeddingContract,
             limit: usize,
         ) -> Result<Vec<Scored<NodeId>>, StoreError> {
             crate::store::validate_vector_candidate_limit(limit)?;
@@ -3254,6 +3280,31 @@ mod tests {
                 }
                 Err(e) => return Err(e),
             };
+            // H1/E2E-1: like Cockroach's checked read, bind the query's
+            // expected contract to the DURABLE contract and refuse a change —
+            // never silently answer with vectors the caller cannot interpret.
+            // (Legacy unstamped vectors are quarantined at load, so an
+            // unrecorded durable contract is an empty pool.)
+            match &snapshot.embedding {
+                None => {
+                    self.answers.lock().push(Vec::new());
+                    return Ok(Vec::new());
+                }
+                Some(durable) if durable == expected_contract => {}
+                Some(durable) => {
+                    return Err(StoreError::Invariant(format!(
+                        "vector candidate lookup refused after embedding contract changed: \
+                         vectors were written by kind={} model={:?} dim={}, but the live/attached \
+                         embedder is kind={} model={:?} dim={} — re-embed or start a new session",
+                        durable.kind,
+                        durable.model,
+                        durable.dim,
+                        expected_contract.kind,
+                        expected_contract.model,
+                        expected_contract.dim,
+                    )));
+                }
+            }
             let mut scored: Vec<Scored<NodeId>> = snapshot
                 .concepts
                 .iter()
@@ -5480,6 +5531,82 @@ mod tests {
         );
 
         reopened.close().await.unwrap();
+    }
+
+    /// **E2E-1 regression.** The `--allow-embedding-mismatch` relabel must be
+    /// durable BEFORE the first write on a `VECTOR_SEARCH`-capable store: the
+    /// checked candidate read compares the *durable* contract against the
+    /// expected one, so a write-behind relabel (flush at interval / close)
+    /// made the documented override workflow refuse its FIRST hybrid write
+    /// with `Invariant` (live-reproduced on Cockroach; the identical
+    /// invocation only succeeded on the second run, once `close()` had landed
+    /// the relabel). The sqlite/memory override tests cannot catch this —
+    /// neither store advertises `VECTOR_SEARCH`, so the hybrid checked read
+    /// is never reached; [`VectorSearchStore`] does advertise it and enforces
+    /// the contract like Cockroach.
+    #[tokio::test]
+    async fn h1_override_relabel_is_durable_before_the_first_hybrid_write() {
+        let store = Arc::new(VectorSearchStore::new(
+            Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>
+        ));
+        let old = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-v1".into()),
+            dim: 1024,
+        };
+        let live = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("fixture-model-renamed".into()),
+            dim: 1024,
+        };
+        let open = |store: Arc<VectorSearchStore>, contract: EmbeddingContract, allow: bool| {
+            let store = store.clone();
+            async move {
+                Memory::builder()
+                    .session("e2e1-override-first-write")
+                    .agent("operator")
+                    .flush_interval(Duration::from_secs(3_600))
+                    .match_strategy(MatchStrategy::Hybrid)
+                    .store(store as Arc<dyn GraphStore>)
+                    .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                    .embedding_contract(contract)
+                    .allow_embedding_mismatch(allow)
+                    .build()
+                    .await
+                    .expect("attach")
+            }
+        };
+
+        // Writer 1: contract A; the derive writes a real vector through the
+        // checked read (empty pool on the fresh, unstamped session).
+        let first = open(store.clone(), old.clone(), false).await;
+        first
+            .derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        first.close().await.unwrap();
+
+        // Writer 2: same kind, same width, renamed model, explicit override.
+        // The FIRST write must now succeed — the relabel was flushed to the
+        // store at attach, so the checked read sees the new durable contract.
+        let second = open(store.clone(), live.clone(), true).await;
+        second
+            .derive(
+                &[("auth middleware", ConceptType::Entity)],
+                &ParentOf::none(),
+            )
+            .await
+            .unwrap_or_else(|err| {
+                panic!("override relabel must be durable before the first hybrid write: {err}")
+            });
+        second.close().await.unwrap();
+
+        // The durable contract is the relabeled one, not the original.
+        let snapshot = store
+            .load_session(&SessionId::new("e2e1-override-first-write"))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.embedding, Some(live));
     }
 
     #[tokio::test]

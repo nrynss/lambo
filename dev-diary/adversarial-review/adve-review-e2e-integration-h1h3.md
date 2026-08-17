@@ -398,7 +398,145 @@ the override path; the P3s can ride the next hardening cycle.
 
 ## Remediation disposition
 
-Pending — no remediation has been performed yet; this review's findings await
-disposition.
+Remediated by `E2ERemediationR1` on branch `codex/e2e-remediation` (base = main
+HEAD `759d59c`).
+
+- **Code fix commit:** `fd92341` `fix(hardening): E2E remediation round 1`
+- **Docs/disposition commit:** (see the commit log — this section is its
+  payload; hash recorded below at the signature line)
+
+### E2E-1 (P2) — FIXED, live-verified
+
+The override relabel is now flushed to the store synchronously at attach
+(`Memory::build`, the `Mismatch` arm): `graph.drain_log()` → `final_flush`
+(the same armored, timeout-bounded, panic-contained one-shot flush `close()`
+uses) before the writer is usable. It stays an ordered durable mutation —
+later writes append after it in the log. A failed relabel flush refuses the
+attach (the startup-error path releases the freshly acquired lease), because
+a writer whose relabel is not durable would hit the same E2E-1 refusal on its
+first write. The in-process `VectorSearchStore` test adapter now enforces the
+contract check like Cockroach (unstamped durable contract → empty pool;
+durable ≠ expected → `Invariant`), and the regression
+`h1_override_relabel_is_durable_before_the_first_hybrid_write` proves
+override-attach → first hybrid write succeeds on a VECTOR_SEARCH-capable
+store — it FAILS (reproducing the exact refusal) with the eager flush
+disabled, and PASSES with it. The sqlite/memory suites cannot catch this
+because neither store advertises `VECTOR_SEARCH`.
+
+**Live verification (real Cockroach cluster `nrynss`, real BGE-M3 via the
+local llama.cpp server; DSN loaded only from `.env`, never shown):**
+fresh session, `lambo derive` with contract A → ok; same session with the
+renamed model id and `--allow-embedding-mismatch` → **succeeded on the FIRST
+run** (`derived 1 concept(s): 1 created, 0 matched existing`, exit 0) — the
+round-1 reviewer reproduced a refusal (`invariant violated: vector candidate
+lookup refused after embedding contract changed: …`) on exactly this
+invocation. Post-override: recall under B works with real semantic scores
+(0.94 / 0.25); recall under A refuses naming both contracts (fail-closed in
+the other direction, as before).
+
+### E2E-2 (P3) — FIXED
+
+The two kind-XOR-dim arms of `session_embedding_from_parts`
+(`src/store/cockroach.rs`) now classify as `StoreError::Invariant`, so
+`tx_retry` returns on the first attempt instead of replaying a deterministic
+corruption 5× (~500 ms). Both consumers — the checked vector read AND the
+load path — share the helper, so the load path is fixed by the same change.
+The unit test now asserts `Invariant` for both arms (negative-dim stays
+`Backend`, sqlite parity, unchanged).
+
+### E2E-3 (P2) — FIXED
+
+`web/app.js runLookup`: the stage `setInterval` is now a module-level
+`lookupTimer` cleared at the TOP of every `runLookup` (a superseded lookup's
+timer dies immediately — the Enter key is not gated on the in-flight flag),
+self-clears inside the interval when its `seq` is stale (so it can never
+overwrite `#lookup-stage` with the first query's text), and is cleared on the
+success path. No interval can leak; no superseded lookup writes stage text.
+
+### E2E-4 (P3) — FIXED
+
+`loadGraph` is now scheduled from the previous request's completion
+(`scheduleGraph`: `loadGraph().then(scheduleGraph)` after the 20 s delay),
+replacing `setInterval` — requests never overlap and a slow (older) response
+cannot commit stale state; a failed poll still schedules the next one. The
+hero deps `/api/inspect` fetch carries a `state.heroSeq` sequence token, so
+an overlapping render for an older pillar can no longer fill `hero-deps`.
+
+### E2E-5 (P3) — FIXED
+
+`render_cli_text` now renders `DetailedRecall.warnings` that no annotation
+already carries (the skip set is exactly the annotation-rendered set —
+response annotations plus every hit's annotations), with the same ⚑ header
+treatment, appended after the response-global annotations. A warnings-only
+producer (the `warn_only` refusal paths, the missing-index note) can no
+longer render empty output on CLI or HTTP. Three unit tests pin it: a
+warnings-only result renders non-empty and ⚑-prefixed; an annotation-covered
+warning renders exactly once; an unannotated warning renders beside context
+blocks. Reachable-path output is byte-unchanged — every reachable warning is
+annotation-covered (golden/parity tests stay green, all verified).
+
+### E2E-6 (P3) — FIXED
+
+When `gather` is refused mid-flight by the checked read's contract-race
+`Invariant` (`embedding contract changed`), the daemon attaches a
+`vector_degraded` response annotation — `recall: vector leg refused because
+the embedding contract changed mid-query; results are keyword-only` — which
+`render_cli_text` puts in the ⚑ header (verbatim view) and the portal renders
+as a typed annotation box (card view). Ranking stays fail-closed: the vector
+leg is still empty; only the explanation is new. No duplication with the
+CLI-side embed-failure `vector_degraded`: that path has no query embedding,
+so `gather` returns before reaching the store — the two are mutually
+exclusive by construction. Test
+`gather_contract_race_annotates_vector_degraded` pins it.
+
+### E2E-7 (P3) — FIXED
+
+`web/app.js` gate-block comment rewritten (server has suppressed
+`gate_progress` for Canonical since H2; the client guard is defense-in-depth
+for older payloads); `serve_web.rs` module doc now names
+`cli::recall::run_detailed`; the H2 completion record's cooldown regression
+ref in `dev-diary/notes/hardening-tasks.md` updated from the stale
+`2623-2667` to the HEAD range `2944-2984`; the dead `extra_warnings` variable
+in `src/cli/recall.rs` deleted (the typed `vector_degraded` annotation
+superseded it).
+
+### E2E-8 (P3) — FIXED
+
+`EmbeddingStatus::vector_search_trusted` is now `status == "compatible"`:
+`unrecorded` (legacy sessions whose vectors were quarantined at load, where
+the checked read returns an empty pool) and `mismatch` both report
+`vector_search: false` in `/api/session` and `/api/pulse`, while the `status`
+field keeps its `unrecorded|compatible|mismatch` semantics (H1's banner logic
+untouched). Test `h1_legacy_unrecorded_sessions_report_vector_search_false`
+proves the wire shape on a VECTOR_SEARCH-advertising store: unrecorded →
+false (session + pulse), then stamped compatible → true.
+
+### Gates (this remediation's runs, branch HEAD)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `git diff --check` | clean |
+| `node --check web/app.js` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --all-features -- -D warnings` | clean |
+| `cargo test` (default) | **711 passed, 1 ignored** (705 + 6 new tests) |
+| `cargo test --no-default-features --features store-memory,embed-fixture` | **698 passed** (692 + 6) |
+| `cargo test --no-default-features --features store-sqlite,embed-fixture` | **517 passed** (513 + 4; sqlite matrix) |
+| `cargo test --all-features`, no DSN | **841 passed, 8 ignored** (835 + 6) |
+| `cargo test --all-features -- --ignored`, DSN loaded (LIVE) | **8 passed, 0 failed** (conformance suite 59.5 s) + `tests/live_calibration.rs` 2 passed |
+
+New tests: `memory::tests::h1_override_relabel_is_durable_before_the_first_hybrid_write`,
+`cli::recall::tests::{a_warnings_only_detailed_result_renders_non_empty,
+a_warning_covered_by_an_annotation_is_not_duplicated,
+an_unannotated_warning_renders_beside_context_blocks}`,
+`daemon::tests::gather_contract_race_annotates_vector_degraded`,
+`cli::serve_web::tests::h1_legacy_unrecorded_sessions_report_vector_search_false`.
+
+Awaiting independent re-review.
+
+— E2ERemediationR1, 2026-08-17 (branch `codex/e2e-remediation`, base main
+`759d59c`; live cluster `nrynss`; code commit `fd92341`; docs commit recorded
+in the git log)
 
 — e2e_review_r1, 2026-08-17 (main @ c5586c5; live cluster `nrynss`)

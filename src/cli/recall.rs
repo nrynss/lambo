@@ -118,7 +118,6 @@ pub(crate) async fn run_detailed(
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
     let daemon = Daemon::from_config(loaded.graph, &cfg).with_index(loaded.index);
 
-    let mut extra_warnings = Vec::new();
     // H3: the embed-failure line is a typed, response-global annotation
     // (`vector_degraded`) captured at its producer — never text-parsed later.
     let mut extra_annotations: Vec<Annotation> = Vec::new();
@@ -131,7 +130,6 @@ pub(crate) async fn run_detailed(
             Ok(vector) => Some(vector),
             Err(err) => {
                 let text = format!("recall: query embedding failed ({err}); vector leg skipped");
-                extra_warnings.push(text.clone());
                 extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
                 None
             }
@@ -180,12 +178,15 @@ pub(crate) async fn run_detailed(
 /// carries every warning whose owning block is outside the token budget,
 /// preserving producer order: `vector_degraded` first, then each hit's
 /// annotations in rank order, then the remaining response-global annotations
-/// (`traversal`). A warning line whose block IS in the context is not
-/// duplicated in the header.
+/// (`traversal`), then any pipeline `warnings` no annotation already carries
+/// (E2E-5 — a warnings-only producer must never render empty output). A
+/// warning line whose block IS in the context is not duplicated in the
+/// header, and a warning text that a typed annotation already rendered is
+/// not duplicated either.
 ///
 /// The parity this enforces is the H3 losslessness property: every annotation
-/// text appears in the output exactly once — inside its included block, or as
-/// a header line when the block was excluded.
+/// and warning text appears in the output exactly once — inside its included
+/// block, or as a header line when the block was excluded.
 pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for h in &detail.detailed {
@@ -224,6 +225,27 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
             push_header(&a.text);
         }
     }
+    // E2E-5: pipeline warnings that no annotation already rendered. Every
+    // warning a hit carries is also a typed annotation (assemble attaches
+    // both), so the annotation-rendered set is the exact skip set — a plain
+    // warning such as the warn_only refusal paths or the missing-index note
+    // is neither, and would otherwise vanish from CLI and HTTP output.
+    let annotated: std::collections::HashSet<&str> = detail
+        .response_annotations
+        .iter()
+        .map(|a| a.text.as_str())
+        .chain(
+            detail
+                .detailed
+                .iter()
+                .flat_map(|h| h.annotations.iter().map(|a| a.text.as_str())),
+        )
+        .collect();
+    for w in &detail.warnings {
+        if !annotated.contains(w.as_str()) {
+            push_header(w);
+        }
+    }
 
     if header.is_empty() {
         block_context
@@ -231,5 +253,69 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
         header
     } else {
         format!("{header}{block_context}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// E2E-5: a warnings-only detailed result (the daemon's early refusal
+    /// paths — limit validation, session mismatch — and the missing-index
+    /// note) carries its message in `warnings` with empty `detailed` and no
+    /// annotations. It must render non-empty, or the warning would silently
+    /// vanish from both the CLI string and the HTTP `context`.
+    #[test]
+    fn a_warnings_only_detailed_result_renders_non_empty() {
+        let warning = "recall: top-k validation failed; refusing to search";
+        let detail = DetailedRecall::warn_only(warning.to_string());
+        let text = render_cli_text(&detail);
+        assert!(!text.is_empty(), "a warnings-only result must render");
+        assert!(
+            text.contains(warning),
+            "the warning text must survive: {text:?}"
+        );
+        assert!(
+            text.starts_with('⚑'),
+            "a bare warning is ⚑-prefixed: {text:?}"
+        );
+    }
+
+    /// E2E-5: a warning whose text an annotation already rendered must not be
+    /// duplicated into the header (the H3 losslessness property). The
+    /// embed-failure path and every per-hit warning are annotated; the
+    /// warnings list carries the same text, and the skip set is the exact
+    /// annotation-rendered set.
+    #[test]
+    fn a_warning_covered_by_an_annotation_is_not_duplicated() {
+        let warning = "recall: query embedding failed (boom); vector leg skipped";
+        let mut detail = DetailedRecall::warn_only(warning.to_string());
+        detail
+            .response_annotations
+            .push(Annotation::new(AnnotationKind::VectorDegraded, warning));
+        let text = render_cli_text(&detail);
+        assert_eq!(
+            text.matches(warning).count(),
+            1,
+            "annotated warning renders exactly once: {text:?}"
+        );
+    }
+
+    /// E2E-5: a warning with no annotation renders even beside an included
+    /// block — the header is additive, never swallowed by the context.
+    #[test]
+    fn an_unannotated_warning_renders_beside_context_blocks() {
+        let mut detail = DetailedRecall::warn_only(
+            "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"
+                .to_string(),
+        );
+        detail.warnings.push("recall: second note".to_string());
+        let text = render_cli_text(&detail);
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "one header line per warning: {text:?}"
+        );
+        assert!(text.contains("recall: second note"), "{text:?}");
     }
 }

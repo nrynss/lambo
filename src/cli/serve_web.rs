@@ -35,8 +35,9 @@
 //! This process is a **reader**: it never constructs a [`Memory`], never takes
 //! the T8.6 writer lease, and never spawns GC — same discipline as
 //! [`crate::cli::recall`] and [`crate::cli::stats`]. Recall reuses
-//! `cli::recall::run` outright, so the page cannot drift from what the CLI and
-//! MCP surfaces return.
+//! `cli::recall::run_detailed` outright (the H3 single-execution seam — CLI
+//! string, `hits` and `response_annotations` come from one run), so the page
+//! cannot drift from what the CLI and MCP surfaces return.
 //!
 //! The honest cost of least privilege, stated on the page rather than papered
 //! over:
@@ -402,9 +403,16 @@ impl EmbeddingStatus {
             },
         }
     }
-
+    /// E2E-8: only a `compatible` contract means the vector leg can actually
+    /// return candidates. `unrecorded` (legacy) sessions had their vectors
+    /// quarantined at load and the checked read returns an empty pool for an
+    /// unstamped durable contract — the flag must not say the leg is on when
+    /// it returns nothing. `mismatch` is refused by the checked read. The
+    /// `status` field itself keeps its `unrecorded|compatible|mismatch`
+    /// semantics (H1's banner logic depends on it); only this derived flag
+    /// tightens.
     fn vector_search_trusted(&self) -> bool {
-        self.status != "mismatch"
+        self.status == "compatible"
     }
 }
 
@@ -3398,6 +3406,103 @@ mod tests {
             "the banner must clear in the compatible direction, not only appear"
         );
 
+        handle.abort();
+    }
+
+    /// E2E-8: a legacy (unrecorded) session reports `vector_search: false`
+    /// even on a store that advertises `VECTOR_SEARCH` — its vectors were
+    /// quarantined at load and the checked read returns an empty pool for an
+    /// unstamped durable contract. The `embedding_contract.status` field
+    /// stays `unrecorded` (H1's banner semantics are unchanged); only the
+    /// derived flag tightens. A compatible session on the same store still
+    /// reports the leg on.
+    #[tokio::test]
+    async fn h1_legacy_unrecorded_sessions_report_vector_search_false() {
+        let store = Arc::new(MemoryStore::new());
+        // The legacy shape: concept vectors present, no embedding contract
+        // stamped — exactly what `load_session` quarantines (store/load.rs).
+        let sid = SessionId::new("e2e8-legacy");
+        let iid = NodeId::new();
+        let cid = NodeId::new();
+        let now = Utc::now();
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: iid,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("legacy".to_string()),
+                previous_id: None,
+                created_at: now,
+            }),
+        });
+        let mut c = concept(sid.clone(), cid, iid, "legacy", now);
+        c.embedding = Some(vec![0.0; 1024]);
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c),
+        });
+        batch.push(Mutation::UpsertEdge {
+            edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+        });
+        store
+            .flush(&batch, None)
+            .await
+            .expect("seed legacy session");
+
+        let (addr, handle) = spawn(state_from_backends(
+            backends_with_store(Box::new(VectorSearch(Shared(store.clone())))),
+            "e2e8-legacy",
+            None,
+        ))
+        .await;
+
+        let info = get_json(addr, "/api/session").await;
+        assert_eq!(info["embedding_contract"]["status"], "unrecorded", "{info}");
+        assert_eq!(
+            info["vector_search"], false,
+            "unrecorded session on a VECTOR_SEARCH store must report the leg off: {info}"
+        );
+
+        let pulse = get_json(addr, "/api/pulse").await;
+        assert_eq!(
+            pulse["embedding_contract"]["status"], "unrecorded",
+            "{pulse}"
+        );
+        assert_eq!(
+            pulse["vector_search"], false,
+            "/api/pulse must agree with /api/session: {pulse}"
+        );
+        handle.abort();
+
+        // The same store, now stamped compatible: the leg is genuinely on.
+        store
+            .flush(
+                &crate::types::MutationBatch {
+                    mutations: vec![crate::types::Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(EmbeddingContract {
+                            kind: "fixture".into(),
+                            model: None,
+                            dim: 1024,
+                        }),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let (addr, handle) = spawn(state_from_backends(
+            backends_with_store(Box::new(VectorSearch(Shared(store.clone())))),
+            "e2e8-legacy",
+            None,
+        ))
+        .await;
+        let info = get_json(addr, "/api/session").await;
+        assert_eq!(info["embedding_contract"]["status"], "compatible", "{info}");
+        assert_eq!(
+            info["vector_search"], true,
+            "a compatible session on a VECTOR_SEARCH store keeps the leg on: {info}"
+        );
         handle.abort();
     }
 
