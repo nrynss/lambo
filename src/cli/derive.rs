@@ -157,9 +157,6 @@ mod tests {
             parse_parent_of(":parent"),
             Err(CliError::Usage(_))
         ));
-        assert!(matches!(
-            parse_parent_of("child:"),
-            Err(CliError::Usage(_))
-        ));
+        assert!(matches!(parse_parent_of("child:"), Err(CliError::Usage(_))));
     }
 }

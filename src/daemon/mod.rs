@@ -364,8 +364,7 @@ impl Daemon {
         // by traversal below; the gather and the blended pipeline are skipped
         // only for a DISPATCHED structural query (N2) - one that actually resolves
         // an anchor with structural dependents.
-        let structural =
-            dispatch::classify(&query.query) == RecallKind::Structural;
+        let structural = dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents? Only then
@@ -413,12 +412,9 @@ impl Daemon {
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
         if structural {
-            if let Some(result) = dispatch::try_structural(
-                &graph,
-                &query.query,
-                query.top_k,
-                query.max_tokens,
-            ) {
+            if let Some(result) =
+                dispatch::try_structural(&graph, &query.query, query.top_k, query.max_tokens)
+            {
                 return result;
             }
         }

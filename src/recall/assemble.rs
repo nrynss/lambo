@@ -163,7 +163,11 @@ where
         // a trace subscriber is present (T9-R1-4) - never per-member with
         // tracing disabled.
         if tracing::enabled!(target: "lambo::recall", tracing::Level::TRACE) {
-            let arm = if r > 0.0 { "lexical/vector" } else { "structural" };
+            let arm = if r > 0.0 {
+                "lexical/vector"
+            } else {
+                "structural"
+            };
             let content = match graph.node(s.item) {
                 Some(Node::Concept(c)) => c.content.as_str(),
                 _ => "<non-concept>",

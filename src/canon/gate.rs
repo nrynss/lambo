@@ -145,7 +145,7 @@ pub async fn gate_progress(
         distinct_interactions: GateMetric::at_least(span.distinct as f64, MIN_DISTINCT as f64),
         coverage: GateMetric::at_least(span.coverage, MIN_COVERAGE),
         in_cooldown,
-        cooldown_until: in_cooldown.then(|| until).flatten(),
+        cooldown_until: in_cooldown.then_some(until).flatten(),
     })
 }
 
@@ -183,4 +183,3 @@ fn in_cooldown(
         None => true,
     }
 }
-

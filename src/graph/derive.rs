@@ -1364,7 +1364,10 @@ mod tests {
         .unwrap();
         assert_eq!(first.created.len(), 1, "first Observation derives normally");
         let obs_id = first.created[0];
-        assert_eq!(concept_of(&g, obs_id).concept_type, ConceptType::Observation);
+        assert_eq!(
+            concept_of(&g, obs_id).concept_type,
+            ConceptType::Observation
+        );
 
         // Re-referencing the same content as Observation → refusal, not a node.
         let err = derive(

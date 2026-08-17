@@ -530,13 +530,14 @@ mod tests {
         .unwrap();
         let mut cfg = Config::default();
         both.daemon.apply_to(&mut cfg);
-        assert!(cfg.validate().is_err(), "both zero [daemon] cadences must fail");
+        assert!(
+            cfg.validate().is_err(),
+            "both zero [daemon] cadences must fail"
+        );
 
         // Each override alone: gc only.
-        let gc_only = LamboFile::from_toml_str(
-            "[daemon]\ngc_interval = 0\n\n[store]\n[embedder]\n",
-        )
-        .unwrap();
+        let gc_only =
+            LamboFile::from_toml_str("[daemon]\ngc_interval = 0\n\n[store]\n[embedder]\n").unwrap();
         let mut cfg_gc = Config::default();
         gc_only.daemon.apply_to(&mut cfg_gc);
         assert!(

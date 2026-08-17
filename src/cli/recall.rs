@@ -8,7 +8,7 @@ use super::caps::{
     check_size_cli, clamp_cfg_default, require_nonempty, CliError, MAX_MAX_TOKENS, MAX_TOP_K,
     MAX_TRAVERSAL_DEPTH,
 };
-use super::{load_reader_graph_with_contract};
+use super::load_reader_graph_with_contract;
 use crate::config::Config;
 use crate::daemon::{Daemon, RecallPipeline};
 use crate::recall::cache::RecallCache;

@@ -710,16 +710,13 @@ mod tests {
             model: None,
             dim: 512,
         };
-        let err = match load_reader_graph_with_contract(
-            &shared,
-            "t1p2-reader-embed",
-            Some(&disagreeing),
-        )
-        .await
-        {
-            Ok(_) => panic!("a disagreeing embedder contract must refuse"),
-            Err(e) => e,
-        };
+        let err =
+            match load_reader_graph_with_contract(&shared, "t1p2-reader-embed", Some(&disagreeing))
+                .await
+            {
+                Ok(_) => panic!("a disagreeing embedder contract must refuse"),
+                Err(e) => e,
+            };
         let msg = err.to_string();
         assert!(
             msg.to_lowercase().contains("incompatible"),

@@ -71,7 +71,7 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
 /// prose, so they are dropped. A marker-bearing but non-dependency question
 /// ("is the system independent of a single region", "the report references
 /// the changelog") stays `General`.
-
+///
 /// Classify a query into a recall arm (lexical/vector vs structural).
 pub fn classify(query: &str) -> RecallKind {
     let lower = query.to_lowercase();
@@ -238,10 +238,9 @@ fn max_structural_strength(graph: &Graph, a: NodeId, b: NodeId) -> f64 {
     for e in graph.edges() {
         if format::STRUCTURAL_EDGE_TYPES.contains(&e.edge_type)
             && ((e.source == a && e.target == b) || (e.source == b && e.target == a))
+            && e.weight > best
         {
-            if e.weight > best {
-                best = e.weight;
-            }
+            best = e.weight;
         }
     }
     best
@@ -338,14 +337,18 @@ pub fn try_structural(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "fixtures")]
+    use parking_lot::RwLock;
+    #[cfg(feature = "fixtures")]
     use std::sync::Arc;
 
     use chrono::{TimeZone, Utc};
-    use parking_lot::RwLock;
 
     use super::*;
     use crate::graph::Graph;
-    use crate::types::{AgentId, Concept, ConceptType, Edge, EdgeType, Interaction, RecallQuery, SessionId};
+    use crate::types::{
+        AgentId, Concept, ConceptType, Edge, EdgeType, Interaction, RecallQuery, SessionId,
+    };
 
     fn sid() -> SessionId {
         SessionId::from("t9-exhibit")
@@ -410,7 +413,11 @@ mod tests {
 
         let concepts: &[(u64, &str, ConceptType)] = &[
             (10, "SG-Base-VPC", ConceptType::Entity),
-            (11, "SG-Base-VPC = sg-071b52ffe5950efdf", ConceptType::Entity),
+            (
+                11,
+                "SG-Base-VPC = sg-071b52ffe5950efdf",
+                ConceptType::Entity,
+            ),
             (
                 12,
                 "SG-Base-VPC egress all protocols to 0.0.0.0/0",
@@ -427,7 +434,11 @@ mod tests {
                 ConceptType::Constraint,
             ),
             (20, "SG-PublicWeb", ConceptType::Entity),
-            (21, "SG-PublicWeb = sg-0cf21b70c346eaa99", ConceptType::Entity),
+            (
+                21,
+                "SG-PublicWeb = sg-0cf21b70c346eaa99",
+                ConceptType::Entity,
+            ),
             (
                 22,
                 "SG-PublicWeb egress all protocols to 0.0.0.0/0",
@@ -439,7 +450,11 @@ mod tests {
                 "RDS-Lambo-Demo-DB = rds-lambo-demo-db.cm3yke2423t5.us-east-1.rds.amazonaws.com",
                 ConceptType::Entity,
             ),
-            (32, "RDS-Lambo-Demo-DB is not publicly accessible", ConceptType::Constraint),
+            (
+                32,
+                "RDS-Lambo-Demo-DB is not publicly accessible",
+                ConceptType::Constraint,
+            ),
         ];
         for (id, content, ty) in concepts {
             g.insert_concept(concept(*id, content, *ty), i1.id).unwrap();
@@ -488,7 +503,10 @@ mod tests {
             classify("is it safe to delete the shared security group"),
             RecallKind::Structural
         );
-        assert_eq!(classify("does anything depend on this"), RecallKind::Structural);
+        assert_eq!(
+            classify("does anything depend on this"),
+            RecallKind::Structural
+        );
         // General questions stay general (refusal path).
         assert_eq!(classify("update user schema"), RecallKind::General);
         assert_eq!(classify("pagination"), RecallKind::General);
@@ -523,7 +541,7 @@ mod tests {
             .expect("structural question must dispatch");
         let contents = content_of(&result.hits);
         assert!(
-            contents.iter().any(|c| *c == "RDS-Lambo-Demo-DB"),
+            contents.contains(&"RDS-Lambo-Demo-DB"),
             "the dependent must be surfaced, got {contents:?}"
         );
         // The traversal ranks the strongest-bound dependent first: RDS is
@@ -622,6 +640,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fixtures")]
     #[tokio::test]
     async fn recall_entry_dispatches_structural_query() {
         // End-to-end through Daemon::recall: a structural query short-circuits
@@ -656,7 +675,7 @@ mod tests {
             .await;
         let contents: Vec<&str> = res.hits.iter().map(|h| h.content.as_str()).collect();
         assert!(
-            contents.iter().any(|c| *c == "RDS-Lambo-Demo-DB"),
+            contents.contains(&"RDS-Lambo-Demo-DB"),
             "Daemon::recall must dispatch the dependency question, got {contents:?}"
         );
     }

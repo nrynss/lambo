@@ -488,7 +488,6 @@ impl InspectResponse {
     }
 }
 
-
 /// The structural edge types the page may show. Mirrors
 /// `STRUCTURAL_EDGE_IN` in `src/store/sqlite.rs`: blast radius,
 /// interaction span and this page all exclude `CoOccurrence`/`Semantic`.
@@ -968,7 +967,11 @@ async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
                 blast_radius: radii.get(&c.id).copied().unwrap_or(0),
             })
             .collect();
-        nodes.sort_by(|a, b| a.content.cmp(&b.content).then_with(|| a.status.cmp(b.status)));
+        nodes.sort_by(|a, b| {
+            a.content
+                .cmp(&b.content)
+                .then_with(|| a.status.cmp(b.status))
+        });
         let nodes_trunc = nodes.len() > MAX_GRAPH_NODES;
         nodes.truncate(MAX_GRAPH_NODES);
 
@@ -992,13 +995,19 @@ async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
             })
             .collect();
         raw.sort_by(|a, b| {
-            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2))
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
         });
         let edges_trunc = raw.len() > MAX_GRAPH_EDGES;
         let edges: Vec<GraphEdge> = raw
             .into_iter()
             .take(MAX_GRAPH_EDGES)
-            .map(|(_, parent, child, edge)| GraphEdge { parent, child, edge })
+            .map(|(_, parent, child, edge)| GraphEdge {
+                parent,
+                child,
+                edge,
+            })
             .collect();
 
         (nodes, edges, nodes_trunc || edges_trunc)
@@ -1570,11 +1579,7 @@ mod tests {
     /// each a structural (Dependency) edge `focus -> dep_i`, plus one
     /// interaction to root the concepts on. No canonization runs, so
     /// `focus` stays status `None` — a load-bearing non-canonical node.
-    async fn seed_chain_around(
-        session: &str,
-        focus: &str,
-        dependents: usize,
-    ) -> Arc<MemoryStore> {
+    async fn seed_chain_around(session: &str, focus: &str, dependents: usize) -> Arc<MemoryStore> {
         let store = Arc::new(MemoryStore::new());
         let sid = SessionId::new(session);
         let iid = NodeId::new();
@@ -1596,7 +1601,14 @@ mod tests {
         });
         // §5.7: every concept must have a Derives edge from an interaction.
         batch.push(Mutation::UpsertEdge {
-            edge: edge(NodeId::new(), sid.clone(), iid, focus_id, EdgeType::Derives, now),
+            edge: edge(
+                NodeId::new(),
+                sid.clone(),
+                iid,
+                focus_id,
+                EdgeType::Derives,
+                now,
+            ),
         });
         for i in 0..dependents {
             let cid = NodeId::new();
@@ -1686,7 +1698,13 @@ mod tests {
         });
         for (i, &cid) in ids.iter().enumerate() {
             batch.push(Mutation::UpsertNode {
-                node: Node::Concept(concept(sid.clone(), cid, iid, &format!("concept {i:05}"), now)),
+                node: Node::Concept(concept(
+                    sid.clone(),
+                    cid,
+                    iid,
+                    &format!("concept {i:05}"),
+                    now,
+                )),
             });
             // §5.7: every concept must have a Derives edge from an interaction.
             batch.push(Mutation::UpsertEdge {
@@ -1696,11 +1714,21 @@ mod tests {
         for (i, &src) in ids.iter().enumerate() {
             for &dst in ids.iter().skip(i + 1) {
                 batch.push(Mutation::UpsertEdge {
-                    edge: edge(NodeId::new(), sid.clone(), src, dst, EdgeType::Dependency, now),
+                    edge: edge(
+                        NodeId::new(),
+                        sid.clone(),
+                        src,
+                        dst,
+                        EdgeType::Dependency,
+                        now,
+                    ),
                 });
             }
         }
-        store.flush(&batch, None).await.expect("seed many structural edges");
+        store
+            .flush(&batch, None)
+            .await
+            .expect("seed many structural edges");
         store
     }
 
@@ -2489,7 +2517,10 @@ mod tests {
 
         // A longer presented value whose prefix matches must refuse: the scan
         // and the length fold both see the trailing bytes.
-        assert!(!tokens_match(b"s3cret-extra", token), "padded token refuses");
+        assert!(
+            !tokens_match(b"s3cret-extra", token),
+            "padded token refuses"
+        );
 
         // A shorter presented value that is an exact prefix must refuse: a
         // naive full-scan-equal-length or zip-short-circuit implementation
