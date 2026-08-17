@@ -151,3 +151,88 @@ not passed. The Cockroach production SQL/read paths were inspected directly.
 open. After remediation, re-review must exercise a cross-process lease retry, a
 contract-changing reader race, and a live `serve-web` status transition rather
 than only fixed in-process snapshots.
+
+## Remediation disposition
+
+- **Remediation agent:** `h1_remediation_r1`
+- **Remediation commit:** `c72acf5fb1abd0f909d8bc2ef15f6d579df0d2fd`
+- **Disposition:** all four round-1 findings remediated; awaiting independent
+  re-review. The original `REQUEST_CHANGES` verdict above is unchanged.
+
+### H1-R1-1 (P1) - remediated
+
+`MemoryBuilder::build` now groups every fallible startup step after lease
+acquisition in one startup result and holder-scoped releases the lease before
+returning any clean startup error (`src/memory.rs:645-691`). This covers load,
+legacy stamp, default mismatch refusal, and refused/failed operator override;
+the process-crash path still correctly relies on TTL.
+
+`tests/cli_write_lease.rs:231-300` is a real shipped-binary SQLite regression.
+Distinct processes write model v1, refuse model v2, immediately retry the
+correct v1, refuse v2 again, and immediately retry v2 with the override. Both
+post-refusal acquisitions succeed without waiting for the 45-second lease TTL.
+
+### H1-R1-2 (P1) - remediated
+
+`GraphStore::vector_candidates` now requires the exact contract that produced
+the query embedding (`src/store/mod.rs:155-172`). That contract travels with
+the embedding through every production vector path: reader recall
+(`src/cli/recall.rs`, `src/daemon/mod.rs`, `src/recall/candidates.rs`) and hybrid
+writer matching (`src/graph/hybrid.rs`). All adapter and test-double signatures
+were updated, so a new caller cannot accidentally omit it.
+
+Cockroach validates the durable contract and runs both the global-index query
+and exact session fallback in one serializable read transaction
+(`src/store/cockroach.rs:2080-2192`). A concurrent ordered `SetEmbedding` plus
+vector rewrite is therefore observed wholly before or wholly after candidate
+retrieval; a newly incompatible contract returns an error before rankings.
+Memory and SQLite retain their no-vector capability refusal while implementing
+the same contract-bearing trait surface.
+
+`src/recall/candidates.rs:523-542` deterministically loads contract A, changes
+the store to contract B at the point where a reader would be awaiting its query
+embedding, and proves candidate gathering returns a mismatch error instead of
+the planted high-confidence hit. This regression could not be expressed
+safely against the old contract-free candidate interface.
+
+### H1-R1-3 (P2) - remediated
+
+`AppState` no longer freezes embedding compatibility at startup. `/api/session`
+loads the live durable snapshot for every request (`src/cli/serve_web.rs:823`),
+and the existing `/api/pulse` polling response now carries compatibility and
+trusted-vector availability from the same live stats snapshot
+(`src/cli/serve_web.rs:455-464`, `:877-909`). Structural routes remain
+available and recall still uses the fail-closed reader path.
+
+The browser reconciles the embedding banner on initial session load and every
+pulse, removes it after repair, and avoids duplicate/unchanged DOM insertions
+(`web/app.js:82-106`, `:290`). The same-server regression at
+`src/cli/serve_web.rs:2682-2794` proves compatible -> mismatch -> compatible
+through both `/api/session` and `/api/pulse`, structural availability, and
+mismatched recall refusal.
+
+### H1-R1-4 (P3) - remediated
+
+The override is no longer a global Clap option. It exists only on writer
+subcommands and is extracted from those variants before the single backend
+construction (`src/main.rs:55-59`, `:322-353`, `:421-440`). Reader parsing now
+rejects the option directly, reader help omits it, and writer help advertises
+it (`src/main.rs:703-747`).
+
+### Remediation verification
+
+| Command/check | Result |
+|---|---|
+| `env -u RUST_LOG cargo test --all-features h1_ -- --nocapture` | pass: 6 library H1 tests, binary parser test, and real subprocess SQLite lease regression |
+| `env -u RUST_LOG cargo test --all-features` | pass: library 825 passed/8 ignored; every binary, integration, and doc harness passed; 2 live calibration tests ignored |
+| `env -u RUST_LOG cargo test --no-default-features --features store-sqlite,embed-fixture` | pass: library 510 passed; every enabled binary, integration, and doc harness passed |
+| `cargo test --all-features store::cockroach::tests::` | pass: 23 non-live Cockroach unit tests |
+| `cargo check --all-targets --all-features` | pass |
+| `cargo clippy --all-targets --all-features -- -D warnings` | pass |
+| `cargo clippy --all-targets --no-default-features --features store-sqlite,embed-fixture -- -D warnings` | pass |
+| `cargo fmt --all -- --check`; `git diff --check` | pass |
+
+No live CockroachDB conformance was run because `LAMBO_COCKROACH_DSN` was not
+available. The next independent reviewer should inspect the serializable read
+transaction and, when a DSN is available, exercise a concurrent contract/vector
+rewrite against both the global-index and exact-fallback candidate paths.
