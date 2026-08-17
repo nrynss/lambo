@@ -91,7 +91,7 @@ from _common import (  # noqa: E402
 )
 
 DEFAULT_LAMBO_REPO = "nrynss/lambo"
-DEFAULT_LAMBO_VERSION = "0.2.1"
+DEFAULT_LAMBO_VERSION = "0.2.2"
 DEFAULT_CADDY_VERSION = "2.10.0"
 
 # BGE-M3 as GGUF, served by llama.cpp on the instance itself.

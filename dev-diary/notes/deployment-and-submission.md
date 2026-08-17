@@ -41,10 +41,23 @@ and it is **not** a clean product of the current script. Until a launch from zer
 succeeds, "rebuildable from the scripts alone" is a claim that cannot be made,
 and that claim is load-bearing for the submission.
 
+**CORRECTION 2026-08-18: `teardown.py` cannot do step 1 as written.** It has no
+target selection (only `--confirm`, `--verify-only`, `--force-delete-secret`),
+and a dry run lists **18 resources**: the Lambda, both IAM roles, the RDS
+instance, the DB subnet group, `SG-PublicWeb`, `SG-Base-VPC`, the route table,
+internet gateway, all three subnets, the VPC and the DSN secret, alongside the
+instance and the EIP. Running it would destroy the very resources the demo
+narrates, and `launch_exhibit_ec2.py` rebuilds only the exhibit host, so
+recovery would need `provision_network.py` + `provision_app_data.py` and would
+mint **new** resource ids that the recorded graph does not know (it stores
+`SG-Base-VPC = sg-071b52ffe5950efdf`). D1 therefore terminates the instance
+only.
+
 Sequence:
 
-1. `teardown.py --confirm` on the exhibit instance and its Elastic IP. Keep the
-   network, RDS, Lambda and the secret; nothing about those is in question.
+1. Terminate **only** the exhibit instance, leaving the Elastic IP allocated and
+   the network, RDS, Lambda and secret untouched. Do not run
+   `teardown.py --confirm`.
 2. `launch_exhibit_ec2.py` from clean, with no manual steps afterwards.
 3. Re-point the A record if the Elastic IP changed. It should not, since the
    address is allocated separately and re-associated, but check rather than
