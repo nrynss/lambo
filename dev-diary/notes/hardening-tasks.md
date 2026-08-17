@@ -559,34 +559,236 @@ for interaction-state loss before treating H4 as satisfied.
 ### H5 - Anchor the crates.io include patterns
 
 **Files:** `Cargo.toml`
+**Blocked by:** nothing
+**Status:** **OPEN**
+**Severity:** low today; future disclosure risk
+**Release policy:** land before the next crates.io release, but do not cut a
+release for this alone
+**Owns:** `Cargo.toml`, this H5 section, and H5
+adversarial-review/disposition records
 
-Cargo `include` patterns are gitignore-style, so the unanchored `README.md`
-entry matches at every depth and shipped 14 internal README files in the 0.2.0
-crate. Scanned at release time: no live identifiers, no credentials, nothing
-resolvable. It is internal process documentation, not a leak.
+**The verified package surface.** `Cargo.toml:16-27` intends to be a whitelist,
+but its `README.md`, `LICENSE` and `NOTICE` entries are unanchored
+gitignore-style patterns. On the reviewed H1 head, `cargo package --list
+--allow-dirty --no-verify` lists 103 files and matches `README.md` at every
+depth. Fourteen internal READMEs enter solely through that pattern: the demo,
+dev-diary, adversarial-review, evidence, cloud-operations and site notes. The
+tracked `dev-diary/evidence -> ../evidence` symlink makes the four evidence
+READMEs appear under both paths. `examples/README.md` is different: it is
+intentionally included by `examples/**` at `Cargo.toml:21` and must remain.
 
-Fix is three characters in three places: `/README.md`, `/LICENSE`, `/NOTICE`.
-Not worth a release on its own. Fold it into whatever forces the next patch.
+The 0.2.0 release-time scan found no live identifier, credential or resolvable
+secret in the accidental files. This is packaging hygiene rather than an
+incident, but leaving the broad match in place means a future internal README
+can be published without any change to `Cargo.toml` or the release workflow.
+The release job currently proceeds directly to `cargo publish`
+(`.github/workflows/release.yml:239-242`) and has no file-set assertion.
+
+**The change.** Anchor exactly three entries:
+
+- `README.md` -> `/README.md`;
+- `LICENSE` -> `/LICENSE`;
+- `NOTICE` -> `/NOTICE`.
+
+**Acceptance criteria.** Root `README.md`, `LICENSE` and `NOTICE` remain in the
+crate. `examples/README.md` remains through the explicit examples subtree. No
+path under `demo/`, `dev-diary/`, `evidence/`, `scripts/` or `site/` is
+packaged. A verifying package build succeeds, proving that the source,
+`include_str!` web assets, migrations, fixtures and example config remain
+complete. The change has no Rust API or runtime effect.
+
+**Verification.** Record the whole list rather than counting files, because a
+legitimate source file added later should not fail an unrelated fixed-count
+assertion:
+
+```bash
+cargo package --list --allow-dirty --no-verify \
+  | tee /tmp/lambo-package-files.txt
+
+diff -u \
+  <(printf '%s\n' LICENSE NOTICE README.md examples/README.md | sort) \
+  <(rg '(^|/)(README\.md|LICENSE|NOTICE)$' \
+      /tmp/lambo-package-files.txt | sort)
+
+! rg '^(demo|dev-diary|evidence|scripts|site)/' \
+  /tmp/lambo-package-files.txt
+
+cargo package --allow-dirty
+git diff --check
+```
+
+`cargo package --list` is the non-vacuous acceptance check for the include
+semantics. Adding a permanent release-workflow assertion is optional follow-up,
+not required for this three-character manifest fix.
+
+**Cut lines and risks.** H5 does not bump the version, tag or publish a release;
+redesign the release workflow; remove examples; or change production code. The
+main regression risks are accidentally dropping the root legal/readme files or
+an embedded runtime input, which is why both the exact list comparison and the
+verifying `cargo package` run are mandatory. Consumers cannot rely on internal
+process notes that were never intended as crate API.
 
 ### H6 - Confirm truncation is actually surfaced
 
-**Files:** `web/app.js`
+**Files:** `web/app.js`, `web/index.html`, optionally `web/app.css`, and
+`src/cli/serve_web.rs` for narrowly scoped portal regression tests
+**Status:** **OPEN** on the reviewed H1 branch
+**Severity:** low-frequency visible correctness bug
+**Blocked by:** the focused-inspect half should land with or after portal
+redesign reconciliation
+**Owns:** the files above, this H6 section, and H6
+adversarial-review/disposition records
 
-`/api/graph` and `/api/inspect` both report a `truncated` flag when they hit
-their bounds, which is the honest design. Worth confirming the page actually
-renders it rather than silently showing a partial tree as though it were whole.
-This may already be handled; it was not checked during the brief. If it is not,
-it belongs with the redesign rather than as separate work.
+**The server half is already complete.** `/api/inspect` always returns a
+`truncated` boolean (`src/cli/serve_web.rs:517-529`) and `/api/graph` does the
+same. The bounds are 200 unique structural Concept neighbours
+(`src/cli/caps.rs:38`), 4,096 graph nodes and 16,384 structural edges
+(`src/cli/serve_web.rs:137-145`). Existing tests drive all three branches past
+their caps and assert both the flag and the bounded length
+(`src/cli/serve_web.rs:2283-2344`). Do not change those contracts to solve H6.
+
+**The browser half is missing on this branch.** `loadGraph` fetches the response
+at `web/app.js:320-347`, renders its nodes and edges and discards
+`g.truncated`. `web/index.html:84-94` has no partial-result notice. The current
+portal does not call `/api/inspect` at all; `web/app.js:308-315` explicitly
+parks the focus/detail panel. A page can therefore present a bounded tree as the
+whole tree, and a later details UI can repeat the same bug if it consumes the
+flag in only one location.
+
+**Required UI contract.** A truncated graph shows persistent, accessible text
+adjacent to the tree saying the structure is partial. Every browser consumer of
+a truncated inspect response must surface the same fact; a hero, summary or
+button must not describe the capped array length as "all N". The notice hides
+when `truncated` is false and clears when a newer untruncated response replaces
+the old one. It must be conveyed in text, not by colour alone. Server-controlled
+concept text continues through `textContent`, never `innerHTML`.
+
+**Acceptance criteria.** Exercise `truncated: true` and `false` for the graph,
+and for every UI location that consumes `/api/inspect`. Prove the visible,
+accessible sentence appears and clears; checking only that the JSON flag or a
+DOM id exists is insufficient. Existing endpoint cap tests remain green. If no
+browser harness is available at implementation time, add a focused
+embedded-asset contract test binding both response flags to both notice
+elements and record a manual runtime/browser capture; prefer the repository's
+existing Playwright tooling under `scripts/recording` over a second browser
+stack.
+
+Targeted Rust checks already available are:
+
+```bash
+cargo test inspect_truncates_and_reports_at_the_dependents_bound
+cargo test graph_truncates_and_reports_at_the_nodes_bound
+cargo test graph_truncates_and_reports_at_the_edges_bound
+node --check web/app.js
+cargo fmt --all -- --check
+git diff --check
+```
+
+Add and run a client regression with the equivalent of
+`embedded_page_surfaces_every_truncation_flag`, plus the normal minimal
+`store-sqlite,embed-fixture` and all-features gates.
+
+**Cut lines and risks.** H6 does not add pagination or "load more", raise or
+remove safety caps, change `/api/graph` or `/api/inspect`, absorb H4's refresh
+cadence, or implement H3's structured recall. The bounds protect response size;
+surfacing them must not weaken that denial-of-service control. A later graph
+refresh must also clear stale warnings, but implementing refresh remains H4.
+
+**Out-of-branch context, not completion evidence.** The independent
+`origin/main` portal commit `5ccd48f` added graph and details notices
+(`web/index.html:88,114`) and toggles them from `g.truncated` / `d.truncated`
+(`web/app.js:413,493`). It is not part of the reviewed H1 chain and cannot make
+H6 done here. When reconciled, audit every inspect consumer: that commit's hero
+path at `web/app.js:326-328` discards `d.truncated` and passes the capped array
+length as its apparent total. Reuse the useful work, but close that gap and add
+non-vacuous client evidence before marking H6 clean.
 
 ### H7 - One session per process
 
-**Files:** `src/cli/serve_web.rs`
+**Status:** **PARKED / NEEDS DESIGN**
+**Severity:** low current product pressure; high architectural and security
+risk if implemented casually
+**Do not claim for implementation until:** selection, discovery, URL and auth
+decisions below are recorded
 
-`serve-web` takes a single `--session`, so a developer with three sessions runs
-three processes on three ports. Fine today, and genuinely out of scope for now.
-Recording it because it is the kind of limitation that stops being tolerable
-quickly once people use the portal daily, and because the redesign's navigation
-will implicitly assume one session forever unless someone says otherwise.
+`serve-web` takes exactly one required `--session` (`src/main.rs:68-74`), and
+`AppState` owns one `SessionId` (`src/cli/serve_web.rs:302-311`). Every unscoped
+route resolves through that state (`src/cli/serve_web.rs:1135-1158`). The public
+store contract has `load_session(id)` but no session discovery/list operation
+(`src/store/mod.rs:101-146`), the CLI guide promises one session
+(`docs/reference/cli.mdx:272-287`), and the AWS service carries one
+`LAMBO_SESSION` (`scripts/aws-infra/launch_exhibit_ec2.py:434-456`). This is not
+a local navigation tweak.
+
+**Recommended first scope: an explicit configured allowlist, not store-wide
+discovery.** Let the operator name one or more sessions while preserving today's
+single-session invocation, and expose only those names. This avoids adding a
+required `GraphStore::list_sessions` method that would source-break published
+Level B adapters. It also avoids turning an authenticated or accidentally
+reachable portal into an implicit session-name enumeration endpoint.
+
+**Decisions required before implementation.** Record all of these in a short
+design note:
+
+1. Is selection a repeatable `--session`, a config allowlist, or store-wide
+   discovery? If discovery wins, define an additive fail-closed adapter surface
+   and capability rather than a new required trait method.
+2. Is the selected session encoded in a namespaced path or query parameter?
+   Selection must be request-local and deep-linkable, never one mutable global
+   "current session" shared by browsers.
+3. Does one bearer authorize every configured session, or is per-session auth
+   required? Are session names themselves sensitive, and may a client list them
+   or only open a name it already knows?
+4. What stable metadata and ordering may the selector show? `created_at` is not
+   portable across stores (`src/store/mod.rs:140-144`), so the design cannot
+   assume it exists.
+5. Do today's unscoped APIs remain aliases in single-session mode? Define 404
+   and authorization behaviour for unknown, unconfigured and oversized session
+   ids without leaking whether an unconfigured session exists.
+6. What request/concurrency bounds prevent a client from multiplying full graph
+   loads and embedding work across allowed sessions?
+
+H1 compatibility, vector-search trust, freshness and warning state are all
+session-specific. Switching sessions must recompute them independently; one
+mismatched session must remain structural-only without disabling recall for a
+compatible session or blessing its vectors.
+
+**Likely ownership once approved.** `src/main.rs`,
+`src/cli/serve_web.rs`, `web/{index.html,app.js,app.css}` and
+`tests/binary_parity.rs`; the reference CLI/config docs and mirrored site pages;
+and the AWS launcher only if that deployment opts into multiple sessions.
+Store adapters and migrations enter scope only if store-wide discovery is
+chosen. The eventual claim must enumerate the exact paths rather than treating
+this list as blanket ownership.
+
+**Compatibility and security constraints.** Preserve the existing one-session
+command and response behaviour. Keep every route GET-only, `no-store` and under
+the existing bearer middleware. Encode untrusted session and concept text as
+data, not markup. Never allow a session selection to escape the configured
+allowlist, reveal whether another session exists, or reuse another client's
+cursor/freshness/embedding state. One bearer covering multiple sessions is a
+material expansion of read authority and must be explicit. Arbitrary switching
+also amplifies graph-load and recall work, so bounded concurrency is part of the
+design, not an optional hardening pass.
+
+**Eventual acceptance criteria for the recommended allowlist design.** One
+session behaves exactly as today. Two configured durable sessions are
+selectable and deep-linkable on one port; concurrent clients can select
+different sessions without affecting each other. Counts, events, graph,
+inspect, recall, freshness and H1 warnings never cross the boundary. Unknown or
+unallowed sessions fail without existence disclosure. A mismatch in one
+session does not disable compatible recall in the other. The read-only route
+sweep, bearer checks, cache headers and existing AWS one-session systemd
+configuration remain valid. Integration tests cover two-session isolation,
+concurrent selection, invalid ids, unauthorized requests and backward
+compatibility.
+
+**Explicit non-goals.** H7 does not alter `lambo serve` or the
+single-writer-per-session model; add writes, session creation/deletion or
+cross-store aggregation; perform model migration/re-embedding; mandate
+store-wide discovery; or broaden the public AWS deployment automatically. It
+remains parked because choosing among those product and authority boundaries is
+the work that must happen before code.
 
 ---
 
