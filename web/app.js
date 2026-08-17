@@ -40,29 +40,32 @@
     { key: "none", desc: "Most memories stay here, and that is normal." }
   ];
 
-  var EDGE_LABEL = { Hierarchical: "contains", Dependency: "depends on", Causal: "caused" };
+  // Phrased from the dependent's side, because that is whose name the label is
+  // printed next to. "contains" beside `role column` reads as "role column
+  // contains", which is the relationship backwards.
+  var EDGE_LABEL = { Hierarchical: "part of it", Dependency: "depends on it", Causal: "caused by it" };
 
   var GATE_LABEL = {
-    gc_survived: "survived cleanup passes",
-    blast_radius: "how much depends on it",
-    distinct_interactions: "separate interactions",
-    coverage: "spread across the session"
+    gc_survived: "Survived cleanup passes",
+    blast_radius: "How much depends on it",
+    distinct_interactions: "Separate interactions",
+    coverage: "Spread across the session"
   };
 
   var COUNT_LABEL = [
-    ["nodes", "things remembered"],
-    ["concepts", "distinct memories"],
-    ["edges", "connections"],
+    ["nodes", "Things remembered"],
+    ["concepts", "Distinct memories"],
+    ["edges", "Connections"],
     ["canonical", "Canonical"],
-    ["canonization_events", "status changes"]
+    ["canonization_events", "Status changes"]
   ];
 
   // Live in the writer process. A reader cannot observe them, so they are shown
   // as unavailable rather than as a zero that reads like a real count.
   var WRITER_ONLY = [
-    ["flush lag", "measured in the writing process"],
-    ["log depth", "measured in the writing process"],
-    ["daemon cycles", "measured in the writing process"]
+    ["Flush lag", "Measured in the writing process"],
+    ["Log depth", "Measured in the writing process"],
+    ["Daemon cycles", "Measured in the writing process"]
   ];
 
   // ---- tiny DOM helpers ------------------------------------------------
@@ -110,6 +113,7 @@
     seen: 0,
     events: [],
     failures: 0,
+    painted: false,
     lookupSeq: 0,
     showFallback: false,
     lastResult: null
@@ -123,7 +127,7 @@
   function applyTheme(t) {
     if (t === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", t);
-    $("theme-btn").textContent = "theme: " + t;
+    $("theme-btn").textContent = "Theme: " + t;
     try { localStorage.setItem("lambo-theme", t); } catch (e) { /* private mode */ }
   }
 
@@ -146,12 +150,12 @@
     state.pollMs = info.poll_interval_ms || 1500;
 
     var facts = [
-      ["session", info.session],
-      ["memory stored in", info.store],
-      ["meaning model", info.embedder + (info.embedding_dim ? ", " + info.embedding_dim + " dimensions" : "")],
-      ["search by meaning", info.vector_search ? "on" : "off"],
-      ["this view", info.mode === "reader" ? "reads a copy" : info.mode],
-      ["refreshes", (state.pollMs / 1000).toFixed(1) + "s"]
+      ["Session", info.session],
+      ["Memory stored in", info.store],
+      ["Meaning model", info.embedder + (info.embedding_dim ? ", " + info.embedding_dim + " dimensions" : "")],
+      ["Search by meaning", info.vector_search ? "On" : "Off"],
+      ["This view", info.mode === "reader" ? "Reads a copy" : info.mode],
+      ["Refreshes", (state.pollMs / 1000).toFixed(1) + "s"]
     ];
     var wrap = $("facts");
     clear(wrap);
@@ -162,7 +166,7 @@
       wrap.appendChild(d);
     });
 
-    $("refresh-note").textContent = "every " + (state.pollMs / 1000).toFixed(1) + "s";
+    $("refresh-note").textContent = "Every " + (state.pollMs / 1000).toFixed(1) + "s";
     $("footer").textContent =
       "This view reads a copy of the memory and cannot write to it. Nothing here can pin, " +
       "promote, edit or delete. Refreshes every " + (state.pollMs / 1000).toFixed(1) +
@@ -185,7 +189,7 @@
       card.title = stats.writer_only || u[1];
       card.appendChild(el("div", "count-num", "—"));
       card.appendChild(el("div", "count-label", u[0]));
-      card.appendChild(el("div", "count-note", "not visible to a reader"));
+      card.appendChild(el("div", "count-note", "Not visible to a reader"));
       wrap.appendChild(card);
     });
   }
@@ -227,7 +231,7 @@
 
       var bar = el("div", "ladder-bar");
       bar.style.width = Math.max(6, Math.round((count / max) * 100)) + "%";
-      bar.appendChild(el("span", "ladder-label", d.key === "none" ? "no status" : d.key));
+      bar.appendChild(el("span", "ladder-label", d.key === "none" ? "No status" : d.key));
       bar.appendChild(el("span", "ladder-count", count));
       row.appendChild(bar);
       row.appendChild(el("div", "ladder-desc", d.desc));
@@ -248,15 +252,22 @@
       var row = el("div", "audit-row");
       var t = e.occurred_at ? new Date(e.occurred_at) : null;
       row.appendChild(el("span", "audit-time", t ? t.toLocaleTimeString() : ""));
-      row.appendChild(el("span", "audit-name", e.content));
 
-      var from = (!e.from_status || e.from_status === "None") ? "nothing yet" : e.from_status;
-      row.appendChild(el("span", "audit-transition", from + " → " + e.to_status));
+      // Written as a sentence. "user schema became Canonical" is what the row
+      // means; a four column grid with no header makes the reader work that
+      // out from position alone.
+      var sentence = el("span", "audit-sentence");
+      sentence.appendChild(el("span", "audit-name", e.content));
+      var promoted = !e.from_status || e.from_status === "None";
+      sentence.appendChild(document.createTextNode(promoted ? " became " : " went from " + e.from_status + " to "));
+      sentence.appendChild(el("span", "audit-to", e.to_status));
+      row.appendChild(sentence);
 
       // Only frozen at the moment something becomes Canonical. Elsewhere it is
       // legitimately absent, so nothing is rendered rather than a zero.
       if (e.blast_radius !== null && e.blast_radius !== undefined) {
-        row.appendChild(el("span", "audit-blast", e.blast_radius + " depended on it"));
+        row.appendChild(el("span", "audit-blast",
+          e.blast_radius + " " + plural(e.blast_radius, "thing", "things") + " depended on it"));
       }
       wrap.appendChild(row);
     });
@@ -294,7 +305,7 @@
 
     if (!pillar) {
       $("hero-empty-msg").textContent = state.graph
-        ? "Nothing in this session has enough depending on it yet. Memories are being recorded; status is earned from evidence over time, not granted on arrival."
+        ? "Nothing here has enough depending on it yet. Memories are being recorded; status has to be earned."
         : "Waiting for the session's structure.";
       return;
     }
@@ -316,10 +327,13 @@
     }
 
     $("hero-blast").textContent = pillar.blast_radius;
+    $("hero-blast-caption").textContent = pillar.blast_radius === 1
+      ? "other thing depends on this"
+      : "other things depend on this";
     $("hero-sentence").textContent =
       pillar.status === "Canonical"
         ? "Lambo marks this Canonical, so any agent that moves to change it is warned first."
-        : "More depends on this than on anything else recorded here.";
+        : "More depends on this than on anything else in the session.";
 
     // Dependents come from the focus endpoint; until it answers we show what
     // the structure payload already knows.
@@ -341,7 +355,7 @@
     if (deps.length > 6) {
       wrap.appendChild(el("div", "chip", "+" + (deps.length - 6) + " more"));
     }
-    $("hero-deps-label").textContent = "depends on it (" + (total || deps.length) + ")";
+    $("hero-deps-label").textContent = "What depends on it (" + (total || deps.length) + ")";
 
     var btn = $("hero-inspect");
     show(btn, deps.length > 0);
@@ -476,9 +490,12 @@
     }
 
     $("details-blast").textContent = d.blast_radius;
+    $("details-blast-caption").textContent = d.blast_radius === 1
+      ? "thing depends on this right now"
+      : "things depend on this right now";
 
     var deps = d.dependents || [];
-    $("details-deps-label").textContent = "depends on it (" + deps.length + ")";
+    $("details-deps-label").textContent = "What depends on it (" + deps.length + ")";
     var wrap = $("details-deps");
     clear(wrap);
     deps.forEach(function (x) {
@@ -641,7 +658,7 @@
     });
   }
 
-  var STAGES = ["embedding the query…", "searching by meaning…", "ranking results…"];
+  var STAGES = ["Embedding the query…", "Searching by meaning…", "Ranking results…"];
 
   function runLookup(query) {
     var q = (query || "").trim();
@@ -700,7 +717,7 @@
     }
 
     var ms = r.elapsed_ms !== undefined ? r.elapsed_ms : r.clientMs;
-    $("lookup-timing").textContent = "answered in " +
+    $("lookup-timing").textContent = "Answered in " +
       (ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s");
 
     // Structured results when the payload carries them, the verbatim block
@@ -709,8 +726,8 @@
 
     show($("fallback-toggle"), !!hits);
     $("fallback-toggle").textContent = state.showFallback
-      ? "show results as cards"
-      : "show what the agent receives";
+      ? "Show results as cards"
+      : "Show what the agent receives";
 
     var useCards = hits && !state.showFallback;
     show($("lookup-cards"), !!useCards);
@@ -751,7 +768,7 @@
       fill.style.width = Math.max(0, Math.min(100, (h.score || 0) * 100)) + "%";
       track.appendChild(fill);
       scoreRow.appendChild(track);
-      scoreRow.appendChild(el("span", "muted-small", "score " + (h.score || 0).toFixed(2)));
+      scoreRow.appendChild(el("span", "muted-small", "Score " + (h.score || 0).toFixed(2)));
       if (h.blast_radius) {
         scoreRow.appendChild(el("span", "muted-small", "· " + h.blast_radius + " depend on it"));
       }
@@ -783,18 +800,25 @@
     return get("/api/pulse?since=" + state.seen)
       .then(function (p) {
         state.failures = 0;
-        setConn("live", "live");
+        setConn("live", "Live");
         renderCounts(p.stats);
-        if (p.events && p.events.events && p.events.events.length) {
+        var fresh = p.events && p.events.events && p.events.events.length;
+        if (fresh) {
           state.events = state.events.concat(p.events.events);
           state.seen = p.events.total;
+        }
+        // Paint on the first answer even when there is nothing in it, so a
+        // genuinely empty session says so; after that, only when something
+        // actually moved, so the page does not redraw under the cursor.
+        if (fresh || !state.painted) {
+          state.painted = true;
           renderHistory();
           renderLadder();
         }
       })
       .catch(function (e) {
         state.failures++;
-        setConn("stale", "not connected (" + state.failures + ")");
+        setConn("stale", "Not connected (" + state.failures + ")");
       });
   }
 
@@ -845,10 +869,13 @@
     poll().then(schedule);
   }
 
+  // The legend is the only thing that can be drawn before any data arrives.
+  // The ladder and the history are deliberately NOT painted here: rendering
+  // them empty would assert "nothing has happened in this session" during the
+  // moment before the first response lands, which is a claim, not a spinner.
+  // They appear when there is something true to say.
   function initLegendAndStatic() {
     renderLegend();
-    renderLadder();
-    renderHistory();
   }
 
   if (document.readyState === "loading") {

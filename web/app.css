@@ -138,7 +138,7 @@ section { margin-bottom: 34px; }
 h1 { font-size: 26px; line-height: 1.2; margin: 0; letter-spacing: -0.02em; }
 h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 
-.section-sub { margin: 0 0 14px; color: var(--text-muted); max-width: 66ch; }
+.section-sub { margin: 0 0 14px; color: var(--text-muted); }
 
 .empty-note {
   padding: 14px 16px; border: 1px dashed var(--border); border-radius: 8px;
@@ -155,19 +155,18 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 }
 
 .hero-label {
-  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
-  text-transform: lowercase; color: var(--text-muted); margin-bottom: 10px;
+  font-size: 12px; letter-spacing: 0.02em;
+  color: var(--text-muted); margin-bottom: 10px;
 }
 
 .hero-title-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.hero-sub { margin: 10px 0 0; color: var(--text-muted); max-width: 66ch; }
+.hero-sub { margin: 10px 0 0; color: var(--text-muted); }
 
-.hero-big { margin: 18px 0 4px; display: flex; align-items: baseline; gap: 12px; }
-.hero-big-num { font-size: 46px; font-weight: 700; line-height: 1; letter-spacing: -0.03em; color: var(--warn); }
-.hero-big-caption { color: var(--text-muted); max-width: 34ch; }
+.hero-big { margin: 18px 0 4px; font-size: 17px; color: var(--text-muted); line-height: 1.45; }
+.hero-big-num { font-size: 34px; font-weight: 700; letter-spacing: -0.03em; color: var(--warn); }
 
 .col-label {
-  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
+  font-size: 12px; font-weight: 600;
   color: var(--text-muted); margin: 20px 0 8px;
 }
 
@@ -180,7 +179,7 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
   font-size: 13px; max-width: 100%;
 }
 .chip-name { overflow-wrap: anywhere; }
-.chip-edge { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+.chip-edge { font-size: 12px; color: var(--text-muted); }
 
 .shape { display: inline-block; width: 7px; height: 7px; flex: none; background: var(--text-muted); }
 .shape.k-Entity { border-radius: 50%; }
@@ -224,7 +223,7 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
   gap: 14px 18px; padding: 16px 18px;
   background: var(--bg-alt); border: 1px solid var(--border); border-radius: 10px;
 }
-.fact-label { font-size: 11px; letter-spacing: 0.04em; color: var(--text-muted); }
+.fact-label { font-size: 12px; color: var(--text-muted); }
 .fact-value { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 
 /* ---- counts ---------------------------------------------------------- */
@@ -259,7 +258,9 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 
 .ladder-label { font-weight: 600; }
 .ladder-count { font-family: var(--mono); font-size: 13px; }
-.ladder-desc { font-size: 13px; color: var(--text-muted); margin-top: 5px; max-width: 68ch; }
+/* No max-width. These are one-sentence labels, not paragraphs, and a reading
+   measure on a label just wraps it for no reason. */
+.ladder-desc { font-size: 13px; color: var(--text-muted); margin-top: 5px; }
 
 /* ---- history --------------------------------------------------------- */
 
@@ -272,10 +273,15 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 }
 .audit-row:last-child { border-bottom: none; }
 
+/* These read as sentences, not table columns. The transition sits next to the
+   name it describes rather than being flung to the right edge, because a
+   headerless grid makes a reader decode a layout to recover a fact. */
+.audit-row { gap: 8px; }
 .audit-time { font-family: var(--mono); font-size: 12px; color: var(--text-muted); flex: none; }
-.audit-name { font-weight: 600; overflow-wrap: anywhere; }
-.audit-transition { font-family: var(--mono); font-size: 12px; color: var(--text-muted); margin-left: auto; }
-.audit-blast { font-family: var(--mono); font-size: 12px; color: var(--warn); font-weight: 600; flex: none; }
+.audit-sentence { overflow-wrap: anywhere; }
+.audit-name { font-weight: 600; }
+.audit-to { font-weight: 600; }
+.audit-blast { font-size: 12px; color: var(--warn); font-weight: 600; margin-left: auto; flex: none; }
 
 /* ---- legend ---------------------------------------------------------- */
 
@@ -283,10 +289,7 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
   padding: 14px 18px; border: 1px solid var(--border);
   border-radius: 10px; background: var(--bg-alt);
 }
-.legend-label {
-  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
-  color: var(--text-muted); margin-bottom: 10px;
-}
+.legend-label { font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 10px; }
 .legend-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px 18px; }
 .legend-item { display: flex; align-items: baseline; gap: 8px; }
 .legend-text { font-size: 12px; color: var(--text-muted); }
@@ -329,8 +332,8 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 }
 .clear-btn:hover { color: var(--text); border-color: var(--accent); }
 
-.details-blast { display: flex; align-items: baseline; gap: 9px; margin-top: 14px; }
-.details-blast-num { font-size: 30px; font-weight: 700; color: var(--warn); letter-spacing: -0.02em; }
+.details-blast { margin: 14px 0 0; font-size: 16px; color: var(--text-muted); }
+.details-blast-num { font-size: 26px; font-weight: 700; color: var(--warn); letter-spacing: -0.02em; }
 
 /* Gates answer "why is this not relied on yet", so they are shown only for
    concepts that have not reached Canonical. See H2. */
