@@ -414,7 +414,9 @@ The round-1 reviewer independently verified all five acceptance criteria with
 evidence (counting-store wrapper wired into the served router proving zero
 gate-only queries; key-absence asserted on the parsed wire JSON; the
 non-Canonical fixture exercising Candidate/Venerable/status-None; cooldown
-regression at `src/cli/serve_web.rs:2623-2667`; miss and failure paths
+regression at `src/cli/serve_web.rs:2944-2984` (2623-2667 at merge time; the
+H3 merge inserted ~316 lines upstream — E2E-7 disposition); miss and failure
+paths
 unchanged) and reproduced every gate:
 
 - `cargo test`: **699 passed, 1 ignored** in the library, plus all binary,
