@@ -17,6 +17,14 @@
 // The script FAILS on unexpected browser console errors and on the XSS check,
 // so a silent regression cannot be captured as evidence.
 //
+// Round-1 review fixes (H3-R1-1): each cards screenshot now waits for the
+// QUERY-SPECIFIC content to be actually rendered and visible (a real card
+// element, the traversal banner, or the excluded-warnings area — never just
+// `#lookup-cards` having leftover text from the previous render), then
+// scrolls the results region (#lookup-results) into view so the cards, score
+// bars, status badges, response annotations and excluded-warnings area are
+// genuinely on camera instead of sitting below the 900px fold.
+//
 // Output: evidence/h3-recall-cards/cards-<utc>.png (+ full-page stills and a
 // webm video). Captures are written unedited; no DSNs or keys are read here.
 
@@ -46,6 +54,7 @@ const QUERIES = [
 ];
 
 const BEAT = 1800;
+const XSS_MARKER = '<img src=x onerror=window.__h3xss=1>';
 
 mkdirSync(OUT, { recursive: true });
 
@@ -75,6 +84,14 @@ page.on('response', (r) => {
   if (r.status() >= 400 && !r.url().includes('/favicon')) problems.push(`http ${r.status()}: ${r.url()}`);
 });
 
+// True when the element exists and is laid out (not `display: none` under a
+// `.hidden` ancestor). Visibility checks are scroll-independent: they assert
+// a REAL rendered element, not stale DOM text from a previous query.
+const RENDERED = `(sel) => {
+  const el = document.querySelector(sel);
+  return !!el && el.getClientRects().length > 0;
+}`;
+
 console.log(`portal: ${PORTAL}`);
 await page.goto(PORTAL, { waitUntil: 'networkidle', timeout: 60_000 });
 
@@ -87,6 +104,49 @@ await page.waitForFunction(
 const session = (await page.locator('#session-name').textContent())?.trim();
 console.log(`session on page: ${session}`);
 await page.waitForTimeout(BEAT);
+
+// Per-query render proof: the specific content THIS query must produce is
+// visible on screen (and the request has finished, so it cannot be a stale
+// render from the previous query riding the same DOM text).
+const RENDER_CONDITIONS = {
+  blended: `() => {
+    if (document.querySelector('#lookup-btn')?.disabled) return false;
+    if (!(${RENDERED})('#lookup-results')) return false;
+    // The Canonical pillar card with its score track and blast-radius note.
+    const pillar = document.querySelector('#lookup-cards .card.is-pillar');
+    return !!pillar && (${RENDERED})('#lookup-cards .card.is-pillar .score-track')
+      && pillar.textContent.includes(' depend on it');
+  }`,
+  structural: `() => {
+    if (document.querySelector('#lookup-btn')?.disabled) return false;
+    if (!(${RENDERED})('#lookup-results')) return false;
+    // The traversal banner (response_annotations) above a visible card.
+    const ann = document.querySelector('#response-annotations');
+    return (${RENDERED})('#response-annotations')
+      && !!ann && ann.textContent.includes('graph traversal')
+      && document.querySelectorAll('#lookup-cards .card').length > 0;
+  }`,
+  'tiny-budget': `() => {
+    if (document.querySelector('#lookup-btn')?.disabled) return false;
+    if (!(${RENDERED})('#lookup-results')) return false;
+    // The persistent excluded-hit warnings area, populated with the typed
+    // load-bearing warning and its owning hit; collapsed excluded cards.
+    const w = document.querySelector('#excluded-warnings');
+    return (${RENDERED})('#excluded-warnings')
+      && !!w && w.textContent.includes('Load-bearing pillar')
+      && w.textContent.includes('outside the context budget')
+      && document.querySelectorAll('#lookup-cards .card.is-excluded').length > 0;
+  }`,
+  xss: `() => {
+    if (document.querySelector('#lookup-btn')?.disabled) return false;
+    if (!(${RENDERED})('#lookup-results')) return false;
+    // The untrusted marker rendered as text inside a real card.
+    const cards = document.querySelector('#lookup-cards');
+    return (${RENDERED})('#lookup-cards')
+      && !!cards && cards.textContent.includes(${JSON.stringify(XSS_MARKER)})
+      && document.querySelectorAll('#lookup-cards .card').length > 0;
+  }`,
+};
 
 for (const q of QUERIES) {
   console.log(`recall: ${q.label}: ${q.query}`);
@@ -107,20 +167,34 @@ for (const q of QUERIES) {
   await page.type('#lookup-input', q.query, { delay: 30, timeout: 60_000 });
   await page.click('#lookup-btn');
   await page
-    .waitForFunction(
-      () => {
-        const busy = document.querySelector('#lookup-btn')?.disabled;
-        const cards = document.querySelector('#lookup-cards')?.textContent ?? '';
-        const fallback = document.querySelector('#lookup-fallback')?.textContent ?? '';
-        return !busy && (cards.length > 0 || fallback.length > 0);
-      },
-      { timeout: 90_000 },
-    )
-    .catch(() => problems.push(`no recall output for: ${q.label}`));
+    .waitForFunction(RENDER_CONDITIONS[q.label], { timeout: 90_000 })
+    .catch(() => problems.push(`no rendered ${q.label} output for: ${q.query}`));
 
-  // The cards view is the default; the verbatim context view stays one toggle
-  // away. Let the stage settle, then capture.
+  // Let the stage settle, then put the H3 results region on camera: the
+  // region top (response annotations, first card) pins to the viewport top,
+  // so the screenshot genuinely shows the cards view instead of the legend
+  // and structure tree that sit above it (round-1 finding H3-R1-1).
   await page.waitForTimeout(BEAT);
+  await page.evaluate(() => {
+    document.querySelector('#lookup-results')?.scrollIntoView({ block: 'start', inline: 'start' });
+  });
+  if (q.label === 'tiny-budget') {
+    // The excluded-warnings area must be on camera too. After pinning the
+    // results top, bring the warnings area fully into the viewport bottom if
+    // the collapsed cards above it push it below the fold.
+    const warningsBelowFold = await page.evaluate(() => {
+      const w = document.querySelector('#excluded-warnings');
+      if (!w) return true;
+      const r = w.getBoundingClientRect();
+      return r.bottom > window.innerHeight || r.top < 0;
+    });
+    if (warningsBelowFold) {
+      await page.evaluate(() => {
+        document.querySelector('#excluded-warnings')?.scrollIntoView({ block: 'end', inline: 'start' });
+      });
+    }
+  }
+  await page.waitForTimeout(400);
   await page.screenshot({ path: resolve(OUT, `cards-${q.label}-${seq}.png`), fullPage: false });
 
   if (q.label === 'tiny-budget') {
@@ -145,8 +219,7 @@ for (const q of QUERIES) {
     const img = await page.locator('#lookup-cards img').count();
     if (img !== 0) problems.push(`an <img> element was created from untrusted text`);
     const text = await page.locator('#lookup-cards').textContent();
-    const marker = '<img src=x onerror=window.__h3xss=1>';
-    if (!text.includes(marker)) problems.push(`untrusted text must appear verbatim, got: ${text}`);
+    if (!text.includes(XSS_MARKER)) problems.push(`untrusted text must appear verbatim, got: ${text}`);
     const fired = await page.evaluate(() => window.__h3xss);
     if (fired) problems.push('the injected onerror handler executed');
   }
@@ -156,19 +229,29 @@ for (const q of QUERIES) {
   }
 }
 
-// The verbatim context view stays available (H3 keeps it).
+// The verbatim context view stays available (H3 keeps it). Wait for the
+// fallback pane to actually render the canonical marker before capturing.
 await page.fill('#lookup-input', '');
 await page.type('#lookup-input', 'update user schema', { delay: 30, timeout: 60_000 });
 await page.click('#lookup-btn');
 await page.waitForFunction(
-  () => {
-    const busy = document.querySelector('#lookup-btn')?.disabled;
-    return !busy && (document.querySelector('#lookup-cards')?.textContent ?? '').length > 0;
-  },
+  RENDER_CONDITIONS.blended,
+  { timeout: 90_000 },
+).catch(() => problems.push('no rendered cards for the verbatim pre-query'));
+await page.click('#fallback-toggle');
+await page.waitForFunction(
+  `() => {
+    if (document.querySelector('#lookup-btn')?.disabled) return false;
+    const fb = document.querySelector('#lookup-fallback');
+    return !!fb && fb.getClientRects().length > 0 && fb.textContent.includes(', canonical]');
+  }`,
   { timeout: 90_000 },
 );
-await page.click('#fallback-toggle');
 await page.waitForTimeout(BEAT);
+await page.evaluate(() => {
+  document.querySelector('#lookup-results')?.scrollIntoView({ block: 'start', inline: 'start' });
+});
+await page.waitForTimeout(400);
 const verbatim = await page.locator('#lookup-fallback').textContent();
 if (!verbatim || !verbatim.includes(', canonical]')) {
   problems.push(`verbatim context view missing the canonical marker: ${verbatim}`);

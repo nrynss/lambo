@@ -2344,15 +2344,28 @@ mod tests {
             ann_texts.push(a["text"].as_str().expect("text").to_string());
         }
         assert!(!ann_texts.is_empty(), "seeded recall must carry warnings");
+        // Warning-line parity per text (H3 losslessness is per warning LINE,
+        // not per distinct text): two hits may legitimately share an
+        // identical warning line (e.g. two canonical hits with the same blast
+        // radius, or two conflicts with the same writer and age), so the
+        // number of times a text renders in `context` must equal the number
+        // of annotations carrying that text — never a hard "exactly once".
+        // A header-rendered line carries the `⚑ ` prefix when the text itself
+        // does not (`render_cli_text`'s `push_header`), so count the line
+        // with and without that prefix; a text never renders both ways, since
+        // an included block's line is never duplicated into the header.
         for text in &ann_texts {
-            assert!(
-                context.contains(text.as_str()),
-                "every annotation text must appear in context; missing {text:?}\n{context}"
-            );
+            let expected = ann_texts.iter().filter(|t| *t == text).count();
+            let prefixed = format!("⚑ {text}");
+            let actual = context
+                .lines()
+                .filter(|l| *l == text.as_str() || *l == prefixed.as_str())
+                .count();
             assert_eq!(
-                context.matches(text.as_str()).count(),
-                1,
-                "each annotation text appears exactly once in context (lossless, no dup): {text:?}"
+                actual, expected,
+                "warning-line parity: every {text:?} warning line in context must have \
+                 one typed counterpart (expected {expected} annotations, found {actual} lines)\n\
+                 {context}"
             );
         }
 
