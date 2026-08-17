@@ -31,6 +31,7 @@
           {
             "group": "Guides",
             "pages": [
+              "agent-skill",
               "end-to-end"
             ]
           }

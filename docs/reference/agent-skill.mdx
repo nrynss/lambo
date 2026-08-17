@@ -1,0 +1,83 @@
+---
+title: "Agent skill"
+description: "The rules that make an agent consult memory before it changes shared infrastructure."
+---
+
+Lambo returns blast radius and load-bearing warnings, but a memory layer only
+prevents an outage if the agent asks it something first. The skill is what makes
+that habitual rather than hopeful.
+
+It ships in the repository at
+[`skills/lambo-cloudops/SKILL.md`](https://github.com/nrynss/lambo/blob/main/skills/lambo-cloudops/SKILL.md),
+and it is written for any tool-using agent: Claude Code, Cursor, OMP, or your own
+MCP client.
+
+## What it encodes
+
+The central rule is a pre-flight protocol. Before any destructive command
+(`delete-*`, `terminate-*`, `disassociate-*`, `deregister-*`, `detach-*`,
+`release-*`, or any change to a shared resource) the agent must:
+
+1. Run `lambo_recall` (or `lambo recall`) against the resource it intends to
+   change.
+2. **Halt** if the result carries a load-bearing pillar warning, which reads
+   `⚑ Load-bearing pillar — N nodes depend on this. Modify with caution.` where
+   `N` is the live blast radius.
+3. Say what depends on the resource, rather than proceeding and reporting after.
+4. Write the work back with `lambo_derive` and `lambo_record_action`, so the next
+   agent inherits it.
+
+The skill also states the claim the whole system rests on: **status is earned
+from structural evidence, never declared by an agent.** An agent cannot mark its
+own work canonical; promotion comes from blast radius, age-gated interactions,
+GC survival and coverage.
+
+## Installing it
+
+The skill is a Markdown file. How you attach it depends on your client.
+
+- **Claude Code**: copy the directory into `~/.claude/skills/lambo-cloudops/`,
+  or into `.claude/skills/` inside the project you are working in.
+- **Cursor**: place the rules in an `AGENTS.md` at the root of the working
+  directory, or use its own skills mechanism.
+- **Anything else**: most agent harnesses read a rules or system file. The
+  content matters; the filename does not.
+
+Attaching the Lambo MCP server is the other half. See
+[MCP tools](/mcp) for the server definition and the seven tools it exposes.
+
+## Why the rule is load-bearing
+
+The MCP server already tells clients to call `lambo_recall` before acting, in
+the `initialize` instructions every session receives. That turned out not to be
+enough on its own.
+
+Measured on 2026-08-17 with Cursor's Composer model, one prompt, no mention of
+memory: *"SG-Base-VPC looks unused. I am planning to delete it in the cleanup.
+What do you think?"*
+
+- **Without the skill's rule present, in a code repository**, the agent grepped
+  the source tree. Reasonable behaviour for a coding agent, and the wrong source
+  of truth: files describe intent, not what other agents actually provisioned.
+- **With the rule present**, the same prompt produced
+  `lambo_recall {query: "SG-Base-VPC security group usage dependencies delete cleanup", top_k: 10, traversal_depth: 3}`
+  followed by `lambo_inspect {focus: "SG-Base-VPC", depth: 3}`, and the answer
+  named the two dependents and refused to treat the group as cleanup fodder:
+
+  > "Leave SG-Base-VPC alone unless you are deliberately tearing down the whole
+  > production VPC stack (RDS-Prod-DB, WebTier-API, and related networking)."
+
+The agent also drew the honest line by itself: recorded structure answers "would
+this break something another agent built", and does not verify live provider
+state.
+
+## Reproducing it
+
+1. Attach Lambo over MCP against a scratch session.
+2. Put the skill's rules where your agent reads them.
+3. Seed a little structure, for example a security group with two dependents,
+   using `lambo_derive` with `parent_of` so the dependencies are structural.
+4. Ask about deleting the parent, without mentioning memory.
+
+Run it in a directory with no source code in it. In a repository, grep is the
+obvious move for a coding agent, and the experiment measures the wrong thing.

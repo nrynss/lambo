@@ -98,3 +98,28 @@ ORDER BY event_order ASC;
 ```
 
 You can view raw logs and execution plans in the `evidence/` folder of the repository.
+
+## Recorded demonstrations
+
+Every claim on this page has a log or a test behind it. Some of them also have
+footage, captured 2026-08-17 against the live `cloudops-exhibit` session in
+CockroachDB and the deployed portal.
+
+| Demonstration | What it shows |
+|---|---|
+| `lambo demo` | The full scenario with no config and no database, ending on a recall block that carries `[canonical]`, a blast radius, and the load-bearing warning |
+| Recall against the exhibit | `what depends on SG-Base-VPC` answered by graph traversal, with `RDS-Lambo-Demo-DB` returned as the top hit at score 9.50 |
+| Inspect | `SG-Base-VPC` at blast radius 5, its typed dependency edges, and which agent provisioned each dependent |
+| The crossover guard | `03_crossover_protect.py` refusing a security-group deletion, naming the four concepts that would have been stranded, and issuing no AWS call on any path |
+| The portal | The structure tree, a focused concept with its canonization gates, and a recall rendered as cards with score bars |
+| An agent consulting memory | A model asked about deleting a security group, calling `lambo_recall` and `lambo_inspect` unprompted, and refusing. See [Agent skill](/agent-skill) |
+
+The agent demonstration is the one worth reproducing yourself, because it is the
+only one where nothing is scripted: the prompt does not mention memory, and the
+tool calls are the model's own choice. The [Agent skill](/agent-skill) page has
+the exact prompt, the observed calls, and the conditions that change the outcome.
+
+One honest boundary, stated because the footage makes it easy to blur: the
+CloudOps scripts in `evidence/cloudops-run/` are deterministic Python playing
+agent roles. They provisioned real infrastructure and wrote real derives, but
+they are not model-driven. The agent demonstration above is.

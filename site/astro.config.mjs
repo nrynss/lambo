@@ -30,6 +30,7 @@ export default defineConfig({
           items: [
             { label: 'Installation', slug: 'installation' },
             { label: 'MCP tools', slug: 'mcp' },
+            { label: 'Agent skill', slug: 'agent-skill' },
             { label: 'Command line', slug: 'cli' },
             { label: 'Configuration', slug: 'config' },
             { label: 'Library API', slug: 'api' },
