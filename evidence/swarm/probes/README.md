@@ -19,17 +19,21 @@ functiongemma-270m files below are **fresh-run transcripts** (2026-08-18).
 | `omp-harness-garbled-tool-call.txt` | Under the harness: long prose reply that fabricates a `lambo_derive` CLI (`lambo_derive schema auth_guards.json`, …) instead of tool-call JSON; probe server logged zero `tools/call`; store read back 0 interactions. Re-run transcript (reproduces the original). |
 | `raw-tools-probe.json` | Raw `/v1/chat/completions` with a `tools` array: prose, `finish_reason: "stop"`, **no `tool_calls`**. |
 
-## Qwen3-0.6B — emits tool_calls at the protocol level, not under OMP
+## Qwen3-0.6B — emits tool_calls at the protocol level; selects correctly under OMP when the toolset is narrowed
 
 | File | Result |
 |---|---|
-| `omp-harness-qwen3-0.6b.txt` | Under the harness (fresh run): the model **did** emit one tool call — but for the wrong tool (`lsp`, a built-in OMP tool, with hallucinated `{i, action}` arguments); the call failed, `lambo_derive` was never invoked, OMP print-mode stdout was empty, and the store read back 0 interactions. |
+| `omp-harness-qwen3-0.6b.txt` | Under the harness with OMP's **default full toolset** (fresh run): the model **did** emit one tool call — but for the wrong tool (`lsp`, a built-in OMP tool, with hallucinated `{i, action}` arguments); the call failed, `lambo_derive` was never invoked, OMP print-mode stdout was empty, and the store read back 0 interactions. **Scoped per C5M-R1-1: this is a full-toolset result.** |
+| `omp-harness-qwen3-narrowed.txt` | C5M-R1-1 remediation: the **narrowed-toolset** probe (`omp --no-tools`; the request-level context is captured in `omp-request-tool-context.jsonl` — 15 tools: read/write/edit + 7 lambo MCP + 5 inherited openaiDeveloperDocs). With the toolset narrowed, the same model emits a **correct `mcp__lambo_derive` tool call under OMP** (session 2026-08-18T02-51-32-500Z) — the C5M-R1-1 counterfactual. OMP cannot provide a lambo-only toolset (read/write/edit and every configured MCP server always load; no flag excludes them), and in this harness the inherited `mcp__lambo_*` server shadows the workspace-scoped scratch lambo, so the probe's calls executed against the harness's inherited lambo server rather than a scratch store — recorded there. |
+| `omp-swarm-qwen3-narrowed/` | C5M-R1-1 (a) leg: the swarm re-run under OMP with the narrowed toolset and the lambo-cloudops skill in the system prompt (3 concurrent agents). The model drove protocol-shaped sequences (recall→derive→record_action→recall) and one agent ended with "DONE", but the calls executed against the inherited live lambo server (scratch store stayed at 0 rows), one agent hit a provider-stream error, and one drifted into the inherited openaiDeveloperDocs tools — see the directory's README. |
+| `omp-request-tool-context.jsonl` | The actual request OMP sends to llama-server under `--no-tools` in an empty workspace (captured by a logging reverse proxy): **15 tools** — read, write, edit, 7 lambo MCP tools, 5 openaiDeveloperDocs MCP tools inherited from the parent session. |
 | `raw-tools-probe-qwen3-0.6b.json` | Raw `/v1/chat/completions` with a single-tool `tools` array (request + response embedded): `finish_reason: "tool_calls"`, one `lambo_derive` tool call with valid JSON arguments `{"concepts":[{"content":"auth middleware guards schema integrity","concept_type":"logic"}]}`. The model **can** emit correct OpenAI tool_calls when the toolset is small. |
 
-Qwen3-0.6B therefore got a swarm run — via the spec's minimal LLM loop
-(`scripts/loadtest/mcp_swarm.py`), because under OMP's harness (dozens of
-tool schemas in a ~31k-token prompt) it cannot select the right tool; the
-runbook records the numbers.
+Qwen3-0.6B therefore got a swarm run — via the agentic re-run
+(`scripts/loadtest/mcp_agentic.py`, `../ledger-agentic-qwen3-1787022500.jsonl`),
+whose calls go straight to a scratch `lambo serve` over MCP and are
+store-verified after a clean SIGTERM. It also got the OMP swarm re-run
+recorded above with its execution-target caveat.
 
 ## functiongemma-270m — cannot emit tool_calls as served (the LFM2 finding stands)
 
@@ -46,9 +50,18 @@ concurrency-capture.md).
 ## What these probes establish
 
 LFM2-350M: pseudo-tool prose under the harness, prose + `finish_reason=stop`
-at the raw protocol. Qwen3-0.6B: real `tool_calls` at the raw protocol, but
-wrong-tool selection under OMP's harness. functiongemma-270m: native
-function-call markup that the serving build never converts to `tool_calls`.
-The only harness that works with what these models can do is the minimal LLM
-loop of `scripts/loadtest/mcp_swarm.py` (the loop supplies the tool-calling;
-the model supplies the content) — which is what ran for Qwen3-0.6B.
+at the raw protocol. Qwen3-0.6B: real `tool_calls` at the raw protocol;
+wrong-tool selection under OMP's **default full toolset** (scoped per
+C5M-R1-1), but **correct selection under OMP when the toolset is narrowed**
+(`--no-tools`, 15-tool context — C5M-R1-1 remediation; OMP still cannot
+provide a lambo-only toolset, and the inherited lambo MCP server shadows
+workspace-scoped scratch serves, so the OMP leg's execution target is the
+harness's live lambo — see `omp-harness-qwen3-narrowed.txt` and
+`omp-swarm-qwen3-narrowed/`). functiongemma-270m: native function-call
+markup that the serving build never converts to `tool_calls`. The harness
+that works with what these models can do, with the model choosing the calls,
+is the agentic loop of `scripts/loadtest/mcp_agentic.py` (skill as the
+system prompt, minimal lambo-only toolset, model-chosen tool calls,
+scratch-isolated and store-verified — `../ledger-agentic-qwen3-1787022500.jsonl`),
+which is what ran for Qwen3-0.6B (the LFM2/functiongemma runs used the
+`mcp_swarm.py` loop, which supplies the tool-calling).

@@ -1,10 +1,12 @@
 C5 re-run — OMP-harness tool-calling probe: Qwen3-0.6B
 =====================================================
 
-Fresh run transcript, 2026-08-18 ~07:52 UTC. Machine: Linux box (cachyos
-x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware caveat
-in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server build
-10456 serving Qwen3-0.6B-UD-Q6_K_XL.gguf on :8082 (--jinja -c 32768
+Fresh run transcript, 2026-08-18 ~02:22 UTC (OMP session file
+2026-08-18T02-22-21-162Z; the earlier "~07:52 UTC" label was this box's IST
+wall-clock — Asia/Kolkata, +0530 — mislabeled as UTC). Machine: Linux box
+(cachyos x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware
+caveat in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server
+build 10456 serving Qwen3-0.6B-UD-Q6_K_XL.gguf on :8082 (--jinja -c 32768
 -a qwen3-0.6b), lambo serve (scratch session c-swarm-qwen3-20260818, SQLite
 store, BGE-M3 embedder) on :7701 with the scratch auth token
 (<SCRATCH-TOKEN>, env-only).
@@ -70,9 +72,22 @@ Result:
   - Store readback (probe phase, before the swarm): 0 interactions,
     0 concepts. The model never drove a lambo tool call under the harness.
 
-Verdict: Qwen3-0.6B does not drive the OMP harness (it emits a tool call,
-but selects the wrong tool among OMP's dozens of schemas). The raw-API probe
-(raw-tools-probe-qwen3-0.6b.json) is the counterpart: there, with a single
-tool in the request, the same model emits a correct lambo_derive tool_calls.
-So the swarm harness for this model is the spec's minimal LLM loop
-(scripts/loadtest/mcp_swarm.py), not OMP — documented in the runbook.
+Verdict — SCOPED per C5M-R1-1 (see omp-harness-qwen3-narrowed.txt): this run
+used OMP's DEFAULT FULL TOOLSET (all built-ins + all inherited MCP servers in
+the context), and under that toolset Qwen3-0.6B selects the wrong tool (`lsp`,
+a built-in, with hallucinated arguments) instead of lambo_derive. That is a
+property of the full toolset, not of the model: the C5M-R1-1 counterfactual
+was run — with OMP's toolset narrowed (`--no-tools`, the 15-tool context
+documented in omp-request-tool-context.jsonl) the same model emits a correct
+mcp__lambo_derive tool call under OMP (session 2026-08-18T02-51-32-500Z in
+omp-harness-qwen3-narrowed.txt). No narrowed-toolset attempt existed at the
+time of this transcript; the round-1 remediation added it. The raw-API probe
+(raw-tools-probe-qwen3-0.6b.json) is the counterpart: with a single tool in
+the request, the same model emits a correct lambo_derive tool_calls. The
+"~31k-token prompt" figure previously used to describe the full context is
+dropped (it appears in no committed artifact; the measured context is the
+15-tool request in omp-request-tool-context.jsonl). The swarm harness for
+this model is the agentic re-run (mcp_agentic.py) — scratch-isolated and
+store-verified — not OMP, because under OMP the inherited lambo MCP server
+shadows the workspace-scoped scratch server (execution-target caveat in
+omp-harness-qwen3-narrowed.txt).

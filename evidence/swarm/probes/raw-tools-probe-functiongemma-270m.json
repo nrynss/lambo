@@ -1,6 +1,6 @@
 {
   "probe": "raw OpenAI tools API (POST /v1/chat/completions with a tools array)",
-  "note": "Fresh runs 2026-08-18 ~07:57-07:58 UTC against llama-server on :8083 (functiongemma-270m-it-UD-Q8_K_XL.gguf, --jinja -c 32768 -a functiongemma-270m). The model emits FunctionGemma-native <start_function_call>call:NAME{...}<end_function_call> markup, but this llama.cpp build returns it as plain content prose: no tool_calls field, finish_reason=length when truncated at 512 tokens, finish_reason=stop with the full generation. Both attempts recorded.",
+  "note": "Fresh runs 2026-08-18 ~02:24-02:25 UTC (response `created` epochs 1787019855 = 02:24:15Z and 1787019904 = 02:25:04Z; the earlier \"~07:57-07:58 UTC\" label was this box's IST wall-clock — Asia/Kolkata, +0530 — mislabeled as UTC) against llama-server on :8083 (functiongemma-270m-it-UD-Q8_K_XL.gguf, --jinja -c 32768 -a functiongemma-270m). The model emits FunctionGemma-native <start_function_call>call:NAME{...}<end_function_call> markup, but this llama.cpp build returns it as plain content prose: no tool_calls field, finish_reason=length when truncated at 512 tokens, finish_reason=stop with the full generation. Both attempts recorded.",
   "request": {
     "model": "functiongemma-270m",
     "messages": [

@@ -1,10 +1,12 @@
 C5 re-run — OMP-harness tool-calling probe: functiongemma-270m
 ==============================================================
 
-Fresh run transcript, 2026-08-18 ~07:57 UTC. Machine: Linux box (cachyos
-x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware caveat
-in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server build
-10456 serving functiongemma-270m-it-UD-Q8_K_XL.gguf on :8083 (--jinja
+Fresh run transcript, 2026-08-18 ~02:24 UTC (OMP session file
+2026-08-18T02-24-04-143Z; the earlier "~07:57 UTC" label was this box's IST
+wall-clock — Asia/Kolkata, +0530 — mislabeled as UTC). Machine: Linux box
+(cachyos x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware
+caveat in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server
+build 10456 serving functiongemma-270m-it-UD-Q8_K_XL.gguf on :8083 (--jinja
 -c 32768 -a functiongemma-270m), lambo serve (scratch session
 c-swarm-fgemma-20260818, SQLite store, BGE-M3 embedder) on :7702 with the
 scratch auth token (<SCRATCH-TOKEN>, env-only).

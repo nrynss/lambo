@@ -1,6 +1,6 @@
 {
   "probe": "raw OpenAI tools API (POST /v1/chat/completions with a tools array)",
-  "note": "Fresh run 2026-08-18 ~07:54 UTC against llama-server on :8082 (Qwen3-0.6B-UD-Q6_K_XL.gguf, --jinja -c 32768 -a qwen3-0.6b). Response: finish_reason=tool_calls with a single lambo_derive tool_call carrying valid JSON arguments \u2014 the model CAN emit OpenAI tool_calls at the protocol level.",
+  "note": "Fresh run 2026-08-18 ~02:23 UTC (response `created` 1787019793 = 02:23:13Z; the earlier \"~07:54 UTC\" label was this box's IST wall-clock — Asia/Kolkata, +0530 — mislabeled as UTC) against llama-server on :8082 (Qwen3-0.6B-UD-Q6_K_XL.gguf, --jinja -c 32768 -a qwen3-0.6b). Response: finish_reason=tool_calls with a single lambo_derive tool_call carrying valid JSON arguments \u2014 the model CAN emit OpenAI tool_calls at the protocol level.",
   "request": {
     "model": "qwen3-0.6b",
     "messages": [

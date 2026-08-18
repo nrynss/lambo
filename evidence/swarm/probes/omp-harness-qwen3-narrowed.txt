@@ -1,0 +1,127 @@
+C5M-R1-1 remediation — narrowed-toolset OMP probe: Qwen3-0.6B
+==============================================================
+
+Fresh runs 2026-08-18 ~02:48-02:51 UTC (OMP session files
+2026-08-18T02-48-01-107Z and 2026-08-18T02-51-32-500Z). Machine: Linux box
+(cachyos x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the
+hardware caveat in dev-diary/notes/concurrency-capture.md). OMP 17.3.5,
+llama-server build 10456 serving Qwen3-0.6B-UD-Q6_K_XL.gguf on :8082
+(--jinja -c 32768 -a qwen3-0.6b). This is the round-1 finding C5M-R1-1
+counterfactual: the original probe used OMP's default full toolset; this one
+narrows the toolset as far as OMP allows.
+
+What OMP's tool restriction actually does (request-level evidence)
+------------------------------------------------------------------
+
+The claim "OMP cannot drop its built-ins" is verified at the protocol level.
+`omp --no-tools` (and `--tools=<list>`, which has the same effect) reduces
+the built-in tools in the model's context from the default ~16 to exactly
+three — read, write, edit — but does NOT remove them, and it does NOT touch
+MCP servers: every configured MCP server is loaded regardless. A logging
+reverse proxy in front of llama-server :8082 captured the actual request OMP
+sends (committed as `omp-request-tool-context.jsonl`; empty workspace, no
+.mcp.json at all, `--no-tools`):
+
+  n_tools: 15
+  read, write, edit,
+  mcp__lambo_derive, mcp__lambo_inspect, mcp__lambo_recall,
+  mcp__lambo_record_action, mcp__lambo_reserve, mcp__lambo_saints,
+  mcp__lambo_stats,
+  mcp__openaideveloperdocs_fetch_openai_doc,
+  mcp__openaideveloperdocs_get_openapi_spec,
+  mcp__openaideveloperdocs_list_api_endpoints,
+  mcp__openaideveloperdocs_list_openai_docs,
+  mcp__openaideveloperdocs_search_openai_docs
+
+The 7 lambo MCP tools and the 5 openaiDeveloperDocs tools are INHERITED from
+the parent omp session (the harness's broker registers its MCP servers for
+every child `omp` process; with the default profile the aws-mcp and
+cockroachdb-cloud servers are also inherited). There is no OMP flag that
+drops read/write/edit or the inherited MCP servers, so a lambo-only toolset
+is NOT achievable under OMP. The "~31k-token prompt" figure previously used
+to describe the full context appears in no committed artifact (only the
+llama-server context flag `-c 32768` is documented) and is dropped here;
+the measured context is the 15-tool request above.
+
+The narrowed probe (lambo_derive task)
+--------------------------------------
+
+Command (isolated profile, `--no-tools`, workspace `.mcp.json` pointing at a
+scratch `lambo serve` on :7703):
+
+  omp --model qwen3-0.6b -p --no-pty --no-tools \
+      "Use the lambo_derive tool to derive the concept 'auth middleware
+       guards schema integrity' into the memory graph."
+
+Run 1 (02:48:01Z, default profile): the model emitted ONE tool call — but
+for `mcp__cockroachdb_cloud_create_database` with hallucinated
+`{"i": "auth middleware guards schema integrity", "database":
+"auth-middleware"}` arguments (an inherited MCP server with no relation to
+the task). Wrong-tool selection persists as long as the default profile's
+extra inherited servers are in context.
+
+Run 2 (02:51:32Z, isolated profile — the 15-tool context above): the model
+emitted the CORRECT tool call. Verbatim extract from the OMP session file
+(assistant messages, unedited):
+
+  {"type":"toolCall","id":"…","name":"mcp__lambo_derive",
+   "arguments":{"i":"auth middleware guards schema integrity",
+   "agent_id":"unknown","concepts":[{"concept_type":"resource",
+   "content":"auth middleware guards schema integrity"}]}}
+
+The harness executed the call; the server replied `derived 1 concept(s):
+1 created, 0 matched existing`; the model then called it again and the
+server replied `derived 1 concept(s): 0 created, 1 matched existing` (the
+dedup path — same concept key). So the C5M-R1-1 counterfactual is satisfied:
+**under a narrowed toolset, Qwen3-0.6B selects lambo_derive correctly under
+OMP** — the original wrong-tool result (`lsp`) is a property of the default
+full toolset, and every OMP claim in this repo is now scoped to that.
+
+Execution-target caveat (why the scratch store stayed empty)
+------------------------------------------------------------
+
+The narrowed probe's lambo calls were executed by OMP against the harness's
+INHERITED `mcp__lambo_*` MCP server (which answers as agent 'cursor-agent'),
+not against the workspace `.mcp.json`'s scratch lambo serve. Evidence: the
+probe workspace's scratch serve (:7703, session c-qwen3-narrowed-20260818)
+logged no daemon event lines during the probe window and its store read back
+0 interactions / 0 concepts afterwards (the only row in it came from a
+direct HTTP test later), while the session's toolResult came back with real
+server content and the "this process owns the session as agent
+'cursor-agent'" attribution warning. OMP loads the parent session's MCP
+servers alongside the workspace's, and Qwen3-0.6B consistently selects the
+inherited prefixed lambo tools (`mcp__lambo_*`) — even when the workspace
+server is the only lambo configured and even when a distinct toolPrefix is
+set (`prefix-test-toolprefix-scratch.session.txt` in
+`omp-swarm-qwen3-narrowed/`). A workspace-scoped scratch lambo therefore
+cannot be isolated under OMP in this harness: the inherited lambo server
+shadows it, and the model's lambo calls land on the harness's live store.
+This is a real OMP finding in its own right and is recorded here and in the
+swarm transcripts; the scratch-isolated agentic evidence for this model is
+the raw-protocol agentic re-run (`mcp_agentic.py`), whose calls go straight
+to a scratch `lambo serve` over MCP and are store-verified.
+
+Verdict
+-------
+
+* OMP CAN narrow its toolset: `--no-tools` cuts the built-ins to
+  read/write/edit (request-verified). It CANNOT provide a lambo-only
+  toolset: read/write/edit and every configured MCP server always load, and
+  no flag excludes them.
+* Under the narrowed toolset, Qwen3-0.6B selects lambo_derive correctly —
+  the C5M-R1-1 counterfactual. The "Qwen3-0.6B does not drive the OMP
+  harness" verdict in `omp-harness-qwen3-0.6b.txt` is scoped: with OMP's
+  default full toolset it selects the wrong tool; with the narrowed toolset
+  it selects correctly.
+* The OMP swarm re-run (skill in the system prompt, narrowed toolset, 3
+  agents) was attempted and is recorded honestly in
+  `omp-swarm-qwen3-narrowed/` — including the execution-target caveat above:
+  the model chose protocol-shaped tool sequences, but the calls executed
+  against the harness-inherited lambo server, not a scratch store, and 2 of
+  3 agents ended early (one provider-stream error, one exit without a final
+  answer; one agent also drifted into the inherited openaiDeveloperDocs
+  tools and looped until OMP's loop guard shook the context).
+* The scratch-isolated, store-verified agentic re-run is the
+  `ledger-agentic-qwen3-1787022500.jsonl` run (see the swarm README): 3
+  agents × 151 s, skill as system prompt, 4 lambo tools only, model-chosen
+  calls, durability check green after clean SIGTERM.
