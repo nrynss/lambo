@@ -116,9 +116,18 @@ Notes:
 
 ---
 
-## D2 — Recording and video
+## ✅ D2 done: recording and video (2026-08-18)
 
-**Blocked by:** remediation **T8** (`03_crossover_protect.py` has never run), D1
+**Published:** [Lambo: Durable canonical memory for agents](https://www.youtube.com/watch?v=dfbMvf_YwFo). Linked from the
+README header, the hackathon page (the `Not yet` row is now **Met**), and
+`site/src/content/docs/evidence.mdx` §Recorded demonstrations. Submission entry:
+https://devpost.com/software/lambo
+
+The record of how it was built follows, because the tooling notes below are the
+reusable part.
+
+**Was blocked by:** remediation **T8** (`03_crossover_protect.py` has never run), D1.
+Both cleared before the take.
 
 Nothing gets recorded until the climax script has executed successfully at least
 once and the exhibit is the clean article.
@@ -182,9 +191,11 @@ written, not against the plan.
   T10 root cause named.
 - `site/src/content/docs/{demo,cli}.mdx`: `only one in v0.1` → `v0.2`.
 
-**Deliberately left saying `Not yet`:** the video row. D2 has not happened, and
-a submission page that claimed otherwise would break the exact habit the page's
-closing note is about.
+**The video row said `Not yet` until D2 landed**, because a submission page that
+claimed otherwise would have broken the exact habit the page's closing note is
+about. It now reads **Met** and links the video. The `What is not done yet`
+section did not become empty: it still carries the unauthorized Bedrock path and
+the v0.2 single-writer boundary, which are the two things that genuinely remain.
 
 **Checked, no change needed:** the portal's own copy. The sentence this note
 worried about, Lambo "names the workloads that would break", is not in
@@ -205,6 +216,8 @@ T8 ──────────► D2      the climax script must have run
        D3            done; landed early, see the note in that section
 ```
 
-Critical path to a submission is now just **D1 → D2**, with **T8** joining
-before D2. T6 and T12 are done, and D3 is done. The only row on the hackathon
-page still reading `Not yet` is the video, and D2 is what clears it.
+**Critical path CLOSED (2026-08-18).** T6, T8, T12, D1, D2 and D3 are all done,
+the video is published, and the Devpost entry is up at https://devpost.com/software/lambo. No row on the
+hackathon page reads `Not yet` any more. What remains open is recorded as
+open rather than as pending work: Bedrock authorization (external), and
+multi-writer coordination (scoped out of v0.2).

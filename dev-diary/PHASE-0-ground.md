@@ -116,7 +116,13 @@ Capture cost/latency of a single call in the Handoff Log.
 - [x] CI green, license detectable, `.env.example` committed
 - [x] Cluster live, schema applied, `provision.sh` idempotent
 - [x] **Go/no-go on Rust recorded** (T0.3 Handoff Log) → **GO**
-- [ ] Bedrock access proven end-to-end — **blocked on account use-case form** (see Handoff)
+- [~] Bedrock access proven end-to-end — **CLOSED AS BLOCKED, NOT DONE (2026-08-18).**
+  The account use-case form was never approved. Refusal captured at `evidence/bedrock-blocked.txt`;
+  BGE-M3 is and remains the only real embedder. Nothing in the submission claims Bedrock.
+  A skeletal adapter went up as **unmerged** PR [#6](https://github.com/nrynss/lambo/pull/6) (issue #3) so the trait boundary is
+  checkable against code rather than a promise; `InvokeModel` is fail-closed there too, and the
+  feature is in neither `ship` nor `demo`. It is not merged and nothing depends on it.
+  Left unticked on purpose (see Handoff).
 
 ---
 

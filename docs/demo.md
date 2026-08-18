@@ -1,5 +1,8 @@
 # `lambo demo` — the spec §13 two-agent scenario (T8.4)
 
+The public getting-started page is [Demo](https://nrynss.github.io/lambo/demo/).
+This file is the operator's view: knobs, determinism, and how to check a run.
+
 ```bash
 lambo demo --scenario rest-api
 ```
@@ -12,7 +15,7 @@ memory rather than by a colleague, that the thing it is about to change is
 load-bearing and was touched seconds ago.
 
 The scenario lives in `src/cli/demo.rs`. That module's doc comment is the
-authority on how it works; this page is the operator's view.
+authority on how it works.
 
 ---
 
@@ -153,8 +156,8 @@ session id per run:
 session      demo-rest-api-172e62ae-3f34-4b6b-af6a-7b29d10b442d   (fresh per run — P6 R3-1)
 ```
 
-`--session <id>` exists so the live runbook can point the reader CLIs at a known
-id, and is documented as fresh-only. Do not re-run into one.
+`--session <id>` exists so a reader CLI can be pointed at a known id, and is
+documented as fresh-only. Do not re-run into one.
 
 ---
 
@@ -169,5 +172,3 @@ id, and is documented as fresh-only. Do not re-run into one.
 The ×2 tests run the whole scenario twice in one process, against a store that
 already holds the first run's session, and assert the two `DemoOutcome`s are
 equal.
-
-The live-cluster ×2 run is in [`LIVE-RUNBOOK.md`](LIVE-RUNBOOK.md).

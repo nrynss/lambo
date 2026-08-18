@@ -1610,7 +1610,12 @@ for a human pressing Enter — worth one manual keypress before the video.
 
 - **Branch:** `task/t8.4-demo`, cut from `phase/p8-surface` @ `f68cfc3`.
 - **Owns:** `src/cli/demo.rs`, `demo/README.md`, `demo/LIVE-RUNBOOK.md`,
-  `tests/t84_demo.rs`.
+  `tests/t84_demo.rs`. **Paths changed 2026-08-18** (`bcf75aa` + the docs
+  commit that follows it): `demo/` is now gitignored because it holds the
+  video-recording assets, `demo/README.md` moved to
+  [`docs/demo.md`](../docs/demo.md), and `demo/LIVE-RUNBOOK.md` was dropped from
+  tracking rather than moved. It still exists locally under the ignored `demo/`
+  and is quoted where this doc needs it. Read `demo/…` below as historical.
 - **Appends only:** `src/cli/mod.rs` (`pub mod demo;` — the one line the
   shared-file rule allows) and `src/main.rs` (**one** dispatch arm, plus the
   `demo` subcommand's own two flags `--scenario` / `--session` with help text).
@@ -1631,7 +1636,7 @@ and the conflict line. **No code path in `demo.rs` writes a status or an audit
 row** — the real `CanonizationTask` does, through the same write gate that
 rejects fabricated transitions.
 
-**Knobs (documented in `demo/README.md` and the module docs).** Two `Config`s;
+**Knobs (documented in `docs/demo.md`, formerly `demo/README.md`, and the module docs).** Two `Config`s;
 **no threshold weakened**, only intervals and one age floor compressed:
 `canonization_edge_min_age` 60s → **10ms** (kept non-zero, so the inflation
 guard still bites), `canonization_eval_interval` 60s → **1h during the build**
@@ -1702,7 +1707,8 @@ APIs and compiles on every row of the matrix.
 **Live-only, not done here.** The T8.4 "done when" needs the scenario ×2 against
 the **live cluster**, plus the split-screen `canonization_events` query through
 CockroachDB's managed MCP server. Neither can run on this machine (no DSN).
-`demo/LIVE-RUNBOOK.md` carries the exact commands, the expected transcript, the
+`demo/LIVE-RUNBOOK.md` (local-only since 2026-08-18, see Owns above) carries the
+exact commands, the expected transcript, the
 `diff` that constitutes the ×2 proof, the session-scoped audit query for the
 split screen, a failure-mode table, and the **schema-divergence warning** (the
 hand-created `concepts_embedding_nonnull_idx` and the ~2833 seeded concepts on

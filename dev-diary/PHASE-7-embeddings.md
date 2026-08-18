@@ -449,10 +449,30 @@ merge, and the ship run must capture an index-favorable `EXPLAIN` before claimin
 use on camera.
 
 - [x] BGE-M3 + llama.cpp path documented and smokeable (default, `embed-bge`) — T7.0
-- [ ] Bedrock path optional swap-in under `embed-bedrock` (same 1024-d contract) — T7.1
-- [ ] Hybrid merge demonstrated offline (fixtures) and live (Cockroach) — T7.2 / T7.3
+- [~] Bedrock path optional swap-in under `embed-bedrock` (same 1024-d contract) — T7.1
+  - **CLOSED AS BLOCKED, NOT DONE (2026-08-18).** The AWS account's Bedrock model-access
+    request was never approved, so the adapter behind `embed-bedrock` is not implemented and
+    `kind = "bedrock"` fails at startup saying so. Refusal captured at
+    `evidence/bedrock-blocked.txt`. Not claimed anywhere in the submission. Deliberately
+    left unticked: the box means shipped, and this did not ship.
+  - **The adapter PR is up and staying unmerged:** [#6](https://github.com/nrynss/lambo/pull/6) (`feat/embed-bedrock-titan`,
+    refs issue #3, opened 2026-08-18, 298/-21 across 5 files). It carries
+    `BedrockTitanEmbedder` behind `embed-bedrock`, the Titan widths 256/512/1024, the T0.4
+    request/response shape (`inputText`, `dimensions`, `normalize`), CON-7 empty reject, and
+    refusal of non-finite or wrong-width responses. `kind = "bedrock"` constructs when the
+    feature is compiled in, `embed()` returns `Unavailable` naming issue #3, and the feature is
+    in neither `ship` nor `demo`. CodeRabbit left 4 actionable comments (region-env blank
+    handling, f64 accumulation in the L2 normalize, `is_ready()` not keying off the feature
+    flag, and a docs line on the accepted dimensions). They are **not** being actioned, because
+    the PR is not being merged. Linked from the README's AWS boundary paragraph.
+- [x] Hybrid merge demonstrated offline (fixtures) and live (Cockroach) — T7.2 / T7.3
   - offline fixture merge: DONE (T7.2 `near_pair_merges_with_decaying_semantic_edge`, no-capability Canonical-equivalence);
-    live end-to-end hybrid merge: PENDING until T8.1 Memory wires hybrid::derive against a live session (T8.4 demo).
+    live end-to-end hybrid merge: **DONE (2026-08-18)**. T8.1 wired hybrid into live sessions and the
+    e2e live-cluster review exercised the full write path with the real BGE-M3 embedder against
+    CockroachDB (`lambo demo --scenario rest-api --session e2e-live-r1`): 27 concepts, `user schema`
+    promoted to Canonical by the engine with `canonization_events` rows written, blast radius 9, and
+    `lambo recall` routing through `vector_candidates_checked` (global ANN growth loop) on the live
+    cluster. Evidence: `evidence/e2e-live-cockroach/` (README §Manual live exercises, legs 1 and 2).
 - [x] Degraded mode proven equivalent to Canonical strategy (T7.2 `no_capability_is_byte_identical_to_canonical`)
 - [x] `EXPLAIN` evidence of index use committed — **SATISFIED by T7.4, 2026-08-13.**
   `vector_explain_camera_proof` is GREEN against a cluster provisioned from

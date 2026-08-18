@@ -32,6 +32,9 @@ lambo.toml
 scripts/recording/node_modules/
 evidence/cloudops-video/
 evidence/video-raw/
+# Video recording assets (Audacity projects, wavs) plus the live runbook, which
+# is operator-local. The operator page that used to be demo/README.md now lives
+# at docs/demo.md and is tracked there.
 demo/
 
 # Container build tree (scripts/aws-infra deploy pipeline)
