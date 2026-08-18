@@ -1,8 +1,8 @@
 # Lambo
 
-Agentic graph memory for multi-agent coding. Lambo stores what your agents learn and recalls
-it by meaning. A background process promotes concepts to canonical facts when they earn it
-from structural evidence, not when an agent declares them important.
+Agentic graph memory for multi-agent AI operations. Lambo stores what your agents learn
+and recalls it by meaning. A background process promotes concepts to canonical facts when
+they earn it from structural evidence, not when an agent declares them important.
 
 ### [Read the documentation at nrynss.github.io/lambo](https://nrynss.github.io/lambo)
 
@@ -13,9 +13,14 @@ from structural evidence, not when an agent declares them important.
 [Command line](https://nrynss.github.io/lambo/cli/) ·
 [Configuration](https://nrynss.github.io/lambo/config/) ·
 [Library API](https://nrynss.github.io/lambo/api/) ·
+[Canonization](https://nrynss.github.io/lambo/canonization/) ·
 [End to end](https://nrynss.github.io/lambo/end-to-end/)
 
 Everything below is covered there in depth.
+
+**Watch it work:** [video walkthrough](https://www.youtube.com/watch?v=dfbMvf_YwFo) ·
+**Try it live:** [lambo.nryn.dev](https://lambo.nryn.dev) (read-only, no login) ·
+**Submission:** [devpost.com/software/lambo](https://devpost.com/software/lambo)
 
 ## Deployment model
 
@@ -32,6 +37,39 @@ list all seven tools, and two different models have driven the tools autonomousl
 Flash under OMP called derive, recall, and stats against a live CockroachDB session, and
 Cursor's model ran derive, record_action, recall, and stats in sequence. Transcripts are in
 [`evidence/`](evidence/).
+
+## How importance is earned
+
+A concept is not important because an agent said it was. The daemon rescores every concept
+from structure alone, on a loop no agent can call:
+
+$$
+S(c) = 0.25\,R + 0.20\,F + 0.20\,A + 0.35\,D + \sum_{e \in E(c)} b(\tau(e)) + m(\tau(c))
+$$
+
+Recency, frequency, session activity and density, each clamped and measured relative to the
+session, plus a per-edge bonus that pays structural edge types and pays `Derives` exactly
+nothing. An agent can write a thousand observations and move the score by zero.
+
+That score is only the entry fee. Promotion runs three gates, one hop per cycle:
+
+- **Candidate.** Survived 3 GC sweeps, and scores strictly above the 90th percentile of its
+  non-canonical peers. The percentile is nearest-rank, so the bar is a real peer's score
+  rather than an interpolated value nobody scored.
+- **Venerable.** At least 3 inbound structural edges from distinct origin interactions,
+  covering at least 0.3 of the session's temporal extent. Edges younger than 60 seconds do
+  not count, so a burst of writes cannot inflate a span.
+- **Canonical.** Blast radius strictly greater than 5, and outside the 300 second
+  re-promotion cooldown, so a flapping concept cannot oscillate into permanence.
+
+Recall mixes the two halves, `0.5 × daemon score + 0.5 × query relevance`. A concept reached
+by graph traversal scores zero on relevance and surfaces on structure alone, which is what
+makes recall answer "what rests on this" and not only "what is this like".
+
+Every promotion writes an audit row, so none of the above has to be taken on trust.
+[Canonization](https://nrynss.github.io/lambo/canonization/) has the full arithmetic, every
+constant, and the transcripts that verify it from a plain SQL client.
+
 
 ## The agent skill
 
@@ -89,7 +127,7 @@ lambo demo
 Two agents build one REST API. `user schema` earns canonical status from the real
 canonization engine, and the second agent's recall warns that it is load-bearing and was
 just edited. The [Demo page](https://nrynss.github.io/lambo/demo/) explains what the run
-proves and what it compresses.
+proves and what it compresses. The in-repo operator page is [`docs/demo.md`](docs/demo.md).
 
 To run it for real, write a `lambo.toml` that picks a store and an embedder.
 
@@ -163,8 +201,9 @@ flowchart LR
 | [Command line](https://nrynss.github.io/lambo/cli/) | The same operations as deterministic one-shot lines |
 | [Configuration](https://nrynss.github.io/lambo/config/) | Every `lambo.toml` key, env override, and feature flag |
 | [Library API](https://nrynss.github.io/lambo/api/) | The Rust `Memory` API and the adapter traits |
+| [Canonization](https://nrynss.github.io/lambo/canonization/) | The composite score, the three promotion gates, and the constants they run on |
 | [End to end](https://nrynss.github.io/lambo/end-to-end/) | Serving, reading, and running a swarm against one session |
-| [Demo](https://nrynss.github.io/lambo/demo/) | Two agents building one REST API on shared memory |
+| [Demo](https://nrynss.github.io/lambo/demo/) | Two agents building one REST API on shared memory. Operator notes in [`docs/demo.md`](docs/demo.md) |
 
 ## CockroachDB tools used
 
@@ -201,6 +240,15 @@ can drop in as the dense path, and `embed-bedrock` is reserved as a Cargo featur
 adapter behind it is not implemented, and selecting `kind = "bedrock"` fails at startup saying
 so. BGE-M3 served by a local `llama-server` is the only real embedder today, and the
 account's model-access request is still unapproved ([capture](evidence/bedrock-blocked.txt)).
+
+A skeletal adapter for that path exists as an **unmerged** pull request,
+[#6](https://github.com/nrynss/lambo/pull/6), against
+[issue #3](https://github.com/nrynss/lambo/issues/3). It locks the Titan request and response
+shape and refuses malformed responses, but `InvokeModel` stays fail-closed: `embed()` returns
+`Unavailable` naming the issue, and the feature is in neither the `ship` nor the `demo` set. It
+is linked here because the design boundary above is easier to check against real code than
+against a promise, and it is deliberately not merged, so nothing in this repository's `main`,
+released binaries, or claims depends on it.
 
 ## Development
 
