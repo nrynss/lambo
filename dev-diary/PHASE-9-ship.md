@@ -162,34 +162,11 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 
 ---
 
-## Exit criteria — the spec §12.4 checklist, verbatim
+## Exit criteria — the spec §12.4 checklist
 
-Checked against the repo and the running exhibit on **2026-08-17**, not against
-the plan. Each box names what was verified, so the next reader can re-check it
-rather than trust it.
-
-- [x] Public repo, license detectable in About  ·  `gh repo view` → `isPrivate: false`,
-      `licenseInfo: apache-2.0`. **Apache-2.0, not MIT. Spec §12.4 is stale here**
-- [x] README with setup/run instructions + single-writer constraint stated  ·  T9.1;
-      install → `lambo demo` → `lambo.toml`, and the constraint is stated in
-      README §Deployment model and on the site's End-to-end page
-- [x] Functional demo app URL  ·  `https://lambo.nryn.dev` → 200, `/healthz` → `ok`,
-      `/api/stats` → session `cloudops-exhibit`, 113 nodes / 485 edges / 41 concepts /
-      1 canonical / 7 canonization events, `mode: reader`. Re-verified 2026-08-17.
-      A Lambda Function URL serves the same session
-- [ ] Video under 3 minutes showing the memory layer at work  ·  **the open one.**
-      D2, blocked on D1
-- [x] Written identification of CockroachDB tools and AWS services used  ·  README
-      §CockroachDB tools used, and §AWS services used, which is **six** services
-      (EC2, VPC, Secrets Manager, Lambda, RDS for PostgreSQL, IAM), each exercised by
-      the running exhibit. The earlier "AWS count is ZERO" note below is history:
-      it was true on 2026-08-15 and was closed by the CloudOps build on 2026-08-16
-- [x] Architecture diagram  ·  T9.2, mermaid in README §Architecture plus the site
-      topology. Not at `docs/architecture.*`; that path was never created
-- [ ] **Submitted before Tue Aug 18, 5:00 pm ET**  ·  T9.5, not started; gated on the
-      video link
-
----
+Moved to [notes/deployment-and-submission.md](notes/deployment-and-submission.md)
+on 2026-08-18. The §12.4 boxes are submission compliance, not phase work, so they
+live with D1–D3 where the deadline and the deploy steps already are.
 
 ## Handoff Log
 
