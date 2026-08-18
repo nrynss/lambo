@@ -109,7 +109,12 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
 
     let embedding = EmbeddingContract {
         kind: embedder_cfg.kind.to_string(),
-        model: embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
+        model: match embedder_cfg.kind {
+            crate::embed::EmbedderKind::Bedrock => {
+                Some("amazon.titan-embed-text-v2:0".to_string())
+            }
+            _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
+        },
         dim: embed_dim,
     };
 
