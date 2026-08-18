@@ -12,6 +12,10 @@ hero:
     - text: "Read the reference"
       link: "/lambo/mcp/"
 
+    - text: "See the evidence"
+      link: "/lambo/evidence/"
+      variant: minimal
+
 ---
 
 import Mermaid from '../../components/Mermaid.astro';
@@ -55,12 +59,14 @@ A single `lambo serve` process owns each session. Agents connect to that process
 
 Multi-agent coding produces a flood of observations. Each small agent sees one slice of the work, writes it down in its own words, and moves on. That memory lives in tool call history and dies when the context window closes.
 
+That is the problem Lambo was built for, and [Origin](/lambo/origin/) is the author's account of how the idea arrived: what working with coding agents made obvious, and where a promotion model borrowed from veneration and canonization came from.
+
 Lambo gives those agents a shared memory that outlives the context. It treats each session as a graph of concepts. A concept is something your agents learn, such as `user schema`, `auth middleware`, or `retry budget is 3`. Typed edges connect concepts that depend on, produce, or relate to each other.
 
 Three properties make this memory useful at scale.
 
 - **It consolidates.** Many agents write the same idea in different words. Lambo matches the duplicates, deduplicates them, and lets recall return one canonical fact instead of fifty near-identical notes.
-- **It promotes by evidence.** Importance is earned, not declared. The background daemon scores concepts from structural evidence such as peer count, blast radius, and how long edges have lived. A concept that accumulates evidence earns canonical status.
+- **It promotes by evidence.** Importance is earned, not declared. The background daemon scores concepts from structural evidence such as peer count, blast radius, and how long edges have lived. A concept that accumulates evidence earns canonical status. [Canonization](/lambo/canonization/) has the arithmetic, and [Evidence and evaluation](/lambo/evidence/) has the transcripts that verify it from a plain SQL client.
 - **It retracts safely.** Each concept carries a blast radius, so an agent knows how many things depend on what it is about to change. Coordination tools such as `lambo_reserve` and `lambo_inspect` turn that knowledge into action.
 
 Durability is write-behind and eventual. Mutations batch into a few round trips to a durable store, so a burst of writes drains quickly and the session survives restarts.
@@ -77,4 +83,6 @@ Start with the quickstart or jump straight into a reference page.
   <LinkCard title="Canonization" href="/lambo/canonization/" description="How a concept earns canonical status: the score, the three gates, the constants." />
   <LinkCard title="Command line" href="/lambo/cli/" description="The same operations as single deterministic lines from the terminal." />
   <LinkCard title="End to end" href="/lambo/end-to-end/" description="How the parts fit together, from serving a session to running a swarm." />
+  <LinkCard title="Evidence & evaluation" href="/lambo/evidence/" description="Live-cluster measurements, determinism proofs, and the raw transcripts behind every claim." />
+  <LinkCard title="Origin" href="/lambo/origin/" description="Where the idea came from, in the author's words, including what is not yet done." />
 </CardGrid>
