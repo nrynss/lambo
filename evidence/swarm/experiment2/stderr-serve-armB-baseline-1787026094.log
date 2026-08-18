@@ -1,0 +1,6 @@
+2026-08-18T04:08:14.950196Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=c-qwen3-exp2-baseline-20260818 agent=c5-agentic existing=false match_strategy=Hybrid embedder=bge_m3 dim=1024
+2026-08-18T04:08:14.950271Z  INFO lambo::mcp::serve: lambo serve: session attached session=c-qwen3-exp2-baseline-20260818 agent=c5-agentic transport=Http
+2026-08-18T04:08:14.950292Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-18T04:08:14.950370Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:7709
+2026-08-18T04:11:06.413354Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-18T04:11:06.413662Z  INFO lambo::mcp::serve: lambo serve: session closed, tail durable

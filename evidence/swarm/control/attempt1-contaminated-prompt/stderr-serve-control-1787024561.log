@@ -1,0 +1,8 @@
+2026-08-18T03:42:41.752015Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=c-qwen3-control-20260818 agent=c5-agentic existing=false match_strategy=Hybrid embedder=bge_m3 dim=1024
+2026-08-18T03:42:41.752076Z  INFO lambo::mcp::serve: lambo serve: session attached session=c-qwen3-control-20260818 agent=c5-agentic transport=Http
+2026-08-18T03:42:41.752093Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-18T03:42:41.752158Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:7707
+2026-08-18T03:42:44.802829Z  WARN lambo::mcp::serve: mcp http: rejected an unauthenticated request had_header=false
+2026-08-18T03:42:56.767853Z  WARN lambo::hybrid: hybrid matching disabled: store lacks VECTOR_SEARCH — degrading to MatchStrategy::Canonical (creating keyword-only concept) session=c-qwen3-control-20260818
+2026-08-18T03:45:34.185620Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-18T03:45:34.185893Z  INFO lambo::mcp::serve: lambo serve: session closed, tail durable

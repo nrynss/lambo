@@ -1,0 +1,7 @@
+store readback (post-SIGTERM, sqlite direct):
+  interactions: 82
+  concepts:     12
+  edges:        132
+  canon_events: 0
+  lease rows:   0
+  sessions:     ('c-qwen3-agentic-20260818', '2026-08-18T03:08:15.464Z', None)

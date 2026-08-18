@@ -1,0 +1,13 @@
+session=c-swarm-fgemma-20260818
+ledger=none (no swarm run — functiongemma-270m emitted no tool_calls in either probe)
+interactions=0
+concepts=0
+edges=0
+lease_rows=0
+
+The session store only ever saw the probe's session attach: neither the OMP
+harness probe nor the raw OpenAI tools-API probe produced a lambo_derive (or
+any) tool call, so no interactions or concepts were ever written. The lease
+row is gone after the clean SIGTERM (server exit lines in
+stderr-serve-fgemma-1787019996.log: "shutdown signal received, winding down"
+then "session closed, tail durable").

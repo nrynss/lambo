@@ -1,0 +1,135 @@
+{
+  "probe": "raw OpenAI tools API (POST /v1/chat/completions with a tools array)",
+  "note": "Fresh runs 2026-08-18 ~02:24-02:25 UTC (response `created` epochs 1787019855 = 02:24:15Z and 1787019904 = 02:25:04Z; the earlier \"~07:57-07:58 UTC\" label was this box's IST wall-clock — Asia/Kolkata, +0530 — mislabeled as UTC) against llama-server on :8083 (functiongemma-270m-it-UD-Q8_K_XL.gguf, --jinja -c 32768 -a functiongemma-270m). The model emits FunctionGemma-native <start_function_call>call:NAME{...}<end_function_call> markup, but this llama.cpp build returns it as plain content prose: no tool_calls field, finish_reason=length when truncated at 512 tokens, finish_reason=stop with the full generation. Both attempts recorded.",
+  "request": {
+    "model": "functiongemma-270m",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a memory agent. You have access to the lambo_derive tool to derive concepts into a memory graph."
+      },
+      {
+        "role": "user",
+        "content": "Use the lambo_derive tool to derive the concept 'auth middleware guards schema integrity' into the memory graph."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lambo_derive",
+          "description": "Derive concepts into the memory graph",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "concepts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "concept_type": {
+                      "type": "string",
+                      "enum": [
+                        "entity",
+                        "logic",
+                        "constraint",
+                        "resource"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "concept_type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "concepts"
+            ]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 512,
+    "temperature": 0.7
+  },
+  "responses": [
+    {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "<start_function_call>call:lambo_derive{concepts:[{concept_type:<escape>entity<escape>,content:<escape>auth middleware guards schema integrity<escape>}]}<end_function_call>call:lambo_derive{concepts:[{concept_type:<escape>constraint<escape>,content:<escape>auth middleware guards schema integrity<escape>}]}<end_function_call>call:lambo_derive{concepts:[<escape>resource<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call><start_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call"
+          }
+        }
+      ],
+      "created": 1787019855,
+      "model": "functiongemma-270m",
+      "system_fingerprint": "b10456-f17008d",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 512,
+        "prompt_tokens": 179,
+        "total_tokens": 691,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "id": "chatcmpl-5UtTj5kTk4mQBl8OzFR7bwBVRonqs1HZ",
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 179,
+        "prompt_ms": 93.009,
+        "prompt_per_token_ms": 0.5196033519553073,
+        "prompt_per_second": 1924.5449365115203,
+        "predicted_n": 512,
+        "predicted_ms": 1596.991,
+        "predicted_per_token_ms": 3.1252270058708413,
+        "predicted_per_second": 319.9767562872928
+      }
+    },
+    {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "<start_function_call>call:lambo_derive{concepts:[{concept_type:<escape>entity<escape>,content:<escape>auth middleware guards schema integrity<escape>}]}<end_function_call>call:lambo_derive{concepts:[{concept_type:<escape>constraint<escape>,content:<escape>auth middleware guards schema integrity<escape>}]}<end_function_call>call:lambo_derive{concepts:[<escape>resource<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call><start_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape>]}<end_function_call>call:lambo_derive{concepts:[<escape>entity<escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape><escape>\u304c2500000000000 equation equation\u3068\u3057\u3066\u3068\u3057\u3066\u3068\u3057\u3066\u3068\u3057\u3066\u304d\u305f\u3002"
+          }
+        }
+      ],
+      "created": 1787019904,
+      "model": "functiongemma-270m",
+      "system_fingerprint": "b10456-f17008d",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 1808,
+        "prompt_tokens": 179,
+        "total_tokens": 1987,
+        "prompt_tokens_details": {
+          "cached_tokens": 174
+        }
+      },
+      "id": "chatcmpl-R1lckfomuHmEhvEf0neKk8AJoXVYa1Vl",
+      "timings": {
+        "cache_n": 174,
+        "prompt_n": 5,
+        "prompt_ms": 199.8,
+        "prompt_per_token_ms": 39.96,
+        "prompt_per_second": 25.025025025025023,
+        "predicted_n": 1808,
+        "predicted_ms": 4599.333,
+        "predicted_per_token_ms": 2.5452866629773103,
+        "predicted_per_second": 392.8830549994967
+      }
+    }
+  ]
+}

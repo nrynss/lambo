@@ -38,3 +38,14 @@ target-docker/
 
 # Agent worktrees and local agent config
 .claude/
+
+# Author's working documents (script drafts) and LibreOffice lock files
+/lambo-script.odt
+.~lock.*#
+
+# Runtime pid file written by the local serve helper
+serve.pid
+
+# SQLite sidecars left behind by reading a committed evidence store
+*.db-shm
+*.db-wal

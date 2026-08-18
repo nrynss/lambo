@@ -33,6 +33,35 @@ Flash under OMP called derive, recall, and stats against a live CockroachDB sess
 Cursor's model ran derive, record_action, recall, and stats in sequence. Transcripts are in
 [`evidence/`](evidence/).
 
+## The agent skill
+
+[`skills/lambo-cloudops/`](skills/lambo-cloudops/SKILL.md) is the protocol written for
+agents to read: recall before you touch shared state, treat a blocking warning as
+blocking, record what you built so the next agent inherits it. Any tool-using agent can
+load it, and the docs mirror it at
+[agent skill](https://nrynss.github.io/lambo/agent-skill/).
+
+The surface is small enough that a very small model can execute the protocol against it.
+Given that skill and Lambo's four MCP tools, **Qwen3-0.6B**, a 0.6-billion-parameter
+model running locally under llama.cpp, drove the MCP surface directly: three agents
+against one session for 151 seconds, 55 tasks, 173 tool calls, 165 of them successful.
+
+- **In every task where the model acted, it called recall before it wrote anything**
+  (43 of 43), and **none of its 45 derive calls happened without a prior recall in the
+  same task.**
+- Every call was one the model composed itself, and the surface refused none of them for
+  malformed arguments: 86 recalls, 45 derives, 40 record_actions, 2 inspects. The eight
+  failures were transport, not rejection.
+- 0.857 of successful derives landed on concepts that already existed, so the graph
+  converged instead of sprawling.
+- On SIGTERM after the run, the store matched the ledger exactly: 82 interactions, 12
+  concepts, nothing lost.
+
+The tasks in that run named the sequence to follow, so this measures whether a very small
+model can execute the protocol reliably against a live surface, not whether it reaches
+for memory unprompted. Ledger, transcripts, and the post-SIGTERM durability readback are
+in [`evidence/swarm/`](evidence/swarm/).
+
 ## Install and run
 
 Lambo ships as one binary carrying every adapter. You install it, then write a `lambo.toml`

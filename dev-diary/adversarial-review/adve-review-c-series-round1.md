@@ -386,4 +386,5 @@ the remediations are confined to the docs and the runbook claims.
   greps, control-run recomputation via the committed `check_durability.py`,
   probe re-runs); `python3 -m py_compile` on the three `.py` scripts (clean);
   `git diff --check` (clean). Working tree clean after the two commits.
-- **Status: AWAITING independent re-review (round 2).**
+- **Status: CLOSED.** Round 2 ran and returned CLEAN / APPROVE, all 8 findings
+  verified closed: [adve-review-c-series-round2.md](adve-review-c-series-round2.md).

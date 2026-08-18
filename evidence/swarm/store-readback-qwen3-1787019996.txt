@@ -1,0 +1,24 @@
+session=c-swarm-qwen3-20260818
+ledger=ledger-qwen3-1787019996.jsonl
+interactions=124
+concepts=27
+edges=404
+lease_rows=0
+
+Ledger-vs-store accounting (check_durability.py pattern; SQLite readback after
+clean SIGTERM):
+
+- interactions: 124 ledger-successful lambo_derive calls == 124 store
+  interactions (1:1, the server stamps one interaction node per tool call).
+- concepts: 27 created per the server's own derive responses
+  ("derived N concept(s): C created, M matched existing") == 27 store rows.
+  The 225 matched-existing references are canonization hits on keys already
+  in the session, not new rows.
+- edges: derive edges are not reported by the server, so the store total is a
+  lower bound on ledger-expected edges (the ledger accounts no
+  record_action edges for the swarm).
+- session_leases: 0 rows after exit — the single-writer lease was released.
+
+Server exit (stderr-serve-qwen3-1787019996.log):
+  lambo serve: shutdown signal received, winding down  (02:29:23.527356Z)
+  lambo serve: session closed, tail durable            (02:29:23.527618Z)

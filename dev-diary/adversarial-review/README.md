@@ -1,9 +1,10 @@
 # Adversarial reviews
 
-# Complete index of the review records in this directory (64 records).
+# Complete index of the review records in this directory (65 records).
 
 | File | Scope | Status |
 |------|-------|--------|
+| [adve-review-c5-models-round1.md](adve-review-c5-models-round1.md) | codex/c5-models — C5 model re-run (Qwen3-0.6B swarm + functiongemma-270m no-tool-call finding), round 1 | **REQUEST_CHANGES → remediated, CLOSED with round 2 waived** (2 P2 / 2 P3; probes/ledger/durability/portal all verified against artifacts — P2s were OMP-infeasibility under-evidence + fallback-loop agency framing, both remediated in `decdc74`; independent re-review waived by operator decision 2026-08-18, recorded in the closing note) |
 | [adve-review-c-series-round1.md](adve-review-c-series-round1.md) | codex/c-series — C1–C5 concurrency capture (load driver, SIGTERM capture, durability accounting, real-model swarm), round 1 | **REQUEST_CHANGES** (1 P1 / 2 P2 / 5 P3; evidence-doc integrity — see the record, 2026-08-18) |
 | [adve-review-c-series-round2.md](adve-review-c-series-round2.md) | codex/c-series — C1–C5 concurrency capture, round 2 re-review of the round-1 remediation (all 8 findings closed) | **CLEAN / APPROVE** (1 P1 / 2 P2 / 5 P3 all verified closed against artifacts; regression sweep green; zero new findings, 2026-08-18) |
 | [adve-review-e2e-integration-h1h3-r2.md](adve-review-e2e-integration-h1h3-r2.md) | Main — E2E round-2 re-review of the remediation branch (E2E-1..8 closure re-verification + regression sweep) | **CLEAN / APPROVE** (all 8 findings closed incl. LIVE first-run override success; zero new findings, 2026-08-17) |
