@@ -6,6 +6,8 @@
 
 mod math;
 
+#[cfg(feature = "embed-bedrock")]
+mod bedrock;
 #[cfg(feature = "embed-bge")]
 mod bge_m3;
 #[cfg(feature = "embed-fixture")]
@@ -13,6 +15,8 @@ mod fixture;
 
 pub use math::cosine;
 
+#[cfg(feature = "embed-bedrock")]
+pub use bedrock::{BedrockTitanEmbedder, TITAN_V2_DIMS, TITAN_V2_MODEL_ID};
 #[cfg(feature = "embed-bge")]
 pub use bge_m3::BgeM3LlamaCppEmbedder;
 #[cfg(feature = "embed-fixture")]
@@ -97,7 +101,7 @@ impl EmbedderKind {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
-            // T7.1 not implemented yet.
+            // Constructible behind embed-bedrock. Invoke is still blocked (issue #3).
             Self::Bedrock => false,
         }
     }
@@ -268,11 +272,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         EmbedderKind::Bedrock => {
             #[cfg(feature = "embed-bedrock")]
             {
-                Err(EmbedError::Unavailable(
-                    "embed-bedrock is enabled but the Bedrock embedder is not implemented yet; \
-                     account must also be authorizationStatus=AUTHORIZED"
-                        .into(),
-                ))
+                Ok(Box::new(BedrockTitanEmbedder::from_config_dim(cfg.dim)?))
             }
             #[cfg(not(feature = "embed-bedrock"))]
             {
@@ -359,8 +359,14 @@ mod tests {
         // is locked by bge_m3::tests::rejects_empty_text (mock server, 404 ->
         // Backend, so only the guard can produce Unavailable).
         let bge = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024).unwrap();
+        #[cfg(feature = "embed-bedrock")]
+        let titan = BedrockTitanEmbedder::new("us-east-1", 1024).unwrap();
+        #[cfg(feature = "embed-bedrock")]
+        let backends: Vec<&dyn Embedder> = vec![&fixture, &bge, &titan];
+        #[cfg(not(feature = "embed-bedrock"))]
+        let backends: Vec<&dyn Embedder> = vec![&fixture, &bge];
         for text in ["", "   ", "\t\n"] {
-            for e in [&fixture as &dyn Embedder, &bge as &dyn Embedder] {
+            for e in &backends {
                 let err = e.embed(text).await.unwrap_err();
                 assert!(
                     matches!(err, EmbedError::Unavailable(_)),
@@ -460,16 +466,44 @@ mod tests {
             llama_url: None,
             llama_model: None,
         });
+        #[cfg(not(feature = "embed-bedrock"))]
+        {
+            let Err(err) = r else {
+                panic!("expected Unavailable, got Ok — silent fallback forbidden");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("embed-bedrock") || msg.contains("not compiled"),
+                "msg={msg}"
+            );
+            assert!(!msg.to_ascii_lowercase().contains("fixture"));
+            assert!(!EmbedderKind::Bedrock.is_ready());
+        }
+        #[cfg(feature = "embed-bedrock")]
+        {
+            let e = r.expect("skeleton must construct behind embed-bedrock");
+            assert_eq!(e.dimensions(), 1024);
+            assert!(
+                !EmbedderKind::Bedrock.is_ready(),
+                "is_ready stays false until InvokeModel is live"
+            );
+            assert!(EmbedderKind::Bedrock.is_compiled());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "embed-bedrock")]
+    fn bedrock_rejects_non_titan_dim() {
+        let r = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Bedrock,
+            dim: 768,
+            llama_url: None,
+            llama_model: None,
+        });
         let Err(err) = r else {
-            panic!("expected Unavailable, got Ok — silent fallback forbidden");
+            panic!("expected err");
         };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("embed-bedrock") || msg.contains("not compiled"),
-            "msg={msg}"
-        );
-        assert!(!msg.to_ascii_lowercase().contains("fixture"));
-        assert!(!EmbedderKind::Bedrock.is_ready());
+        assert!(err.to_string().contains("256"), "{err}");
     }
 
     #[test]
