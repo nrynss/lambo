@@ -58,6 +58,30 @@ release targets plus auto-extension registration before sqlx opens a pool. Not w
 exact scan actually hurts. **Trigger to revisit:** per-session concept counts where the scan shows
 up in recall latency. That is a number, not a guess.
 
+#### The assumption underneath has moved
+
+The exact-scan argument rests on *"Lambo is session-scoped, so n stays small by construction"* —
+41 concepts in the `cloudops-exhibit` session, ~1,400 in the K=12 run.
+
+**Mooshik holds one unified session.** That is a settled product decision, not a possibility:
+spec §3.3's single autobiographical memory across every machine, bootstrapped from 17,106 commits
+and 8.7M words of markdown in one graph. Whatever that extracts to, it is not 1,400, and at 1536
+dimensions each concept carries ~6 KB of vector.
+
+So `n` is no longer small by construction. It is small *in the workloads Lambo has measured so
+far*, which is a different claim.
+
+This does not change the decision to start with an exact scan — it is still the right first
+implementation, and the alternative costs a C toolchain across four targets for a number nobody
+has measured. What it changes is **how F1 should be written**: the scan must sit behind a seam
+that can be replaced without touching its callers. Concretely, keep candidate selection separable
+from scoring, so swapping exact cosine for an index is one implementation change rather than a
+refactor of the recall path.
+
+The revisit trigger is now a scheduled measurement rather than a hypothetical: measure recall
+latency and peak RSS on the bootstrapped graph the day it first exists, not the week someone
+complains.
+
 **Depends on:** nothing.
 
 ---
