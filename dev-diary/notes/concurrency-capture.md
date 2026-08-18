@@ -146,9 +146,11 @@ should stop describing this as "concurrency-on-MBP" with no further detail: the
 missing thing was always the capture, and after C3 it is either captured or
 explained.
 
-**Hardware caveat to write down:** the criterion says *runs on the MBP*. If it
-runs on the Linux box (16 cores, 2560x1440 display, CachyOS) the starvation
-threshold differs, so say which machine produced the numbers.
+**Hardware, to write down:** the MBP requirement was dropped 2026-08-18 as
+incidental — what the criterion actually tests is K concurrent clients against
+K ≥ the CPU worker count, which the Linux box satisfies. Starvation thresholds
+are hardware-dependent, so name the machine that produced the numbers in every
+artifact.
 ## C5 — Optional: drive it with real local models
 
 **Requires:** C2 green

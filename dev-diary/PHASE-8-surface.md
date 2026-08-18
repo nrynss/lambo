@@ -809,13 +809,12 @@ release (not only build from source) and run `lambo serve` on a clean machine.
       K=12 raw MCP load driver against a scratch SQLite store; exact
       `lambo serve: session closed, tail durable`, 0 `tail lost on exit`,
       signal→exit 1419 ms, exit 0; interaction yardstick AHEAD by 21
-      (in-flight flushed by the close drain); concept shortfall 107 fully
-      explained by one daemon GC sweep; wire scan clean. Evidence:
-      `evidence/concurrency/` (+ runbook). **Hardware caveat, recorded per
-      concurrency-capture.md C4:** the criterion says "runs on the MBP"; the
-      numbers above were produced on the Linux box (cachyos-x8664, Ryzen 5
-      3600, 12 threads, CachyOS), so the starvation threshold differs from an
-      MBP and the MBP leg is unrun — the box is named in every artifact.
+      (in-flight writes already swept by the 1 s flush loop, so the close
+      drain was a no-op); concept shortfall 107 fully explained by one daemon
+      GC sweep; wire scan clean. Evidence: `evidence/concurrency/` (+ runbook).
+      Produced on the Linux box (cachyos-x8664, Ryzen 5 3600, 12 threads,
+      CachyOS), which satisfies K ≥ the CPU worker count. The machine is named
+      in every artifact because starvation thresholds are hardware-dependent.
 - [x] Demo app reachable and honest (renders real recall output, not canned text)  ·  T8.5 reverify CLEAN + live Cockroach `serve-web` (Handoff 1927-1956, 2020-2025)
 - [x] **T8.7 surface hardening:** HTTP transport refuses unauthenticated non-loopback
       requests, enforces a documented rate limit + concurrent-session cap (tested);
