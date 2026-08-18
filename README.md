@@ -195,12 +195,12 @@ read-only and test-enforced. Every service below is exercised by it; none is asp
 | **Amazon RDS for PostgreSQL** | The private-tier workload the app-data agent provisioned: `db.t4g.micro`, encrypted, not publicly accessible. Its dependency on the shared security group and private subnet is precisely what the blast-radius warning protects. It is **not** a Lambo store: `VECTOR(1024)` and `CREATE VECTOR INDEX` do not apply to stock PostgreSQL. |
 | **AWS IAM** | An instance profile and a Lambda execution role, each scoped to the single secret ARN it needs rather than to `secretsmanager:*`. |
 
-One honest boundary: AWS runs *around* Lambo here, not inside it. The released binary calls
-no AWS API. The `Embedder` trait was designed so Amazon Titan Text Embeddings V2 on Bedrock
-can drop in as the dense path, and `embed-bedrock` is reserved as a Cargo feature, but the
-adapter behind it is not implemented, and selecting `kind = "bedrock"` fails at startup saying
-so. BGE-M3 served by a local `llama-server` is the only real embedder today, and the
-account's model-access request is still unapproved ([capture](evidence/bedrock-blocked.txt)).
+One honest boundary: AWS runs *around* Lambo here, not inside it. The released binary
+calls no AWS API. Amazon Titan Text Embeddings V2 is wired as `embed-bedrock` (issue
+#3): the adapter constructs, the session contract names `amazon.titan-embed-text-v2:0`,
+and `embed` fail-closes until the account is AUTHORIZED. BGE-M3 served by a local
+`llama-server` is the live dense path today
+([capture](evidence/bedrock-blocked.txt)).
 
 ## Development
 

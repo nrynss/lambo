@@ -101,8 +101,8 @@ impl EmbedderKind {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
-            // Constructible behind the feature. Invoke is still blocked (issue #3).
-            Self::Bedrock => cfg!(feature = "embed-bedrock"),
+            // Constructible behind embed-bedrock. Invoke is still blocked (issue #3).
+            Self::Bedrock => false,
         }
     }
 }
@@ -483,7 +483,11 @@ mod tests {
         {
             let e = r.expect("skeleton must construct behind embed-bedrock");
             assert_eq!(e.dimensions(), 1024);
-            assert!(EmbedderKind::Bedrock.is_ready());
+            assert!(
+                !EmbedderKind::Bedrock.is_ready(),
+                "is_ready stays false until InvokeModel is live"
+            );
+            assert!(EmbedderKind::Bedrock.is_compiled());
         }
     }
 

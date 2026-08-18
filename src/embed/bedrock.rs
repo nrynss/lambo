@@ -45,14 +45,15 @@ pub struct BedrockTitanEmbedder {
 }
 
 impl BedrockTitanEmbedder {
+    /// Build a Titan V2 embedder for `region` at one of [`TITAN_V2_DIMS`].
     pub fn new(region: impl Into<String>, dim: usize) -> Result<Self, EmbedError> {
         if !TITAN_V2_DIMS.contains(&dim) {
             return Err(EmbedError::Unavailable(format!(
                 "Titan V2 dim must be one of {TITAN_V2_DIMS:?}, got {dim}"
             )));
         }
-        let region = region.into();
-        if region.trim().is_empty() {
+        let region = region.into().trim().to_string();
+        if region.is_empty() {
             return Err(EmbedError::Unavailable("Bedrock region is empty".into()));
         }
         Ok(Self {
@@ -63,19 +64,20 @@ impl BedrockTitanEmbedder {
     }
 
     /// Region from `LAMBO_BEDROCK_REGION`, then `AWS_REGION`, else `us-east-1`.
+    /// Blank values are skipped so a whitespace override cannot hide `AWS_REGION`.
     pub fn from_config_dim(dim: usize) -> Result<Self, EmbedError> {
-        let region = std::env::var("LAMBO_BEDROCK_REGION")
-            .or_else(|_| std::env::var("AWS_REGION"))
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        let region = env_nonblank("LAMBO_BEDROCK_REGION")
+            .or_else(|| env_nonblank("AWS_REGION"))
             .unwrap_or_else(|| DEFAULT_REGION.to_string());
         Self::new(region, dim)
     }
 
+    /// Titan model id stamped on the session embedding contract.
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
 
+    /// Resolved Bedrock Runtime region.
     pub fn region(&self) -> &str {
         &self.region
     }
@@ -118,24 +120,32 @@ impl BedrockTitanEmbedder {
     }
 }
 
+fn env_nonblank(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn l2_check_and_normalize(v: &mut [f32]) -> Result<(), EmbedError> {
-    let mut sum = 0.0f32;
+    let mut sum = 0.0f64;
     for &x in v.iter() {
         if !x.is_finite() {
             return Err(EmbedError::Backend(
                 "Titan returned a non-finite embedding".into(),
             ));
         }
+        let x = f64::from(x);
         sum += x * x;
     }
     let norm = sum.sqrt();
-    if norm <= f32::EPSILON {
+    if !norm.is_finite() || norm <= f64::from(f32::EPSILON) {
         return Err(EmbedError::Backend(
             "Titan returned a zero-norm embedding".into(),
         ));
     }
     for x in v.iter_mut() {
-        *x /= norm;
+        *x = (f64::from(*x) / norm) as f32;
     }
     Ok(())
 }
@@ -179,6 +189,26 @@ mod tests {
     #[test]
     fn rejects_empty_region() {
         assert!(BedrockTitanEmbedder::new("  ", 1024).is_err());
+    }
+
+    #[test]
+    fn blank_bedrock_region_falls_back_to_aws_region() {
+        let _g = crate::test_util::env_lock();
+        std::env::set_var("LAMBO_BEDROCK_REGION", "  ");
+        std::env::set_var("AWS_REGION", "eu-west-1");
+        let e = BedrockTitanEmbedder::from_config_dim(1024).unwrap();
+        assert_eq!(e.region(), "eu-west-1");
+        std::env::remove_var("LAMBO_BEDROCK_REGION");
+        std::env::remove_var("AWS_REGION");
+    }
+
+    #[test]
+    fn normalize_large_finite_values() {
+        let mut v = vec![f32::MAX, f32::MAX];
+        l2_check_and_normalize(&mut v).unwrap();
+        assert!(v.iter().all(|x| x.is_finite()));
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((n - 1.0).abs() < 1e-5);
     }
 
     #[test]

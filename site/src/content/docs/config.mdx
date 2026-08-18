@@ -59,7 +59,7 @@ The kind you choose must be compiled into your binary. If it is not, Lambo fails
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3`, `fixture`, or `bedrock`. `bedrock` needs `--features embed-bedrock`. Invoke is still blocked until the account is AUTHORIZED. |
+| `kind` | string | `bge_m3` | `bge_m3`, `fixture`, or `bedrock`. `bedrock` needs `--features embed-bedrock`. Titan V2 accepts only dim `256`, `512`, or `1024`. Invoke is still blocked until the account is AUTHORIZED. |
 | `dim` | integer | `1024` | The width you expect the embedder to emit. |
 | `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
 | `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
