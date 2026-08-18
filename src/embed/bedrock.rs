@@ -92,9 +92,8 @@ impl BedrockTitanEmbedder {
     }
 
     fn decode_response(&self, bytes: &[u8]) -> Result<Vec<f32>, EmbedError> {
-        let parsed: TitanResponse = serde_json::from_slice(bytes).map_err(|e| {
-            EmbedError::Backend(format!("Titan response is not valid JSON: {e}"))
-        })?;
+        let parsed: TitanResponse = serde_json::from_slice(bytes)
+            .map_err(|e| EmbedError::Backend(format!("Titan response is not valid JSON: {e}")))?;
         let mut vec = parsed.embedding;
         if vec.len() != self.dim {
             return Err(EmbedError::Backend(format!(
@@ -266,7 +265,10 @@ mod tests {
         let e = BedrockTitanEmbedder::new("us-east-1", 1024).unwrap();
         let err = e.embed("user schema").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("InvokeModel") || msg.contains("blocked"), "{msg}");
+        assert!(
+            msg.contains("InvokeModel") || msg.contains("blocked"),
+            "{msg}"
+        );
         assert!(!msg.to_ascii_lowercase().contains("fixture"));
     }
 }
