@@ -1,31 +1,27 @@
 ---
-title: "Lambo"
+# The tab title. `hero.title` below is what the page displays, so this only
+# has to stop the browser tab reading "Lambo | Lambo".
+title: "Agentic graph memory"
 description: "Agentic graph memory for multi-agent AI operations."
 template: doc
 hero:
   title: "Lambo"
   tagline: "Shared, self-consolidating memory for your agents. Importance is earned from structural evidence, not declared."
+  # Only the two the sidebar cannot offer. Quickstart and Evidence are one
+  # click away in the sidebar and again in the cards below, so buttons for
+  # them would be a third copy of the same link.
   actions:
-    - text: "Get started"
-      link: "/lambo/quickstart/"
-      variant: primary
-
     - text: "Try it live"
       link: "https://lambo.nryn.dev"
-      variant: secondary
+      variant: primary
       attrs:
         target: _blank
-
-    - text: "See the evidence"
-      link: "/lambo/evidence/"
-      variant: minimal
 
     - text: "Watch the walkthrough"
       link: "https://www.youtube.com/watch?v=dfbMvf_YwFo"
-      variant: minimal
+      variant: secondary
       attrs:
         target: _blank
-
 ---
 
 import Mermaid from '../../components/Mermaid.astro';
