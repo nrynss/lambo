@@ -159,12 +159,6 @@ Devpost under deadline load is a known failure mode. Confirmation screenshot int
 
 ---
 
-## Exit criteria — the spec §12.4 checklist
-
-Moved to [notes/deployment-and-submission.md](notes/deployment-and-submission.md)
-on 2026-08-18. The §12.4 boxes are submission compliance, not phase work, so they
-live with D1–D3 where the deadline and the deploy steps already are.
-
 ## Handoff Log
 
 > _Fill on completion. Last entry in this diary: what would v0.7.0's first day want to know?_
