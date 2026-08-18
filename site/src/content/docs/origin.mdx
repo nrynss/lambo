@@ -1,32 +1,65 @@
 ---
 title: "Origin"
-description: "Where Lambo came from, and what the hackathon actually contributed"
+description: "How Lambo came about, in the author's words"
 ---
 
-Lambo is not a hackathon project that grew a design. It is a design that finally got built during a hackathon.
+Hello. I am Narayan.
 
-## The problem came first
+I am a technical writer. I have been dabbling with tech for over 25 years now.
+For someone like me, the past 2-3 years have been a whirlwind. LLM revolution
+has transformed how I work, how I play, and may be even how I live.
 
-The idea Lambo implements had been worked out over months before any of this code existed: that agents working on the same codebase need memory with structure, and that the useful signal is not similarity but dependency. A concept matters because other things rest on it. Editing something load-bearing is a different act from editing something isolated, and a retrieval layer that returns both with the same confidence is hiding the distinction that mattered.
+The idea for Lambo came to me earlier this year. I was trying my best to get
+Claude Code and Cursor to behave at work. In spite of having a much faster
+utility like ripgrep, the agents would insist on going for grep and glob. Not an
+ideal scenario when the information you want is deep inside a large monorepo.
 
-That thinking predates the repository. It existed as a design document, written by the same author, with no code attached.
+I managed to harness it to a certain level with the help of skills and the base
+json files. The behaviour was just not something I could nail down when it came
+to subagents and even regular agents.
 
-## What the hackathon gave
+Another aspect were the memory files that Claude created when you did something.
+You might do something one-off and it annoyingly would think I want that one
+thing I did at some point of time.
 
-A deadline, and a reason to stop designing.
+May be behaviour like this made people think LLMs as human-adjacent. But my
+thought went the other way. We as humans learn things through associations and
+importance. Importance that is earned rather than mentioned once or twice. I am
+oversimplifying. Since there are events that are one-off and extremely affecting
+that it burns in your brain for life. Even there, you could argue that the
+associations and earned importance are doing their work.
 
-It also fixed a decision that had been open. Building against CockroachDB meant the graph and the vectors could live in one store rather than a database plus a retrieval sidecar, and that concepts could earn canonical status through a background process reading the same tables everything else reads. The design had assumed something like that was possible. The hackathon is where it became a thing that runs.
+LLMs simply do not have such a system in place. There is nothing earned. You try
+to artificially reinforce. You stack things in a vector database. You create a
+RAG. RAG works great when you want grounded information. But does it really work
+in an agentic workflow when there are disparate agents at work? RAG is again
+more like a secondary storage. It is not identical to RAM. I was wondering about
+a RAM component for the LLM.
 
-So the implementation is recent and the ideas are not. The parts a reader might expect to be rushed are the parts that had the most thought behind them: the canonization rules, the single-writer constraint, the shape of the recall contract. All three were settled long before there was a deadline.
+The idea of memory evolved in my head. I happened to read a random article one
+day. The concept of veneration and canonization in Catholicism came to my mind.
+A group coming together to decide someone is worthy of veneration. After some
+time, the venerated are canonized. A crude analogy to memory came to my mind.
+Not all candidates are venerated. Not all venerated become canonized. I started
+writing a specification for Lambo.
 
-## What was actually written here
+Since I do not run in the circles of AI gurus, and my genuine lack of time given
+the demands of my professional and personal life, I did not get to share these
+ideas with real humans. The spec went through an intensely gruelling review with
+many, many LLMs instead. My interest was primarily around how much holes LLMs
+can poke into the spec. Eventually, the review rounds and review notes became
+much longer than the spec itself.
 
-All of it. No code from the prior design document was incorporated, because there was none to incorporate: it described behaviour, not implementation. The document is credited for honesty rather than because anything was lifted from it.
+The question of RAM and secondary storage was being challenged. RAM alone does
+not make it good. Canonized entries needs long term storage. Canonized and
+venerated needs to be remembered for more than a session. No matter how long
+they are, in the larger time frame they are more transient than they appear. My
+intitial thought was to use SQLite with vector extensions or any other vector
+database. Concurrency would be the blocker then. My thoughts as usual went
+towards Postgres and the vector extensions.
 
-What that means in practice is that everything in this repository was built and reviewed in the open. The [dev diary](https://github.com/nrynss/lambo/tree/main/dev-diary) records the phase handoffs and the adversarial reviews, including the ones that found real defects. The [evidence directory](https://github.com/nrynss/lambo/tree/main/evidence) holds the raw captures behind the claims, including the runs that failed before they passed, kept as recorded rather than re-taken.
-
-## How to read the rest of these docs
-
-Nothing here is written to be judged. The [Demo](/lambo/demo/) shows the memory layer working and says plainly what it compresses. [Evidence and evaluation](/lambo/evidence/) states what was measured, on what, and what the measurement does not cover.
-
-Where something is unverified, the docs say so. That is the more useful thing to read than a claim with nothing behind it.
+When the CockroachDBxAWS hackathon came up, I read up on CockroachDB.
+CockroachDB made the design more elegant. It could store graphs, vectors, and
+promotions in a single space with the immense possibilities of a distributed
+system. Not to mention the independent MCP, that makes the query possible
+independent of Lambo.
