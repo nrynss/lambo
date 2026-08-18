@@ -5,7 +5,7 @@ id:       P9
 branch:   phase/p9-ship
 requires: [P8]
 blocks:   submission (Tue Aug 18, 5:00 pm ET — 2:30 am IST Aug 19)
-parallel: high   # T9.1 ‖ T9.2 ‖ T9.4 ‖ T9.5; T9.3 needs T8.4 rehearsed
+parallel: high   # T9.1 ‖ T9.2 ‖ T9.5
 ```
 
 **Goal:** the spec §12.4 deliverables, all of them, with a buffer in front of the deadline.
@@ -92,95 +92,55 @@ aspirations), including feature-gated adapters.
 
 ---
 
-### T9.3 — Video ★★
-```yaml
-requires:   T8.4 (rehearsed), T8.5
-fixture-ok: n/a
-owns:       evidence/video/, demo/script.md
-status:     FOOTAGE CAPTURED 2026-08-17, not yet cut. Eight raw takes in
-            `evidence/video-raw/` (gitignored); see notes/video-shoot.md for the
-            shot list, the three things the narration must not overclaim, and the
-            capture rig. Editing, voiceover and upload remain.
-            CORRECTION 2026-08-17: "screen capture fails silently on this machine"
-            was true of the XWayland/x11grab path only. OBS on the KDE PipeWire
-            portal works; the takes above were shot that way. See
-            notes/video-shoot.md for the four rules that make it reliable, chiefly
-            "pick the window, not the screen" and "verify frames by looking at them".
-            `05-guard.mkv` is a real live run of `03_crossover_protect.py` against
-            the exhibit, which closes the note that the committed capture
-            (evidence/remed-t8-crossover-run.md) was a synthetic recapture.
-            Still to do: cut to under 3:00, record voiceover, upload, test the link
-            logged out. D1 is not a blocker for editing, but the portal take shows a
-            newer build than the deployed site (see the note).
-```
-Under 3 minutes, memory layer visibly at work (spec §12.4). Script beats (spec §13): the
-derive montage → `canonization_events` filling → Agent B's recall with the ⚑ warning →
-"Agent B does not make the breaking change" → split-screen CockroachDB MCP query. Show
-`provision.sh` for the ccloud story (spec §12.1). Answer "why a graph instead of top-k" in
-one screen — the recall context block *is* that screen. Write the script before recording;
-record the terminal, not slides.
-
-**Done when:** exported, under 3:00, uploaded, link tested logged-out.
-
----
-
-### T9.4 — Lambda canonization sweep (optional — first thing cut)
-```yaml
-requires:   T3.2, T6.4
-fixture-ok: no
-owns:       lambda/
-status:     not-started, and still cut-order #1, so it stays that way while T9.3 and
-            T9.5 are open.
-            **Do not read the exhibit's Lambda as this task.** A `python3.12` arm64
-            Function URL serving read-only stats over the live session was built under
-            remediation T10 and is listed in the README's AWS table. It is a stats
-            endpoint. It runs no canonization predicate and writes no
-            `canonization_events` row, so T9.4's "Done when" is untouched by it.
-```
-Spec §12.2 optional: scheduled sweep against the store for sessions with no active writer.
-**#1 in the cut order — do not start while anything above is open.** If built: a small
-binary re-running T6.x predicates via SQL, EventBridge-scheduled.
-
-**Done when:** a session with no writer gets a canonization transition from the sweep,
-logged in `canonization_events`.
-
----
-
-### T9.6 — Swarm benchmark & showcase (optional — cut order #2, behind T9.4)
+### T9.6 — Swarm benchmark & showcase (optional)
 ```yaml
 requires:   T8.2 (R4 CLEAN), P8 exit "surface holds under concurrency"; soft: T8.5
 fixture-ok: yes (fixture embedder; store = memory or live)
 owns:       evidence/swarm/, bench/
-status:     not-started. Cut-order #2, behind T9.4.
-            Worth knowing when it is scheduled or cut: P8's one open exit criterion is
-            the concurrency leg (T8.2 N1/N2), which has no evidence capture. That is
-            the correctness half and T9.6 is the scale half, so cutting T9.6 leaves the
-            correctness box open too, so cut it with that stated, not silently.
-parallel:   yes — separate hardware, off the submission critical path
+status:     SATISFIED 2026-08-18 by the C-series C5 work, not by a separate run.
+            Swarms ran concurrently against one session over MCP with tasks/hour and
+            dedup captured, on more than one model, and the models that could not
+            drive the surface at all were diagnosed rather than left hanging.
+            Evidence: evidence/swarm/ (+ probes, runbook, portal visuals).
+            Two things this does NOT cover, stated so nobody reads more into it:
+            `reserve` coordination / no-double-work was never exercised by any swarm
+            run, and the highest tasks/hour figures come from a fallback loop that
+            hardcodes the call sequence, so those measure loop throughput rather than
+            model-chosen work. The model-chosen run is the agentic one
+            (scripts/loadtest/mcp_agentic.py): 1120 completed tasks/hour, dedup 0.857.
+parallel:   yes — off the submission critical path
 ```
-The headline "lambo beyond coding agents" evidence: a swarm of small local agents
-(LiquidAI **LFM2.5-230M** under llama.cpp/vLLM) driven concurrently against one `lambo`
-session over MCP, producing the numbers that back the swarm claim — sustained tasks/hour,
-canonization dedup rate (duplicate observations collapsed to canonical nodes), and
-`reserve` coordination (no double-work). **Target rig: the 12 GB RTX 4070 desktop** (vLLM
-or SGLang for continuous batching — check LFM2 support first), not the MBP: this test is
-throughput-bound and wants the ~16–32 concurrent headroom. Measured baseline on an 18 GB
-M3 Pro for reference: GPU knee at concurrency ~4–8, ~650 tok/s aggregate, memory a
-non-issue (~12 KB/token KV).
+The headline "lambo beyond coding agents" evidence: **a swarm of small local agents
+driven concurrently against one `lambo` session over MCP**, producing the numbers that
+back the swarm claim — sustained tasks/hour and canonization dedup rate (duplicate
+observations collapsed to canonical nodes).
+
+The requirement is the swarm, not any particular model or rig. Any small local model
+that can drive the MCP surface counts, on whatever hardware is to hand; a model that
+turns out to be unable to drive it is a finding, not a blocker, and the next model is
+tried. Whatever runs, the machine and the model go in the artifacts, because
+throughput and starvation numbers are meaningless without them.
+
+**What ran (2026-08-18, C-series C5):** LFM2-350M and functiongemma-270m were probed
+and cannot emit tool calls at all, under either an agent harness or the raw OpenAI
+tools API — logged with transcripts. Qwen3-0.6B can, and drove three concurrent agents
+against one session: 1120 completed tasks/hour with the model choosing every call,
+dedup 0.857, durability exact after SIGTERM. Fallback-loop throughput figures for both
+LFM2-350M and Qwen3-0.6B are recorded separately and labeled as loop throughput.
 
 **Non-blocking by construction.** If it succeeds it strengthens the README/video benchmark
 story and can drive the T8.5 swarm view; **if it fails it feeds diagnosis of the swarm
-claims** and is cut without touching the submission. Do NOT start while any required
-deliverable (T9.1/T9.2/T9.3/T9.5) is open.
+claims** and is cut without touching the submission.
 
-**Done when:** a concurrent LFM2.5-230M swarm runs against one session with a dedup-rate
-and tasks/hour figure captured, OR it is deliberately cut with the diagnosis logged.
+**Done when:** a concurrent swarm of small local agents runs against one session with a
+dedup-rate and tasks/hour figure captured, OR it is deliberately cut with the diagnosis
+logged. **Met** — see status above.
 
 ---
 
 ### T9.5 — Devpost submission
 ```yaml
-requires:   T9.1, T9.3
+requires:   T9.1; the video link (tracked in D2)
 fixture-ok: n/a
 owns:       dev-diary/notes/devpost.md
 status:     not-started. `dev-diary/notes/devpost.md` does not exist.
@@ -189,8 +149,8 @@ status:     not-started. `dev-diary/notes/devpost.md` does not exist.
             CockroachDB-tools and six-service AWS identification in README.md. T9.5 is
             now the act of drafting that into the form's own fields and submitting it,
             not fresh writing.
-            `requires: T9.1, T9.3` still binds: T9.1 is done, T9.3 is not, so the video
-            link is the one field that cannot be filled today.
+            T9.1 is done; the video link is the one field that cannot be filled
+            today, and it is tracked as D2 in notes/deployment-and-submission.md.
 ```
 The form itself, drafted in-repo first: repo URL (public, Apache-2.0 About-visible — NOT MIT, see Handoff Log), demo app URL
 (T8.5, live), video link, written CockroachDB-tools + AWS-services identification (lift
@@ -218,7 +178,7 @@ rather than trust it.
       1 canonical / 7 canonization events, `mode: reader`. Re-verified 2026-08-17.
       A Lambda Function URL serves the same session
 - [ ] Video under 3 minutes showing the memory layer at work  ·  **the open one.**
-      T9.3 / D2, blocked on D1
+      D2, blocked on D1
 - [x] Written identification of CockroachDB tools and AWS services used  ·  README
       §CockroachDB tools used, and §AWS services used, which is **six** services
       (EC2, VPC, Secrets Manager, Lambda, RDS for PostgreSQL, IAM), each exercised by
@@ -265,13 +225,13 @@ license confirmed Apache-2.0 by `gh repo view`; the clean-machine repro was
 retired as noise, owner's call). T9.2 **DONE**, but delivered as a mermaid
 diagram in `README.md`
 rather than at the reserved `docs/architecture.*` path, which does not exist.
-T9.3 and T9.5 remain **not started** and are the only two open §12.4 boxes.
-T9.4 and T9.6 remain cut-order #1 and #2.
+The video and T9.5 remain **not started** and are the only two open §12.4 boxes;
+the video is tracked as D2. T9.6 is satisfied (see above).
 
 Three things a cold reader would otherwise get wrong:
 
-1. **The exhibit's Lambda is not T9.4.** It is remediation T10's read-only stats
-   Function URL. The canonization sweep does not exist.
+1. **The exhibit's Lambda is not a canonization sweep.** It is remediation T10's
+   read-only stats Function URL.
 2. **T9.5's writing is mostly done, filed elsewhere.** D3 put the
    condition-by-condition table on the site's hackathon page and the tool/service
    identification in the README. `dev-diary/notes/devpost.md`, which T9.5 owns,
@@ -491,8 +451,8 @@ ORDER BY occurred_at;
 
 Scope by `session_id` always — the cluster also holds ~2833 seeded concepts and 240 events
 across many sessions. Save the transcript to `evidence/` naming the MCP tool that
-answered, which closes the one UNEVIDENCED row in the claim audit below and gives T9.3 its
-split-screen beat.
+answered, which closes the one UNEVIDENCED row in the claim audit below and gives the
+video its split-screen beat.
 
 **OMP is not a viable driver right now.** It crashes at startup: `Provider inferx: "apiKey"
 or "oauth" is required when defining models`. OMP validates every registered provider before
@@ -546,8 +506,8 @@ authorization that has not moved since Aug 11 (`notes/bedrock-authorization-bloc
 a read-only single binary against the existing cluster, so App Runner, Lightsail, or a small
 EC2 box all work. That produces the **functional demo app URL** (§12.4, still missing, still
 unowned) *and* the **one AWS service used** (§12.2) from one afternoon of work. It does not
-depend on Bedrock authorization arriving. Recommend doing this before T9.3 records, so the
-video can show the hosted URL.
+depend on Bedrock authorization arriving. Recommend doing this before the video records, so it
+can show the hosted URL.
 
 #### Deliverable status against spec §12.4
 

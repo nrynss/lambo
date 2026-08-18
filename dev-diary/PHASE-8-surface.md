@@ -572,7 +572,7 @@ demo scenario, with `lambo serve-web` running **beside** the MCP writer
 
 **Optional swarm showcase (non-blocking — must NOT jeopardize the base demo above):**
 if time allows after the two-agent demo works, add a swarm view — N concurrent small
-agents (local LFM2.5-230M swarm) writing into one session, with the canonization feed
+agents (any local small-model swarm) writing into one session, with the canonization feed
 visibly collapsing duplicates and `reserve` coordination visible. This is a video/Devpost
 asset, not a deliverable; the base demo is what the video requires. See T9.6 for the
 benchmark that feeds it.
@@ -799,7 +799,7 @@ release (not only build from source) and run `lambo serve` on a clean machine.
       with the CLI↔MCP differential test green  ·  `serve_single_writer_lease` + `cli_write_lease` green (Handoff 1958-1981)
 - [x] Demo scenario deterministic ×2 on live infra under `--features demo`, evidence captured  ·  T84-1 CLOSED; `demo-live-{1,2,diff}.txt`
 - [x] **Surface holds under concurrency (T8.2 N1/N2 closure):** K concurrent clients
-      (K ≥ the CPU worker count, ~12–32 via the local LFM2.5-230M rig or a raw MCP load
+      (K ≥ the CPU worker count, ~12–32 via a local small-model swarm or a raw MCP load
       driver) issuing a mix of valid + adversarial tool calls do **not** starve the
       process — SIGTERM still flushes the tail (`session closed, tail durable`), oversized
       `record_action` gets the honest cap refusal, and no internal detail (URLs/DSNs/driver
