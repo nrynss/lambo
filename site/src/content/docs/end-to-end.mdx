@@ -165,7 +165,7 @@ lambo --config lambo.toml derive --session demo --agent agent-7 \
   --content "retry budget is 3" --kind constraint
 ```
 
-Because each agent call is one deterministic line, a small local model can drive it without a tool schema taking up its context. Over MCP the schemas are small enough that a 0.6B model composed 173 well-formed calls in a three-agent run; models that cannot emit tool calls at all are the real limit, not size. See [Evidence](/lambo/evidence/). Canonization collapses the duplicate observations that many agents produce into single canonical facts.
+Because each agent call is one deterministic line, a small local model can drive it reliably, and no tool schema takes up the model's context. Canonization collapses the duplicate observations that many agents produce into single canonical facts.
 
 For coordination, use `lambo_reserve` from the writer before editing a shared concept. A reservation taken by a one-shot command line call ends when that command exits, so the durable coordination point is the writer. See [Command line](/lambo/cli/).
 
