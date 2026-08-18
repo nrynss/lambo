@@ -1,16 +1,25 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 // The site deploys to GitHub Pages at https://nrynss.github.io/lambo.
 // `base` matches the repository name so assets resolve under that path.
 export default defineConfig({
   site: 'https://nrynss.github.io',
   base: '/lambo',
+  // KaTeX renders the canonization formulas on /canonization/. `$...$` inline
+  // and `$$...$$` display, the same syntax GitHub renders in the README.
+  markdown: {
+    remarkPlugins: [remarkMath],
+    rehypePlugins: [rehypeKatex],
+  },
   integrations: [
     starlight({
       title: 'Lambo',
-      description: 'Agentic graph memory for multi-agent coding.',
+      description: 'Agentic graph memory for multi-agent AI operations.',
       favicon: '/favicon.svg',
+      customCss: ['katex/dist/katex.min.css'],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/nrynss/lambo' },
       ],
@@ -34,6 +43,7 @@ export default defineConfig({
             { label: 'Command line', slug: 'cli' },
             { label: 'Configuration', slug: 'config' },
             { label: 'Library API', slug: 'api' },
+            { label: 'Canonization', slug: 'canonization' },
             { label: 'End to end', slug: 'end-to-end' },
             { label: 'Evidence & evaluation', slug: 'evidence' },
             { label: 'Origin', slug: 'origin' },

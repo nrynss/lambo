@@ -1,6 +1,6 @@
 ---
 title: "Lambo"
-description: "Agentic graph memory for multi-agent coding."
+description: "Agentic graph memory for multi-agent AI operations."
 template: splash
 hero:
   title: "Lambo"
@@ -22,7 +22,7 @@ import { CardGrid, LinkCard } from '@astrojs/starlight/components';
   <img src="https://img.shields.io/github/license/nrynss/lambo?color=%2316A34A&label=license" alt="License" height="20" />
 </div>
 
-Lambo is agentic graph memory for multi-agent work. It stores what your agents learn, recalls relevant memory on request, and coordinates edits across many small agents that never talk to each other directly.
+Lambo is agentic graph memory for multi-agent AI operations. It stores what your agents learn, recalls relevant memory on request, and coordinates edits across many small agents that never talk to each other directly.
 
 A single `lambo serve` process owns each session. Agents connect to that process and share its in-memory graph. A background daemon consolidates what they write.
 
@@ -74,6 +74,7 @@ Start with the quickstart or jump straight into a reference page.
   <LinkCard title="Demo" href="/lambo/demo/" description="Watch two agents build one REST API and share load-bearing memory." />
   <LinkCard title="Installation" href="/lambo/installation/" description="Install the binary, write a lambo.toml, and connect an MCP client." />
   <LinkCard title="MCP tools" href="/lambo/mcp/" description="The seven tools your agents call, with arguments and limits." />
+  <LinkCard title="Canonization" href="/lambo/canonization/" description="How a concept earns canonical status: the score, the three gates, the constants." />
   <LinkCard title="Command line" href="/lambo/cli/" description="The same operations as single deterministic lines from the terminal." />
   <LinkCard title="End to end" href="/lambo/end-to-end/" description="How the parts fit together, from serving a session to running a swarm." />
 </CardGrid>

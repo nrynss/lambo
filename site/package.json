@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
-  "description": "Documentation site for Lambo, agentic graph memory for multi-agent coding.",
+  "description": "Documentation site for Lambo, agentic graph memory for multi-agent AI operations.",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
@@ -14,7 +14,10 @@
   "dependencies": {
     "@astrojs/starlight": "^0.41.7",
     "astro": "^7.2.2",
-    "mermaid": "^11.16.1"
+    "katex": "^0.18.4",
+    "mermaid": "^11.16.1",
+    "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

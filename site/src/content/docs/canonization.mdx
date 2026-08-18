@@ -1,0 +1,134 @@
+---
+title: "Canonization"
+description: "The composite score, the three promotion gates, and the recall mix, with the constants they actually run on"
+---
+import Note from '../../components/MdxNote.astro';
+
+A concept does not become important because an agent said so in a tool argument. It becomes important because the structure of the session says so, and the structure is measured on a background loop that no agent can call.
+
+This page is the arithmetic behind that sentence. [Origin](/lambo/origin/) covers where the idea came from. Every constant below is the value the shipped build runs on, and each section links to the file it lives in.
+
+## The composite score
+
+The daemon rescores every concept $c$ whenever the graph epoch changes ([`src/daemon/score.rs`](https://github.com/nrynss/lambo/blob/main/src/daemon/score.rs)):
+
+$$
+S(c) = 0.25\,R + 0.20\,F + 0.20\,A + 0.35\,D + \sum_{e \in E(c)} b\big(\tau(e)\big) + m\big(\tau(c)\big)
+$$
+
+The four weighted dimensions are session-relative, so the same graph scores identically no matter when you replay it. That is what makes the demo's output reproducible rather than clock-dependent.
+
+| Term | Meaning | Definition |
+|---|---|---|
+| $R$ | recency | $\dfrac{t_{\text{last}} - t_{\text{start}}}{t_{\text{end}} - t_{\text{start}}}$ over the session's own temporal extent |
+| $F$ | frequency | $\min\!\left(1,\ \dfrac{\text{access count}}{10}\right)$ |
+| $A$ | session activity | share of the session's interactions that derived this concept |
+| $D$ | density | incident edge count normalized by the most connected concept in the session |
+
+The two additive terms are where the shape of the graph leaks into the number.
+
+$b(\tau)$ pays per incident edge by type, and it pays structure rather than provenance.
+
+| Edge type | Bonus |
+|---|---|
+| `Dependency`, `Causal` | 0.02 |
+| `Hierarchical` | 0.015 |
+| `Semantic` | 0.01 |
+| `CoOccurrence` | 0.005 |
+| `Derives`, `Temporal` | 0.0 |
+
+An agent can write a thousand observations and move the score by zero, because the `Derives` edges those writes create are worth nothing. The sum is capped at 0.25.
+
+$m(\tau)$ is the concept-type offset: $+0.15$ for a Constraint, $+0.05$ for an Entity or a Logic, $0$ for a Resource, and $-0.10$ for an Observation.
+
+Every dimension is clamped to $[0,1]$ before weighting, a non-finite input counts as $0$ for that dimension, and the composite is clamped to $[0,\,1.40]$. The score is finite for every input a client can construct.
+
+## The three gates
+
+That score is the entry fee, not the promotion. Evaluation runs one hop per cycle, and each stage is a separate predicate against evidence the concept cannot fabricate.
+
+### Stage 1, Candidate
+
+[`src/canon/stage1.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage1.rs). The concept must have survived three garbage collection passes, and its composite must sit **strictly** above the 90th percentile of its non-Canonical peers. The percentile is nearest-rank, not interpolated:
+
+$$
+k = \lceil 0.90\,n \rceil, \qquad P_{90} = x_{(k)}
+$$
+
+where $x$ is the ascending sort of the non-Canonical peer scores and $n$ is their count.
+
+An interpolating percentile, the kind a spreadsheet gives you, returns a value no concept actually scored. Nearest-rank returns a real peer's score, so "above $P_{90}$" means "beat an actual peer" rather than "beat an average of two". The stage is also gated on the session holding at least `canonization_min_peer_count` non-Canonical concepts, 20 by default. In a session of three concepts, nobody is exceptional.
+
+### Stage 2, Venerable
+
+[`src/canon/stage2.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage2.rs). Time and independence, both at once:
+
+$$
+\text{distinct}(c) \ge 3 \quad \wedge \quad \frac{\text{span}(c)}{\text{extent}(\text{session})} \ge 0.3
+$$
+
+`distinct` counts inbound structural edges tracing to distinct origin interactions. `span` is the temporal reach of those edges against the session's own extent. Edges younger than `canonization_edge_min_age`, 60 seconds by default, are excluded from both counts, so a burst of fresh writes cannot inflate a span.
+
+One agent writing the same idea five times in one minute produces one distinct source and near-zero coverage. It does not pass.
+
+### Stage 3, Canonical
+
+[`src/canon/stage3.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage3.rs). Consequence. Blast radius is the count of concepts that transitively depend on this one over structural edges:
+
+$$
+B(c) = \big|\{\, d : d \leadsto c \,\}\big|, \qquad B(c) > 5
+$$
+
+The comparison is strict. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
+
+<Note>
+The blast radius that admitted the concept is the one stamped on the audit row. It is not re-queried afterwards, which on a live store could write a row that contradicts the gate that let the concept through.
+</Note>
+
+## What recall does with it
+
+[`src/recall/assemble.rs`](https://github.com/nrynss/lambo/blob/main/src/recall/assemble.rs). Retrieval mixes earned importance with query relevance:
+
+$$
+\text{score}_{\text{final}}(c) = w_d\,S(c) + w_q\,Q(c), \qquad w_d = w_q = 0.5
+$$
+
+$Q$ is the BM25 keyword score, or the merged similarity score for a vector hit. It is $0$ for a concept that arrived through graph traversal rather than as a query hit.
+
+That last rule is the one that makes dependency retrieval work. A concept nobody searched for still surfaces if the graph says it is load-bearing, carried entirely by the daemon half of the mix. Canonical concepts are partitioned ahead of everything else regardless of score, and each one returns marked with its blast radius and a warning.
+
+Near-duplicate merging is cosine similarity over the 1024 dimensional embeddings, at `semantic_match_threshold`:
+
+$$
+\text{sim}(u,v) = \frac{u \cdot v}{\lVert u \rVert \, \lVert v \rVert} \ge 0.85
+$$
+
+Without an embedder you keep the whole canonization path and lose this check, which degrades recall over very long sessions as near-duplicates accumulate.
+
+## The constants, in one place
+
+Everything here is a `lambo.toml` key. See [Configuration](/lambo/config/) for the full set.
+
+| Key | Default | Gate it governs |
+|---|---|---|
+| `canonization_min_peer_count` | 20 | Stage 1 needs a distribution to be exceptional against |
+| `canonization_edge_min_age` | 60s | Stages 2 and 3 ignore edges younger than this |
+| `canonization_eval_interval` | 60s | How often the evaluation cycle runs |
+| `canonization_eval_batch_size` | 50 | Concepts evaluated per cycle |
+| `canonization_repromotion_cooldown` | 300s | Stage 3 refusal window after a demotion |
+| `gc_interval` | 10000 | Mutations between GC sweeps, which Stage 1 counts survivals of |
+| `semantic_match_threshold` | 0.85 | Cosine floor for merging near-duplicates |
+
+The cadence keys change how often the bar is checked. None of them changes where the bar sits.
+
+## Verifying it yourself
+
+Every promotion writes an audit row, which is what makes this checkable rather than assertable. In the shipped demo, `user schema` walks Candidate to Venerable to Canonical, with a blast radius of 9 recorded on the promotion and left null on the earlier hops.
+
+You can read those rows from a client that has never heard of Lambo:
+
+- [The managed CockroachDB MCP server answering `select_query`](https://github.com/nrynss/lambo/blob/main/evidence/managed-mcp-canonization-events.md) against a live cluster, scoped to one session
+- [The same events in the database](https://github.com/nrynss/lambo/blob/main/evidence/demo-live-canon-events.txt) after a live run
+- [Three independent MCP clients](https://github.com/nrynss/lambo/tree/main/evidence/mcp-client-interop) returning that table and agreeing on every field
+
+[Evidence and evaluation](/lambo/evidence/) covers the rest, including the determinism work that makes the demo's rendered scores byte-identical across runs.
