@@ -7,6 +7,8 @@ requires: [P8]
 parallel: high   # T9.1 ‖ T9.2
 ```
 
+**Goal:** Ship Lambo with evidence.
+
 ---
 
 ### T9.1 — README & repo hygiene
@@ -87,7 +89,7 @@ aspirations), including feature-gated adapters.
 
 ---
 
-### T9.6 — Swarm benchmark & showcase (optional)
+### T9.3 — Swarm benchmark & showcase (optional)
 ```yaml
 requires:   T8.2 (R4 CLEAN), P8 exit "surface holds under concurrency"; soft: T8.5
 fixture-ok: yes (fixture embedder; store = memory or live)

@@ -191,7 +191,7 @@ placeholders. Both runs were store ledger-exact after clean SIGTERM.
 All probe transcripts committed (fresh-run) under `evidence/swarm/probes/`;
 per-model results table, durability figures and portal visuals (Qwen-derived
 concepts as recall cards) in `evidence/swarm/README.md`.
-**Relates to:** T9.6 (the LFM2 swarm, P9's cut-order #2)
+**Relates to:** T9.3 (P9's swarm benchmark, which this satisfies)
 
 **C5M round-1 remediation (2026-08-18, branch `codex/c5-models`):** the
 round-1 review (adve-review-c5-models-round1.md) verified every probe,
@@ -285,7 +285,7 @@ This box already has the pieces:
 
 - `llama-server` is installed and already serving BGE-M3 on `:8080` for
   embeddings, so a second instance on another port can serve a chat model.
-- Local weights in `~/models/`: `LiquidAI_LFM2.5-350M` (the model T9.6 names),
+- Local weights in `~/models/`: `LiquidAI_LFM2.5-350M`,
   `kat-E2B-Q4_K_M`, `kat-E4B-Q6_K`, `gemma-4-E4B-it`, `Qwen3-30B-A3B-Q4_K_M`.
 - The MCP surface is already proven with real agents: see
   [notes/video-shoot.md](video-shoot.md) and the `agent-skill` page for a model
@@ -305,7 +305,7 @@ touching the submission.
 |---|---|
 | Driver | `scripts/loadtest/mcp_load.py` |
 | Run transcripts, server stderr, durability counts | `evidence/concurrency/` |
-| Swarm evidence, if C5 happens | `evidence/swarm/` (the path T9.6 reserves) |
+| Swarm evidence, if C5 happens | `evidence/swarm/` (the path T9.3 reserves) |
 
 Scratch sessions only. Never point a load test at `cloudops-exhibit`: it is the
 session the portal, the video and the submission all read from.

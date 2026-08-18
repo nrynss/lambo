@@ -574,7 +574,7 @@ demo scenario, with `lambo serve-web` running **beside** the MCP writer
 if time allows after the two-agent demo works, add a swarm view — N concurrent small
 agents (any local small-model swarm) writing into one session, with the canonization feed
 visibly collapsing duplicates and `reserve` coordination visible. This is a video/Devpost
-asset, not a deliverable; the base demo is what the video requires. See T9.6 for the
+asset, not a deliverable; the base demo is what the video requires. See T9.3 for the
 benchmark that feeds it.
 
 ---
@@ -624,7 +624,7 @@ that pointer was drift). This is the security/robustness half of the agent-facin
   warning path exists and close it as won't-fix with reasoning.
 
 **Explicitly NOT here:** anything the demo page renders (that is T8.5); provisioning
-(T8.3's `provision`); the swarm *benchmark* (P9 T9.6).
+(T8.3's `provision`); the swarm *benchmark* (P9 T9.3).
 
 **Done when:** the HTTP transport refuses unauthenticated non-loopback requests, enforces a
 documented rate limit and concurrent-session cap (each with a test), residual #3 is fixed
@@ -804,7 +804,7 @@ release (not only build from source) and run `lambo serve` on a clean machine.
       process — SIGTERM still flushes the tail (`session closed, tail durable`), oversized
       `record_action` gets the honest cap refusal, and no internal detail (URLs/DSNs/driver
       text) crosses the wire. Evidence into `evidence/`. This is
-      the correctness half; the P9 T9.6 benchmark is the scale half.
+      the correctness half; the P9 T9.3 benchmark is the scale half.
       **CLOSED 2026-08-18 by the C-series capture (C1–C3, branch `codex/c-series`):**
       K=12 raw MCP load driver against a scratch SQLite store; exact
       `lambo serve: session closed, tail durable`, 0 `tail lost on exit`,
