@@ -3,63 +3,28 @@ title: "Origin"
 description: "How Lambo came about, in the author's words"
 ---
 
-Hello. I am Narayan.
+I am a technical writer. I have been dabbling with tech for over 25 years now. For someone like me, the past 2-3 years have been a whirlwind. LLM revolution has transformed how I work, how I play, and may be even how I live.
 
-I am a technical writer. I have been dabbling with tech for over 25 years now.
-For someone like me, the past 2-3 years have been a whirlwind. LLM revolution
-has transformed how I work, how I play, and may be even how I live.
+The idea for Lambo came to me earlier this year. I was trying my best to get Claude Code and Cursor to behave at work. In spite of having a much faster utility like ripgrep, the agents would insist on going for grep and glob. Not an ideal scenario when the information you want is deep inside a large monorepo.
 
-The idea for Lambo came to me earlier this year. I was trying my best to get
-Claude Code and Cursor to behave at work. In spite of having a much faster
-utility like ripgrep, the agents would insist on going for grep and glob. Not an
-ideal scenario when the information you want is deep inside a large monorepo.
+I managed to harness it to a certain level with the help of skills and the base json files. The behaviour was just not something I could nail down when it came to subagents and even regular agents.
 
-I managed to harness it to a certain level with the help of skills and the base
-json files. The behaviour was just not something I could nail down when it came
-to subagents and even regular agents.
+Another aspect were the memory files that Claude created when you did something. You might do something one-off and it annoyingly would think I want that one thing I did at some point of time.
 
-Another aspect were the memory files that Claude created when you did something.
-You might do something one-off and it annoyingly would think I want that one
-thing I did at some point of time.
+May be behaviour like this made people think LLMs as human-adjacent. But my thought went the other way. We as humans learn things through associations and importance. Importance that is earned rather than mentioned once or twice. I am oversimplifying. Since there are events that are one-off and extremely affecting that it burns in your brain for life. Even there, you could argue that the associations and earned importance are doing their work.
 
-May be behaviour like this made people think LLMs as human-adjacent. But my
-thought went the other way. We as humans learn things through associations and
-importance. Importance that is earned rather than mentioned once or twice. I am
-oversimplifying. Since there are events that are one-off and extremely affecting
-that it burns in your brain for life. Even there, you could argue that the
-associations and earned importance are doing their work.
+LLMs simply do not have such a system in place. There is nothing earned. You try to artificially reinforce. You stack things in a vector database. You create a RAG. RAG works great when you want grounded information. But does it really work in an agentic workflow when there are disparate agents at work? RAG is again more like a secondary storage. It is not identical to RAM. I was wondering about a RAM component for the LLM.
 
-LLMs simply do not have such a system in place. There is nothing earned. You try
-to artificially reinforce. You stack things in a vector database. You create a
-RAG. RAG works great when you want grounded information. But does it really work
-in an agentic workflow when there are disparate agents at work? RAG is again
-more like a secondary storage. It is not identical to RAM. I was wondering about
-a RAM component for the LLM.
+The idea of memory evolved in my head. I happened to read a random article one day. The concept of veneration and canonization in Catholicism came to my mind. A group coming together to decide someone is worthy of veneration. After some time, the venerated are canonized. A crude analogy to memory came to my mind. Not all candidates are venerated. Not all venerated become canonized. I started writing a specification for Lambo.
 
-The idea of memory evolved in my head. I happened to read a random article one
-day. The concept of veneration and canonization in Catholicism came to my mind.
-A group coming together to decide someone is worthy of veneration. After some
-time, the venerated are canonized. A crude analogy to memory came to my mind.
-Not all candidates are venerated. Not all venerated become canonized. I started
-writing a specification for Lambo.
+Since I do not run in the circles of AI gurus, and my genuine lack of time given the demands of my professional and personal life, I did not get to share these ideas with real humans. The spec went through an intensely gruelling review with many, many LLMs instead. My interest was primarily around how much holes LLMs can poke into the spec. Eventually, the review rounds and review notes became much longer than the spec itself.
 
-Since I do not run in the circles of AI gurus, and my genuine lack of time given
-the demands of my professional and personal life, I did not get to share these
-ideas with real humans. The spec went through an intensely gruelling review with
-many, many LLMs instead. My interest was primarily around how much holes LLMs
-can poke into the spec. Eventually, the review rounds and review notes became
-much longer than the spec itself.
+The question of RAM and secondary storage was being challenged. RAM alone does not make it good. Canonized entries needs long term storage. Canonized and venerated needs to be remembered for more than a session. No matter how long they are, in the larger time frame they are more transient than they appear. My intitial thought was to use SQLite with vector extensions or any other vector database. Concurrency would be the blocker then. My thoughts as usual went towards Postgres and the vector extensions.
 
-The question of RAM and secondary storage was being challenged. RAM alone does
-not make it good. Canonized entries needs long term storage. Canonized and
-venerated needs to be remembered for more than a session. No matter how long
-they are, in the larger time frame they are more transient than they appear. My
-intitial thought was to use SQLite with vector extensions or any other vector
-database. Concurrency would be the blocker then. My thoughts as usual went
-towards Postgres and the vector extensions.
+When the CockroachDB x AWS hackathon came up, I read up on CockroachDB. CockroachDB made the design more elegant. It could store graphs, vectors, and promotions in a single space with the immense possibilities of a distributed system. Not to mention the independent MCP, that makes the query possible independent of Lambo. I have not ran Lambo over a geographically distributed setup in CockroachDB. But the possibility exists.
 
-When the CockroachDBxAWS hackathon came up, I read up on CockroachDB.
-CockroachDB made the design more elegant. It could store graphs, vectors, and
-promotions in a single space with the immense possibilities of a distributed
-system. Not to mention the independent MCP, that makes the query possible
-independent of Lambo.
+Lambo needed an embedding core. My initial thoughts were to use any competent local embedding mode. With AWS in the picture, Titan embedding became a strong candidate. Unfortunately, the access to Titan in AWS services never materialized. I did the embedding part with [BGE-M3](https://huggingface.co/BAAI/bge-m3), which was my choice before Titan came into the picture. 1024 is the sweet spot beyond which it is diminishing returns. BGE-M3 is at 560M parameters and easily runnable on my machine with llama.cpp. The embedder design is pluggable. We could, in theory, add support for any embedder that satisfies the 1024 vector requirements. Titan is distinctly similar and an easy to implement embedder for Lambo. Interestingly, Lambo works without an embedder. You still get the canonization aspect. Without an embedder, you cannot get vector similarity checks, which will degrade the recall over very long sessions.
+
+SQLite was always in the picture. The reliable workhorse you need for an application like this. Lambo will work out of the box with just SQLite and no embedder. We can make further enhancements to leverage SQLite for vector similarity if required. This enhancement would bring parity for a fully localized agentic workflow.
+
+Lambo is built upon the thoughts I collected over time working with AI. The hackathon gave me an outlet to put the spec to test and build a tool. There was no code written before the hackathon.
