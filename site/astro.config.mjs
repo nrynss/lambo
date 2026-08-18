@@ -26,27 +26,45 @@ export default defineConfig({
       editLink: {
         baseUrl: 'https://github.com/nrynss/lambo/edit/main/site',
       },
+      // Five small groups rather than one eleven-item 'References' bucket: a
+      // reader can tell from the group label whether a page is for running
+      // Lambo, calling it, or checking a claim.
       sidebar: [
         {
           label: 'Start here',
           items: [
             { label: 'Quickstart', slug: 'quickstart' },
             { label: 'Demo', slug: 'demo' },
+            { label: 'Origin', slug: 'origin' },
           ],
         },
         {
-          label: 'References',
+          label: 'Install and configure',
           items: [
             { label: 'Installation', slug: 'installation' },
-            { label: 'MCP tools', slug: 'mcp' },
-            { label: 'Agent skill', slug: 'agent-skill' },
-            { label: 'Command line', slug: 'cli' },
             { label: 'Configuration', slug: 'config' },
+          ],
+        },
+        {
+          label: 'Interfaces',
+          items: [
+            { label: 'MCP tools', slug: 'mcp' },
+            { label: 'Command line', slug: 'cli' },
+            { label: 'Agent skill', slug: 'agent-skill' },
             { label: 'Library API', slug: 'api' },
+          ],
+        },
+        {
+          label: 'How it works',
+          items: [
             { label: 'Canonization', slug: 'canonization' },
             { label: 'End to end', slug: 'end-to-end' },
+          ],
+        },
+        {
+          label: 'Evidence',
+          items: [
             { label: 'Evidence & evaluation', slug: 'evidence' },
-            { label: 'Origin', slug: 'origin' },
             { label: 'Hackathon submission', slug: 'hackathon' },
           ],
         },
