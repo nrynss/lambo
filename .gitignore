@@ -32,6 +32,7 @@ lambo.toml
 scripts/recording/node_modules/
 evidence/cloudops-video/
 evidence/video-raw/
+demo/
 
 # Container build tree (scripts/aws-infra deploy pipeline)
 target-docker/
