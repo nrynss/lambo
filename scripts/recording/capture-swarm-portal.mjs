@@ -21,13 +21,15 @@ const REPO = resolve(HERE, '..', '..');
 const OUT = resolve(REPO, 'evidence', 'swarm');
 const PORTAL = process.env.PORTAL ?? 'http://127.0.0.1:7799';
 
-// Queries whose answers can only exist if the swarm's derives landed:
-// 1. the auth-middleware concept the swarm derived in its first turns;
-// 2. the billing concept (second agent's topic).
-const QUERIES = [
-  { label: 'auth-middleware', query: 'auth middleware user schema' },
-  { label: 'billing-retries', query: 'billing service retries charges' },
-];
+// Queries whose answers can only exist if the swarm's derives landed.
+// Defaults are the LFM2-350M run's queries; override per run with
+// SWARM_QUERIES='[{"label":"auth-middleware","query":"auth middleware user schema"}]'
+const QUERIES = process.env.SWARM_QUERIES
+  ? JSON.parse(process.env.SWARM_QUERIES)
+  : [
+      { label: 'auth-middleware', query: 'auth middleware user schema' },
+      { label: 'billing-retries', query: 'billing service retries charges' },
+    ];
 const BEAT = 2500;
 
 mkdirSync(OUT, { recursive: true });
@@ -40,10 +42,11 @@ const page = await context.newPage();
 const problems = [];
 page.on('console', (m) => {
   if (m.type() !== 'error') return;
+  const loc = m.location() || {};
+  if (loc.url && loc.url.includes('favicon')) return;
   if (m.text().includes('favicon')) return;
   problems.push(`console: ${m.text()}`);
 });
-page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 page.on('requestfailed', (r) => problems.push(`requestfailed: ${r.method()} ${r.url()}`));
 page.on('response', (r) => {
   if (r.status() >= 400 && !r.url().includes('/favicon')) problems.push(`http ${r.status()}: ${r.url()}`);

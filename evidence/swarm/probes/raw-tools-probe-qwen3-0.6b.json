@@ -1,0 +1,108 @@
+{
+  "probe": "raw OpenAI tools API (POST /v1/chat/completions with a tools array)",
+  "note": "Fresh run 2026-08-18 ~07:54 UTC against llama-server on :8082 (Qwen3-0.6B-UD-Q6_K_XL.gguf, --jinja -c 32768 -a qwen3-0.6b). Response: finish_reason=tool_calls with a single lambo_derive tool_call carrying valid JSON arguments \u2014 the model CAN emit OpenAI tool_calls at the protocol level.",
+  "request": {
+    "model": "qwen3-0.6b",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a memory agent. You have access to the lambo_derive tool to derive concepts into a memory graph."
+      },
+      {
+        "role": "user",
+        "content": "Use the lambo_derive tool to derive the concept 'auth middleware guards schema integrity' into the memory graph."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lambo_derive",
+          "description": "Derive concepts into the memory graph",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "concepts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "concept_type": {
+                      "type": "string",
+                      "enum": [
+                        "entity",
+                        "logic",
+                        "constraint",
+                        "resource"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "concept_type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "concepts"
+            ]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 512,
+    "temperature": 0.7
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "Okay, the user wants me to use the lambo_derive tool to derive the concept 'auth middleware guards schema integrity' into the memory graph. Let me start by understanding what the tool requires. The lambo_derive function takes an array of concepts, each with a content and concept_type. The required parameters are content and concept_type.\n\nSo, the concept here is 'auth middleware guards schema integrity'. The concept_type needs to be one of the enum values: entity, logic, constraint, or resource. The term 'auth middleware guards schema integrity' seems to be a logic or constraint-related concept. \n\nWait, 'schema integrity' might be a constraint. Also, 'auth middleware' could be an entity. But maybe the key is to categorize the concept. Since it's about middleware and schema integrity, perhaps the logic is about ensuring that the middleware constraints are applied correctly. \n\nI need to structure the concept into the memory graph. The content is 'auth middleware guards schema integrity', and the concept_type should be 'logic' because it involves constraints. Let me check if there are any other parameters needed. The tool requires 'concepts' as an array, so I'll create an object with content and concept_type. \n\nI think that's all. Just make sure to format the JSON correctly within the tool_call tags.\n",
+          "tool_calls": [
+            {
+              "type": "function",
+              "function": {
+                "name": "lambo_derive",
+                "arguments": "{\"concepts\": [{\"content\": \"auth middleware guards schema integrity\", \"concept_type\": \"logic\"}]}"
+              },
+              "id": "KyChYSTtXrpJfBAuEZYUM9LbsrxfqBgc"
+            }
+          ]
+        }
+      }
+    ],
+    "created": 1787019793,
+    "model": "qwen3-0.6b",
+    "system_fingerprint": "b10456-f17008d",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 313,
+      "prompt_tokens": 257,
+      "total_tokens": 570,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "id": "chatcmpl-3VVeKf0x90sbsKMRJ6zhF3dOuyJO9Att",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 257,
+      "prompt_ms": 11.909,
+      "prompt_per_token_ms": 0.04633852140077821,
+      "prompt_per_second": 21580.317407003105,
+      "predicted_n": 313,
+      "predicted_ms": 787.341,
+      "predicted_per_token_ms": 2.5235288461538463,
+      "predicted_per_second": 396.27048508841784
+    }
+  }
+}

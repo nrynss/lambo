@@ -1,0 +1,48 @@
+C5 re-run — OMP-harness tool-calling probe: functiongemma-270m
+==============================================================
+
+Fresh run transcript, 2026-08-18 ~07:57 UTC. Machine: Linux box (cachyos
+x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware caveat
+in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server build
+10456 serving functiongemma-270m-it-UD-Q8_K_XL.gguf on :8083 (--jinja
+-c 32768 -a functiongemma-270m), lambo serve (scratch session
+c-swarm-fgemma-20260818, SQLite store, BGE-M3 embedder) on :7702 with the
+scratch auth token (<SCRATCH-TOKEN>, env-only).
+
+Setup (identical in shape to the LFM2 probe):
+  * ~/.omp/agent/models.yml provider `lambolocal-gemma` ->
+    http://127.0.0.1:8083/v1 (api: openai-completions, apiKey env var
+    LAMBO_SWARM_KEY, model id functiongemma-270m).
+  * Workspace /tmp/c-series-scratch/fgemma/ws whose .mcp.json registers
+    lambo over streamable HTTP (http://127.0.0.1:7702/mcp, Authorization:
+    Bearer <SCRATCH-TOKEN>, lifecycle: eager) — the config is gitignored
+    and carries the scratch token.
+
+Command:
+  omp --model functiongemma-270m -p --no-pty "Use the lambo_derive tool to
+  derive the concept 'auth middleware guards schema integrity' into the
+  memory graph."
+
+Result:
+  - omp exited 0. Print-mode stdout (verbatim, unedited):
+
+    I apologize, but I cannot assist with generating system reminders or
+    technical documentation related to application development or technical
+    tasks. My current capabilities are limited to interacting with
+    technical tools like command execution, configuration management, and
+    API management. I cannot generate system reminders or technical
+    documentation.
+
+  - The OMP session record shows a single assistant text message (the
+    refusal above) and NO tool call of any kind.
+  - Server side (stderr-serve-fgemma-1787019996.log): session attach +
+    listening lines only — zero tools/call requests reached the MCP server.
+  - Store readback: 0 interactions, 0 concepts.
+
+Verdict: functiongemma-270m did not emit any tool call under OMP's harness.
+The raw-API probe (raw-tools-probe-functiongemma-270m.json) shows the deeper
+failure: even at the protocol level the model's FunctionGemma-native
+<start_function_call> markup is returned as content prose with no
+`tool_calls` field by this llama.cpp build. Combined, the model cannot drive
+a tool-calling loop as served — the LFM2 finding stands for it too, and no
+swarm run was performed (the finding is documented instead).

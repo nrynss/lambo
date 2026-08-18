@@ -1,0 +1,78 @@
+C5 re-run — OMP-harness tool-calling probe: Qwen3-0.6B
+=====================================================
+
+Fresh run transcript, 2026-08-18 ~07:52 UTC. Machine: Linux box (cachyos
+x86_64, Ryzen 5 3600, RTX 4070 SUPER — not the MBP; see the hardware caveat
+in dev-diary/notes/concurrency-capture.md). OMP 17.3.5, llama-server build
+10456 serving Qwen3-0.6B-UD-Q6_K_XL.gguf on :8082 (--jinja -c 32768
+-a qwen3-0.6b), lambo serve (scratch session c-swarm-qwen3-20260818, SQLite
+store, BGE-M3 embedder) on :7701 with the scratch auth token
+(<SCRATCH-TOKEN>, env-only).
+
+Setup (identical in shape to the LFM2 probe):
+  * ~/.omp/agent/models.yml provider `lambolocal-qwen` ->
+    http://127.0.0.1:8082/v1 (api: openai-completions, apiKey env var
+    LAMBO_SWARM_KEY, model id qwen3-0.6b).
+  * Workspace /tmp/c-series-scratch/qwen3/ws whose .mcp.json registers lambo
+    over streamable HTTP (http://127.0.0.1:7701/mcp, Authorization: Bearer
+    <SCRATCH-TOKEN>, lifecycle: eager) — the config is gitignored and
+    carries the scratch token.
+
+Command:
+  omp --model qwen3-0.6b -p --no-pty "Use the lambo_derive tool to derive
+  the concept 'auth middleware guards schema integrity' into the memory
+  graph."
+
+Result:
+  - omp exited 0; print-mode stdout was EMPTY (the harness never produced a
+    final answer text) and stderr carried only "Working...".
+  - The OMP session record (saved under ~/.omp/agent/sessions/) shows the
+    model DID emit one tool call — but for the WRONG tool. Verbatim extract
+    from the session file (assistant messages, unedited):
+
+    THINKING:
+    Okay, let's see. The user wants me to use the lambo_derive tool to
+    derive the 'auth middleware guards schema integrity' concept into the
+    memory graph. First, I need to understand what the lambo_derive tool
+    does. From the tool description, it seems to generate a memory graph
+    based on a concept. The concept here is 'auth middleware guards schema
+    integrity'. So my task is to call this tool with the given concept as
+    the input.
+
+    The parameters for the tool include 'i' (concise intent), which I need
+    to specify. The concept is 'auth middleware guards schema integrity',
+    so the 'i' would be something like 'derive concept: auth middleware
+    guards schema integrity'. Then, the arguments should be structured as a
+    JSON object with 'i' and possibly other parameters as needed. Since the
+    tool doesn't require additional parameters, I should just provide the
+    'i' field with the concept.
+
+    I need to make sure that the function name is exactly 'lambo_derive'
+    and the arguments are correctly formatted. The user didn't mention any
+    other parameters, so the JSON object will have 'i' set to the concept.
+    Once the tool is called, the memory graph should represent the derived
+    concept.
+
+    {"type":"toolCall","id":"REhEfyP1117pllTMuYyhSe4JBI7i5lwC","name":"lsp",
+    "arguments":{"i":"derive concept: auth middleware guards schema
+    integrity","action":"definition"},
+    "partialArgs":"{\"i\": \"derive concept: auth middleware guards schema
+    integrity\", \"action\": \"definition\"}","streamIndex":0,
+    "intent":"derive concept: auth middleware guards schema integrity"}
+
+  The model called `lsp` — a built-in OMP tool — with hallucinated
+  arguments (lsp takes file/line, not an intent/action pair); the call
+  failed. It never called `lambo_derive`.
+
+  - Server side (stderr-serve-qwen3-1787019996.log): the session attach +
+    listening lines only — NO daemon event lines, i.e. zero
+    lambo_derive/lambo_recall tool calls reached the MCP server.
+  - Store readback (probe phase, before the swarm): 0 interactions,
+    0 concepts. The model never drove a lambo tool call under the harness.
+
+Verdict: Qwen3-0.6B does not drive the OMP harness (it emits a tool call,
+but selects the wrong tool among OMP's dozens of schemas). The raw-API probe
+(raw-tools-probe-qwen3-0.6b.json) is the counterpart: there, with a single
+tool in the request, the same model emits a correct lambo_derive tool_calls.
+So the swarm harness for this model is the spec's minimal LLM loop
+(scripts/loadtest/mcp_swarm.py), not OMP — documented in the runbook.

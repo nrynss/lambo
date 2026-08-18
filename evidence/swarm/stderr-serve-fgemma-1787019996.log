@@ -1,0 +1,6 @@
+2026-08-18T02:23:40.437241Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=c-swarm-fgemma-20260818 agent=c-swarm-fgemma existing=false match_strategy=Hybrid embedder=bge_m3 dim=1024
+2026-08-18T02:23:40.437294Z  INFO lambo::mcp::serve: lambo serve: session attached session=c-swarm-fgemma-20260818 agent=c-swarm-fgemma transport=Http
+2026-08-18T02:23:40.437300Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-18T02:23:40.437369Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:7702
+2026-08-18T02:29:37.123237Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-18T02:29:37.123574Z  INFO lambo::mcp::serve: lambo serve: session closed, tail durable

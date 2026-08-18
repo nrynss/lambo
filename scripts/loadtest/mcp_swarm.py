@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """C5 — real-model swarm, minimal LLM loop fallback.
 
-The specified swarm (OMP agents driving lambo MCP tools with LFM2-350M) is
-not feasible: LFM2-350M cannot emit tool calls — under OMP's harness it
-garbles the tool invocation, and under llama.cpp's OpenAI tools API it
-returns prose with `finish_reason=stop` and no `tool_calls` (probed and
-recorded in evidence/swarm/). The spec's fallback applies: a minimal LLM
-loop of llama.cpp `/v1/chat/completions` + the streamable-HTTP MCP client
-pattern.
+The specified swarm (OMP agents driving lambo MCP tools with a local chat
+model) is not feasible for the models probed so far: LFM2-350M cannot emit
+tool calls (prose, `finish_reason=stop`, no `tool_calls`); Qwen3-0.6B emits
+correct `tool_calls` at the raw protocol level but under OMP's harness calls
+the wrong tool (`lsp`, hallucinated arguments — zero lambo interactions);
+functiongemma-270m emits FunctionGemma-native `<start_function_call>`
+markup that this llama.cpp build returns as prose, never as `tool_calls`
+(probed and recorded in evidence/swarm/probes/). The spec's fallback
+applies: a minimal LLM loop of llama.cpp `/v1/chat/completions` + the
+streamable-HTTP MCP client pattern.
 
 Each agent is a thread that loops:
 
@@ -18,15 +21,17 @@ Each agent is a thread that loops:
   every response goes to a JSONL ledger
 
 The model supplies the content; the loop supplies the tool-calling, which
-is the honest description of what a 350M model can do here. Tasks/hour and
-the canonization dedup rate (created vs matched existing, from the server's
-own response text) are measured from the ledger.
+is the honest description of what these small models can do under a harness
+with dozens of tool schemas in context. Tasks/hour and the canonization
+dedup rate (created vs matched existing, from the server's own response
+text) are measured from the ledger.
 
 Usage:
   python3 scripts/loadtest/mcp_swarm.py \
       --session c-swarm-20260818 --agents 3 --duration 240 \
       --ledger evidence/swarm/ledger-<run>.jsonl \
-      --token "$SWARM_TOKEN"
+      --token "$SWARM_TOKEN" \
+      --llama-model qwen3-0.6b --llama-endpoint http://127.0.0.1:8082/v1
 """
 
 from __future__ import annotations
@@ -151,11 +156,11 @@ class Mcp:
         return not bool(result.get("isError")), text.strip()
 
 
-def model_reply(prompt: str, token: str) -> str:
+def model_reply(prompt: str, token: str, endpoint: str, model: str) -> str:
     """One /v1/chat/completions turn. Returns the raw content."""
     body = json.dumps(
         {
-            "model": LLAMA_MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": prompt},
@@ -165,8 +170,8 @@ def model_reply(prompt: str, token: str) -> str:
         }
     ).encode()
     req = urllib.request.Request(
-        LLAMA_ENDPOINT, data=body, headers={"Content-Type": "application/json",
-                                            "Authorization": f"Bearer {token}"},
+        endpoint, data=body, headers={"Content-Type": "application/json",
+                                      "Authorization": f"Bearer {token}"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as r:
@@ -203,7 +208,7 @@ def agent_loop(idx: int, ledger: Ledger, args: argparse.Namespace, stop: threadi
         seq += 1
         prompt = f"Derive concepts about: {topic}.\nContext from recall: {context or '(none yet)'}"
         try:
-            reply = model_reply(prompt, args.llama_key)
+            reply = model_reply(prompt, args.llama_key, args.llama_endpoint, args.llama_model)
         except Exception as e:
             ledger.write(
                 {"kind": "model_error", "worker": idx, "agent": agent_id, "seq": seq,
@@ -251,13 +256,18 @@ def main() -> int:
     ap.add_argument("--agents", type=int, default=3)
     ap.add_argument("--duration", type=float, default=240.0)
     ap.add_argument("--turn-gap", type=float, default=2.0)
+    ap.add_argument("--llama-endpoint", default=LLAMA_ENDPOINT,
+                    help="llama.cpp /v1/chat/completions base URL")
+    ap.add_argument("--llama-model", default=LLAMA_MODEL,
+                    help="model id to request from the llama server")
     args = ap.parse_args()
     args.token = args.token or os.environ.get("LAMBO_AUTH_TOKEN")
+    args.llama_endpoint = args.llama_endpoint.rstrip("/") + "/chat/completions"
 
     ledger = Ledger(args.ledger)
     ledger.write(
         {"kind": "meta", "session": args.session, "agents": args.agents,
-         "model": LLAMA_MODEL, "llama_endpoint": LLAMA_ENDPOINT,
+         "model": args.llama_model, "llama_endpoint": args.llama_endpoint,
          "started_at": time.time(), "duration": args.duration}
     )
     stop = threading.Event()
