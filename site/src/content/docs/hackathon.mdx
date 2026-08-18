@@ -18,7 +18,7 @@ This page maps the submission conditions to the specific artefact that satisfies
 | Architecture diagram | **Met** | In the README, and the topology on [End to end](/lambo/end-to-end/) |
 | CockroachDB tools identified | **Met** | The table below, and the raw captures in [Evidence](/lambo/evidence/) |
 | Functional demo URL | **Met** | [lambo.nryn.dev](https://lambo.nryn.dev), the read-only portal on a live CockroachDB session, plus a [stats endpoint](https://uwvhgfb2rothsct6pnl44edk3q0kazsl.lambda-url.us-east-1.on.aws/) on AWS Lambda reading the same session |
-| Video under three minutes | **Not yet** | Not recorded. See below. |
+| Video under three minutes | **Met** | [Lambo: Durable canonical memory for agents](https://www.youtube.com/watch?v=dfbMvf_YwFo) |
 | AWS services identified | **Met** | Six, in [the table below](#aws-and-what-is-actually-running) and in the README. Each one is exercised by the running exhibit. |
 
 ## CockroachDB, and what was actually exercised
@@ -52,7 +52,9 @@ One boundary worth stating rather than blurring: AWS runs *around* Lambo here, n
 
 Stating these plainly is more useful than a page that implies otherwise.
 
-**No video.** Not recorded. The portal and terminal capture tooling is built and working, but a take needs the exhibit rebuilt from the launch script alone rather than the hand-repaired instance currently serving, and that rebuild has not happened yet.
+**Bedrock is still unauthorized.** Amazon Titan Text Embeddings V2 was the intended dense path. The `Embedder` trait was designed for it and `embed-bedrock` is reserved as a Cargo feature, but the adapter behind it is not implemented, and selecting `kind = "bedrock"` fails at startup saying so. The account's model-access request was never approved, and the refusal is captured in the repository. Nothing on this page or in the AWS table claims Bedrock.
+
+**Multi-writer coordination is out of scope for v0.2.** One `lambo serve` process owns a session and is its single writer. That is a stated boundary rather than a missing feature, and readers are unlimited.
 
 <Note>
 The pattern above is deliberate. Everything in these docs marks what was measured and what was not, including [Evidence and evaluation](/lambo/evidence/), which dates a determinism claim to when it became a guarantee rather than presenting an earlier capture as stronger than it was. A submission page that broke that habit would be the least trustworthy page on the site.
