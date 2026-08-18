@@ -5,11 +5,11 @@ toolResult: derived 1 concept(s): 0 created, 1 matched existing
 
 warnings:
 - attribution: this process owns the session as agent 'cursor-agent'; the call from 'scratch' is recorded in the graph as 'cursor-agent'. Per-call agent attribution needs a Memory-level agent override; until then, run one serve process per agent.
-assistant: The concept **"auth middleware guards schema integrity"** has been successfully derived into the memory graph. 
+assistant: The concept **"auth middleware guards schema integrity"** has been successfully derived into the memory graph.
 
-**Warnings:**  
-- **Agent Attribution:** The session is now owned by the `cursor-agent`. A **Memory-level agent override** is required for future edits.  
-- **Conceit:** One concept was matched successfully, confirming the derivation.  
+**Warnings:**
+- **Agent Attribution:** The session is now owned by the `cursor-agent`. A **Memory-level agent override** is required for future edits.
+- **Conceit:** One concept was matched successfully, confirming the derivation.
 
 If further edits are needed, ensure to use the `cursor-agent` for attribution.
 session_exit: dispose @ 2026-08-18T03:07:19.914Z

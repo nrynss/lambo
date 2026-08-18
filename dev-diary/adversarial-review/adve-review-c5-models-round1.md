@@ -230,3 +230,105 @@ explicit disclosure, or a narrowed-toolset/agentic probe). Branch stays
 **unmerged** per the validation-only instruction.
 
 - **Status: AWAITING independent re-review (round 2).**
+
+## Remediation disposition (C5M-R1-1..4)
+
+```text
+Agent:      C5ModelsRemediationR1
+Date:       2026-08-18
+Remediation: decdc74 (fix(c-series): C5M round-1 remediation)
+Disposition: this document (docs(review): C5M round-1 remediation disposition)
+Status:     AWAITING independent re-review (round 2) — branch stays unmerged
+            per the validation-only instruction.
+```
+
+### C5M-R1-1 (P2) — narrowed-toolset OMP probe — RESOLVED (both arms, honest)
+
+The counterfactual was run and it satisfies the finding's test: with OMP's
+toolset narrowed (`omp --no-tools` — the request-level context is captured
+verbatim in `evidence/swarm/probes/omp-request-tool-context.jsonl`: 15 tools
+= read/write/edit + 7 lambo MCP + 5 inherited openaiDeveloperDocs),
+Qwen3-0.6B emits a correct `mcp__lambo_derive` tool call under OMP (session
+2026-08-18T02-51-32-500Z, transcript `omp-harness-qwen3-narrowed.txt`) —
+the original `lsp` selection is a default-full-toolset result, and every OMP
+claim in the repo is now scoped to that. OMP **cannot** provide a lambo-only
+toolset (read/write/edit and all configured MCP servers always load; no flag
+excludes them) — recorded with the request-level evidence. New honest
+disclosure: in this harness the inherited `mcp__lambo_*` server shadows the
+workspace-scoped scratch lambo, so the OMP leg's lambo calls executed
+against the harness's live lambo (agent 'cursor-agent'), not a scratch
+store — scratch stores read back 0 rows. The OMP swarm re-run with the skill
+in the system prompt was attempted (3 agents; the model drove
+recall→derive→record_action→recall sequences, one agent ended "DONE", one
+hit a provider-stream error, one drifted into the inherited
+openaiDeveloperDocs tools) and is recorded with the same caveat
+(`omp-swarm-qwen3-narrowed/`). The "~31k-token prompt" figure is dropped
+(no committed artifact supports it; the measured context is the 15-tool
+request).
+
+### C5M-R1-2 (P2) — the genuine agentic re-run — RESOLVED
+
+`scripts/loadtest/mcp_agentic.py` ran the real thing: system prompt = the
+lambo-cloudops skill text verbatim (`skills/lambo-cloudops/SKILL.md`, sha256
+`fb9462e5…` in the ledger `meta`), minimal toolset = the four lambo MCP
+tools only, model-chosen calls via llama.cpp's OpenAI tools API on :8082.
+Numbers (ledger `evidence/swarm/ledger-agentic-qwen3-1787022500.jsonl`,
+3 agents × 151.0 s, fresh scratch store + session):
+
+| Metric | Value |
+|---|---|
+| Tasks | 55 (47 model-completed, 8 cut off by llama-server HTTP 500s) |
+| Tasks/hour | 1120 completed |
+| Tool calls | 173 (86 recall / 45 derive / 40 record_action / 2 inspect; 165 ok) |
+| **Protocol adherence** | **43/55 tasks (78%) recall-first; 0 of 45 derives without a prior recall in the same task**; the 12 non-recall-first tasks made zero tool calls (no protocol action taken — recorded) |
+| Derive / recall | 42 ok derives / 81 ok recalls (~1.9:1, as the protocol demands) |
+| Dedup rate | 0.857 (36 matched of 42 successful derives) |
+| Unparseable turns | 15/106 (14.2%) empty (no content, no tool_calls); 8 HTTP 500 failures — all recorded, none hidden |
+| Durability (clean SIGTERM) | interactions 82 == 82, concepts 12 == 12, edges 132 ≥ 3, lease 0 — "tail durable" (`durability-agentic-qwen3-1787022500.txt`); server exit lines verbatim, 0.288 ms gap |
+
+The fallback swarm's no-protocol/no-agency limitation is now explicitly
+disclosed in `evidence/swarm/README.md` and `concurrency-capture.md` C5, and
+the headline C5 numbers are labeled as loop-throughput + concept-text
+measurement, not model-driven tool selection.
+
+### C5M-R1-3 (P3) — probe timestamps — RESOLVED
+
+All four transcripts corrected to the actual UTC run times, citing the
+embedded timestamps: OMP session files 2026-08-18T02-22-21-162Z
+(`omp-harness-qwen3-0.6b.txt` → ~02:22 UTC) and 2026-08-18T02-24-04-143Z
+(`omp-harness-functiongemma-270m.txt` → ~02:24 UTC); response `created`
+epochs 1787019793 = 02:23:13Z (`raw-tools-probe-qwen3-0.6b.json` → ~02:23
+UTC) and 1787019855 / 1787019904 = 02:24:15Z / 02:25:04Z
+(`raw-tools-probe-functiongemma-270m.json` → ~02:24-02:25 UTC). Each notes
+that the earlier "~07:5x UTC" label was the box's IST wall-clock (+0530)
+mislabeled as UTC.
+
+### C5M-R1-4 (P3) — portal-string counts + placeholder echo — RESOLVED
+
+README:133-144 restated precisely (re-derived from the ledger): "auth
+middleware guards the user schema" — 2× in derive concepts, 38 whole-ledger
+records containing it (35 recall + 1 model_reply + 2 derive); "Rate limit
+protects the public API" — 25× in derive concepts (case-insensitive), 132
+occurrences across 70 ledger records counting the exact case-sensitive
+phrase (23 derive + 41 recall + 6 model_reply; case-insensitive whole-ledger
+136 in 74). "252 concept references" labeled as the server's own per-call
+accounting (27 created + 225 matched) vs the ledger's 255 concept objects;
+the 3-reference gap is derive `seq 34 worker 1`, which shipped four
+`<concept text>` placeholder concepts (the model echoing the SYSTEM
+template), server-accounted 1 created — disclosed in the honesty footnote.
+
+### Scope and hygiene
+
+Only `scripts/loadtest/`, `evidence/swarm/`, and the three diary docs
+changed; no Rust production code; `python3 -m py_compile` clean on the
+changed scripts; the two edited probe JSONs parse; `node --check
+capture-swarm-portal.mjs` clean (untouched); `git diff --check` clean; the
+two probe JSON files re-validated after the timestamp edits. Scratch
+sessions only for the new runs (agentic store on /tmp, WAL-verified);
+llama-servers left running. The OMP leg's unintended writes to the
+harness-inherited live lambo (agent 'cursor-agent') are disclosed in
+`omp-harness-qwen3-narrowed.txt` / `omp-swarm-qwen3-narrowed/README.md` for
+operator action if that store matters.
+
+**Status: AWAITING independent re-review (round 2).** The user's
+validation-only instruction stands: this branch is not merged.

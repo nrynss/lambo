@@ -178,6 +178,24 @@ the only place the board points at them.
 | **T1–T12** remediation | [notes/remediation-tasks.md](notes/remediation-tasks.md) | **ALL DONE**, plus the whole-tree **E2E** review: R1 APPROVE with 3 P3 remediated (`5db0b90`), R2 APPROVE, then a further E2E round merged as `1dd5b48`. `v0.2.0` (`35c86fb`) and `v0.2.1` shipped from it |
 | **H1–H7** hardening | [notes/hardening-tasks.md](notes/hardening-tasks.md) | **ALL IMPLEMENTATION TASKS CLOSED.** H1, H2, H3 each ran implement → adversarial review → remediation to CLEAN; H4, H5, H6 were closed by the portal rebuild `5ccd48f` and the `0.2.1` release. **H7 is PARKED / NEEDS DESIGN** and is not claimable until its selection/discovery/URL/auth decisions are recorded |
 | **C1–C5** concurrency capture | [notes/concurrency-capture.md](notes/concurrency-capture.md) | **ALL DONE (2026-08-18, branch `codex/c-series`)** — C1–C3: K=12 load driver (`scripts/loadtest/`), SIGTERM capture and durability check against a scratch SQLite store on the Linux box (cachyos-x8664, NOT the MBP): exact `lambo serve: session closed, tail durable`, 0 `tail lost on exit`, signal→exit 1419 ms, exit 0; interactions yardstick AHEAD by 21 (in-flight flushed by the close drain); concept shortfall 107 fully explained by one daemon GC sweep; wire-hygiene scan clean. Evidence: `evidence/concurrency/`. **C5 (real-model swarm): DONE-with-findings, re-run 2026-08-18 with Qwen3-0.6B + functiongemma-270m** — LFM2-350M cannot emit tool calls (probed under OMP and the OpenAI tools API), so the spec's fallback LLM loop ran: 3961 derive-calls/hour, dedup 0.183, 0 model errors, portal screenshots. Qwen3-0.6B emits a correct `lambo_derive` tool_calls at the raw protocol level but calls the wrong tool under OMP; fallback loop ran: 2956 derive-calls/hour, dedup 0.893, 0 model errors, 22% unparseable turns disclosed, portal screenshots. functiongemma-270m joins LFM2 as a no-tool_calls finding (native `<start_function_call>` markup returned as prose; no swarm ran). All probe transcripts committed. Evidence: `evidence/swarm/`. P8's last exit box is ticked |
+    **C5M round-1 remediation (2026-08-18, branch `codex/c5-models`):**
+    round-1 review verified every claim artifact-exact (2 P2 evidence
+    gaps / 2 P3), now remediated: (1) narrowed-toolset OMP probe —
+    `--no-tools` cuts built-ins to read/write/edit (request-verified) but
+    OMP cannot give a lambo-only toolset; under the narrowed 15-tool context
+    Qwen3-0.6B selects `lambo_derive` correctly (counterfactual satisfied),
+    with the inherited-lambo-shadowing caveat recorded
+    (`evidence/swarm/probes/omp-harness-qwen3-narrowed.txt` +
+    `omp-swarm-qwen3-narrowed/`); (2) genuine agentic re-run
+    (`scripts/loadtest/mcp_agentic.py`): lambo-cloudops skill as system
+    prompt, 4 lambo tools only, model-chosen calls — 3 agents × 151 s, 55
+    tasks (1120/hour), 43/55 tasks recall-first, 0 of 45 derives without a
+    prior recall, dedup 0.857, durability green after SIGTERM
+    (`evidence/swarm/ledger-agentic-qwen3-1787022500.jsonl`); (3) probe
+    timestamps corrected to UTC 02:22–02:25Z; (4) portal-string counts
+    restated (derive 2/25, whole-ledger 38/132, 70 records) + placeholder-
+    echo derive disclosed. Awaiting independent re-review per the
+    validation-only instruction (branch stays unmerged).
 | **D1–D3** deployment & submission | [notes/deployment-and-submission.md](notes/deployment-and-submission.md) | **D3 done** (docs + submission text, landed early). **D1 clean redeploy NOT STARTED**. The live instance was repaired by hand, so "rebuildable from the scripts alone" is not yet a supportable claim. **D2 recording NOT STARTED**, blocked on D1 |
 
 **Critical path to submission:** D1 → D2/T9.3 → T9.5, with T9.2 already met. A

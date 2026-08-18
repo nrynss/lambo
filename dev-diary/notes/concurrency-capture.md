@@ -172,6 +172,35 @@ per-model results table, durability figures and portal visuals (Qwen-derived
 concepts as recall cards) in `evidence/swarm/README.md`.
 **Relates to:** T9.6 (the LFM2 swarm, P9's cut-order #2)
 
+**C5M round-1 remediation (2026-08-18, branch `codex/c5-models`):** the
+round-1 review (adve-review-c5-models-round1.md) verified every probe,
+ledger, durability and portal claim artifact-exact, and required two
+evidence-completeness fixes that are now done:
+
+* **C5M-R1-1 (narrowed OMP toolset):** `omp --no-tools` cuts the built-ins
+  to read/write/edit (request-verified; the exact 15-tool array is in
+  `evidence/swarm/probes/omp-request-tool-context.jsonl`), but OMP cannot
+  drop read/write/edit or the MCP servers it inherits from the parent
+  session, so a lambo-only toolset is not achievable. Under the narrowed
+  toolset Qwen3-0.6B selects `lambo_derive` correctly under OMP
+  (`probes/omp-harness-qwen3-narrowed.txt`) — the round-1 counterfactual —
+  with the execution-target caveat that the inherited `mcp__lambo_*` server
+  shadows the workspace-scoped scratch lambo (the OMP leg's calls landed on
+  the harness's live lambo, agent 'cursor-agent'; scratch store read back
+  0 rows). The OMP swarm re-run with the skill in the system prompt is in
+  `evidence/swarm/probes/omp-swarm-qwen3-narrowed/`.
+* **C5M-R1-2 (genuine agentic re-run):** `scripts/loadtest/mcp_agentic.py`
+  ran with the lambo-cloudops skill as the system prompt, the four lambo
+  MCP tools only, and the model choosing every call (llama.cpp OpenAI tools
+  API). 3 agents × 151.0 s: 55 tasks (1120 completed tasks/hour), 173 tool
+  calls (86 recall / 45 derive / 40 record_action / 2 inspect; 165 ok),
+  **pre-flight protocol adherence 43/55 tasks recall-first and 0 of 45
+  derives without a prior recall**, dedup 0.857 (36/42), 8 llama-server
+  HTTP 500s and 15 degenerate turns recorded, durability green after clean
+  SIGTERM (interactions 82 == 82, concepts 12 == 12, edges 132, lease 0 —
+  `durability-agentic-qwen3-1787022500.txt`). Ledger +
+  transcripts under `evidence/swarm/`.
+
 C1's driver is synthetic: deterministic, fast, and precise about what it sent.
 That is the right instrument for the correctness half. The scale half wants real
 agents.
