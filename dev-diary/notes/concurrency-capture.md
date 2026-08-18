@@ -152,22 +152,41 @@ threshold differs, so say which machine produced the numbers.
 ## C5 — Optional: drive it with real local models
 
 **Requires:** C2 green
-**Status:** DONE-with-findings — 2026-08-18, re-run with two more local
-models. The LFM2-350M finding stands: it cannot emit tool calls (probed
-under OMP's harness — garbled pseudo-tool text — and under llama.cpp's
-OpenAI tools API — prose, `finish_reason=stop`, no `tool_calls`).
-**Qwen3-0.6B** (new): emits a *correct* `lambo_derive` `tool_calls` at the
-raw protocol level, but under OMP's harness it calls the wrong tool (`lsp`,
-hallucinated arguments) — so its swarm ran on the same spec-sanctioned
-fallback as LFM2 (`scripts/loadtest/mcp_swarm.py`, now parameterized with
-`--llama-model`/`--llama-endpoint`): 3 agents × 150 s, **2956
-derive-calls/hour**, **dedup rate 0.893** (225 of 252 concept references
-matched existing), 0 model errors, 22% unparseable turns (35/159, disclosed),
-store ledger-exact after clean SIGTERM. **functiongemma-270m** (new): a
-second no-tool-call finding — under OMP it refuses in prose, and its native
-FunctionGemma `<start_function_call>` markup is returned as content prose
-with no `tool_calls` by this llama.cpp build, so no swarm ran for it. All
-probe transcripts committed (fresh-run) under `evidence/swarm/probes/`;
+**Status:** DONE-with-findings — 2026-08-18, re-run across three local models
+and, decisively, across two harnesses.
+
+**The result that matters.** Handed the lambo-cloudops skill text verbatim as
+its system prompt and the four lambo MCP tools and nothing else, **Qwen3-0.6B
+calls lambo correctly on its own** (`scripts/loadtest/mcp_agentic.py`, llama.cpp
+OpenAI tools API). 3 agents × 151.0 s, 55 tasks, 173 tool calls (86 recall /
+45 derive / 40 record_action / 2 inspect; 165 ok): **43/55 tasks recall-first,
+and 0 of 45 derives without a prior recall in the same task**. The 12
+non-recall-first tasks made no tool calls at all, so nothing derived blind.
+Dedup 0.857 (36 of 42), 1120 completed tasks/hour, durability exact after clean
+SIGTERM (interactions 82 == 82, concepts 12 == 12, edges 132, lease 0). A 0.6B
+model given sufficient instructions reaches for recall before it writes: that is
+a claim about lambo's surface, not about Qwen. Throughput is the secondary
+number here.
+
+**Tool-call capability, per model.** **Qwen3-0.6B**: emits a *correct*
+`lambo_derive` `tool_calls` at the raw protocol level, and under a narrowed OMP
+toolset selects it correctly; under OMP's *default* full toolset it picks the
+wrong tool (`lsp`, hallucinated arguments). **LFM2-350M**: the original finding
+stands, no tool calls (garbled pseudo-tool text under OMP, prose with
+`finish_reason=stop` under the OpenAI tools API). **functiongemma-270m**: a
+second no-tool-call finding, refusing in prose under OMP, with its native
+`<start_function_call>` markup returned as content by this llama.cpp build, so
+no swarm ran for it.
+
+**The `mcp_swarm.py` figures are not agency.** That fallback harness hardcodes
+prompt → derive → recall and gives the model no lambo semantics, so LFM2's
+3961 derive-calls/hour (dedup 0.183) and Qwen3's 2956/hour (dedup 0.893, 22%
+unparseable turns, 35/159) measure loop throughput and concept-text behavior
+only. Qwen's higher dedup is inflated by repetition, including derives echoing
+recall context verbatim and one that shipped literal `<concept text>`
+placeholders. Both runs were store ledger-exact after clean SIGTERM.
+
+All probe transcripts committed (fresh-run) under `evidence/swarm/probes/`;
 per-model results table, durability figures and portal visuals (Qwen-derived
 concepts as recall cards) in `evidence/swarm/README.md`.
 **Relates to:** T9.6 (the LFM2 swarm, P9's cut-order #2)
@@ -200,6 +219,61 @@ evidence-completeness fixes that are now done:
   SIGTERM (interactions 82 == 82, concepts 12 == 12, edges 132, lease 0 —
   `durability-agentic-qwen3-1787022500.txt`). Ledger +
   transcripts under `evidence/swarm/`.
+
+**Task-text contamination, found 2026-08-18 while building a control arm.** The
+six task strings hardcoded in `mcp_agentic.py` each read "modify the 'X'
+resource: run the pre-flight recall protocol for it, derive the concept, record
+the action with its depends-on edges, then re-check with recall." The model was
+therefore *told* the recall-first sequence in every task, so the agentic run's
+43/55 measures whether a 0.6B model can **execute** the protocol, not whether
+the skill causes it to reach for memory unprompted. The first control arm
+inherited the same task text in both arms and so could not isolate the system
+prompt either; its 78.2% vs 35.0% headline also conflated adherence with
+liveness, since the control was inert on 62% of tasks against the treatment's
+22% under heavier machine load. Conditioned on tasks where the model acted at
+all, that comparison is 43/43 (100%) vs 21/23 (91.3%). The corrected
+experiment, neutral task text plus both arms re-run under equal load, is
+recorded under `evidence/swarm/experiment2/`; the first control arm is kept
+under `evidence/swarm/control/` as superseded. The public README claims only
+the execution result.
+
+**Experiment 2 result, and it is a negative one (2026-08-18).** With task text
+reduced to "modify the 'X' resource and record what you changed" (banned-word
+grep clean, `tasks-neutral.txt` sha `915bc889`), both arms were re-run back to
+back: arm A with the skill (`SKILL.md` sha `fb9462e5`), arm B with the
+protocol-free baseline (sha `a9103b28`). **Neither arm called `lambo_recall`
+once.** Arm A made 21 `lambo_record_action` and 2 `lambo_derive` calls, arm B
+made 42 `lambo_record_action` calls, and no recall appears even among the tool
+calls the model *proposed* and did not execute, so this is not an execution
+filter. Both runs completed cleanly with durability MATCH.
+
+The reading, stated conservatively: **the skill's system-prompt pre-flight
+protocol produced no recall-first behavior above a protocol-free baseline once
+the task stopped asking for it.** What the model did instead was exactly what
+the neutral task said, record what changed, which is defensible task-following
+rather than misbehavior. So this is evidence about how little a 0.6B model
+carries from a long system prompt into behavior the immediate task does not
+restate, not evidence that lambo's surface is unclear. It does mean the
+honest public claim is the execution one: given the protocol, a very small
+model runs it correctly, 43 of 43 acting tasks, which is what the README
+says and all it says.
+
+Caveat carried from the run: the machine was not quiesced and 1-minute load
+trended down across the session (5.97 → 5.09 → 3.46), so arm A ran under
+somewhat heavier ambient load than arm B. Irrelevant to a 0 vs 0 primary
+result, recorded anyway. Single run per arm, no retries.
+
+**Round 2 waived (2026-08-18).** The independent re-review the C-series ran for
+every other branch was waived here by operator decision, and the branch merged
+after round 1 plus remediation. The reason: round 1 verified every number
+artifact-exact, and the remediation added evidence rather than revising a
+checked claim. What that leaves unverified by a second pair of eyes is the
+`mcp_agentic.py` ledger arithmetic, its durability readback, and the
+narrowed-toolset OMP transcripts, all of which rest on this branch's own
+accounting. Two open operator items ride along: the OMP legs' writes to the
+harness-inherited live lambo (agent 'cursor-agent') are still in that store,
+and one of the fallback swarm's stored concepts may literally be
+`<concept text>` from the placeholder-echo derive.
 
 C1's driver is synthetic: deterministic, fast, and precise about what it sent.
 That is the right instrument for the correctness half. The scale half wants real

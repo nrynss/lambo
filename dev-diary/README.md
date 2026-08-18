@@ -173,29 +173,11 @@ Three streams opened after P8 and are numbered separately from each other and
 from the phases. They are tracked in `notes/`, not in a phase doc, and this is
 the only place the board points at them.
 
-| Stream | Doc | State (2026-08-17) |
+| Stream | Doc | State (2026-08-18) |
 |---|---|---|
 | **T1–T12** remediation | [notes/remediation-tasks.md](notes/remediation-tasks.md) | **ALL DONE**, plus the whole-tree **E2E** review: R1 APPROVE with 3 P3 remediated (`5db0b90`), R2 APPROVE, then a further E2E round merged as `1dd5b48`. `v0.2.0` (`35c86fb`) and `v0.2.1` shipped from it |
 | **H1–H7** hardening | [notes/hardening-tasks.md](notes/hardening-tasks.md) | **ALL IMPLEMENTATION TASKS CLOSED.** H1, H2, H3 each ran implement → adversarial review → remediation to CLEAN; H4, H5, H6 were closed by the portal rebuild `5ccd48f` and the `0.2.1` release. **H7 is PARKED / NEEDS DESIGN** and is not claimable until its selection/discovery/URL/auth decisions are recorded |
-| **C1–C5** concurrency capture | [notes/concurrency-capture.md](notes/concurrency-capture.md) | **ALL DONE (2026-08-18, branch `codex/c-series`)** — C1–C3: K=12 load driver (`scripts/loadtest/`), SIGTERM capture and durability check against a scratch SQLite store on the Linux box (cachyos-x8664, NOT the MBP): exact `lambo serve: session closed, tail durable`, 0 `tail lost on exit`, signal→exit 1419 ms, exit 0; interactions yardstick AHEAD by 21 (in-flight flushed by the close drain); concept shortfall 107 fully explained by one daemon GC sweep; wire-hygiene scan clean. Evidence: `evidence/concurrency/`. **C5 (real-model swarm): DONE-with-findings, re-run 2026-08-18 with Qwen3-0.6B + functiongemma-270m** — LFM2-350M cannot emit tool calls (probed under OMP and the OpenAI tools API), so the spec's fallback LLM loop ran: 3961 derive-calls/hour, dedup 0.183, 0 model errors, portal screenshots. Qwen3-0.6B emits a correct `lambo_derive` tool_calls at the raw protocol level but calls the wrong tool under OMP; fallback loop ran: 2956 derive-calls/hour, dedup 0.893, 0 model errors, 22% unparseable turns disclosed, portal screenshots. functiongemma-270m joins LFM2 as a no-tool_calls finding (native `<start_function_call>` markup returned as prose; no swarm ran). All probe transcripts committed. Evidence: `evidence/swarm/`. P8's last exit box is ticked |
-    **C5M round-1 remediation (2026-08-18, branch `codex/c5-models`):**
-    round-1 review verified every claim artifact-exact (2 P2 evidence
-    gaps / 2 P3), now remediated: (1) narrowed-toolset OMP probe —
-    `--no-tools` cuts built-ins to read/write/edit (request-verified) but
-    OMP cannot give a lambo-only toolset; under the narrowed 15-tool context
-    Qwen3-0.6B selects `lambo_derive` correctly (counterfactual satisfied),
-    with the inherited-lambo-shadowing caveat recorded
-    (`evidence/swarm/probes/omp-harness-qwen3-narrowed.txt` +
-    `omp-swarm-qwen3-narrowed/`); (2) genuine agentic re-run
-    (`scripts/loadtest/mcp_agentic.py`): lambo-cloudops skill as system
-    prompt, 4 lambo tools only, model-chosen calls — 3 agents × 151 s, 55
-    tasks (1120/hour), 43/55 tasks recall-first, 0 of 45 derives without a
-    prior recall, dedup 0.857, durability green after SIGTERM
-    (`evidence/swarm/ledger-agentic-qwen3-1787022500.jsonl`); (3) probe
-    timestamps corrected to UTC 02:22–02:25Z; (4) portal-string counts
-    restated (derive 2/25, whole-ledger 38/132, 70 records) + placeholder-
-    echo derive disclosed. Awaiting independent re-review per the
-    validation-only instruction (branch stays unmerged).
+| **C1–C5** concurrency capture | [notes/concurrency-capture.md](notes/concurrency-capture.md) | **ALL DONE (2026-08-18).** C1–C3: K=12 load driver (`scripts/loadtest/`), SIGTERM capture and durability readback against a scratch SQLite store on the Linux box (cachyos-x8664, NOT the MBP): exact `lambo serve: session closed, tail durable`, 0 `tail lost on exit`, signal→exit 1419 ms, exit 0; interactions yardstick AHEAD by 21 (in-flight writes already swept by the 1 s flush loop, so the close drain was a no-op and `CLOSE_GRACE` stays untested at its limit); concept shortfall 107 fully explained by one daemon GC sweep, proven by the `gc_interval=1` control run; wire-hygiene scan clean. Evidence: `evidence/concurrency/`. **C5 (real models): DONE-with-findings, re-run 2026-08-18.** The load-bearing result is the agentic run (`scripts/loadtest/mcp_agentic.py`: the lambo-cloudops skill text verbatim as system prompt, the four lambo MCP tools only, model-chosen calls), Qwen3-0.6B × 3 agents × 151 s: 55 tasks (1120/hour), **43/55 tasks recall-first and 0 of 45 derives without a prior recall**, dedup 0.857, durability exact after clean SIGTERM. Tool-call capability findings: Qwen3-0.6B emits a valid `lambo_derive` at the protocol level and selects it correctly under a narrowed OMP toolset; LFM2-350M and functiongemma-270m cannot emit tool calls at all (each probed two ways). The `mcp_swarm.py` figures (LFM2 3961 derive-calls/hour, dedup 0.183; Qwen3 2956/hour, dedup 0.893) measure **loop throughput and concept-text behavior, not model tool selection** (that harness hardcodes the call sequence), and Qwen's higher dedup reflects repetition, including one placeholder-echo derive. 22% unparseable turns, and the OMP leg's writes to the inherited live lambo, are disclosed in `evidence/swarm/`. P8's last exit box is ticked. Detail: [§C5 model re-run](#c5-model-re-run-2026-08-18) |
 | **D1–D3** deployment & submission | [notes/deployment-and-submission.md](notes/deployment-and-submission.md) | **D3 done** (docs + submission text, landed early). **D1 clean redeploy NOT STARTED**. The live instance was repaired by hand, so "rebuildable from the scripts alone" is not yet a supportable claim. **D2 recording NOT STARTED**, blocked on D1 |
 
 **Critical path to submission:** D1 → D2/T9.3 → T9.5, with T9.2 already met. A
@@ -203,6 +185,45 @@ real-live capture of `03_crossover_protect.py` is recommended before D2: T8 ran
 both cases live, but the committed evidence
 (`evidence/remed-t8-crossover-run.md`) is a synthetic recapture with stubbed
 I/O.
+
+### C5 model re-run (2026-08-18)
+
+Branch `codex/c5-models`, base `e3715e8`. The re-run replaced C5's single
+LFM2-350M result with three models and, more to the point, with a harness that
+lets the model decide.
+
+**What it settles.** Given the lambo-cloudops skill text as its system prompt
+and nothing but the four lambo MCP tools, a 0.6B model follows the recall-first
+protocol: 43 of 55 tasks opened with a recall, and **not one of the 45 derive
+calls happened without a prior recall in the same task**. The 12 tasks that did
+not open with a recall made no tool calls at all. That is a statement about
+lambo's surface being legible to a very small model, which is the thing C5
+existed to test. Throughput (1120 completed tasks/hour) is secondary.
+
+**Review loop.** Round 1
+([adve-review-c5-models-round1.md](adversarial-review/adve-review-c5-models-round1.md))
+verified every probe, ledger, durability and portal claim artifact-exact and
+returned REQUEST_CHANGES on 2 P2 / 2 P3, all of them evidence-completeness gaps
+rather than wrong numbers. The remediation (`decdc74`) ran the narrowed-toolset
+OMP counterfactual and the genuine agentic re-run, corrected the probe
+timestamps to UTC, and restated the portal-string counts. **Round 2 was waived
+by decision on 2026-08-18:** the result that mattered was already captured and
+independently verified at round 1, and the remediation added evidence rather
+than revising any checked claim. Recorded here so the waived gate is visible
+rather than implied.
+
+**Caveats that travel with the numbers.**
+
+- The `mcp_swarm.py` throughput figures are loop throughput, not agency. That
+  harness hardcodes prompt → derive → recall, and its system prompt carries no
+  lambo semantics at all.
+- Qwen3-0.6B's 0.893 dedup is inflated by repetition: derives that echo recall
+  context verbatim, plus one that shipped literal `<concept text>` placeholders.
+- The OMP legs executed against the harness-inherited live lambo (agent
+  `cursor-agent`) rather than the workspace scratch store, which read back 0
+  rows. Disclosed in `evidence/swarm/probes/omp-harness-qwen3-narrowed.txt` and
+  `probes/omp-swarm-qwen3-narrowed/README.md`. Those writes are still in that
+  store and are an open operator item, not a captured result.
 
 ---
 

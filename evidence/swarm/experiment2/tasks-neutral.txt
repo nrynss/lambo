@@ -1,0 +1,6 @@
+modify the 'rate limit' resource and record what you changed.
+modify the 'auth middleware' resource and record what you changed.
+modify the 'billing service' resource and record what you changed.
+modify the 'session store' resource and record what you changed.
+modify the 'migration script' resource and record what you changed.
+modify the 'cache layer' resource and record what you changed.

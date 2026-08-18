@@ -1,18 +1,49 @@
-# Load testing `lambo serve` (C1–C3)
+# Driving `lambo serve` under load and under real models (C-series)
 
-The C-series concurrency capture (see
-[dev-diary/notes/concurrency-capture.md](../../dev-diary/notes/concurrency-capture.md))
-drives `lambo serve --transport http` with K concurrent MCP clients under a
-weighted valid + adversarial mix, then pulls SIGTERM while load is in flight
-and proves the tail is durable. These scripts produce that evidence.
+Two families of harness live here, and they answer different questions. The
+C-series capture is written up in
+[dev-diary/notes/concurrency-capture.md](../../dev-diary/notes/concurrency-capture.md).
+
+**Synthetic (C1–C3)** drives `lambo serve --transport http` with K concurrent
+MCP clients under a weighted valid + adversarial mix, pulls SIGTERM while load
+is in flight, and proves the tail is durable. Deterministic, fast, and exact
+about what it sent, which is what the correctness question needs.
+
+**Model-driven (C5)** puts a real local model in the loop instead. Nothing here
+is deterministic; the point is what a model does with the surface when nobody
+is scripting its calls.
 
 ## What is here
+
+### Synthetic harness (C1–C3)
 
 | Script | Role |
 |---|---|
 | `mcp_load.py` | The load driver (C1). K worker threads, each an independent streamable-HTTP MCP session, issuing a deterministic seeded mix: valid `lambo_derive` / `lambo_record_action` / `lambo_recall`, plus adversarial calls (record_action over `MAX_ACTION_TARGETS`, content with NUL and U+202E, content over `MAX_CONTENT_BYTES`, an unknown tool, malformed params). Every response — success, tool refusal, 429, 503, transport error — is recorded to a JSONL ledger. |
 | `capture_sigterm.sh` | The run harness (C2). Provisions a scratch SQLite store, starts `lambo serve` with a scratch bearer token, runs the driver, sends SIGTERM inside the burst phase, measures signal→exit wall time and exit code, captures full server stderr, then runs the durability check. |
-| `check_durability.py` | The C3 check: compares the ledger's successful-call accounting (interactions 1:1 per write call; concept/edge counts parsed from the server's own response text) against a post-exit readback of the SQLite store. |
+| `check_durability.py` | The C3 check: compares the ledger's successful-call accounting (interactions 1:1 per write call; concept/edge counts parsed from the server's own response text) against a post-exit readback of the SQLite store. Used by both families. |
+
+### Model-driven harnesses (C5)
+
+| Script | Role |
+|---|---|
+| `mcp_agentic.py` | **The one that measures agency.** System prompt = a skill file (`--skill`), toolset = the four lambo MCP tools and nothing else, and the *model* chooses every call via llama.cpp's OpenAI tools API. Records each model turn with the tool calls it proposed, each executed call with the server's response, and per-task protocol accounting (`recall_first`, `derives_without_prior_recall`, the call sequence). |
+| `mcp_swarm.py` | Throughput loop, **not** an agency measurement. It hardcodes prompt → `lambo_derive` → `lambo_recall` and gives the model no lambo semantics, so its numbers describe loop throughput and the model's concept-text behavior only. Parameterized by `--llama-model` / `--llama-endpoint`. Do not quote its rates as evidence a model chose anything. |
+| `omp_swarm.py` | Runs the same idea through the OMP agent harness rather than a raw chat loop, with the skill in the system prompt. Note that OMP always loads read/write/edit plus any inherited MCP servers, so a lambo-only toolset is not achievable there. |
+
+#### `--tasks`, and why it exists
+
+`mcp_agentic.py` takes `--tasks <file>` (one task string per line). Without it
+the built-in list is used, and that list *names the recall-first sequence in
+the task text itself*. Measuring whether a model reaches for memory on its own
+therefore requires a neutral task file: task text that describes only the work,
+with no mention of recall, memory, checking, ordering, or any tool name. The
+first control arm missed this and had to be redone; see
+`evidence/swarm/experiment2/` for the neutral list, the banned-word grep that
+guards it, and what changed when the instruction was removed.
+
+The same rule applies to `--skill`: the file is read verbatim as the system
+prompt, so any commentary in it (even an HTML comment) reaches the model.
 
 ## How the driver is shaped (so refusals don't crowd out the measurement)
 
@@ -77,6 +108,34 @@ Stdlib only (urllib + threads), mirroring the streamable-HTTP MCP client in
 `tools/call` with the `Mcp-Session-Id` header, accepting both JSON and SSE
 replies, and `Authorization: Bearer` when a token is configured (via
 `--token` or `LAMBO_AUTH_TOKEN`).
+
+## Running a model-driven capture
+
+Needs `llama-server` serving a chat model, and a `lambo serve` on a scratch
+session with a scratch SQLite store. Never point either at `cloudops-exhibit`.
+
+```bash
+llama-server -m <Qwen3-0.6B-UD-Q6_K_XL.gguf> --port 8082 --jinja -c 32768 -a qwen3-0.6b
+
+# agency measurement: model chooses every call
+python3 scripts/loadtest/mcp_agentic.py \
+    --session c-qwen3-agentic-20260818 --ledger <ledger>.jsonl \
+    --endpoint http://127.0.0.1:7706/mcp --token "$LAMBO_AUTH_TOKEN" \
+    --agents 3 --duration 150 --skill skills/lambo-cloudops/SKILL.md \
+    --tasks evidence/swarm/experiment2/tasks-neutral.txt \
+    --llama-model qwen3-0.6b --llama-endpoint http://127.0.0.1:8082/v1 \
+    --llama-key lambo-swarm-local
+
+# then SIGTERM the server and check what survived
+python3 scripts/loadtest/check_durability.py \
+    --ledger <ledger>.jsonl --db <store> --session <session> --stderr <serve-stderr>
+```
+
+Comparing two system prompts means changing `--skill` and nothing else, running
+the arms back to back so ambient machine load is shared, and reporting
+recall-first among **acting** tasks (those with at least one tool call). The
+unconditional rate mixes protocol adherence with liveness: a model that stalls
+looks identical to one that ignores the protocol.
 
 ## Determinism
 

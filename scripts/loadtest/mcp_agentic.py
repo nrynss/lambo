@@ -243,7 +243,7 @@ def agent_loop(idx: int, ledger: Ledger, args: argparse.Namespace, stop: threadi
     task_idx = idx
     seq = 0
     while not stop.is_set():
-        topic = AGENTIC_TASKS[task_idx % len(AGENTIC_TASKS)]
+        topic = args.task_list[task_idx % len(args.task_list)]
         task_idx += 1
         seq += 1
         messages: list[dict] = [
@@ -331,6 +331,9 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=150.0)
     ap.add_argument("--turn-gap", type=float, default=1.0)
     ap.add_argument("--skill", default="skills/lambo-cloudops/SKILL.md")
+    ap.add_argument("--tasks", default=None,
+                    help="path to a task-list file, one task per line; default (omitted) "
+                    "is the built-in AGENTIC_TASKS, unchanged from before this flag existed")
     ap.add_argument("--llama-endpoint", default=LLAMA_ENDPOINT,
                     help="llama.cpp /v1/chat/completions base URL")
     ap.add_argument("--llama-model", default=LLAMA_MODEL,
@@ -341,14 +344,25 @@ def main() -> int:
     with open(args.skill, encoding="utf-8") as fh:
         args.skill_text = fh.read()
     skill_sha = hashlib.sha256(args.skill_text.encode()).hexdigest()
+    if args.tasks:
+        with open(args.tasks, encoding="utf-8") as fh:
+            args.task_list = [line.strip() for line in fh if line.strip()]
+        if not args.task_list:
+            raise SystemExit(f"--tasks {args.tasks}: no non-empty lines")
+    else:
+        args.task_list = AGENTIC_TASKS
 
     ledger = Ledger(args.ledger)
-    ledger.write(
-        {"kind": "meta", "session": args.session, "agents": args.agents,
+    meta_record = {"kind": "meta", "session": args.session, "agents": args.agents,
          "model": args.llama_model, "llama_endpoint": args.llama_endpoint,
          "skill": args.skill, "skill_sha256": skill_sha,
          "tools": LAMBO_TOOLS, "started_at": time.time(), "duration": args.duration}
-    )
+    if args.tasks:
+        meta_record["tasks"] = args.tasks
+        meta_record["tasks_sha256"] = hashlib.sha256(
+            "\n".join(args.task_list).encode()
+        ).hexdigest()
+    ledger.write(meta_record)
     stop = threading.Event()
     threads = [
         threading.Thread(target=agent_loop, args=(i, ledger, args, stop), daemon=True)

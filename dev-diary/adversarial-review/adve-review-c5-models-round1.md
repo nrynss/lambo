@@ -2,12 +2,13 @@
 
 ```text
 ╔════════════════════════════════════════════════════════════════╗
-║  STATUS: OPEN — Round 1 of the review/remediate loop           ║
+║  STATUS: CLOSED — Round 1 findings remediated; round 2 waived  ║
+║          by operator decision 2026-08-18 (see closing note).   ║
 ║  Scope:  C5 re-run — Qwen3-0.6B swarm + functiongemma-270m     ║
 ║          no-tool-call finding (commit 957326e on               ║
 ║          codex/c5-models, base main e3715e8)                   ║
 ║  Branch: codex/c5-models (worktree /home/nryn/work/lambo/      ║
-║          worktrees/c5-models) — DO NOT MERGE (validation)      ║
+║          worktrees/c5-models) — cleared to merge 2026-08-18    ║
 ║  Date:   2026-08-18                                            ║
 ║  Reviewer: C5ModelsReviewR1 (fresh, read-only)                 ║
 ║  Verdict: REQUEST_CHANGES — 2 P2 / 2 P3.                       ║
@@ -226,10 +227,11 @@ claims are worded: the OMP-infeasibility conclusion for Qwen3-0.6B was
 tested only under the default full toolset (C5M-R1-1), and the fallback
 "swarm" gave the model no protocol context at all, which the summary framing
 does not state (C5M-R1-2). Both are cheap to remediate (scoped wording and
-explicit disclosure, or a narrowed-toolset/agentic probe). Branch stays
-**unmerged** per the validation-only instruction.
+explicit disclosure, or a narrowed-toolset/agentic probe). *(Round-1 verdict
+as written; both P2s were remediated in `decdc74` and the branch was later
+cleared to merge.)*
 
-- **Status: AWAITING independent re-review (round 2).**
+- **Status: remediated, then CLOSED with round 2 waived (2026-08-18).**
 
 ## Remediation disposition (C5M-R1-1..4)
 
@@ -238,8 +240,8 @@ Agent:      C5ModelsRemediationR1
 Date:       2026-08-18
 Remediation: decdc74 (fix(c-series): C5M round-1 remediation)
 Disposition: this document (docs(review): C5M round-1 remediation disposition)
-Status:     AWAITING independent re-review (round 2) — branch stays unmerged
-            per the validation-only instruction.
+Status:     CLOSED — round 2 waived by operator decision (2026-08-18);
+            branch cleared to merge. See the closing note below.
 ```
 
 ### C5M-R1-1 (P2) — narrowed-toolset OMP probe — RESOLVED (both arms, honest)
@@ -330,5 +332,13 @@ harness-inherited live lambo (agent 'cursor-agent') are disclosed in
 `omp-harness-qwen3-narrowed.txt` / `omp-swarm-qwen3-narrowed/README.md` for
 operator action if that store matters.
 
-**Status: AWAITING independent re-review (round 2).** The user's
-validation-only instruction stands: this branch is not merged.
+**Status: CLOSED, round 2 waived by operator decision (2026-08-18).** The
+operator waived the independent re-review and cleared the branch to merge.
+The reasoning, recorded rather than implied: the result the C5 re-run existed
+to produce (a 0.6B model calling lambo correctly from the skill text alone)
+was captured and verified artifact-exact at round 1, and the remediation
+added evidence rather than revising any claim round 1 had checked. What a
+round 2 would still have covered, and therefore did not: independent
+verification of the `mcp_agentic.py` ledger arithmetic and its durability
+readback, and of the narrowed-toolset OMP transcripts, all of which stand on
+this branch's own accounting. The waiver is mirrored on the status board.
