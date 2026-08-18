@@ -37,7 +37,7 @@ or container); **the single-writer constraint stated** (spec §12.4); the Cockro
 and AWS services used, written out (that written identification is itself a deliverable);
 credit to the v0.6.0 design doc for honesty (spec §12.4 note); MIT license visible in the
 GitHub About sidebar (add the license file mapping if GitHub doesn't auto-detect). Repo
-public.  **CORRECTION 2026-08-15: the repo is Apache-2.0, not MIT — see Handoff Log.**
+public.  **CORRECTION 2026-08-15: the repo is Apache-2.0, not MIT.**
 
 **Boundary with T8.8:** this is the getting-started / onboarding path. The per-surface
 **reference** (MCP tools, CLI verbs, `Memory` API, config keys, end-to-end) lives in
@@ -55,7 +55,7 @@ public.  **CORRECTION 2026-08-15: the repo is Apache-2.0, not MIT — see Handof
 - Never instruct users to mix embedder models mid-session without re-embed.
 
 **Done when:** a cold reader reproduces the demo from README alone (including features +
-config), and the About section shows the license.  **The repo is Apache-2.0, not MIT (Handoff Log).**
+config), and the About section shows the license.  **The repo is Apache-2.0, not MIT.**
 
 ---
 
