@@ -100,6 +100,45 @@ Lambo writes all promotions into `canonization_events`. You can inspect this aud
 
 You can view raw logs and execution plans in the `evidence/` folder of the repository.
 
+## A swarm of very small models
+
+The surface is small enough to be driven by models far below the size you would
+normally point at a tool-calling task. We ran three concurrent agents against one
+session for 151 seconds, each an instance of **Qwen3-0.6B** served locally by
+llama.cpp, given the [agent skill](/lambo/agent-skill/) as its system prompt and
+Lambo's MCP tools as its only capability.
+
+| Measurement | Result |
+|---|---|
+| Tool calls | 173, of which 165 succeeded |
+| Call mix | 86 `recall`, 45 `derive`, 40 `record_action`, 2 `inspect` |
+| Malformed-argument refusals | 0 — every call the model composed was well formed |
+| Recall before write | 43 of 43 tasks where the model acted, and none of its 45 derives without a prior recall in the same task |
+| Canonization dedup | 0.857 — 36 of 42 successful derives landed on concepts that already existed |
+| Durability after SIGTERM | 82 interactions and 12 concepts, matching the driver's ledger exactly |
+
+### What this measurement teaches you
+
+1. A 0.6-billion-parameter model can operate the MCP surface without composing a
+   single malformed call. The tool schemas are small enough to fit a model this
+   size, which is the property that makes a swarm cheap.
+2. The tasks in this run named the sequence to follow, so it measures whether a
+   very small model can *execute* the protocol reliably against a live surface,
+   not whether it reaches for memory unprompted.
+3. Dedup rises as the swarm runs. Concurrent agents observing overlapping ground
+   truth collapse onto shared canonical nodes rather than each growing a private
+   copy of the graph.
+
+<Note>
+Not every small model can do this. Under the same llama.cpp build, **LFM2-350M**
+and **functiongemma-270m** cannot emit tool calls at all: probed through both an
+agent harness and the raw OpenAI tools API, they return prose where a `tool_calls`
+field should be. Tool-calling ability is the gate, and it does not track parameter
+count neatly. Every probe transcript is in `evidence/swarm/probes/`.
+</Note>
+
+Ledgers, server logs, and the durability readbacks are in `evidence/swarm/`.
+
 ## Recorded demonstrations
 
 Every claim on this page has a log or a test behind it. Some of them also have
