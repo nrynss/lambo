@@ -8,9 +8,6 @@ blocks:   submission (Tue Aug 18, 5:00 pm ET — 2:30 am IST Aug 19)
 parallel: high   # T9.1 ‖ T9.2 ‖ T9.5
 ```
 
-**Goal:** the spec §12.4 deliverables, all of them, with a buffer in front of the deadline.
-Nothing here is optional except where marked; the checklist *is* the phase.
-
 ---
 
 ### T9.1 — README & repo hygiene
