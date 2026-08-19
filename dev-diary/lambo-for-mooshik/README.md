@@ -39,6 +39,11 @@ has (D).
 
 E (consumption from Mooshik) stays in this file — it is two lines of manifest, not a workstream.
 
+[DOGFOOD.md](DOGFOOD.md) is not a workstream either: it is the proposal for running the
+branch's own development on a live Lambo session (pinned binary, store outside the repo,
+recall-before-workstream). Design only until someone runs it; its open questions get
+answered in that file.
+
 ---
 
 ## Task graph
