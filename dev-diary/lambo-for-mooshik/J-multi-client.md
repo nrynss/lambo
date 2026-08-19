@@ -244,3 +244,21 @@ Every figure is one rig, not a property of lambo.
 - [ ] A refused lease acquisition appears in the ledger from both sides (J4)
 - [ ] Docs state the multi-client default and the every-layer config rule (J5)
 - [ ] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
+
+---
+
+## Rig re-pin rides with J's landing
+
+When J lands, the dogfood **rig re-pin and the runbook update are one act, not two**:
+J changes `serve`'s startup behaviour (J2's proxy-on-refusal, J5's transport defaults) in
+ways that make parts of [DOGFOOD-SETUP.md](DOGFOOD-SETUP.md) §4/§5 stale the moment a
+J-carrying binary serves — §5's "one client at a time" interim rule is *specifically*
+written to be deleted by J2, and the per-client stdio blocks change meaning when a losing
+serve proxies instead of exiting. Re-pinning without the runbook edit ships a rig whose
+operating instructions describe the previous binary; editing the runbook without the
+re-pin describes a binary that is not running. Do both in the same commit/upgrade event,
+and let the heartbeat's `git_sha` change be the proof, per §2.
+
+Status note: this machine's rig was re-pinned to `0f672f1` (the I-close, ledger-carrying
+binary) on 2026-08-20; other machines re-pin per the runbook whenever they next set up —
+nothing else re-pins tonight.
