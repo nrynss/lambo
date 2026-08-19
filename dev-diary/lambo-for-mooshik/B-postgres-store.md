@@ -93,23 +93,30 @@ two halves are one contract.
 > `StoreConfig::vector_dim: Option<usize>`, i.e. the TOML key `[store] vector_dim`, serde-defaulted
 > like its siblings. Semantics as shipped, which B4 inherits rather than re-litigates:
 >
-> * It is an **operator-asserted pre-ingest pin** — an assertion about what the database already
->   holds, not a preference.
+> * It is an **operator-asserted pre-ingest pin** — an assertion about the width this deployment's
+>   vectors use, not a preference.
 > * Precedence in `build_store_with_vector_dim` is `cfg.vector_dim.or(param)`, then the
 >   `EmbedderConfig` default. So a pin outranks the resolved `[embedder] dim`, which outranks the
 >   default.
-> * `resolve_backends` **refuses to resolve** when the pin disagrees with the embedder's real output
->   width, naming both numbers. That refusal lives at the **serving verbs' resolution boundary, not
->   in store construction** — a migration verb (a future `lambo reembed`) must still be able to open
->   a store whose sessions carry a different contract in order to rewrite them.
-> * With **no** pin set, a width-agnostic store's `vector_dimensions()` is an **echo** of the
->   embedder width, so `check_vector_compatibility` compares a number to itself. Describe it that
->   way; the pin is what makes the check non-vacuous.
+> * `resolve_backends` **refuses to resolve** when the pin disagrees with the resolved
+>   `[embedder] dim`, naming both numbers. That refusal lives at the **serving verbs' resolution
+>   boundary, not in store construction** — a migration verb (a future `lambo reembed`) must still
+>   be able to open a store whose sessions carry a different contract in order to rewrite them. It
+>   is an **explicit comparison written inline in `resolve_backends`**, and it is deliberately
+>   **kind-agnostic**: a stale pin refuses a Postgres/Cockroach/`memory` resolve too (F-R2-4).
+> * `check_vector_compatibility` is **not** what performs that refusal, and a pin does not make it
+>   non-vacuous. A width-agnostic store's `vector_dimensions()` echoes the embedder width with no
+>   pin and echoes **the pin itself** once one is set, so the comparison is `x == x` either way; the
+>   pin check runs first and returns first. Describe it as an echo for a width-agnostic store, full
+>   stop (F-R2-3).
 >
 > Postgres, like Cockroach, will have a real `VECTOR(n)`/`vector(n)` DDL authority once B2 lands its
-> configurable width. Where a DDL width exists it **outranks the pin** (Cockroach already ignores
-> the key), so B4's job is to report the schema number and leave the pin to the width-agnostic
-> adapters. What B4 should still add is the check the DDL makes possible and SQLite cannot have:
+> configurable width. Where a DDL width exists it **outranks the pin** for *reporting* (Cockroach
+> reports its DDL number and ignores the key there) — but not at the resolution boundary, where the
+> kind-agnostic pin check still fires. So B4's job is to report the schema number and leave the pin's
+> *reporting* role to the width-agnostic adapters, without assuming the pin is inert on a
+> DDL-carrying store. What B4 should still add is the check the DDL makes possible and SQLite cannot
+> have:
 > that the *initialized* schema width matches config, verified against the live database rather
 > than echoed from the same config value.
 

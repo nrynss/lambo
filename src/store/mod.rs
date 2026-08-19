@@ -488,16 +488,24 @@ pub struct StoreConfig {
     /// carries no width of its own (SQLite's `BLOB`). `None` — the default — means
     /// the store echoes the resolved `[embedder] dim`.
     ///
-    /// Setting it is an assertion about what this database *already holds* (or is
-    /// about to hold), which is why it can disagree with the embedder and why that
-    /// disagreement is an error: `resolve::resolve_backends` refuses to resolve when
-    /// the pin and the embedder's real output width differ, naming both. That is the
-    /// only thing that makes `check_vector_compatibility` non-vacuous for SQLite —
-    /// without a pin the store's reported width *is* the embedder's, so the
-    /// comparison is `x == x` (F-R1-2).
+    /// Setting it is an assertion about the width this deployment's vectors use,
+    /// which is why it can disagree with the embedder and why that disagreement is an
+    /// error: `resolve::resolve_backends` refuses to resolve when the pin and the
+    /// resolved `[embedder] dim` differ, naming both. That refusal is an **explicit
+    /// comparison in `resolve_backends`**, not something `check_vector_compatibility`
+    /// performs — the latter stays an *echo* for a width-agnostic store either way,
+    /// since `vector_dimensions()` reports the pin itself once one is set, so the
+    /// comparison is `x == x` with a pin exactly as it is without one (F-R1-2 /
+    /// F-R2-3).
     ///
-    /// Cockroach ignores it: `VECTOR(n)` is parsed out of its own DDL, which is a
-    /// real schema authority and outranks a config assertion.
+    /// **Reporting** ignores it on Cockroach: `VECTOR(n)` is parsed out of its own
+    /// DDL, which is a real schema authority and outranks a config assertion. The
+    /// **resolution check does not** — it is deliberately kind-agnostic, so a pin
+    /// left behind in `lambo.toml` refuses a Cockroach or `memory` resolve too. A
+    /// stale pin failing loud is the pin's whole job; on a store that persists no
+    /// vectors at all (`memory`) the pin still asserts a width, and asserting one
+    /// this process cannot honour is a config error worth refusing rather than
+    /// silently ignoring (F-R2-4).
     #[serde(default)]
     pub vector_dim: Option<usize>,
 }
@@ -603,7 +611,10 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
 ///    `Some(embedder_cfg.dim)`, so with no pin the store reports the width the
 ///    process configured rather than a constant baked into the adapter. Note this
 ///    makes [`crate::resolve::check_vector_compatibility`] an **echo** rather than a
-///    check on that path; the pin is what gives it something real to compare.
+///    check on that path — and setting a pin does not change that: the pin becomes
+///    the reported width, so the echo echoes the pin. What bites on a pin/embedder
+///    disagreement is the explicit comparison in `resolve::resolve_backends`, which
+///    runs *before* `check_vector_compatibility` and returns first (F-R2-3).
 /// 3. the [`crate::embed::EmbedderConfig`] default — a **default, not a configured
 ///    width** (F-R1-8). Direct `build_store` callers (provision tools, store-only
 ///    verbs such as `resolve_store_only`, tests) land here, and nothing on that path

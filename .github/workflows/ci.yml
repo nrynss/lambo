@@ -161,6 +161,20 @@ jobs:
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --features demo
+          # F-R2-2: the row that compiles COCKROACH TEST CODE together with
+          # `fixtures`. No other row does: `demo` above is `cargo check` (no test
+          # targets) and `cockroach` is `--no-default-features --features
+          # store-cockroach` (no fixtures). That gap let three `StoreConfig`
+          # literals inside `#[cfg(feature = "fixtures")]` cockroach/canon test
+          # modules miss a new struct field — CI stayed green while
+          # `cargo test --features ship,fixtures --lib` and
+          # `cargo test --features demo` could not compile at all. `--all-targets`
+          # is what makes this row see them, and `ship,fixtures` is the widest
+          # adapter set in the tree (cockroach + memory + sqlite + embedders), so
+          # it also lints the two SQL adapters against each other. Same argument
+          # F-R1-7 made for `store-sqlite,fixtures` in the `sqlite-vectors` row.
+          - name: ship-fixtures
+            command: cargo clippy --all-targets --features ship,fixtures -- -D warnings
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

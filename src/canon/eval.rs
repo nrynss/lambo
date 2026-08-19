@@ -2306,6 +2306,7 @@ mod tests {
                 kind: crate::store::StoreKind::Cockroach,
                 dsn: Some(dsn),
                 path: None,
+                vector_dim: None,
             })
             .unwrap();
             store.init_schema().await.unwrap();

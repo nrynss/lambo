@@ -127,18 +127,27 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     }
     // F-R1-2: the pin is the one width authority a width-agnostic store can carry that
     // the embedder did not supply, so a disagreement between them is a real, reachable
-    // resolution failure rather than the self-comparison `check_vector_compatibility`
-    // performs when no pin is set. Refuse here — at the serving verbs' resolution
+    // resolution failure — unlike `check_vector_compatibility` below, which compares
+    // `store.vector_dimensions()` to the embedder width and therefore echoes either the
+    // embedder (no pin) or the pin itself (pin set): an echo in both cases, never the
+    // check that catches this (F-R2-3). Refuse here — at the serving verbs' resolution
     // boundary — and NOT in `build_store*`: a migration verb (a future `lambo reembed`)
     // must still be able to open a store whose sessions carry a different contract.
+    //
+    // F-R2-4: deliberately **kind-agnostic**. A pin left behind in `lambo.toml` refuses
+    // a `cockroach` or `memory` resolve as well as a `sqlite` one, even though those
+    // kinds do not report the pin as their width (Cockroach parses `VECTOR(n)`;
+    // MemoryStore has no vector column). A stale pin failing loud is the pin's job, so
+    // the message states the general property — the width this deployment's vectors use
+    // — rather than claiming anything about what a particular database already holds.
     if let Some(pinned) = store_cfg.vector_dim {
         if pinned != embed_dim {
             return Err(LamboError::Config(format!(
                 "store.vector_dim is pinned to {pinned} but the configured embedder emits \
-                 {embed_dim} — refusing to resolve: the pin asserts what this database \
-                 already holds, so serving with a different width would write vectors no \
-                 reader can interpret (drop the pin, change the embedder, or re-embed the \
-                 database)"
+                 {embed_dim} — refusing to resolve: the pin asserts the width this \
+                 deployment's vectors use, and serving with a different width would write \
+                 or read vectors against an asserted width that is not theirs (drop the \
+                 pin, change the embedder, or re-embed)"
             )));
         }
     }
@@ -341,7 +350,7 @@ mod tests {
             daemon: Default::default(),
         };
 
-        // The pin asserts this database holds 768-wide vectors; the embedder emits
+        // The pin asserts this deployment's vectors are 768 wide; the embedder emits
         // 1024. Refused at process resolution, with both numbers in the message.
         // `ResolvedBackends` is not `Debug`, so match rather than `unwrap_err`.
         let msg = match resolve_backends(file(Some(768))) {
@@ -355,7 +364,11 @@ mod tests {
             );
         }
 
-        // An agreeing pin resolves, and the store reports the pinned width.
+        // An agreeing pin resolves, and the store reports the pinned width — which is
+        // also why `check_vector_compatibility` stays vacuous *with* a pin: it is then
+        // handed the pin and compares it to the width the pin was just checked against
+        // (F-R2-3). The refusal above comes from the explicit comparison in
+        // `resolve_backends`, not from that function.
         let ok = resolve_backends(file(Some(1024))).unwrap();
         assert_eq!(ok.store.vector_dimensions(), Some(1024));
 

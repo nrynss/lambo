@@ -45,6 +45,34 @@ must call the checked variant. It must compare the expected contract to the sess
 contract *in the same transactional snapshot as every candidate query* and refuse a mismatch —
 the way the Cockroach path does.
 
+### The write side has to hold the width too (F-R1-1, completed under F-R2-1)
+
+Read-side detection is terminal and session-wide — `select_session_vectors` returns on the first
+bad row, so **one** width-mismatched concept fails the whole session's vector leg on every read,
+permanently. `concepts.embedding` is a width-agnostic `BLOB`, so unlike Cockroach's `VECTOR(n)` the
+adapter must hold the width by hand, and it takes **two** statements, not one:
+
+* `enforce_concept_vector_widths` (F-R1-1) refuses a concept whose vector disagrees with the
+  contract durable at its flush step, before any encoding, so a refusal leaves the transaction empty.
+* `set_embedding` (F-R2-1) NULLs every vector of a **different width** when it stamps a contract.
+  The gate alone was not enough: round 2 reproduced a **restamp** — `SetEmbedding{4}`,
+  `Concept{4-wide}`, `SetEmbedding{3}`, `Concept{3-wide}` — through one public `flush` with no
+  direct SQL, where every concept matched the contract of its own step and the batch still committed
+  a 4-wide vector under a `dim = 3` contract. That is the same terminal state, reached one ordering
+  over. With the wider predicate the batch is accepted and **self-heals**: the orphan is erased.
+
+Together: *no vector whose width disagrees with the session contract survives a write through this
+adapter.* The per-read check remains the defence against an externally edited database, which no
+write-side rule can cover.
+
+The quarantine keys on **width**, deliberately — a same-width `kind`/`model` relabel keeps its
+vectors, because `Graph::replace_embedding_with_operator_override` (the `--allow-embedding-mismatch`
+attach path) requires equal widths and explicitly permits a same-kind model rename with the vectors
+intact. Cockroach keeps the narrower NULL-contract-only quarantine, and that divergence is sound
+rather than an oversight: its `VECTOR(1024)` DDL means every stored vector is exactly that wide, so
+a restamp cannot produce a row that decodes to an unexpected width — it fails loud at the
+DDL-authority probe check instead. Recorded on `set_embedding` in `src/store/sqlite.rs`.
+
 ### Exact scan, not an index
 
 Lambo is session-scoped, so n stays small by construction. At 1024 f32 a concept vector is 4 KB:
@@ -57,7 +85,7 @@ the objection is not a stray `.so` — it is a C toolchain dependency across fou
 release targets plus auto-extension registration before sqlx opens a pool. Not worth it until an
 exact scan actually hurts.
 
-**Trigger to revisit — measure `hybrid::derive`, not recall** (corrected under F-R1-2 remediation;
+**Trigger to revisit — measure `hybrid::derive`, not recall** (corrected under F-R1-3 remediation;
 the original text said "recall latency", which named the *cooler* of the two paths). Recall runs
 **one** scan per query. `derive` calls `vector_candidates_checked` *inside* its per-unmatched-concept
 loop (`src/graph/hybrid.rs`), so a derive of `k` concepts over `n` stored vectors is **k×n** BLOB
@@ -153,9 +181,12 @@ stored) or from config, matching whatever B2 settles on as the authority.
       synthetic unit vectors into `SqliteStore` and into an exact-cosine oracle with the shared
       ordering contract, and asserts the returned `Vec<Scored<NodeId>>` is **exactly equal** across
       4 probes × 5 limits × 2 fixtures (40 assertions) — same ids, same order, same `f64` scores.
-      This replaces the prior artifact, which only *transcribed* Cockroach's `distance_to_score`
-      into a test body and therefore proved the formula was copied, not that the adapters agree on
-      candidates or ranks.
+      This supersedes the prior artifact for this box: `vector_scores_match_the_cockroach_distance_conversion`
+      only *transcribed* Cockroach's `distance_to_score` into a test body and therefore proved the
+      formula was copied, not that the adapters agree on candidates or ranks. It was **kept, not
+      replaced** — it still runs in the `sqlite-vectors` row, and a transcription test is worth
+      having as long as it is not mistaken for parity evidence (round 2's wording note: "replaces"
+      read as if it had been deleted).
       **Cockroach half: explicitly awaiting the live tier.** `cockroach-live` is gated off on this
       branch (`ci.yml`, `if: github.ref != 'refs/heads/lambo-for-mooshik'`), and no live DSN was
       available for this remediation, so no run compares the two adapters' answers on one graph.

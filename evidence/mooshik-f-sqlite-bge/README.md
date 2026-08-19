@@ -69,10 +69,16 @@ floor, not a vector-leg threshold. Two of these three queries clear it; one does
 Recording the one that does not is the point — a capture that only kept the wins would
 be the same kind of overclaim the finding was about.
 
-(The displayed recall scores are not the cosines: they pass through the leg merge and
-per-concept-type scaling, which is why 0.5706 shows as 0.29 for an `Entity` and 0.5823
-shows as 0.49 for a `Logic`. `cosine_probe.py` exists so the raw number is on the
-record independently.)
+(The displayed recall scores are not the cosines. The final score is
+`daemon_score * w_daemon + query_relevance * w_query` (`src/config.rs`), with defaults
+`w_daemon = w_query = 0.5` — **no concept-type term anywhere in it**. That arithmetic
+accounts for the displayed numbers: the flat floor is `0.5 * 0.5 = 0.25`, which is every
+baseline row; `0.5706 * 0.5 = 0.285`, displayed `0.29`. The `0.49` is not a type effect —
+a 0.012 cosine difference cannot move a score by 0.20 — it needs a **daemon-leg**
+contribution of ≈0.40, which that concept plausibly accrued from the *earlier* query in
+the same sequential run returning it: the daemon leg accumulates across a run, the query
+leg does not. `cosine_probe.py` exists so the raw cosine is on the record independently
+of any of this.)
 
 ## The context-framing asymmetry, visible in the numbers
 
@@ -100,9 +106,21 @@ database already holds, so serving with a different width would write vectors no
 can interpret (drop the pin, change the embedder, or re-embed the database)
 ```
 
-Before this remediation that disagreement was **unreachable**: SQLite's
-`vector_dimensions()` echoed the embedder's own width, so `check_vector_compatibility`
-compared a number to itself and could not fail on any path reaching it.
+Before F-R1-2 that disagreement was **unreachable**: SQLite's `vector_dimensions()`
+echoed the embedder's own width, so `check_vector_compatibility` compared a number to
+itself and could not fail on any path reaching it. It is the explicit pin comparison in
+`resolve::resolve_backends` that catches it — `check_vector_compatibility` remains an
+echo for a width-agnostic store, with a pin as well as without one, because the pin
+becomes the width the store reports (F-R2-3).
+
+**The message wording moved after this capture.** F-R2-4 replaced *"the pin asserts what
+this database already holds"* with *"the pin asserts the width this deployment's vectors
+use"*, because the refusal is deliberately kind-agnostic and the old sentence is false on
+a store that persists no vectors (`kind = "memory"`). The block above and
+`transcript.txt` are left as the run actually printed at the time rather than edited to
+match today's binary — a capture that gets retouched is not a capture. Re-running
+step 6 today prints the new sentence; every number in it is unchanged, since the wording
+is all that moved.
 
 ## Reproducing
 

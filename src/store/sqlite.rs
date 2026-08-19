@@ -28,11 +28,14 @@
 //!   `store::build_store_with_vector_dim`, else the `EmbedderConfig` default (so no
 //!   *third* hardcoded width is minted — issue #5 as filed asked for a literal
 //!   `Some(1024)`; F amends that).
-//!   - With a **pin** set, this is a real authority: an operator assertion about what
-//!     the database already holds, which `resolve_backends` refuses to contradict.
-//!   - With **no pin**, it is an **echo** of the embedder width, not an authority:
-//!     `resolve::check_vector_compatibility` is then comparing a number to itself and
-//!     cannot fail. Do not describe it as a store-side check on that path.
+//!   - With a **pin** set, the number is a real authority: an operator assertion about
+//!     the width this deployment's vectors use, which `resolve_backends` refuses to
+//!     contradict — via an **explicit pin comparison written there**, which runs and
+//!     returns before `check_vector_compatibility` (F-R2-3).
+//!   - `resolve::check_vector_compatibility` is an **echo** for this adapter either
+//!     way, and a pin does not change that: with no pin it receives the embedder width
+//!     the adapter was handed, and with a pin it receives the pin — a number against
+//!     itself in both cases. Never describe it as a store-side check for SQLite.
 //!   - On the `build_store` / `resolve_store_only` path (provision and other
 //!     store-only verbs, tests) the value is the `EmbedderConfig` **default** —
 //!     nothing configured or verified it, and it may disagree with every session in
@@ -43,7 +46,13 @@
 //!   transaction as the candidate query (`vector_candidates_checked` refuses a
 //!   mismatch), and at the **write gate**, where `enforce_concept_vector_widths`
 //!   refuses a concept whose vector width disagrees with it — the check Cockroach's
-//!   DDL performs for free.
+//!   DDL performs for free. The gate has a second half in [`set_embedding`], which
+//!   NULLs every vector of a different width when it stamps a contract (F-R2-1): the
+//!   gate alone could not stop a **restamp** from leaving earlier vectors under a
+//!   width they no longer match, because each of them was valid when written. The
+//!   two together give the property — *no vector whose width disagrees with the
+//!   session contract survives a write through this adapter* — and the per-read
+//!   check remains the only defence against a hand-edited database.
 //!
 //! ### The scan is a seam
 //!
@@ -1668,8 +1677,19 @@ async fn upsert_interactions(
 ///   concepts of that `dim` **passes** (this is the shape `seed_vectors` and every
 ///   real `hybrid::derive` flush use);
 /// * concepts submitted **before** it are validated against the contract that was
-///   durable when they were written, which is the same contract a reader would
-///   have interpreted them under.
+///   durable when they were written — which is **not** necessarily the contract a
+///   reader will interpret them under, because the later `SetEmbedding` can move
+///   it. That gap is closed on the other side, in [`set_embedding`]: stamping a
+///   contract NULLs every vector of a different width, so a concept validated
+///   against a contract that has since changed width is erased rather than
+///   orphaned (F-R2-1 — round 2 reproduced the orphan through one public `flush`
+///   when the quarantine only fired over a NULL contract).
+///
+/// So the two halves together, and neither alone, give the property this gate is
+/// for: **no vector whose width disagrees with the session contract can survive a
+/// write through this adapter.** The gate refuses a mismatch against a contract
+/// that already exists; the quarantine erases one that a contract change would
+/// otherwise leave behind.
 ///
 /// # A vector arriving with no contract stamped is accepted
 ///
@@ -1681,8 +1701,9 @@ async fn upsert_interactions(
 /// pin, see the module doc's "Width authority"). Accepting is safe because such a
 /// vector is unreachable *and* cannot survive to become the fatal mismatch above:
 /// the read path returns an empty pool while the contract is NULL, and
-/// [`set_embedding`] NULLs every existing vector when it stamps a contract over a
-/// NULL one. The width becomes enforceable exactly when it becomes meaningful.
+/// [`set_embedding`] NULLs every vector of a different width when it stamps —
+/// which from a NULL contract means all of them. The width becomes enforceable
+/// exactly when it becomes meaningful.
 async fn enforce_concept_vector_widths(
     tx: &mut sqlx::SqliteConnection,
     rows: &[ConceptRow<'_>],
@@ -1939,6 +1960,62 @@ async fn set_root_goal(
 
 /// Persist the embedding-space identity in the same ordered transaction as
 /// concept vectors. A reload must never observe vectors without their contract.
+///
+/// # Stamping a contract quarantines every vector of a different width (F-R2-1)
+///
+/// The `UPDATE concepts SET embedding = NULL` below fires whenever the width
+/// being stamped differs from the width durable *before* this statement —
+/// `embedding_dim IS NOT ?` is SQLite's null-safe comparison, so it is true both
+/// for an unstamped session (`embedding_dim IS NULL`, the original case) and for
+/// a **restamp** from one width to another. Round 2 reproduced why the narrower
+/// NULL-only predicate was not enough: a batch of
+/// `SetEmbedding{4}`, `Concept{4-wide}`, `SetEmbedding{3}`, `Concept{3-wide}`
+/// passes [`enforce_concept_vector_widths`] at every step — each concept really
+/// does match the contract of its own moment — and still commits a 4-wide vector
+/// under a `dim = 3` contract, which is the durable, session-wide,
+/// permanent-until-hand-edited recall failure the gate exists to prevent. With
+/// this predicate the second stamp NULLs the earlier vector, so the batch
+/// self-heals instead: it is accepted, and the terminal state is a `dim = 3`
+/// contract beside only 3-wide vectors. Same for the two-flush shape.
+///
+/// Together with the gate this closes the property outright: **no vector whose
+/// width disagrees with the session contract can survive a write through this
+/// adapter.** The gate refuses a mismatch against an existing contract; this
+/// statement erases one that a contract change would otherwise orphan. The read
+/// path's per-row width check remains the defence against an externally edited
+/// database, which no write-side rule can cover.
+///
+/// # Why *width*, and not any contract change
+///
+/// A kind or model change at the **same** width does **not** quarantine, and that
+/// is deliberate rather than an omission:
+///
+/// * The graph tier already treats those cases differently on purpose.
+///   `Graph::replace_embedding_with_operator_override` — the
+///   `--allow-embedding-mismatch` writer attach path — *requires* equal widths,
+///   refuses a `kind` change while any vector remains, and explicitly permits a
+///   same-kind **model identifier rename** with the vectors left in place. Erasing
+///   them here would destroy data on the one migration path built to keep it.
+/// * Width is the only contract property this storage can enforce. A same-width
+///   relabel leaves every BLOB decodable and every read correct; a width change
+///   makes the stored bytes uninterpretable. Semantic space identity (kind/model)
+///   is checked where it is knowable — `EmbeddingContract::ensure_compatible`, at
+///   the graph tier and in `vector_candidates_checked` against the caller's
+///   expected contract.
+///
+/// # Cockroach parity: deliberate divergence, with the reason
+///
+/// `cockroach.rs`'s `QUARANTINE_LEGACY_EMBEDDINGS_SQL` keeps the NULL-contract-only
+/// predicate. That is a divergence, and it is sound because the shape it would
+/// close cannot arise there: `concepts.embedding` is `VECTOR(1024)` in the DDL, so
+/// every stored vector is exactly that wide or NULL, and a restamp to any other
+/// width cannot produce a row that decodes to an unexpected width — it instead
+/// makes the whole session refuse loudly at `check_embedding_dim` against the
+/// DDL-parsed authority, before any row is read. SQLite's `BLOB` has no such
+/// authority, which is why the adapter has to hold this line by hand. (The second
+/// reason is honest rather than structural: this worktree has no Cockroach DSN, so
+/// a change to that statement could not be executed, and an unrun SQL edit is
+/// worse than a documented asymmetry.)
 async fn set_embedding(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,
@@ -1953,13 +2030,18 @@ async fn set_embedding(
             ))
         })?;
     if embedding.is_some() {
+        // F-R2-1: `IS NOT` is SQLite's null-safe inequality, so this covers both
+        // "no contract yet" (embedding_dim IS NULL) and "a different width was
+        // durable a moment ago" — a restamp. Equal widths quarantine nothing, which
+        // is what keeps a same-width model rename non-destructive. See the doc above.
         sqlx::query(
             "UPDATE concepts SET embedding = NULL WHERE session_id = ? AND EXISTS (\
              SELECT 1 FROM sessions WHERE session_id = ? \
-             AND embedding_kind IS NULL AND embedding_dim IS NULL)",
+             AND embedding_dim IS NOT ?)",
         )
         .bind(&session.0)
         .bind(&session.0)
+        .bind(dim)
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("quarantine legacy embeddings: {m}")))?;
@@ -3106,7 +3188,8 @@ mod tests {
         assert_eq!(loaded.embedding.as_ref(), Some(&vec_contract(4)));
         assert_eq!(
             loaded.concepts[0].embedding, None,
-            "quarantined by set_embedding, so it can never become the fatal mismatch"
+            "quarantined by set_embedding: stamping a width NULLs every vector of a \
+             different width, and from a NULL contract that is all of them"
         );
         // Consequently the read path is clean rather than poisoned.
         assert!(store
@@ -3114,6 +3197,259 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// F-R2-1, the ordering round 2 found: a **restamp**. Every concept can match the
+    /// contract of its own moment — so `enforce_concept_vector_widths` has nothing to
+    /// refuse — while the *final* contract disagrees with a vector written earlier in
+    /// the same batch. Round 2 reproduced exactly this through one public `flush` with
+    /// no direct SQL and reached the terminal state round 1 called fatal: a 4-wide
+    /// vector under a `dim = 3` contract, after which the whole session's vector leg
+    /// fails on every read because `select_session_vectors` returns on the first bad
+    /// row.
+    ///
+    /// The fix is on the other side of the barrier — `set_embedding` now NULLs every
+    /// vector of a different width when it stamps — so the batch is **accepted and
+    /// self-heals** rather than refused: the earlier vector is erased, and the
+    /// terminal state is a `dim = 3` contract beside 3-wide vectors only. This test
+    /// asserts the terminal state is clean, which is the property that matters; it
+    /// would fail identically if a future change made the batch pass *and* keep the
+    /// orphan.
+    #[tokio::test]
+    async fn vector_write_gate_restamp_inside_one_batch_cannot_orphan_earlier_vectors() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let sid = SessionId::from("gate-restamp-one-batch");
+        let origin = NodeId::new();
+        let wide = NodeId::new();
+        let narrow = NodeId::new();
+
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, origin, None, ts),
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(vec_contract(4)),
+                        },
+                        plant_concept_with_vector(
+                            &sid,
+                            wide,
+                            origin,
+                            "written under dim 4",
+                            ts,
+                            vec![1.0, 0.0, 0.0, 0.0],
+                        ),
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(vec_contract(3)),
+                        },
+                        plant_concept_with_vector(
+                            &sid,
+                            narrow,
+                            origin,
+                            "written under dim 3",
+                            ts,
+                            vec![1.0, 0.0, 0.0],
+                        ),
+                    ],
+                },
+                None,
+            )
+            .await
+            .expect("every concept matches the contract of its own step, so nothing is refused");
+
+        assert_restamp_left_no_orphan(&store, &sid, wide, narrow).await;
+    }
+
+    /// F-R2-1 across a flush boundary — the shape an operator actually produces,
+    /// since a restamp normally follows a commit rather than sharing a batch with the
+    /// vectors it invalidates. Round 2 reproduced both; the quarantine is a property
+    /// of the `SetEmbedding` statement, so both must end clean for the same reason.
+    #[tokio::test]
+    async fn vector_write_gate_restamp_across_two_flushes_cannot_orphan_earlier_vectors() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let sid = SessionId::from("gate-restamp-two-flushes");
+        let origin = NodeId::new();
+        let wide = NodeId::new();
+        let narrow = NodeId::new();
+
+        // Flush 1: an ordinary, entirely legal dim-4 session.
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, origin, None, ts),
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(vec_contract(4)),
+                        },
+                        plant_concept_with_vector(
+                            &sid,
+                            wide,
+                            origin,
+                            "written under dim 4",
+                            ts,
+                            vec![1.0, 0.0, 0.0, 0.0],
+                        ),
+                    ],
+                },
+                None,
+            )
+            .await
+            .expect("a dim-4 session with 4-wide vectors is legal");
+        // Its read path answers, so the state being repaired below is a live one.
+        assert_eq!(
+            store
+                .vector_candidates_checked(&sid, &[1.0, 0.0, 0.0, 0.0], &vec_contract(4), 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Flush 2: restamp to dim 3 and write a 3-wide concept. The already-committed
+        // 4-wide vector is the one the old NULL-only quarantine left behind.
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(vec_contract(3)),
+                        },
+                        plant_concept_with_vector(
+                            &sid,
+                            narrow,
+                            origin,
+                            "written under dim 3",
+                            ts,
+                            vec![1.0, 0.0, 0.0],
+                        ),
+                    ],
+                },
+                None,
+            )
+            .await
+            .expect("the restamp and the concepts that follow it are each locally valid");
+
+        assert_restamp_left_no_orphan(&store, &sid, wide, narrow).await;
+    }
+
+    /// Shared terminal-state assertion for the two restamp orderings: the durable
+    /// contract is the restamped one, the vector written under the *old* width is
+    /// gone rather than orphaned, the vector written under the new width survives,
+    /// and the read path answers cleanly instead of failing session-wide.
+    async fn assert_restamp_left_no_orphan(
+        store: &SqliteStore,
+        sid: &SessionId,
+        wide: NodeId,
+        narrow: NodeId,
+    ) {
+        let loaded = store.load_session(sid).await.unwrap();
+        assert_eq!(
+            loaded.embedding.as_ref(),
+            Some(&vec_contract(3)),
+            "the last stamp is the durable contract"
+        );
+        let find = |id: NodeId| {
+            loaded
+                .concepts
+                .iter()
+                .find(|c| c.id == id)
+                .expect("concept present")
+                .embedding
+                .clone()
+        };
+        assert_eq!(
+            find(wide),
+            None,
+            "the 4-wide vector must be quarantined by the dim-3 stamp, not left \
+             under a contract that says 3"
+        );
+        assert_eq!(
+            find(narrow),
+            Some(vec![1.0f32, 0.0, 0.0]),
+            "a vector written under the new contract is untouched"
+        );
+        // The whole point: before F-R2-1 both of these were `Backend` errors for the
+        // entire session — including for the good concept — permanently.
+        let hits = store
+            .vector_candidates_checked(sid, &[1.0, 0.0, 0.0], &vec_contract(3), 5)
+            .await
+            .expect("the session's vector leg still answers after a restamp");
+        assert_eq!(
+            hits.len(),
+            1,
+            "only the surviving 3-wide vector is a candidate"
+        );
+        assert_eq!(hits[0].item, narrow);
+        // The frozen surface reads the stored contract itself, so it must agree.
+        let frozen = store
+            .vector_candidates(sid, &[1.0, 0.0, 0.0], 5)
+            .await
+            .expect("the frozen surface is clean too");
+        assert_eq!(frozen, hits);
+    }
+
+    /// The scope decision F-R2-1 forced, pinned so it cannot be "fixed" into a
+    /// data-losing quarantine-on-any-change: the quarantine keys on **width**, so a
+    /// same-width `kind`/`model` relabel leaves every vector in place. That is not an
+    /// oversight — `Graph::replace_embedding_with_operator_override`, the
+    /// `--allow-embedding-mismatch` writer attach path, requires equal widths and
+    /// deliberately permits a same-kind model-identifier rename *with the vectors
+    /// intact*. Erasing them here would destroy data on the one migration path built
+    /// to keep it, and width is the only contract property this storage can enforce:
+    /// a same-width relabel leaves every BLOB decodable.
+    #[tokio::test]
+    async fn vector_write_gate_same_width_relabel_keeps_the_vectors() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("gate-same-width-relabel");
+        let c = NodeId::new();
+        seed_vectors(
+            &store,
+            &sid,
+            &vec_contract(4),
+            &[(c, "kept across a rename", vec![1.0, 0.0, 0.0, 0.0])],
+        )
+        .await;
+
+        let renamed = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("test-model-v2".into()),
+            dim: 4,
+        };
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(renamed.clone()),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(loaded.embedding.as_ref(), Some(&renamed));
+        assert_eq!(
+            loaded.concepts[0].embedding.as_deref(),
+            Some([1.0f32, 0.0, 0.0, 0.0].as_slice()),
+            "a same-width relabel must not erase vectors the operator declared compatible"
+        );
+        let hits = store
+            .vector_candidates_checked(&sid, &[1.0, 0.0, 0.0, 0.0], &renamed, 5)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item, c);
     }
 
     /// F1 boundaries: a top-k above the candidate count returns the whole pool, and

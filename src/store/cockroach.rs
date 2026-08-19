@@ -367,6 +367,21 @@ SET embedding_kind = $2::STRING,
 WHERE session_id = $1
 "#;
 
+/// Stamping a contract over an **unstamped** session NULLs its vectors: nothing
+/// attested which space they were in, so they are unreadable by construction.
+///
+/// **Deliberate divergence from SQLite (F-R2-1), recorded here so it reads as a
+/// decision and not an oversight.** `sqlite.rs`'s `set_embedding` widened the same
+/// predicate to fire on any *width* change, not only over a NULL contract, because a
+/// restamp there could leave earlier vectors under a width they no longer match. That
+/// shape cannot arise on Cockroach: `concepts.embedding` is `VECTOR(1024)` in the DDL
+/// (`migrations/cockroach/001_init.sql`), so every stored vector is exactly that wide
+/// or NULL and no row can decode to an unexpected width — a restamp to some other
+/// width instead makes the session refuse loudly at `check_embedding_dim` against the
+/// DDL-parsed authority, before a single candidate row is read. SQLite's width-agnostic
+/// `BLOB` has no such authority, which is why only it needs the wider rule. Widen this
+/// statement too if Cockroach's width ever becomes configurable per deployment (B2's
+/// Postgres split is where that would land).
 const QUARANTINE_LEGACY_EMBEDDINGS_SQL: &str = r#"
 UPDATE concepts SET embedding = NULL
 WHERE session_id = $1 AND EXISTS (
@@ -2684,6 +2699,7 @@ mod tests {
             kind: super::super::StoreKind::Cockroach,
             dsn: Some("postgresql://localhost:26257/defaultdb?sslmode=disable".into()),
             path: None,
+            vector_dim: None,
         })
         .unwrap();
         let err = store
@@ -3256,6 +3272,9 @@ mod conformance {
             kind: super::super::StoreKind::Cockroach,
             dsn: Some(dsn),
             path: None,
+            // Cockroach parses its width out of `VECTOR(n)`; the pin is for
+            // width-agnostic adapters, so the conformance suite carries none.
+            vector_dim: None,
         }
     }
 
