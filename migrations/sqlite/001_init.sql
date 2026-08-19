@@ -39,11 +39,10 @@
 -- against a latency number nobody has measured; see store/sqlite.rs, "The scan is
 -- a seam", for the replacement point and the trigger to revisit.
 -- All spec INDEX clauses are separate CREATE INDEX IF NOT EXISTS statements
--- below. Table-level UNIQUE /
--- PRIMARY KEY constraints stay inline — SQLite autoindexes them, which is
--- what ON CONFLICT targets require. REFERENCES clauses are kept for schema
--- fidelity; SQLite enforces them only when the connection sets
--- PRAGMA foreign_keys = ON (the adapter's job).
+-- below. Table-level UNIQUE / PRIMARY KEY constraints stay inline — SQLite
+-- autoindexes them, which is what ON CONFLICT targets require. REFERENCES
+-- clauses are kept for schema fidelity; SQLite enforces them only when the
+-- connection sets PRAGMA foreign_keys = ON (the adapter's job).
 --
 -- Partial UNIQUE index (spec §4 errata, muse-spark M1-M2): canonical-key
 -- uniqueness is partial — non-Observation concepts only. Demoted Observations

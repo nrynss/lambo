@@ -606,6 +606,7 @@ kind = "fake"
                 kind: StoreKind::Sqlite,
                 dsn: None,
                 path: Some("./x.db".into()),
+                vector_dim: None,
             },
             embedder: EmbedderConfig {
                 kind: EmbedderKind::Fixture,

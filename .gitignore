@@ -53,3 +53,7 @@ serve.pid
 # SQLite sidecars left behind by reading a committed evidence store
 *.db-shm
 *.db-wal
+
+# Test-run log the CI sqlite-vectors row tees so its guards can assert the
+# outcome (F-R1-6); dropped in the workspace when the row is run locally.
+vector-run.log

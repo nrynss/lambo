@@ -1,0 +1,105 @@
+
+=== 0. Environment ===
+lambo 0.2.2
+llama-server health: {"status":"ok"}
+embedder width reported by the server: 1024
+--- config ---
+# F-R1-5 evidence config: the real local store + a REAL embedder.
+#
+# This is the configuration the docs' End-to-end walkthrough deliberately does NOT
+# use: the walkthrough runs `kind = "fixture"`, which exercises the vector leg
+# mechanically but has no semantics in it. Here the embedder is BGE-M3 (1024-d)
+# served by a local llama.cpp server over the OpenAI-compatible
+# POST /v1/embeddings route, so a semantic hit is possible at all.
+
+[store]
+kind = "sqlite"
+path = "./evidence/mooshik-f-sqlite-bge/f-bge.db"
+# The operator's pre-ingest width pin (added under F remediation, F-R1-2). BGE-M3
+# emits 1024, so this agrees; resolve refuses to start any serving verb if the
+# embedder ever changes width under this database.
+vector_dim = 1024
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"
+
+=== 1. Fresh store ===
+sqlite schema provisioned (init_schema, idempotent)
+
+=== 2. Derive three concepts (a real embedder, so these vectors mean something) ===
+derived 1 concept(s): 1 created, 0 matched existing
+derived 1 concept(s): 1 created, 0 matched existing
+derived 1 concept(s): 1 created, 0 matched existing
+
+=== 3. Durable readback: the stamped contract and the stored vectors ===
+sessions: f-bge-semantic | kind=bge_m3 | model=NULL | dim=1024
+auth middleware validates bearer tokens | blob_bytes=12786 | elements=1024
+deployment must stay backward compatible | blob_bytes=12786 | elements=1024
+user schema stores account records | blob_bytes=12781 | elements=1024
+
+=== 4. THE POINT: recall with queries that share no vocabulary with any concept ===
+
+--- query: database table for people signing up
+    shared words with 'user schema stores account records': NONE
+    shared words with 'auth middleware validates bearer tokens': NONE
+    shared words with 'deployment must stay backward compatible': NONE
+user schema stores account records [Entity] (score 0.29)
+
+deployment must stay backward compatible [Constraint] (score 0.25)
+
+auth middleware validates bearer tokens [Logic] (score 0.25)
+
+--- query: login token checking layer
+    shared words with 'user schema stores account records': NONE
+    shared words with 'auth middleware validates bearer tokens': NONE
+    shared words with 'deployment must stay backward compatible': NONE
+auth middleware validates bearer tokens [Logic] (score 0.49)
+
+user schema stores account records [Entity] (score 0.25)
+
+deployment must stay backward compatible [Constraint] (score 0.25)
+
+--- query: changes that do not break existing clients
+    shared words with 'user schema stores account records': NONE
+    shared words with 'auth middleware validates bearer tokens': NONE
+    shared words with 'deployment must stay backward compatible': NONE
+user schema stores account records [Entity] (score 0.25)
+
+deployment must stay backward compatible [Constraint] (score 0.25)
+
+auth middleware validates bearer tokens [Logic] (score 0.25)
+
+=== 5. The raw similarity the adapter actually scores ===
+3 durable vectors, width 1024
+
+Cosine of the recall query against each DURABLE stored vector.
+Note what the stored vector is the embedding OF: hybrid embeds the
+context-framed string 'Concept: {content}' (no origin text on the CLI
+path), while recall embeds the query bare. This is that comparison.
+
+  query: 'database table for people signing up'
+    +0.5706  user schema stores account records
+    +0.4120  deployment must stay backward compatible
+    +0.4019  auth middleware validates bearer tokens
+    -> top: 'user schema stores account records' (margin over 2nd: +0.1586)
+
+  query: 'login token checking layer'
+    +0.5823  auth middleware validates bearer tokens
+    +0.4171  deployment must stay backward compatible
+    +0.3571  user schema stores account records
+    -> top: 'auth middleware validates bearer tokens' (margin over 2nd: +0.1652)
+
+  query: 'changes that do not break existing clients'
+    +0.3991  deployment must stay backward compatible
+    +0.3515  user schema stores account records
+    +0.3258  auth middleware validates bearer tokens
+    -> top: 'deployment must stay backward compatible' (margin over 2nd: +0.0476)
+
+=== 6. F-R1-2: the width pin is a real authority — a disagreement is refused ===
+--- the only change: [embedder] dim 1024 -> 768, against store.vector_dim = 1024 ---
+lambo recall: failed to build backends: config: store.vector_dim is pinned to 1024 but the configured embedder emits 768 — refusing to resolve: the pin asserts what this database already holds, so serving with a different width would write vectors no reader can interpret (drop the pin, change the embedder, or re-embed the database)
+(refused at process resolution, as it must be)
+
+=== done ===

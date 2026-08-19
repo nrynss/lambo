@@ -1776,6 +1776,7 @@ mod tests {
                 kind: StoreKind::Memory,
                 dsn: None,
                 path: None,
+                vector_dim: None,
             },
             embedder_cfg: EmbedderConfig {
                 kind: EmbedderKind::Fixture,

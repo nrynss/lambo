@@ -223,6 +223,21 @@ fn note_fallback_logged(session: &SessionId) -> bool {
 /// The "Concept: " framing guards the no-origin case so even a missing origin is
 /// never a bare label; the calibration evidence that separates the classes comes
 /// from the real interaction text, which the tests carry.
+///
+/// # The asymmetry this creates with recall (F-R1-5)
+///
+/// What lands in `concepts.embedding` is the vector of this **framed** string, but
+/// `cli::recall` embeds the user's query **bare**. So a recall probe is always
+/// compared against `"{content} — {origin}"`, never against `content` alone. It is a
+/// real cost, not a bug: with a semantic embedder the framing shifts similarity
+/// slightly and the ranking survives it (see `evidence/mooshik-f-sqlite-bge/`, where a
+/// query sharing no vocabulary with the concept still recalls it). With a
+/// *deterministic* embedder it is fatal to the match — `FixtureEmbedder` keys on the
+/// exact normalized phrase, so the framed string and a bare query are near-orthogonal
+/// by construction, which is why the SQLite acceptance test needs a test-only
+/// `ContextTolerantEmbedder` that strips the framing before delegating. No such
+/// wrapper exists (or should exist) in production; anything relying on it is testing
+/// the wrapper, not the product.
 fn context_text(content: &str, origin: Option<&str>) -> String {
     match origin.map(str::trim).filter(|s| !s.is_empty()) {
         Some(origin) => format!("{content} — {origin}"),

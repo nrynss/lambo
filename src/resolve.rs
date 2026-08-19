@@ -34,12 +34,19 @@ pub struct ResolvedBackends {
     pub config: crate::Config,
 }
 
-/// Store vector width vs embedder output dim (store is the authority when it persists vectors).
+/// Store vector width vs embedder output dim.
 ///
 /// * `None` store width (MemoryStore) → any positive embedder dim OK.
-/// * `Some(n)` → embedder must emit exactly `n`. Cockroach's `n` is its `VECTOR(n)` DDL;
-///   SQLite's `BLOB` column has no width of its own, so it reports the width this
-///   process configured (see `build_store_with_vector_dim`).
+/// * `Some(n)` → embedder must emit exactly `n`. Cockroach's `n` is its `VECTOR(n)`
+///   DDL — a real schema authority, so this is a real check for Cockroach.
+///
+/// **For a width-agnostic store this can be a self-comparison** (F-R1-2). SQLite's
+/// `BLOB` has no width of its own, so unless the operator sets
+/// [`crate::store::StoreConfig::vector_dim`] it reports the very embedder width this
+/// function is handed, and `store_dim != embedder_dim` is unreachable. The check that
+/// bites on that path is the explicit pin comparison in [`resolve_backends`]; the
+/// authority that attests the stored vectors' space is the session's durable contract,
+/// enforced per candidate read inside the adapter.
 pub fn check_vector_compatibility(
     store_vector_dim: Option<usize>,
     embedder_dim: usize,
@@ -98,8 +105,10 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     daemon_cfg.apply_to(&mut config);
     config.validate()?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
-    // the configured embedder width, so `check_vector_compatibility` below still has a
-    // store-side authority to check and no adapter needs a width constant of its own.
+    // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
+    // the configured embedder width — an echo, not a store-side authority, which is
+    // why `check_vector_compatibility` alone cannot catch a SQLite disagreement and
+    // the explicit pin check below exists (F-R1-2).
     // A zero dim is passed through as `None` so `build_embedder` produces the canonical
     // "embedder dim must be > 0" error rather than a store-shaped one.
     let store =
@@ -115,6 +124,23 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
             "embedder reported dim {embed_dim} but config requested {}",
             embedder_cfg.dim
         )));
+    }
+    // F-R1-2: the pin is the one width authority a width-agnostic store can carry that
+    // the embedder did not supply, so a disagreement between them is a real, reachable
+    // resolution failure rather than the self-comparison `check_vector_compatibility`
+    // performs when no pin is set. Refuse here — at the serving verbs' resolution
+    // boundary — and NOT in `build_store*`: a migration verb (a future `lambo reembed`)
+    // must still be able to open a store whose sessions carry a different contract.
+    if let Some(pinned) = store_cfg.vector_dim {
+        if pinned != embed_dim {
+            return Err(LamboError::Config(format!(
+                "store.vector_dim is pinned to {pinned} but the configured embedder emits \
+                 {embed_dim} — refusing to resolve: the pin asserts what this database \
+                 already holds, so serving with a different width would write vectors no \
+                 reader can interpret (drop the pin, change the embedder, or re-embed the \
+                 database)"
+            )));
+        }
     }
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
@@ -266,6 +292,7 @@ mod tests {
                 kind: StoreKind::Memory,
                 dsn: None,
                 path: None,
+                vector_dim: None,
             },
             embedder: EmbedderConfig {
                 kind: EmbedderKind::Fixture,
@@ -280,6 +307,84 @@ mod tests {
         assert_eq!(r.store.vector_dimensions(), None);
         assert_eq!(r.embedding.dim, 1024);
         assert_eq!(r.embedding.kind, "fixture");
+    }
+
+    /// F-R1-2: a width disagreement that is **reachable through
+    /// `resolve_backends`**, which is precisely what the pre-remediation tree could
+    /// not produce for SQLite. The old test built a `(Some(1536), 768)` pair by hand
+    /// and asserted `check_vector_compatibility` rejected it; but with the store
+    /// echoing the embedder, no config could make `resolve_backends` reach that pair,
+    /// so the check was `x == x` on every real path. `store.vector_dim` is the
+    /// operator's pin, so it *can* disagree — and must be refused, naming both widths.
+    // Needs a real embedder as well as the adapter: `resolve_backends` builds the
+    // embedder before it reaches the pin check, so without `embed-fixture` the
+    // refusal under test is masked by a missing-feature error.
+    #[cfg(all(feature = "store-sqlite", feature = "embed-fixture"))]
+    #[test]
+    fn a_pinned_store_width_disagreeing_with_the_embedder_is_refused_at_resolve() {
+        use crate::embed::EmbedderKind;
+        use crate::store::StoreKind;
+        let file = |vector_dim: Option<usize>| LamboFile {
+            store: StoreConfig {
+                kind: StoreKind::Sqlite,
+                dsn: None,
+                path: Some("sqlite::memory:".into()),
+                vector_dim,
+            },
+            embedder: EmbedderConfig {
+                // FixtureEmbedder emits 1024.
+                kind: EmbedderKind::Fixture,
+                dim: 1024,
+                llama_url: None,
+                llama_model: None,
+            },
+            daemon: Default::default(),
+        };
+
+        // The pin asserts this database holds 768-wide vectors; the embedder emits
+        // 1024. Refused at process resolution, with both numbers in the message.
+        // `ResolvedBackends` is not `Debug`, so match rather than `unwrap_err`.
+        let msg = match resolve_backends(file(Some(768))) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("a pin disagreeing with the embedder must not resolve"),
+        };
+        for needle in ["768", "1024", "store.vector_dim"] {
+            assert!(
+                msg.contains(needle),
+                "the refusal must name the pin and both widths: {msg}"
+            );
+        }
+
+        // An agreeing pin resolves, and the store reports the pinned width.
+        let ok = resolve_backends(file(Some(1024))).unwrap();
+        assert_eq!(ok.store.vector_dimensions(), Some(1024));
+
+        // No pin: the store echoes the embedder, so this cannot fail — the vacuity
+        // the finding names. Pinned here so a future change that gives SQLite a real
+        // store-side authority has to revisit this assertion deliberately.
+        let echo = resolve_backends(file(None)).unwrap();
+        assert_eq!(
+            echo.store.vector_dimensions(),
+            Some(1024),
+            "with no pin, vector_dimensions() is an echo of the embedder width"
+        );
+    }
+
+    /// The pin's refusal belongs to the serving verbs' resolution path, NOT to store
+    /// construction: a future `lambo reembed` migration verb must be able to open a
+    /// store whose sessions carry a different contract in order to rewrite them.
+    #[cfg(feature = "store-sqlite")]
+    #[test]
+    fn the_pin_does_not_block_store_construction() {
+        use crate::store::StoreKind;
+        let store = crate::store::build_store(StoreConfig {
+            kind: StoreKind::Sqlite,
+            dsn: None,
+            path: Some("sqlite::memory:".into()),
+            vector_dim: Some(768),
+        })
+        .expect("a pinned width must not stop a store from opening");
+        assert_eq!(store.vector_dimensions(), Some(768));
     }
 
     #[test]

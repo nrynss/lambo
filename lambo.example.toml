@@ -13,6 +13,13 @@ kind = "memory"
 # dsn = "postgresql://USER:PASSWORD@HOST:26257/lambo?sslmode=verify-full&sslrootcert=system"
 # SQLite path when kind = "sqlite":
 # path = "./lambo.db"
+# Operator-asserted vector width pin, for stores whose vector column carries no width of
+# its own (SQLite's BLOB). Omit it and the store simply ECHOES [embedder] dim below —
+# which means process resolve compares that number to itself and cannot catch a
+# disagreement. Set it to assert what this database already holds: resolve then refuses
+# to start any serving verb whose embedder emits a different width, naming both numbers.
+# Cockroach ignores it — VECTOR(n) in its own DDL is a real schema authority and wins.
+# vector_dim = 1024
 
 [embedder]
 # bge_m3 | bedrock | fixture
@@ -20,6 +27,11 @@ kind = "bge_m3"
 # Expected embedder output width (default for BGE demos). Not a global product law:
 # stores that persist vectors expose GraphStore::vector_dimensions(); process resolve
 # requires a match. MemoryStore has no vector column → any positive dim is allowed.
+# How much that match proves depends on the store. Cockroach reports its own VECTOR(n)
+# DDL, so the check is real. SQLite's BLOB has no width of its own: unless you set
+# store.vector_dim above, it reports THIS number back and the comparison is vacuous.
+# What actually protects a SQLite database is the per-session embedding contract stamped
+# in `sessions` — every candidate read refuses vectors from a different space.
 dim = 1024
 # llama.cpp OpenAI-compatible embeddings base URL (kind = bge_m3):
 url = "http://127.0.0.1:8080"

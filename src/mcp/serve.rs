@@ -1869,6 +1869,7 @@ mod tests {
                     kind: Default::default(),
                     dsn: None,
                     path: None,
+                    vector_dim: None,
                 },
                 embedder_cfg: Default::default(),
                 embedding: EmbeddingContract {

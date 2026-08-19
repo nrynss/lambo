@@ -107,15 +107,27 @@ pub trait GraphStore: Send + Sync {
     /// Dense-vector width this store will accept, when it persists embeddings.
     ///
     /// * `Some(n)` — embedder output must be exactly `n`. Cockroach's `n` is its
-    ///   `VECTOR(n)` DDL. An adapter whose column carries no width of its own
-    ///   (SQLite's `BLOB`) reports the width configured for the process — see
-    ///   [`build_store_with_vector_dim`] — and enforces the session's durable
-    ///   contract on every candidate read instead.
+    ///   `VECTOR(n)` DDL: a genuine schema authority, independent of any config.
     /// * `None` — no vector column at all (MemoryStore). Must be paired with an
     ///   absent [`Capabilities::VECTOR_SEARCH`].
     ///
-    /// Dim is **not** a global product constant: the store is the authority.
-    /// Checked at process resolution (`crate::resolve::check_vector_compatibility`).
+    /// **How much authority this carries depends on the adapter, and for one of them
+    /// it can be none** (F-R1-2). An adapter whose column has no width of its own
+    /// (SQLite's `BLOB`) has no schema number to report. It reports, in precedence
+    /// order: the operator's [`StoreConfig::vector_dim`] pin when set, else the
+    /// resolved `[embedder] dim`, else the [`crate::embed::EmbedderConfig`] default.
+    /// Only the first is an independent authority. **With no pin set, the value is an
+    /// echo of the embedder width** — so `check_vector_compatibility` is comparing a
+    /// number to itself and cannot fail. Say "echo", not "authority", when describing
+    /// that case.
+    ///
+    /// What such an adapter enforces instead is the **session's durable
+    /// contract** (`sessions.embedding_{kind,model,dim}`), on every candidate read,
+    /// in the read's own transaction. That is the only authority that can attest
+    /// which space the stored vectors actually occupy.
+    ///
+    /// Dim is **not** a global product constant. Checked at process resolution
+    /// (`crate::resolve::check_vector_compatibility`).
     fn vector_dimensions(&self) -> Option<usize> {
         None
     }
@@ -472,6 +484,22 @@ pub struct StoreConfig {
     /// SQLite file path or `sqlite::memory:`.
     #[serde(default)]
     pub path: Option<String>,
+    /// **Operator-asserted pre-ingest width pin** for a store whose vector column
+    /// carries no width of its own (SQLite's `BLOB`). `None` — the default — means
+    /// the store echoes the resolved `[embedder] dim`.
+    ///
+    /// Setting it is an assertion about what this database *already holds* (or is
+    /// about to hold), which is why it can disagree with the embedder and why that
+    /// disagreement is an error: `resolve::resolve_backends` refuses to resolve when
+    /// the pin and the embedder's real output width differ, naming both. That is the
+    /// only thing that makes `check_vector_compatibility` non-vacuous for SQLite —
+    /// without a pin the store's reported width *is* the embedder's, so the
+    /// comparison is `x == x` (F-R1-2).
+    ///
+    /// Cockroach ignores it: `VECTOR(n)` is parsed out of its own DDL, which is a
+    /// real schema authority and outranks a config assertion.
+    #[serde(default)]
+    pub vector_dim: Option<usize>,
 }
 
 impl std::fmt::Debug for StoreConfig {
@@ -483,6 +511,7 @@ impl std::fmt::Debug for StoreConfig {
                 &self.dsn.as_ref().map(|_| "***REDACTED***".to_string()),
             )
             .field("path", &self.path)
+            .field("vector_dim", &self.vector_dim)
             .finish()
     }
 }
@@ -493,6 +522,7 @@ impl Default for StoreConfig {
             kind: StoreKind::Memory,
             dsn: None,
             path: None,
+            vector_dim: None,
         }
     }
 }
@@ -562,14 +592,29 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
 ///
 /// Only adapters whose vector column carries **no** width of its own consume it —
 /// today that is SQLite, whose `concepts.embedding` is a `BLOB` (Cockroach parses
-/// `VECTOR(n)` out of its own DDL and ignores this). `None` leaves the adapter on its
-/// own default.
+/// `VECTOR(n)` out of its own DDL and ignores this).
 ///
-/// `resolve::resolve_backends` passes `Some(embedder_cfg.dim)` so
-/// [`crate::resolve::check_vector_compatibility`] compares a width-agnostic store
-/// against the embedder the process actually configured, rather than against a constant
-/// baked into the adapter. Direct `build_store` callers (provision tools, tests) get the
-/// `EmbedderConfig` default.
+/// # Precedence
+///
+/// 1. [`StoreConfig::vector_dim`] — the operator's explicit pin, an assertion about
+///    what the database holds. Wins over the embedder because it is the only one of
+///    the three that is an independent authority (F-R1-2).
+/// 2. the `vector_dim` argument — `resolve::resolve_backends` passes
+///    `Some(embedder_cfg.dim)`, so with no pin the store reports the width the
+///    process configured rather than a constant baked into the adapter. Note this
+///    makes [`crate::resolve::check_vector_compatibility`] an **echo** rather than a
+///    check on that path; the pin is what gives it something real to compare.
+/// 3. the [`crate::embed::EmbedderConfig`] default — a **default, not a configured
+///    width** (F-R1-8). Direct `build_store` callers (provision tools, store-only
+///    verbs such as `resolve_store_only`, tests) land here, and nothing on that path
+///    configured or verified the number: it may disagree with every session in the
+///    database. It exists so no adapter needs a width constant of its own, and it is
+///    inert because store-only verbs never embed.
+///
+/// **The pin is not enforced here.** Store construction must stay able to open a
+/// database whose sessions carry a different contract — a future `lambo reembed`
+/// migration verb needs exactly that. The refusal on a pin/embedder disagreement
+/// belongs to the serving verbs' resolution path (`resolve::resolve_backends`).
 pub fn build_store_with_vector_dim(
     cfg: StoreConfig,
     vector_dim: Option<usize>,
@@ -578,8 +623,10 @@ pub fn build_store_with_vector_dim(
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
     }
-    // Consumed only by the width-agnostic adapters below; this keeps the binding used
-    // under feature rows that compile none of them.
+    // Precedence: the operator's pin outranks the resolved embedder width (see the
+    // doc comment). Consumed only by the width-agnostic adapters below; the binding
+    // stays used under feature rows that compile none of them.
+    let vector_dim = cfg.vector_dim.or(vector_dim);
     let _ = vector_dim;
     match cfg.kind {
         StoreKind::Memory => {
@@ -722,6 +769,7 @@ mod tests {
             kind: StoreKind::Cockroach,
             dsn: Some("postgresql://localhost/lambo".into()),
             path: None,
+            vector_dim: None,
         };
         if StoreKind::Cockroach.is_compiled() {
             let s = build_store(cfg).unwrap();
@@ -748,6 +796,7 @@ mod tests {
             kind: StoreKind::Sqlite,
             dsn: None,
             path: Some("sqlite::memory:".into()),
+            vector_dim: None,
         });
         if cfg!(feature = "store-sqlite") {
             // T3.3: with the feature on, build_store returns a working adapter.
@@ -789,6 +838,7 @@ mod tests {
             kind: StoreKind::Sqlite,
             dsn: None,
             path: None,
+            vector_dim: None,
         })
         .err()
         .expect("sqlite without a path must hard-error, never fall back to memory");
@@ -806,6 +856,7 @@ mod tests {
             kind: StoreKind::Cockroach,
             dsn: None,
             path: None,
+            vector_dim: None,
         });
         assert!(r.is_err());
     }
@@ -836,6 +887,7 @@ mod tests {
             kind: StoreKind::Memory,
             dsn: Some("toml-dsn".into()),
             path: None,
+            vector_dim: None,
         };
 
         // No DSN env → keep TOML; from_env has no file → None.
@@ -895,6 +947,7 @@ mod tests {
             kind: StoreKind::Cockroach,
             dsn: Some("postgresql://user:s3cret@host:26257/lambo".into()),
             path: None,
+            vector_dim: None,
         };
         let s = format!("{cfg:?}");
         assert!(s.contains("REDACTED"), "{s}");
@@ -939,6 +992,7 @@ mod tests {
             kind: StoreKind::Sqlite,
             dsn: None,
             path: None,
+            vector_dim: None,
         }
         .overlay_env()
         .unwrap();

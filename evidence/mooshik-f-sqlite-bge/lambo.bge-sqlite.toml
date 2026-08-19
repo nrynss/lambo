@@ -1,0 +1,20 @@
+# F-R1-5 evidence config: the real local store + a REAL embedder.
+#
+# This is the configuration the docs' End-to-end walkthrough deliberately does NOT
+# use: the walkthrough runs `kind = "fixture"`, which exercises the vector leg
+# mechanically but has no semantics in it. Here the embedder is BGE-M3 (1024-d)
+# served by a local llama.cpp server over the OpenAI-compatible
+# POST /v1/embeddings route, so a semantic hit is possible at all.
+
+[store]
+kind = "sqlite"
+path = "./evidence/mooshik-f-sqlite-bge/f-bge.db"
+# The operator's pre-ingest width pin (added under F remediation, F-R1-2). BGE-M3
+# emits 1024, so this agrees; resolve refuses to start any serving verb if the
+# embedder ever changes width under this database.
+vector_dim = 1024
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"

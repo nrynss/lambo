@@ -45,6 +45,32 @@ pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
     fn dimensions(&self) -> usize;
 
+    /// Embed `text`.
+    ///
+    /// # Output contract: vectors MUST be L2-normalized (unit norm)
+    ///
+    /// Every returned vector must satisfy `‖v‖₂ ≈ 1`. This is not a style
+    /// preference — it is the precondition that makes the storage tiers *agree*, and
+    /// it was previously honoured by all implementations but documented by none
+    /// (F-R1-4).
+    ///
+    /// The two vector-capable adapters rank by different formulas, and the formulas
+    /// coincide **only** on unit-norm input:
+    ///
+    /// * SQLite (and the `MemoryStore` reference) score `crate::embed::cosine`, which
+    ///   divides by both norms and is therefore norm-invariant.
+    /// * Cockroach scores `1 − d²/2` over the `<->` L2 distance, which is *not*
+    ///   norm-invariant; it equals cosine exactly when both operands are unit vectors.
+    ///
+    /// A non-normalizing embedder would make the two tiers disagree by a wide margin
+    /// rather than marginally — a stored `[2,0,0,0]` against probe `[1,0,0,0]` scores
+    /// `1.0` on SQLite and `0.5` on Cockroach — and would silently break the
+    /// `semantic_match_threshold` calibration shared by both. Recall parity between
+    /// tiers rests on this contract.
+    ///
+    /// Shipped implementations comply: `bge_m3` L2-normalizes what llama.cpp returns
+    /// (and rejects a zero-norm vector), and `FixtureEmbedder` emits unit vectors by
+    /// construction. `A-gemini-embedder.md` instructs the next one to.
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
 }
 

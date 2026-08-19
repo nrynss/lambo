@@ -55,8 +55,33 @@ neighbours, where C-SPANN measured 0.99 recall@50 at beam 64.
 `sqlite-vec` gives a real ANN index and can be statically linked via `sqlite3_auto_extension`, so
 the objection is not a stray `.so` — it is a C toolchain dependency across four cross-compiled
 release targets plus auto-extension registration before sqlx opens a pool. Not worth it until an
-exact scan actually hurts. **Trigger to revisit:** per-session concept counts where the scan shows
-up in recall latency. That is a number, not a guess.
+exact scan actually hurts.
+
+**Trigger to revisit — measure `hybrid::derive`, not recall** (corrected under F-R1-2 remediation;
+the original text said "recall latency", which named the *cooler* of the two paths). Recall runs
+**one** scan per query. `derive` calls `vector_candidates_checked` *inside* its per-unmatched-concept
+loop (`src/graph/hybrid.rs`), so a derive of `k` concepts over `n` stored vectors is **k×n** BLOB
+decodes and text→`f32` parses, with no caching and no reuse between iterations. Three things
+compound there and nowhere else:
+
+* all `k` scans share **one 30s deadline** (`HYBRID_IO_TIMEOUT`, computed once per `derive` call);
+* they contend for the **single pooled connection** (`max_connections(1)`), which the write-behind
+  flush also needs, so a scan blocks durability;
+* overrunning the deadline is **not** a degradation — it returns `Backend("hybrid vector candidate
+  lookup timed out…")`, which propagates and fails the whole derive before its commit phase. This
+  is a failure mode that could not occur on SQLite at all before F2.
+
+So the scheduled measurement is: **k×n scan cost and peak RSS on the derive path**, on the
+bootstrapped graph the day it first exists — plus recall latency as the secondary number.
+
+**Named next mitigation, not done here:** hoist **one scan per `derive` call** instead of one per
+unmatched concept (same pool, same session, same contract check). Deliberately deferred: the probes
+come from per-concept `embed` calls interleaved with the lookups, so hoisting means splitting
+`derive` into an embed-all phase and a scan-once phase, and it needs a trait method returning the
+raw candidate pool rather than `Vec<Scored<NodeId>>`. That restructures `derive`'s per-concept error
+handling (today each arm degrades a *single* concept on embed failure or capability miss) and the
+`GraphStore` trait, which is frozen after P1. Recorded with its trigger rather than smuggled into a
+doc-correction pass.
 
 #### The assumption underneath has moved
 
@@ -116,12 +141,44 @@ stored) or from config, matching whatever B2 settles on as the authority.
 
 ## Done when
 
-- [ ] SQLite advertises `VECTOR_SEARCH` and reports a width that is not hardcoded
-- [ ] Hybrid derive no longer logs the degradation warning on SQLite
-- [ ] A test proves the vector leg **fired**, rather than inferring it from rank — mirroring what
+- [x] SQLite advertises `VECTOR_SEARCH` and reports a width that is not hardcoded
+- [x] Hybrid derive no longer logs the degradation warning on SQLite
+- [x] A test proves the vector leg **fired**, rather than inferring it from rank — mirroring what
       `VectorSearchStore` does for MemoryStore
-- [ ] Contract mismatch is refused on the checked path
-- [ ] Recall parity between SQLite and Cockroach on the same seeded graph, with any divergence
-      explained by ANN approximation rather than by the adapter
-- [ ] `README.md` and the site's End-to-end page describe SQLite as the out-of-the-box store;
-      revisit what each tier earns once semantic matching works there
+- [x] Contract mismatch is refused on the checked path
+- [~] Recall parity between SQLite and Cockroach on the same seeded graph, with any divergence
+      explained by ANN approximation rather than by the adapter.
+      **Cluster-free half: done.** `vector_candidates_agree_with_an_exact_cosine_oracle_on_both_fixtures`
+      (`src/store/sqlite.rs`) seeds both committed fixture graphs plus a stamped contract and
+      synthetic unit vectors into `SqliteStore` and into an exact-cosine oracle with the shared
+      ordering contract, and asserts the returned `Vec<Scored<NodeId>>` is **exactly equal** across
+      4 probes × 5 limits × 2 fixtures (40 assertions) — same ids, same order, same `f64` scores.
+      This replaces the prior artifact, which only *transcribed* Cockroach's `distance_to_score`
+      into a test body and therefore proved the formula was copied, not that the adapters agree on
+      candidates or ranks.
+      **Cockroach half: explicitly awaiting the live tier.** `cockroach-live` is gated off on this
+      branch (`ci.yml`, `if: github.ref != 'refs/heads/lambo-for-mooshik'`), and no live DSN was
+      available for this remediation, so no run compares the two adapters' answers on one graph.
+      Recording this as *not covered* rather than letting the transcription test imply it is.
+      What the identity now rests on instead of an unstated assumption: `cosine` is norm-invariant
+      while Cockroach's `1 − d²/2` is not, so the two agree **only for unit-norm vectors** — now a
+      documented `Embedder::embed` output contract ("vectors MUST be L2-normalized"), which every
+      shipped embedder already satisfies (`bge_m3` normalizes and rejects zero-norm;
+      `FixtureEmbedder` emits unit vectors) and which `A-gemini-embedder.md` instructs the next one
+      to. It is stated as a trait contract rather than a `CON-`numbered one because `CON-1`…`CON-9`
+      are all assigned findings from `adve-review-e2e-p0-p3-fable.md`; that series has no free slot,
+      and minting `CON-10` would imply a registry entry that does not exist.
+- [~] `README.md` and the site's End-to-end page describe SQLite as the out-of-the-box store;
+      revisit what each tier earns once semantic matching works there.
+      **Site/docs End-to-end: done** (and, under F-R1-5, corrected — the walkthrough exercises the
+      vector leg *mechanically*; its fixture embedder is deterministic, not semantic, so the
+      semantic claim now points at `evidence/mooshik-f-sqlite-bge/` instead of implying the
+      walkthrough demonstrates it).
+      **README tier-positioning: DEFERRED, deliberately.** Not an oversight and not out of scope by
+      accident: rewriting the README's tier narrative is an editorial call the orchestrator is
+      holding during the judging window, so a remediation agent must not pre-empt it. `README.md`
+      contains nothing *false* — its only vector lines are Cockroach-tier/RDS text and remain
+      accurate — so the deferral costs correctness nothing; what remains undone is the positioning
+      question ("what does each tier earn now that the local store matches on meaning?") and the
+      config example still leading with `kind = "memory"`. Reopen with the tier narrative, not
+      separately.

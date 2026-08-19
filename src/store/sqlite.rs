@@ -18,20 +18,32 @@
 //! ### Width authority
 //!
 //! SQLite's `concepts.embedding` is a width-agnostic `BLOB` — unlike Cockroach's
-//! `VECTOR(n)` there is no schema number to parse, so the adapter has no schema
-//! authority of its own to report from. The two authorities that do exist are used for
-//! the two different jobs they can each answer:
+//! `VECTOR(n)` there is no schema number to parse, so the adapter has **no schema
+//! authority of its own to report from**. Three numbers are therefore in play, and
+//! only two of them are authorities (F-R1-2 / F-R1-8):
 //!
-//! * **Process resolution** (`vector_dimensions()`, sync, session-less) reports the
-//!   width configured for this process — `[embedder] dim`, threaded in by
-//!   `resolve::resolve_backends` via `store::build_store_with_vector_dim`. A bare
-//!   `SqliteStore::connect` (tests, direct embedding) falls back to the same
-//!   `EmbedderConfig` default the TOML key has, so no *third* hardcoded width is
-//!   introduced (issue #5 as filed asked for a literal `Some(1024)`; F amends that).
-//! * **Every candidate read** enforces the session's **durable** contract
-//!   (`sessions.embedding_{kind,model,dim}`) instead, in the same transaction as the
-//!   candidate query. That is the only authority that can attest which space the stored
-//!   vectors are in, and it is what `vector_candidates_checked` refuses on.
+//! * **`vector_dimensions()`** (sync, session-less) reports, in precedence order:
+//!   `[store] vector_dim` when the operator set it, else the resolved
+//!   `[embedder] dim` threaded in by `resolve::resolve_backends` via
+//!   `store::build_store_with_vector_dim`, else the `EmbedderConfig` default (so no
+//!   *third* hardcoded width is minted — issue #5 as filed asked for a literal
+//!   `Some(1024)`; F amends that).
+//!   - With a **pin** set, this is a real authority: an operator assertion about what
+//!     the database already holds, which `resolve_backends` refuses to contradict.
+//!   - With **no pin**, it is an **echo** of the embedder width, not an authority:
+//!     `resolve::check_vector_compatibility` is then comparing a number to itself and
+//!     cannot fail. Do not describe it as a store-side check on that path.
+//!   - On the `build_store` / `resolve_store_only` path (provision and other
+//!     store-only verbs, tests) the value is the `EmbedderConfig` **default** —
+//!     nothing configured or verified it, and it may disagree with every session in
+//!     the file. It is inert because store-only verbs never embed.
+//! * **The session's durable contract** (`sessions.embedding_{kind,model,dim}`) is the
+//!   authority that matters, and the only one that can attest which space the stored
+//!   vectors are in. It is enforced twice: on **every candidate read**, in the same
+//!   transaction as the candidate query (`vector_candidates_checked` refuses a
+//!   mismatch), and at the **write gate**, where `enforce_concept_vector_widths`
+//!   refuses a concept whose vector width disagrees with it — the check Cockroach's
+//!   DDL performs for free.
 //!
 //! ### The scan is a seam
 //!
@@ -40,11 +52,33 @@
 //! scoring is exact cosine, which is right while `n` is small: at 1024 f32 a concept
 //! vector is 4 KB and the largest measured session held ~1,400 of them. But "n is small
 //! by construction" was a property of *session-scoped* graphs, and a single unified
-//! autobiographical session is not bounded that way. When the scan starts showing up in
-//! recall latency, an ANN index replaces `select_session_vectors` — whose signature
-//! already takes the probe and the limit for exactly that reason, even though an exact
-//! scan ignores both — and `rank_by_cosine` keeps re-ranking the survivors exactly. No
-//! caller and no other adapter method changes.
+//! autobiographical session is not bounded that way. An ANN index replaces
+//! `select_session_vectors` — whose signature already takes the probe and the limit for
+//! exactly that reason, even though an exact scan ignores both — and `rank_by_cosine`
+//! keeps re-ranking the survivors exactly. No caller and no other adapter method
+//! changes.
+//!
+//! **Trigger to revisit: `hybrid::derive`, not recall** (F-R1-3). Recall runs one scan
+//! per query. `derive` calls `vector_candidates_checked` *inside* its per-unmatched-
+//! concept loop (`graph/hybrid.rs`), so a derive of `k` concepts over `n` stored vectors
+//! is **k×n** BLOB decodes and text→`f32` parses, with no caching and no reuse between
+//! iterations. All `k` of those scans share **one 30s deadline**
+//! (`HYBRID_IO_TIMEOUT`, computed once per `derive` call) and contend for the **single
+//! pooled connection** (`max_connections(1)`), which the write-behind flush also needs.
+//! Overrunning the deadline is not a degradation — it returns `Backend("hybrid vector
+//! candidate lookup timed out…")`, which propagates and fails the whole derive before
+//! its commit phase. So measure the scan on the derive path first: that is where the
+//! cliff is, and it is a path that could not run on SQLite at all before F2.
+//!
+//! The cheapest mitigation short of an index is to **hoist one scan per `derive` call**
+//! instead of one per unmatched concept (same pool, same session, same contract check).
+//! It is deliberately not done here: the probes are produced by per-concept `embed`
+//! calls interleaved with the lookups, so hoisting means splitting `derive` into an
+//! embed-all phase and a scan-once phase, and it needs a trait method that returns the
+//! raw candidate pool rather than `Vec<Scored<NodeId>>`. Both restructure `derive`'s
+//! per-concept error handling (each arm degrades a *single* concept on embed failure or
+//! capability miss today) and the `GraphStore` trait, which is frozen. Named as the next
+//! mitigation, with the trigger above, rather than smuggled in.
 //!
 //! `sqlite-vec` is deliberately not that index yet: it is a C toolchain dependency across
 //! four cross-compiled release targets plus `sqlite3_auto_extension` registration before
@@ -188,7 +222,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -977,13 +1011,19 @@ impl GraphStore for SqliteStore {
 
     /// Exact cosine over the session's flushed embeddings (F1, issue #5).
     ///
-    /// **One transaction covers the contract read and the candidate read.** SQLite's
-    /// single connection serializes writers, but a flush landing between two separate
-    /// statements could still swap the contract out from under vectors already
-    /// selected — the same race the Cockroach adapter closes with a retried
-    /// serializable transaction. The refusal is `StoreError::Invariant`, matching
-    /// Cockroach and the `VectorSearchStore` reference so callers classify it
-    /// identically on all three.
+    /// **One transaction covers the contract read and the candidate read.** The race
+    /// it closes is **cross-process**, not in-process (F-R1-9): within one process the
+    /// single pooled connection (`max_connections(1)`) is a mutex, so a same-process
+    /// flush cannot land between two statements of a transaction that already holds
+    /// the only connection. What the transaction closes is a concurrent *writer
+    /// process* on the same file database — `lambo serve` writing while `lambo recall`
+    /// or `serve-web` reads, the documented topology — where WAL snapshot isolation
+    /// guarantees both statements observe one snapshot and a commit in between is
+    /// invisible until this transaction ends. (It follows that a future
+    /// `max_connections(n) > 1` would make the in-process interleave real as well;
+    /// the transaction already covers it, but the reason would change.) The refusal is
+    /// `StoreError::Invariant`, matching Cockroach and the `VectorSearchStore`
+    /// reference so callers classify it identically on all three.
     ///
     /// **An empty answer is not an error.** An unknown session, a session with no
     /// durable contract yet, and a session whose concepts carry no vectors all return
@@ -1040,7 +1080,8 @@ impl GraphStore for SqliteStore {
         if embedding.len() != stored.dim {
             return Err(StoreError::Invariant(format!(
                 "query embedding has {} dimensions but session {} stores vectors of {} \
-                 (see vector_dimensions())",
+                 (the session's durable embedding contract is the authority here, not \
+                 the process-wide vector_dimensions())",
                 embedding.len(),
                 session.0,
                 stored.dim
@@ -1593,6 +1634,115 @@ async fn upsert_interactions(
     Ok(())
 }
 
+/// **The write gate for vector width** (F-R1-1).
+///
+/// Refuse a concept whose vector width disagrees with the session's durable
+/// embedding contract, in the same transaction as the upsert that would store it.
+/// This is what Cockroach's `VECTOR(1024)` DDL does for free
+/// (`migrations/cockroach/001_init.sql`); SQLite's `concepts.embedding` is a
+/// width-agnostic `BLOB`, so the adapter has to do it by hand or not at all.
+///
+/// # Why the write gate and not only the read check
+///
+/// [`select_session_vectors`] detects a width-mismatched row, but detection is
+/// terminal and session-wide: it returns on the first bad row, so **one** corrupt
+/// concept makes the whole session's vector leg — and therefore
+/// `recall::candidates::gather` and `hybrid::derive`, both of which propagate a
+/// `Backend` error rather than degrading — fail permanently, until someone edits
+/// the row by hand. `Concept::embedding`'s own contract is *"width = session
+/// `EmbeddingContract::dim`"*, and before this gate nothing on the SQLite write
+/// path enforced it: one public `GraphStore::flush` could durably poison a
+/// session. Refusing the write costs the caller one batch; accepting it costs the
+/// session its recall.
+///
+/// # What the contract is at the moment a concept is validated
+///
+/// The contract read here is the one **visible in `sessions` when this step
+/// executes**, which makes the intra-batch ordering well defined rather than
+/// incidental: [`super::batch::plan_flush`] treats [`Mutation::SetEmbedding`] as a
+/// barrier that drains every open bucket before it and is then emitted alone. So
+/// within one [`MutationBatch`]:
+///
+/// * concepts submitted **after** a `SetEmbedding` are validated against the width
+///   that `SetEmbedding` just stamped — a batch that stamps `dim` and then upserts
+///   concepts of that `dim` **passes** (this is the shape `seed_vectors` and every
+///   real `hybrid::derive` flush use);
+/// * concepts submitted **before** it are validated against the contract that was
+///   durable when they were written, which is the same contract a reader would
+///   have interpreted them under.
+///
+/// # A vector arriving with no contract stamped is accepted
+///
+/// Deliberate, and the one place SQLite cannot mirror Cockroach: Cockroach's DDL
+/// width is a property of the *table*, so it refuses a wrong-width insert even
+/// with no session contract. SQLite has no such number — with `embedding_kind` /
+/// `embedding_dim` still NULL there is no authority to check against, and the
+/// process-configured `vector_dim` is explicitly not one (it is a resolution-time
+/// pin, see the module doc's "Width authority"). Accepting is safe because such a
+/// vector is unreachable *and* cannot survive to become the fatal mismatch above:
+/// the read path returns an empty pool while the contract is NULL, and
+/// [`set_embedding`] NULLs every existing vector when it stamps a contract over a
+/// NULL one. The width becomes enforceable exactly when it becomes meaningful.
+async fn enforce_concept_vector_widths(
+    tx: &mut sqlx::SqliteConnection,
+    rows: &[ConceptRow<'_>],
+) -> Result<(), StoreError> {
+    // Cache per session: a batch normally touches one, and only vector-bearing
+    // rows can violate anything, so a vector-free flush costs zero extra reads.
+    let mut widths: HashMap<&str, Option<usize>> = HashMap::new();
+    for r in rows {
+        let Some(vector) = r.concept.embedding.as_ref() else {
+            continue;
+        };
+        let sid = r.concept.session_id.0.as_str();
+        if !widths.contains_key(sid) {
+            let row = sqlx::query(
+                "SELECT embedding_kind, embedding_model, embedding_dim \
+                 FROM sessions WHERE session_id = ?",
+            )
+            .bind(sid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_err("upsert concept: session contract", e))?;
+            // Same classifier as `load_session` and the checked read, so a
+            // kind-XOR-dim corrupt row is reported identically on all three paths
+            // instead of being silently treated as unstamped here.
+            let contract = match row {
+                Some(row) => session_embedding_from_parts(
+                    row.try_get(0)
+                        .map_err(|e| db_err("upsert concept: session contract", e))?,
+                    row.try_get(1)
+                        .map_err(|e| db_err("upsert concept: session contract", e))?,
+                    row.try_get(2)
+                        .map_err(|e| db_err("upsert concept: session contract", e))?,
+                    sid,
+                )?,
+                // `ensure_sessions` runs before every flush step, so a missing row
+                // here means the session vanished mid-batch; treat it as unstamped
+                // and let the upsert itself produce the real error.
+                None => None,
+            };
+            widths.insert(sid, contract.map(|c| c.dim));
+        }
+        let Some(dim) = widths[sid] else {
+            continue;
+        };
+        if vector.len() != dim {
+            return Err(StoreError::Invariant(format!(
+                "concept {} carries a {}-dimensional embedding but session {} stores \
+                 vectors of {} — refusing the write: one width-mismatched row makes the \
+                 session's entire vector leg fail on every read (re-embed the session or \
+                 start a new one; `Concept::embedding` must match the session contract)",
+                r.concept.id,
+                vector.len(),
+                sid,
+                dim
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn upsert_concepts(
     tx: &mut sqlx::SqliteConnection,
     rows: &[ConceptRow<'_>],
@@ -1600,6 +1750,9 @@ async fn upsert_concepts(
     if rows.is_empty() {
         return Ok(());
     }
+    // Before any encoding: a refusal must leave the transaction with nothing
+    // written, and `?` here rolls the whole batch back (F-R1-1).
+    enforce_concept_vector_widths(&mut *tx, rows).await?;
     let mut encoded: Vec<ConceptBinds> = Vec::with_capacity(rows.len());
     for r in rows {
         encoded.push(concept_binds(r)?);
@@ -2775,8 +2928,12 @@ mod tests {
         .await;
         let probe = [1.0f32, 0.0, 0.0, 0.0];
 
-        // Direct SQL is the only way to produce these — the write path encodes through
-        // the shared codec — which is exactly why the read path cannot trust the width.
+        // Direct SQL is used here because it is the only way *left* to produce these:
+        // the write path encodes through the shared codec, and since F-R1-1
+        // `enforce_concept_vector_widths` refuses a width-mismatched vector at the
+        // flush gate too (`vector_write_gate_refuses_a_concept_of_the_wrong_width` covers
+        // that surface). What remains reachable is an externally edited database —
+        // which is exactly why the read path still cannot trust the stored width.
         for (what, blob) in [
             ("short", b"[1,0,0]".to_vec()),
             ("long", b"[1,0,0,0,0]".to_vec()),
@@ -2798,6 +2955,165 @@ mod tests {
                 "{what} blob must be a Backend error, got {err:?}"
             );
         }
+    }
+
+    /// F-R1-1: the **write gate**. The review reproduced session-wide, permanent
+    /// recall failure from one `flush` through the public `GraphStore` surface — no
+    /// direct SQL: a batch stamping `dim = 4` and then upserting one 4-wide and one
+    /// 3-wide concept was accepted, after which `vector_candidates_checked`,
+    /// `vector_candidates` and `recall::candidates::gather` all failed for the whole
+    /// session, including the *good* concept. This is that repro, expressed through
+    /// the same public types, asserting the batch is now refused instead.
+    ///
+    /// The external-crate form the reviewer used is expressible in-crate: `flush`,
+    /// `MutationBatch`, `Mutation`, `Node` and `Concept` are all public, and
+    /// `SqliteStore` reaches them through the same trait. What the in-crate form
+    /// cannot show is a *foreign* caller, which is immaterial — the gate is in the
+    /// adapter, below the trait boundary.
+    #[tokio::test]
+    async fn vector_write_gate_refuses_a_concept_of_the_wrong_width() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-write-gate");
+        let contract = vec_contract(4);
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let origin = NodeId::new();
+        let good = NodeId::new();
+        let bad = NodeId::new();
+
+        // The reviewer's batch, verbatim in shape: interaction, SetEmbedding{dim:4},
+        // a 4-wide concept, then a 3-wide one.
+        let batch = MutationBatch {
+            mutations: vec![
+                plant_interaction(&sid, origin, None, ts),
+                Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(contract.clone()),
+                },
+                plant_concept_with_vector(&sid, good, origin, "good", ts, vec![1.0, 0.0, 0.0, 0.0]),
+                plant_concept_with_vector(&sid, bad, origin, "bad", ts, vec![1.0, 0.0, 0.0]),
+            ],
+        };
+        let err = store.flush(&batch, None).await.unwrap_err();
+        assert!(
+            matches!(err, StoreError::Invariant(_)),
+            "a width-mismatched concept must be refused as Invariant, got {err:?}"
+        );
+        let msg = err.to_string();
+        for needle in ["3-dimensional", "stores vectors of 4"] {
+            assert!(msg.contains(needle), "message must name both widths: {msg}");
+        }
+
+        // The refusal is atomic: `?` inside the flush transaction rolls the whole
+        // batch back, so the *good* concept did not land either. That matters — a
+        // half-applied batch would leave the caller unable to reason about retry.
+        assert!(matches!(
+            store.load_session(&sid).await.unwrap_err(),
+            StoreError::SessionNotFound(_)
+        ));
+
+        // And the session is still usable: the same batch without the bad row
+        // succeeds, and its vector leg answers. Before the gate, the session was
+        // permanently poisoned at this point.
+        seed_vectors(
+            &store,
+            &sid,
+            &contract,
+            &[(good, "good", vec![1.0, 0.0, 0.0, 0.0])],
+        )
+        .await;
+        let hits = store
+            .vector_candidates_checked(&sid, &[1.0, 0.0, 0.0, 0.0], &contract, 5)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the surviving session still answers");
+        assert_eq!(hits[0].item, good);
+    }
+
+    /// F-R1-1, the ordering half: what the contract *is* at the moment each concept
+    /// is validated. `plan_flush` makes `SetEmbedding` a barrier, so this is a
+    /// property of the planner rather than of statement luck.
+    #[tokio::test]
+    async fn vector_write_gate_reads_the_contract_each_step_sees() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+
+        // (a) Stamp-then-upsert inside ONE batch passes: the concepts are planned
+        // after the barrier, so they are validated against the width just stamped —
+        // a session's very first vectors always arrive this way.
+        let fresh = SessionId::from("gate-stamp-then-upsert");
+        let origin = NodeId::new();
+        let c = NodeId::new();
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&fresh, origin, None, ts),
+                        Mutation::SetEmbedding {
+                            session_id: fresh.clone(),
+                            embedding: Some(vec_contract(4)),
+                        },
+                        plant_concept_with_vector(
+                            &fresh,
+                            c,
+                            origin,
+                            "after the stamp",
+                            ts,
+                            vec![1.0, 0.0, 0.0, 0.0],
+                        ),
+                    ],
+                },
+                None,
+            )
+            .await
+            .expect("stamp-then-upsert of a matching width must pass");
+
+        // (b) A concept upserted BEFORE the stamp is validated against the contract
+        // that was durable when it was written — here none, so it is accepted, and
+        // `set_embedding`'s quarantine then NULLs it rather than leaving a vector the
+        // new contract cannot interpret. This is why "no contract stamped yet" is
+        // safe to accept at the gate.
+        let pre = SessionId::from("gate-upsert-then-stamp");
+        let origin2 = NodeId::new();
+        let c2 = NodeId::new();
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&pre, origin2, None, ts),
+                        plant_concept_with_vector(
+                            &pre,
+                            c2,
+                            origin2,
+                            "before any stamp",
+                            ts,
+                            // Deliberately not 4 wide: with no contract there is no
+                            // authority to check it against.
+                            vec![1.0, 0.0, 0.0],
+                        ),
+                        Mutation::SetEmbedding {
+                            session_id: pre.clone(),
+                            embedding: Some(vec_contract(4)),
+                        },
+                    ],
+                },
+                None,
+            )
+            .await
+            .expect("a vector written before any contract is accepted");
+        let loaded = store.load_session(&pre).await.unwrap();
+        assert_eq!(loaded.embedding.as_ref(), Some(&vec_contract(4)));
+        assert_eq!(
+            loaded.concepts[0].embedding, None,
+            "quarantined by set_embedding, so it can never become the fatal mismatch"
+        );
+        // Consequently the read path is clean rather than poisoned.
+        assert!(store
+            .vector_candidates_checked(&pre, &[1.0, 0.0, 0.0, 0.0], &vec_contract(4), 5)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// F1 boundaries: a top-k above the candidate count returns the whole pool, and
@@ -3161,10 +3477,15 @@ mod tests {
         let i1 = NodeId::new();
         let c1 = NodeId::new();
         let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        // `dim` matches the seeded concept's vector width below. It used to read
+        // 1024 against a 3-wide vector — incidental to what this test asserts
+        // (STORE-1 contract persistence + CON-8 embedding round-trip), but a
+        // snapshot no writer should be able to produce: since F-R1-1 the width gate
+        // refuses it on the seed path too, which is the point of the gate.
         let contract = EmbeddingContract {
             kind: "bge_m3".into(),
             model: Some("BAAI/bge-m3".into()),
-            dim: 1024,
+            dim: 3,
         };
         store
             .seed(&GraphSnapshot {
@@ -3685,6 +4006,199 @@ mod tests {
             }
         }
         assertions
+    }
+
+    /// An **exact-cosine oracle** with the ordering contract of `MemoryStore`'s
+    /// `VectorSearchStore` and of `rank_by_cosine`: best score first by `total_cmp`
+    /// descending, ties broken by the smaller `NodeId`, then truncated to `limit`.
+    ///
+    /// Reimplemented here rather than reused because `VectorSearchStore` is private to
+    /// `memory.rs`'s test module. That is not a weakness of the comparison: the oracle
+    /// is deliberately the naive formulation — score everything, sort, truncate — with
+    /// no transaction, no BLOB codec, no SQL and no width checking, so agreement is
+    /// evidence about the adapter rather than about shared code.
+    #[cfg(feature = "fixtures")]
+    fn cosine_oracle(
+        probe: &[f32],
+        pool: &[(NodeId, Vec<f32>)],
+        limit: usize,
+    ) -> Vec<Scored<NodeId>> {
+        let mut scored: Vec<Scored<NodeId>> = pool
+            .iter()
+            .map(|(id, v)| Scored::new(*id, f64::from(crate::embed::cosine(probe, v))))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.item.0.cmp(&b.item.0))
+        });
+        scored.truncate(limit);
+        scored
+    }
+
+    /// A deterministic **unit-norm** vector for fixture concept `i`.
+    ///
+    /// Unit norm is the `Embedder` output contract (see `embed::Embedder::embed`), and
+    /// the property the SQLite/Cockroach score identity rests on, so synthetic vectors
+    /// that stand in for embedder output must honour it too. The spread is deliberately
+    /// uneven — not one-hot — so distinct concepts produce distinct, non-orthogonal
+    /// scores and a ranking has something to get wrong.
+    #[cfg(feature = "fixtures")]
+    fn synthetic_unit_vector(i: usize, dim: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dim)
+            .map(|j| {
+                // Cheap deterministic spread; no rand dependency, stable across runs
+                // and platforms (integer math, then one divide).
+                let k = ((i + 1) * 37 + (j + 1) * 11) % 97;
+                (k as f32) / 97.0 - 0.5
+            })
+            .collect();
+        // Guard the degenerate case rather than dividing by ~0.
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(norm > 1e-6, "degenerate synthetic vector for i={i}");
+        for x in &mut v {
+            *x /= norm;
+        }
+        v
+    }
+
+    /// **Acceptance: Done-when box 5, the cluster-free half** (F-R1-4).
+    ///
+    /// The vector agreement matrix, in the shape of
+    /// `assert_structural_agreement_matrix`: both committed fixture graphs, plus a
+    /// stamped contract and synthetic unit vectors, seeded into `SqliteStore` and into
+    /// an exact-cosine oracle; every returned `Vec<Scored<NodeId>>` asserted **exactly
+    /// equal** across probes × limits — same ids, same order, same `f64` scores.
+    ///
+    /// What this replaces: `vector_scores_match_the_cockroach_distance_conversion`
+    /// *transcribes* Cockroach's `distance_to_score` into its own body, so it proves
+    /// the formula was copied correctly and nothing about which candidates or which
+    /// ranks an adapter returns. This asserts the answers themselves, over real
+    /// committed graphs, through the whole adapter path — flush → BLOB codec →
+    /// transaction → scan → rank.
+    ///
+    /// The probe set is chosen so ranking mistakes are visible: a stored vector itself
+    /// (score 1.0, must rank first), its negation (score −1.0, must rank *last* — this
+    /// is what catches a `sort` that mishandles sign or a `total_cmp` swapped for
+    /// `partial_cmp`), a midpoint between two stored vectors, and an off-axis probe.
+    /// Limits sweep 1 → past the pool size to pin truncation and the whole-pool case.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn vector_candidates_agree_with_an_exact_cosine_oracle_on_both_fixtures() {
+        const DIM: usize = 8;
+        let mut total_assertions = 0usize;
+        for fixture in ["session-rest-api", "session-drift"] {
+            let snap: GraphSnapshot = crate::fixtures::load_snapshot(fixture).unwrap();
+            let sid = snap.session_id.clone();
+            let contract = vec_contract(DIM);
+
+            // The fixtures carry no contract and no vectors (asserted below, so this
+            // stays honest if a fixture ever gains them). Attach both.
+            assert!(
+                snap.embedding.is_none() && snap.concepts.iter().all(|c| c.embedding.is_none()),
+                "{fixture}: fixture is expected to carry no vectors; \
+                 this test supplies them"
+            );
+
+            let pool: Vec<(NodeId, Vec<f32>)> = snap
+                .concepts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id, synthetic_unit_vector(i, DIM)))
+                .collect();
+
+            let store = vec_test_store(DIM);
+            store.init_schema().await.unwrap();
+
+            // Structure first (interactions are FK targets for concepts), then the
+            // contract, then the vector-bearing concepts. `SetEmbedding` is a planner
+            // barrier, so the concepts are validated against the width it just
+            // stamped — the ordering the write gate depends on (F-R1-1).
+            let mut mutations = snapshot_to_batch(&snap).mutations;
+            mutations.push(Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding: Some(contract.clone()),
+            });
+            for (i, c) in snap.concepts.iter().enumerate() {
+                let mut concept = c.clone();
+                concept.embedding = Some(synthetic_unit_vector(i, DIM));
+                mutations.push(Mutation::UpsertNode {
+                    node: NodeKind::Concept(concept),
+                });
+            }
+            store
+                .flush(&MutationBatch { mutations }, None)
+                .await
+                .unwrap();
+
+            // Probes, in the pool's own space so scores span [-1, 1].
+            let first = &pool[0].1;
+            let second = &pool[1].1;
+            let negated: Vec<f32> = first.iter().map(|x| -x).collect();
+            let midpoint: Vec<f32> = {
+                let mut m: Vec<f32> = first
+                    .iter()
+                    .zip(second.iter())
+                    .map(|(a, b)| (a + b) / 2.0)
+                    .collect();
+                let n = m.iter().map(|x| x * x).sum::<f32>().sqrt();
+                for x in &mut m {
+                    *x /= n;
+                }
+                m
+            };
+            let off_axis = synthetic_unit_vector(usize::from(u8::MAX), DIM);
+            let probes: [(&str, Vec<f32>); 4] = [
+                ("stored-itself", first.clone()),
+                ("negated", negated),
+                ("midpoint", midpoint),
+                ("off-axis", off_axis),
+            ];
+
+            for (label, probe) in &probes {
+                for limit in [1usize, 3, 5, pool.len(), pool.len() + 7] {
+                    let got = store
+                        .vector_candidates_checked(&sid, probe, &contract, limit)
+                        .await
+                        .unwrap();
+                    let want = cosine_oracle(probe, &pool, limit);
+                    assert_eq!(
+                        got, want,
+                        "{fixture}: probe {label}, limit {limit} — SQLite disagrees \
+                         with the exact-cosine oracle"
+                    );
+                    total_assertions += 1;
+                }
+            }
+
+            // Anchors independent of the oracle, so a bug shared by both would still
+            // be caught: a stored vector scores 1.0 against itself and ranks first;
+            // its negation scores -1.0 and ranks LAST of the whole pool.
+            let top = store
+                .vector_candidates_checked(&sid, first, &contract, pool.len())
+                .await
+                .unwrap();
+            assert_eq!(top[0].item, pool[0].0);
+            assert!((top[0].score - 1.0).abs() < 1e-6, "{:?}", top[0]);
+            let bottom = store
+                .vector_candidates_checked(
+                    &sid,
+                    &first.iter().map(|x| -x).collect::<Vec<f32>>(),
+                    &contract,
+                    pool.len(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(bottom.len(), pool.len());
+            assert_eq!(bottom[pool.len() - 1].item, pool[0].0);
+            assert!(
+                (bottom[pool.len() - 1].score + 1.0).abs() < 1e-6,
+                "{:?}",
+                bottom[pool.len() - 1]
+            );
+        }
+        // 2 fixtures × 4 probes × 5 limits.
+        assert_eq!(total_assertions, 40, "matrix dimensions drifted");
     }
 
     /// Acceptance (T3.6): the three-way agreement matrix on BOTH fixture
@@ -4966,6 +5480,7 @@ mod tests {
             kind: crate::store::StoreKind::Sqlite,
             dsn: None,
             path: Some("sqlite::memory:".into()),
+            vector_dim: None,
         })
         .unwrap();
         assert!(crate::store::StoreKind::Sqlite.is_ready());
