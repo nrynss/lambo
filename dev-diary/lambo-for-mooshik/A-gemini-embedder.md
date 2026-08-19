@@ -119,6 +119,26 @@ sideways.
 
 ---
 
+## The model field must be stamped for real (gap found 2026-08-19)
+
+The two-machine story does not need a shared embedder *instance* — the space is defined
+by the function (weights + dim + normalization), so the same model artifact on both
+machines produces interchangeable vectors. But "same model" must mean **same artifact
+including quantization**: `bge-m3-q8_0.gguf` and a Q4 conversion are different functions.
+Today that rule is convention only, because **the bge_m3 adapter stamps `model = NULL`
+into the contract** (visible in `evidence/mooshik-f-sqlite-bge/`: the durable row is
+`bge_m3||1024`) — the store can refuse a kind or dim mismatch across machines but cannot
+tell two quantizations apart.
+
+So: **A3 stamps a real model string** (`gemini-embedding-001`) rather than inheriting the
+NULL pattern, and whoever next touches `bge_m3.rs` should make it stamp the served model
+identity (name, or better the artifact hash — the rig's GGUF is
+`sha256 aa473d51…a173`) so the same-artifact rule becomes machine-checked. Gemini
+sidesteps the whole class — one hosted function, nothing to keep in agreement — which is
+A's honest advantage now that local BGE-M3 on both machines is proven viable (this
+MacBook runs it fine under Metal, contra this doc's "the MacBook does not" premise; the
+hosted embedder is the *convenient* answer, no longer the only correct one).
+
 ## Done when
 
 - [ ] `kind = "gemini"` builds an adapter and embeds against Vertex
