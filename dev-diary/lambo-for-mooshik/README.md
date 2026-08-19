@@ -63,6 +63,7 @@ F1 ─→ F2
 F2 ─→ G1 ─→ G2
 F2 ─→ H1 ─→ H2        (H2 needs a DSN-bearing machine or post-merge CI)
 I1 ─→ I2 ─→ I3        (I first among remaining starts, by decision — feeds DOGFOOD's metrics)
+J0                    (independent: I round-3 advisories, carried by decision 2026-08-20)
 J1 ─→ J2              (a proxy must forward the caller's agent_id; reserve is broken without it)
 J1 ─→ J3              (async write receipts need per-agent scoping)
 I1 ─→ J4              (a refused serve exits before it can ledger itself)

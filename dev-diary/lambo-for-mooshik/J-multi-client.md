@@ -23,6 +23,7 @@ caller's identity, and `lambo_reserve` is already broken without it. Renumbered.
 
 | # | Task | Depends on |
 | --- | --- | --- |
+| J0 | Carryover from workstream I, round 3 (CLEAN) | nothing |
 | J1 | Per-call agent identity | nothing |
 | J2 | A losing serve proxies instead of exiting | J1 |
 | J3 | Writes acknowledged before the embedder | J1 (receipt scoping) |
@@ -33,6 +34,37 @@ J2 and J3 were previously one item. Splitting them ships the outage fix without 
 the write-path change.
 
 ---
+
+## J0 — Carryover from workstream I (round 3, CLEAN — decision 2026-08-20)
+
+Workstream I closed CLEAN with three P3 advisories
+([adve-review-mooshik-I-round3.md](../adversarial-review/adve-review-mooshik-I-round3.md)).
+By decision, they ride here instead of a fourth remediation round: I's residual surface is
+serve startup and ledger accounting, which J1/J2/J4 rebuild anyway. All three are
+doc-precision; none touches behaviour.
+
+1. **I-R3-1** — `src/ledger.rs:250-254`: `Ledger::open`'s docstring still asserts serve
+   arms the SIGTERM handler *after* calling it; I-R2-1 inverted that. Reword to the
+   current ordering (a blocking `open` there now wedges a server that never serves —
+   availability, not durability). Keep the probe-placement conclusion; it stands on its
+   own.
+2. **I-R3-2** — `scripts/observability/README.md:320-327`: the parked-writer reading
+   names the wrong transport. A parked writer writes nothing, heartbeats included, so the
+   case is visible only through **live `lambo_stats`**, never in the file; the
+   heartbeat-trend reading belongs to the writer-*behind* case. One clause. Optionally:
+   `header()` mentions a non-zero last-heartbeat `queued` beside the dropped line.
+3. **I-R3-3** — `I-observability.md`'s Handoff Log lacks an entry for `1f86792`'s two
+   behavioural changes: the arming move (option 2 deferred, and why) and the
+   `ledger_queued_lines` key — fold in the arithmetic deviation's reasoning
+   (`accepted − written − write_failed`, because channel-full rejects never enter
+   `accepted`), which is the part most likely to be re-derived.
+
+Guidance handed forward with them: serve-startup ordering claims live in more prose sites
+than any one of them signals — the cheap defence when touching that ordering is an `rg`
+sweep for the claim, not a read of the neighbourhood. J2 moves this ordering again;
+apply the sweep then.
+
+**Depends on:** nothing.
 
 ## J1 — Per-call agent identity
 
