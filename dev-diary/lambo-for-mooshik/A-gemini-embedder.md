@@ -105,6 +105,18 @@ config flip.
 
 The choice is made once, when the embedder is chosen, before the ingest.
 
+**Recommended default: 1536** (decided 2026-08-19). Not for the raw number — dims are not
+comparable across models, and gemini-embedding-001 at 768 already outperforms BGE-M3's
+1024 — but for the regret asymmetry under MRL: information is front-loaded, so choosing
+too *wide* is later fixable by a local truncate-and-renormalize migration with no API
+calls, while choosing too *narrow* means re-embedding the whole corpus through Vertex at
+full cost. 1536 also clears pgvector's 2000-dim hnsw ceiling (B2), where 3072 does not
+(it needs `halfvec` or goes unindexed — B2 refuses it loudly at init). One
+incompatibility travels with the choice: the shipped Cockroach schema is a fixed
+`VECTOR(1024)`, so a 1536-d session cannot land there without its own schema change —
+irrelevant to Mooshik (its cloud tier is Postgres) but stated so nobody discovers it
+sideways.
+
 ---
 
 ## Done when
