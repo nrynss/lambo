@@ -73,3 +73,25 @@ decision. After G2, the original F query that had tied at the old floor returns
 `deployment must stay backward compatible` first. The final displayed score is
 0.20 because phase-3 applies its default 0.5 query weight; its raw 0.3991
 vector score is still above the calibrated phase-1 floor.
+
+## Reproducing the interaction checks
+
+`g-calibration.db` is intentionally ignored because it was a local measurement
+scratch database. The interaction proof does not depend on it. Instead,
+[`run.sh`](run.sh) copies F's committed `f-bge.db` durable-vector fixture into
+a temporary directory and builds both exact revisions: `74febca^` with the
+0.50 floor and `74febca` with the 0.35 floor.
+
+With the local llama.cpp BGE-M3 server listening on `127.0.0.1:8080`, run this
+from the repository root:
+
+```sh
+./evidence/mooshik-g-recall-calibration/run.sh
+```
+
+The driver fails unless the before run ranks `user schema stores account
+records` first, the after run ranks `deployment must stay backward compatible`
+first, and each revision reports exactly two concepts and zero `Semantic` edges
+for its `register user` / `create account` session. It cleans up its temporary
+worktrees and database copies on exit. Its command log contains complete
+arguments, making the captured interaction independently replayable.

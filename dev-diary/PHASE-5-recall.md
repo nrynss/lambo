@@ -134,7 +134,7 @@ an agent waiting on T5.1.
 
 **What exists now (wave A, integrated e230f71 / 53979b2):**
 
-- `src/recall/candidates.rs` (T5.1) — phase-1 candidates: `gather(&dyn GraphStore, session, embedding, limit) -> Phase1Input` (async; the only store I/O — the vector leg, capability-gated; absent `VECTOR_SEARCH` → zero store calls + one log line) then `candidates(&Graph, &InvertedIndex, Phase1Input, query, limit) -> Vec<Scored<NodeId>>` (sync, safe under the graph lock). Union = BM25 keyword hits ∪ concepts of the 3 most recent interactions (`created_at` desc, ties by id asc) ∪ vector hits; per-node max-merge; score-desc then id-asc total order; `RECENT_SCORE = 0.5`.
+- `src/recall/candidates.rs` (T5.1) — phase-1 candidates: `gather(&dyn GraphStore, session, embedding, limit) -> Phase1Input` (async; the only store I/O — the vector leg, capability-gated; absent `VECTOR_SEARCH` → zero store calls + one log line) then `candidates(&Graph, &InvertedIndex, Phase1Input, query, limit) -> Vec<Scored<NodeId>>` (sync, safe under the graph lock). Union = BM25 keyword hits ∪ concepts of the 3 most recent interactions (`created_at` desc, ties by id asc) ∪ vector hits; per-node max-merge; score-desc then id-asc total order; `RECENT_SCORE = 0.5` **at this wave-A integration point**.
 - `src/recall/cache.rs` (T5.4) — LRU keyed `(query_hash, top_k, traversal_depth, mutation_epoch)`; capacity const 128; epoch invalidation only; plain struct (caller wires locking).
 - Module declarations: `pub mod cache;` + `pub mod candidates;` added to `src/recall/mod.rs` by the two task branches (shared-file policy announcement — additive only).
 
@@ -144,6 +144,13 @@ an agent waiting on T5.1.
 - **Recent-interactions leg:** the 3 most recent by `created_at`, NOT chain order (the fixture's chain tail is the oldest); ties by id asc.
 
 **Recorded but not remediated (P3 doc-accuracy, verdict ACCEPT):** T54-1 (eviction-cost doc claim; capacity small, harmless), T54-2 ("Not Sync-friendly" phrasing; the struct is auto-Sync, real constraint is the `&mut self` API). See `adve-review-t5.4-cache.md`.
+
+**Post-phase calibration (2026-08-19):** G later changed the live
+`RECENT_SCORE` to **0.35**, based on the committed BGE-M3 durable-vector miss
+at 0.3991. The historical 0.50 above records what wave A integrated; it is not
+the current runtime contract. The measured decision and a replayable before/
+after interaction driver are in
+[`evidence/mooshik-g-recall-calibration/`](../evidence/mooshik-g-recall-calibration/).
 
 **What exists now (wave B, integrated 33fb935):**
 

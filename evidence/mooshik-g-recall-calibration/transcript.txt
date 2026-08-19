@@ -10,9 +10,9 @@ See measurement.txt for every pair and the four class summaries.
 === G1 duplicate before G2 ===
 ./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml provision
 sqlite schema provisioned (init_schema, idempotent)
-./target/debug/lambo ... derive --session g-merge --content 'register user' --kind entity
+./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml derive --session g-merge --agent agent-a --content 'register user' --kind entity
 derived 1 concept(s): 1 created, 0 matched existing
-./target/debug/lambo ... derive --session g-merge --content 'create account' --kind entity
+./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml derive --session g-merge --agent agent-a --content 'create account' --kind entity
 derived 1 concept(s): 1 created, 0 matched existing
 sqlite: g-merge concepts=2, semantic_edges=0
 
@@ -31,11 +31,25 @@ The displayed values are final recall scores. The raw durable-vector cosine is
 0.3991, so it now survives the 0.35 max-merge floor and takes first place.
 
 === G2 duplicate after ===
-./target/debug/lambo ... derive --session g-merge-after --content 'register user' --kind entity
+./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml derive --session g-merge-after --agent agent-a --content 'register user' --kind entity
 derived 1 concept(s): 1 created, 0 matched existing
-./target/debug/lambo ... derive --session g-merge-after --content 'create account' --kind entity
+./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml derive --session g-merge-after --agent agent-a --content 'create account' --kind entity
 derived 1 concept(s): 1 created, 0 matched existing
 sqlite: g-merge-after concepts=2, semantic_edges=0
 
 The merge threshold remains 0.85 by the measured precision decision, so this
 below-threshold paraphrase still produces a duplicate after G2.
+
+=== Reproducible before/after replay ===
+./evidence/mooshik-g-recall-calibration/run.sh
+
+`run.sh` is the committed, complete interaction driver. It prints every command
+with its full arguments, builds `74febca^` and `74febca` in temporary worktrees,
+copies the committed F durable-vector database to temporary files, and asserts:
+
+before G2: `user schema stores account records` is first for the committed query;
+after G2: `deployment must stay backward compatible` is first for the same query;
+both revisions: `register user` and `create account` produce two concepts and zero
+`Semantic` edges.
+
+The generated `g-calibration.db` is not an input to this replay.
