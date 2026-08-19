@@ -116,12 +116,12 @@ Recall has three legs: keyword matching, vector similarity, and expansion throug
 | Store | Keyword | Vector | Graph expansion |
 |---|---|---|---|
 | CockroachDB | Yes | Yes | Yes |
-| SQLite | Yes | No | Yes |
+| SQLite | Yes | Yes | Yes |
 | In-memory | Yes | No | Yes |
 
 Concepts your agents write through `derive` and `record-action` store their embedding along with their text. On a store with vector search, that means recall finds memory the swarm wrote itself by meaning, not just memory you loaded in bulk ahead of time. This matters most for the swarm pattern below, where many agents write the same idea in different words.
 
-The walkthrough above uses SQLite, so it exercises the keyword and graph legs only. Recall still works there. You get matches on the words you use rather than on meaning, so a query sharing no vocabulary with a stored concept can miss it.
+The walkthrough above uses SQLite, so it exercises all three. SQLite scans its stored vectors exactly rather than through an index, which is the right trade while a session's concept count stays small and returns exact nearest neighbours rather than approximate ones. The in-memory store has no vector leg: recall there matches on the words you use rather than on meaning, so a query sharing no vocabulary with a stored concept can miss it.
 
 ## Readers and the writer
 

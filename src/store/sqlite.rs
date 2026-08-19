@@ -1,10 +1,54 @@
 //! T3.3 — SQLite GraphStore adapter (offline / test tier, spec §3.2–§3.3, §4).
 //!
-//! Same trait surface as [`super::memory::MemoryStore`] over `sqlx::SqlitePool`. SQLite has
-//! **no** `VECTOR_SEARCH` capability, so `capabilities()` is empty and
-//! `vector_candidates` returns [`StoreError::Capability`]; `vector_dimensions()` is `None`.
-//! `Concept.embedding` IS written and read for flush→load round-trip parity (CON-8 — the
-//! shared text form lives in the `embedding BLOB`), but it is never queried.
+//! Same trait surface as [`super::memory::MemoryStore`] over `sqlx::SqlitePool`.
+//! `Concept.embedding` is written and read for flush→load round-trip parity (CON-8 — the
+//! shared text form lives in the `embedding BLOB`) **and**, since F1/F2, queried: the
+//! adapter advertises `VECTOR_SEARCH` and answers
+//! [`GraphStore::vector_candidates_checked`] with an exact cosine scan over that column.
+//!
+//! ## Vector search (F1/F2 — issue #5)
+//!
+//! See the [seam note](#the-scan-is-a-seam) below for why the scan is split in two.
+//! `capabilities()` and `vector_dimensions()` are two halves of one contract
+//! (`resolve::check_vector_search_contract`), so they landed together with the query path:
+//! the trait's fail-closed default for `vector_candidates_checked` turns recall into an
+//! error for a store that advertises the capability without implementing the atomic
+//! contract check, so advertising alone would have been worse than not advertising.
+//!
+//! ### Width authority
+//!
+//! SQLite's `concepts.embedding` is a width-agnostic `BLOB` — unlike Cockroach's
+//! `VECTOR(n)` there is no schema number to parse, so the adapter has no schema
+//! authority of its own to report from. The two authorities that do exist are used for
+//! the two different jobs they can each answer:
+//!
+//! * **Process resolution** (`vector_dimensions()`, sync, session-less) reports the
+//!   width configured for this process — `[embedder] dim`, threaded in by
+//!   `resolve::resolve_backends` via `store::build_store_with_vector_dim`. A bare
+//!   `SqliteStore::connect` (tests, direct embedding) falls back to the same
+//!   `EmbedderConfig` default the TOML key has, so no *third* hardcoded width is
+//!   introduced (issue #5 as filed asked for a literal `Some(1024)`; F amends that).
+//! * **Every candidate read** enforces the session's **durable** contract
+//!   (`sessions.embedding_{kind,model,dim}`) instead, in the same transaction as the
+//!   candidate query. That is the only authority that can attest which space the stored
+//!   vectors are in, and it is what `vector_candidates_checked` refuses on.
+//!
+//! ### The scan is a seam
+//!
+//! Candidate *selection* ([`select_session_vectors`]) is separated from candidate
+//! *scoring* ([`rank_by_cosine`]) on purpose. Today selection is a full session scan and
+//! scoring is exact cosine, which is right while `n` is small: at 1024 f32 a concept
+//! vector is 4 KB and the largest measured session held ~1,400 of them. But "n is small
+//! by construction" was a property of *session-scoped* graphs, and a single unified
+//! autobiographical session is not bounded that way. When the scan starts showing up in
+//! recall latency, an ANN index replaces `select_session_vectors` — whose signature
+//! already takes the probe and the limit for exactly that reason, even though an exact
+//! scan ignores both — and `rank_by_cosine` keeps re-ranking the survivors exactly. No
+//! caller and no other adapter method changes.
+//!
+//! `sqlite-vec` is deliberately not that index yet: it is a C toolchain dependency across
+//! four cross-compiled release targets plus `sqlite3_auto_extension` registration before
+//! sqlx opens a pool, bought against a latency number nobody has measured.
 //!
 //! ## Dialect notes (T3.1 handoff, binding)
 //!
@@ -247,6 +291,10 @@ const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
 pub struct SqliteStore {
     options: SqliteConnectOptions,
     pool: OnceLock<SqlitePool>,
+    /// Width reported by [`GraphStore::vector_dimensions`] — see the module doc's
+    /// "Width authority". Not a schema constraint (the column is a `BLOB`) and NOT
+    /// what the candidate path enforces; that is the session's durable contract.
+    vector_dim: usize,
 }
 
 impl SqliteStore {
@@ -254,7 +302,30 @@ impl SqliteStore {
         Self {
             options,
             pool: OnceLock::new(),
+            // The configured embedder width is the process's statement of the width
+            // SQLite will persist; absent a caller-supplied one, use the same default
+            // the `[embedder] dim` key has rather than minting a new literal here.
+            vector_dim: crate::embed::EmbedderConfig::default().dim,
         }
+    }
+
+    /// Report `dim` from [`GraphStore::vector_dimensions`] instead of the
+    /// `EmbedderConfig` default.
+    ///
+    /// `resolve::resolve_backends` calls this (through
+    /// [`super::build_store_with_vector_dim`]) with the resolved `[embedder] dim`, so
+    /// `check_vector_compatibility` compares the store against the embedder the process
+    /// actually configured. A zero width is refused: the capability/width pair must stay
+    /// consistent (`resolve::check_vector_search_contract`), and `Some(0)` would advertise
+    /// a store that can hold no vector.
+    pub fn with_vector_dim(mut self, dim: usize) -> Result<Self, StoreError> {
+        if dim == 0 {
+            return Err(StoreError::Invariant(
+                "SqliteStore vector width must be > 0".into(),
+            ));
+        }
+        self.vector_dim = dim;
+        Ok(self)
     }
 
     /// Open a SQLite database — `sqlite::memory:` or a file path.
@@ -562,7 +633,19 @@ impl GraphStore for SqliteStore {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::empty()
+        // F2: the query path exists (`vector_candidates_checked` below), so the
+        // capability is honest. It must never be advertised without that
+        // implementation — the trait's fail-closed default would turn every recall on
+        // this store into `StoreError::Capability`, which is worse than the
+        // keyword-only degradation it replaced.
+        Capabilities::VECTOR_SEARCH
+    }
+
+    /// Configured width, never a schema parse — the `BLOB` column has no width.
+    /// See the module doc's "Width authority": this answers process resolution, while
+    /// the session's durable `sessions.embedding_dim` is what candidate reads enforce.
+    fn vector_dimensions(&self) -> Option<usize> {
+        Some(self.vector_dim)
     }
 
     async fn acquire_lease(
@@ -766,31 +849,12 @@ impl GraphStore for SqliteStore {
             .map(serde_json::from_str::<serde_json::Value>)
             .transpose()
             .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
-        let embedding = match (embedding_kind, embedding_dim) {
-            (Some(kind), Some(dim)) => Some(EmbeddingContract {
-                kind,
-                model: embedding_model,
-                dim: usize::try_from(dim).map_err(|_| {
-                    StoreError::Backend(format!(
-                        "sessions row for {} has negative embedding_dim",
-                        session.0
-                    ))
-                })?,
-            }),
-            (None, None) => None,
-            (Some(_), None) => {
-                return Err(StoreError::Backend(format!(
-                    "sessions row for {} has embedding_kind without embedding_dim",
-                    session.0
-                )));
-            }
-            (None, Some(_)) => {
-                return Err(StoreError::Backend(format!(
-                    "sessions row for {} has embedding_dim without embedding_kind",
-                    session.0
-                )));
-            }
-        };
+        let embedding = session_embedding_from_parts(
+            embedding_kind,
+            embedding_model,
+            embedding_dim,
+            &session.0,
+        )?;
 
         let interactions = load_interactions(&mut *tx, session).await?;
         let concepts = load_concepts(&mut *tx, session).await?;
@@ -886,14 +950,109 @@ impl GraphStore for SqliteStore {
 
     async fn vector_candidates(
         &self,
-        _session: &SessionId,
-        _embedding: &[f32],
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        // Frozen v0.2.0 compatibility surface (Cockroach parity). It cannot attest
+        // which contract produced `embedding`, so production code never calls it;
+        // re-entering the checked path with the session's currently stored contract
+        // preserves the legacy result shape while keeping the contract/vector snapshot
+        // race closed inside this adapter.
+        validate_vector_candidate_limit(limit)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let stored = match self.load_session(session).await {
+            Ok(snapshot) => snapshot.embedding,
+            Err(StoreError::SessionNotFound(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let Some(stored) = stored else {
+            return Ok(Vec::new());
+        };
+        self.vector_candidates_checked(session, embedding, &stored, limit)
+            .await
+    }
+
+    /// Exact cosine over the session's flushed embeddings (F1, issue #5).
+    ///
+    /// **One transaction covers the contract read and the candidate read.** SQLite's
+    /// single connection serializes writers, but a flush landing between two separate
+    /// statements could still swap the contract out from under vectors already
+    /// selected — the same race the Cockroach adapter closes with a retried
+    /// serializable transaction. The refusal is `StoreError::Invariant`, matching
+    /// Cockroach and the `VectorSearchStore` reference so callers classify it
+    /// identically on all three.
+    ///
+    /// **An empty answer is not an error.** An unknown session, a session with no
+    /// durable contract yet, and a session whose concepts carry no vectors all return
+    /// an empty candidate list — the shape a vector-capable store returns before its
+    /// first embedding lands. Only a corrupt row or a contract change is an error.
+    async fn vector_candidates_checked(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         validate_vector_candidate_limit(limit)?;
-        Err(StoreError::Capability(
-            "SqliteStore has no VECTOR_SEARCH".into(),
-        ))
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| db_err("begin vector candidate transaction", e))?;
+
+        let row = sqlx::query(
+            "SELECT embedding_kind, embedding_model, embedding_dim \
+             FROM sessions WHERE session_id = ?",
+        )
+        .bind(&session.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("vector_candidates: session contract", e))?;
+        let Some(row) = row else {
+            return Ok(Vec::new());
+        };
+        let stored = session_embedding_from_parts(
+            row.try_get(0)
+                .map_err(|e| db_err("vector_candidates: session contract", e))?,
+            row.try_get(1)
+                .map_err(|e| db_err("vector_candidates: session contract", e))?,
+            row.try_get(2)
+                .map_err(|e| db_err("vector_candidates: session contract", e))?,
+            &session.0,
+        )?;
+        let Some(stored) = stored else {
+            return Ok(Vec::new());
+        };
+        stored.ensure_compatible(expected_contract).map_err(|err| {
+            StoreError::Invariant(format!(
+                "vector candidate lookup refused after embedding contract changed: {err}"
+            ))
+        })?;
+        // The probe is the caller's; the contract it claims is now known to be the
+        // durable one, so a probe of a different width is a caller bug rather than a
+        // store state. `cosine` would silently score it 0.0 on every row.
+        if embedding.len() != stored.dim {
+            return Err(StoreError::Invariant(format!(
+                "query embedding has {} dimensions but session {} stores vectors of {} \
+                 (see vector_dimensions())",
+                embedding.len(),
+                session.0,
+                stored.dim
+            )));
+        }
+
+        let candidates =
+            select_session_vectors(&mut *tx, session, embedding, limit, stored.dim).await?;
+        tx.commit()
+            .await
+            .map_err(|e| db_err("commit vector candidate transaction", e))?;
+        Ok(rank_by_cosine(embedding, candidates, limit))
     }
 
     async fn blast_radius(
@@ -1074,6 +1233,122 @@ impl GraphStore for SqliteStore {
 
 fn db_err(context: &str, e: sqlx::Error) -> StoreError {
     StoreError::Backend(format!("{context}: {e}"))
+}
+
+/// Rebuild the session's [`EmbeddingContract`] from the three nullable columns.
+///
+/// Shared by `load_session` and the checked candidate read so both classify a corrupt
+/// row identically (STORE-7 parity with Cockroach's `session_embedding_from_parts`): a
+/// row with `embedding_kind` XOR `embedding_dim` set — which direct SQL can manufacture —
+/// is a corruption error, never a silent `None`. `embedding_model` alone is legal (an
+/// embedder with no model identifier).
+fn session_embedding_from_parts(
+    kind: Option<String>,
+    model: Option<String>,
+    dim: Option<i64>,
+    session_id: &str,
+) -> Result<Option<EmbeddingContract>, StoreError> {
+    match (kind, dim) {
+        (Some(kind), Some(dim)) => Ok(Some(EmbeddingContract {
+            kind,
+            model,
+            dim: usize::try_from(dim).map_err(|_| {
+                StoreError::Backend(format!(
+                    "sessions row for {session_id} has negative embedding_dim"
+                ))
+            })?,
+        })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(StoreError::Backend(format!(
+            "sessions row for {session_id} has embedding_kind without embedding_dim"
+        ))),
+        (None, Some(_)) => Err(StoreError::Backend(format!(
+            "sessions row for {session_id} has embedding_dim without embedding_kind"
+        ))),
+    }
+}
+
+/// One decoded stored vector, before scoring.
+type VectorCandidate = (NodeId, Vec<f32>);
+
+/// **Candidate selection** — the swappable half of the vector query path (F1).
+///
+/// Today: every non-null `concepts.embedding` in the session, decoded. `probe` and
+/// `limit` are part of the signature although an exact scan cannot use them, so that an
+/// ANN index (see the module doc's "The scan is a seam") replaces this function's body
+/// without touching [`rank_by_cosine`], `vector_candidates_checked`, or any caller.
+///
+/// Runs on the caller's transaction: the contract read that authorised this scan and the
+/// scan itself must observe one snapshot.
+///
+/// **Width is checked, not truncated.** The BLOB holds the shared `[x,y,z]` text codec
+/// (CON-8), so a row whose decoded element count disagrees with the session contract is
+/// a corrupt row — returned as [`StoreError::Backend`]. `cosine` refuses length
+/// mismatches by scoring 0.0, which would silently rank a corrupt concept last instead of
+/// reporting it.
+async fn select_session_vectors(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+    _probe: &[f32],
+    _limit: usize,
+    dim: usize,
+) -> Result<Vec<VectorCandidate>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT id, embedding FROM concepts \
+         WHERE session_id = ? AND embedding IS NOT NULL ORDER BY id ASC",
+    )
+    .bind(&session.0)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| db_err("vector_candidates: session vectors", e))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: String = row
+            .try_get(0)
+            .map_err(|e| db_err("vector_candidates: concept id", e))?;
+        let blob: Vec<u8> = row
+            .try_get(1)
+            .map_err(|e| db_err("vector_candidates: concept embedding", e))?;
+        let text = std::str::from_utf8(&blob).map_err(|e| {
+            StoreError::Backend(format!(
+                "concepts.embedding for {id} is not valid UTF-8: {e}"
+            ))
+        })?;
+        let vector = decode_vector(text)?;
+        if vector.len() != dim {
+            return Err(StoreError::Backend(format!(
+                "concepts.embedding for {id} decodes to {} dimensions but session {} \
+                 declares {dim}",
+                vector.len(),
+                session.0
+            )));
+        }
+        out.push((node_id(&id, "concept id")?, vector));
+    }
+    Ok(out)
+}
+
+/// **Candidate scoring** — the fixed half. Exact cosine, best first, ties broken by the
+/// smaller node id so the answer is deterministic (MemoryStore / Cockroach parity).
+/// Stays exact whatever [`select_session_vectors`] becomes: an approximate index would
+/// prune the pool, never the ranking.
+fn rank_by_cosine(
+    probe: &[f32],
+    candidates: Vec<VectorCandidate>,
+    limit: usize,
+) -> Vec<Scored<NodeId>> {
+    let mut scored: Vec<Scored<NodeId>> = candidates
+        .into_iter()
+        .map(|(id, vector)| Scored::new(id, f64::from(crate::embed::cosine(probe, &vector))))
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.item.0.cmp(&b.item.0))
+    });
+    scored.truncate(limit);
+    scored
 }
 
 /// Atomic single-writer lease acquire / refresh (T8.6).
@@ -2035,34 +2310,542 @@ mod tests {
         assert!(matches!(err, StoreError::SessionNotFound(_)));
     }
 
-    #[tokio::test]
-    async fn vector_candidates_capability_error_and_no_dimensions() {
-        let store = test_store();
-        let contract = EmbeddingContract {
+    // -- F1/F2 vector search (issue #5) -------------------------------------
+
+    /// The 8-d contract every vector test below writes and queries under.
+    fn vec_contract(dim: usize) -> EmbeddingContract {
+        EmbeddingContract {
             kind: "fixture".into(),
-            model: None,
-            dim: 8,
+            model: Some("test-model".into()),
+            dim,
+        }
+    }
+
+    /// A store whose reported width matches `dim`, so a small test vector is a
+    /// legal probe (the default width is the `[embedder] dim` default, not 8).
+    fn vec_test_store(dim: usize) -> SqliteStore {
+        SqliteStore::connect("sqlite::memory:")
+            .unwrap()
+            .with_vector_dim(dim)
+            .unwrap()
+    }
+
+    fn plant_concept_with_vector(
+        sid: &SessionId,
+        id: NodeId,
+        origin: NodeId,
+        content: &str,
+        ts: DateTime<Utc>,
+        embedding: Vec<f32>,
+    ) -> Mutation {
+        let Mutation::UpsertNode {
+            node: NodeKind::Concept(mut concept),
+        } = plant_concept(sid, id, origin, content, ConceptType::Entity, ts)
+        else {
+            unreachable!("plant_concept builds a concept upsert");
         };
-        store.init_schema().await.unwrap();
-        assert!(store.capabilities().is_empty());
-        assert_eq!(store.vector_dimensions(), None);
-        let err = store
-            .vector_candidates_checked(&SessionId::from("x"), &[0.0; 8], &contract, 5)
+        concept.embedding = Some(embedding);
+        Mutation::UpsertNode {
+            node: NodeKind::Concept(concept),
+        }
+    }
+
+    /// Seed a session with a durable contract and the given vector-bearing concepts.
+    async fn seed_vectors(
+        store: &SqliteStore,
+        sid: &SessionId,
+        contract: &EmbeddingContract,
+        vectors: &[(NodeId, &str, Vec<f32>)],
+    ) {
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let origin = NodeId::new();
+        let mut mutations = vec![
+            plant_interaction(sid, origin, None, ts),
+            Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding: Some(contract.clone()),
+            },
+        ];
+        for (id, content, vector) in vectors {
+            mutations.push(plant_concept_with_vector(
+                sid,
+                *id,
+                origin,
+                content,
+                ts,
+                vector.clone(),
+            ));
+        }
+        store
+            .flush(&MutationBatch { mutations }, None)
             .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Capability(_)));
+            .unwrap();
+    }
+
+    /// F2: the capability and a concrete width land together, and the width is the
+    /// configured one — never a constant minted inside the adapter (the amendment to
+    /// issue #5, which asked for a literal `Some(1024)`).
+    #[tokio::test]
+    async fn vector_search_capability_reports_a_configured_width() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        assert_eq!(store.capabilities(), Capabilities::VECTOR_SEARCH);
+        assert_eq!(
+            store.vector_dimensions(),
+            Some(crate::embed::EmbedderConfig::default().dim)
+        );
+        // The pair must satisfy CON-5 — advertising without a width makes recall
+        // refuse to resolve at all.
+        crate::resolve::check_vector_search_contract(&store, crate::store::StoreKind::Sqlite)
+            .unwrap();
+
+        // A configured width flows through, including a width no adapter hardcodes.
+        let wide = vec_test_store(1536);
+        assert_eq!(wide.vector_dimensions(), Some(1536));
+        crate::resolve::check_vector_compatibility(wide.vector_dimensions(), 1536).unwrap();
+        assert!(crate::resolve::check_vector_compatibility(wide.vector_dimensions(), 768).is_err());
+
+        // Zero is refused: `Some(0)` would advertise a store that can hold no vector.
+        let zero = SqliteStore::connect("sqlite::memory:")
+            .unwrap()
+            .with_vector_dim(0);
+        assert!(
+            matches!(zero, Err(StoreError::Invariant(_))),
+            "{:?}",
+            zero.err()
+        );
+
+        // The caller-limit guard survives the capability flip.
         assert!(matches!(
             store
                 .vector_candidates_checked(
                     &SessionId::from("x"),
-                    &[],
-                    &contract,
+                    &[0.0; 8],
+                    &vec_contract(8),
                     crate::store::MAX_VECTOR_CANDIDATE_LIMIT + 1,
                 )
                 .await
                 .unwrap_err(),
             StoreError::Invariant(_)
         ));
+    }
+
+    /// F1: the scan scores exact cosine over the flushed BLOBs, best first, ties by
+    /// the smaller node id — the ordering contract MemoryStore and Cockroach share.
+    #[tokio::test]
+    async fn vector_candidates_score_exact_cosine_in_rank_order() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-rank");
+        let contract = vec_contract(4);
+        // `near` is the probe itself, `mid` is 45° away, `far` is orthogonal.
+        let near = NodeId::new();
+        let mid = NodeId::new();
+        let far = NodeId::new();
+        seed_vectors(
+            &store,
+            &sid,
+            &contract,
+            &[
+                (near, "near", vec![1.0, 0.0, 0.0, 0.0]),
+                (mid, "mid", vec![1.0, 1.0, 0.0, 0.0]),
+                (far, "far", vec![0.0, 1.0, 0.0, 0.0]),
+            ],
+        )
+        .await;
+
+        let probe = [1.0f32, 0.0, 0.0, 0.0];
+        let hits = store
+            .vector_candidates_checked(&sid, &probe, &contract, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|s| s.item).collect::<Vec<_>>(),
+            vec![near, mid, far]
+        );
+        assert!((hits[0].score - 1.0).abs() < 1e-6, "{hits:?}");
+        assert!(
+            (hits[1].score - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+            "{hits:?}"
+        );
+        assert!(hits[2].score.abs() < 1e-6, "{hits:?}");
+
+        // A concept with no vector is not a candidate at all (NULL, not score 0).
+        let bare = NodeId::new();
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let origin = store.load_session(&sid).await.unwrap().interactions[0].id;
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![plant_concept(
+                        &sid,
+                        bare,
+                        origin,
+                        "no vector",
+                        ConceptType::Entity,
+                        ts,
+                    )],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let hits = store
+            .vector_candidates_checked(&sid, &probe, &contract, 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 3, "the vector-less concept must not appear");
+
+        // Ties break by the smaller id, deterministically, whichever order the two
+        // identical vectors were written in.
+        let (lo, hi) = {
+            let a = NodeId::new();
+            let b = NodeId::new();
+            if a.0 < b.0 {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        };
+        let tie_sid = SessionId::from("vec-ties");
+        seed_vectors(
+            &store,
+            &tie_sid,
+            &contract,
+            &[
+                (hi, "written first", vec![1.0, 0.0, 0.0, 0.0]),
+                (lo, "written second", vec![1.0, 0.0, 0.0, 0.0]),
+            ],
+        )
+        .await;
+        let hits = store
+            .vector_candidates_checked(&tie_sid, &probe, &contract, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|s| s.item).collect::<Vec<_>>(),
+            vec![lo, hi]
+        );
+
+        // The frozen unchecked surface answers with the session's own contract.
+        let legacy = store.vector_candidates(&sid, &probe, 10).await.unwrap();
+        assert_eq!(legacy[0].item, near);
+    }
+
+    /// F1: SQLite's score is on the **same scale** as Cockroach's, so
+    /// `semantic_match_threshold` and every recall rank mean the same thing on both.
+    ///
+    /// Cockroach ranks by the L2 distance its `<->` operator returns and converts with
+    /// `1 - d²/2`; for the L2-normalized vectors every embedder is required to emit,
+    /// that identity *is* cosine. Getting a distance/score conversion wrong does not
+    /// fail — it just ranks differently — so the equality is asserted rather than
+    /// assumed. This is the part of SQLite↔Cockroach recall parity that needs no
+    /// cluster; ANN-vs-exact divergence in *which* candidates come back does.
+    #[tokio::test]
+    async fn vector_scores_match_the_cockroach_distance_conversion() {
+        /// Cockroach's `distance_to_score`, transcribed.
+        fn distance_to_score(dist: f64) -> f64 {
+            (1.0 - 0.5 * dist * dist).clamp(-1.0, 1.0)
+        }
+        fn unit(v: [f32; 4]) -> Vec<f32> {
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            v.iter().map(|x| x / norm).collect()
+        }
+        fn l2(a: &[f32], b: &[f32]) -> f64 {
+            f64::from(
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| (x - y) * (x - y))
+                    .sum::<f32>()
+                    .sqrt(),
+            )
+        }
+
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-scale");
+        let contract = vec_contract(4);
+        let vectors = [
+            unit([1.0, 0.0, 0.0, 0.0]),
+            unit([1.0, 1.0, 0.0, 0.0]),
+            unit([0.0, 1.0, 0.3, 0.0]),
+            unit([-1.0, 0.0, 0.0, 0.0]),
+        ];
+        let seeded: Vec<(NodeId, &str, Vec<f32>)> = vectors
+            .iter()
+            .enumerate()
+            .zip(["v0", "v1", "v2", "v3"])
+            .map(|((_, v), label)| (NodeId::new(), label, v.clone()))
+            .collect();
+        seed_vectors(&store, &sid, &contract, &seeded).await;
+
+        let probe = unit([1.0, 0.2, 0.0, 0.0]);
+        let hits = store
+            .vector_candidates_checked(&sid, &probe, &contract, 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 4);
+        for (id, label, vector) in &seeded {
+            let got = hits
+                .iter()
+                .find(|s| s.item == *id)
+                .unwrap_or_else(|| panic!("{label} missing from {hits:?}"))
+                .score;
+            let want = distance_to_score(l2(&probe, vector));
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{label}: sqlite scored {got}, cockroach's conversion gives {want}"
+            );
+        }
+    }
+
+    /// F1: the checked path refuses a durable/expected contract change — kind, model
+    /// and dim alike — instead of ranking vectors the caller cannot interpret. Same
+    /// `Invariant` classification as Cockroach and `VectorSearchStore`, so a caller
+    /// handles all three identically.
+    #[tokio::test]
+    async fn vector_candidates_refuse_a_changed_embedding_contract() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-contract");
+        let durable = vec_contract(4);
+        let id = NodeId::new();
+        seed_vectors(
+            &store,
+            &sid,
+            &durable,
+            &[(id, "stored", vec![1.0, 0.0, 0.0, 0.0])],
+        )
+        .await;
+        let probe = [1.0f32, 0.0, 0.0, 0.0];
+
+        // Sanity: the matching contract is served.
+        assert_eq!(
+            store
+                .vector_candidates_checked(&sid, &probe, &durable, 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mismatches = [
+            (
+                "kind",
+                EmbeddingContract {
+                    kind: "bge_m3".into(),
+                    ..durable.clone()
+                },
+            ),
+            (
+                "model",
+                EmbeddingContract {
+                    model: Some("other-model".into()),
+                    ..durable.clone()
+                },
+            ),
+            (
+                "model cleared",
+                EmbeddingContract {
+                    model: None,
+                    ..durable.clone()
+                },
+            ),
+        ];
+        for (what, expected) in mismatches {
+            let err = store
+                .vector_candidates_checked(&sid, &probe, &expected, 5)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::Invariant(_)),
+                "{what} mismatch must be Invariant, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("embedding contract changed"),
+                "{what}: {err}"
+            );
+        }
+
+        // A dim mismatch is refused by the same comparison; the probe is sized to the
+        // expected contract so the refusal is the contract check, not the width guard.
+        let err = store
+            .vector_candidates_checked(&sid, &[1.0, 0.0], &vec_contract(2), 5)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("embedding contract changed"),
+            "{err}"
+        );
+
+        // A probe that disagrees with the contract it claims is a caller bug, not a
+        // silently zero-scored scan (`cosine` returns 0.0 on a length mismatch).
+        let err = store
+            .vector_candidates_checked(&sid, &[1.0, 0.0], &durable, 5)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+        assert!(err.to_string().contains("dimensions"), "{err}");
+    }
+
+    /// F1: nothing-to-search is an empty answer, never an error — the shape a
+    /// vector-capable store returns before its first embedding lands. Recall must not
+    /// fail on a fresh database.
+    #[tokio::test]
+    async fn vector_candidates_are_empty_before_the_first_vector() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let contract = vec_contract(4);
+        let probe = [1.0f32, 0.0, 0.0, 0.0];
+
+        // A session no writer has touched.
+        assert!(store
+            .vector_candidates_checked(&SessionId::from("never-written"), &probe, &contract, 5)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .vector_candidates(&SessionId::from("never-written"), &probe, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A session with rows but no durable contract: legacy vectors are quarantined
+        // at materialization, so an unstamped session is an empty pool.
+        let sid = SessionId::from("vec-unstamped");
+        let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
+        let origin = NodeId::new();
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        plant_interaction(&sid, origin, None, ts),
+                        plant_concept(
+                            &sid,
+                            NodeId::new(),
+                            origin,
+                            "unstamped",
+                            ConceptType::Entity,
+                            ts,
+                        ),
+                    ],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .vector_candidates_checked(&sid, &probe, &contract, 5)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .vector_candidates(&sid, &probe, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A stamped session whose concepts carry no vectors yet.
+        let stamped = SessionId::from("vec-stamped-empty");
+        seed_vectors(&store, &stamped, &contract, &[]).await;
+        assert!(store
+            .vector_candidates_checked(&stamped, &probe, &contract, 5)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// F1: a stored BLOB whose decoded width disagrees with the session contract is
+    /// corruption, reported — not truncated, and not silently ranked last by `cosine`'s
+    /// length-mismatch 0.0.
+    #[tokio::test]
+    async fn vector_candidates_refuse_a_malformed_stored_blob() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-corrupt");
+        let contract = vec_contract(4);
+        let id = NodeId::new();
+        seed_vectors(
+            &store,
+            &sid,
+            &contract,
+            &[(id, "stored", vec![1.0, 0.0, 0.0, 0.0])],
+        )
+        .await;
+        let probe = [1.0f32, 0.0, 0.0, 0.0];
+
+        // Direct SQL is the only way to produce these — the write path encodes through
+        // the shared codec — which is exactly why the read path cannot trust the width.
+        for (what, blob) in [
+            ("short", b"[1,0,0]".to_vec()),
+            ("long", b"[1,0,0,0,0]".to_vec()),
+            ("unparseable", b"[1,0,oops,0]".to_vec()),
+            ("not utf-8", vec![0xff, 0xfe, 0x00]),
+        ] {
+            sqlx::query("UPDATE concepts SET embedding = ? WHERE id = ?")
+                .bind(&blob)
+                .bind(id.0.to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let err = store
+                .vector_candidates_checked(&sid, &probe, &contract, 5)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::Backend(_)),
+                "{what} blob must be a Backend error, got {err:?}"
+            );
+        }
+    }
+
+    /// F1 boundaries: a top-k above the candidate count returns the whole pool, and
+    /// `k = 0` returns empty without touching the database.
+    #[tokio::test]
+    async fn vector_candidates_boundaries_top_k_and_zero() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-bounds");
+        let contract = vec_contract(4);
+        // Distinct content: the partial unique index on (session_id, canonical_key)
+        // rejects duplicate non-Observation keys.
+        let labels = ["c0", "c1", "c2"];
+        let seeded: Vec<(NodeId, &str, Vec<f32>)> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (NodeId::new(), *label, vec![1.0, i as f32 * 0.25, 0.0, 0.0]))
+            .collect();
+        seed_vectors(&store, &sid, &contract, &seeded).await;
+        let probe = [1.0f32, 0.0, 0.0, 0.0];
+
+        let all = store
+            .vector_candidates_checked(&sid, &probe, &contract, 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3, "top-k above the pool returns the whole pool");
+        let one = store
+            .vector_candidates_checked(&sid, &probe, &contract, 1)
+            .await
+            .unwrap();
+        assert_eq!(one, all[..1].to_vec(), "k truncates the same ranking");
+        assert!(store
+            .vector_candidates_checked(&sid, &probe, &contract, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        // k = 0 short-circuits before the contract is even read, so a contract that
+        // would otherwise be refused still returns empty rather than erroring.
+        assert!(store
+            .vector_candidates_checked(&sid, &probe, &vec_contract(999), 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .vector_candidates(&sid, &probe, 0)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// XP-8: `root_goal` survives flush → load through the **mutation path**.
@@ -4186,7 +4969,14 @@ mod tests {
         })
         .unwrap();
         assert!(crate::store::StoreKind::Sqlite.is_ready());
-        assert!(store.capabilities().is_empty());
+        // F2: the registry hands back a vector-capable adapter that reports a width.
+        assert_eq!(store.capabilities(), Capabilities::VECTOR_SEARCH);
+        assert_eq!(
+            store.vector_dimensions(),
+            Some(crate::embed::EmbedderConfig::default().dim),
+            "a registry build with no configured width falls back to the `[embedder] dim` \
+             default, never a width constant of its own"
+        );
 
         store.init_schema().await.unwrap();
         let sid = SessionId::from("registry");
@@ -4496,5 +5286,370 @@ mod tests {
         drop(store_a);
         drop(store_b);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // F1/F2 end to end: derive -> flush -> vector recall, on SQLite
+    // -----------------------------------------------------------------------
+
+    /// Everything the end-to-end test needs beyond `store-sqlite`: a deterministic
+    /// embedder with a documented near/far pair.
+    #[cfg(feature = "embed-fixture")]
+    mod vector_e2e {
+        use super::*;
+        use crate::embed::{Embedder, FixtureEmbedder, NEAR_A, NEAR_B};
+        use crate::memory::Memory;
+        use crate::store::{Capabilities, GraphStore, SessionFlushStats};
+        use crate::store::{LeaseHolder, LeaseOutcome};
+        use crate::types::InteractionSpan;
+        use crate::types::{MatchStrategy, RecallQuery};
+        use std::sync::{Arc, Mutex};
+
+        /// [`SqliteStore`] with every checked vector answer recorded, in call order.
+        ///
+        /// The twin of `memory.rs`'s `VectorSearchStore`, pointed at the real adapter:
+        /// it proves the vector leg **fired** on SQLite and what SQLite returned, rather
+        /// than inferring a vector hit from where a node landed in a rank. It adds no
+        /// behaviour — every method delegates.
+        struct RecordingSqlite {
+            inner: SqliteStore,
+            answers: Mutex<Vec<Vec<Scored<NodeId>>>>,
+        }
+
+        impl RecordingSqlite {
+            fn new(inner: SqliteStore) -> Self {
+                Self {
+                    inner,
+                    answers: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
+                self.answers.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl GraphStore for RecordingSqlite {
+            async fn init_schema(&self) -> Result<(), StoreError> {
+                self.inner.init_schema().await
+            }
+            fn capabilities(&self) -> Capabilities {
+                self.inner.capabilities()
+            }
+            fn vector_dimensions(&self) -> Option<usize> {
+                self.inner.vector_dimensions()
+            }
+            async fn flush(
+                &self,
+                batch: &MutationBatch,
+                token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                self.inner.flush(batch, token).await
+            }
+            async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+                self.inner.load_session(session).await
+            }
+            async fn keyword_candidates(
+                &self,
+                session: &SessionId,
+                tokens: &[String],
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                self.inner.keyword_candidates(session, tokens, limit).await
+            }
+            async fn vector_candidates(
+                &self,
+                session: &SessionId,
+                embedding: &[f32],
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                self.inner
+                    .vector_candidates(session, embedding, limit)
+                    .await
+            }
+            async fn vector_candidates_checked(
+                &self,
+                session: &SessionId,
+                embedding: &[f32],
+                expected_contract: &EmbeddingContract,
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                let hits = self
+                    .inner
+                    .vector_candidates_checked(session, embedding, expected_contract, limit)
+                    .await?;
+                self.answers.lock().unwrap().push(hits.clone());
+                Ok(hits)
+            }
+            async fn blast_radius(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_edge_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<u64, StoreError> {
+                self.inner
+                    .blast_radius(session, node, min_edge_age, now)
+                    .await
+            }
+            async fn interaction_span(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<InteractionSpan, StoreError> {
+                self.inner
+                    .interaction_span(session, node, min_age, now)
+                    .await
+            }
+            async fn record_canonization(
+                &self,
+                event: &CanonizationEvent,
+                token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                self.inner.record_canonization(event, token).await
+            }
+            async fn acquire_lease(
+                &self,
+                session: &SessionId,
+                holder: &LeaseHolder,
+                ttl: Duration,
+            ) -> Result<LeaseOutcome, StoreError> {
+                self.inner.acquire_lease(session, holder, ttl).await
+            }
+            async fn refresh_lease(
+                &self,
+                session: &SessionId,
+                holder: &LeaseHolder,
+                ttl: Duration,
+            ) -> Result<LeaseOutcome, StoreError> {
+                self.inner.refresh_lease(session, holder, ttl).await
+            }
+            async fn release_lease(
+                &self,
+                session: &SessionId,
+                holder: &LeaseHolder,
+            ) -> Result<(), StoreError> {
+                self.inner.release_lease(session, holder).await
+            }
+            async fn write_flush_stats(
+                &self,
+                session: &SessionId,
+                stats: &SessionFlushStats,
+            ) -> Result<(), StoreError> {
+                self.inner.write_flush_stats(session, stats).await
+            }
+            async fn read_flush_stats(
+                &self,
+                session: &SessionId,
+            ) -> Result<Option<SessionFlushStats>, StoreError> {
+                self.inner.read_flush_stats(session).await
+            }
+        }
+
+        /// Hybrid embeds a concept **with** its origin context (`"register user — <prompt>"`)
+        /// while recall embeds the bare query (`"create account"`). A real semantic
+        /// embedder still scores those two as near; `FixtureEmbedder` is hash-seeded per
+        /// exact phrase and cannot. This reduces the framing back to the concept label
+        /// before delegating — the same wrapper `memory.rs` uses for the MemoryStore
+        /// version of this test, and nothing else about the embedding path changes.
+        #[derive(Debug)]
+        struct ContextTolerantEmbedder(FixtureEmbedder);
+
+        #[async_trait]
+        impl Embedder for ContextTolerantEmbedder {
+            fn dimensions(&self) -> usize {
+                self.0.dimensions()
+            }
+            async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+                let label = text
+                    .strip_prefix("Concept: ")
+                    .unwrap_or(text)
+                    .split(" — ")
+                    .next()
+                    .unwrap_or(text);
+                self.0.embed(label).await
+            }
+        }
+
+        /// **F, end to end.** A concept created by the ordinary derive surface on SQLite
+        /// persists its vector, the vector survives the write-behind flush and a session
+        /// reload, and recall's vector leg finds it from a query that shares no token
+        /// with it. Before F this was impossible on the default local store: hybrid
+        /// derive logged `hybrid matching disabled: store lacks VECTOR_SEARCH` and
+        /// recall was keyword/recency only, which made semantic recall a property of the
+        /// cloud tier.
+        ///
+        /// The vector leg is proven to have **fired** by `RecordingSqlite::answers`, not
+        /// by the recalled node's rank.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn sqlite_vector_leg_fires_on_an_organically_derived_concept() {
+            let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+            let session = SessionId::from("sqlite-organic-vectors");
+            let (dir, path) = scratch_db();
+            let store = Arc::new(RecordingSqlite::new(SqliteStore::connect(&path).unwrap()));
+            store.init_schema().await.unwrap();
+
+            let contract = EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: FixtureEmbedder::new().dimensions(),
+            };
+            let session_name = session.0.clone();
+            let open = |store: Arc<RecordingSqlite>, contract: EmbeddingContract| {
+                let session_name = session_name.clone();
+                async move {
+                    Memory::builder()
+                        .session(session_name)
+                        .agent("agent-a")
+                        .flush_interval(Duration::from_secs(3_600))
+                        .match_strategy(MatchStrategy::Hybrid)
+                        .store(store as Arc<dyn GraphStore>)
+                        .embedder(Arc::new(ContextTolerantEmbedder(FixtureEmbedder::new()))
+                            as Arc<dyn Embedder>)
+                        .embedding_contract(contract)
+                        .build()
+                        .await
+                        .expect("build")
+                }
+            };
+
+            let mem = open(store.clone(), contract.clone()).await;
+            let out = mem
+                .derive(
+                    &[(NEAR_A, ConceptType::Entity)],
+                    &crate::graph::derive::ParentOf::none(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.created.len(), 1);
+            let organic = out.created[0];
+            // close() drains the tail: the vector must be durable, not RAM-only.
+            mem.close().await.unwrap();
+
+            let snapshot = store.load_session(&session).await.unwrap();
+            let stored = snapshot
+                .concepts
+                .iter()
+                .find(|c| c.id == organic)
+                .expect("the derived concept is durable");
+            assert_eq!(
+                stored.embedding.as_ref().map(Vec::len),
+                Some(contract.dim),
+                "an organically-derived concept persists its vector through SQLite"
+            );
+            assert_eq!(
+                snapshot.embedding.as_ref(),
+                Some(&contract),
+                "and the contract that makes it interpretable is durable with it"
+            );
+            assert_eq!(
+                store.answers(),
+                vec![Vec::new()],
+                "the derive's own hybrid gather queried SQLite and found an empty pool"
+            );
+
+            // Reopen — proving the vector round-trips through load_session — and recall
+            // with text sharing NO token with the stored concept but near it in the
+            // embedding space. The keyword leg cannot score it; only the vector leg can.
+            let reopened = open(store.clone(), contract.clone()).await;
+            let result = reopened
+                .recall(RecallQuery {
+                    query: NEAR_B.into(),
+                    top_k: 5,
+                    max_tokens: 500,
+                    traversal_depth: 1,
+                })
+                .await
+                .unwrap();
+
+            let answers = store.answers();
+            assert_eq!(answers.len(), 2, "recall issued exactly one vector query");
+            let scored = answers[1]
+                .iter()
+                .find(|s| s.item == organic)
+                .expect("SQLite's vector leg returned the organically-derived concept");
+            assert!(
+                scored.score >= 0.85,
+                "scored by real cosine similarity, got {}",
+                scored.score
+            );
+            assert!(
+                result.hits.iter().any(|h| h.node_id == organic),
+                "the vector-leg candidate reaches the assembled result: {result:?}"
+            );
+            assert!(
+                !logs.contains("store lacks VECTOR_SEARCH"),
+                "SQLite must no longer log the hybrid degradation warning: {}",
+                logs.contents()
+            );
+            assert!(
+                !logs.contains("capability miss"),
+                "nor the capability-refusal degradation: {}",
+                logs.contents()
+            );
+
+            reopened.close().await.unwrap();
+            drop(store);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// The same store, the same session, a renamed embedder: the checked read
+        /// refuses rather than ranking vectors from another space. On SQLite this path
+        /// was previously unreachable (no capability meant hybrid never called it).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_mid_session_model_swap_is_refused_on_the_recall_path() {
+            let _quiet = crate::test_util::quiet_logs();
+            let session = SessionId::from("sqlite-contract-swap");
+            let (dir, path) = scratch_db();
+            let store = Arc::new(RecordingSqlite::new(SqliteStore::connect(&path).unwrap()));
+            store.init_schema().await.unwrap();
+            let dim = FixtureEmbedder::new().dimensions();
+
+            let mem = Memory::builder()
+                .session(session.0.clone())
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .match_strategy(MatchStrategy::Hybrid)
+                .store(store.clone() as Arc<dyn GraphStore>)
+                .embedder(
+                    Arc::new(ContextTolerantEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>
+                )
+                .embedding_contract(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: Some("model-v1".into()),
+                    dim,
+                })
+                .build()
+                .await
+                .expect("build");
+            mem.derive(
+                &[(NEAR_A, ConceptType::Entity)],
+                &crate::graph::derive::ParentOf::none(),
+            )
+            .await
+            .unwrap();
+            mem.close().await.unwrap();
+
+            let renamed = EmbeddingContract {
+                kind: "fixture".into(),
+                model: Some("model-v2".into()),
+                dim,
+            };
+            let err = store
+                .vector_candidates_checked(&session, &vec![0.0; dim], &renamed, 5)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+            assert!(
+                err.to_string().contains("embedding contract changed"),
+                "{err}"
+            );
+
+            drop(store);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

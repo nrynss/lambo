@@ -5540,10 +5540,11 @@ mod tests {
     /// made the documented override workflow refuse its FIRST hybrid write
     /// with `Invariant` (live-reproduced on Cockroach; the identical
     /// invocation only succeeded on the second run, once `close()` had landed
-    /// the relabel). The sqlite/memory override tests cannot catch this —
-    /// neither store advertises `VECTOR_SEARCH`, so the hybrid checked read
-    /// is never reached; [`VectorSearchStore`] does advertise it and enforces
-    /// the contract like Cockroach.
+    /// the relabel). This is the default-features guard: MemoryStore does not
+    /// advertise `VECTOR_SEARCH`, so its own override test never reaches the
+    /// hybrid checked read, while [`VectorSearchStore`] does advertise it and
+    /// enforces the contract like Cockroach. (SQLite reaches it for real since
+    /// F2, but only under the `store-sqlite` feature row.)
     #[tokio::test]
     async fn h1_override_relabel_is_durable_before_the_first_hybrid_write() {
         let store = Arc::new(VectorSearchStore::new(

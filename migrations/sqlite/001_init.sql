@@ -32,8 +32,14 @@
 --                    TIMESTAMPTZ format uniform and add millisecond
 --                    precision.)
 --
--- No vector index: SQLite has no VECTOR_SEARCH. All spec INDEX clauses are
--- separate CREATE INDEX IF NOT EXISTS statements below. Table-level UNIQUE /
+-- No vector index: VECTOR_SEARCH is served by an exact cosine scan over
+-- `concepts.embedding` in the adapter (F1, issue #5), not by an index. An ANN
+-- index would mean sqlite-vec — a C toolchain across four cross-compiled release
+-- targets plus auto-extension registration before sqlx opens a pool — bought
+-- against a latency number nobody has measured; see store/sqlite.rs, "The scan is
+-- a seam", for the replacement point and the trigger to revisit.
+-- All spec INDEX clauses are separate CREATE INDEX IF NOT EXISTS statements
+-- below. Table-level UNIQUE /
 -- PRIMARY KEY constraints stay inline — SQLite autoindexes them, which is
 -- what ON CONFLICT targets require. REFERENCES clauses are kept for schema
 -- fidelity; SQLite enforces them only when the connection sets
@@ -79,7 +85,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     canonization_status TEXT NOT NULL DEFAULT 'None',
     blast_radius        INTEGER,
     last_demotion_time  TEXT,
-    embedding           BLOB,   -- flush->load parity (CON-8): written/read as the shared text form; no VECTOR_SEARCH
+    embedding           BLOB,   -- shared text form (CON-8); width-agnostic, scanned by vector_candidates_checked
     chunk_group_id      TEXT    -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
 );
 

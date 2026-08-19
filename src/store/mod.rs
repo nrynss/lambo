@@ -13,7 +13,7 @@ pub use memory::MemoryStore;
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4). Feature: store-cockroach.
 #[cfg(feature = "store-cockroach")]
 pub mod cockroach;
-// T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). No VECTOR_SEARCH.
+// T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). VECTOR_SEARCH since F1/F2.
 #[cfg(feature = "store-sqlite")]
 mod sqlite;
 
@@ -104,12 +104,17 @@ pub trait GraphStore: Send + Sync {
     async fn init_schema(&self) -> Result<(), StoreError>;
     fn capabilities(&self) -> Capabilities;
 
-    /// Fixed dense-vector column width when this store persists embeddings.
+    /// Dense-vector width this store will accept, when it persists embeddings.
     ///
-    /// * `Some(n)` — e.g. Cockroach `VECTOR(n)`; embedder output must be exactly `n`.
-    /// * `None` — no vector column / no constraint (MemoryStore, SQLite without vectors).
+    /// * `Some(n)` — embedder output must be exactly `n`. Cockroach's `n` is its
+    ///   `VECTOR(n)` DDL. An adapter whose column carries no width of its own
+    ///   (SQLite's `BLOB`) reports the width configured for the process — see
+    ///   [`build_store_with_vector_dim`] — and enforces the session's durable
+    ///   contract on every candidate read instead.
+    /// * `None` — no vector column at all (MemoryStore). Must be paired with an
+    ///   absent [`Capabilities::VECTOR_SEARCH`].
     ///
-    /// Dim is **not** a global product constant: the store schema is the authority.
+    /// Dim is **not** a global product constant: the store is the authority.
     /// Checked at process resolution (`crate::resolve::check_vector_compatibility`).
     fn vector_dimensions(&self) -> Option<usize> {
         None
@@ -550,10 +555,32 @@ fn missing_feature(kind: StoreKind) -> StoreError {
 /// Prefer [`crate::resolve::resolve_backends`] at process start so store×embedder
 /// compatibility is checked once and the same instances are handed to the command.
 pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> {
+    build_store_with_vector_dim(cfg, None)
+}
+
+/// [`build_store`], plus the process's configured dense-vector width.
+///
+/// Only adapters whose vector column carries **no** width of its own consume it —
+/// today that is SQLite, whose `concepts.embedding` is a `BLOB` (Cockroach parses
+/// `VECTOR(n)` out of its own DDL and ignores this). `None` leaves the adapter on its
+/// own default.
+///
+/// `resolve::resolve_backends` passes `Some(embedder_cfg.dim)` so
+/// [`crate::resolve::check_vector_compatibility`] compares a width-agnostic store
+/// against the embedder the process actually configured, rather than against a constant
+/// baked into the adapter. Direct `build_store` callers (provision tools, tests) get the
+/// `EmbedderConfig` default.
+pub fn build_store_with_vector_dim(
+    cfg: StoreConfig,
+    vector_dim: Option<usize>,
+) -> Result<Box<dyn GraphStore>, StoreError> {
     // Pre-check for a clear rebuild hint (see module comment above is_compiled).
     if !cfg.kind.is_compiled() {
         return Err(missing_feature(cfg.kind));
     }
+    // Consumed only by the width-agnostic adapters below; this keeps the binding used
+    // under feature rows that compile none of them.
+    let _ = vector_dim;
     match cfg.kind {
         StoreKind::Memory => {
             // Real gate: type only exists under this feature.
@@ -596,7 +623,12 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
                         "SqliteStore requires a path (store.path or LAMBO_SQLITE_PATH)".into(),
                     )
                 })?;
-                Ok(Box::new(SqliteStore::connect(&path)?))
+                let store = SqliteStore::connect(&path)?;
+                let store = match vector_dim {
+                    Some(dim) => store.with_vector_dim(dim)?,
+                    None => store,
+                };
+                Ok(Box::new(store))
             }
             #[cfg(not(feature = "store-sqlite"))]
             {
@@ -720,7 +752,13 @@ mod tests {
         if cfg!(feature = "store-sqlite") {
             // T3.3: with the feature on, build_store returns a working adapter.
             let s = r.expect("sqlite store must build under store-sqlite");
-            assert_eq!(s.capabilities(), Capabilities::empty());
+            // F2: SQLite advertises VECTOR_SEARCH, and the capability/width pair must
+            // be self-consistent (CON-5) even on the bare `build_store` path that has
+            // no embedder config to take a width from.
+            assert_eq!(s.capabilities(), Capabilities::VECTOR_SEARCH);
+            assert!(s.vector_dimensions().is_some());
+            crate::resolve::check_vector_search_contract(s.as_ref(), StoreKind::Sqlite)
+                .expect("capability and width must resolve together");
             assert!(StoreKind::Sqlite.is_ready());
         } else {
             let Err(err) = r else {

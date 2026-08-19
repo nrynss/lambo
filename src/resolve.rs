@@ -4,7 +4,9 @@
 //! than calling `build_store` + `build_embedder` separately and re-checking.
 
 use crate::embed::{build_embedder, Embedder, EmbedderConfig, EmbedderKind};
-use crate::store::{build_store, Capabilities, GraphStore, StoreConfig};
+use crate::store::{
+    build_store, build_store_with_vector_dim, Capabilities, GraphStore, StoreConfig,
+};
 use crate::types::{EmbeddingContract, LamboError};
 use crate::LamboFile;
 
@@ -34,8 +36,10 @@ pub struct ResolvedBackends {
 
 /// Store vector width vs embedder output dim (store is the authority when it persists vectors).
 ///
-/// * `None` store width (MemoryStore, SQLite without vectors) → any positive embedder dim OK.
-/// * `Some(n)` (e.g. Cockroach `VECTOR(n)`) → embedder must emit exactly `n`.
+/// * `None` store width (MemoryStore) → any positive embedder dim OK.
+/// * `Some(n)` → embedder must emit exactly `n`. Cockroach's `n` is its `VECTOR(n)` DDL;
+///   SQLite's `BLOB` column has no width of its own, so it reports the width this
+///   process configured (see `build_store_with_vector_dim`).
 pub fn check_vector_compatibility(
     store_vector_dim: Option<usize>,
     embedder_dim: usize,
@@ -93,7 +97,14 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let mut config = crate::Config::default();
     daemon_cfg.apply_to(&mut config);
     config.validate()?;
-    let store = build_store(store_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
+    // A store whose vector column carries no width of its own (SQLite's BLOB) reports
+    // the configured embedder width, so `check_vector_compatibility` below still has a
+    // store-side authority to check and no adapter needs a width constant of its own.
+    // A zero dim is passed through as `None` so `build_embedder` produces the canonical
+    // "embedder dim must be > 0" error rather than a store-shaped one.
+    let store =
+        build_store_with_vector_dim(store_cfg.clone(), Some(embedder_cfg.dim).filter(|d| *d > 0))
+            .map_err(|e| LamboError::Config(e.to_string()))?;
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     check_vector_search_contract(store.as_ref(), store_cfg.kind)?;

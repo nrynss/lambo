@@ -83,7 +83,7 @@ Recall combines keyword matching with vector similarity, then expands through th
 | Store | What recall uses |
 |---|---|
 | CockroachDB | Keyword matching and vector similarity, plus graph expansion. |
-| SQLite | Keyword matching plus graph expansion. It has no vector column. |
+| SQLite | Keyword matching and vector similarity, plus graph expansion. |
 | In-memory | Keyword matching plus graph expansion. |
 
 Recall still works without a vector leg. You get matches on the words you use rather than on meaning, so a query that shares no vocabulary with a stored concept may miss it.

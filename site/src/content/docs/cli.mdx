@@ -83,7 +83,7 @@ Read commands query the store directly and never take the writer lease, so they 
 
 Recalls the context block for a query, with canonical markers, blast-radius warnings, and conflict lines.
 
-Recall combines keyword matching with vector similarity, then expands through the graph. Concepts your agents write keep their embedding, so on a CockroachDB store recall finds memory the swarm wrote itself and not only memory you loaded in bulk. The SQLite and in-memory stores have no vector column, so there recall matches on words rather than on meaning.
+Recall combines keyword matching with vector similarity, then expands through the graph. Concepts your agents write keep their embedding, so on SQLite or CockroachDB recall finds memory the swarm wrote itself and not only memory you loaded in bulk. The in-memory store has no vector column, so there recall matches on words rather than on meaning.
 
 | Flag | Required | Default |
 |---|---|---|

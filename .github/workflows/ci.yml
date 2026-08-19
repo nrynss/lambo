@@ -114,6 +114,23 @@ jobs:
           # test module (CON-4) must never regress.
           - name: sqlite-minimal
             command: cargo test --no-default-features --features store-sqlite
+          # F (issue #5) — semantic recall on the default local store. Its own row
+          # rather than trusting the `sqlite` row above, so a regression in the vector
+          # leg is a named red row instead of one line in an 800-test log: without it
+          # SQLite silently degrades to keyword-only and "memory recall" becomes a
+          # property of the cloud tier.
+          #
+          # The second command is the anti-vacuity guard the acceptance criterion needs.
+          # A name filter that matches nothing exits 0, so a rename would leave this row
+          # green while testing nothing; `--list | grep` fails instead. The test it names
+          # proves the vector leg FIRED — a recording wrapper around the real adapter
+          # captures every answer SQLite returned — rather than inferring a vector hit
+          # from where a node landed in a rank.
+          - name: sqlite-vectors
+            command: |
+              cargo test --features store-sqlite,fixtures --lib store::sqlite::tests::vector
+              cargo test --features store-sqlite,fixtures --lib -- --list \
+                | grep -q 'store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept'
           # No adapters at all.
           - name: minimal
             command: cargo check --no-default-features
