@@ -123,14 +123,18 @@ evidence pointers.
   dogfood session is lambo-development memory only. The Endor pilot gets its own store,
   its own session, its own doc.
 
-## Open questions (answer before running, record answers here)
+## Open questions — answered at standup (2026-08-19)
 
-1. Which commit pins the first binary — current HEAD (has F + G2's new floor) is the
-   obvious candidate.
-2. Does the orchestrator-holds-the-connection wiring (option a) give subagents recall in
-   practice, or does the brief-injection pattern (orchestrator recalls, pastes into the
-   agent prompt) serve better? Try (a), fall back without ceremony.
-3. Retention: does the session persist across the branch's whole life, or reset at merge?
-   Leaning persist — the post-merge state is the interesting long-run data.
-4. Does the dogfood ledger inform H2/G follow-ups directly, or only after a curated
-   export? (Default: curated export only.)
+1. **Pin: `3039b82`** (has F's vector leg and G2's recalibrated floor). Binary at
+   `~/lambo-dogfood/bin/lambo-3039b82`; config at `~/lambo-dogfood/lambo.toml`
+   (sqlite at `~/lambo-dogfood/lambo-dev.db`, bge_m3 @ `127.0.0.1:8080`, dim 1024).
+2. **Wiring: option (a)** — a user-scope stdio MCP registration (`claude mcp add --scope
+   user lambo-dogfood -- <pinned binary> serve …`), so the orchestrator session holds the
+   one connection and no project `.mcp.json` touches the public repo. Brief-injection
+   stays the fallback if subagent recall proves clumsy. One session at a time: each
+   session spawns its own serve, and while the write lease fences a stale one safely,
+   two live sessions fencing each other is noise.
+3. **Retention: persist** across the branch's life and past merge — the long-run state is
+   the interesting data.
+4. **Export: curated only.** The ledger informs nothing directly; slices earn their way
+   into `evidence/` through the normal adversarial treatment.
