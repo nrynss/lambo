@@ -65,13 +65,28 @@ echo "$out"
 check "quotes G1's true_recall band" "$out" "0.4599"
 check "catches the planted floor mask" "$out" "Floor masking (metric 4's recurrence check): 1"
 check "counts the expansion-only hit" "$out" "had no phase-1 legs"
+check "reads the recency floor off the ledger" "$out" "recency floor observed in the ledger: 0.35"
+if "$py" "$here/score_bands.py" --floor 0.9 "$ledger" >/dev/null 2>&1; then
+  printf '    FAIL --floor was accepted; the floor is read off the ledger, not supplied\n'
+  fail=1
+else
+  printf '    ok   --floor is gone (the ledger states the floor)\n'
+fi
 
 step "warnings.py (metric 5)"
 out="$("$py" "$here/warnings.py" "$ledger")"
 echo "$out"
 check "counts both blast-radius warnings" "$out" "blast-radius (load_bearing) warnings fired: 2"
-check "flags the one the token budget cut" "$out" "CUT BY TOKEN BUDGET"
+check "flags the one the token budget cut" "$out" "BLOCK CUT BY TOKEN BUDGET"
+check "says the warning line was still delivered" "$out" "the WARNING LINE still reached the agent"
 check "names the warned concept" "$out" "pagination contract"
+# The budget-gated half: the same Canonical concept, returned twice, marker
+# rendered once. A canonical_marker computed over every returned hit would make
+# this line read 2 and the ledger would be claiming a marker nobody received.
+check "separates canonical hits returned from markers rendered" "$out" \
+  "Canonical hits: 2 recall(s) returned one, 1 rendered the [canonical] marker"
+check "reports the canonical hit the budget cut" "$out" \
+  "1 Canonical hit(s) were CUT BY THE TOKEN BUDGET"
 
 step "warnings.py --repo (the git join)"
 out="$("$py" "$here/warnings.py" --repo "$repo" --window-minutes 60 "$ledger")"
@@ -85,6 +100,45 @@ echo "$out"
 check "finds the should-have-merged pair" "$out" "AT OR ABOVE the merge threshold (0.85): 1 pair"
 check "finds the in-band pair" "$out" "IN THE BAND [0.65, 0.85): 1 pair"
 check "warns about the unembedded concept" "$out" "CANNOT be scanned"
+
+# The committed sample is deliberately clean-v1: these two cases are generated
+# here instead, so they cannot perturb the planted facts every check above reads.
+step "an unknown schema version warns loudly and is still read"
+cat >"$work/mixed.jsonl" <<'MIXED'
+{"v":1,"ts":"2026-08-18T09:00:00+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10,"created":2,"matched":1}
+{"v":2,"ts":"2026-08-18T09:01:00+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10,"created":1,"matched":9}
+{"ts":"2026-08-18T09:02:00+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10}
+MIXED
+out="$("$py" "$here/dedup_rate.py" --bucket all "$work/mixed.jsonl")"
+echo "$out"
+check "names the unknown version" "$out" "UNKNOWN SCHEMA VERSION"
+check "says which versions it saw" "$out" "saw 2, None"
+check "still reports the v1 lines (warn, do not refuse)" "$out" "TOTAL"
+check "counts the fact-less derive separately from a zero" "$out" \
+  "1 SUCCESSFUL derive call(s) carried NO created/matched facts"
+if "$py" "$here/dedup_rate.py" --json "$work/mixed.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+u = d["ledger_schema"]["unknown_version_lines"]
+assert len(u) == 2, u
+assert d["derive_calls_without_facts"] == 1, d["derive_calls_without_facts"]'; then
+  printf '    ok   --json carries the schema warning too\n'
+else
+  printf '    FAIL --json did not carry the schema provenance\n'
+  fail=1
+fi
+
+step "chrono's nine-digit fractional seconds parse (no Python floor)"
+cat >"$work/nanos.jsonl" <<'NANOS'
+{"v":1,"ts":"2026-08-18T09:00:00.123456789+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-18T09:00:01.987654321+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10,"created":1,"matched":0}
+{"v":1,"ts":"2026-08-18T09:00:02+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10,"created":0,"matched":1}
+{"v":1,"ts":"2026-08-18T09:00:03.123+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":10,"created":0,"matched":1}
+NANOS
+out="$("$py" "$here/recall_first.py" "$work/nanos.jsonl")"
+echo "$out"
+check "parses 0/3/9-digit stamps without erroring" "$out" "metric 1"
+check "and scores the run it found" "$out" "100.0%"
 
 step "every report also emits JSON"
 for script in recall_first dedup_rate score_bands warnings; do

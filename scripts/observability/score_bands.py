@@ -37,9 +37,18 @@ Three things are flagged:
      without VECTOR_SEARCH or a failed query embedding; either way the score
      bands say nothing about that stretch.
 
+**The recency floor is read off the ledger, not supplied.** Every hit the recency
+leg produced carries `legs.recent`, which *is* the `RECENT_SCORE` the serving
+binary was built with — so the ledger states the floor and there is nothing to
+configure. A `--floor` flag used to exist and only ever changed a header line: it
+printed "recency floor in force: 0.9" above masking rows computed from each hit's
+own `recent` value ("cosine=0.2914 < floor=0.3500"), which is a report
+contradicting itself. Reading it off the ledger is the right design, and a ledger
+that spans a recalibration says so by carrying two values.
+
 Usage:
     python3 scripts/observability/score_bands.py ~/lambo-dogfood/calls.jsonl
-    python3 scripts/observability/score_bands.py --floor 0.5 --json calls.jsonl
+    python3 scripts/observability/score_bands.py --json calls.jsonl
 """
 
 from __future__ import annotations
@@ -61,10 +70,14 @@ G1_BANDS = {
 }
 
 
-def analyse(ledger: _ledger.Ledger, floor: float) -> dict[str, Any]:
+def analyse(ledger: _ledger.Ledger) -> dict[str, Any]:
     vector: list[float] = []
     bm25: list[float] = []
     masked: list[dict[str, Any]] = []
+    #: Every distinct `legs.recent` in the file: the recency floor(s) the serving
+    #: binary or binaries actually applied. More than one means the ledger spans a
+    #: recalibration, which is a finding, not an error.
+    floors: dict[float, int] = {}
     expansion_hits = 0
     recalls = 0
     recalls_with_vector = 0
@@ -84,6 +97,10 @@ def analyse(ledger: _ledger.Ledger, floor: float) -> dict[str, Any]:
             if not legs:
                 expansion_hits += 1
                 continue
+            observed_floor = legs.get("recent")
+            if isinstance(observed_floor, (int, float)):
+                key = float(observed_floor)
+                floors[key] = floors.get(key, 0) + 1
             cosine = legs.get("vector_cosine")
             if isinstance(cosine, (int, float)):
                 vector.append(float(cosine))
@@ -136,7 +153,16 @@ def analyse(ledger: _ledger.Ledger, floor: float) -> dict[str, Any]:
         }
 
     return {
-        "floor": floor,
+        # The floor(s) the ledger states, most-seen first, and the single value
+        # the report bands against. `None` when no hit carried a recency leg —
+        # in which case the report says the ledger did not state one rather than
+        # substituting the constant this kit happens to know.
+        "observed_floors": [
+            {"recent": v, "hits": n}
+            for v, n in sorted(floors.items(), key=lambda t: (-t[1], t[0]))
+        ],
+        "floor": max(floors, key=lambda v: floors[v]) if floors else None,
+        "kit_recent_floor": _ledger.RECENT_FLOOR,
         "g1_bands": G1_BANDS,
         "recalls": recalls,
         "recalls_with_a_vector_leg": recalls_with_vector,
@@ -180,9 +206,33 @@ def render(data: dict[str, Any]) -> list[str]:
         f"recalls: {data['recalls']} "
         f"({data['recalls_with_a_vector_leg']} with a vector leg, "
         f"{data['recalls_that_returned_no_hits']} returned no hits)",
-        f"recency floor in force: {data['floor']:g}   "
-        f"merge threshold: {_ledger.MERGE_THRESHOLD:g}",
     ]
+    floors = data["observed_floors"]
+    if not floors:
+        out.append(
+            "recency floor: NOT STATED BY THIS LEDGER — no hit carried a `recent` leg, "
+            f"so the floor is unobserved here (this kit knows {data['kit_recent_floor']:g} "
+            "as the current constant, which is not evidence about this traffic).   "
+            f"merge threshold: {_ledger.MERGE_THRESHOLD:g}"
+        )
+    else:
+        stated = ", ".join(f"{f['recent']:g} ({f['hits']} hit(s))" for f in floors)
+        out.append(
+            f"recency floor observed in the ledger: {stated}   "
+            f"merge threshold: {_ledger.MERGE_THRESHOLD:g}"
+        )
+        if len(floors) > 1:
+            out.append(
+                "   ^ more than one recency floor in this file: it spans a "
+                "recalibration (or two binaries), so the masking rows below are "
+                "against each hit's OWN floor, not one global value."
+            )
+        if data["floor"] != data["kit_recent_floor"]:
+            out.append(
+                f"   ^ the serving binary's floor is not this kit's constant "
+                f"({data['kit_recent_floor']:g}): the binary is authoritative — that is "
+                "why this figure is read off the ledger and not passed in."
+            )
     if data["expansion_only_hits"]:
         out.append(
             f"{data['expansion_only_hits']} hit(s) had no phase-1 legs at all — they "
@@ -225,10 +275,12 @@ def render(data: dict[str, Any]) -> list[str]:
             "re-measure before trusting the floor or the merge threshold."
         )
 
-    if observed["min"] < data["floor"]:
+    floor = data["floor"]
+    if floor is not None and observed["min"] < floor:
         out.append(
             f"   ^ the weakest observed cosine ({observed['min']:.4f}) is BELOW the "
-            f"recency floor ({data['floor']:g}): scores in that band are maskable."
+            f"recency floor this ledger states ({floor:g}): scores in that band are "
+            "maskable."
         )
 
     out += ["", "Distribution (0.05 buckets):"]
@@ -236,7 +288,7 @@ def render(data: dict[str, Any]) -> list[str]:
     for b in data["histogram"]:
         bar = "#" * max(1, round(40 * b["n"] / peak))
         marker = ""
-        if b["low"] <= data["floor"] < b["high"]:
+        if floor is not None and b["low"] <= floor < b["high"]:
             marker = "  <- recency floor"
         if b["low"] <= _ledger.MERGE_THRESHOLD < b["high"]:
             marker += "  <- merge threshold"
@@ -277,16 +329,12 @@ def render(data: dict[str, Any]) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    # No `--floor`: the ledger states the floor the serving binary applied (see
+    # this module's docstring), so there is nothing here to override it with.
     parser = _ledger.base_parser(__doc__ or "")
-    parser.add_argument(
-        "--floor",
-        type=float,
-        default=_ledger.RECENT_FLOOR,
-        help="RECENT_SCORE the serve was built with (default: %(default)s)",
-    )
     args = parser.parse_args(argv)
     ledger = _ledger.load(args.ledger)
-    data = analyse(ledger, args.floor)
+    data = analyse(ledger)
     _ledger.emit(
         "metric 4 — recall score bands", ledger, render(data), data, args.json
     )

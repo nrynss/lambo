@@ -47,10 +47,23 @@ but binds a network service for no real saving; the model is 605 MB.)
 
 ```sh
 cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently 3039b82
-cargo build --release --features store-sqlite,embed-bge
+LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \
+  cargo build --release --features store-sqlite,embed-bge
 mkdir -p ~/lambo-dogfood/bin
 cp target/release/lambo ~/lambo-dogfood/bin/lambo-<sha>
 ```
+
+`LAMBO_GIT_SHA` is **not optional and not cosmetic.** It is an `option_env!` read at
+compile time (`src/ledger.rs`), and it is the only thing that makes the ledger's `stats`
+heartbeat able to say *which* pinned binary produced a stretch of ledger. Omit it and the
+field is `"unknown"` — so two builds at different commits are indistinguishable in the
+file, and the I2 property "an upgrade shows as a sha change" is unobtainable however
+carefully the upgrade is performed. This build step is the one place in the rig that can
+set it; nothing downstream can recover it.
+
+Build with a dirty tree and the sha is still the last commit's, which is a lie about the
+binary. Commit (or stash) first, or the heartbeat attributes the run to code that is not
+in it.
 
 The copy out of `target/` is the isolation rule: rebuilds and `cargo clean` must not be
 able to touch the serving binary. Upgrading = build at a newer sha, copy, re-register,
@@ -92,15 +105,33 @@ differs only in the `--agent` id, so the ledger attributes writes per client:
 The server command, everywhere:
 
 ```
-~/lambo-dogfood/bin/lambo-<sha> serve --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent <agent-id>
+~/lambo-dogfood/bin/lambo-<sha> serve --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent <agent-id> --ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300
 ```
+
+**The two `--ledger` flags belong on every registration below, and are elided from them
+for length — treat the command above as the template each client block instantiates.**
+They are off by default, so a block without them yields a serving rig that measures
+nothing: DOGFOOD metrics 1, 2, 4 and 5 are all computed from the ledger by
+[`scripts/observability/`](../../scripts/observability/README.md), and there is no
+after-the-fact way to reconstruct a call that was never recorded. `--ledger-heartbeat 300`
+is what makes the counts quotable — without it the file carries no
+`ledger_dropped_lines`, so every report has to say `dropped: UNKNOWN` and no number in it
+can be trusted as complete. The path is deliberately **outside the repo** (I1 hygiene: the
+ledger carries recall queries and truncated concept text, and reaches `evidence/` only
+through the curated export path).
+
+Every client writes to the **same** ledger file, which is intended: one file, `agent_id`
+per line, so per-client attribution is a `GROUP BY` rather than a set of files to
+reconcile. Rotation is the operator's (`logrotate`, or just `mv` it — the writer reopens
+the path per batch).
 
 **Claude Code** — user scope, never project scope (a project `.mcp.json` lands in this
 public repo):
 
 ```sh
 claude mcp add --scope user lambo-dogfood -- ~/lambo-dogfood/bin/lambo-<sha> serve \
-  --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent claude-orchestrator
+  --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent claude-orchestrator \
+  --ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300
 ```
 
 **Codex CLI** — `codex mcp add lambo-dogfood -- <command…>` with `--agent codex-agent`,
@@ -109,7 +140,8 @@ or declaratively in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.lambo-dogfood]
 command = "/absolute/path/to/lambo-dogfood/bin/lambo-<sha>"
-args = ["serve", "--config", "/abs/path/lambo.toml", "--session", "lambo-dev", "--agent", "codex-agent"]
+args = ["serve", "--config", "/abs/path/lambo.toml", "--session", "lambo-dev", "--agent", "codex-agent",
+        "--ledger", "/abs/path/lambo-dogfood/calls.jsonl", "--ledger-heartbeat", "300"]
 ```
 
 **Cursor** — merge into `~/.cursor/mcp.json` (global, not the project file):
@@ -118,7 +150,9 @@ args = ["serve", "--config", "/abs/path/lambo.toml", "--session", "lambo-dev", "
 { "mcpServers": { "lambo-dogfood": {
     "command": "/abs/path/lambo-dogfood/bin/lambo-<sha>",
     "args": ["serve", "--config", "/abs/path/lambo.toml",
-             "--session", "lambo-dev", "--agent", "cursor-agent"] } } }
+             "--session", "lambo-dev", "--agent", "cursor-agent",
+             "--ledger", "/abs/path/lambo-dogfood/calls.jsonl",
+             "--ledger-heartbeat", "300"] } } }
 ```
 
 The Cursor Agent CLI reads the same file; it already drove lambo's seven tools once
@@ -140,7 +174,8 @@ lambo's tools are visible (established in the LFM2 rig work).
 
 ```sh
 grok mcp add lambo-dogfood -- ~/lambo-dogfood/bin/lambo-<sha> serve \
-  --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent grok-agent
+  --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent grok-agent \
+  --ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300
 ```
 
 or declaratively in `~/.grok/config.toml`; tools appear namespaced
@@ -190,3 +225,17 @@ Ask the agent to call `lambo_stats`, then `lambo_recall` with query "width autho
 a seeded graph answers with the F property statement and the pin semantics. An empty
 graph on a fresh machine is correct too (stores do not sync yet); seed it with the same
 protocol: derive the current workstream decisions, record-action the standup.
+
+Then check the ledger actually caught it, because both of the things §2 and §4 exist to
+wire are silently absent when they are wrong:
+
+```sh
+tail -2 ~/lambo-dogfood/calls.jsonl
+jq -r 'select(.kind=="stats") | [.ts, .version, .git_sha] | @tsv' ~/lambo-dogfood/calls.jsonl | tail -1
+```
+
+Two lines for the two calls, and a `git_sha` that is **not** `unknown`. A `git_sha` of
+`unknown` means §2's `LAMBO_GIT_SHA` did not reach the build; an absent or empty file
+means §4's `--ledger` did not reach the registration. Either way the rig serves memory
+fine and measures nothing, which is the failure worth catching here rather than a week
+later.

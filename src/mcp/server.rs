@@ -334,6 +334,31 @@ tokio::task_local! {
 /// it is what makes `warnings.py` able to say *which concept* a blast-radius
 /// warning fired over without a store join. It is truncated rather than whole
 /// so one recall of `MAX_TOP_K` long concepts cannot turn into a megabyte line.
+///
+/// # What the five set-level flags mean, and why they are not all computed alike
+///
+/// The spec's word is **rendered**, and the honest answer differs by kind
+/// because the two rendering paths differ:
+///
+/// * **`canonical_marker` is budget-gated.** `[canonical]` exists *only* inside a
+///   hit's context block (`format::render_block`), and the block is emitted only
+///   while the token budget lasts. So this flag counts hits with
+///   `included_in_context == true` and nothing else. A `max_tokens: 1` recall of
+///   a Canonical concept therefore reports `canonical_marker: false` — correctly:
+///   the agent received an empty context and the string `[canonical]` appeared
+///   nowhere in the response. (Per-hit `is_canonical` is still on every hit, so
+///   "was a Canonical concept *returned*" remains answerable — from the hits,
+///   which is where a set-level flag cannot honestly answer it.)
+/// * **The four warning flags are budget-independent** —
+///   `blast_radius_warning`, `conflict_line`, `hot_warning`,
+///   `reservation_warning`. Their lines are pushed into the flat `warnings`
+///   vector for *every* returned hit regardless of the budget
+///   (`assemble.rs`: "a block truncated from the context still reports its
+///   conditions") and delivered to the agent as a second text block. The line
+///   reached the agent even when the block did not, so these are computed over
+///   every returned hit. Per-hit `included_in_context` is what tells a consumer
+///   whether the *block* the warning was about was also there — which is the
+///   distinction `warnings.py` reports.
 fn recall_facts(
     query: &str,
     top_k: usize,
@@ -350,7 +375,9 @@ fn recall_facts(
         .iter()
         .zip(detailed.detailed.iter())
         .map(|(hit, d)| {
-            canonical_marker |= hit.is_canonical;
+            // Budget-gated: `[canonical]` renders inside the hit's block, so a
+            // hit the budget cut rendered no marker. See this function's docs.
+            canonical_marker |= hit.is_canonical && d.included_in_context;
             let mut legs = serde_json::Map::new();
             if let Some(l) = detailed.legs.get(&hit.node_id) {
                 if let Some(s) = l.keyword {
@@ -364,6 +391,10 @@ fn recall_facts(
                 }
             }
             let mut kinds: Vec<&'static str> = Vec::new();
+            // Deliberately NOT gated on `included_in_context`: these four lines
+            // go into the flat `warnings` vector for every returned hit and
+            // reach the agent as a second text block whatever the budget did to
+            // the block itself. See this function's docs.
             for a in &d.annotations {
                 match a.kind {
                     AnnotationKind::LoadBearing => {
@@ -414,7 +445,7 @@ fn recall_facts(
         .collect();
 
     json!({
-        "query": query,
+        "query": truncate_to(query, LEDGER_QUERY_PREFIX),
         "top_k": top_k,
         "hit_count": detailed.hits.len(),
         "hits": hits,
@@ -436,15 +467,45 @@ fn recall_facts(
 /// dogfood day's ledger in the low megabytes.
 const LEDGER_CONTENT_PREFIX: usize = 200;
 
+/// Longest recall-`query` prefix a ledger line carries.
+///
+/// The query is the other client string on a recall line, and it is `check_size`d
+/// at 16 KiB like everything else — so it belongs in the worst-case reasoning
+/// above, which an earlier revision omitted: a real 15.4 KiB query produced a
+/// 15,752-byte line, ten times what [`LEDGER_CONTENT_PREFIX`] budgets for all
+/// `MAX_TOP_K` hits together.
+///
+/// Cut generously rather than at 200, because the two strings are read for
+/// different things. Concept text only has to *name* the concept in a report;
+/// a query is the input under study — `score_bands.py` and `warnings.py` both
+/// print it verbatim, and a query cut at 200 characters stops being reproducible.
+/// 2000 characters keeps one line's query an order of magnitude below the hit
+/// budget while covering every query a human or an agent actually writes.
+const LEDGER_QUERY_PREFIX: usize = 2000;
+
+/// Compile-time pin on the relationship the two caps' reasoning rests on: the
+/// query cap is deliberately the wider of the two, for the reason above. A future
+/// edit that narrowed it below the content cap would not fail a test — it would
+/// fail the build, here.
+const _: () = if LEDGER_QUERY_PREFIX <= LEDGER_CONTENT_PREFIX {
+    panic!("the ledger's recall-query cap must stay wider than its concept-text cap");
+};
+
 /// `content` truncated to [`LEDGER_CONTENT_PREFIX`] **characters**, with an
 /// explicit marker so a consumer never mistakes a cut for the whole text.
+fn truncate_for_ledger(content: &str) -> String {
+    truncate_to(content, LEDGER_CONTENT_PREFIX)
+}
+
+/// `text` truncated to `max` **characters**, with an explicit marker so a
+/// consumer never mistakes a cut for the whole string.
 ///
 /// Cut on a `char` boundary, not a byte one: a byte slice through a multi-byte
 /// codepoint would panic, and the ledger is not allowed to panic a tool call.
-fn truncate_for_ledger(content: &str) -> String {
-    match content.char_indices().nth(LEDGER_CONTENT_PREFIX) {
-        None => content.to_string(),
-        Some((cut, _)) => format!("{}…[truncated]", &content[..cut]),
+fn truncate_to(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        None => text.to_string(),
+        Some((cut, _)) => format!("{}…[truncated]", &text[..cut]),
     }
 }
 
@@ -627,6 +688,19 @@ impl LamboServer {
         self.ledger.as_ref()
     }
 
+    /// The agent id [`LamboServer::observed`] should stamp on the line — `None`,
+    /// and no allocation at all, when there is no ledger to stamp it onto.
+    ///
+    /// This exists so that "off costs nothing" is true of the *string* too. The
+    /// obvious shape (`observed(tool, &p.agent_id, self.foo_impl(p))`) does not
+    /// compile: `p` moves into the impl future, so a borrow of `p.agent_id`
+    /// cannot outlive the call expression. Deciding here keeps the one clone on
+    /// the ledger-on path where it belongs, without duplicating the check across
+    /// seven tool wrappers.
+    fn ledger_agent(&self, agent_id: &str) -> Option<String> {
+        self.ledger.as_ref().map(|_| agent_id.to_string())
+    }
+
     /// Run one tool body and, when a ledger is listening, append its line.
     ///
     /// **The ledger never changes what the caller gets.** The result is
@@ -636,16 +710,21 @@ impl LamboServer {
     /// microseconds of one `serde_json::to_vec`.
     ///
     /// With no ledger this is `contain_panic` and nothing else — no task-local
-    /// scope, no `Instant`, no facts.
+    /// scope, no `Instant`, no facts, and (see [`LamboServer::ledger_agent`]) no
+    /// copy of the agent id either.
     async fn observed(
         &self,
         tool: &'static str,
-        agent_id: String,
+        agent_id: Option<String>,
         fut: impl Future<Output = CallToolResult>,
     ) -> CallToolResult {
         let Some(ledger) = self.ledger.clone() else {
             return contain_panic(tool, fut).await;
         };
+        // `Some` whenever a ledger is attached: `ledger_agent` and `self.ledger`
+        // read the same field. An empty id would be refused by `attribution`
+        // anyway, and a line is still owed for that refusal.
+        let agent_id = agent_id.unwrap_or_default();
         let started = Instant::now();
         TRACE
             .scope(std::cell::RefCell::new(CallTrace::default()), async move {
@@ -714,6 +793,13 @@ impl LamboServer {
         // a ledger exists — with `--ledger` off the payload is byte-identical
         // to what it was before I1, which is what "off by default means no
         // behaviour change" has to mean for a payload.
+        //
+        // `ledger_dropped_lines` stays the headline total ("is this ledger
+        // complete?"); the two `_channel_full` / `_write_failed` keys beside it
+        // answer "why", which the total cannot: backpressure means the writer is
+        // behind, a failed write means the path is broken, and an operator
+        // reading one number cannot tell those apart. Additive keys on a payload
+        // that only exists when the ledger is on.
         if let Some(ledger) = &self.ledger {
             let obj = payload.as_object_mut().expect("json! built an object");
             obj.insert(
@@ -727,6 +813,14 @@ impl LamboServer {
             obj.insert(
                 "ledger_dropped_lines".into(),
                 json!(ledger.counters().dropped()),
+            );
+            obj.insert(
+                "ledger_dropped_channel_full".into(),
+                json!(ledger.counters().dropped_channel_full()),
+            );
+            obj.insert(
+                "ledger_dropped_write_failed".into(),
+                json!(ledger.counters().dropped_write_failed()),
             );
         }
         payload
@@ -816,7 +910,7 @@ impl LamboServer {
                        (canonical markers, blast-radius warnings, conflict lines)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_recall", agent_id, self.recall_impl(p))
             .await
     }
@@ -831,7 +925,7 @@ impl LamboServer {
                        Timestamps are stamped server-side; do not send one."
     )]
     async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_derive", agent_id, self.derive_impl(p))
             .await
     }
@@ -847,7 +941,7 @@ impl LamboServer {
         &self,
         Parameters(p): Parameters<RecordActionParams>,
     ) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_record_action", agent_id, self.record_action_impl(p))
             .await
     }
@@ -865,7 +959,7 @@ impl LamboServer {
                        only accepted from the agent this server session runs as."
     )]
     async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_reserve", agent_id, self.reserve_impl(p))
             .await
     }
@@ -877,7 +971,7 @@ impl LamboServer {
                        status, blast radius and typed edges out to a depth."
     )]
     async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_inspect", agent_id, self.inspect_impl(p))
             .await
     }
@@ -889,7 +983,7 @@ impl LamboServer {
                        status through the audited transition path."
     )]
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_saints", agent_id, self.saints_impl(p))
             .await
     }
@@ -901,7 +995,7 @@ impl LamboServer {
                        counts, canonization progress and degraded state."
     )]
     async fn lambo_stats(&self, Parameters(p): Parameters<StatsParams>) -> CallToolResult {
-        let agent_id = p.agent_id.clone();
+        let agent_id = self.ledger_agent(&p.agent_id);
         self.observed("lambo_stats", agent_id, self.stats_impl(p))
             .await
     }
@@ -1259,19 +1353,21 @@ impl LamboServer {
     }
 
     async fn reserve_impl(&self, p: ReserveParams) -> CallToolResult {
+        let releasing = p.release.unwrap_or(false);
+        // I1: grant/refusal for EVERY exit of this tool, set before the first
+        // one can be taken — which means before `attribution`, not after. Each
+        // success path overwrites it with `granted: true`; anything that returns
+        // early — an empty or oversized `agent_id`, the foreign-agent refusal
+        // below, a bad node_id, a `Conflict` from a lock another agent holds —
+        // leaves this standing, so a refusal can never be recorded as a grant by
+        // a path somebody forgot to annotate. `attribution` used to run first,
+        // which left its own two exits reporting `op=None granted=None`.
+        let op = if releasing { "release" } else { "reserve" };
+        note_facts(|| json!({ "op": op, "granted": false }));
         let mut warnings = match self.attribution(&p.agent_id) {
             Ok(w) => w,
             Err(e) => return e,
         };
-        let releasing = p.release.unwrap_or(false);
-        // I1: grant/refusal for EVERY exit of this tool, set before the first
-        // one can be taken. Each success path overwrites it with `granted:
-        // true`; anything that returns early — the foreign-agent refusal below,
-        // a bad node_id, a `Conflict` from a lock another agent holds — leaves
-        // this standing, so a refusal can never be recorded as a grant by a
-        // path somebody forgot to annotate.
-        let op = if releasing { "release" } else { "reserve" };
-        note_facts(|| json!({ "op": op, "granted": false }));
         // Fail closed before touching the graph (R1/T82-3).
         if let Err(e) = self.require_session_agent(
             &p.agent_id,
@@ -3222,6 +3318,134 @@ mod tests {
             );
         }
         assert!(recall["warning_count"].is_u64(), "{recall}");
+        // `canonical_marker` above is only claimable because the block that
+        // carries `[canonical]` actually rendered. Pinned so the two halves of
+        // the flag's definition are asserted together, not separately.
+        assert!(
+            hits.iter().any(
+                |h| h["is_canonical"] == json!(true) && h["included_in_context"] == json!(true)
+            ),
+            "the Canonical hit must be IN the context for canonical_marker to be true: {recall}"
+        );
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I-R1-1.** The five set-level flags are not all budget-blind, because
+    /// the two rendering paths are not alike.
+    ///
+    /// Recall the same Canonical, load-bearing concept with `max_tokens: 1`, so
+    /// no hit block fits and the rendered context is empty. The reviewer's probe,
+    /// promoted to a test:
+    ///
+    /// * `canonical_marker` must be **false** — `[canonical]` lives only inside a
+    ///   hit's block, and no block rendered. Reporting `true` here was the
+    ///   finding: the ledger claimed a marker the agent never received.
+    /// * the four warning flags must still be **true** — their lines go into the
+    ///   flat `warnings` vector for every returned hit whatever the budget did,
+    ///   and reach the agent as a second text block.
+    /// * per-hit `is_canonical` must still be true, so "was a Canonical concept
+    ///   *returned*" stays answerable from the hits.
+    #[tokio::test]
+    async fn i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing() {
+        use crate::types::CanonizationStatus;
+
+        let dir = ledger_dir("canonical-budget");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-canonical-budget", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        call(
+            &s,
+            "lambo_record_action",
+            json!({
+                "agent_id": "agent-a",
+                "action": "rebuild the pagination index",
+                "modifies": ["pagination contract"],
+            }),
+        )
+        .await;
+        {
+            let mut g = s.mem.graph().write();
+            let target = g
+                .concepts()
+                .find(|c| c.content.contains("pagination contract"))
+                .map(|c| c.id)
+                .expect("the action created its target concept");
+            let now = chrono::Utc::now();
+            for (from, to) in [
+                (CanonizationStatus::None, CanonizationStatus::Venerable),
+                (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+            ] {
+                g.apply_canonization_transition(crate::types::CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: s.mem.session().clone(),
+                    node_id: target,
+                    from_status: from,
+                    to_status: to,
+                    blast_radius: Some(1),
+                    last_demotion_time: None,
+                    occurred_at: now,
+                })
+                .expect("audited promotion");
+            }
+        }
+
+        let out = call(
+            &s,
+            "lambo_recall",
+            json!({
+                "agent_id": "agent-a",
+                "query": "pagination contract",
+                "max_tokens": 1,
+            }),
+        )
+        .await;
+
+        // The response really did carry no marker: assert against the artifact
+        // the agent received, not only against the ledger's opinion of it.
+        let rendered = out
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !rendered.contains("[canonical]"),
+            "a 1-token budget renders no hit block, so no canonical marker: {rendered}"
+        );
+
+        let lines = read_ledger(&ledger, 2);
+        let recall = lines
+            .iter()
+            .find(|l| l["tool"] == json!("lambo_recall"))
+            .expect("a recall line");
+
+        let hits = recall["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "the query must still hit: {recall}");
+        assert!(
+            hits.iter()
+                .all(|h| h["included_in_context"] == json!(false)),
+            "no hit fits a 1-token budget: {recall}"
+        );
+        assert!(
+            hits.iter().any(|h| h["is_canonical"] == json!(true)),
+            "the Canonical hit was still RETURNED, and the hit says so: {recall}"
+        );
+
+        assert_eq!(
+            recall["canonical_marker"],
+            json!(false),
+            "the marker renders inside the block, and no block rendered: {recall}"
+        );
+        assert_eq!(
+            recall["blast_radius_warning"],
+            json!(true),
+            "the warning line reaches the agent through `warnings` whatever the budget \
+             did to the block: {recall}"
+        );
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
@@ -3585,6 +3809,49 @@ mod tests {
         let back: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&v).expect("encode")).expect("decode");
         assert_eq!(back["content"], v["content"]);
+    }
+
+    /// **I-R1-12.** The recall `query` is bounded too.
+    ///
+    /// It was the one client string on a recall line that went in whole: bounded
+    /// only by `check_size`'s 16 KiB, so a real 15.4 KiB query produced a
+    /// 15,752-byte line — ten times what the hit budget allows for all
+    /// `MAX_TOP_K` hits together. Cut at a wider cap than concept text, because a
+    /// query is the input under study and the reports print it verbatim.
+    #[test]
+    fn i1_the_recall_query_is_truncated_at_its_own_wider_cap() {
+        // The two caps' relative order is pinned at compile time beside the
+        // constants themselves, not here — a runtime assert on two consts is one
+        // clippy refuses, and rightly.
+        let short = "how do we paginate list endpoints";
+        assert_eq!(truncate_to(short, LEDGER_QUERY_PREFIX), short);
+
+        let exact: String = "q".repeat(LEDGER_QUERY_PREFIX);
+        assert_eq!(truncate_to(&exact, LEDGER_QUERY_PREFIX), exact);
+
+        // A query at `check_size`'s ceiling: cut, announced, and bounded.
+        let huge: String = "q".repeat(16 * 1024);
+        let cut = truncate_to(&huge, LEDGER_QUERY_PREFIX);
+        assert!(cut.ends_with("…[truncated]"), "the cut is announced");
+        assert_eq!(
+            cut.chars().count(),
+            LEDGER_QUERY_PREFIX + "…[truncated]".chars().count()
+        );
+
+        // Multi-byte: a char boundary, never a byte one.
+        let multibyte: String = "é".repeat(LEDGER_QUERY_PREFIX * 2);
+        let cut = truncate_to(&multibyte, LEDGER_QUERY_PREFIX);
+        assert!(cut.starts_with('é') && cut.ends_with("…[truncated]"));
+
+        // And it is the truncated form that reaches the line.
+        let facts = recall_facts(
+            &huge,
+            8,
+            &crate::recall::detail::DetailedRecall::warn_only(String::new()),
+        );
+        let query = facts["query"].as_str().expect("query is a string");
+        assert!(query.ends_with("…[truncated]"), "{}", &query[..40]);
+        assert_eq!(query.chars().count(), cut.chars().count());
     }
 
     /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,

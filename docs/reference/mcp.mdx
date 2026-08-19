@@ -207,7 +207,7 @@ Report session health: flush lag, write-behind log depth, node, edge, and concep
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
 
-When the server was started with `serve --ledger`, the payload also carries `ledger_path`, `ledger_written_lines`, and `ledger_dropped_lines`. The dropped count is the one to read first: the call ledger drops lines rather than delay a tool call, so a non-zero value means any count taken from the ledger file is a lower bound. Without `--ledger` these three keys are absent and the payload is unchanged.
+When the server was started with `serve --ledger`, the payload also carries `ledger_path`, `ledger_written_lines`, `ledger_dropped_lines`, `ledger_dropped_channel_full`, and `ledger_dropped_write_failed`. The dropped total is the one to read first: the call ledger drops lines rather than delay a tool call, so a non-zero value means any count taken from the ledger file is a lower bound. The two keys beside it say which kind of drop it was — `channel_full` is backpressure (the writer fell behind, so the filesystem is slow), `write_failed` is everything else (a batch whose write or open failed, a batch abandoned at shutdown, or an append after shutdown, so the path is wrong) — and they sum to the total. Without `--ledger` all five keys are absent and the payload is unchanged.
 
 ## How the server introduces itself
 

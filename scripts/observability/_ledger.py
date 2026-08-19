@@ -30,7 +30,26 @@ Schema (from `src/ledger.rs`; every line carries `v`, currently 1):
 
 Forward compatibility: consumers here ignore unknown keys and unknown `kind`s,
 so adding a field to a line does not need a `v` bump. A field that changes
-meaning or disappears does.
+meaning or disappears does — and this reader ACTS on `v` (see `KNOWN_VERSIONS`)
+rather than merely recording it, because the failure mode of not acting is a
+confidently wrong number.
+
+Two quiet dependencies on the SHAPE of `ts`, written down here because both are
+invisible at their use site and both break silently:
+
+  1. **String sort is timestamp sort** (`Ledger.sorted_calls`, `restart_times`,
+     `binaries`). True only while every stamp is the same fixed-offset RFC3339
+     form chrono's `to_rfc3339()` emits — same field widths, same `+00:00`
+     suffix. A producer that switched to `Z`, to local offsets, or to a variable
+     number of fractional digits would reorder lines lexically without erroring.
+  2. **Prefix slicing is bucketing** (`BUCKETS` in `dedup_rate.py`: `ts[:13]` is
+     the hour, `ts[:10]` the day). True only for the same fixed-width form, and
+     only while the stamp is UTC — a local-offset stamp would bucket by local
+     wall clock while sorting by neither.
+
+`parse_ts` normalises the one part of the shape that legitimately varies (the
+number of fractional-second digits); nothing normalises the offset, so both
+dependencies above remain conditions on the producer, not guarantees.
 """
 
 from __future__ import annotations
@@ -41,6 +60,22 @@ import json
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
+
+#: Line schema versions this kit knows how to read (`LINE_VERSION` in
+#: `src/ledger.rs`).
+#:
+#: `v` is the ledger's ONLY schema promise, and a reader that records it without
+#: acting on it converts a schema change into a wrong number rather than a
+#: message: a hypothetical `v:2` that renamed `matched` would make every dedup
+#: rate read `0.000` — the exact opposite of the truth — with no warning anywhere.
+#:
+#: The choice here is **warn, do not refuse** (stated in the README's choices
+#: list). A mixed file is the realistic case — one ledger spanning an upgrade, the
+#: thing `git_sha` exists to make visible — and refusing it would throw away the
+#: v1 lines that are still perfectly readable. So unknown-version lines are read
+#: as best they can be AND announced in the header, in the same register as
+#: dropped lines: capitals, first, unmissable.
+KNOWN_VERSIONS = frozenset({1})
 
 #: Tools that mutate the graph. "Did a recall precede the writes?" is a question
 #: about exactly these two.
@@ -72,9 +107,37 @@ class LedgerError(Exception):
     """A ledger that cannot be read as a ledger."""
 
 
+#: Fractional-second digits `datetime.fromisoformat` accepts before Python 3.11.
+_FRACTION_DIGITS = 6
+
+
 def parse_ts(raw: str) -> dt.datetime:
-    """RFC3339 -> aware datetime. `serve` always stamps UTC with an offset."""
-    return dt.datetime.fromisoformat(raw)
+    """RFC3339 -> aware datetime. `serve` always stamps UTC with an offset.
+
+    The producer is chrono's `to_rfc3339()`, which uses `SecondsFormat::AutoSi`:
+    it emits 0, 3, 6 or **9** fractional digits depending on the clock's
+    resolution. `datetime.fromisoformat` accepts only 3 or 6 before Python 3.11,
+    and nanosecond stamps are exactly what a Linux box produces — which is half
+    the dogfood rig. Truncating to microseconds here (not rounding: a ledger
+    timestamp is an ordering key, and truncation cannot reorder two stamps that
+    string-sort in a given order) removes the Python floor this kit would
+    otherwise have to declare, and keeps 3.10 boxes readable.
+
+    Truncation is the only normalisation performed. The offset is left exactly as
+    the producer wrote it — see this module's docstring for why the two callers
+    that treat `ts` as a sortable, sliceable string depend on that.
+    """
+    head, sep, rest = raw.partition(".")
+    if not sep:
+        return dt.datetime.fromisoformat(raw)
+    # `rest` is digits followed by the offset (`+00:00`, `-05:00` or `Z`).
+    digits = ""
+    for ch in rest:
+        if not ch.isdigit():
+            break
+        digits += ch
+    offset = rest[len(digits):]
+    return dt.datetime.fromisoformat(f"{head}.{digits[:_FRACTION_DIGITS]}{offset}")
 
 
 @dataclass
@@ -91,6 +154,10 @@ class Ledger:
     unparseable: list[tuple[int, str]] = field(default_factory=list)
     #: Line `v` values seen, so a report can say which schema it read.
     versions: set[int] = field(default_factory=set)
+    #: Lines whose `v` is outside `KNOWN_VERSIONS`, or absent/non-integer, as
+    #: (line number, the `v` value seen). Read anyway; announced loudly. See
+    #: `KNOWN_VERSIONS` for why this warns rather than refusing.
+    unknown_version: list[tuple[int, Any]] = field(default_factory=list)
     paths: list[str] = field(default_factory=list)
 
     @property
@@ -178,8 +245,13 @@ def load(paths: Iterable[str]) -> Ledger:
                 if not isinstance(record, dict):
                     out.unparseable.append((lineno, raw[:120]))
                     continue
-                if isinstance(record.get("v"), int):
-                    out.versions.add(record["v"])
+                version = record.get("v")
+                if isinstance(version, int):
+                    out.versions.add(version)
+                if version not in KNOWN_VERSIONS:
+                    # Read it anyway (a mixed file's v1 lines are still good),
+                    # but never silently: `header` says so in capitals.
+                    out.unknown_version.append((lineno, version))
                 kind = record.get("kind")
                 if kind == "call":
                     out.calls.append(record)
@@ -258,6 +330,19 @@ def header(title: str, ledger: Ledger) -> list[str]:
         + (f", {len(ledger.unparseable)} UNPARSEABLE" if ledger.unparseable else ""),
         f"   schema v: {sorted(ledger.versions) or 'unstated'}",
     ]
+    if ledger.unknown_version:
+        seen = sorted({str(v) for _, v in ledger.unknown_version})
+        out.append(
+            f"   schema:   {len(ledger.unknown_version)} LINE(S) AT AN UNKNOWN SCHEMA "
+            f"VERSION (saw {', '.join(seen)}; this kit knows "
+            f"{sorted(KNOWN_VERSIONS)}). They were read as v"
+            f"{max(KNOWN_VERSIONS)} anyway, so any field whose MEANING changed is "
+            "being reported wrong. Update this kit before quoting these numbers."
+        )
+        out.append(
+            "             first at: "
+            + ", ".join(f"L{n}" for n, _ in ledger.unknown_version[:5])
+        )
     binaries = ledger.binaries()
     if binaries:
         out.append("   binaries: " + "; ".join(
@@ -296,9 +381,35 @@ def emit(
     data: dict[str, Any],
     as_json: bool,
 ) -> None:
-    """Print the report, in whichever form was asked for."""
+    """Print the report, in whichever form was asked for.
+
+    The provenance the text header leads with travels in the JSON too, under
+    `ledger_schema` — a `--json` consumer piping into duckdb must not be the one
+    reader that cannot see an unknown schema version or a dropped-line count.
+    """
     if as_json:
-        json.dump({"report": title, "ledger": ledger.paths, **data}, sys.stdout, indent=2)
+        provenance = {
+            "versions": sorted(ledger.versions),
+            "known_versions": sorted(KNOWN_VERSIONS),
+            "unknown_version_lines": [
+                {"line": n, "v": v} for n, v in ledger.unknown_version
+            ],
+            "unparseable_lines": [n for n, _ in ledger.unparseable],
+            "dropped_lines": ledger.dropped_lines(),
+            "call_lines": len(ledger.calls),
+            "heartbeat_lines": len(ledger.heartbeats),
+            "unknown_kind_lines": len(ledger.unknown),
+        }
+        json.dump(
+            {
+                "report": title,
+                "ledger": ledger.paths,
+                "ledger_schema": provenance,
+                **data,
+            },
+            sys.stdout,
+            indent=2,
+        )
         sys.stdout.write("\n")
     else:
         print("\n".join(header(title, ledger) + [""] + text))

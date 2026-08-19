@@ -14,7 +14,13 @@ can quote:
     once and then derives six concepts complied once, and scoring it six times
     would flatter it exactly as much as scoring it once would punish it.
   * A write sequence is **recall-first** when a successful `lambo_recall`
-    appears earlier in the same work session.
+    appears earlier in the same work session. Compliance is **sticky within a
+    session**: one successful recall marks every later write sequence in that
+    session compliant, and nothing clears it. That is deliberate — a session's
+    recalled context does not evaporate after the next write — but it is stronger
+    than the illustration above ("recalls once then derives six concepts complied
+    once") admits, and it is named in the README's list of definitions that are
+    choices. Shorten `--gap-minutes` to make the claim weaker.
   * A **work session** is a stretch of one agent's calls with no gap longer than
     --gap-minutes and no serve restart inside it. The ledger records no
     agent-session boundary — `serve` holds one lambo session for its whole life
@@ -22,8 +28,11 @@ can quote:
     heartbeat's uptime resetting.
 
 Also reported, because it is the number C5 measured and the one directly
-comparable to `evidence/swarm/`: **derives with no prior recall in their work
-session**, counted per call rather than per sequence.
+comparable to `evidence/swarm/`: **`derives_without_prior_recall`** — derives with
+no prior recall in their work session, counted **per call** rather than per
+sequence. That is the only figure in this report comparable to
+`evidence/swarm/`'s 43/43; `compliance` (per sequence) is not, and reading the two
+as the same number would flatter this one.
 
 Usage:
     python3 scripts/observability/recall_first.py ~/lambo-dogfood/calls.jsonl
@@ -81,7 +90,12 @@ def analyse(ledger: _ledger.Ledger, gap_minutes: float) -> dict[str, Any]:
                     "write_sequences": sequences,
                     "recall_first_sequences": compliant,
                     "derives_without_prior_recall": derives_without_recall,
-                    "opened_with_recall": session[0].get("tool") == RECALL_TOOL,
+                    # `succeeded()` like every other predicate here: a session
+                    # that opened with a recall that ERRORED did not open with a
+                    # recall, and counting it as one is the same overstatement
+                    # every other check in this kit avoids.
+                    "opened_with_recall": session[0].get("tool") == RECALL_TOOL
+                    and _ledger.succeeded(session[0]),
                 }
             )
         seqs = sum(r["write_sequences"] for r in rows)

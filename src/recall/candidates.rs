@@ -216,7 +216,7 @@ pub fn candidates_with_legs(
         legs.entry(id).or_default().recent = Some(RECENT_SCORE);
     }
     for s in input.vector {
-        legs.entry(s.item).or_default().vector = Some(s.score);
+        merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
     let out = rank(&legs);
     // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
@@ -293,10 +293,29 @@ pub fn candidates_without_keyword_with_legs(
         legs.entry(id).or_default().recent = Some(RECENT_SCORE);
     }
     for s in input.vector {
-        legs.entry(s.item).or_default().vector = Some(s.score);
+        merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
     let out = rank(&legs);
     (out, legs)
+}
+
+/// Fold `score` into a leg slot by **max**, the same rule the cross-leg merge
+/// uses.
+///
+/// Only the vector leg needs this, and it needs it for a reason that is easy to
+/// lose: `vector_candidates` is a trait method whose contract does not forbid an
+/// adapter returning the same `NodeId` twice, and a plain assignment makes the
+/// *last* duplicate win. That silently reversed the pre-I1 arithmetic — a
+/// `[(dup, 0.90), (dup, 0.10)]` input ranked at 0.1 where it used to rank at 0.9.
+/// The keyword leg assigns rather than max-merges because that is what it did
+/// before I1 too (the inverted index yields each id once), and the recency leg is
+/// idempotent by construction; changing either would be the same kind of silent
+/// arithmetic change in the other direction.
+fn merge_max(slot: &mut Option<f64>, score: f64) {
+    *slot = Some(match *slot {
+        Some(previous) => previous.max(score),
+        None => score,
+    });
 }
 
 /// Ids of the concepts owned by the [`RECENT_INTERACTIONS`] most recent
@@ -1047,6 +1066,42 @@ mod tests {
         assert!(
             l.keyword.is_some() || l.recent.is_some(),
             "the shared node must also carry the leg that outscored the vector one: {l:?}"
+        );
+
+        // A DUPLICATE id inside the vector leg max-merges rather than
+        // last-writes. The `vector_candidates` trait contract does not forbid
+        // duplicates and no shipped adapter emits them, so this is the arithmetic
+        // no test held down: a plain assignment made `[(dup, 0.90), (dup, 0.10)]`
+        // rank at 0.1, reversing what the pre-I1 merge did with the same input.
+        let dup = NodeId(Uuid::from_u64_pair(11, 42));
+        let (ranked, legs) = candidates_with_legs(
+            &g,
+            &index,
+            Phase1Input {
+                vector: vec![Scored::new(dup, 0.90), Scored::new(dup, 0.10)],
+            },
+            "zzzznomatch",
+            5,
+        );
+        let l = legs.get(&dup).expect("the duplicated id is a candidate");
+        assert_eq!(
+            l.vector,
+            Some(0.90),
+            "duplicate vector entries max-merge; the later, weaker score must not \
+             overwrite the stronger one: {l:?}"
+        );
+        let scored = ranked
+            .iter()
+            .find(|s| s.item == dup)
+            .expect("the duplicated id is ranked");
+        assert_eq!(
+            scored.score, 0.90,
+            "and the ranking sees the merged maximum, not the last write"
+        );
+        assert_eq!(
+            ranked.iter().filter(|s| s.item == dup).count(),
+            1,
+            "a duplicated input id is still one candidate"
         );
     }
 

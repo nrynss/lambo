@@ -8,9 +8,23 @@ unclaimable — this script is the claimable version.
 
 Reported for every recall that rendered a warning: when, to whom, over which
 concept, at what blast radius, and whether the concept's block actually made it
-into the context the model read (`included_in_context` — a warning attached to a
-hit that fell past the token budget was still *counted* by lambo but the model
-never saw the block).
+into the context the model read.
+
+**`included_in_context` cuts the block, not the warning.** The four hit-owned
+warning kinds go into the flat `warnings` vector for every returned hit whatever
+the token budget did (`src/recall/assemble.rs`: "a block truncated from the
+context still reports its conditions"), and reach the agent as a second text
+block. So a warning on a cut hit *was* delivered — the model read the warning line
+and did not read the concept it was about. That is a weaker delivery, not a
+missing one, and this report distinguishes them rather than calling the second one
+unseen.
+
+The `[canonical]` marker is the opposite case and is reported separately: it
+renders **only** inside a hit's block, so a Canonical hit the budget cut carried no
+marker at all. The ledger's set-level `canonical_marker` flag is gated on
+`included_in_context` for that reason (`recall_facts` in `src/mcp/server.rs`), and
+this report counts the cut-canonical hits so the gap is visible rather than merely
+absent.
 
 The honest part, and the reason this is metric 5's "honest version": with
 `--repo <path>` each warning is joined against `git log` in the window after it.
@@ -64,11 +78,38 @@ def analyse(ledger: _ledger.Ledger) -> dict[str, Any]:
     by_concept: Counter[str] = Counter()
     recalls = 0
     recalls_with_a_warning = 0
+    #: Canonical hits the token budget cut, so `[canonical]` never rendered for
+    #: them. The counterpart of the warning case above: for these, the marker was
+    #: NOT delivered in any form.
+    canonical_cut: list[dict[str, Any]] = []
+    #: Recalls that returned a Canonical hit but reported `canonical_marker:
+    #: false` — the flag and the hits disagreeing is exactly the budget case, and
+    #: seeing it counted is how the flag's definition stays checkable from a file.
+    recalls_with_a_canonical_hit = 0
+    recalls_that_rendered_a_marker = 0
 
     for call in ledger.sorted_calls():
         if call.get("tool") != _ledger.RECALL_TOOL or not _ledger.succeeded(call):
             continue
         recalls += 1
+        hits_all = call.get("hits") or []
+        if any(h.get("is_canonical") for h in hits_all):
+            recalls_with_a_canonical_hit += 1
+        if call.get("canonical_marker") is True:
+            recalls_that_rendered_a_marker += 1
+        for h in hits_all:
+            if h.get("is_canonical") and h.get("included_in_context") is False:
+                canonical_cut.append(
+                    {
+                        "ts": call["ts"],
+                        "agent_id": call.get("agent_id"),
+                        "query": call.get("query"),
+                        "node_id": h.get("node_id"),
+                        "content": h.get("content"),
+                        "blast_radius": h.get("blast_radius"),
+                        "score": h.get("score"),
+                    }
+                )
         fired = False
         for hit in call.get("hits") or []:
             kinds = [k for k in (hit.get("annotations") or []) if k in HIT_KINDS]
@@ -107,9 +148,13 @@ def analyse(ledger: _ledger.Ledger) -> dict[str, Any]:
         "recalls_with_a_warning": recalls_with_a_warning,
         "warning_events": events,
         "blast_radius_warnings": blast,
-        "blast_radius_warnings_unseen": [
+        # The warning line reached the agent; the BLOCK it was about did not.
+        "blast_radius_warnings_whose_block_was_cut": [
             e for e in blast if e["included_in_context"] is False
         ],
+        "recalls_with_a_canonical_hit": recalls_with_a_canonical_hit,
+        "recalls_that_rendered_a_canonical_marker": recalls_that_rendered_a_marker,
+        "canonical_hits_cut_by_the_budget": canonical_cut,
         "by_kind": dict(by_kind),
         "by_agent": dict(by_agent),
         "top_concepts": by_concept.most_common(15),
@@ -185,12 +230,38 @@ def render(data: dict[str, Any], joined: list[dict[str, Any]] | None, window: fl
         f"with at least one warning: {data['recalls_with_a_warning']}",
         f"blast-radius (load_bearing) warnings fired: {len(blast)}",
     ]
-    unseen = data["blast_radius_warnings_unseen"]
-    if unseen:
+    cut = data["blast_radius_warnings_whose_block_was_cut"]
+    if cut:
         out.append(
-            f"   of which {len(unseen)} were attached to a hit the TOKEN BUDGET CUT — "
-            "lambo counted the warning, the model never saw the block"
+            f"   of which {len(cut)} were attached to a hit the TOKEN BUDGET CUT — "
+            "the WARNING LINE still reached the agent (warnings are delivered "
+            "independently of the budget); the concept BLOCK it was about did not"
         )
+
+    # The marker is the other half of the same story, and the half that IS
+    # budget-gated: `[canonical]` renders only inside a hit's block.
+    out += [
+        "",
+        f"Canonical hits: {data['recalls_with_a_canonical_hit']} recall(s) returned one, "
+        f"{data['recalls_that_rendered_a_canonical_marker']} rendered the [canonical] marker",
+    ]
+    marker_cut = data["canonical_hits_cut_by_the_budget"]
+    if marker_cut:
+        out.append(
+            f"   {len(marker_cut)} Canonical hit(s) were CUT BY THE TOKEN BUDGET, so no "
+            "[canonical] marker rendered for them at all — unlike a warning line, the "
+            "marker lives inside the block and is not delivered separately. The ledger's "
+            "`canonical_marker` flag is false for those recalls, which is why it is not a "
+            "count of Canonical hits returned; read per-hit `is_canonical` for that."
+        )
+        for e in marker_cut[:10]:
+            out.append(
+                f"   {e['ts']}  {e['agent_id']}  blast_radius={e['blast_radius']}  "
+                f"concept: {e['content']!r}"
+            )
+        if len(marker_cut) > 10:
+            out.append(f"   … and {len(marker_cut) - 10} more")
+
     out += ["", "By kind:"]
     if not data["by_kind"]:
         out.append("   none")
@@ -218,7 +289,13 @@ def render(data: dict[str, Any], joined: list[dict[str, Any]] | None, window: fl
 
     out += ["", "Every blast-radius warning, in order:"]
     for e in blast:
-        seen = "in context" if e["included_in_context"] else "CUT BY TOKEN BUDGET"
+        # The warning was delivered either way; this says whether the concept
+        # block it pointed at was in the context the model read.
+        seen = (
+            "block in context"
+            if e["included_in_context"]
+            else "warning delivered, BLOCK CUT BY TOKEN BUDGET"
+        )
         out.append(
             f"   {e['ts']}  {e['agent_id']}  blast_radius={e['blast_radius']}  "
             f"score={e['score']:.4f}  [{seen}]"

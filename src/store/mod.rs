@@ -179,6 +179,11 @@ pub trait GraphStore: Send + Sync {
     /// instead. This method cannot bind the query's embedding contract to the
     /// durable candidate read and therefore cannot prevent a concurrent model
     /// replacement from making a ranking meaningless.
+    ///
+    /// **Duplicate `NodeId`s in the returned list are tolerated, and the highest
+    /// score wins** (recall's phase-1 vector leg max-merges them); an adapter need
+    /// not deduplicate, and a `Vec` carrying the same id twice will not change the
+    /// ranking from what the best of those entries would have produced alone.
     async fn vector_candidates(
         &self,
         session: &SessionId,

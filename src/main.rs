@@ -497,16 +497,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // A zero interval would spin the heartbeat loop as fast as the
-            // executor allows, which is a flood, not a heartbeat. Refuse here
-            // rather than let `tokio::time::interval` panic on a zero period.
-            if ledger_heartbeat == Some(0) {
-                eprintln!(
-                    "lambo serve: --ledger-heartbeat must be at least 1 second (0 given); \
-                     omit the flag to disable heartbeats"
-                );
-                return ExitCode::from(2);
-            }
+            // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
+            // as the executor allows, which is a flood, not a heartbeat. The
+            // refusal used to live here and now lives in
+            // `mcp::serve::authorize_ledger`, which keeps this message verbatim:
+            // a library caller gets the same refusal instead of a panicking
+            // heartbeat task, and both ledger configuration errors leave through
+            // the one `Err` arm at the end of this block rather than with two
+            // different exit codes for the same class of mistake.
             let opts = ServeOptions {
                 session,
                 agent,

@@ -18,7 +18,11 @@ Deliberately planted, one per script, so no report is exercised on an empty set:
   * recall hits carrying all three legs, including one where the recency floor
     masks a real cosine                              -> score_bands.py
   * a Canonical hit with a blast radius, warned over twice, one of those cut by
-    the token budget                                 -> warnings.py
+    the token budget — so BOTH sides of the budget distinction are present: the
+    warning line was delivered either way, while `[canonical]` rendered only for
+    the hit that stayed in the context (`canonical_marker` is true on the first
+    recall and FALSE on the second, over the very same Canonical concept)
+                                                     -> warnings.py
   * a non-zero dropped-line count on the last heartbeat, so the "counts are a
     lower bound" path in the header is exercised
   * one failed call with an error_kind, and one torn final line
@@ -120,7 +124,14 @@ def recall(minute: float, agent: str, query: str, hits: list[dict]) -> dict:
         top_k=8,
         hit_count=len(hits),
         hits=hits,
-        canonical_marker=any(h["is_canonical"] for h in hits),
+        # `canonical_marker` is BUDGET-GATED, exactly as `recall_facts` computes
+        # it: `[canonical]` renders only inside a hit's context block, so a
+        # Canonical hit the budget cut rendered no marker. The four warning flags
+        # below are NOT gated — their lines reach the agent through the flat
+        # `warnings` vector whatever the budget did to the block.
+        canonical_marker=any(
+            h["is_canonical"] and h["included_in_context"] for h in hits
+        ),
         blast_radius_warning="load_bearing" in kinds,
         conflict_line="conflict" in kinds,
         hot_warning="hot" in kinds,
@@ -143,7 +154,22 @@ def derive(minute: float, agent: str, created: int, matched: int, merged: int = 
     )
 
 
-def heartbeat(minute: float, uptime: int, sha: str, *, nodes: int, dropped: int = 0) -> dict:
+def heartbeat(
+    minute: float,
+    uptime: int,
+    sha: str,
+    *,
+    nodes: int,
+    dropped: int = 0,
+    channel_full: int = 0,
+) -> dict:
+    """One `stats` heartbeat.
+
+    `dropped` is the headline total; `channel_full` is how much of it was
+    backpressure (the writer behind) rather than a failed write. The serve emits
+    all three keys, so the sample carries all three — and they add up, because
+    `ledger_dropped_lines` is defined as the sum.
+    """
     return {
         "v": V,
         "ts": ts(minute),
@@ -170,6 +196,8 @@ def heartbeat(minute: float, uptime: int, sha: str, *, nodes: int, dropped: int 
             "ledger_path": "/home/dogfood/lambo-dogfood/calls.jsonl",
             "ledger_written_lines": 10 + int(minute),
             "ledger_dropped_lines": dropped,
+            "ledger_dropped_channel_full": channel_full,
+            "ledger_dropped_write_failed": dropped - channel_full,
         },
     }
 
@@ -286,8 +314,12 @@ def lines() -> list[dict]:
             "pagination cursors",
             [
                 # Warned over a second time; this time the hit fell past the
-                # token budget, so lambo counted the warning and the model never
-                # saw the block. warnings.py must distinguish the two.
+                # token budget. The warning LINE still reached the agent (the
+                # `warnings` vector is budget-independent) while the concept BLOCK
+                # did not — and because the `[canonical]` marker lives inside that
+                # block, this line's `canonical_marker` is FALSE over the same
+                # Canonical concept the first recall reported TRUE for.
+                # warnings.py must distinguish all three of those.
                 hit(
                     "pagination",
                     PAGINATION,
@@ -318,8 +350,18 @@ def lines() -> list[dict]:
     out.append(derive(day2 + 11, "agent-beta", created=0, matched=2))
 
     # Last heartbeat reports DROPPED LINES, so every report's header must say
-    # its counts are a lower bound.
-    out.append(heartbeat(day2 + 15, uptime=2_400, sha=SHA_AFTER, nodes=33, dropped=4))
+    # its counts are a lower bound — split by cause: 3 of the 4 were backpressure
+    # (the writer behind), 1 was a write that failed.
+    out.append(
+        heartbeat(
+            day2 + 15,
+            uptime=2_400,
+            sha=SHA_AFTER,
+            nodes=33,
+            dropped=4,
+            channel_full=3,
+        )
+    )
     return out
 
 

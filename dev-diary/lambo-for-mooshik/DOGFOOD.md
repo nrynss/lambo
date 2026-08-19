@@ -123,7 +123,12 @@ evidence pointers.
 > **Rig consequence:** the ledger changes `serve`, so measuring any of this means a new
 > pinned binary and a deliberate upgrade event (see the pin below). Build it with
 > `LAMBO_GIT_SHA=$(git rev-parse --short HEAD)` so the heartbeat's `git_sha` proves the
-> upgrade happened in the ledger itself.
+> upgrade happened in the ledger itself. Both halves of that are now in the runbook rather
+> than only here: [`DOGFOOD-SETUP.md`](DOGFOOD-SETUP.md) §2 sets `LAMBO_GIT_SHA` in the
+> build step and §4 carries the two `--ledger` flags on the server command and the client
+> registrations, with a §6 smoke check that catches a `git_sha` of `unknown` or an absent
+> file. An operator who follows only that file gets a measuring rig; before, they got a
+> serving one that measured nothing.
 
 1. Recall-first compliance per agent cycle (the ledger records it; no self-reporting).
 2. Re-derivation savings: times a recalled decision replaced re-reading a workstream doc.

@@ -601,13 +601,24 @@ impl ServeOptions {
     }
 }
 
-/// `--ledger-heartbeat` without `--ledger` is a configuration error, not a
-/// silent no-op.
+/// Both ledger configuration errors, refused in one place.
 ///
-/// An operator who asked for heartbeats and got a server with no ledger at all
-/// would find out a day later, from an absent file. Refusing at startup costs
-/// them one flag; the alternative costs them the run. Split out from [`serve`]
-/// so it is testable without a store, a transport, or a lease.
+/// **`--ledger-heartbeat` without `--ledger`.** An operator who asked for
+/// heartbeats and got a server with no ledger at all would find out a day later,
+/// from an absent file. Refusing at startup costs them one flag; the alternative
+/// costs them the run.
+///
+/// **A zero heartbeat interval.** `tokio::time::interval` panics on a zero
+/// period, and a heartbeat that fired as fast as the executor allows would be a
+/// flood, not a heartbeat. The guard used to live only in `main.rs`, which left
+/// two holes: a `serve()` caller that is not the CLI got a silently-panicked
+/// heartbeat task, and the two configuration errors exited with two different
+/// codes (1 and 2) for the same class of mistake. Both are refused here now, so
+/// both take the same path out — and the CLI's wording is kept verbatim, since it
+/// is the message an operator has already learned to read.
+///
+/// Split out from [`serve`] so it is testable without a store, a transport, or a
+/// lease, and called before any lease is taken.
 pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
     match (&opts.ledger, opts.ledger_heartbeat) {
         (None, Some(secs)) => Err(LamboError::Config(format!(
@@ -616,6 +627,11 @@ pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
              drop --ledger-heartbeat.",
             secs.as_secs()
         ))),
+        (_, Some(every)) if every.is_zero() => Err(LamboError::Config(
+            "--ledger-heartbeat must be at least 1 second (0 given); omit the flag to disable \
+             heartbeats"
+                .to_string(),
+        )),
         _ => Ok(()),
     }
 }
@@ -1307,6 +1323,40 @@ mod tests {
         // A ledger with no heartbeat is also fine — heartbeats are optional.
         opts.ledger_heartbeat = None;
         assert!(authorize_ledger(&opts).is_ok());
+    }
+
+    /// **I-R1-12.** A zero heartbeat interval is refused at the *library*
+    /// boundary, not only by the CLI.
+    ///
+    /// `tokio::time::interval` panics on a zero period, so `serve()` used to hand
+    /// a non-CLI caller a heartbeat task that panicked on its first tick while
+    /// the CLI refused the same options with a different exit code from the
+    /// heartbeat-without-ledger case. One check, one path out, for both.
+    #[test]
+    fn i2_a_zero_heartbeat_interval_is_refused_at_the_library_boundary() {
+        let mut opts = ServeOptions::new("s", "a");
+        opts.ledger = Some(std::path::PathBuf::from("/tmp/nonexistent/calls.jsonl"));
+        opts.ledger_heartbeat = Some(Duration::ZERO);
+        let err = authorize_ledger(&opts).expect_err("a zero interval must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("at least 1 second"),
+            "keeps the CLI's wording: {msg}"
+        );
+        assert!(
+            matches!(err, LamboError::Config(_)),
+            "a configuration error, so it exits the way the other one does: {err:?}"
+        );
+
+        // One second is the smallest legal interval.
+        opts.ledger_heartbeat = Some(Duration::from_secs(1));
+        assert!(authorize_ledger(&opts).is_ok());
+
+        // And zero is refused with no ledger too — that arm reports the missing
+        // flag first, which is the more useful of the two messages.
+        opts.ledger = None;
+        opts.ledger_heartbeat = Some(Duration::ZERO);
+        assert!(authorize_ledger(&opts).is_err());
     }
 
     /// **I2 acceptance.** The heartbeat interval actually fires, repeatedly, on

@@ -11,6 +11,11 @@ that got past canonicalization (which is metric 3's job, `duplicates.py`).
 The trend is the point, not the number: a session whose dedup rate climbs is
 converging on a stable vocabulary. `--bucket` sets the time axis.
 
+An **absent** fact is not a zero. A successful derive line carrying no
+created/matched keys at all is counted and reported on its own line rather than
+folded in as `created=0, matched=0` — the difference between "nothing was
+re-derived" and "this reader no longer understands these lines".
+
 `semantic_merged` is reported separately and NOT counted as a match. A hybrid
 similarity merge adds a decaying `Semantic` edge and does **not** re-upsert the
 target or add a `Derives` edge, so folding it into `matched` would overstate
@@ -37,7 +42,20 @@ from typing import Any
 
 import _ledger
 
-BUCKETS = {"hour": 13, "day": 10, "all": 0}  # prefix length of the RFC3339 stamp
+#: Prefix length of the RFC3339 stamp that identifies each bucket.
+#:
+#: This is a **dependency on the shape of `ts`**, invisible at the slicing site:
+#: `2026-08-18T09` is 13 characters and `2026-08-18` is 10 only for the
+#: fixed-width UTC form chrono's `to_rfc3339()` emits. A producer that switched to
+#: local offsets would bucket by local wall clock while `sorted_calls` still
+#: ordered by the string; one that changed field widths would slice mid-field. See
+#: `_ledger.py`'s module docstring, where both timestamp-shape dependencies are
+#: recorded together.
+BUCKETS = {"hour": 13, "day": 10, "all": 0}
+
+#: The derive facts this report reads. `matched` and `created` are the dedup rate;
+#: the other two are reported beside it and deliberately not folded in.
+DERIVE_FACTS = ("created", "matched", "semantic_merged", "reinforced")
 
 
 def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str, Any]:
@@ -49,6 +67,12 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         lambda: {"calls": 0, "created": 0, "matched": 0, "semantic_merged": 0}
     )
     failed = 0
+    # A successful derive line that carries NO created/matched facts at all is not
+    # the same thing as one that created and matched nothing, and folding the two
+    # together is how a schema change becomes a wrong number rather than a
+    # message: a `v:2` that renamed `matched` would leave every line fact-less and
+    # every rate reading 0.000. Counted separately and reported.
+    factless = 0
     # `record_action` fans its produces/modifies/depends_on out into concepts too,
     # so the store cross-check below must count them or it will always report a
     # phantom surplus. They are NOT part of the dedup rate: `record_action` has
@@ -70,12 +94,16 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         row["calls"] += 1
         agent_row = per_agent[call.get("agent_id", "?")]
         agent_row["calls"] += 1
-        for name in ("created", "matched", "semantic_merged", "reinforced"):
+        present = 0
+        for name in DERIVE_FACTS:
             value = call.get(name)
             if isinstance(value, int):
+                present += 1
                 row[name] += value
                 if name in agent_row:
                     agent_row[name] += value
+        if present == 0:
+            factless += 1
 
     def rate(row: dict[str, int]) -> float | None:
         total = row["created"] + row["matched"]
@@ -98,6 +126,7 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         },
         "totals": {**totals, "dedup_rate": rate(totals)},
         "failed_derive_calls": failed,
+        "derive_calls_without_facts": factless,
         "record_action_created": action_created,
     }
 
@@ -156,6 +185,13 @@ def render(data: dict[str, Any]) -> list[str]:
     if data["failed_derive_calls"]:
         out.append(
             f"   ({data['failed_derive_calls']} derive call(s) failed and are excluded)"
+        )
+    if data["derive_calls_without_facts"]:
+        out.append(
+            f"   {data['derive_calls_without_facts']} SUCCESSFUL derive call(s) carried NO "
+            "created/matched facts at all — not the same as creating and matching "
+            "nothing. Either the lines predate the facts, or a field was renamed; "
+            "the rates above are computed over the remaining calls only."
         )
 
     out += ["", "Per agent:"]

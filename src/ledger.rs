@@ -12,23 +12,38 @@
 //!
 //! **1. Observability must never take down memory.** A tool call hands its line
 //! to a bounded [`std::sync::mpsc::sync_channel`] with `try_send` and returns.
-//! There is no `await`, no lock, no file I/O and no allocation of the writer's
-//! making on the calling path; a full channel **drops the line** and bumps
-//! [`LedgerCounters::dropped`]. Writing happens on a dedicated OS thread — not a
-//! Tokio worker — so a slow or hung filesystem cannot starve the runtime of the
-//! worker that would otherwise run `Memory::close` on SIGTERM.
+//! There is **no `await`, no file I/O, and no lock held across anything that can
+//! block** on the calling path — the one lock `append` takes is a
+//! `parking_lot::Mutex` around the sender, held for the duration of a
+//! non-blocking `try_send` and nothing else — and no allocation of the writer's
+//! making. A full channel **drops the line** and bumps
+//! [`LedgerCounters::dropped_channel_full`]. Writing happens on a dedicated OS
+//! thread — not a Tokio worker — so a slow or hung filesystem cannot starve the
+//! runtime of the worker that would otherwise run `Memory::close` on SIGTERM.
 //!
-//! Every failure mode is a *drop*, counted and visible in `lambo_stats`:
+//! Every failure mode is a *drop*, counted and visible in `lambo_stats`. The two
+//! counters are separate because they are different operational facts: a full
+//! channel means the writer is behind, an unwritten batch means the path is
+//! broken, and an operator reading one total cannot tell those apart.
 //!
 //! | failure | behaviour |
 //! | --- | --- |
-//! | channel full (writer behind) | drop the line, `dropped += 1` |
-//! | path unopenable at startup | one WARN, every line drops, serve still starts |
-//! | path unwritable mid-run | one WARN, `dropped += batch`, keep dropping |
-//! | shutdown drain exceeds [`SHUTDOWN_DRAIN`] | give up waiting, log, exit |
+//! | channel full (writer behind) | drop the line, `dropped_channel_full += 1` |
+//! | path **cannot** be opened (`ENOENT`, `ENOTDIR`, `EACCES`) | one WARN from the writer thread, every batch drops, serve serves |
+//! | path's `open` **blocks** (a FIFO with no reader, a hung mount) | the writer thread parks; serve starts, serves, and shuts down normally; lines drop as channel-full |
+//! | path unwritable mid-run | one WARN, `dropped_write_failed += batch`, keep dropping |
+//! | shutdown drain exceeds [`SHUTDOWN_DRAIN`] | give up waiting, log, count the abandoned lines as `dropped_write_failed`, exit |
 //!
-//! There are **no silent caps**: `dropped` is reported next to `written`, so
-//! silence in the file is always distinguishable from silence in the traffic.
+//! "Cannot open" and "open blocks" are deliberately separate rows: the first is
+//! a typo and is loud, the second is a filesystem condition no amount of
+//! error-handling can turn into a return value. Both are survivable because
+//! **nothing on the startup path opens the file** — the probe that makes a typo
+//! loud runs as the writer thread's first act, which is precisely the thread the
+//! OS-thread design exists to let park.
+//!
+//! There are **no silent caps**: both drop counters are reported next to
+//! `written`, so silence in the file is always distinguishable from silence in
+//! the traffic.
 //!
 //! **2. The ledger is not the store.** No replay semantics, nothing on the serve
 //! path ever *reads* it, and the only schema promise is "one JSON object per
@@ -76,8 +91,11 @@ const MAX_BATCH_BYTES: usize = 1 << 20;
 /// How long [`Ledger::shutdown`] waits for the writer to finish.
 ///
 /// Bounded on purpose: an unresponsive filesystem must not hold process exit
-/// hostage. Exceeding it loses at most [`CHANNEL_CAPACITY`] lines, which is the
-/// documented policy rather than a surprise.
+/// hostage. Exceeding it loses at most **[`CHANNEL_CAPACITY`] lines plus one
+/// in-flight batch** (the batch the writer is holding inside its `write`, itself
+/// bounded by [`MAX_BATCH_BYTES`]) — and those lines are *counted*, as
+/// `dropped_write_failed`, by [`Ledger::shutdown`] before it returns. The policy
+/// is documented, bounded and visible rather than a surprise.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_millis(500);
 
 /// The crate version this binary was built from.
@@ -98,7 +116,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// — and note the consequence of *not* setting it: two builds of the same crate
 /// version both report `"unknown"`, so a dogfood upgrade event shows as a sha
 /// change only if the rig sets the variable when it builds the pinned binary.
-/// `DOGFOOD-SETUP.md`'s build step is the place that must do it.
+/// `dev-diary/lambo-for-mooshik/DOGFOOD-SETUP.md` **§2 "The pinned binary"** owns
+/// the rig's build step and is the place that sets it.
 pub const GIT_SHA: &str = match option_env!("LAMBO_GIT_SHA") {
     Some(sha) => sha,
     None => "unknown",
@@ -106,12 +125,24 @@ pub const GIT_SHA: &str = match option_env!("LAMBO_GIT_SHA") {
 
 /// Written / dropped line counts, shared with the writer thread.
 ///
-/// `dropped` is the load-bearing one: it is what `lambo_stats` reports so that
-/// a gap in the ledger is never mistaken for a gap in the traffic.
+/// The dropped counts are the load-bearing ones: they are what `lambo_stats`
+/// reports so that a gap in the ledger is never mistaken for a gap in the
+/// traffic. They are **split by cause** because the two causes are different
+/// operational facts and a single total cannot distinguish them — which is
+/// exactly the position an earlier revision left an operator (and a test) in.
 #[derive(Debug, Default)]
 pub struct LedgerCounters {
     written: AtomicU64,
-    dropped: AtomicU64,
+    /// Backpressure: `try_send` rejected the line because the writer is behind.
+    channel_full: AtomicU64,
+    /// Everything else: see [`LedgerCounters::dropped_write_failed`].
+    write_failed: AtomicU64,
+    /// Lines the channel accepted — written, still in flight, or abandoned.
+    ///
+    /// Not reported. It exists so [`Ledger::shutdown`] can count the lines an
+    /// abandoned writer was still holding (`accepted - written - write_failed`)
+    /// instead of losing them silently.
+    accepted: AtomicU64,
 }
 
 impl LedgerCounters {
@@ -120,11 +151,45 @@ impl LedgerCounters {
         self.written.load(Ordering::Relaxed)
     }
 
-    /// Lines never appended — channel full, or a write that failed.
+    /// Lines the channel refused because the writer was behind — **backpressure**.
+    ///
+    /// The first row of this module's failure table, and the one a genuinely
+    /// stalled filesystem produces. Non-zero here means the ledger is an
+    /// undercount *and* that the writer could not keep up.
+    pub fn dropped_channel_full(&self) -> u64 {
+        self.channel_full.load(Ordering::Relaxed)
+    }
+
+    /// Lines that never reached the file for any reason other than backpressure:
+    ///
+    /// * a batch whose `write` (or its `open`) failed — the path is broken;
+    /// * a batch abandoned when [`SHUTDOWN_DRAIN`] expired;
+    /// * an [`Ledger::append`] after [`Ledger::shutdown`];
+    /// * a `Value` that would not serialize (a caller bug, still only a drop).
+    ///
+    /// Non-zero here points at the *path or the process*, not at throughput.
+    pub fn dropped_write_failed(&self) -> u64 {
+        self.write_failed.load(Ordering::Relaxed)
+    }
+
+    /// Every dropped line, whatever the cause.
+    ///
+    /// Retained as the headline number (`lambo_stats`'s `ledger_dropped_lines`)
+    /// so "is this ledger complete?" stays one field; the split answers "why".
     pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
+        self.dropped_channel_full() + self.dropped_write_failed()
     }
 }
+
+/// How a batch reaches durable storage.
+///
+/// Production always uses [`write_batch`]. The indirection exists for one
+/// reason: the channel-full row of this module's failure table is only reachable
+/// when the writer is *inside* a write that has not returned, and no black-box
+/// test can hold a real filesystem there deterministically. Injecting the sink
+/// lets a test park the writer on demand and prove backpressure drops rather
+/// than blocking the caller.
+type BatchSink = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
 
 /// A handle onto the append-only call ledger.
 ///
@@ -142,30 +207,29 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Open (or create) the ledger at `path` and start its writer thread.
+    /// Start the ledger's writer thread for `path`.
     ///
-    /// **Never fails.** An unopenable path logs one WARN naming the path and the
-    /// error and returns a ledger that counts every line as dropped: a typo in
-    /// `--ledger` must not stop a memory server from serving memory. The startup
-    /// probe exists so the operator learns about the typo at startup rather than
-    /// from an empty file a day later.
+    /// **Never fails the server, and performs no I/O of its own.** Opening,
+    /// probing and writing all happen on the writer thread, so neither an
+    /// unopenable path (a typo: one WARN, every batch dropped) nor a path whose
+    /// `open` *blocks* (a FIFO with no reader, a hung mount: the writer parks)
+    /// can delay or wedge the caller. That distinction is the whole reason the
+    /// probe is not here: `serve` calls this **after** the single-writer lease is
+    /// taken and **before** the SIGTERM handler is armed, so a blocking `open`
+    /// on this path would take down memory through the flag that turns
+    /// observability on.
+    ///
+    /// The operator still learns about a typo at startup rather than from an
+    /// empty file a day later — the writer thread probes as its first act, with
+    /// no tool call needed to provoke it.
     pub fn open(path: impl Into<PathBuf>) -> Arc<Self> {
+        Self::open_with_sink(path, Arc::new(write_batch))
+    }
+
+    /// [`Ledger::open`], with the durable-write step injected. See [`BatchSink`].
+    fn open_with_sink(path: impl Into<PathBuf>, sink: BatchSink) -> Arc<Self> {
         let path = path.into();
         let counters = Arc::new(LedgerCounters::default());
-
-        // Probe once, up front, so a bad path is loud at startup. The writer
-        // reopens per batch regardless (rotation-friendly), so this handle is
-        // dropped immediately — it is a check, not the writer's file.
-        if let Err(err) = open_for_append(&path) {
-            tracing::warn!(
-                target: "lambo::ledger",
-                path = %path.display(),
-                error = %err,
-                "lambo serve: the call ledger path could not be opened; every line will be \
-                 DROPPED and counted in lambo_stats (ledger_dropped_lines). Serving continues — \
-                 observability never takes down memory."
-            );
-        }
 
         let (tx, rx) = sync_channel::<Vec<u8>>(CHANNEL_CAPACITY);
         let writer = std::thread::Builder::new()
@@ -173,7 +237,7 @@ impl Ledger {
             .spawn({
                 let path = path.clone();
                 let counters = Arc::clone(&counters);
-                move || writer_loop(&path, rx, &counters)
+                move || writer_loop(&path, rx, &counters, &sink)
             });
 
         let writer = match writer {
@@ -213,8 +277,9 @@ impl Ledger {
     ///
     /// Serialization happens on the calling thread (it is a few hundred bytes of
     /// `serde_json`, and doing it here keeps the writer thread's batch a single
-    /// contiguous `write`); handing it over is a `try_send`. A full channel or a
-    /// departed writer drops the line and bumps `dropped`.
+    /// contiguous `write`); handing it over is a `try_send`. A full channel bumps
+    /// `dropped_channel_full`; a departed writer or a post-shutdown call bumps
+    /// `dropped_write_failed`.
     pub fn append(&self, line: &Value) {
         let mut bytes = match serde_json::to_vec(line) {
             Ok(b) => b,
@@ -227,7 +292,7 @@ impl Ledger {
                     error = %err,
                     "ledger: line could not be serialized; dropped"
                 );
-                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
@@ -236,13 +301,23 @@ impl Ledger {
         let guard = self.tx.lock();
         let Some(tx) = guard.as_ref() else {
             // Post-shutdown call. Counted, not silent.
-            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+            self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
             return;
         };
         match tx.try_send(bytes) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+            Ok(()) => {
+                self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+            }
+            // The writer is behind. This is the failure table's first row and
+            // the one a stalled filesystem produces; counted on its own so an
+            // operator (and a test) can tell it from a broken path.
+            Err(TrySendError::Full(_)) => {
+                self.counters.channel_full.fetch_add(1, Ordering::Relaxed);
+            }
+            // The writer thread is gone (it panicked, or the OS refused to
+            // spawn it). Not backpressure — the line had nowhere to go.
+            Err(TrySendError::Disconnected(_)) => {
+                self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -251,7 +326,11 @@ impl Ledger {
     /// flush what it already holds.
     ///
     /// Idempotent. Bounded: a writer stuck on a hung filesystem is abandoned
-    /// with a log line rather than allowed to hold process exit.
+    /// with a log line rather than allowed to hold process exit. The lines it
+    /// was still holding are **counted as drops before this returns** — the
+    /// sender is already gone, so `accepted - written - write_failed` is exactly
+    /// what the abandoned writer had in hand plus whatever is still queued,
+    /// bounded by [`CHANNEL_CAPACITY`] plus one [`MAX_BATCH_BYTES`] batch.
     pub fn shutdown(&self) {
         // Dropping the sender is what tells the writer loop to finish.
         drop(self.tx.lock().take());
@@ -261,12 +340,25 @@ impl Ledger {
         let deadline = Instant::now() + SHUTDOWN_DRAIN;
         while !handle.is_finished() {
             if Instant::now() >= deadline {
+                // No sender remains, so `accepted` can no longer move: the
+                // arithmetic below is a settled count, not a sample.
+                let abandoned = self
+                    .counters
+                    .accepted
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(self.counters.written())
+                    .saturating_sub(self.counters.dropped_write_failed());
+                self.counters
+                    .write_failed
+                    .fetch_add(abandoned, Ordering::Relaxed);
                 tracing::warn!(
                     target: "lambo::ledger",
+                    abandoned,
                     dropped = self.counters.dropped(),
                     written = self.counters.written(),
-                    "ledger: writer did not drain within the shutdown budget; abandoning it \
-                     (buffered lines are lost — counted policy, not a surprise)"
+                    "ledger: writer did not drain within the shutdown budget; abandoning it. \
+                     The lines it still held are counted in ledger_dropped_lines — bounded by \
+                     the channel capacity plus one batch, and never silent."
                 );
                 return;
             }
@@ -286,12 +378,35 @@ fn open_for_append(path: &Path) -> std::io::Result<std::fs::File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
-/// The writer thread: drain, write, repeat until every sender is gone.
-fn writer_loop(path: &Path, rx: Receiver<Vec<u8>>, counters: &LedgerCounters) {
+/// The writer thread: probe once, then drain, write, repeat until every sender
+/// is gone.
+///
+/// **The probe lives here, not in [`Ledger::open`].** It is the same check it
+/// always was — an `open` in append mode, dropped immediately, so a typo in
+/// `--ledger` is loud at startup instead of showing up as an empty file a day
+/// later — but running it on this thread is what makes the loudness free. An
+/// `open` that cannot succeed warns; an `open` that *blocks* parks this thread
+/// and nothing else, which is exactly the failure the OS-thread design exists to
+/// absorb. On the runtime's main task the same call wedged `serve` between the
+/// lease and the SIGTERM handler.
+fn writer_loop(path: &Path, rx: Receiver<Vec<u8>>, counters: &LedgerCounters, sink: &BatchSink) {
     // One WARN for the whole run, however many writes fail (I1: "logs its own
     // failure once"). A recovered write re-arms it, so an operator who fixes the
     // path and breaks it again is told twice — which is information, not noise.
     let warned = AtomicBool::new(false);
+
+    if let Err(err) = open_for_append(path) {
+        tracing::warn!(
+            target: "lambo::ledger",
+            path = %path.display(),
+            error = %err,
+            "lambo serve: the call ledger path could not be opened; every line will be \
+             DROPPED and counted in lambo_stats (ledger_dropped_lines). Serving continues — \
+             observability never takes down memory."
+        );
+        // Already told. The first failing batch must not repeat it.
+        warned.store(true, Ordering::Relaxed);
+    }
 
     while let Ok(first) = rx.recv() {
         let mut batch = first;
@@ -307,13 +422,13 @@ fn writer_loop(path: &Path, rx: Receiver<Vec<u8>>, counters: &LedgerCounters) {
             }
         }
 
-        match write_batch(path, &batch) {
+        match sink(path, &batch) {
             Ok(()) => {
                 counters.written.fetch_add(lines, Ordering::Relaxed);
                 warned.store(false, Ordering::Relaxed);
             }
             Err(err) => {
-                counters.dropped.fetch_add(lines, Ordering::Relaxed);
+                counters.write_failed.fetch_add(lines, Ordering::Relaxed);
                 if !warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         target: "lambo::ledger",
@@ -474,6 +589,16 @@ mod tests {
             "every line drops when the path cannot be opened, dropped={}",
             ledger.counters().dropped()
         );
+        assert_eq!(
+            ledger.counters().dropped_write_failed(),
+            10,
+            "an unopenable path is a broken path, not backpressure"
+        );
+        assert_eq!(
+            ledger.counters().dropped_channel_full(),
+            0,
+            "the channel never filled: the writer drains it and fails on the write"
+        );
         assert_eq!(ledger.counters().written(), 0);
         ledger.shutdown();
         std::fs::remove_dir_all(&dir).ok();
@@ -512,27 +637,148 @@ mod tests {
         ledger.shutdown();
     }
 
+    /// **The failure table's first row, actually exercised.** A previous
+    /// revision named a test for this and measured the unopenable-path arm
+    /// instead: `writer_loop` calls `rx.recv()` first, so a receiver is never
+    /// parked by a path it cannot open, and the channel never filled once in
+    /// 3072 lines. Creating real backpressure needs the writer held *inside* its
+    /// write, which is what the injected [`BatchSink`] is for.
     #[test]
     fn a_full_channel_drops_rather_than_blocking_the_caller() {
-        // No writer thread can drain a channel whose receiver is parked on a
-        // path it cannot open, so push well past the capacity and assert the
-        // calls all returned (the test itself completing IS the assertion that
-        // `append` never blocked) with the overflow counted.
-        let dir = temp_dir("full");
-        let blocker = dir.join("not-a-dir");
-        std::fs::write(&blocker, b"x").expect("blocker");
-        let ledger = Ledger::open(blocker.join("calls.jsonl"));
+        let dir = temp_dir("channel-full");
+        let path = dir.join("calls.jsonl");
 
-        let n = CHANNEL_CAPACITY as u64 * 3;
-        for _ in 0..n {
+        // The sink parks on first entry and stays parked until released, so the
+        // writer holds exactly one batch and drains nothing.
+        let entered = Arc::new(AtomicU64::new(0));
+        let released = Arc::new((parking_lot::Mutex::new(false), parking_lot::Condvar::new()));
+        let ledger = {
+            let entered = Arc::clone(&entered);
+            let released = Arc::clone(&released);
+            Ledger::open_with_sink(
+                &path,
+                Arc::new(move |p: &Path, batch: &[u8]| {
+                    entered.fetch_add(1, Ordering::Relaxed);
+                    let (lock, cv) = &*released;
+                    let mut open = lock.lock();
+                    while !*open {
+                        cv.wait(&mut open);
+                    }
+                    // Released: write for real, so the file is still the file.
+                    write_batch(p, batch)
+                }),
+            )
+        };
+
+        // One line to get the writer into the sink, where it parks.
+        ledger.append(&call_line("lambo_derive", "a", "ok", None, 1, None));
+        assert!(
+            until(Duration::from_secs(10), || entered.load(Ordering::Relaxed)
+                >= 1),
+            "the writer must be inside the sink before backpressure can be built"
+        );
+
+        // The channel now takes CHANNEL_CAPACITY lines and refuses the rest.
+        let overflow = 64u64;
+        let burst = CHANNEL_CAPACITY as u64 + overflow;
+        let started = Instant::now();
+        for _ in 0..burst {
             ledger.append(&call_line("lambo_derive", "a", "ok", None, 1, None));
         }
+        let elapsed = started.elapsed();
+
         assert!(
-            until(Duration::from_secs(10), || ledger.counters().dropped() == n),
-            "every line is accounted for as a drop: dropped={} of {n}",
-            ledger.counters().dropped()
+            ledger.counters().dropped_channel_full() > 0,
+            "a full channel must drop: dropped_channel_full={} of a {burst}-line burst",
+            ledger.counters().dropped_channel_full()
+        );
+        assert_eq!(
+            ledger.counters().dropped_channel_full(),
+            overflow,
+            "exactly the lines past the capacity are dropped as backpressure"
+        );
+        assert_eq!(
+            ledger.counters().dropped_write_failed(),
+            0,
+            "nothing failed to write — this arm is backpressure, not a broken path"
+        );
+        // `append` returned for every line while the writer was parked. The
+        // budget is deliberately loose: the assertion is "did not block", not a
+        // throughput measurement.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "append must not block on a full channel; {burst} appends took {elapsed:?}"
+        );
+
+        // Release and let it drain, so the shutdown path is the normal one.
+        {
+            let (lock, cv) = &*released;
+            *lock.lock() = true;
+            cv.notify_all();
+        }
+        let want = 1 + CHANNEL_CAPACITY as u64;
+        assert!(
+            until(Duration::from_secs(20), || ledger.counters().written()
+                == want),
+            "the accepted lines land once the writer is released: written={} of {want}",
+            ledger.counters().written()
         );
         ledger.shutdown();
+        assert_eq!(
+            ledger.counters().dropped(),
+            overflow,
+            "the total is the backpressure drops and nothing else"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I-R1-3.** `Ledger::open` must not perform the ledger's first `open`.
+    ///
+    /// A FIFO with no reader is the cheapest real path whose `open(2)` blocks
+    /// forever, and it stands in for the hung mount that motivates the rule:
+    /// `serve` calls `Ledger::open` after the single-writer lease is taken and
+    /// before the SIGTERM handler is armed, so an `open` on that path would hold
+    /// the lease in a process that never serves and dies without flushing.
+    ///
+    /// Guarded by a timeout rather than asserted structurally, and skipped
+    /// rather than failed where `mkfifo` does not exist.
+    #[test]
+    fn opening_a_ledger_does_not_block_even_when_the_paths_open_blocks() {
+        let dir = temp_dir("fifo");
+        let path = dir.join("calls.jsonl");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            // No FIFO available (no `mkfifo`, or a filesystem that refuses one).
+            // Nothing to assert; do not fail a platform this claim is not about.
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let (done_tx, done_rx) = sync_channel::<()>(1);
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            let ledger = Ledger::open(&probe);
+            // `open` returned. Appending must also return — the writer is parked
+            // in its own `open`, so these are channel-full drops, not blocks.
+            for _ in 0..10 {
+                ledger.append(&call_line("lambo_stats", "a", "ok", None, 1, None));
+            }
+            let _ = done_tx.send(());
+            // Deliberately leaked: this ledger's writer thread is blocked in
+            // `open(2)` on a reader-less FIFO and cannot be joined. It costs one
+            // parked thread for the rest of the test binary's life, which is the
+            // point — the process still exits.
+            std::mem::forget(ledger);
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "Ledger::open (and append) must return promptly on a path whose open blocks"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -578,6 +824,12 @@ mod tests {
         ledger.shutdown(); // idempotent
         ledger.append(&call_line("lambo_stats", "a", "ok", None, 1, None));
         assert_eq!(ledger.counters().dropped(), 1);
+        assert_eq!(
+            ledger.counters().dropped_write_failed(),
+            1,
+            "a post-shutdown append had nowhere to go; that is not backpressure"
+        );
+        assert_eq!(ledger.counters().dropped_channel_full(), 0);
         assert_eq!(ledger.counters().written(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
