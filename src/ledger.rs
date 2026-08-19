@@ -248,10 +248,19 @@ impl Ledger {
     /// unopenable path (a typo: one WARN, every batch dropped) nor a path whose
     /// `open` *blocks* (a FIFO with no reader, a hung mount: the writer parks)
     /// can delay or wedge the caller. That distinction is the whole reason the
-    /// probe is not here: `serve` calls this **after** the single-writer lease is
-    /// taken and **before** the SIGTERM handler is armed, so a blocking `open`
-    /// on this path would take down memory through the flag that turns
-    /// observability on.
+    /// probe is not here: `serve` calls this **after** the single-writer lease
+    /// is taken and — since I-R2-1 — **after** the SIGTERM handler is armed
+    /// (`shutdown_signal()` is the first statement once `build_memory` returns;
+    /// this call is the next one). What that ordering leaves is an
+    /// **availability** hazard rather than the durability one it used to be: a
+    /// blocking `open` here would wedge `serve` between the lease and the
+    /// transport, holding the session in a process that never serves, and it
+    /// could not be shut down either — the pinned shutdown future is never
+    /// polled while the main task sits in the blocking syscall, so
+    /// `Memory::close` never runs. Before I-R2-1 the same block lost the tail
+    /// instead, the signal hitting its default disposition and killing the
+    /// process outright. Either way it is observability taking down memory
+    /// through the flag that turns observability on.
     ///
     /// The operator still learns about a typo at startup rather than from an
     /// empty file a day later — the writer thread probes as its first act, with
@@ -789,11 +798,15 @@ mod tests {
     /// `serve` calls `Ledger::open` after the single-writer lease is taken, so an
     /// `open` on that path would hold the lease in a process that never serves.
     ///
-    /// Since I-R2-1 the SIGTERM handler is armed *before* this call, so such a
-    /// process would at least still die flushing. The rule stands on its own
-    /// anyway: a `serve` that hangs before it serves is a failure whether or not
-    /// its eventual death is graceful, and the guarantee here is that
-    /// `Ledger::open` performs no I/O at all.
+    /// Since I-R2-1 the SIGTERM handler is armed *before* this call, which
+    /// changes what such a process does on a signal without rescuing it: the
+    /// handler is installed, so SIGTERM no longer kills it by the default
+    /// disposition — but the pinned shutdown future is never polled while the
+    /// main task blocks inside the `open`, so `Memory::close` never runs either.
+    /// It simply hangs, lease held, until something kills it harder. The rule
+    /// stands on its own anyway: a `serve` that hangs before it serves is a
+    /// failure however its eventual death arrives, and the guarantee here is
+    /// that `Ledger::open` performs no I/O at all.
     ///
     /// Guarded by a timeout rather than asserted structurally, and skipped
     /// rather than failed where `mkfifo` does not exist.

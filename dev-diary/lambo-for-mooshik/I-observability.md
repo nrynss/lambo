@@ -282,3 +282,105 @@ good); `parse_ts` truncates chrono's nine-digit fractional seconds, which remove
 pre-3.11 Python floor the kit never declared; `score_bands.py --floor` is gone in favour
 of the floor the ledger states; and two Done-when boxes are unchecked with reasons rather
 than backfilled with fabricated evidence.
+
+### Round-2 review remediation (2026-08-20, `1f86792`)
+
+Adversarial review `adve-review-mooshik-I-round2.md` (REQUEST_CHANGES; one P1 blocking, two
+P3). The P1 was CI-red. Two of the changes were behavioural rather than prose, and both are
+worth not re-deriving. Round 3 verified them at the artifact and closed the workstream CLEAN
+(`adve-review-mooshik-I-round3.md`).
+
+1. **The shutdown signal is armed *before* the startup block I inserted, not after it.**
+   `serve()` used to call `shutdown_signal()` below `Ledger::open`, `LamboServer::new`
+   (which runs the rmcp `#[tool_router]` JSON-schema build for every tool), the heartbeat
+   spawn and the event pump — work that I1/I2 either added or lifted up out of
+   `serve_stdio`. That widened the unguarded pre-handshake window from ~6 µs pre-I to
+   ~1.1 ms, on the default path with no flag required, and a SIGTERM landing in it killed
+   the process by the signal's default disposition: `Memory::close` never ran, the
+   write-behind tail never reached the store, and the single-writer lease was left held by
+   a dead process. The arming is now the **first statement after `build_memory` returns**,
+   so every one of those steps runs guarded.
+
+   **Option 2 — arming before `build_memory` — was deferred, and the reason is not
+   obvious.** It is strictly better in target property, because it would also cover lease
+   acquisition, which neither pre-I nor the shipped ordering does. But eager registration
+   only makes the arming *point* effective; it does not make a blocked task poll the
+   future. Above `build_memory`, a startup SIGTERM is therefore **deferred rather than
+   honoured** — round 2 measured an 8 s simulated startup take a signal at 2 s and run the
+   remaining 6 s before acting on it — so a `build_memory` that *hangs* (a wedged store, an
+   unreachable embedder) would make the process SIGTERM-immune. That trades a durability
+   hazard for an availability one, which is not obviously a win. It becomes one only
+   together with racing `build_memory` against the shutdown future — abandon the build,
+   return without a lease — and that is a design change, not a ride-along. Until it lands,
+   the residual unguarded window **is** `build_memory` itself, which is why the
+   memory-level "Memory session attached" line and the serve-level "lambo serve: session
+   attached" line are not interchangeable: only the second sits behind the arming. The
+   invariant comment in `serve()` and the `shutdown_signal` docstring both say so now, and
+   the pre-handshake test's loose `contains("session attached")` matcher is kept
+   deliberately, because firing on the *first* of those two lines is what caught the hole.
+
+2. **`lambo_stats` gained `ledger_queued_lines`, and its arithmetic deliberately deviates
+   from the formula the finding prescribed.** The key is the writer's queue depth
+   (accepted, not yet on disk). It exists because the drop counters have a blind spot about
+   themselves: on a path whose `open` blocks — a reader-less FIFO, a hung mount — the writer
+   parks *before its first write*, so `written` and both drop counters read `0`, which is
+   indistinguishable from an idle server until `CHANNEL_CAPACITY` (1024) lines have piled
+   up. It is present only when the ledger is on, inserted inside the existing
+   `if let Some(ledger)` arm; round 3 diffed the ledger-OFF payload against the parent
+   binary and found it identical, 17 keys either side.
+
+   Round 2 prescribed `accepted − written − dropped`. The shipped derivation is
+   **`accepted − written − write_failed`**, and the difference is not a preference. In
+   `Ledger::append`'s `match tx.try_send(bytes)`, the `Err(TrySendError::Full(_))` arm
+   increments `channel_full` and **never touches `accepted`** — a backpressure drop is a
+   line the channel *refused*, so it was never in the queue to be subtracted from it.
+   Subtracting the `dropped` total would subtract lines that never entered the numerator:
+   it would understate depth by exactly the backpressure count and drive the key back
+   toward `0` in the stalled-and-full case the key exists to make visible, which is the
+   inversion of its whole purpose. `Ledger::shutdown` derives its abandoned-line count from
+   the same subtraction, so the live gauge and the exit count cannot disagree.
+
+   **Pinned by a test the prescribed formula cannot pass:**
+   `ledger::tests::a_full_channel_drops_rather_than_blocking_the_caller` in
+   [`src/ledger.rs`](../../src/ledger.rs) parks the writer inside one batch via the
+   injected `BatchSink`, bursts `CHANNEL_CAPACITY + 64` lines, and asserts
+   `queued() == 1 + CHANNEL_CAPACITY` (the in-flight batch plus the full channel) while
+   `dropped_channel_full() == 64`. Round 3 substituted the prescribed formula into
+   `queued()` and the assertion failed `left: 961, right: 1025` — short by exactly the 64
+   the inline comment predicts.
+
+   One property the code states only in part: the subtrahend `write_failed` also carries
+   classes that were never `accepted` (an unserializable line, an append after shutdown, a
+   `Disconnected` send). Round 3 constructed those deliberately and confirmed both halves —
+   the gauge then drifts *toward zero* with `dropped_write_failed` climbing loudly beside
+   it, and all three sub-classes are unreachable on the shipped serve path. Do not
+   re-derive it; it is `adve-review-mooshik-I-round3.md`'s flip D.
+
+### Round-3 advisories closed as J0 (2026-08-20)
+
+Round 3 was CLEAN with three P3 doc-precision advisories, carried into workstream J as
+[J0](J-multi-client.md) rather than a fourth remediation round. All three are remediated.
+
+* **`Ledger::open`'s docstring asserted the ordering `1f86792` had just inverted**
+  (I-R3-1) — ~540 lines above a docstring the same commit did fix. Reworded to the current
+  ordering, and the hazard class moves with it: with the handler armed above the call, a
+  blocking `open` there no longer loses the tail to the default disposition; it hangs a
+  process that holds the lease and never serves, and that process cannot be closed either,
+  because the pinned shutdown future is never polled while the main task sits in the
+  blocking syscall. **Availability, not durability.** The probe-placement conclusion is
+  unchanged — it never depended on the ordering. The same correction was applied to the
+  FIFO test's docstring, which said such a process "would at least still die flushing": it
+  would not, for the same reason — nothing polls the shutdown future.
+* **The kit README's parked-writer reading recipe described something the file can never
+  show** (I-R3-2). Heartbeat lines travel the same bounded channel as call lines, so a
+  parked writer emits none of them and the file stays empty. The heartbeat-trend reading
+  (`queued` climbing while `written` lags) belongs to a writer that is *behind*; the
+  **parked** case is visible only in a live `lambo_stats` call. Both readings are named
+  separately now.
+* **`header()` in `_ledger.py` prints a non-zero last-heartbeat `queued` beside the dropped
+  count**, so no report says "the ledger is complete" over a backlog it can see (the
+  optional half of I-R3-2). Queue depth is a gauge, not a counter, so the reader takes the
+  **last** heartbeat rather than the maximum, and it rides `--json` under
+  `ledger_schema.queued_lines` so a duckdb consumer sees it too. Every heartbeat in the
+  committed sample carries `ledger_queued_lines: 0`, so sample reports are byte-identical
+  and `verify.sh` needed no change.

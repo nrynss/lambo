@@ -26,7 +26,8 @@ Schema (from `src/ledger.rs`; every line carries `v`, currently 1):
     + inspect   depth, fuzzy
     + saints    canonical_count
     stats       uptime_secs, version, git_sha, stats{...the lambo_stats payload,
-                including ledger_written_lines / ledger_dropped_lines}
+                including ledger_written_lines / ledger_dropped_lines /
+                ledger_queued_lines}
 
 Forward compatibility: consumers here ignore unknown keys and unknown `kind`s,
 so adding a field to a line does not need a `v` bump. A field that changes
@@ -209,6 +210,26 @@ class Ledger:
             ((v, s, n) for (v, s), n in seen.items()), key=lambda t: -t[2]
         )
 
+    def queued_lines(self) -> int | None:
+        """`ledger_queued_lines` from the LAST heartbeat, not the maximum.
+
+        A gauge, not a counter — the writer's queue depth at that instant — so
+        only the newest reading says anything about the state the file was left
+        in. Non-zero means lines were accepted and are not on disk yet, which
+        makes the tail of the file trail the traffic that produced it even when
+        nothing was dropped. `None` means no heartbeat carried the key (no
+        heartbeats, or a producer older than I-R2-3).
+
+        A fully **parked** writer cannot be seen here at all: heartbeats travel
+        the same channel as call lines, so a parked writer emits none of them
+        (I-R3-2). That case is only visible in a live `lambo_stats` call.
+        """
+        for hb in sorted(self.heartbeats, key=lambda r: r["ts"], reverse=True):
+            value = hb.get("stats", {}).get("ledger_queued_lines")
+            if isinstance(value, int):
+                return value
+        return None
+
     def dropped_lines(self) -> int | None:
         """Highest `ledger_dropped_lines` any heartbeat reported.
 
@@ -320,7 +341,10 @@ def header(title: str, ledger: Ledger) -> list[str]:
     """The provenance block every report opens with.
 
     Line counts, schema version, the binaries the lines came from, and — first,
-    because it decides whether the rest can be quoted — the dropped-line count.
+    because they decide whether the rest can be quoted — the dropped-line count
+    and, when the last heartbeat reported one, the writer's outstanding queue
+    depth. A backlog is not a drop, but it is the other way this file can be an
+    undercount, so "the ledger is complete" is never printed over one.
     """
     out = [
         f"== {title} ==",
@@ -354,6 +378,7 @@ def header(title: str, ledger: Ledger) -> list[str]:
                 "so read trends across the boundary with care"
             )
     dropped = ledger.dropped_lines()
+    queued = ledger.queued_lines()
     if dropped is None:
         out.append(
             "   dropped:  UNKNOWN — no heartbeat lines, so the ledger cannot say "
@@ -364,8 +389,17 @@ def header(title: str, ledger: Ledger) -> list[str]:
             f"   dropped:  {dropped} LINES DROPPED — every count below is a "
             "LOWER BOUND. The serve dropped rather than delay a tool call."
         )
+    elif queued:
+        out.append("   dropped:  0 — but the ledger is not complete; see `queued`")
     else:
         out.append("   dropped:  0 — the ledger is complete")
+    if queued:
+        out.append(
+            f"   queued:   {queued} LINE(S) STILL QUEUED at the last heartbeat — "
+            "accepted by the writer and not yet on disk, so this file's tail "
+            "trails the traffic and every count below is a LOWER BOUND until the "
+            "writer catches up."
+        )
     if ledger.unparseable:
         out.append(
             "   note:     unparseable lines were skipped: "
@@ -396,6 +430,7 @@ def emit(
             ],
             "unparseable_lines": [n for n, _ in ledger.unparseable],
             "dropped_lines": ledger.dropped_lines(),
+            "queued_lines": ledger.queued_lines(),
             "call_lines": len(ledger.calls),
             "heartbeat_lines": len(ledger.heartbeats),
             "unknown_kind_lines": len(ledger.unknown),

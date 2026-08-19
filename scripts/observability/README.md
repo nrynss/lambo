@@ -323,9 +323,16 @@ spot about themselves (I-R2-3): on a path whose `open` blocks — a reader-less
 FIFO, a hung mount — the writer parks *before its first write*, so `written` and
 both drop counters read `0`, which is indistinguishable from an idle server until
 1024 lines have piled up. This key moves on the first call. A heartbeat with
-`written` flat and `queued` climbing is a parked writer; both flat is genuinely
-no traffic. It is derived as `accepted - written - write_failed`, so a
-`channel_full` drop — which the channel never accepted — does not deflate it.
+`queued` climbing while `written` lags is a writer that is **behind**; both flat
+is genuinely no traffic. A **parked** writer is a different case and the file
+cannot show it at all — heartbeat lines travel the same channel as call lines, so
+they queue too and are abandoned with everything else (measured at the binary:
+`written=0`, every line dropped at shutdown), which leaves a **live
+`lambo_stats` call** as the only place the parked case can be read (I-R3-2). It
+is derived as `accepted - written - write_failed`, so a `channel_full` drop —
+which the channel never accepted — does not deflate it. Every report's header
+prints a non-zero `queued` from the last heartbeat beside the dropped count, so
+no report says "the ledger is complete" over a backlog it can see.
 
 `legs` is the field the ledger exists for. Recall's phase-1 merge folds the three
 legs by `max`, so a merged score is lossy: a `0.35` is either the recency floor
