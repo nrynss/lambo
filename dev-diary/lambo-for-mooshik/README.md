@@ -37,6 +37,7 @@ has (D).
 | [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
+| [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
 
 E (consumption from Mooshik) stays in this file — it is two lines of manifest, not a workstream.
 
@@ -62,6 +63,10 @@ F1 ─→ F2
 F2 ─→ G1 ─→ G2
 F2 ─→ H1 ─→ H2        (H2 needs a DSN-bearing machine or post-merge CI)
 I1 ─→ I2 ─→ I3        (I first among remaining starts, by decision — feeds DOGFOOD's metrics)
+J1 ─→ J2              (a proxy must forward the caller's agent_id; reserve is broken without it)
+J1 ─→ J3              (async write receipts need per-agent scoping)
+I1 ─→ J4              (a refused serve exits before it can ledger itself)
+J5                    (independent: docs plus a client-config emitter)
 (H1, B3) ─→ H3
 (A4, B4, F2) ─→ E1 ─→ E2
 ```
