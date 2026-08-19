@@ -97,8 +97,11 @@
 //!    links no single comparison ever endorsed. No `Semantic` edge is written, so
 //!    that chain cannot start.
 //! 2. **The merge bar did not move.** A merge still requires
-//!    `score >= semantic_match_threshold` (0.85 default, calibrated against
-//!    BGE-M3 — PHASE-7), after `best_candidate`'s finite/`[0,1]`/deterministic
+//!    `score >= semantic_match_threshold` (0.85 default). G1's BGE-M3 corpus
+//!    overlaps real paraphrases and related-but-distinct pairs, so lowering the
+//!    score-only bar would add measured false positives; 0.85 remains the
+//!    deliberate precision bias. See `evidence/mooshik-g-recall-calibration/`.
+//!    Selection still applies `best_candidate`'s finite/`[0,1]`/deterministic
 //!    tie-break validation and the commit-time "target really is a Concept"
 //!    check. Persisting a vector lowers nothing.
 //! 3. **A vector minted in this call can never drive a merge in this call.**
@@ -137,8 +140,10 @@ use crate::types::{
 };
 
 /// Default merge threshold (spec §7.1 step 6). Configurable per call
-/// (driven by `Config::semantic_match_threshold`); biased toward precision —
-/// under-merging into separate concepts is safe for canonization.
+/// (driven by `Config::semantic_match_threshold`); G1's BGE-M3 measurements
+/// retain 0.85 because score-only paraphrase and related-distinct bands overlap.
+/// It is intentionally biased toward precision: under-merging into separate
+/// concepts is safe for canonization.
 pub const SEMANTIC_MATCH_THRESHOLD_DEFAULT: f64 = 0.85;
 
 /// How many vector candidates to request from the store per concept.
@@ -156,7 +161,8 @@ const MAX_HYBRID_REPLANS: usize = 8;
 
 /// Initial weight of a `Semantic` merge edge: the accepted cosine similarity,
 /// clamped into the legal `[0, MAX_EDGE_WEIGHT]` range. A merge only happens
-/// at >= 0.85, so the weight is always positive and finite, and the edge
+/// at or above the configured precision threshold, so the weight is always
+/// positive and finite, and the edge
 /// decays over time (see the spec §5 decay table, where `Semantic` decays).
 fn semantic_weight(score: f64) -> f64 {
     score.clamp(0.0, crate::graph::MAX_EDGE_WEIGHT)

@@ -157,7 +157,7 @@ impl Default for Config {
             canonization_eval_batch_size: 50,
             canonization_repromotion_cooldown: Duration::from_secs(300),
 
-            semantic_match_threshold: 0.85,
+            semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             max_cooccurrence_per_derive: 10,
 
             default_top_k: 5,
@@ -368,7 +368,10 @@ mod tests {
             Duration::from_secs(300)
         );
 
-        assert!((c.semantic_match_threshold - 0.85).abs() < 1e-12);
+        assert_eq!(
+            c.semantic_match_threshold,
+            crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT
+        );
         assert_eq!(c.max_cooccurrence_per_derive, 10);
 
         assert_eq!(c.default_top_k, 5);

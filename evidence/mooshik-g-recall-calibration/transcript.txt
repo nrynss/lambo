@@ -1,0 +1,41 @@
+=== G1 rig ===
+GET http://127.0.0.1:8080/health
+{"status":"ok"}
+model: local bge-m3-q8_0.gguf, 1024 dimensions
+
+=== G1 distribution ===
+python3 evidence/mooshik-g-recall-calibration/measure.py
+See measurement.txt for every pair and the four class summaries.
+
+=== G1 duplicate before G2 ===
+./target/debug/lambo --config evidence/mooshik-g-recall-calibration/lambo.g-bge-sqlite.toml provision
+sqlite schema provisioned (init_schema, idempotent)
+./target/debug/lambo ... derive --session g-merge --content 'register user' --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+./target/debug/lambo ... derive --session g-merge --content 'create account' --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+sqlite: g-merge concepts=2, semantic_edges=0
+
+`register user` / `create account` measured 0.8230 in the production no-origin
+hybrid framing, below the 0.85 precision threshold. The duplicate is expected.
+
+=== G2 committed-recall query after lowering RECENT_SCORE to 0.35 ===
+./target/debug/lambo --config evidence/mooshik-f-sqlite-bge/lambo.bge-sqlite.toml \
+  recall --session f-bge-semantic \
+  --query 'changes that do not break existing clients' --top-k 3
+deployment must stay backward compatible [Constraint] (score 0.20)
+user schema stores account records [Entity] (score 0.18)
+auth middleware validates bearer tokens [Logic] (score 0.17)
+
+The displayed values are final recall scores. The raw durable-vector cosine is
+0.3991, so it now survives the 0.35 max-merge floor and takes first place.
+
+=== G2 duplicate after ===
+./target/debug/lambo ... derive --session g-merge-after --content 'register user' --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+./target/debug/lambo ... derive --session g-merge-after --content 'create account' --kind entity
+derived 1 concept(s): 1 created, 0 matched existing
+sqlite: g-merge-after concepts=2, semantic_edges=0
+
+The merge threshold remains 0.85 by the measured precision decision, so this
+below-threshold paraphrase still produces a duplicate after G2.

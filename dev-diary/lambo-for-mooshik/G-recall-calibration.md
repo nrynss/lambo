@@ -96,12 +96,35 @@ Constraints, whatever is chosen:
 
 ## Done when
 
-- [ ] A measurement note records BGE-M3 score distributions for the four pair classes,
+- [x] A measurement note records BGE-M3 score distributions for the four pair classes,
       with the floor and merge threshold placed against them
-- [ ] The committed miss (`0.3991` under a `0.5` floor) surfaces in recall after G2,
+- [x] The committed miss (`0.3991` under a `0.5` floor) surfaces in recall after G2,
       shown on the same committed queries
-- [ ] Duplicate-creation under the merge threshold is measured before and after
-- [ ] Fixture-based tests pass unweakened, or any test that asserted a constant now
+- [x] Duplicate-creation under the merge threshold is measured before and after
+- [x] Fixture-based tests pass unweakened, or any test that asserted a constant now
       asserts the behaviour, with the change explained
-- [ ] The chosen option and the rejected ones are recorded here with the numbers that
+- [x] The chosen option and the rejected ones are recorded here with the numbers that
       decided it
+
+## G1/G2 outcome (2026-08-19)
+
+Evidence: [`evidence/mooshik-g-recall-calibration/`](../../evidence/mooshik-g-recall-calibration/).
+
+`RECENT_SCORE` is now **0.35**. The deciding low watermark is the F durable-vector
+miss at **0.3991**, not the fresh corpus's 0.4599 minimum. This retains max-merge's
+monotonicity while surfacing the same query first after G2; additive blending was
+rejected because it changes all phase-1 ordering to solve a floor problem.
+
+`semantic_match_threshold` stays **0.85**. This is a calibration decision: the
+measured paraphrase and related-distinct bands overlap. Lowering to 0.84 would rescue
+only `user schema` / `user data model` (0.8495), while newly accepting three recorded
+related-distinct pairs at 0.8069, 0.8152, and 0.8340. It also cannot cure the existing
+0.8913 `reset password` / `forgot password` overlap. Under-merging is intentionally
+safer, so the 0.8230 `register user` / `create account` pair creates duplicates both
+before and after G2. Per-embedder constants cannot solve that score-only overlap.
+
+The fixture suite retains its semantic behavior. The former recent-floor assumption
+is now tested as behavior: the actual 0.3991 vector lift outranks unrelated recent
+concepts, rather than asserting that recency is exactly 0.50. C2/SoloPolicy did not
+land in this worktree, so there were no boundary tests to re-run; C should calibrate
+against the 0.35 floor.

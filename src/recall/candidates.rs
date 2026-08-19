@@ -59,9 +59,11 @@ pub const RECENT_INTERACTIONS: usize = 3;
 /// Flat phase-1 score for recent-interaction-leg members.
 ///
 /// Chosen as a secondary signal below a genuine BM25 hit or store similarity
-/// score (both are typically > 0.5 for a match worth returning); the exact
-/// value is not spec-pinned, only its rank position relative to real matches.
-pub const RECENT_SCORE: f64 = 0.5;
+/// score. BGE-M3 calibration put the lowest durable true semantic hit at
+/// `0.3991`; `0.35` keeps the recency leg useful without masking that ranking
+/// under max-merge. The exact value is not spec-pinned, only its rank position
+/// relative to real matches. See `evidence/mooshik-g-recall-calibration/`.
+pub const RECENT_SCORE: f64 = 0.35;
 
 /// Phase-1 keyword over-fetch multiplier: the keyword leg is over-fetched so
 /// strong query matches cannot be evicted by the flat-scored recent/vector
@@ -518,10 +520,10 @@ mod tests {
 
         // "beta" is the keyword hit for query "beta"; c2 is BOTH the keyword
         // hit and the vector hit -> max-merge keeps the BM25 score, and the
-        // recent leg (c1/c2/c3 at 0.5) must not lower it.
+        // recent leg (c1/c2/c3 at RECENT_SCORE) must not lower it.
         let out = candidates(&graph, &index, input, "beta", 10);
         // Union: c2 (keyword + vector) first, then the recent-leg members c1/c3
-        // at the flat 0.5 score, ties by id asc.
+        // at the flat recent score, ties by id asc.
         assert_eq!(ids(out.clone()), vec![c2, c1, c3]);
         let s = out[0].score;
         assert!(s > 0.8, "max-merge keeps the higher BM25 score, got {s}");
@@ -608,6 +610,38 @@ mod tests {
         );
     }
 
+    /// G2: the F BGE-M3 evidence found the right durable vector at 0.3991,
+    /// below the former 0.50 recent floor. A recent leg must remain secondary:
+    /// that real semantic ranking has to survive the phase-1 max merge rather
+    /// than tie by node id with every young concept.
+    #[test]
+    fn true_vector_hit_below_the_former_recent_floor_surfaces_over_recency() {
+        let (graph, index) = planted_graph();
+        let target = NodeId(Uuid::from_u64_pair(2, 3));
+        let out = candidates(
+            &graph,
+            &index,
+            Phase1Input {
+                vector: vec![Scored::new(target, 0.3991)],
+            },
+            "changes that do not break existing clients",
+            3,
+        );
+
+        assert_eq!(out[0].item, target, "the semantic hit must surface first");
+        assert_eq!(out[0].score, 0.3991, "max merge must retain vector lift");
+        assert!(
+            out.iter()
+                .filter(|candidate| candidate.item != target)
+                .all(|candidate| candidate.score == RECENT_SCORE),
+            "unrelated recent concepts retain only the secondary score"
+        );
+        assert!(
+            RECENT_SCORE < out[0].score,
+            "the calibrated recent floor must not mask the recorded true hit"
+        );
+    }
+
     #[test]
     fn recent_ties_break_by_node_id() {
         let mut g = Graph::new(sid());
@@ -632,7 +666,7 @@ mod tests {
 
         // i4 (120) is strictly most recent; i1/i2/i3 tie at 60. Recent =
         // i4 + {i1, i2} (tie broken by id asc) -> concepts c4, c1, c2; final
-        // output is score-desc (all 0.5) then id asc -> c1, c2, c4. A
+        // output is score-desc (all RECENT_SCORE) then id asc -> c1, c2, c4. A
         // chain-order or id-desc selection would yield {c4, c3, c2}.
         let out = ids(candidates(&g, &index, Phase1Input::default(), "zzz", 10));
         let expected = vec![
@@ -729,7 +763,7 @@ mod tests {
         assert_eq!(
             ids(out.clone()),
             vec![c8, c5, c9, c10, c11, c12],
-            "keyword first, then vector 0.8, then recent 0.5, ties by id"
+            "keyword first, then vector 0.8, then recent leg, ties by id"
         );
         let score8 = out.iter().find(|s| s.item == c8).unwrap().score;
         assert!(score8 > 0.9, "max-merge keeps the BM25 score, got {score8}");

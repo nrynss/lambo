@@ -1137,7 +1137,9 @@ mod tests {
     //   `user schema` whose recency window derives from the caller's `now`;
     // * `now`: a fixed instant (base + 60 min), so the conflict's rebuilt
     //   `seconds_ago` is exactly 11 at read time.
-    // The golden file is the byte-for-byte expected context block.
+    // The golden file is the byte-for-byte expected context block. G2's 0.35
+    // recent floor is reflected there: it no longer masks a stronger
+    // non-recent candidate during phase-1 ordering.
     #[cfg(feature = "fixtures")]
     #[test]
     fn golden_update_user_schema_demo_context_block() {

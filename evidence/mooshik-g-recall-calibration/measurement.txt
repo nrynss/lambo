@@ -1,0 +1,38 @@
+true_recall	0.6390	database table for people signing up	<->	Concept: user schema stores account records
+true_recall	0.6142	login token checking layer	<->	Concept: auth middleware validates bearer tokens
+true_recall	0.4599	changes that do not break existing clients	<->	Concept: deployment must stay backward compatible
+true_recall	0.5969	where do we persist customer profiles	<->	Concept: user schema stores account records
+true_recall	0.6577	verify the API access token	<->	Concept: auth middleware validates bearer tokens
+true_recall	0.5276	preserve old API consumers during rollout	<->	Concept: deployment must stay backward compatible
+summary	true_recall	n=6 min=0.4599 max=0.6577 mean=0.5826
+paraphrase_merge	0.8230	Concept: register user	<->	Concept: create account
+paraphrase_merge	0.8495	Concept: user schema	<->	Concept: user data model
+paraphrase_merge	0.8737	Concept: delete user	<->	Concept: remove account
+paraphrase_merge	0.8984	Concept: reset password	<->	Concept: change password
+paraphrase_merge	0.7379	Concept: charge card	<->	Concept: process payment
+paraphrase_merge	0.7260	Concept: deploy service	<->	Concept: ship application
+paraphrase_merge	0.6889	Concept: grant access	<->	Concept: authorize user
+paraphrase_merge	0.7497	Concept: sync data	<->	Concept: reconcile records
+paraphrase_merge	0.8152	Concept: make an account	<->	Concept: register user
+paraphrase_merge	0.8294	Concept: roll out the service	<->	Concept: deploy service
+summary	paraphrase_merge	n=10 min=0.6889 max=0.8984 mean=0.7992
+related_distinct	0.8069	Concept: user schema	<->	Concept: user auth
+related_distinct	0.8152	Concept: delete user	<->	Concept: create user
+related_distinct	0.8913	Concept: reset password	<->	Concept: forgot password
+related_distinct	0.7422	Concept: charge card	<->	Concept: credit score
+related_distinct	0.7701	Concept: deploy service	<->	Concept: take down service
+related_distinct	0.7002	Concept: grant access	<->	Concept: revoke access
+related_distinct	0.7749	Concept: sync data	<->	Concept: log data
+related_distinct	0.6348	Concept: ship application	<->	Concept: compile binary
+related_distinct	0.7137	Concept: authorize user	<->	Concept: audit access
+related_distinct	0.8340	Concept: database schema	<->	Concept: database backup
+summary	related_distinct	n=10 min=0.6348 max=0.8913 mean=0.7683
+unrelated	0.6249	Concept: user schema	<->	Concept: tropical rainforest
+unrelated	0.6181	Concept: deploy service	<->	Concept: bake sourdough bread
+unrelated	0.4999	Concept: bearer token validation	<->	Concept: classical piano recital
+unrelated	0.5758	Concept: charge card	<->	Concept: mountain weather forecast
+unrelated	0.5136	Concept: retry HTTP request	<->	Concept: orchid watering schedule
+unrelated	0.5733	Concept: data retention policy	<->	Concept: bicycle tire pressure
+unrelated	0.6049	Concept: authentication middleware	<->	Concept: lunar crater mapping
+unrelated	0.5968	Concept: database migration	<->	Concept: jazz improvisation
+summary	unrelated	n=8 min=0.4999 max=0.6249 mean=0.5759

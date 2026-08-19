@@ -1,0 +1,10 @@
+# G1/G2 evidence configuration. The generated g-calibration.db is ephemeral.
+[store]
+kind = "sqlite"
+path = "./evidence/mooshik-g-recall-calibration/g-calibration.db"
+vector_dim = 1024
+
+[embedder]
+kind = "bge_m3"
+dim = 1024
+url = "http://127.0.0.1:8080"
