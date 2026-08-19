@@ -160,6 +160,11 @@ evidence pointers.
    stays the fallback if subagent recall proves clumsy. One session at a time: each
    session spawns its own serve, and while the write lease fences a stale one safely,
    two live sessions fencing each other is noise.
+   **Corrected the same day:** option (a)'s reasoning holds for subagents, not across
+   client apps — the first live session showed a second client's serve exits 1 silently
+   (no error reaching the agent). Interim rule and the fix are workstream
+   [J](J-multi-client.md): HTTP transport for multi-client machines until J2 makes a
+   losing serve proxy to the holder.
 3. **Retention: persist** across the branch's life and past merge — the long-run state is
    the interesting data.
 4. **Export: curated only.** The ledger informs nothing directly; slices earn their way

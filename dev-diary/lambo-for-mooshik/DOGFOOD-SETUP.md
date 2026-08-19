@@ -164,15 +164,25 @@ layers, by client capability:
   43/43 recall-first. Reuse the `skills/lambo-cloudops/SKILL.md` pattern: hand the
   protocol text directly to the harness (`omp` system prompt, Pi's skill slot).
 
-## 5. The one-writer reality (per machine)
+## 5. The one-writer reality (per machine) — corrected by the first live session
 
-Each stdio registration spawns its **own** serve against that machine's SQLite file. The
-write lease makes overlap safe, not simultaneous: the newest serve holds the lease and
-everyone else's writes are refused with `StaleWrite` (loud, never corruption) until they
-re-acquire. Switching clients is a lease handoff — restart the client you're moving to.
-If genuinely simultaneous clients are wanted, that is DOGFOOD.md wiring option (c): one
-`serve` over HTTP MCP, every client pointed at the URL, serialization inside the single
-writer where it belongs.
+Each stdio registration spawns its **own** serve against that machine's SQLite file, and
+**what actually happens to the losers is worse than fencing: they exit 1 at startup, and
+the client may surface no error to the agent at all** — a silent memory outage, observed
+2026-08-19 with Claude Code + pi and now workstream
+[J — Multi-client survivability](J-multi-client.md). The lease itself is correct and
+stays; the wiring below is the interim rule until J2 (a losing serve becomes a proxy to
+the holder) lands:
+
+- **One client registered at a time**, or
+- **More than one client on the machine ⇒ HTTP transport** (J5's stated default): one
+  `serve` process, every client pointed at the URL. And a transport migration touches
+  **every config layer on the machine** — a stale user-scope `command` entry beside a new
+  `url` produced a client that rejected the server outright (J5's second finding).
+
+After J2, the per-client stdio wiring in §4 simply works — the first serve becomes the
+hub, later ones proxy — with no client config change. That is the target state; this
+section shrinks to a pointer when it ships.
 
 ## 6. Smoke test (any client)
 
