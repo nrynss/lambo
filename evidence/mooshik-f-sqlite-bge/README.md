@@ -113,14 +113,19 @@ itself and could not fail on any path reaching it. It is the explicit pin compar
 echo for a width-agnostic store, with a pin as well as without one, because the pin
 becomes the width the store reports (F-R2-3).
 
-**The message wording moved after this capture.** F-R2-4 replaced *"the pin asserts what
-this database already holds"* with *"the pin asserts the width this deployment's vectors
-use"*, because the refusal is deliberately kind-agnostic and the old sentence is false on
-a store that persists no vectors (`kind = "memory"`). The block above and
+**The message wording moved after this capture.** F-R2-4 reworded the refusal's explanatory
+clauses **in three places, none of them a number** (F-R3-3): *"asserts what this database
+already holds, so serving"* → *"asserts the width this deployment's vectors use, and
+serving"*; *"would write vectors no reader can interpret"* → *"would write or read vectors
+against an asserted width that is not theirs"*; and *"or re-embed the database)"* → *"or
+re-embed)"*. Those three spans are the whole delta — the rest of the sentence is
+byte-identical to the capture above. The
+reason is that the refusal is deliberately kind-agnostic, so the old first clause is false
+on a store that persists no vectors (`kind = "memory"`). The block above and
 `transcript.txt` are left as the run actually printed at the time rather than edited to
 match today's binary — a capture that gets retouched is not a capture. Re-running
-step 6 today prints the new sentence; every number in it is unchanged, since the wording
-is all that moved.
+step 6 today prints the reworded sentence; every number in it is unchanged, since the
+wording is all that moved.
 
 ## Reproducing
 

@@ -1687,9 +1687,19 @@ async fn upsert_interactions(
 ///
 /// So the two halves together, and neither alone, give the property this gate is
 /// for: **no vector whose width disagrees with the session contract can survive a
-/// write through this adapter.** The gate refuses a mismatch against a contract
-/// that already exists; the quarantine erases one that a contract change would
-/// otherwise leave behind.
+/// write through this adapter's `GraphStore` surface.** The gate refuses a mismatch
+/// against a contract that already exists; the quarantine erases one that a contract
+/// change would otherwise leave behind.
+///
+/// The scoping to the trait is deliberate, and it leaves **two** residuals (F-R3-1):
+/// a hand-edited database, which no write-side rule can cover and which the read
+/// path's per-row width check is the defence against; and `SqliteStore::seed`, the
+/// adapter's other `sessions.embedding_dim` writer, which restamps the contract with
+/// no quarantine at all — `#[cfg(feature = "fixtures")]`, absent from the trait, and
+/// reached by no in-tree caller outside tests. Because it *upserts* where
+/// `MemoryStore::seed` *replaces*, a second seed over a live session can leave the
+/// first seed's vectors orphaned under the new width. Named rather than closed
+/// because it is fixtures scaffolding, not a shipped path.
 ///
 /// # A vector arriving with no contract stamped is accepted
 ///
@@ -1978,12 +1988,26 @@ async fn set_root_goal(
 /// self-heals instead: it is accepted, and the terminal state is a `dim = 3`
 /// contract beside only 3-wide vectors. Same for the two-flush shape.
 ///
-/// Together with the gate this closes the property outright: **no vector whose
-/// width disagrees with the session contract can survive a write through this
-/// adapter.** The gate refuses a mismatch against an existing contract; this
-/// statement erases one that a contract change would otherwise orphan. The read
-/// path's per-row width check remains the defence against an externally edited
-/// database, which no write-side rule can cover.
+/// Together with the gate this closes the property across the trait: **no vector
+/// whose width disagrees with the session contract can survive a write through this
+/// adapter's `GraphStore` surface.** The gate refuses a mismatch against an existing
+/// contract; this statement erases one that a contract change would otherwise
+/// orphan.
+///
+/// Two residuals sit outside that surface (F-R3-1). The read path's per-row width
+/// check remains the defence against an externally edited database, which no
+/// write-side rule can cover. And `SqliteStore::seed` is a second
+/// `sessions.embedding_dim` writer that this quarantine does not run: it restamps
+/// the contract through `INSERT … ON CONFLICT (session_id) DO UPDATE SET …
+/// embedding_dim = excluded.embedding_dim` with no quarantine, and because it
+/// *upserts* where `MemoryStore::seed` *replaces*, concepts already in the session
+/// but absent from the new snapshot are never revisited — so a second seed over a
+/// live session can leave the first seed's vectors orphaned under the new width
+/// (round-3 PROBE G reproduced exactly this terminal state through two `seed` calls
+/// and no direct SQL). It is named rather than closed because the surface is
+/// fixtures scaffolding: `seed` is `#[cfg(feature = "fixtures")]`, `fixtures` is off
+/// both `default` and `ship`, `seed` is not on the `GraphStore` trait, and no
+/// in-tree caller outside tests reaches it.
 ///
 /// # Why *width*, and not any contract change
 ///
@@ -3405,6 +3429,12 @@ mod tests {
     /// intact*. Erasing them here would destroy data on the one migration path built
     /// to keep it, and width is the only contract property this storage can enforce:
     /// a same-width relabel leaves every BLOB decodable.
+    ///
+    /// Both halves of the `kind`/`model` property are restamped here (F-R3-2): a
+    /// model-identifier rename first, then a `kind` change at the same width. The
+    /// second is the case the two tiers deliberately disagree on — the graph tier's
+    /// `replace_embedding_with_operator_override` *refuses* a `kind` change while any
+    /// vector remains, where storage keys on width alone and keeps them.
     #[tokio::test]
     async fn vector_write_gate_same_width_relabel_keeps_the_vectors() {
         let store = vec_test_store(4);
@@ -3446,6 +3476,40 @@ mod tests {
         );
         let hits = store
             .vector_candidates_checked(&sid, &[1.0, 0.0, 0.0, 0.0], &renamed, 5)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item, c);
+
+        // F-R3-2: the `kind` half, at the same width. Without this a regression
+        // widening the predicate to fire on a `kind` change would pass the rename
+        // above unchanged.
+        let rekinded = EmbeddingContract {
+            kind: "bge_m3".into(),
+            model: Some("test-model-v2".into()),
+            dim: 4,
+        };
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![Mutation::SetEmbedding {
+                        session_id: sid.clone(),
+                        embedding: Some(rekinded.clone()),
+                    }],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let loaded = store.load_session(&sid).await.unwrap();
+        assert_eq!(loaded.embedding.as_ref(), Some(&rekinded));
+        assert_eq!(
+            loaded.concepts[0].embedding.as_deref(),
+            Some([1.0f32, 0.0, 0.0, 0.0].as_slice()),
+            "a same-width kind change must not erase vectors either"
+        );
+        let hits = store
+            .vector_candidates_checked(&sid, &[1.0, 0.0, 0.0, 0.0], &rekinded, 5)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);

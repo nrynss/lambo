@@ -62,8 +62,17 @@ adapter must hold the width by hand, and it takes **two** statements, not one:
   over. With the wider predicate the batch is accepted and **self-heals**: the orphan is erased.
 
 Together: *no vector whose width disagrees with the session contract survives a write through this
-adapter.* The per-read check remains the defence against an externally edited database, which no
-write-side rule can cover.
+adapter's `GraphStore` surface.* The scoping to the trait is deliberate, and it leaves **two**
+residuals (F-R3-1). The per-read check remains the defence against an externally edited database,
+which no write-side rule can cover. And `SqliteStore::seed` is a second `sessions.embedding_dim`
+writer the quarantine does not run: it restamps the contract through `ON CONFLICT (session_id) DO
+UPDATE`, and because it *upserts* where `MemoryStore::seed` *replaces*, concepts already in the
+session but absent from the new snapshot are never revisited — so a second seed over a live session
+can leave the first seed's vectors orphaned under the new width (round-3 PROBE G reproduced it
+through two `seed` calls and no direct SQL). Named rather than closed because the surface is
+fixtures scaffolding: `seed` is `#[cfg(feature = "fixtures")]`, `fixtures` is off both `default` and
+`ship`, `seed` is not on the trait, and no in-tree caller outside tests reaches it. This is the
+property workstream B inherits, so it is stated scoped rather than absolute.
 
 The quarantine keys on **width**, deliberately — a same-width `kind`/`model` relabel keeps its
 vectors, because `Graph::replace_embedding_with_operator_override` (the `--allow-embedding-mismatch`
