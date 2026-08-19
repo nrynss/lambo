@@ -147,6 +147,23 @@ or declaratively in `~/.grok/config.toml`; tools appear namespaced
 `lambo-dogfood__lambo_*`, stderr lands in `~/.grok/logs/mcp/lambo-dogfood.stderr.log`,
 and `grok mcp doctor lambo-dogfood` diagnoses a server that starts but fails to connect.
 
+## 4b. The protocol reaches agents through instructions, not tools
+
+Registration gives an agent the tools; nothing about MCP makes it *use* them. Three
+layers, by client capability:
+
+- **AGENTS.md readers** (Codex, Cursor, Claude Code): the repo's `AGENTS.md`
+  §"Consulting memory during development work" is the always-on protocol — recall before
+  a workstream, derive decisions-with-why, record-action merges, warnings block. Nothing
+  further to configure.
+- **Orchestrated subagents**: the orchestrator recalls and injects the hits into the
+  brief verbatim (stronger than a skill — deterministic), and requires derived decisions
+  in the report.
+- **Small local models / OMP**: instructions must be the *system prompt* — the C5
+  evidence is unambiguous that tools alone produce flailing while the skill text produces
+  43/43 recall-first. Reuse the `skills/lambo-cloudops/SKILL.md` pattern: hand the
+  protocol text directly to the harness (`omp` system prompt, Pi's skill slot).
+
 ## 5. The one-writer reality (per machine)
 
 Each stdio registration spawns its **own** serve against that machine's SQLite file. The

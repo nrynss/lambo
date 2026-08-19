@@ -67,3 +67,25 @@ change to shared infrastructure.
   provider state, so say which of the two you checked.
 - After doing the work, write it back with `lambo_derive` and
   `lambo_record_action` so the next agent inherits it.
+
+## Consulting memory during development work (dogfood)
+
+If a `lambo-dogfood` MCP server is attached, this project's own development memory
+is live (see `dev-diary/lambo-for-mooshik/DOGFOOD.md`). The rules mirror the
+infrastructure section above, applied to design surface instead of resources:
+
+- **Recall before starting a workstream** or touching shared design surface (the
+  dialect trait, width/pin semantics, quarantine rules, recall constants, CI rows):
+  call `lambo_recall` with the topic. Decisions recorded there are settled — do not
+  re-litigate them; if one must change, say so explicitly and update the graph.
+- A load-bearing warning or non-zero blast radius on a concept means another
+  workstream rests on it. Treat it as blocking: name the dependents before editing.
+- **Derive decisions, not activity.** After a design decision, review verdict, or
+  constant change, call `lambo_derive` with the decision *and its why*. Git records
+  what was done; the graph records what the next agent must not re-derive.
+- **`record_action` on merges** — workstream landed, review round closed, dogfood
+  binary re-pinned.
+- Use a stable `agent_id` naming your client (`claude-orchestrator`, `codex-agent`,
+  `cursor-agent`, …) so the ledger attributes work.
+- No server attached = no obligation. Never block on the memory being up; fall back
+  to the dev-diary and note the outage.
