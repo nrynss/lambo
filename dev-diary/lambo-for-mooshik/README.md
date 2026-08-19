@@ -36,6 +36,7 @@ has (D).
 | [F — SQLite vectors](F-sqlite-vectors.md) | issue #5, the query path, the fail-closed capability trap |
 | [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
+| [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
 
 E (consumption from Mooshik) stays in this file — it is two lines of manifest, not a workstream.
 
@@ -60,6 +61,7 @@ C1 ─────────↗
 F1 ─→ F2
 F2 ─→ G1 ─→ G2
 F2 ─→ H1 ─→ H2        (H2 needs a DSN-bearing machine or post-merge CI)
+I1 ─→ I2 ─→ I3        (I first among remaining starts, by decision — feeds DOGFOOD's metrics)
 (H1, B3) ─→ H3
 (A4, B4, F2) ─→ E1 ─→ E2
 ```

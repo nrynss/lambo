@@ -99,6 +99,11 @@ evidence pointers.
 
 ## What it measures (write these down as they happen, not retrospectively)
 
+> **Mechanism: workstream [I — Observability](I-observability.md)** (added 2026-08-19).
+> Metrics 1, 2, 4 and 5 below are unmeasurable without I's serve call ledger; until it
+> lands, Agent Governance audit-only logging and manual `lambo_stats` snapshots are the
+> interim, and metric 5 (warnings fired) simply cannot be counted.
+
 1. Recall-first compliance per agent cycle (the ledger records it; no self-reporting).
 2. Re-derivation savings: times a recalled decision replaced re-reading a workstream doc.
 3. Duplicate-creation rate under `semantic_match_threshold = 0.85` on real dev phrasing —
