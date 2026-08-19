@@ -24,7 +24,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -47,9 +47,11 @@ use crate::cli::caps::{
 use crate::cli::inspect::{render_neighbourhood, resolve_focus, Focus};
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
+use crate::ledger::Ledger;
 use crate::memory::Memory;
+use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
-use crate::types::{ConceptType, LamboError, NodeId, RecallQuery};
+use crate::types::{ConceptType, LamboError, NodeId, RecallQuery, RecallResult};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -257,6 +259,15 @@ pub struct StatsParams {
 pub struct LamboServer {
     mem: Arc<Memory>,
     tool_router: ToolRouter<Self>,
+    /// I1 call ledger, `None` unless `serve --ledger` named a path.
+    ///
+    /// `None` is the whole of "off": no scope is established, so no facts are
+    /// built, no timestamps are taken beyond the one `Instant` every call
+    /// already affords, and `lambo_stats` emits exactly the payload it emitted
+    /// before this field existed.
+    ledger: Option<Arc<Ledger>>,
+    /// When this process's server handle was created — the heartbeat's uptime.
+    started_at: Instant,
 }
 
 impl std::fmt::Debug for LamboServer {
@@ -264,8 +275,188 @@ impl std::fmt::Debug for LamboServer {
         f.debug_struct("LamboServer")
             .field("session", self.mem.session())
             .field("agent", self.mem.agent())
+            .field("ledger", &self.ledger.as_ref().map(|l| l.path()))
             .finish_non_exhaustive()
     }
+}
+
+// ---------------------------------------------------------------------------
+// I1 — the per-call trace slot
+// ---------------------------------------------------------------------------
+
+/// What a tool body tells the ledger about the call it just served.
+///
+/// The alternative was changing every `*_impl` signature to return facts
+/// alongside its [`CallToolResult`], which would have rippled into the tool
+/// bodies, the wrapper block, and every test that calls an `_impl` directly —
+/// a lot of churn for a feature that is off by default. A task-local slot keeps
+/// the whole mechanism in this file and, more importantly, makes "off" cost
+/// **nothing**: with no ledger the scope is never established, so
+/// [`note_facts`]'s closure never runs and no per-tool JSON is ever built.
+#[derive(Default)]
+struct CallTrace {
+    /// Set by [`bad_param`] / [`tool_err`] / [`contain_panic`] on their way out.
+    error_kind: Option<&'static str>,
+    /// Per-tool payload facts, merged into the ledger line at the top level.
+    facts: Option<serde_json::Value>,
+}
+
+tokio::task_local! {
+    /// Established by [`LamboServer::observed`] for the duration of one tool
+    /// call, and only when a ledger is listening.
+    static TRACE: std::cell::RefCell<CallTrace>;
+}
+
+/// The I1 `lambo_recall` payload facts: the query, the top-k hits with **final
+/// and per-leg** scores, and which typed warnings actually rendered.
+///
+/// Every flag here is derived from a **typed producer**, never from matching
+/// text against the rendered context — the H3 annotation kinds
+/// ([`AnnotationKind`]) exist precisely so a consumer never has to parse
+/// `⚑`. That matters for DOGFOOD metric 5: "a blast-radius warning fired" has
+/// to be a fact, not a grep.
+///
+/// `legs` carries only the legs that produced the hit, so a `0.35` from the
+/// recency floor is distinguishable from a genuine `0.35` cosine — the
+/// distinction G1's score bands are meaningless without. An **empty** `legs`
+/// object means the hit was not a phase-1 candidate at all: it arrived through
+/// phase-2 traversal expansion (or the query was answered by structural
+/// dispatch, which skips the blend).
+///
+/// `score` and `legs` describe different stages and are not expected to agree:
+/// `score` is the FINAL ranking score (phase-3 assembly, daemon score table and
+/// `RecallWeights` applied), while `legs` are the raw phase-1 retrieval inputs.
+/// A consumer banding cosines wants `legs.vector_cosine`; one asking "what did
+/// this rank at" wants `score`.
+///
+/// Concept text is carried (truncated to [`LEDGER_CONTENT_PREFIX`]) because the
+/// I1 hygiene rule allows it — the text already lives in the store — and because
+/// it is what makes `warnings.py` able to say *which concept* a blast-radius
+/// warning fired over without a store join. It is truncated rather than whole
+/// so one recall of `MAX_TOP_K` long concepts cannot turn into a megabyte line.
+fn recall_facts(
+    query: &str,
+    top_k: usize,
+    detailed: &crate::recall::detail::DetailedRecall,
+) -> serde_json::Value {
+    let mut canonical_marker = false;
+    let mut blast_radius_warning = false;
+    let mut conflict_line = false;
+    let mut hot_warning = false;
+    let mut reservation_warning = false;
+
+    let hits: Vec<serde_json::Value> = detailed
+        .hits
+        .iter()
+        .zip(detailed.detailed.iter())
+        .map(|(hit, d)| {
+            canonical_marker |= hit.is_canonical;
+            let mut legs = serde_json::Map::new();
+            if let Some(l) = detailed.legs.get(&hit.node_id) {
+                if let Some(s) = l.keyword {
+                    legs.insert("bm25".into(), json!(s));
+                }
+                if let Some(s) = l.recent {
+                    legs.insert("recent".into(), json!(s));
+                }
+                if let Some(s) = l.vector {
+                    legs.insert("vector_cosine".into(), json!(s));
+                }
+            }
+            let mut kinds: Vec<&'static str> = Vec::new();
+            for a in &d.annotations {
+                match a.kind {
+                    AnnotationKind::LoadBearing => {
+                        blast_radius_warning = true;
+                        kinds.push("load_bearing");
+                    }
+                    AnnotationKind::Conflict => {
+                        conflict_line = true;
+                        kinds.push("conflict");
+                    }
+                    AnnotationKind::Hot => {
+                        hot_warning = true;
+                        kinds.push("hot");
+                    }
+                    AnnotationKind::Reservation => {
+                        reservation_warning = true;
+                        kinds.push("reservation");
+                    }
+                    // Response-global kinds are never hit-owned (H3 contract),
+                    // so they are reported once, below.
+                    AnnotationKind::Traversal | AnnotationKind::VectorDegraded => {}
+                }
+            }
+            json!({
+                "node_id": hit.node_id.0.to_string(),
+                "content": truncate_for_ledger(&hit.content),
+                "score": hit.score,
+                "legs": legs,
+                "is_canonical": hit.is_canonical,
+                "blast_radius": hit.blast_radius,
+                "included_in_context": d.included_in_context,
+                "annotations": kinds,
+            })
+        })
+        .collect();
+
+    let response_kinds: Vec<&'static str> = detailed
+        .response_annotations
+        .iter()
+        .map(|a| match a.kind {
+            AnnotationKind::Traversal => "traversal",
+            AnnotationKind::VectorDegraded => "vector_degraded",
+            AnnotationKind::LoadBearing => "load_bearing",
+            AnnotationKind::Conflict => "conflict",
+            AnnotationKind::Hot => "hot",
+            AnnotationKind::Reservation => "reservation",
+        })
+        .collect();
+
+    json!({
+        "query": query,
+        "top_k": top_k,
+        "hit_count": detailed.hits.len(),
+        "hits": hits,
+        "canonical_marker": canonical_marker,
+        "blast_radius_warning": blast_radius_warning,
+        "conflict_line": conflict_line,
+        "hot_warning": hot_warning,
+        "reservation_warning": reservation_warning,
+        "response_annotations": response_kinds,
+        "warning_count": detailed.warnings.len(),
+    })
+}
+
+/// Longest concept-text prefix a ledger line carries.
+///
+/// A concept may be `MAX_CONTENT_BYTES` (16 KiB) and a recall may return
+/// [`MAX_TOP_K`] hits, so untruncated text makes a one-megabyte worst-case line.
+/// 200 characters names a concept unambiguously in a report and keeps a heavy
+/// dogfood day's ledger in the low megabytes.
+const LEDGER_CONTENT_PREFIX: usize = 200;
+
+/// `content` truncated to [`LEDGER_CONTENT_PREFIX`] **characters**, with an
+/// explicit marker so a consumer never mistakes a cut for the whole text.
+///
+/// Cut on a `char` boundary, not a byte one: a byte slice through a multi-byte
+/// codepoint would panic, and the ledger is not allowed to panic a tool call.
+fn truncate_for_ledger(content: &str) -> String {
+    match content.char_indices().nth(LEDGER_CONTENT_PREFIX) {
+        None => content.to_string(),
+        Some((cut, _)) => format!("{}…[truncated]", &content[..cut]),
+    }
+}
+
+/// Classify the error this call is returning. Outside a ledgered call, a no-op.
+fn note_error(kind: &'static str) {
+    let _ = TRACE.try_with(|t| t.borrow_mut().error_kind = Some(kind));
+}
+
+/// Record per-tool payload facts — **lazily**, so the JSON is built only when a
+/// ledger will actually consume it.
+fn note_facts(facts: impl FnOnce() -> serde_json::Value) {
+    let _ = TRACE.try_with(|t| t.borrow_mut().facts = Some(facts()));
 }
 
 /// A short, detail-free class for a `Memory` failure (N4).
@@ -294,6 +485,8 @@ fn tool_err(what: &str, err: LamboError) -> CallToolResult {
         error = %err,
         "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
     );
+    // I1: the same class the caller is told, in the ledger's `error_kind`.
+    note_error(err_class(&err));
     CallToolResult::error(vec![ContentBlock::text(format!(
         "{what}: {} (the detail was logged server-side)",
         err_class(&err)
@@ -332,6 +525,7 @@ fn redact_urls(s: &str) -> String {
 /// the model can read and correct it, so this is a tool-level error rather than
 /// a `-32602` the client renders opaquely.
 fn bad_param(msg: impl Into<String>) -> CallToolResult {
+    note_error("invalid params");
     CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
@@ -388,6 +582,8 @@ async fn contain_panic(
                 panic = %panic_message(&payload),
                 "mcp: tool handler panicked — contained and reported as a tool error"
             );
+            // I1: a contained panic is its own outcome, not just "error".
+            note_error("panic");
             CallToolResult::error(vec![ContentBlock::text(format!(
                 "{tool}: internal error (the failure was logged server-side); \
                  the call had no effect beyond anything already written"
@@ -404,12 +600,142 @@ impl LamboServer {
         Self {
             mem,
             tool_router: Self::tool_router(),
+            ledger: None,
+            started_at: Instant::now(),
+        }
+    }
+
+    /// The same handle, recording every tool call to the I1 ledger.
+    ///
+    /// `serve --ledger` is the only caller. Clones share the ledger, as they
+    /// share the `Memory`: the streamable-http transport clones this handle per
+    /// request and all of them must append to one file.
+    pub fn with_ledger(mem: Arc<Memory>, ledger: Arc<Ledger>) -> Self {
+        Self {
+            ledger: Some(ledger),
+            ..Self::new(mem)
         }
     }
 
     /// The session this process owns.
     pub fn memory(&self) -> &Arc<Memory> {
         &self.mem
+    }
+
+    /// The call ledger, when one is configured.
+    pub fn ledger(&self) -> Option<&Arc<Ledger>> {
+        self.ledger.as_ref()
+    }
+
+    /// Run one tool body and, when a ledger is listening, append its line.
+    ///
+    /// **The ledger never changes what the caller gets.** The result is
+    /// returned unmodified; the line is built from it afterwards. The append
+    /// itself cannot block or fail (see [`Ledger::append`]), so a ledger that
+    /// is behind, unwritable, or gone costs a tool call nothing but the
+    /// microseconds of one `serde_json::to_vec`.
+    ///
+    /// With no ledger this is `contain_panic` and nothing else — no task-local
+    /// scope, no `Instant`, no facts.
+    async fn observed(
+        &self,
+        tool: &'static str,
+        agent_id: String,
+        fut: impl Future<Output = CallToolResult>,
+    ) -> CallToolResult {
+        let Some(ledger) = self.ledger.clone() else {
+            return contain_panic(tool, fut).await;
+        };
+        let started = Instant::now();
+        TRACE
+            .scope(std::cell::RefCell::new(CallTrace::default()), async move {
+                let out = contain_panic(tool, fut).await;
+                let duration_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                // Read the slot from INSIDE the scope: `task_local::scope`
+                // drops its value when the future completes, so there is no
+                // "after" in which to read it.
+                let (error_kind, facts) = TRACE.with(|t| {
+                    let mut t = t.borrow_mut();
+                    (t.error_kind.take(), t.facts.take())
+                });
+                let failed = out.is_error.unwrap_or(false);
+                let outcome = match (failed, error_kind) {
+                    (_, Some("panic")) => "panic",
+                    (true, _) => "error",
+                    (false, _) => "ok",
+                };
+                ledger.append(&crate::ledger::call_line(
+                    tool,
+                    &agent_id,
+                    outcome,
+                    // A failure with no class is a path that returned
+                    // `CallToolResult::error` without going through
+                    // `bad_param` / `tool_err`; say so rather than guessing.
+                    if failed {
+                        Some(error_kind.unwrap_or("unclassified"))
+                    } else {
+                        None
+                    },
+                    duration_us,
+                    facts,
+                ));
+                out
+            })
+            .await
+    }
+
+    /// The `lambo_stats` numbers, as the JSON both `lambo_stats` and the I2
+    /// heartbeat report.
+    ///
+    /// One builder so the two can never drift: a heartbeat that disagreed with
+    /// the tool would make the whole time axis in `scripts/observability`
+    /// unreadable.
+    fn stats_json(&self) -> serde_json::Value {
+        let s = self.mem.stats();
+        let mut payload = json!({
+            "session": s.session.0,
+            "agent": s.agent.0,
+            "flush_lag_ms": s.flush_lag.as_millis() as u64,
+            "log_depth": s.log_depth,
+            "flush_depth": s.flush_depth,
+            "dead_lettered": s.dead_lettered,
+            "degraded": s.degraded,
+            "node_count": s.node_count,
+            "edge_count": s.edge_count,
+            "concept_count": s.concept_count,
+            "canonical_count": s.canonical_count,
+            "epoch": s.epoch,
+            "daemon_cycles": s.daemon_cycles,
+            "canonization_cycles": s.canonization_cycles,
+            "canonization_failures": s.canonization_failures,
+        });
+        // I1: dropped lines are reported next to written ones so a gap in the
+        // ledger is never mistaken for a gap in the traffic. Emitted ONLY when
+        // a ledger exists — with `--ledger` off the payload is byte-identical
+        // to what it was before I1, which is what "off by default means no
+        // behaviour change" has to mean for a payload.
+        if let Some(ledger) = &self.ledger {
+            let obj = payload.as_object_mut().expect("json! built an object");
+            obj.insert(
+                "ledger_path".into(),
+                json!(ledger.path().display().to_string()),
+            );
+            obj.insert(
+                "ledger_written_lines".into(),
+                json!(ledger.counters().written()),
+            );
+            obj.insert(
+                "ledger_dropped_lines".into(),
+                json!(ledger.counters().dropped()),
+            );
+        }
+        payload
+    }
+
+    /// Build one I2 heartbeat line: the `lambo_stats` payload, this process's
+    /// uptime, and the binary's version + git sha.
+    pub fn heartbeat_line(&self) -> serde_json::Value {
+        crate::ledger::stats_line(self.stats_json(), self.started_at.elapsed())
     }
 
     /// Validate `agent_id` and report the attribution gap honestly.
@@ -460,6 +786,7 @@ impl LamboServer {
         if agent_id == owner {
             return Ok(());
         }
+        note_error("refused: foreign agent");
         Err(CallToolResult::error(vec![ContentBlock::text(format!(
             "lambo_reserve: refusing to {what} on behalf of '{agent_id}': this process holds \
              the session as agent '{owner}' and soft locks are taken and released under that \
@@ -489,7 +816,9 @@ impl LamboServer {
                        (canonical markers, blast-radius warnings, conflict lines)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
-        contain_panic("lambo_recall", self.recall_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_recall", agent_id, self.recall_impl(p))
+            .await
     }
 
     /// Derive concepts from a fresh interaction (spec §7).
@@ -502,7 +831,9 @@ impl LamboServer {
                        Timestamps are stamped server-side; do not send one."
     )]
     async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
-        contain_panic("lambo_derive", self.derive_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_derive", agent_id, self.derive_impl(p))
+            .await
     }
 
     /// Record an agent action (spec §7) — a `Resource` concept plus `Causal` /
@@ -516,7 +847,9 @@ impl LamboServer {
         &self,
         Parameters(p): Parameters<RecordActionParams>,
     ) -> CallToolResult {
-        contain_panic("lambo_record_action", self.record_action_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_record_action", agent_id, self.record_action_impl(p))
+            .await
     }
 
     /// Take (or release) a soft lock on a node — spec §11.
@@ -532,7 +865,9 @@ impl LamboServer {
                        only accepted from the agent this server session runs as."
     )]
     async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
-        contain_panic("lambo_reserve", self.reserve_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_reserve", agent_id, self.reserve_impl(p))
+            .await
     }
 
     /// Neighbourhood around a focus concept — the read-only graph view.
@@ -542,7 +877,9 @@ impl LamboServer {
                        status, blast radius and typed edges out to a depth."
     )]
     async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
-        contain_panic("lambo_inspect", self.inspect_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_inspect", agent_id, self.inspect_impl(p))
+            .await
     }
 
     /// The canonical ("saints") memories — spec §10.
@@ -552,7 +889,9 @@ impl LamboServer {
                        status through the audited transition path."
     )]
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
-        contain_panic("lambo_saints", self.saints_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_saints", agent_id, self.saints_impl(p))
+            .await
     }
 
     /// Session health — the spec §2.4 observable durability bound.
@@ -562,7 +901,9 @@ impl LamboServer {
                        counts, canonization progress and degraded state."
     )]
     async fn lambo_stats(&self, Parameters(p): Parameters<StatsParams>) -> CallToolResult {
-        contain_panic("lambo_stats", self.stats_impl(p)).await
+        let agent_id = p.agent_id.clone();
+        self.observed("lambo_stats", agent_id, self.stats_impl(p))
+            .await
     }
 }
 
@@ -628,16 +969,23 @@ impl LamboServer {
             return bad_param(format!("max_tokens must be in 1..={MAX_MAX_TOKENS}"));
         }
 
+        let query_text = p.query.clone();
         let query = RecallQuery {
             query: p.query,
             top_k,
             max_tokens,
             traversal_depth,
         };
-        let result = match self.mem.recall(query).await {
+        // `recall_detailed` is the SAME execution `recall` projects from (it is
+        // what `recall` calls); taking the detailed view here is what lets the
+        // I1 ledger record per-leg scores and typed warning kinds. The response
+        // below is built from the projection and is unchanged by this.
+        let detailed = match self.mem.recall_detailed(query).await {
             Ok(r) => r,
             Err(e) => return tool_err("lambo_recall", e),
         };
+        note_facts(|| recall_facts(&query_text, top_k, &detailed));
+        let result: RecallResult = detailed.into();
         // These include `Memory::recall`'s embed-failure degradation warning —
         // the signal that a recall dropped its vector leg and returned
         // keyword-only hits. `attach_warnings` is what puts it where the model
@@ -735,6 +1083,24 @@ impl LamboServer {
             Ok(o) => o,
             Err(e) => return tool_err("lambo_derive", e),
         };
+
+        // I1 (DOGFOOD metric 2, re-derivation savings). `demoted` is NOT here
+        // and is not an oversight: in this codebase demotion is
+        // `Memory::demote`'s context-overflow split and the canonization
+        // task's Canonical→Venerable regression, neither of which `derive`
+        // can perform — `DeriveOutcome` has no such count to report. What
+        // derive DOES distinguish is `semantic_merged` (a hybrid similarity
+        // merge, which adds no `Derives` edge) from `matched` (a re-derive
+        // that does), and that distinction is the one metric 2 turns on.
+        note_facts(|| {
+            json!({
+                "created": outcome.created.len(),
+                "matched": outcome.matched.len(),
+                "semantic_merged": outcome.semantic_merged.len(),
+                "reinforced": outcome.reinforced,
+                "concepts_requested": concepts.len(),
+            })
+        });
 
         let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
         let matched: Vec<String> = outcome.matched.iter().map(|n| n.0.to_string()).collect();
@@ -864,6 +1230,15 @@ impl LamboServer {
             }
         };
 
+        // I1: the edge count is the point — `record_action` is how the
+        // dependency structure blast radius is computed from gets written.
+        note_facts(|| {
+            json!({
+                "created": outcome.created.len(),
+                "edges": outcome.edges,
+            })
+        });
+
         let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
         let summary = format!(
             "recorded action '{}': {} concept(s) created, {} edge(s) added",
@@ -889,6 +1264,14 @@ impl LamboServer {
             Err(e) => return e,
         };
         let releasing = p.release.unwrap_or(false);
+        // I1: grant/refusal for EVERY exit of this tool, set before the first
+        // one can be taken. Each success path overwrites it with `granted:
+        // true`; anything that returns early — the foreign-agent refusal below,
+        // a bad node_id, a `Conflict` from a lock another agent holds — leaves
+        // this standing, so a refusal can never be recorded as a grant by a
+        // path somebody forgot to annotate.
+        let op = if releasing { "release" } else { "reserve" };
+        note_facts(|| json!({ "op": op, "granted": false }));
         // Fail closed before touching the graph (R1/T82-3).
         if let Err(e) = self.require_session_agent(
             &p.agent_id,
@@ -913,6 +1296,7 @@ impl LamboServer {
         if releasing {
             return match self.mem.release(node_id) {
                 Ok(()) => {
+                    note_facts(|| json!({ "op": "release", "granted": true }));
                     let msg = format!("released {}", node_id.0);
                     let mut out = CallToolResult::success(vec![ContentBlock::text(msg.clone())]);
                     attach_warnings(&mut out, &warnings);
@@ -933,6 +1317,7 @@ impl LamboServer {
             Ok(r) => r,
             Err(e) => return tool_err("lambo_reserve", e),
         };
+        note_facts(|| json!({ "op": "reserve", "granted": true, "ttl_seconds": ttl_secs }));
         warnings.push(
             "reservations are advisory and RAM-local: they are lost on server restart".into(),
         );
@@ -1042,6 +1427,12 @@ impl LamboServer {
             None => text,
         };
 
+        // I1: enough to place an inspect in a call sequence without carrying the
+        // whole neighbourhood into the ledger. `fuzzy` is worth a field — a
+        // resolution the caller did not ask for is exactly the friction
+        // DOGFOOD metric 6 is looking for.
+        note_facts(|| json!({ "depth": depth, "fuzzy": note.is_some() }));
+
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
         attach_warnings(&mut out, &warnings);
         out.structured_content = Some(json!({
@@ -1059,6 +1450,7 @@ impl LamboServer {
             Err(e) => return e,
         };
         let saints = self.mem.canonical_memories();
+        note_facts(|| json!({ "canonical_count": saints.len() }));
         let mut text = format!(
             "{} canonical memor{} in session '{}'\n",
             saints.len(),
@@ -1125,27 +1517,21 @@ impl LamboServer {
             s.canonization_cycles,
             s.canonization_failures,
         );
+        // One payload builder shared with the I2 heartbeat, so a heartbeat can
+        // never report different numbers than the tool. With `--ledger` off
+        // this is exactly the payload it always was; with it on, the three
+        // `ledger_*` keys are appended (I1: the dropped-line counter has to be
+        // reachable from `lambo_stats`, or silence is invisible).
+        let mut payload = self.stats_json();
+        {
+            let obj = payload.as_object_mut().expect("stats_json built an object");
+            obj.insert("summary".into(), json!(text));
+            obj.insert("warnings".into(), json!(warnings));
+        }
+
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
         attach_warnings(&mut out, &warnings);
-        out.structured_content = Some(json!({
-            "summary": text,
-            "session": s.session.0,
-            "agent": s.agent.0,
-            "flush_lag_ms": s.flush_lag.as_millis() as u64,
-            "log_depth": s.log_depth,
-            "flush_depth": s.flush_depth,
-            "dead_lettered": s.dead_lettered,
-            "degraded": s.degraded,
-            "node_count": s.node_count,
-            "edge_count": s.edge_count,
-            "concept_count": s.concept_count,
-            "canonical_count": s.canonical_count,
-            "epoch": s.epoch,
-            "daemon_cycles": s.daemon_cycles,
-            "canonization_cycles": s.canonization_cycles,
-            "canonization_failures": s.canonization_failures,
-            "warnings": warnings,
-        }));
+        out.structured_content = Some(payload);
         out
     }
 }
@@ -2573,5 +2959,673 @@ mod tests {
             7,
             "an in-range config default is left untouched"
         );
+    }
+
+    // =======================================================================
+    // I1 / I2 — the serve call ledger
+    // =======================================================================
+
+    /// A scratch directory outside the repo, unique per test.
+    fn ledger_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-i1-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The same [`server`] fixture, with a ledger attached.
+    async fn server_with_ledger(session: &str, path: &std::path::Path) -> LamboServer {
+        let plain = server(session).await;
+        LamboServer::with_ledger(Arc::clone(plain.memory()), Ledger::open(path))
+    }
+
+    /// Wait until the writer thread has caught up, then parse the file.
+    ///
+    /// The writer is a real OS thread by design (it must not sit on a Tokio
+    /// worker), so tests wait on `written` rather than sleeping a guessed
+    /// interval.
+    fn read_ledger(ledger: &Ledger, expect_lines: u64) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ledger.counters().written() < expect_lines && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            ledger.counters().written(),
+            expect_lines,
+            "expected {expect_lines} written lines, dropped={}",
+            ledger.counters().dropped()
+        );
+        let text = std::fs::read_to_string(ledger.path()).expect("ledger file");
+        text.lines()
+            .map(|l| {
+                serde_json::from_str(l).unwrap_or_else(|e| panic!("line does not parse: {e}: {l}"))
+            })
+            .collect()
+    }
+
+    /// **I1 acceptance.** With `--ledger` on, EVERY published tool appends
+    /// exactly one line, and every line parses as one JSON object carrying the
+    /// common head. Driven through the `#[tool]` wrappers (the only thing the
+    /// router can reach), so a tool whose wrapper forgot the ledger fails here.
+    #[tokio::test]
+    async fn i1_every_tool_call_appends_exactly_one_parseable_ledger_line() {
+        let dir = ledger_dir("every-tool");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-every-tool", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        // One call per published tool, in a realistic order.
+        call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "the ledger is not the store", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        call(
+            &s,
+            "lambo_record_action",
+            json!({
+                "agent_id": "agent-a",
+                "action": "wrote src/ledger.rs",
+                "produces": ["src/ledger.rs"],
+                "depends_on": ["the ledger is not the store"],
+            }),
+        )
+        .await;
+        call(
+            &s,
+            "lambo_recall",
+            json!({"agent_id": "agent-a", "query": "ledger"}),
+        )
+        .await;
+        call(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id": "agent-a", "focus": "ledger"}),
+        )
+        .await;
+        call(&s, "lambo_saints", json!({"agent_id": "agent-a"})).await;
+        call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        call(
+            &s,
+            "lambo_reserve",
+            json!({
+                "agent_id": "agent-a",
+                "node_id": uuid::Uuid::new_v4().to_string(),
+            }),
+        )
+        .await;
+
+        let published: Vec<String> = tools(&s).iter().map(|t| t.name.to_string()).collect();
+        let lines = read_ledger(&ledger, published.len() as u64);
+
+        let mut seen: Vec<String> = Vec::new();
+        for line in &lines {
+            assert_eq!(line["v"], json!(crate::ledger::LINE_VERSION), "{line}");
+            assert_eq!(line["kind"], json!("call"), "{line}");
+            assert_eq!(line["agent_id"], json!("agent-a"), "{line}");
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(line["ts"].as_str().expect("ts is a string"))
+                    .is_ok(),
+                "the server timestamp is RFC3339: {line}"
+            );
+            assert!(line["duration_us"].is_u64(), "{line}");
+            assert!(
+                matches!(line["outcome"].as_str(), Some("ok" | "error" | "panic")),
+                "outcome is one of the three classes: {line}"
+            );
+            seen.push(line["tool"].as_str().expect("tool name").to_string());
+        }
+        seen.sort();
+        let mut expected = published;
+        expected.sort();
+        assert_eq!(
+            seen, expected,
+            "every published tool contributed exactly one line"
+        );
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I1 acceptance (DOGFOOD metrics 4 and 5).** A recall line carries the
+    /// final score AND the per-leg provenance the max-merge would otherwise
+    /// destroy, plus the typed warning flags — including
+    /// `blast_radius_warning`, which is metric 5 in one field.
+    ///
+    /// The `⚑` line is provoked the way it fires in production: a Canonical
+    /// concept with dependents. The assertion is on the FLAG, never on the
+    /// rendered text — the whole point of reading H3's typed annotation kinds
+    /// is that "a warning fired" stops being a grep.
+    #[tokio::test]
+    async fn i1_recall_lines_carry_per_leg_scores_and_the_warning_flags() {
+        use crate::types::CanonizationStatus;
+
+        let dir = ledger_dir("recall-legs");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-recall-legs", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        // An action gives the target a dependent, so its blast radius is > 0.
+        call(
+            &s,
+            "lambo_record_action",
+            json!({
+                "agent_id": "agent-a",
+                "action": "rebuild the pagination index",
+                "modifies": ["pagination contract"],
+            }),
+        )
+        .await;
+        // Promote the target: `⚑` renders for Canonical hits only. Through the
+        // audited transition path (None -> Venerable -> Canonical), because
+        // that is the only way a status can legally change — there is no
+        // back-door setter, by design (GRAPH-4).
+        {
+            let mut g = s.mem.graph().write();
+            let target = g
+                .concepts()
+                .find(|c| c.content.contains("pagination contract"))
+                .map(|c| c.id)
+                .expect("the action created its target concept");
+            let now = chrono::Utc::now();
+            for (from, to) in [
+                (CanonizationStatus::None, CanonizationStatus::Venerable),
+                (CanonizationStatus::Venerable, CanonizationStatus::Canonical),
+            ] {
+                g.apply_canonization_transition(crate::types::CanonizationEvent {
+                    id: NodeId::new(),
+                    session_id: s.mem.session().clone(),
+                    node_id: target,
+                    from_status: from,
+                    to_status: to,
+                    blast_radius: Some(1),
+                    last_demotion_time: None,
+                    occurred_at: now,
+                })
+                .expect("audited promotion");
+            }
+        }
+
+        call(
+            &s,
+            "lambo_recall",
+            json!({"agent_id": "agent-a", "query": "pagination contract"}),
+        )
+        .await;
+
+        let lines = read_ledger(&ledger, 2);
+        let recall = lines
+            .iter()
+            .find(|l| l["tool"] == json!("lambo_recall"))
+            .expect("a recall line");
+
+        assert_eq!(recall["outcome"], json!("ok"), "{recall}");
+        assert_eq!(recall["query"], json!("pagination contract"), "{recall}");
+        assert!(recall["top_k"].is_u64(), "{recall}");
+        let hits = recall["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "the query must actually hit: {recall}");
+
+        // Per-leg provenance: at least one hit reports a named leg with a
+        // number, and every reported leg name is one of the three phase-1 legs.
+        let mut legged = 0usize;
+        for hit in hits {
+            assert!(
+                hit["score"].is_f64() || hit["score"].is_i64(),
+                "final score: {hit}"
+            );
+            assert!(hit["node_id"].as_str().is_some(), "{hit}");
+            assert!(hit["included_in_context"].is_boolean(), "{hit}");
+            let legs = hit["legs"].as_object().expect("legs is an object");
+            for (name, value) in legs {
+                assert!(
+                    matches!(name.as_str(), "bm25" | "recent" | "vector_cosine"),
+                    "unexpected leg name {name}: {hit}"
+                );
+                assert!(
+                    value.is_f64() || value.is_i64(),
+                    "leg {name} carries a score: {hit}"
+                );
+            }
+            if !legs.is_empty() {
+                legged += 1;
+            }
+        }
+        assert!(
+            legged > 0,
+            "at least one hit must report its phase-1 legs, else the provenance was dropped \
+             on the way out: {recall}"
+        );
+
+        // The warning flags, from typed producers.
+        assert_eq!(
+            recall["canonical_marker"],
+            json!(true),
+            "a Canonical hit was returned, so the canonical marker rendered: {recall}"
+        );
+        assert_eq!(
+            recall["blast_radius_warning"],
+            json!(true),
+            "DOGFOOD metric 5: the blast-radius warning fired and the ledger says so: {recall}"
+        );
+        for flag in ["conflict_line", "hot_warning", "reservation_warning"] {
+            assert!(
+                recall[flag].is_boolean(),
+                "{flag} is always present as a boolean: {recall}"
+            );
+        }
+        assert!(recall["warning_count"].is_u64(), "{recall}");
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I1 acceptance.** A derive line carries created / matched, so metric 2
+    /// (re-derivation savings) is answerable from the ledger alone. The second
+    /// derive of the same content must show up as `matched`, not `created`.
+    #[tokio::test]
+    async fn i1_derive_lines_carry_created_and_matched_counts() {
+        let dir = ledger_dir("derive-counts");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-derive-counts", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        let args = json!({
+            "agent_id": "agent-a",
+            "concepts": [{"content": "recall before you derive", "concept_type": "logic"}],
+        });
+        call(&s, "lambo_derive", args.clone()).await;
+        call(&s, "lambo_derive", args).await;
+
+        let lines = read_ledger(&ledger, 2);
+        assert_eq!(
+            lines[0]["created"],
+            json!(1),
+            "first derive creates: {}",
+            lines[0]
+        );
+        assert_eq!(lines[0]["matched"], json!(0), "{}", lines[0]);
+        assert_eq!(
+            lines[1]["created"],
+            json!(0),
+            "re-deriving the same content creates nothing: {}",
+            lines[1]
+        );
+        assert_eq!(
+            lines[1]["matched"],
+            json!(1),
+            "re-deriving the same content MATCHES — this is metric 2: {}",
+            lines[1]
+        );
+        for line in &lines {
+            assert!(line["semantic_merged"].is_u64(), "{line}");
+            assert!(line["reinforced"].is_u64(), "{line}");
+        }
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I1 acceptance.** `record_action` reports its edge count and `reserve`
+    /// reports grant/refusal — including the refusal, which must never be
+    /// recorded as a grant.
+    #[tokio::test]
+    async fn i1_record_action_reports_edges_and_reserve_reports_grant_or_refusal() {
+        let dir = ledger_dir("edges-grants");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-edges-grants", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        call(
+            &s,
+            "lambo_record_action",
+            json!({
+                "agent_id": "agent-a",
+                "action": "provision the store",
+                "produces": ["migrations/sqlite/001_init.sql"],
+                "modifies": ["schema"],
+            }),
+        )
+        .await;
+        let node_id = {
+            let g = s.mem.graph().read();
+            let id = g.concepts().next().map(|c| c.id).expect("a concept");
+            id.0.to_string()
+        };
+        // Granted.
+        call(
+            &s,
+            "lambo_reserve",
+            json!({"agent_id": "agent-a", "node_id": node_id}),
+        )
+        .await;
+        // Refused: a foreign agent cannot hold a lock this process cannot tell
+        // apart from its own (R1/T82-3).
+        call(
+            &s,
+            "lambo_reserve",
+            json!({
+                "agent_id": "someone-else",
+                "node_id": uuid::Uuid::new_v4().to_string(),
+            }),
+        )
+        .await;
+
+        let lines = read_ledger(&ledger, 3);
+        let action = &lines[0];
+        assert_eq!(action["tool"], json!("lambo_record_action"));
+        assert!(
+            action["edges"].as_u64().expect("edge count") >= 2,
+            "one produces + one modifies is at least two edges: {action}"
+        );
+        assert!(action["created"].is_u64(), "{action}");
+
+        let granted = &lines[1];
+        assert_eq!(granted["op"], json!("reserve"), "{granted}");
+        assert_eq!(granted["granted"], json!(true), "{granted}");
+        assert_eq!(granted["outcome"], json!("ok"), "{granted}");
+
+        let refused = &lines[2];
+        assert_eq!(refused["op"], json!("reserve"), "{refused}");
+        assert_eq!(
+            refused["granted"],
+            json!(false),
+            "a refusal must never be logged as a grant: {refused}"
+        );
+        assert_eq!(refused["outcome"], json!("error"), "{refused}");
+        assert_eq!(
+            refused["error_kind"],
+            json!("refused: foreign agent"),
+            "the refusal is classified, not just flagged: {refused}"
+        );
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I1 acceptance — the failure mode that matters.** The ledger path goes
+    /// away *mid-run*. Every subsequent tool call must still succeed, the lines
+    /// must be counted as dropped, and `lambo_stats` must report the count so
+    /// the silence in the file is visible.
+    #[tokio::test]
+    async fn i1_an_unwritable_path_mid_run_drops_lines_and_never_fails_a_tool_call() {
+        let dir = ledger_dir("unwritable");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-unwritable", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        // One good call first, so the "before" state is real.
+        let ok = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        assert_ne!(ok.is_error, Some(true), "the first call succeeds");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ledger.counters().written() < 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(ledger.counters().written(), 1);
+
+        // Pull the ground out. The writer reopens per batch, so the next batch
+        // cannot open its path. Removing the directory (rather than `chmod`)
+        // fails the same way for root, which some CI containers are.
+        std::fs::remove_dir_all(&dir).expect("remove the ledger directory");
+
+        // Every tool, after the failure. All must succeed.
+        let calls: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "lambo_derive",
+                json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": "memory outlives its ledger", "concept_type": "logic"}],
+                }),
+            ),
+            (
+                "lambo_record_action",
+                json!({
+                    "agent_id": "agent-a", "action": "kept serving", "produces": ["a line that is gone"],
+                }),
+            ),
+            (
+                "lambo_recall",
+                json!({"agent_id": "agent-a", "query": "memory"}),
+            ),
+            ("lambo_saints", json!({"agent_id": "agent-a"})),
+            ("lambo_stats", json!({"agent_id": "agent-a"})),
+        ];
+        let n = calls.len() as u64;
+        for (tool, args) in calls {
+            let out = call(&s, tool, args).await;
+            assert_ne!(
+                out.is_error,
+                Some(true),
+                "{tool} must still succeed with a dead ledger — observability never takes \
+                 down memory"
+            );
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ledger.counters().dropped() < n && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            ledger.counters().dropped(),
+            n,
+            "every post-failure line is accounted for as a drop"
+        );
+        assert_eq!(
+            ledger.counters().written(),
+            1,
+            "the one pre-failure line stays written"
+        );
+
+        // The counter must be reachable from `lambo_stats` — otherwise the
+        // silence is invisible, which is the whole failure this guards against.
+        let stats = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        let payload = stats.structured_content.expect("stats payload");
+        assert_eq!(
+            payload["ledger_dropped_lines"]
+                .as_u64()
+                .expect("drop count in the stats payload"),
+            n,
+            "lambo_stats reports the dropped-line count: {payload}"
+        );
+        assert_eq!(payload["ledger_written_lines"], json!(1), "{payload}");
+        assert!(
+            payload["ledger_path"].as_str().is_some(),
+            "the payload names the path the drops were destined for: {payload}"
+        );
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Off means off.** With no ledger the `lambo_stats` payload carries no
+    /// `ledger_*` key at all — the payload is what it was before I1 existed.
+    #[tokio::test]
+    async fn i1_with_the_ledger_off_the_stats_payload_is_unchanged() {
+        let s = server("i1-off").await;
+        assert!(s.ledger().is_none(), "the ledger is off by default");
+        let stats = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        let payload = stats.structured_content.expect("stats payload");
+        let obj = payload.as_object().expect("object");
+        for key in obj.keys() {
+            assert!(
+                !key.starts_with("ledger_"),
+                "with --ledger off the payload must not grow a {key} field: {payload}"
+            );
+        }
+        // …and the fields callers already depend on are all still there.
+        for key in [
+            "summary",
+            "session",
+            "agent",
+            "flush_lag_ms",
+            "log_depth",
+            "flush_depth",
+            "dead_lettered",
+            "degraded",
+            "node_count",
+            "edge_count",
+            "concept_count",
+            "canonical_count",
+            "epoch",
+            "daemon_cycles",
+            "canonization_cycles",
+            "canonization_failures",
+            "warnings",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "{key} is missing from the payload: {payload}"
+            );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// **I1 acceptance.** A full dogfood day's worth of lines round-trips
+    /// through a JSON parser — the `duckdb`-end-to-end criterion, asserted on
+    /// the property duckdb's `read_json` actually needs (every line an
+    /// independent JSON object, no partial writes, no interleaving) rather than
+    /// by shelling out to duckdb from a unit test.
+    ///
+    /// Concurrency is the part worth testing: the HTTP transport clones the
+    /// server handle per request, so many tasks append at once and a torn line
+    /// would be invisible in a serial test.
+    #[tokio::test]
+    async fn i1_a_days_worth_of_concurrent_lines_all_parse() {
+        let dir = ledger_dir("a-day");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-a-day", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        // 480 calls is a heavy dogfood day (a call every ~3 minutes over 24h),
+        // driven 8-wide to mix the writers.
+        const AGENTS: usize = 8;
+        const PER_AGENT: usize = 60;
+        let mut handles = Vec::new();
+        for a in 0..AGENTS {
+            let s = s.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..PER_AGENT {
+                    call(
+                        &s,
+                        "lambo_derive",
+                        json!({
+                            "agent_id": "agent-a",
+                            "concepts": [{
+                                "content": format!("day concept {a}-{i}"),
+                                "concept_type": "observation",
+                            }],
+                        }),
+                    )
+                    .await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("agent task");
+        }
+
+        let total = (AGENTS * PER_AGENT) as u64;
+        let lines = read_ledger(&ledger, total);
+        assert_eq!(lines.len() as u64, total, "one line per call, none torn");
+        for line in &lines {
+            assert_eq!(line["kind"], json!("call"));
+            assert_eq!(line["tool"], json!("lambo_derive"));
+            assert!(
+                line["created"].is_u64() && line["matched"].is_u64(),
+                "{line}"
+            );
+        }
+        assert_eq!(ledger.counters().dropped(), 0, "no drops at this rate");
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **I1.** Ledger concept text is bounded, and cut on a char boundary —
+    /// a byte slice through a multi-byte codepoint would panic, and the ledger
+    /// is never allowed to panic a tool call.
+    #[test]
+    fn i1_ledger_content_is_truncated_on_a_char_boundary() {
+        let short = "a canonical decision";
+        assert_eq!(truncate_for_ledger(short), short, "short text is untouched");
+
+        // Exactly at the boundary: still untouched.
+        let exact: String = "x".repeat(LEDGER_CONTENT_PREFIX);
+        assert_eq!(truncate_for_ledger(&exact), exact);
+
+        // One over: cut, and the cut is announced.
+        let over: String = "x".repeat(LEDGER_CONTENT_PREFIX + 1);
+        let cut = truncate_for_ledger(&over);
+        assert!(cut.ends_with("…[truncated]"), "{cut}");
+        assert_eq!(
+            cut.chars().count(),
+            LEDGER_CONTENT_PREFIX + "…[truncated]".chars().count()
+        );
+
+        // Multi-byte all the way through: no panic, and the result is valid
+        // UTF-8 by construction (it is a `String`).
+        let multibyte: String = "é".repeat(LEDGER_CONTENT_PREFIX * 2);
+        let cut = truncate_for_ledger(&multibyte);
+        assert!(cut.starts_with('é'));
+        assert!(cut.ends_with("…[truncated]"));
+        // And it survives a JSON round-trip, which is the only thing the ledger
+        // actually does with it.
+        let v = json!({"content": cut});
+        let back: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&v).expect("encode")).expect("decode");
+        assert_eq!(back["content"], v["content"]);
+    }
+
+    /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,
+    /// the crate version and a `git_sha` field.
+    ///
+    /// The interval itself is `crate::mcp::serve`'s (tested there); this pins
+    /// the line's contents, which is what the analysis kit's time axis reads.
+    #[tokio::test]
+    async fn i2_heartbeat_lines_carry_the_stats_payload_the_version_and_the_sha() {
+        let dir = ledger_dir("heartbeat");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i2-heartbeat", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+        for _ in 0..3 {
+            ledger.append(&s.heartbeat_line());
+        }
+        let lines = read_ledger(&ledger, 3);
+        for line in &lines {
+            assert_eq!(line["kind"], json!("stats"), "{line}");
+            assert_eq!(line["v"], json!(crate::ledger::LINE_VERSION), "{line}");
+            assert!(line["uptime_secs"].is_u64(), "{line}");
+            assert_eq!(
+                line["version"],
+                json!(env!("CARGO_PKG_VERSION")),
+                "the heartbeat names the crate version: {line}"
+            );
+            let sha = line["git_sha"].as_str().expect("git_sha is a string");
+            assert!(
+                !sha.is_empty(),
+                "git_sha is always present — 'unknown' when LAMBO_GIT_SHA was unset at build \
+                 time, never absent: {line}"
+            );
+            // The stats payload, and the ledger counters with it.
+            assert_eq!(line["stats"]["session"], json!("i2-heartbeat"), "{line}");
+            assert!(line["stats"]["node_count"].is_u64(), "{line}");
+            assert!(line["stats"]["ledger_dropped_lines"].is_u64(), "{line}");
+        }
+
+        ledger.shutdown();
+        s.mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

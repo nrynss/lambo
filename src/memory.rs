@@ -1363,6 +1363,24 @@ impl Memory {
     /// failure degrades to the keyword + recent legs with a warning on the
     /// result rather than failing the read.
     pub async fn recall(&self, query: RecallQuery) -> Result<RecallResult, LamboError> {
+        self.recall_detailed(query).await.map(Into::into)
+    }
+
+    /// [`Memory::recall`], keeping the H3 presentation model of the SAME
+    /// execution instead of the flattened projection.
+    ///
+    /// `recall` is now a projection of this, so there is exactly one recall
+    /// implementation on the `Memory` surface — no second execution, and no way
+    /// for the detailed and flattened views to describe different runs.
+    ///
+    /// The MCP `lambo_recall` handler calls this so the I1 call ledger can
+    /// record final **and** per-leg scores plus the typed warning kinds that
+    /// actually rendered. Its response to the client is built from the
+    /// projection and is byte-identical to what `recall` produced before.
+    pub(crate) async fn recall_detailed(
+        &self,
+        query: RecallQuery,
+    ) -> Result<crate::recall::detail::DetailedRecall, LamboError> {
         self.ensure_open()?;
 
         let mut warnings = Vec::new();
@@ -1390,7 +1408,7 @@ impl Memory {
         let mut cache = self.recall_cache.lock().await;
         let mut result = self
             .daemon
-            .recall(
+            .recall_detailed(
                 &self.session,
                 query,
                 self.store.as_ref(),

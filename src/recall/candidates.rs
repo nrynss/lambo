@@ -70,6 +70,63 @@ pub const RECENT_SCORE: f64 = 0.35;
 /// legs at phase-1 truncation (GPT5.6sol P1-3).
 pub(crate) const KEYWORD_OVERFETCH: usize = 4;
 
+/// The score each phase-1 leg contributed for one node, **before** max-merge.
+///
+/// The merged score alone cannot answer G's question — "was this a real semantic
+/// hit, a lexical hit, or just the recency floor?" — because max-merge is
+/// lossy: a `0.35` could be the [`RECENT_SCORE`] floor or a genuine (weak)
+/// cosine, and the two mean opposite things. `None` means the leg did not
+/// produce this node at all, which is itself information (a node with only
+/// `recent` set was retrieved by nothing but recency).
+///
+/// Collected on every call rather than only under a trace subscriber: the leg
+/// names already had a trace-gated map (below), but the I1 ledger needs the
+/// *numbers*, and only from a run nobody thought to enable tracing on.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LegScores {
+    /// BM25 score from [`InvertedIndex::search`].
+    pub keyword: Option<f64>,
+    /// The flat [`RECENT_SCORE`] floor, when this node belongs to one of the
+    /// [`RECENT_INTERACTIONS`] most recent interactions.
+    pub recent: Option<f64>,
+    /// Store-provided similarity (cosine, for every shipped vector store).
+    pub vector: Option<f64>,
+}
+
+impl LegScores {
+    /// The max-merged score these legs produce — the value phase 1 ranks on.
+    ///
+    /// Kept next to the legs so the two can never disagree: the merge rule is
+    /// stated once, here, and [`candidates_with_legs`] is its only caller.
+    fn merged(&self) -> f64 {
+        [self.keyword, self.recent, self.vector]
+            .into_iter()
+            .flatten()
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// Highest-scoring leg name, for a one-word "where did this come from".
+    /// `None` for an empty [`LegScores`], which callers never construct.
+    pub fn dominant(&self) -> Option<&'static str> {
+        [
+            ("keyword", self.keyword),
+            ("recent", self.recent),
+            ("vector", self.vector),
+        ]
+        .into_iter()
+        .filter_map(|(name, s)| s.map(|s| (name, s)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(name, _)| name)
+    }
+}
+
+/// Per-node phase-1 leg provenance, keyed by node id.
+///
+/// A node absent from the map was **not** a phase-1 candidate: it reached the
+/// result through phase-2 traversal expansion, which has no leg score by
+/// construction.
+pub type LegProvenance = HashMap<NodeId, LegScores>;
+
 /// Async-gathered inputs for the sync, lock-safe [`candidates`] step.
 ///
 /// This is the only channel by which store I/O reaches phase 1: [`gather`]
@@ -129,61 +186,46 @@ pub fn candidates(
     query: &str,
     limit: usize,
 ) -> Vec<Scored<NodeId>> {
+    candidates_with_legs(graph, index, input, query, limit).0
+}
+
+/// [`candidates`], plus the per-leg scores the max-merge would otherwise
+/// discard (I1).
+///
+/// One implementation, two views: the merge rule lives here and `candidates`
+/// projects it, so the ranked list and the leg provenance can never describe
+/// different arithmetic.
+pub fn candidates_with_legs(
+    graph: &Graph,
+    index: &InvertedIndex,
+    input: Phase1Input,
+    query: &str,
+    limit: usize,
+) -> (Vec<Scored<NodeId>>, LegProvenance) {
     // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
     // is applied downstream in phase-3 assembly (by final score). Prematurely
     // truncating here let the flat-scored recent/vector legs evict strong
     // keyword matches (GPT5.6sol P1-3), so keyword is over-fetched (bounded)
     // and the union is returned unreduced.
     let keyword_cap = limit.saturating_mul(KEYWORD_OVERFETCH);
-    let mut merged: HashMap<NodeId, f64> = HashMap::new();
-    // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
-    // trace-enabled run can say whether the lexical (keyword), recent, or
-    // vector arm produced an identifier-shaped hit. Default-invisible trace:
-    // the per-leg map is only allocated when a trace subscriber is present
-    // (T9-R1-4) - never in a hot loop with no subscriber.
-    let mut legs: Option<HashMap<NodeId, Vec<&'static str>>> = tracing::enabled!(
-        target: "lambo::recall",
-        tracing::Level::TRACE,
-    )
-    .then(HashMap::new);
+    let mut legs: LegProvenance = HashMap::new();
     for s in index.search(query, keyword_cap) {
-        merged.insert(s.item, s.score);
-        if let Some(legs) = legs.as_mut() {
-            legs.entry(s.item).or_default().push("keyword");
-        }
+        legs.entry(s.item).or_default().keyword = Some(s.score);
     }
     for id in recent_concepts(graph) {
-        merged
-            .entry(id)
-            .and_modify(|v| *v = v.max(RECENT_SCORE))
-            .or_insert(RECENT_SCORE);
-        if let Some(legs) = legs.as_mut() {
-            legs.entry(id).or_default().push("recent");
-        }
+        legs.entry(id).or_default().recent = Some(RECENT_SCORE);
     }
     for s in input.vector {
-        merged
-            .entry(s.item)
-            .and_modify(|v| *v = v.max(s.score))
-            .or_insert(s.score);
-        if let Some(legs) = legs.as_mut() {
-            legs.entry(s.item).or_default().push("vector");
-        }
+        legs.entry(s.item).or_default().vector = Some(s.score);
     }
-    let mut out: Vec<Scored<NodeId>> = merged
-        .into_iter()
-        .map(|(item, score)| Scored::new(item, score))
-        .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.item.0.cmp(&b.item.0))
-    });
-    if let Some(mut legs) = legs {
+    let out = rank(&legs);
+    // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
+    // trace-enabled run can say whether the lexical (keyword), recent, or
+    // vector arm produced an identifier-shaped hit. Unchanged output; it now
+    // reads the always-collected map instead of building a second one.
+    if tracing::enabled!(target: "lambo::recall", tracing::Level::TRACE) {
         for s in &out {
-            let mut arm_vec = legs.remove(&s.item).unwrap_or_default();
-            arm_vec.sort_unstable();
-            arm_vec.dedup();
+            let arm_vec = arm_names(legs.get(&s.item).copied().unwrap_or_default());
             tracing::trace!(
                 target: "lambo::recall",
                 phase = "candidates",
@@ -198,6 +240,36 @@ pub fn candidates(
             );
         }
     }
+    (out, legs)
+}
+
+/// Leg names in the order T9's trace printed them (sorted, deduplicated).
+fn arm_names(legs: LegScores) -> Vec<&'static str> {
+    // Sorted by construction: "keyword" < "recent" < "vector".
+    [
+        ("keyword", legs.keyword.is_some()),
+        ("recent", legs.recent.is_some()),
+        ("vector", legs.vector.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, present)| present.then_some(name))
+    .collect()
+}
+
+/// Max-merge and sort: score descending, ties by node id ascending.
+///
+/// A total order (f64 `total_cmp`, then UUID), so the output is deterministic
+/// regardless of leg iteration or store result order.
+fn rank(legs: &LegProvenance) -> Vec<Scored<NodeId>> {
+    let mut out: Vec<Scored<NodeId>> = legs
+        .iter()
+        .map(|(item, legs)| Scored::new(*item, legs.merged()))
+        .collect();
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.item.0.cmp(&b.item.0))
+    });
     out
 }
 
@@ -207,29 +279,24 @@ pub fn candidates(
 /// but the independently gathered recent and vector candidates must not be
 /// discarded. Same merge/sort rule as [`candidates`] minus the keyword leg.
 pub fn candidates_without_keyword(graph: &Graph, input: Phase1Input) -> Vec<Scored<NodeId>> {
-    let mut merged: HashMap<NodeId, f64> = HashMap::new();
+    candidates_without_keyword_with_legs(graph, input).0
+}
+
+/// [`candidates_without_keyword`], plus per-leg scores (I1). The `keyword` leg
+/// is `None` throughout — there is no index to ask.
+pub fn candidates_without_keyword_with_legs(
+    graph: &Graph,
+    input: Phase1Input,
+) -> (Vec<Scored<NodeId>>, LegProvenance) {
+    let mut legs: LegProvenance = HashMap::new();
     for id in recent_concepts(graph) {
-        merged
-            .entry(id)
-            .and_modify(|v| *v = v.max(RECENT_SCORE))
-            .or_insert(RECENT_SCORE);
+        legs.entry(id).or_default().recent = Some(RECENT_SCORE);
     }
     for s in input.vector {
-        merged
-            .entry(s.item)
-            .and_modify(|v| *v = v.max(s.score))
-            .or_insert(s.score);
+        legs.entry(s.item).or_default().vector = Some(s.score);
     }
-    let mut out: Vec<Scored<NodeId>> = merged
-        .into_iter()
-        .map(|(item, score)| Scored::new(item, score))
-        .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.item.0.cmp(&b.item.0))
-    });
-    out
+    let out = rank(&legs);
+    (out, legs)
 }
 
 /// Ids of the concepts owned by the [`RECENT_INTERACTIONS`] most recent
@@ -900,6 +967,131 @@ mod tests {
         // And the recent concepts are also present (union not keyword-only).
         for k in 0..8 {
             assert!(ids.contains(&NodeId(Uuid::from_u64_pair(2, 200 + k))));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // I1 — per-leg provenance
+    // -----------------------------------------------------------------------
+
+    /// **I1.** The per-leg scores survive the max-merge, and the merged score
+    /// the ranking uses is exactly the maximum over the legs that fired.
+    ///
+    /// This is the distinction the whole of DOGFOOD metric 4 rests on: a `0.35`
+    /// from the recency floor and a genuine `0.35` cosine rank identically and
+    /// mean opposite things, and before I1 the ledger could not have told them
+    /// apart because `candidates` returned one `f64`.
+    #[test]
+    fn i1_per_leg_scores_survive_the_max_merge() {
+        let (g, index) = planted_graph();
+        // A vector hit on a node the keyword leg also finds, plus one only the
+        // vector leg finds.
+        // "alpha" is concept 1, which the keyword leg finds AND which belongs
+        // to one of the three most recent interactions — so all three legs fire
+        // on one node, with the vector leg deliberately the weakest.
+        let shared = NodeId(Uuid::from_u64_pair(2, 1));
+        let vector_only = NodeId(Uuid::from_u64_pair(9, 77));
+        let input = Phase1Input {
+            vector: vec![Scored::new(shared, 0.42), Scored::new(vector_only, 0.91)],
+        };
+
+        let (ranked, legs) = candidates_with_legs(&g, &index, input, "alpha", 5);
+
+        // Ranking is unchanged by collecting provenance.
+        let plain = candidates(
+            &g,
+            &index,
+            Phase1Input {
+                vector: vec![Scored::new(shared, 0.42), Scored::new(vector_only, 0.91)],
+            },
+            "alpha",
+            5,
+        );
+        let ranked_pairs: Vec<(NodeId, f64)> = ranked.iter().map(|s| (s.item, s.score)).collect();
+        let plain_pairs: Vec<(NodeId, f64)> = plain.iter().map(|s| (s.item, s.score)).collect();
+        assert_eq!(
+            ranked_pairs, plain_pairs,
+            "candidates() must be exactly the projection of candidates_with_legs()"
+        );
+
+        // Every ranked node's score is the max over its own legs — stated as an
+        // invariant over the whole result, not spot-checked on one node.
+        for s in &ranked {
+            let l = legs.get(&s.item).expect("every ranked node has legs");
+            let max = [l.keyword, l.recent, l.vector]
+                .into_iter()
+                .flatten()
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!(
+                s.score, max,
+                "the merged score is the maximum over the legs that fired: {:?}",
+                l
+            );
+        }
+
+        // The vector-only node reports the vector leg and nothing else.
+        let l = legs.get(&vector_only).expect("vector-only candidate");
+        assert_eq!(l.vector, Some(0.91));
+        assert_eq!(l.keyword, None, "the keyword leg did not produce it");
+        assert_eq!(l.recent, None, "nor the recency leg");
+        assert_eq!(l.dominant(), Some("vector"));
+
+        // The shared node keeps BOTH numbers: the higher one won the ranking,
+        // and the lower one is still recoverable — which is the point.
+        let l = legs.get(&shared).expect("shared candidate");
+        assert_eq!(
+            l.vector,
+            Some(0.42),
+            "the losing vector score is retained, not overwritten by the merge: {l:?}"
+        );
+        assert!(
+            l.keyword.is_some() || l.recent.is_some(),
+            "the shared node must also carry the leg that outscored the vector one: {l:?}"
+        );
+    }
+
+    /// **I1.** The recency floor is distinguishable from a real score of the
+    /// same magnitude. A node retrieved by nothing but recency reports
+    /// `recent: 0.35` and no other leg.
+    #[test]
+    fn i1_the_recency_floor_is_distinguishable_from_a_real_hit() {
+        let (g, index) = planted_graph();
+        // A query that matches nothing lexically, so only the recency leg fires.
+        let (ranked, legs) =
+            candidates_with_legs(&g, &index, Phase1Input::default(), "zzzznomatch", 5);
+        assert!(
+            !ranked.is_empty(),
+            "the recency leg still yields candidates"
+        );
+        for s in &ranked {
+            let l = legs.get(&s.item).expect("legs");
+            assert_eq!(l.recent, Some(RECENT_SCORE), "{l:?}");
+            assert_eq!(l.keyword, None, "no lexical match for this query: {l:?}");
+            assert_eq!(l.vector, None, "no vector leg was gathered: {l:?}");
+            assert_eq!(l.dominant(), Some("recent"));
+            assert_eq!(s.score, RECENT_SCORE);
+        }
+    }
+
+    /// **I1.** The keyword-less path (no inverted index installed) still
+    /// reports its two legs.
+    #[test]
+    fn i1_the_keywordless_path_reports_its_legs_too() {
+        let (g, _index) = planted_graph();
+        let vector_only = NodeId(Uuid::from_u64_pair(9, 78));
+        let (ranked, legs) = candidates_without_keyword_with_legs(
+            &g,
+            Phase1Input {
+                vector: vec![Scored::new(vector_only, 0.8)],
+            },
+        );
+        assert_eq!(ranked.first().map(|s| s.item), Some(vector_only));
+        assert_eq!(legs.get(&vector_only).and_then(|l| l.vector), Some(0.8));
+        for l in legs.values() {
+            assert_eq!(
+                l.keyword, None,
+                "there is no index to ask, so the keyword leg is never set: {l:?}"
+            );
         }
     }
 }

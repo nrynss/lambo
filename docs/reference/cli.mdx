@@ -254,12 +254,16 @@ reservations are advisory and RAM-local: this reservation ends when this process
 | `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport. Loopback runs unauthenticated by default. A non-loopback bind fails closed without one. Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. |
 | `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions. |
 | `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate. Burst allowance is double. |
+| `--ledger <PATH>` | No | Off by default. Append one JSON line per MCP tool call to `PATH` (append-only JSONL, created if absent). Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`. Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
+| `--ledger-heartbeat <SECS>` | No | Off by default; requires `--ledger`. Also append a `stats` line every `SECS`: the `lambo_stats` payload plus process uptime and the binary's version and git sha, so a stretch of ledger can be attributed to the binary that produced it. Build with `LAMBO_GIT_SHA=$(git rev-parse --short HEAD)` for a real sha; it reports `unknown` otherwise. |
 
 ```bash
 lambo serve --config lambo.toml --session demo --agent agent-a
 ```
 
 See [MCP tools](/mcp) for the tools it exposes.
+
+The ledger is the input to the report generators in `scripts/observability/`, which answer recall-first compliance, re-derivation savings, score-band drift, duplicate creation, and which blast-radius warnings actually fired. Keep the file outside the repository: it carries recall queries and truncated concept text, so it inherits the store's hygiene rules.
 
 ### Stopping a writer
 

@@ -99,10 +99,31 @@ evidence pointers.
 
 ## What it measures (write these down as they happen, not retrospectively)
 
-> **Mechanism: workstream [I — Observability](I-observability.md)** (added 2026-08-19).
-> Metrics 1, 2, 4 and 5 below are unmeasurable without I's serve call ledger; until it
-> lands, Agent Governance audit-only logging and manual `lambo_stats` snapshots are the
-> interim, and metric 5 (warnings fired) simply cannot be counted.
+> **Mechanism: workstream [I — Observability](I-observability.md)** — **LANDED**
+> (I1–I3, 2026-08-19). Metrics 1, 2, 4 and 5 were unmeasurable without I's serve call
+> ledger. They now have one mechanism each, and it is a committed script rather than a
+> recollection:
+>
+> | metric | how it is measured now |
+> | --- | --- |
+> | 1. Recall-first compliance | `scripts/observability/recall_first.py` over the ledger |
+> | 2. Re-derivation savings | `dedup_rate.py` (ledger `created`/`matched`, + store) |
+> | 3. Duplicate-creation rate | `duplicates.py` (cosine scan over the store) |
+> | 4. Real scores vs G1's bands | `score_bands.py` (ledger per-leg scores) |
+> | 5. Blast-radius warnings fired | `warnings.py` (+ optional `git log` join) |
+> | 6. Friction | human notes, unchanged |
+>
+> Run the rig's serve with `--ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300`;
+> see [`scripts/observability/README.md`](../../scripts/observability/README.md) for what
+> each report says and which of its definitions are choices rather than facts. Agent
+> Governance audit-only logging stays complementary, not redundant: it sees what the
+> *client* did across all its tools, the ledger sees what *lambo* did with per-leg score
+> detail no client can observe.
+>
+> **Rig consequence:** the ledger changes `serve`, so measuring any of this means a new
+> pinned binary and a deliberate upgrade event (see the pin below). Build it with
+> `LAMBO_GIT_SHA=$(git rev-parse --short HEAD)` so the heartbeat's `git_sha` proves the
+> upgrade happened in the ledger itself.
 
 1. Recall-first compliance per agent cycle (the ledger records it; no self-reporting).
 2. Re-derivation savings: times a recalled decision replaced re-reading a workstream doc.

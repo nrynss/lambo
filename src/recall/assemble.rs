@@ -350,6 +350,10 @@ where
         hits,
         context: format::render_context(&blocks),
         warnings,
+        // I1: attached by the caller, which owns the phase-1 result this
+        // assembly ran over. Assembly itself sees only the expanded member
+        // list, so inventing legs here would mean guessing.
+        legs: Default::default(),
         detailed,
         response_annotations: Vec::new(),
     }

@@ -123,6 +123,30 @@ pub(crate) struct DetailedRecall {
     /// counterparts instead.
     #[serde(skip)]
     pub(crate) warnings: Vec<String>,
+    /// Phase-1 leg provenance per node (I1): the vector-cosine / BM25 /
+    /// recent-floor scores that the max-merge in
+    /// [`crate::recall::candidates::candidates_with_legs`] collapses into one
+    /// number.
+    ///
+    /// **These are phase-1 INPUTS, not components of [`DetailedHit::score`].**
+    /// `score` is the final ranking score, which phase-3 assembly computes from
+    /// the merged phase-1 score together with the daemon's score table and the
+    /// configured [`crate::config::RecallWeights`] — so `score` is routinely
+    /// larger or smaller than `max(legs)` and the two must never be expected to
+    /// agree. What the legs answer is the question the final score cannot:
+    /// *which retrieval arm found this, and how strongly*.
+    ///
+    /// **Internal only, and deliberately `#[serde(skip)]`.** The H3 wire
+    /// contract above is pinned; adding a serialized field here would change
+    /// the `serve-web` payload, which I1 has no business doing. The serve call
+    /// ledger reads this field in Rust and writes its own JSON.
+    ///
+    /// A hit whose node id is absent from the map was not a phase-1 candidate
+    /// — it arrived through phase-2 traversal expansion, which has no leg score
+    /// by construction. Empty for a dispatched structural query, which skips
+    /// the blend entirely.
+    #[serde(skip)]
+    pub(crate) legs: crate::recall::candidates::LegProvenance,
     /// The presentation hits, serialized on the wire as `hits`.
     #[serde(rename = "hits")]
     pub(crate) detailed: Vec<DetailedHit>,
@@ -139,6 +163,7 @@ impl DetailedRecall {
             hits: Vec::new(),
             context: String::new(),
             warnings: vec![warning],
+            legs: Default::default(),
             detailed: Vec::new(),
             response_annotations: Vec::new(),
         }

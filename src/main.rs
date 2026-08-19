@@ -58,6 +58,24 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// I1 — append one JSON line per MCP tool call to this path
+        /// (append-only JSONL, created if absent). Off by default.
+        ///
+        /// Never affects a tool call: the write is buffered onto a dedicated
+        /// writer thread and a stalled or unwritable path DROPS lines rather
+        /// than failing or delaying anything, counting them in `lambo_stats`
+        /// as `ledger_dropped_lines`. Rotation is yours (`logrotate`, or just
+        /// `mv` it — the writer recreates the path on the next line).
+        ///
+        /// The file inherits the store's hygiene rules: keep it outside the
+        /// repo (`~/lambo-dogfood/`), export only through the curated path.
+        #[arg(long, value_name = "PATH")]
+        ledger: Option<std::path::PathBuf>,
+        /// I2 — also append a `stats` heartbeat line to the ledger every N
+        /// seconds: the `lambo_stats` payload plus process uptime and the
+        /// binary's version and git sha. Requires --ledger. Off by default.
+        #[arg(long, value_name = "SECS")]
+        ledger_heartbeat: Option<u64>,
     },
     /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
     ///
@@ -452,6 +470,8 @@ fn main() -> ExitCode {
                 max_sessions,
                 rate_limit_rps,
                 allow_embedding_mismatch: _,
+                ledger,
+                ledger_heartbeat,
             },
             Resolved::Full(backends),
         ) => {
@@ -477,6 +497,16 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // A zero interval would spin the heartbeat loop as fast as the
+            // executor allows, which is a flood, not a heartbeat. Refuse here
+            // rather than let `tokio::time::interval` panic on a zero period.
+            if ledger_heartbeat == Some(0) {
+                eprintln!(
+                    "lambo serve: --ledger-heartbeat must be at least 1 second (0 given); \
+                     omit the flag to disable heartbeats"
+                );
+                return ExitCode::from(2);
+            }
             let opts = ServeOptions {
                 session,
                 agent,
@@ -486,6 +516,8 @@ fn main() -> ExitCode {
                 auth_token,
                 max_sessions,
                 rate_limit_rps,
+                ledger,
+                ledger_heartbeat: ledger_heartbeat.map(std::time::Duration::from_secs),
             };
 
             // `backends` is the single resolve from `resolve_for_command` above

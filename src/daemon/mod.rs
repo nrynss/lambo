@@ -95,6 +95,11 @@ pub struct ScoreTable {
 #[derive(Clone)]
 pub struct RecallPipeline {
     phase1: Vec<Scored<NodeId>>,
+    /// Per-leg phase-1 scores (I1). Cached with the rest of the pipeline
+    /// because it describes the same computation: a cache hit that reused
+    /// `phase1` while recomputing legs could report provenance for a ranking
+    /// nobody produced.
+    legs: candidates::LegProvenance,
     expanded: expand::ExpandedSet,
 }
 
@@ -490,14 +495,18 @@ impl Daemon {
                               query: &RecallQuery| {
             // P2-6: without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
-            let phase1 = match index {
+            let (phase1, legs) = match index {
                 Some(index) => {
-                    candidates::candidates(graph, index, input, &query.query, query.top_k)
+                    candidates::candidates_with_legs(graph, index, input, &query.query, query.top_k)
                 }
-                None => candidates::candidates_without_keyword(graph, input),
+                None => candidates::candidates_without_keyword_with_legs(graph, input),
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
-            RecallPipeline { phase1, expanded }
+            RecallPipeline {
+                phase1,
+                legs,
+                expanded,
+            }
         };
         let pipeline = if can_cache {
             match cache.get(&key) {
@@ -528,6 +537,17 @@ impl Daemon {
             now,
             assemble::default_token_count,
         );
+        // I1: attach the phase-1 leg provenance for the hits that survived
+        // assembly. Filtered to the returned hits rather than passed whole —
+        // phase 1 is a bounded over-approximation (keyword is over-fetched by
+        // `KEYWORD_OVERFETCH`), and the ledger only ever asks about a hit it
+        // was given. Hits absent from the map came in through traversal
+        // expansion; that absence is the honest answer, not a gap.
+        result.legs = result
+            .hits
+            .iter()
+            .filter_map(|h| pipeline.legs.get(&h.node_id).map(|l| (h.node_id, *l)))
+            .collect();
         if self.index.is_none() {
             result.warnings.push(
                 "recall: no inverted index installed (Daemon::with_index) - keyword leg unavailable"

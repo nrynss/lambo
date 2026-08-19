@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServiceExt;
 
+use crate::ledger::Ledger;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::{resolve_from_config_path, ResolvedBackends};
@@ -574,6 +575,13 @@ pub struct ServeOptions {
     pub max_sessions: usize,
     /// Sustained requests/second on the HTTP transport; `0` disables the limit.
     pub rate_limit_rps: u32,
+    /// I1 — append one JSONL line per MCP tool call to this path. `None` (the
+    /// default) is off: no writer thread, no per-call facts, and `lambo_stats`
+    /// reports the payload it reported before the ledger existed.
+    pub ledger: Option<PathBuf>,
+    /// I2 — append a `stats` heartbeat line on this interval. Requires
+    /// [`ServeOptions::ledger`]; `None` is off.
+    pub ledger_heartbeat: Option<Duration>,
 }
 
 impl ServeOptions {
@@ -587,7 +595,51 @@ impl ServeOptions {
             auth_token: None,
             max_sessions: DEFAULT_MAX_SESSIONS,
             rate_limit_rps: DEFAULT_RATE_LIMIT_RPS,
+            ledger: None,
+            ledger_heartbeat: None,
         }
+    }
+}
+
+/// `--ledger-heartbeat` without `--ledger` is a configuration error, not a
+/// silent no-op.
+///
+/// An operator who asked for heartbeats and got a server with no ledger at all
+/// would find out a day later, from an absent file. Refusing at startup costs
+/// them one flag; the alternative costs them the run. Split out from [`serve`]
+/// so it is testable without a store, a transport, or a lease.
+pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
+    match (&opts.ledger, opts.ledger_heartbeat) {
+        (None, Some(secs)) => Err(LamboError::Config(format!(
+            "--ledger-heartbeat {}s was given without --ledger: heartbeat lines are written TO \
+             the call ledger, so there is nowhere to put them. Pass --ledger <path> as well, or \
+             drop --ledger-heartbeat.",
+            secs.as_secs()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Append a `stats` heartbeat line every `every` (I2).
+///
+/// The first line lands immediately rather than one interval in: it stamps the
+/// binary's version and sha at the moment the session attached, which is the
+/// "which pinned binary produced this stretch of ledger" question the heartbeat
+/// exists to answer. Waiting an interval would leave the first stretch
+/// unattributed.
+///
+/// Runs until aborted. `Memory::stats()` is synchronous and holds no lock
+/// across an await (spec §6.4) — it takes the graph read lock, counts, and
+/// releases before this function's next `tick()`.
+async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duration) {
+    let mut ticker = tokio::time::interval(every);
+    // Skip missed ticks rather than firing a burst to catch up: a heartbeat
+    // backlog after a stall would be a pile of near-identical lines stamped
+    // microseconds apart, which is noise, not history.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        ledger.append(&server.heartbeat_line());
     }
 }
 
@@ -690,8 +742,45 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // so the operator's retry after setting a token is not blocked by the
     // lease their own refused start would otherwise be holding.
     authorize_bind(opts.transport, opts.bind, opts.auth_token.as_ref())?;
+    // Same argument as the bind check: refuse before any lease is taken.
+    authorize_ledger(&opts)?;
 
     let mem = Arc::new(build_memory(&opts, backends).await?);
+
+    // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
+    // every line as a drop — so nothing here can stop a memory server from
+    // serving memory. ONE server handle for the whole process (the HTTP factory
+    // clones it), so every transport appends to the same file and the
+    // heartbeat's uptime is the session's, not a request's.
+    let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
+    let server = match &ledger {
+        Some(ledger) => LamboServer::with_ledger(mem.clone(), Arc::clone(ledger)),
+        None => LamboServer::new(mem.clone()),
+    };
+    let heartbeat = match (&ledger, opts.ledger_heartbeat) {
+        (Some(ledger), Some(every)) => {
+            tracing::info!(
+                path = %ledger.path().display(),
+                interval_secs = every.as_secs(),
+                version = crate::ledger::VERSION,
+                git_sha = crate::ledger::GIT_SHA,
+                "lambo serve: call ledger open, heartbeat armed"
+            );
+            Some(tokio::spawn(heartbeat_loop(
+                server.clone(),
+                Arc::clone(ledger),
+                every,
+            )))
+        }
+        (Some(ledger), None) => {
+            tracing::info!(
+                path = %ledger.path().display(),
+                "lambo serve: call ledger open (no heartbeat)"
+            );
+            None
+        }
+        _ => None,
+    };
 
     // Exactly once, at startup: `events()` is stateful on its first call — it
     // hands out the receiver subscribed *before* the daemon spawned, so the
@@ -718,12 +807,32 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 
     let transport = async {
         match opts.transport {
-            Transport::Stdio => serve_stdio(mem.clone(), shutdown.as_mut()).await,
-            Transport::Http => serve_http(mem.clone(), &opts, shutdown.as_mut()).await,
+            Transport::Stdio => serve_stdio(server, shutdown.as_mut()).await,
+            Transport::Http => serve_http(server, &opts, shutdown.as_mut()).await,
         }
     };
 
-    run_and_close(mem.clone(), transport, event_pump).await
+    let outcome = run_and_close(mem.clone(), transport, event_pump).await;
+
+    // After `close()`, deliberately: the tail's durability is the load-bearing
+    // guarantee and the ledger is not allowed to be in front of it. The
+    // heartbeat is stopped first so it cannot enqueue a line into a ledger
+    // that is draining, and `shutdown` is bounded — a writer stuck on a hung
+    // filesystem is abandoned, never allowed to hold process exit.
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.abort();
+    }
+    if let Some(ledger) = ledger {
+        ledger.shutdown();
+        tracing::info!(
+            written = ledger.counters().written(),
+            dropped = ledger.counters().dropped(),
+            path = %ledger.path().display(),
+            "lambo serve: call ledger closed"
+        );
+    }
+
+    outcome
 }
 
 /// Run the transport future, then close the session — **on every exit path**.
@@ -959,22 +1068,21 @@ async fn run_until_shutdown<T>(
 /// service, and the default signal disposition killed the process outright with
 /// the tail still in the log.
 async fn serve_stdio(
-    mem: Arc<Memory>,
+    server: LamboServer,
     mut shutdown: Pin<&mut impl Future<Output = ()>>,
 ) -> Result<(), LamboError> {
     // Race the handshake against the shutdown signal (R2-a). `shutdown.as_mut()`
     // reborrows, so the same registration is still live for the transport race
     // below if the handshake wins.
-    let service =
-        match setup_or_shutdown(LamboServer::new(mem).serve(stdio()), shutdown.as_mut()).await {
-            Some(r) => r.map_err(|e| LamboError::Config(format!("mcp stdio: {e}")))?,
-            None => {
-                tracing::info!(
+    let service = match setup_or_shutdown(server.serve(stdio()), shutdown.as_mut()).await {
+        Some(r) => r.map_err(|e| LamboError::Config(format!("mcp stdio: {e}")))?,
+        None => {
+            tracing::info!(
                 "mcp stdio: shutdown signal during handshake — closing the session without serving"
             );
-                return Ok(());
-            }
-        };
+            return Ok(());
+        }
+    };
 
     // Taken before `waiting()` consumes the service — it is the only handle
     // left once the service is inside the future.
@@ -1008,25 +1116,27 @@ async fn serve_stdio(
 /// The service factory clones an `Arc<Memory>` per request — it never builds a
 /// second [`Memory`].
 async fn serve_http(
-    mem: Arc<Memory>,
+    server: LamboServer,
     opts: &ServeOptions,
     mut shutdown: Pin<&mut impl Future<Output = ()>>,
 ) -> Result<(), LamboError> {
-    let factory_mem = mem.clone();
+    // CLONED, not rebuilt (I1): every request handler must share the one call
+    // ledger, and `LamboServer::new` per request would also rebuild the whole
+    // `ToolRouter` — every tool's JSON schema included — on every request,
+    // which is the cost `#[tool_handler(router = self.tool_router)]` exists to
+    // avoid. Cloning shares the `Arc<Memory>` exactly as before.
+    let factory_server = server.clone();
     // Held as its own `Arc` so the session cap can read the live count from the
     // same manager rmcp mutates — see [`LiveSessions`].
     let sessions = Arc::new(LocalSessionManager::default());
-    let service = StreamableHttpService::new(
-        move || Ok(LamboServer::new(factory_mem.clone())),
-        sessions.clone(),
-        {
+    let service =
+        StreamableHttpService::new(move || Ok(factory_server.clone()), sessions.clone(), {
             // `#[non_exhaustive]` — mutate the SDK default rather than
             // constructing, so a new field cannot silently break the build.
             let mut cfg = StreamableHttpServerConfig::default();
             cfg.sse_keep_alive = Some(Duration::from_secs(15));
             cfg
-        },
-    );
+        });
 
     let guard = HttpGuard {
         auth: opts.auth_token.clone(),
@@ -1157,6 +1267,146 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // I1 / I2 — ledger flags and the heartbeat timer
+    // -----------------------------------------------------------------------
+
+    /// **I1.** Both ledger knobs are off in the default options: `--ledger` is
+    /// opt-in, and nobody who did not ask for it gets a writer thread.
+    #[test]
+    fn i1_the_ledger_is_off_in_the_default_serve_options() {
+        let opts = ServeOptions::new("s", "a");
+        assert!(opts.ledger.is_none(), "no ledger path by default");
+        assert!(opts.ledger_heartbeat.is_none(), "no heartbeat by default");
+        assert!(
+            authorize_ledger(&opts).is_ok(),
+            "the default options are a legal configuration"
+        );
+    }
+
+    /// **I2.** `--ledger-heartbeat` without `--ledger` is refused at startup
+    /// with a message that names the fix, rather than accepted as a no-op that
+    /// writes heartbeats nowhere.
+    #[test]
+    fn i2_a_heartbeat_without_a_ledger_is_refused_and_says_why() {
+        let mut opts = ServeOptions::new("s", "a");
+        opts.ledger_heartbeat = Some(Duration::from_secs(60));
+        let err = authorize_ledger(&opts).expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("--ledger"), "names the missing flag: {msg}");
+        assert!(
+            msg.contains("60"),
+            "quotes the interval it was given: {msg}"
+        );
+
+        // With a path, the same interval is fine.
+        opts.ledger = Some(std::path::PathBuf::from("/tmp/nonexistent/calls.jsonl"));
+        assert!(authorize_ledger(&opts).is_ok(), "a path makes it legal");
+
+        // A ledger with no heartbeat is also fine — heartbeats are optional.
+        opts.ledger_heartbeat = None;
+        assert!(authorize_ledger(&opts).is_ok());
+    }
+
+    /// **I2 acceptance.** The heartbeat interval actually fires, repeatedly, on
+    /// the interval it was given — asserted on a paused clock so the test pins
+    /// the *period* rather than racing a wall-clock sleep.
+    // Same gate the other Memory-building tests in this module use: the store
+    // and embedder it needs are feature-gated, and a bare `#[cfg(test)]` would
+    // not compile under `--no-default-features --features store-sqlite`.
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    #[tokio::test(start_paused = true)]
+    async fn i2_the_heartbeat_fires_on_its_interval() {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-i2-hb-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("calls.jsonl");
+        let ledger = Ledger::open(&path);
+
+        let mem = Arc::new(
+            Memory::builder()
+                .session("i2-heartbeat-timer")
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .store(
+                    Arc::new(crate::store::MemoryStore::new()) as Arc<dyn crate::store::GraphStore>
+                )
+                .embedder(Arc::new(crate::embed::FixtureEmbedder::new())
+                    as Arc<dyn crate::embed::Embedder>)
+                .embedding_contract(crate::types::EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                })
+                .build()
+                .await
+                .expect("build"),
+        );
+        let server = LamboServer::with_ledger(mem.clone(), Arc::clone(&ledger));
+
+        let every = Duration::from_secs(30);
+        let task = tokio::spawn(heartbeat_loop(server, Arc::clone(&ledger), every));
+
+        // The writer is a real OS thread, so each step yields to it until the
+        // count lands rather than assuming an instant write.
+        async fn wait_for(ledger: &Ledger, want: u64) -> u64 {
+            for _ in 0..2_000 {
+                if ledger.counters().written() >= want {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            ledger.counters().written()
+        }
+
+        // The first beat is immediate — it stamps the binary's identity at the
+        // moment the session attached, so the first stretch of ledger is not
+        // left unattributed.
+        assert_eq!(wait_for(&ledger, 1).await, 1, "the first beat is immediate");
+
+        // Advancing by less than the interval must NOT produce a beat.
+        tokio::time::advance(every / 2).await;
+        assert_eq!(
+            ledger.counters().written(),
+            1,
+            "half an interval is not a beat"
+        );
+
+        // Crossing the interval produces exactly one more, twice over.
+        tokio::time::advance(every).await;
+        assert_eq!(wait_for(&ledger, 2).await, 2, "one beat per interval");
+        tokio::time::advance(every).await;
+        assert_eq!(wait_for(&ledger, 3).await, 3, "and again");
+
+        task.abort();
+        ledger.shutdown();
+
+        // Every beat is a `stats` line carrying the sha.
+        let text = std::fs::read_to_string(&path).expect("ledger file");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for line in lines {
+            let v: serde_json::Value = serde_json::from_str(line).expect("parses");
+            assert_eq!(v["kind"], serde_json::json!("stats"), "{line}");
+            assert_eq!(
+                v["git_sha"],
+                serde_json::json!(crate::ledger::GIT_SHA),
+                "an upgrade shows here as a sha change: {line}"
+            );
+            assert_eq!(
+                v["version"],
+                serde_json::json!(crate::ledger::VERSION),
+                "{line}"
+            );
+        }
+        mem.close().await.expect("close");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn transport_parses_both_and_rejects_junk() {

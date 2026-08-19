@@ -351,6 +351,10 @@ pub(crate) fn try_structural(
         hits,
         context: format::render_context(&kept),
         warnings,
+        // A dispatched structural query answers by traversal and skips the
+        // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
+        // report. Empty here means "no leg ran", not "the legs were dropped".
+        legs: Default::default(),
         detailed,
         response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })

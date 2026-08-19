@@ -86,6 +86,7 @@ pub mod embed;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
 pub mod graph;
+pub mod ledger;
 pub mod mcp;
 pub mod memory;
 pub mod recall;

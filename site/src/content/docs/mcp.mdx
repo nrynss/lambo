@@ -209,6 +209,8 @@ Report session health: flush lag, write-behind log depth, node, edge, and concep
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
 
+When the server was started with `serve --ledger`, the payload also carries `ledger_path`, `ledger_written_lines`, and `ledger_dropped_lines`. The dropped count is the one to read first: the call ledger drops lines rather than delay a tool call, so a non-zero value means any count taken from the ledger file is a lower bound. Without `--ledger` these three keys are absent and the payload is unchanged.
+
 ## How the server introduces itself
 
 When your client connects, the server names the session and tells the model how to use it. For a session called `demo`, the instructions read:

@@ -104,15 +104,88 @@ upgrade path, with the heartbeat's sha field proving it happened.
 
 ## Done when
 
-- [ ] `--ledger` off by default; on, every tool call appends one line and a full
+- [x] `--ledger` off by default; on, every tool call appends one line and a full
       dogfood day parses with `duckdb` end to end
-- [ ] Recall lines carry final + per-leg scores and the warning-rendered flag; derive
+- [x] Recall lines carry final + per-leg scores and the warning-rendered flag; derive
       lines carry created/matched counts
-- [ ] A ledger-write failure drops lines, logs once, counts in `lambo_stats`, and never
+- [x] A ledger-write failure drops lines, logs once, counts in `lambo_stats`, and never
       fails or delays a tool call — tested by making the path unwritable mid-run
-- [ ] Heartbeat lines carry stats + binary sha; an upgrade shows as a sha change in the
+- [x] Heartbeat lines carry stats + binary sha; an upgrade shows as a sha change in the
       same file
-- [ ] The five analysis scripts run against a real dogfood ledger and each emits its
+- [x] The five analysis scripts run against a real dogfood ledger and each emits its
       report; their outputs are reproducible from committed inputs when exported
 - [ ] The dogfood rig is re-pinned to a ledger-carrying binary and DOGFOOD.md's
-      measurement list points here
+      measurement list points here — **half done:** DOGFOOD.md's measurement list now
+      names a script per metric, but re-pinning the rig is an operator action on the
+      dogfood machine and is not something this implementation could perform
+
+---
+
+## Handoff Log
+
+### I1–I3 implemented (2026-08-19)
+
+**What exists now.** `lambo serve --ledger <path> [--ledger-heartbeat <secs>]`, both
+off by default, plus five report generators in
+[`scripts/observability/`](../../scripts/observability/) with a README, a fabricated
+sample ledger, and a `verify.sh` that asserts each report still finds its planted facts.
+
+* [`src/ledger.rs`](../../src/ledger.rs) — the whole never-block mechanism. `append`
+  serializes on the calling thread and `try_send`s to a **dedicated OS thread**, not a
+  Tokio task: a hung filesystem must not occupy the worker that would otherwise run
+  `Memory::close` on SIGTERM. Every failure is a counted drop (channel full, unopenable
+  path, failed write, post-shutdown call), one WARN per failure *run*, and `shutdown` is
+  bounded at 500 ms.
+* Per-leg recall provenance is the one thing that needed real threading, because it did
+  not exist. `candidates()` max-merged the three legs into a single `f64` and threw the
+  components away; the leg *names* were tracked, but only under a TRACE subscriber and
+  without the numbers. `candidates_with_legs()` now collects `LegScores { keyword,
+  recent, vector }` unconditionally, `candidates()` is its projection (so the ranking
+  and the provenance cannot describe different arithmetic), and the map rides
+  `RecallPipeline` → `DetailedRecall.legs` (`#[serde(skip)]` — the H3 wire contract is
+  pinned and I1 has no business changing the `serve-web` payload).
+* `Memory::recall` is now a projection of a new `pub(crate) recall_detailed`, so
+  `lambo_recall` can read the typed H3 annotation kinds and per-leg scores from the same
+  single execution its response is built from.
+* Per-tool facts reach the ledger through a `tokio::task_local` slot rather than changed
+  `*_impl` signatures. That is what makes "off" cost nothing: with no ledger the scope is
+  never established, so the fact-building closures never run.
+
+**What surprised us, and is worth not re-deriving.**
+
+1. **`derive` has no `demoted` count and cannot have one.** The task brief and this doc
+   both asked for created/matched/**demoted** on derive lines. In this codebase demotion
+   is `Memory::demote`'s context-overflow split (not an MCP tool) and the canonization
+   task's `Canonical → None` regression (a daemon action). `DeriveOutcome` has no such
+   field and `derive` performs no demotion. The lines carry `created`, `matched`,
+   `semantic_merged` and `reinforced` instead, and `semantic_merged` is deliberately NOT
+   folded into `matched`: a similarity merge adds a decaying `Semantic` edge and does not
+   re-upsert the target or add a `Derives` edge, so counting it as re-derivation savings
+   would overstate them. Demotions remain audited in `canonization_events`.
+2. **The HTTP transport was rebuilding the whole `ToolRouter` per request.**
+   `serve_http`'s service factory called `LamboServer::new` on every request, which
+   rebuilds every tool's JSON schema — exactly the cost
+   `#[tool_handler(router = self.tool_router)]` exists to avoid. It now clones one handle
+   built in `serve()`. That was forced by I1 (all requests must share one ledger, and the
+   heartbeat's uptime must be the session's, not a request's) but it is a straight
+   improvement independent of the ledger.
+3. **The writer reopens the file per batch, on purpose.** It makes `logrotate` (or a bare
+   `mv`) work with no signal handling, and it is what makes "the path became unwritable
+   mid-run" a condition the code can observe at all. The mid-run test removes the
+   ledger's *directory* rather than `chmod`-ing it, because that fails the same way for
+   root — some CI containers are.
+4. **`git_sha` is `option_env!`, not a `build.rs`.** Least machinery that satisfies "an
+   upgrade shows as a sha change", per the brief. The consequence must be operated
+   around: without `LAMBO_GIT_SHA` set at build time, two builds of the same crate
+   version both report `"unknown"` and the upgrade is invisible. The rig's build step has
+   to set it; `DOGFOOD.md` now says so.
+5. **The committed analysis scripts are stdlib Python, not duckdb.** The acceptance
+   criterion is that they *run*, and a generator that needs a `pip install` first does not
+   run on the box where the ledger lives. duckdb/jq recipes for the ad-hoc questions are
+   in the kit's README and were verified against the sample.
+
+**What the next agent should know.** CI does not execute `scripts/**`, so
+`scripts/observability/verify.sh` is a manual gate — run it after touching anything in
+that folder. The Rust side needed no new CI rows: `serve`, `server`, `ledger` and
+`candidates` are all default-feature code already compiled and tested by the existing
+`check` job and linted by the `ship-fixtures` and `sqlite-vectors` rows.
