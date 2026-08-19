@@ -763,6 +763,38 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 
     let mem = Arc::new(build_memory(&opts, backends).await?);
 
+    // One signal registration for the whole life of the transport, armed HERE —
+    // the first statement after the lease-taking `build_memory` returns, and
+    // before ANY of the startup work below it (`Ledger::open`, `LamboServer::new`
+    // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the event
+    // pump, and the serve-level attach log). Registration is eager (see
+    // `shutdown_signal`), so every one of those runs guarded (R2-a): a SIGTERM
+    // arriving during them is taken by this future, `Memory::close` runs, the
+    // tail reaches the store, and the single-writer lease is released.
+    //
+    // The precise property, stated where the previous comment overclaimed
+    // (I-R2-1): the guard begins the instant `build_memory` returns. It does NOT
+    // cover `build_memory` itself, so the memory-level "Memory session attached
+    // (daemon + flush + canonization running)" line — emitted from inside
+    // `build_memory`, after the lease is taken — is still followed by a residual
+    // unguarded window until this arming, exactly as it was pre-I. The
+    // serve-level "lambo serve: session attached" line below is fully guarded.
+    // The earlier wording claimed the stronger property for both lines; it was
+    // false for the memory-level one, and I moving `LamboServer::new` up from
+    // inside `serve_stdio` widened that residual window from ~6 µs to ~1.1 ms,
+    // which is the durability regression I-R2-1 records.
+    //
+    // Arming *before* `build_memory` would shrink the residual window to zero,
+    // but only by making a hung `build_memory` SIGTERM-immune (the signal is
+    // deferred, not honoured, until the build finishes). That trade — a
+    // durability hazard for an availability one — needs `build_memory` raced
+    // against the shutdown future to be a win, which is a design change and is
+    // deferred; see I-R2-1's recommendation.
+    //
+    // A fresh registration in `close_bounded` re-arms it for the close phase.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
     // every line as a drop — so nothing here can stop a memory server from
     // serving memory. ONE server handle for the whole process (the HTTP factory
@@ -805,14 +837,6 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // filling and lagging the daemon.
     let events = mem.events();
     let event_pump = tokio::spawn(log_events(events));
-
-    // One signal registration for the whole life of the transport — armed
-    // BEFORE the attach log below, and registration is eager (see
-    // `shutdown_signal`), so from the moment "session attached" is visible a
-    // signal can no longer hit the default disposition (R2-a). A fresh
-    // registration in `close_bounded` re-arms it for the close phase.
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
 
     tracing::info!(
         session = %opts.session,
@@ -1243,7 +1267,11 @@ async fn serve_http_bounded(
 /// (R2-a; observed as a CI-only failure of the pre-handshake durability test
 /// on a loaded runner). `tokio::signal::unix::signal()` registers with the
 /// runtime immediately and buffers a signal that arrives before `recv()` is
-/// polled, so calling this before the attach log closes the window for good.
+/// polled, so calling this before the attach log closes that window. Eagerness
+/// only makes the arming *point* effective; it does not move it. Everything
+/// before the call site in [`serve`] — `build_memory`, which takes the lease —
+/// is still unguarded, which is why the call site sits as early as it does
+/// (I-R2-1).
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {

@@ -822,6 +822,16 @@ impl LamboServer {
                 "ledger_dropped_write_failed".into(),
                 json!(ledger.counters().dropped_write_failed()),
             );
+            // I-R2-3. Queue depth, because the drop counters have a blind spot
+            // about themselves: on a path whose `open` blocks (reader-less FIFO,
+            // hung mount) the writer parks before its first write, so `written`
+            // and both drop counters read `0` — indistinguishable from an idle
+            // server — until CHANNEL_CAPACITY lines have piled up. This key moves
+            // on the first call, so "writer parked" is visible immediately.
+            obj.insert(
+                "ledger_queued_lines".into(),
+                json!(ledger.counters().queued()),
+            );
         }
         payload
     }

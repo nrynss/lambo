@@ -30,7 +30,7 @@
 //! | --- | --- |
 //! | channel full (writer behind) | drop the line, `dropped_channel_full += 1` |
 //! | path **cannot** be opened (`ENOENT`, `ENOTDIR`, `EACCES`) | one WARN from the writer thread, every batch drops, serve serves |
-//! | path's `open` **blocks** (a FIFO with no reader, a hung mount) | the writer thread parks; serve starts, serves, and shuts down normally; lines drop as channel-full |
+//! | path's `open` **blocks** (a FIFO with no reader, a hung mount) | the writer thread parks; serve starts, serves, and shuts down normally. Lines **queue** (visible immediately as `ledger_queued_lines`, `written` and both drop counters still `0`); once the queue fills they drop as channel-full; any still queued at shutdown are counted as `dropped_write_failed` by the abandoned-lines path |
 //! | path unwritable mid-run | one WARN, `dropped_write_failed += batch`, keep dropping |
 //! | shutdown drain exceeds [`SHUTDOWN_DRAIN`] | give up waiting, log, count the abandoned lines as `dropped_write_failed`, exit |
 //!
@@ -43,7 +43,10 @@
 //!
 //! There are **no silent caps**: both drop counters are reported next to
 //! `written`, so silence in the file is always distinguishable from silence in
-//! the traffic.
+//! the traffic. A *queue* is not a drop, so it needs its own field — a parked
+//! writer has dropped nothing yet, and reporting only drops made it look
+//! identical to an idle one until the queue filled. [`LedgerCounters::queued`]
+//! (`ledger_queued_lines`) closes that blind spot (I-R2-3).
 //!
 //! **2. The ledger is not the store.** No replay semantics, nothing on the serve
 //! path ever *reads* it, and the only schema promise is "one JSON object per
@@ -139,9 +142,14 @@ pub struct LedgerCounters {
     write_failed: AtomicU64,
     /// Lines the channel accepted — written, still in flight, or abandoned.
     ///
-    /// Not reported. It exists so [`Ledger::shutdown`] can count the lines an
-    /// abandoned writer was still holding (`accepted - written - write_failed`)
-    /// instead of losing them silently.
+    /// Not reported directly, but [`LedgerCounters::queued`] derives
+    /// `lambo_stats`'s `ledger_queued_lines` from it, and [`Ledger::shutdown`]
+    /// uses the same arithmetic to count the lines an abandoned writer was still
+    /// holding instead of losing them silently.
+    ///
+    /// Note what this does **not** count: a `channel_full` drop was rejected by
+    /// `try_send` and never accepted, so it never appears here. That is why both
+    /// derivations subtract `write_failed` rather than the `dropped` total.
     accepted: AtomicU64,
 }
 
@@ -178,6 +186,32 @@ impl LedgerCounters {
     /// so "is this ledger complete?" stays one field; the split answers "why".
     pub fn dropped(&self) -> u64 {
         self.dropped_channel_full() + self.dropped_write_failed()
+    }
+
+    /// Lines accepted but not yet on disk — the writer's queue depth.
+    ///
+    /// `lambo_stats`'s `ledger_queued_lines`, and the answer to a blind spot
+    /// (I-R2-3): on a path whose `open` blocks — a reader-less FIFO, a hung mount
+    /// — the writer parks *before its first write*, so `written`, and both drop
+    /// counters, stay `0` until [`CHANNEL_CAPACITY`] lines have piled up. An
+    /// operator watching the other keys reads that as "no traffic" when it is
+    /// really "writer parked". This one moves on the very first call.
+    ///
+    /// Bounded by [`CHANNEL_CAPACITY`] plus one in-flight batch. Subtracts
+    /// `write_failed` and **not** `dropped`, for the reason on
+    /// [`LedgerCounters::accepted`]: a `channel_full` drop was never accepted, so
+    /// subtracting it would understate the depth by exactly the backpressure
+    /// count — and would drive this key back to `0` in the stalled-and-full case
+    /// it exists to make visible.
+    ///
+    /// A gauge sampled from relaxed loads, so it can be momentarily inconsistent
+    /// with its parts under concurrency; `saturating_sub` keeps it at worst `0`
+    /// rather than wrapping.
+    pub fn queued(&self) -> u64 {
+        self.accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.written())
+            .saturating_sub(self.dropped_write_failed())
     }
 }
 
@@ -710,6 +744,21 @@ mod tests {
             "append must not block on a full channel; {burst} appends took {elapsed:?}"
         );
 
+        // I-R2-3: the queue depth is visible while the writer is parked, and it
+        // does NOT collapse just because backpressure is also being counted.
+        // `accepted - written - write_failed` = the batch in the sink plus the
+        // full channel; subtracting the `dropped` total instead would understate
+        // it by exactly `overflow`.
+        assert_eq!(
+            ledger.counters().queued(),
+            1 + CHANNEL_CAPACITY as u64,
+            "a parked writer's queue depth is the in-flight batch plus the full \
+             channel; written={} channel_full={} write_failed={}",
+            ledger.counters().written(),
+            ledger.counters().dropped_channel_full(),
+            ledger.counters().dropped_write_failed()
+        );
+
         // Release and let it drain, so the shutdown path is the normal one.
         {
             let (lock, cv) = &*released;
@@ -723,6 +772,7 @@ mod tests {
             "the accepted lines land once the writer is released: written={} of {want}",
             ledger.counters().written()
         );
+        assert_eq!(ledger.counters().queued(), 0, "a drained queue reads zero");
         ledger.shutdown();
         assert_eq!(
             ledger.counters().dropped(),
@@ -736,9 +786,14 @@ mod tests {
     ///
     /// A FIFO with no reader is the cheapest real path whose `open(2)` blocks
     /// forever, and it stands in for the hung mount that motivates the rule:
-    /// `serve` calls `Ledger::open` after the single-writer lease is taken and
-    /// before the SIGTERM handler is armed, so an `open` on that path would hold
-    /// the lease in a process that never serves and dies without flushing.
+    /// `serve` calls `Ledger::open` after the single-writer lease is taken, so an
+    /// `open` on that path would hold the lease in a process that never serves.
+    ///
+    /// Since I-R2-1 the SIGTERM handler is armed *before* this call, so such a
+    /// process would at least still die flushing. The rule stands on its own
+    /// anyway: a `serve` that hangs before it serves is a failure whether or not
+    /// its eventual death is graceful, and the guarantee here is that
+    /// `Ledger::open` performs no I/O at all.
     ///
     /// Guarded by a timeout rather than asserted structurally, and skipped
     /// rather than failed where `mkfifo` does not exist.

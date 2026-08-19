@@ -232,7 +232,7 @@ duckdb -c "SELECT ts, agent_id, duration_us, hit_count, query
 # Graph growth over the heartbeats, with the drop split.
 duckdb -c "SELECT ts, stats.node_count, stats.canonical_count, stats.flush_lag_ms,
                   stats.ledger_dropped_lines, stats.ledger_dropped_channel_full,
-                  stats.ledger_dropped_write_failed
+                  stats.ledger_dropped_write_failed, stats.ledger_queued_lines
            FROM read_json_auto('calls.jsonl') WHERE kind = 'stats' ORDER BY ts"
 
 # Per-leg scores, flattened one row per hit — the join score_bands.py automates.
@@ -296,7 +296,8 @@ lambo_stats         (no extra facts — the numbers are in the heartbeat)
 {"v":1,"ts":"…","kind":"stats","uptime_secs":900,"version":"0.2.2",
  "git_sha":"abc1234","stats":{ …the lambo_stats payload, including
  ledger_path, ledger_written_lines, ledger_dropped_lines,
- ledger_dropped_channel_full, ledger_dropped_write_failed }}
+ ledger_dropped_channel_full, ledger_dropped_write_failed,
+ ledger_queued_lines }}
 ```
 
 **The five set-level flags on a recall line are not computed alike.**
@@ -315,6 +316,16 @@ failed, a batch abandoned when the 500 ms shutdown budget expired, or an append
 after shutdown. The first says "the filesystem is slow"; the second says "the path
 is wrong". The total is their sum, so an old consumer reading only
 `ledger_dropped_lines` is unaffected.
+
+**`ledger_queued_lines` is not a drop — it is the writer's queue depth**
+(accepted, not yet on disk). It exists because the drop counters have a blind
+spot about themselves (I-R2-3): on a path whose `open` blocks — a reader-less
+FIFO, a hung mount — the writer parks *before its first write*, so `written` and
+both drop counters read `0`, which is indistinguishable from an idle server until
+1024 lines have piled up. This key moves on the first call. A heartbeat with
+`written` flat and `queued` climbing is a parked writer; both flat is genuinely
+no traffic. It is derived as `accepted - written - write_failed`, so a
+`channel_full` drop — which the channel never accepted — does not deflate it.
 
 `legs` is the field the ledger exists for. Recall's phase-1 merge folds the three
 legs by `max`, so a merged score is lossy: a `0.35` is either the recency floor

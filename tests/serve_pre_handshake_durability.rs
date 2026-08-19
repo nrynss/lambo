@@ -15,9 +15,14 @@
 //! that unwiring the serve-level arming (back to a bare `.serve(stdio()).await`)
 //! reproduces the *exact* old bug — process killed by the signal, session row
 //! `durable=0` — while every other test stays green. This test closes that hole:
-//! it drives the shipped binary, waits for the "session attached" stderr line,
+//! it drives the shipped binary, waits for a "session attached" stderr line,
 //! sends `SIGTERM` **before** any JSON-RPC, and asserts the process exits `0` and
 //! the session row is durable in the reopened store.
+//!
+//! "A" line, not "the": two stderr lines contain that substring, and the wait
+//! deliberately fires on the earlier memory-level one so the signal lands in the
+//! window that opens at lease acquisition. See the comment at the matcher
+//! (I-R2-2) — the looseness is load-bearing and must not be tightened.
 //!
 //! SQLite (not MemoryStore) is deliberate, and the test is gated on
 //! `store-sqlite` exactly like its sibling: durability across a process boundary
@@ -133,6 +138,22 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     let mut attached = false;
     while std::time::Instant::now() < deadline {
         match erx.recv_timeout(Duration::from_secs(20)) {
+            // This matcher is LOOSE ON PURPOSE — do not tighten it (I-R2-2).
+            // Two stderr lines contain "session attached": the memory-level
+            // "Memory session attached (daemon + flush + canonization running)",
+            // emitted from inside `build_memory` right after the single-writer
+            // lease is taken, and the later serve-level "lambo serve: session
+            // attached". Substring-matching fires on the FIRST, so the SIGTERM
+            // lands in the wider window that starts at lease acquisition rather
+            // than the narrow one after the arming — which is precisely how
+            // I-R2-1 was caught: I had moved `LamboServer::new` above the
+            // shutdown arming, and this test went red in CI because it was
+            // probing the real window instead of the intended one.
+            //
+            // Anchoring on the serve-level line would green CI while leaving the
+            // product hole open. The looseness IS the coverage: it tests the
+            // property the invariant comment in `serve()` claims, not the
+            // property the test author had in mind.
             Ok(line) if line.contains("session attached") => {
                 attached = true;
                 break;

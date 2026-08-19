@@ -169,6 +169,11 @@ def heartbeat(
     backpressure (the writer behind) rather than a failed write. The serve emits
     all three keys, so the sample carries all three — and they add up, because
     `ledger_dropped_lines` is defined as the sum.
+
+    `ledger_queued_lines` is the writer's queue depth (I-R2-3), zero throughout
+    this sample: a healthy writer keeps nothing queued between heartbeats. It is
+    carried anyway because the serve emits it whenever the ledger is on, and this
+    generator's job is to match that payload key-for-key.
     """
     return {
         "v": V,
@@ -198,6 +203,7 @@ def heartbeat(
             "ledger_dropped_lines": dropped,
             "ledger_dropped_channel_full": channel_full,
             "ledger_dropped_write_failed": dropped - channel_full,
+            "ledger_queued_lines": 0,
         },
     }
 
