@@ -34,6 +34,7 @@ has (D).
 | [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
 | [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
 | [F — SQLite vectors](F-sqlite-vectors.md) | issue #5, the query path, the fail-closed capability trap |
+| [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run |
 
 E (consumption from Mooshik) stays in this file — it is two lines of manifest, not a workstream.
 
@@ -50,6 +51,7 @@ B1 ─→ B2 ─→ B3
 D1 ─→ D2 ─→ C2
 C1 ─────────↗
 F1 ─→ F2
+F2 ─→ G1 ─→ G2
 (A4, B4, F2) ─→ E1 ─→ E2
 ```
 
@@ -59,6 +61,12 @@ separation that a bulk ingest does not have.
 
 F is independent of B but shares its "width comes from config" decision, so the two should be
 designed together even though they can be built apart.
+
+G was not in the original four: it is the first finding out of F's real-embedder evidence
+run (a correct cosine ranking erased by recall's flat `RECENT_SCORE` floor, plus the same
+fixture-calibrated geometry behind `semantic_match_threshold`). It needs F's vector leg to
+measure against, hence F2 → G1. C2 consumes recall behaviour, so whichever of C2 and G2
+lands second re-checks the other.
 
 ---
 
