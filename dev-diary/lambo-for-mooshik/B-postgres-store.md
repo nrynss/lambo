@@ -1,81 +1,171 @@
-# B — Postgres store (`store-postgres`)
+# B — Postgres-family store (`pg` base, `postgres` + `cockroach` dialects)
 
-**Goal:** the unified cross-machine store of spec §3.3, on real PostgreSQL with pgvector.
+**Goal:** the unified cross-machine store of spec §3.3, on real PostgreSQL with pgvector —
+built as a shared Postgres-wire-protocol family, not as a fork of the Cockroach adapter.
 
-**The lie to remove:** `StoreKind::from_str` (`src/store/mod.rs:436`) maps `"postgres"` and
+**The lie to remove:** `StoreKind::from_str` (`src/store/mod.rs`) maps `"postgres"` and
 `"pg"` onto `Cockroach`. The Cockroach adapter emits `VECTOR(1024)`, `CREATE VECTOR INDEX` and
 `::STRING` casts that PostgreSQL does not have, so that alias has never meant what it says.
 
-**No new dependency.** `store-cockroach` is already `["dep:sqlx", "sqlx/postgres"]` — sqlx's
-Postgres driver compiles in today. This is a dialect split, not a second 4,900-line adapter.
+**No new dependency.** `store-cockroach` is already `["dep:sqlx", "sqlx/postgres"]` — both
+databases speak the Postgres wire protocol through the *same* sqlx driver, same pool, same row
+types. That is what makes a shared base cheap: it is not generic over drivers, only over dialect.
 
 ---
 
-## B1 — `StoreKind::Postgres`
+## Design decision, recorded (2026-08-19)
 
-New variant, feature `store-postgres`, and remap the aliases so `"postgres"` / `"pg"` stop
-resolving to Cockroach.
+The original plan was copy-then-edit: fork the 4,900-line Cockroach adapter and change the
+narrow dialect surface. **Rejected**, for three reasons:
 
-**This is a behaviour change, not an addition.** Two tests assert the current mapping
-(`src/store/mod.rs:636` and `:658`), and any deployment configured `kind = "postgres"` against a
-CockroachDB cluster changes meaning silently on upgrade.
+1. **It makes Postgres a second-class citizen.** Every future SQL fix must be applied twice or
+   drifts; F-R2-2 demonstrated how reliably "apply it everywhere" fails even for one struct
+   field. And since B's CI gives Postgres a service container that runs on every push while
+   `cockroach-live` needs secrets, the fork would soon be the better-tested copy while the
+   original rots — the worst of both.
+2. **The Cockroach code is battle-hardened** (it carried the hackathon and its reviews).
+   Extraction transfers that pedigree to the whole family; forking walks away from it.
+3. **Future wire-compatible stores** (Yugabyte, Neon, AlloyDB, Timescale) become a dialect file
+   each, not a copy each.
 
-Decide and write down: do `"cockroach"` and `"crdb"` become the only Cockroach spellings? The
-answer belongs in the variant's doc comment, because the next person to read
-`"postgres" | "pg" => Cockroach` in git history will assume it was a bug rather than a decision.
+**The shape — extract, then extend:**
 
-Update the three "expected memory | cockroach | sqlite" error strings.
+```
+src/store/pg/
+  mod.rs        PgStore<D: Dialect> — implements GraphStore once; all shared machinery:
+                upserts, fencing/lease, flush planning, session load, structural queries,
+                quarantine, transaction discipline
+  dialect.rs    the Dialect trait (compile-time, monomorphized; no dynamic dispatch)
+  cockroach.rs  CockroachDialect + the existing include_str! DDL and width-from-DDL authority
+  postgres.rs   PostgresDialect + width-templated DDL, hnsw from init
+```
 
-**Depends on:** nothing.
+Naming: `pg` is the **family** (module, `PgStore`); `postgres` and `cockroach` are the
+**implementations** (dialect files, config kinds, `StoreKind` variants). One collision to kill
+in the module doc: the config alias `"pg"` means the PostgreSQL *implementation*; the module
+`pg/` means the *family* — PostgreSQL, CockroachDB, and future wire-compatible stores.
 
----
-
-## B2 — Migration with templated width
-
-`migrations/postgres/001_init.sql`, pgvector, `VECTOR(n)` width from config.
-
-**The Cockroach pattern cannot be copied.** Cockroach's DDL is `include_str!`'d as a static and
-`schema_vector_dim` (`src/store/cockroach.rs:868`) parses the width back *out* of that string —
-the schema file is the authority and the code reads it. A configurable width has to be substituted
-*into* the SQL before execution, which inverts the direction the data flows.
-
-This is the only genuine design work in B. Two shapes to choose between:
-
-1. **Template at init.** Keep one `001_init.sql` with a placeholder, substitute from config in
-   `init_schema`. Simple; means the file on disk is no longer valid SQL, which breaks reading it
-   as documentation and any tooling that lints migrations.
-2. **Generate the DDL in code.** The width is a parameter, the SQL is built in Rust. Honest about
-   what is happening; loses the "the schema file is the contract" property the Cockroach adapter
-   deliberately has.
-
-Whichever is chosen, `vector_dimensions()` must still have a single authority (B4), and the
-choice should be recorded here rather than inferred from the code later.
-
-**Depends on:** B1.
+**The over-merging trap, named so it is not walked into:** a function moves into `PgStore`
+only when its SQL is **byte-identical** for both dialects. If it differs by one cast, it stays
+in the dialect, even if a `bool` parameter could force it into one body — a base full of
+`if cockroach` branches recreates the drift problem inside the shared code, where it is harder
+to see. Two dialects is the right number to extract from: the shared subset is *discovered* by
+diffing two real implementations, not speculated from one.
 
 ---
 
-## B3 — Dialect split
+## B0 — Extraction
 
-The Cockroach-specific surface is narrow. Each item is a place the two dialects diverge:
+Move-only, then carve:
 
-| Cockroach | PostgreSQL + pgvector |
+1. **Move-only commit.** `store/cockroach.rs` → `store/pg/` with zero behaviour change,
+   provably: the no-default cockroach test suite, the conformance gate, and clippy all pass
+   untouched. No `Dialect` trait yet.
+2. **Carve commits.** Introduce `Dialect`; replace one inline Cockroach-ism per commit with a
+   dialect call; suite green at every step. The live `#[ignore]`d tests re-run on a DSN-bearing
+   machine at the end of the carve (machines exist; not a blocker).
+
+**H1 is the behavioural lock for this refactor** — the cross-store parity harness
+([H](H-cross-store-parity.md)) pins recall behaviour before the carve starts, in addition to
+the existing conformance suite. Soft edge: H1 → B0.
+
+**Depends on:** nothing hard; H1 soft.
+
+---
+
+## B1 — `StoreKind::Postgres` and the alias split
+
+New variant, feature `store-postgres`, and the clean separation:
+
+| Config string | Resolves to |
 | --- | --- |
-| `INIT_SQL` with `CREATE VECTOR INDEX` | pgvector index (choose ivfflat or hnsw, and say why) |
-| `::VECTOR` casts | pgvector's own cast |
-| `::STRING` casts | `::TEXT` |
-| `<->` is L2, score `1 - d²/2` | `<=>` is cosine distance, score `1 - d` |
-| `VECTOR(n)` DDL width parse | B2's authority |
+| `"postgres"`, `"pg"` | `PgStore<PostgresDialect>` |
+| `"cockroach"`, `"crdb"` | `PgStore<CockroachDialect>` |
 
-**The distance operator is the dangerous one.** Getting it wrong does not fail — it ranks wrongly,
-quietly, and looks like a model quality problem. The Cockroach adapter L2-normalizes before
-storing precisely so `<->` rankings stay coherent with cosine; carry that reasoning across rather
-than the formula alone.
+No string maps across the boundary in either direction.
 
-Preserve, unchanged, everything the trait requires of any adapter: the fencing token on `flush`
-(a write below the session lease's `current_token` must be refused with `StaleWrite`, never
-dropped), idempotent upsert semantics on every mutation kind so a replayed batch converges, and
-the documented `created_at` divergence.
+**This is a behaviour change, not an addition.** Two tests assert the current mapping, and any
+deployment configured `kind = "postgres"` against a CockroachDB cluster changes meaning on
+upgrade. It is safe because it fails **loud, not wrong**: the Postgres dialect's
+`CREATE EXTENSION vector` and `<=>` operator do not exist on Cockroach, so the misconfiguration
+dies at provision or first vector query with a clear error — it can never silently mis-rank.
+Record the decision in the variant's doc comment (the next person reading
+`"postgres" | "pg" => Cockroach` in git history must see a choice, not a bug), update the two
+tests deliberately, update the three "expected memory | cockroach | sqlite" error strings, and
+note the break in the 0.3.0 changelog.
+
+**Depends on:** B0 (the variant constructs a dialect that must exist).
+
+---
+
+## B2 — PostgresDialect DDL: templated width, hnsw from init
+
+`PostgresDialect::init_sql(dim)`: pgvector schema at a width taken from config, **with the
+hnsw index created in the same init** — decided 2026-08-19:
+
+- **hnsw from day one, no later migration event.** Behavioural stability outranks early
+  exactness: the system a user starts with is the system they keep. Introducing approximation
+  later via migration — onto a store that by then holds important data — is the worse failure
+  mode; if hnsw disappoints, that is discovered early, on unimportant data. Consequence for
+  parity: the Postgres leg of H is **envelope-based from day one** (hnsw is approximate), with
+  a **forced-exact lane** (`SET LOCAL enable_indexscan = off`) so adapter skew is still
+  detected exactly — approximation must come from the index, never from the dialect's SQL.
+- **ivfflat rejected**, recorded so it is not relitigated: ivfflat clusters at index-build
+  time and wants a populated table; Lambo's tables start empty and grow incrementally, so
+  ivfflat centroids would be built on nothing and recall would quietly degrade as the data
+  distribution drifts. hnsw builds incrementally and does not care when the data arrived.
+- **The hnsw dimension ceiling is a real trap:** pgvector's hnsw index supports at most
+  **2000 dimensions** on the `vector` type. 768 and 1536 pass; **Gemini's 3072 does not** —
+  and A's dim guard explicitly allows 3072. The dialect must handle this **at init, loudly**:
+  either refuse dim > 2000 naming the ceiling and the `halfvec` escape hatch, or implement the
+  `halfvec` path. Decide at implementation and record here; never let index creation be the
+  thing that discovers it.
+- Index parameters: pgvector defaults (`m=16`, `ef_construction=64`, `ef_search=40`). No
+  config knobs until a workload demands them.
+
+**The Cockroach pattern cannot be copied for the width.** Cockroach's DDL is `include_str!`'d
+and `schema_vector_dim` parses the width back *out* — the schema file is the authority. A
+configurable width must be substituted *into* the SQL, inverting the data flow. Two shapes,
+now scoped to `PostgresDialect::init_sql` alone (Cockroach's dialect keeps its static file and
+parse-out authority):
+
+1. **Template at init** — one `001_init.sql` with a placeholder, substituted in `init_schema`.
+   Simple; the file on disk is no longer valid SQL.
+2. **Generate the DDL in code** — width is a parameter, SQL built in Rust. Honest; loses the
+   "schema file is the contract" property.
+
+Whichever is chosen, `vector_dimensions()` keeps a single authority (B4), and the choice gets
+recorded here.
+
+**Depends on:** B0, B1.
+
+---
+
+## B3 — The dialect surface
+
+Exactly this table lives in the `Dialect` trait; everything else is shared:
+
+| Dialect method | Cockroach | PostgreSQL + pgvector |
+| --- | --- | --- |
+| `init_sql(dim)` | static `include_str!`, dim asserted against parse | templated width + hnsw index (B2) |
+| `string_cast` | `::STRING` | `::TEXT` |
+| vector cast | `::VECTOR` | pgvector's own cast |
+| `distance_op` / `distance_to_score` | `<->` is L2, score `1 − d²/2` | `<=>` is cosine distance, score `1 − d` |
+| width authority | `VECTOR(n)` DDL parse | B2's config authority |
+
+**The distance conversion is the dangerous one.** Getting it wrong does not fail — it ranks
+wrongly, quietly, and looks like a model quality problem. The unit-norm `Embedder::embed`
+output contract (documented under F) is what makes `1 − d²/2 ≡ cosine` hold; carry the
+reasoning across, not just the formula. **H3 is this row's verification**: the H harness's
+score-agreement measure catches a fumbled conversion as systematic score skew at zero
+candidate divergence — B3's parity box *is* H3, not a re-specified ad-hoc check.
+
+Preserve, unchanged and shared in `PgStore`: the fencing token on `flush` (a write below the
+session lease's `current_token` refused with `StaleWrite`, never dropped), idempotent upsert
+semantics so a replayed batch converges, the documented `created_at` divergence, and the
+NULL-only quarantine predicate — both dialects have DDL width enforcement, so SQLite's
+stronger restamp-quarantine reasoning does not apply here; that stays written down rather than
+silently inherited.
 
 **Depends on:** B2.
 
@@ -83,10 +173,9 @@ the documented `created_at` divergence.
 
 ## B4 — `vector_dimensions()` from config
 
-Report the configured width so `check_vector_compatibility` still has an authority to check
-against. `check_vector_search_contract` (`src/resolve.rs:63`) additionally refuses a store that
-claims `VECTOR_SEARCH` without a concrete width, or reports a width without the capability — the
-two halves are one contract.
+Report the configured width so `check_vector_search_contract` has its capability/width pairing
+(a store must not claim `VECTOR_SEARCH` without a concrete width, nor report a width without
+the capability).
 
 > **The config key now exists — consume it, do not re-decide the authority.**
 > Added under **F remediation** (finding F-R1-2, orchestrator-approved 2026-08-19):
@@ -116,8 +205,7 @@ two halves are one contract.
 > kind-agnostic pin check still fires. So B4's job is to report the schema number and leave the pin's
 > *reporting* role to the width-agnostic adapters, without assuming the pin is inert on a
 > DDL-carrying store. What B4 should still add is the check the DDL makes possible and SQLite cannot
-> have:
-> that the *initialized* schema width matches config, verified against the live database rather
+> have: that the *initialized* schema width matches config, verified against the live database rather
 > than echoed from the same config value.
 
 **Depends on:** B2.
@@ -126,11 +214,18 @@ two halves are one contract.
 
 ## Done when
 
-- [ ] `kind = "postgres"` reaches a real Postgres, and `"cockroach"` still reaches Cockroach
-- [ ] Schema initializes at a width taken from config, at more than one width
-- [ ] Ranking parity with Cockroach on the same seeded graph, with `<=>` scoring verified rather
-      than assumed
-- [ ] Fencing-token refusal and flush-replay idempotency both proven on the new adapter
+- [ ] B0: Cockroach behaviour byte-identical after extraction — no-default suite, conformance
+      gate, and clippy unchanged across the move-only commit; live `#[ignore]`d tests re-run
+      green on a DSN-bearing machine after the carve
+- [ ] `kind = "postgres"` reaches a real Postgres, `"cockroach"` still reaches Cockroach, and
+      the cross-misconfiguration fails loud at provision or first vector query
+- [ ] Schema initializes at a width taken from config, at more than one width, **with the hnsw
+      index present from init** and a dim > 2000 handled loudly per B2's recorded decision
+- [ ] An `EXPLAIN` capture proves the hnsw index is actually used by the recall query (the
+      camera-proof analogue Cockroach has)
+- [ ] Parity via **H3**: forced-exact lane shows zero adapter skew; hnsw lane's divergence
+      stated as a measured envelope
+- [ ] Fencing-token refusal and flush-replay idempotency both proven on the new dialect
 - [ ] `store-postgres` matrix row, plus a `postgres-live` job using a **service container**
-      (`pgvector/pgvector`) rather than a provisioned cluster: no secret, no cost, and it runs on
-      every push instead of being a tier someone remembers to check
+      (`pgvector/pgvector`) rather than a provisioned cluster: no secret, no cost, and it runs
+      on every push instead of being a tier someone remembers to check

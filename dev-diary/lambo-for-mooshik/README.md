@@ -30,7 +30,7 @@ has (D).
 | Doc | Covers |
 | --- | --- |
 | [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard |
-| [B — Postgres store](B-postgres-store.md) | `store-postgres`, the alias remap, templated width, the dialect split |
+| [B — Postgres-family store](B-postgres-store.md) | `pg` base extracted from the Cockroach adapter, `postgres` + `cockroach` as dialects; clean alias split, templated width, hnsw from init. Redesigned 2026-08-19 from copy-then-edit to extract-then-extend |
 | [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
 | [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
 | [F — SQLite vectors](F-sqlite-vectors.md) | issue #5, the query path, the fail-closed capability trap |
@@ -47,8 +47,9 @@ E (consumption from Mooshik) stays in this file — it is two lines of manifest,
 T0 ─→ everything
 
 A1 ─→ A2 ─→ A3 ─→ A4
-B1 ─→ B2 ─→ B3
-      B2 ─→ B4
+B0 ─→ B1 ─→ B2 ─→ B3
+            B2 ─→ B4
+H1 ⇢ B0               (soft: the parity harness is the extraction's behavioural lock)
 D1 ─→ D2 ─→ C2
 C1 ─────────↗
 F1 ─→ F2
@@ -98,7 +99,7 @@ new embedder, B is a dialect split, C and D are canonization, F is SQLite.
 | --- | --- |
 | `check` (fmt, clippy, `cargo test --all --features fixtures`) | The default path. Touches no adapter and catches every contract regression in C and D. |
 | `sqlite`, `sqlite-minimal` | F changes SQLite directly. These are the rows most likely to catch a real regression this month. |
-| `cockroach` matrix row | Hits **no database** — live tests are `#[ignore]`d. It is the compile-and-unit guard on the adapter B3 forks from, under `-D warnings`. Deleting it would let the reference implementation rot while we copy it. |
+| `cockroach` matrix row | Hits **no database** — live tests are `#[ignore]`d. It is the compile-and-unit guard on the adapter B0 extracts the `pg` family base from, under `-D warnings`. Deleting it would let the code rot while we extract it. |
 | `minimal`, `demo` | Cheap `cargo check` rows guarding feature-combination breakage, which B1's new `StoreKind` variant can cause. |
 
 ### What each workstream adds back

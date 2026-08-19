@@ -35,8 +35,11 @@ For a seeded graph and probe set, per adapter pair:
 Divergence is then attributed: exact-scan adapters (SQLite, memory oracle) must agree
 **exactly** — any diff is adapter skew, a bug. ANN adapters (Cockroach) may diverge within
 a stated envelope — C-SPANN's published figure is 0.99 recall@50 at beam 64; the harness
-turns that from citation into measurement on our schema. pgvector's envelope depends on
-the index B3 chooses (ivfflat/hnsw) and becomes part of B3's record.
+turns that from citation into measurement on our schema. Postgres carries hnsw **from
+init** (decided 2026-08-19, see B2), so its lane is envelope-based from day one — plus a
+**forced-exact lane** (`SET LOCAL enable_indexscan = off`) that detects adapter skew
+exactly: approximation must come from the index, never from the dialect's SQL. The report
+records per run whether an index was present.
 
 ---
 
