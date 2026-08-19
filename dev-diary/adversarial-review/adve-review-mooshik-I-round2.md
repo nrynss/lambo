@@ -1,0 +1,128 @@
+# Adversarial review — lambo-for-mooshik workstream I, round 2
+
+- **Reviewer:** `i_review_r2` (independent; source read-only apart from five declared verification-only flips, all reverted and reported below; nothing committed. Tree clean at `49a9b09` at close, `git diff --check 71a87c4..49a9b09` clean.)
+- **Scope:** remediation commit `49a9b09` ("fix(serve): I round-1 remediation — all 12 findings") against its parent `71a87c4`. 22 files, +1435/−195. Authorities: `dev-diary/adversarial-review/adve-review-mooshik-I-round1.md` (the twelve findings and their required remediations are the checklist; its "Re-review must verify" list is the minimum bar), `dev-diary/lambo-for-mooshik/I-observability.md`, `DOGFOOD.md` / `DOGFOOD-SETUP.md`, and the binding constraint from project memory ("the serve call ledger must never take down memory … off by default; it is not the store").
+- **Verdict:** **REQUEST_CHANGES** — blocking **I-R2-1**. All twelve round-1 findings are verified remediated at the artifact, no new P2, and the gate suite is green with every number in the commit message exact. What blocks is new evidence that arrived mid-review and that I have now confirmed, reproduced and quantified: a durability regression this workstream introduced, currently failing CI on the commit under review.
+
+The remediation is the best-quality one I have reviewed on this branch. Every one of the twelve findings was fixed at the artifact rather than at the comment, and the four that needed code were fixed at the mechanism rather than the symptom. I re-ran round 1's own probes and they now produce round 1's demanded answers, at the real binary: `--ledger <reader-less FIFO>` starts, handshakes in 0.01 s, serves, and on SIGTERM logs `session closed, tail durable` **before** the ledger close, exit 0; the `max_tokens: 1` recall of a Canonical concept reports `canonical_marker: false` while `blast_radius_warning: true` **and** the `⚑` line is genuinely in the text the agent received; a 15.4 KiB query lands as a 2 836-byte ledger line instead of round 1's 15 752; `reserve`'s empty-`agent_id` exit now carries `op=reserve granted=false`; both ledger configuration errors exit 1; the ledger-off `lambo_stats` payload is still exactly the 17 keys with zero `ledger_`-prefixed fields, independently confirmed by driving two real sessions and diffing the key sets. Six self-reported deviations are all real, all stated, and all reasonable.
+
+The blocker is not a regression in the remediation. It is a hole the remediation did not know about and did not close: the I implementation moved `LamboServer::new` — the whole `ToolRouter`/JSON-schema build — from inside `serve_stdio` (after the shutdown signal is armed) up into `serve()` **before** it, widening the unguarded pre-handshake window from ~6 µs to ~1 130 µs on my machine. A SIGTERM in that window kills the process by the default disposition with the single-writer lease held and the write-behind tail unflushed. That is the same failure class as I-R1-3, reached through ordering rather than a blocking `open`, on the default path with no flag required — and CI is red on it.
+
+## Method
+
+Read the full diff hunk by hunk, then re-ran each round-1 probe against the artifact rather than against the remediation's description of it. Built the binary (`--features store-sqlite,fixtures`), provisioned a real SQLite store, and drove five real MCP stdio sessions: the FIFO startup repro with heartbeats and a clean SIGTERM; a probe for the canonical-marker/query-truncation/`reserve`-early-exit trio; two `lambo_stats` sessions (ledger on, ledger off) whose `structuredContent` key sets I diffed independently of the committed test; and a 31-call session against a blocking-open path to check the new failure table's drop classification. Ran the full gate suite sequentially in one script (no concurrent cargo, per the disclosed build race) and recorded real counts. Built an adversarial ledger (9-digit fractional seconds, a `v:2` line, a line with no `v`, a fact-less successful derive, a heartbeat with the split counters, a torn tail) and ran all five reports over it in text and `--json`. Hammered the two new ledger tests (8× and 5×) for flakiness.
+
+Five verification-only flips, each run then reverted with `git checkout --`: an assertion in `i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing` that the `⚑` line is present in the rendered text (the half that test did not assert); an instrumented `serve()` measuring the unguarded pre-handshake window; the same with an env-gated widener, to prove the window is fatal; a three-point split of that window into I-inserted versus pre-existing work; and the candidate fix (arming moved above `build_memory`), run against both durability tests and the whole `store-sqlite,fixtures` suite.
+
+One self-inflicted case is worth recording because it confirmed a positive: my adversarial ledger used `legs.vector` where the producer emits `legs.vector_cosine`, and `score_bands.py` responded with `NO VECTOR-LEG SCORES IN THIS LEDGER … that is the finding` rather than a hollow zero. The fail-loud discipline round 1 praised caught my mistake.
+
+## Round-1 findings: verification at the artifact
+
+| # | Required remediation | Verified how | Verdict |
+|---|---|---|---|
+| **I-R1-1** (P2) | `canonical_marker` counts only rendered hits; the four warning flags' budget-independence named; `warnings.py` corrected; choice in the README's choices list | `server.rs:380` is now `canonical_marker \|= hit.is_canonical && d.included_in_context`. Round-1 probe re-run **at the binary**: `max_tokens: 1`, both hits `included_in_context: false`, `canonical_marker: false`, `[canonical]` absent from the response. Second half, via a review-only assertion: the response text carries `warnings:\n- ⚑ Load-bearing pillar …` — the **warning line did reach the agent** while the block did not, so the asymmetry is real, not asserted (`attach_warnings` at `server.rs:1111` is unconditional). `warnings.py`'s "the model never saw the block" replaced by "the WARNING LINE still reached the agent … the concept BLOCK it was about did not", plus a `Canonical hits: N returned, M rendered the marker` section. `make_sample.py` plants the same Canonical concept twice (true then false); `verify.sh` asserts both halves | **Remediated, both halves** |
+| **I-R1-2** (P2) | Split the counter, inject the sink, hold the writer inside `write_batch`, push past 1024, assert `dropped_channel_full > 0` and `append` returned | The test **genuinely creates backpressure**: the injected `BatchSink` parks on a condvar; the test waits for `entered >= 1` (set only after the coalescing loop drained the channel, so the channel is provably empty at that instant); then `CHANNEL_CAPACITY + 64` appends yield **exactly 64** `dropped_channel_full`, `0` `dropped_write_failed`, with an elapsed-time bound proving `append` returned. Deterministic across 8 runs. Seam is test-only in reach (`open_with_sink` private) and costs one `dyn` call per batch on the writer thread, never the calling path. New stats keys **only when on**: OFF = 17 keys, zero `ledger_`-prefixed; ON = 22, delta exactly the 3 pre-existing plus the two split counters | **Remediated** |
+| **I-R1-3** (P2) | `Ledger::open` cannot block startup; table distinguishes "cannot open" from "open blocks"; "Never fails." reworded | `Ledger::open` performs **no I/O** (only counters, a channel, a thread; the probe is `writer_loop`'s first act, `ledger.rs:389`). **Product repro at the real binary:** `mkfifo`, `serve --ledger <fifo> --ledger-heartbeat 1` → startup completes, handshake 0.01 s, `lambo_stats` answers, SIGTERM → `session closed, tail durable` then `call ledger closed written=0 dropped=4`, **exit 0**. Table has separate rows for `ENOENT`-class and blocking-`open`; doc says "**Never fails the server**, and performs no I/O of its own". New timeout-guarded FIFO test, skipping where `mkfifo` is absent | **Remediated** (one residual doc imprecision on the new row → **I-R2-3**) |
+| **I-R1-4** (P2) | `DOGFOOD-SETUP.md` §2 gains `LAMBO_GIT_SHA`; §4 gains the ledger flags; `src/ledger.rs` pointer corrected | §2 build step is `LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \ cargo build …` with the why and a dirty-tree warning. §4 carries both flags on the template command, an explicit inheritance statement, **and** literally in the four client blocks. New §6 smoke check (`tail -2` + `jq` on `kind=="stats"`) catching `git_sha: unknown` or an absent file. **§5 diff is zero.** `ledger.rs:119` points at §2 "The pinned binary", which exists verbatim | **Remediated** |
+| **I-R1-5** (P2, non-blocking) | `KNOWN_VERSIONS = {1}`; warn in the dropped-lines register; `--json` too; absent facts vs zero | Fed a `v:2` line, a no-`v` line, a fact-less successful derive. Text: `2 LINE(S) AT AN UNKNOWN SCHEMA VERSION … read as v1 anyway, so any field whose MEANING changed is being reported wrong` + line numbers; v1 lines still scored. Fact-less derive announced as "not the same as creating and matching nothing". `--json` carries `ledger_schema{unknown_version_lines,…}` and `derive_calls_without_facts: 1`. Choice in the README | **Remediated** |
+| **I-R1-6** (P3) | Restore vector max-merge + duplicate case; or trait-doc the distinctness | Both: `merge_max` restores max-merge on both paths; duplicate case in `i1_per_leg_scores_survive_the_max_merge` (`[(dup,0.90),(dup,0.10)]` → 0.90); `GraphStore::vector_candidates` doc states the tolerance for B2; `merge_max` docstring says why keyword/recent stay as-were; Handoff records the retained/cloned legs map | **Remediated** |
+| **I-R1-7** (P3) | Uncheck the two boxes with reasons; reword box 1; no fabricated evidence | Both `[ ]`. Box 1 reworded to "one line **whose shape `duckdb`'s `read_json` can consume**" with the old wording quoted and refuted. Box 5 unchecked, "unchecked rather than backfilled". README states the duckdb recipes' provenance | **Remediated** |
+| **I-R1-8** (P3) | Delete `--floor`; print the observed floor | `--floor` rejected by argparse; report prints the observed floor, or honestly `NOT STATED BY THIS LEDGER` when unobservable; `verify.sh` asserts both; choices list explains, quoting the old self-contradiction | **Remediated** |
+| **I-R1-9** (P3) | Count abandoned lines; bound = capacity + one batch; reword "no lock" | Headline now "no `await`, no file I/O, and **no lock held across anything that can block**", the Mutex named. Bound stated. **Accounting works on the real product:** the FIFO run logged `abandoned=4 dropped=4 written=0`. Arithmetic attacked: cannot double-count (`take()` makes shutdown single-shot), cannot go negative (`saturating_sub`); the sender is dropped before the subtraction so `accepted` is frozen. Two immaterial residuals recorded as advisories | **Remediated** |
+| **I-R1-10** (P3) | Normalise `parse_ts`; write down the shape dependencies | Truncates the fractional field to six digits (truncate, not round, with the ordering-key reason). `.123456789` and `.000000000` parse and bucket. Both dependencies recorded (docstring + `BUCKETS` site). README: "No Python version floor". `verify.sh` generates a nanosecond ledger and asserts it parses | **Remediated** |
+| **I-R1-11** (P3) | Stickiness in choices list; `succeeded()`; comparable-figure note | Full bullet in the choices list and the docstring; `opened_with_recall` now checks `succeeded`; the note names `derives_without_prior_recall` as the only figure comparable to `evidence/swarm/`'s and says `compliance` is not | **Remediated** |
+| **I-R1-12** (P3) | Query truncation; zero-guard in `authorize_ledger`; `note_facts` hoist; the clone | Query truncated at a documented 2000-char cap (15.4 KiB query → 2 012-char field, **2 836-byte line** vs round 1's 15 752), with a `const _` compile-time pin of the cap relationship. Both config errors exit **1**, no file created by a refused start. `note_facts` is `reserve`'s third statement — the empty-`agent_id` exit carries `op: "reserve", granted: false`. `ledger_agent` returns `Option<String>`, `None` with no allocation when off | **Remediated** (see deviation 1) |
+
+## Self-reported deviations — all six real, stated, and reasonable
+
+| Deviation | Assessment |
+|---|---|
+| 1. `Option<String>` rather than `&str` | Forced: `p` moves into the impl future. Allocates nothing when off, which is what the finding was about. Residual `unwrap_or_default()` documented and unreachable |
+| 2. Removed the `main.rs` early return | Verified at the binary: both errors exit **1** through one `Err` arm; clap parse errors still exit 2, correctly a different class |
+| 3. `SecondsFormat` left as `AutoSi` | Round 1 offered it as the alternative; the reader-side fix also repairs ledgers already written |
+| 4. The `const _` pin | Unasked-for improvement; compiles under all six clippy configurations |
+| 5. `verify.sh`-generated adversarial cases | Correct: committing them would perturb the planted facts the other checks read |
+| 6. Keyword/recent legs left as-were | Correct — round 1 established keyword was already last-write and recent idempotent; reason recorded at `merge_max` |
+
+## New findings
+
+### I-R2-1 (P1, **blocking**) — A SIGTERM in the pre-handshake window kills `serve` with the lease held and the tail unflushed; the I implementation widened that window ~190× by moving the `ToolRouter` build above the signal arming, and CI is red on this commit
+
+- **Evidence, external:** GitHub Actions run **32275330759**, job `feature-matrix (sqlite)`, on the commit under review: `a_pre_handshake_sigterm_still_flushes_the_session_row` FAILED with `got ExitStatus(unix_wait_status(15))`. The same test failed on the I implementation's push (run **32262805901**) and passed on the push before it. Coordinator-supplied; my own analysis independently establishes `ed674a8` as where the regression enters, which corroborates it.
+- **Evidence, mechanism — confirmed.** The test's sync point is `line.contains("session attached")`, and **two** stderr lines match: `lambo::memory: Memory session attached (daemon + flush + canonization running)` — emitted inside `build_memory`, after the single-writer lease is taken — then ~1.5 ms later `lambo::mcp::serve: lambo serve: session attached`. The invariant comment at `serve.rs:809-813` ("from the moment \"session attached\" is visible a signal can no longer hit the default disposition (R2-a)") is true **only of the second line**: `shutdown_signal()` is at `:814`, the serve-level log at `:817`. The test fires on the first.
+- **Evidence, causation — the diff.** `git diff 2fd18b9..ed674a8 -- src/mcp/serve.rs`: `serve_stdio(mem.clone(), …)` became `serve_stdio(server, …)` — `LamboServer::new(mem)` was **inside `serve_stdio`**, after the arming, and the I implementation lifted it into `serve()` before it. `LamboServer::new` runs the rmcp `#[tool_router]` build — every tool's schemars JSON schema — on the **default path**: the failing test passes no `--ledger`.
+- **Evidence, quantified.** Instrumented three-point split (verification-only, reverted), four runs: the I-inserted block (`Ledger::open` + `LamboServer::new`) took **1125 / 1579 / 1085 / 1043 µs**; the pre-existing part (`mem.events()` + event-pump spawn) **6 / 7 / 6 / 8 µs**. ~99.4 % of the unguarded window is I-inserted; the window widened ~**190×** on a fast machine, before any CI-runner slowdown.
+- **Evidence, reproduced.** Not reproducible by load alone here (25 runs under 10 busy loops: 25 pass). With the window widened 400 ms (verification-only), the test fails with **`ExitStatus(unix_wait_status(15))`** — the CI message byte-for-byte. The window is fatal; only its width was in question.
+- **Impact:** a SIGTERM between lease acquisition and the arming kills the process by the default disposition: `Memory::close` never runs, the write-behind tail never reaches the store, the single-writer lease is left held by a dead process. Same class as I-R1-3 with a **broader trigger**: no flag, no FIFO — every `lambo serve` startup.
+- **Grade:** P1 over I-R1-3's P2 on trigger breadth, observed (CI-red) failures, and the reviewed commit being red. Discounted from P0 because the window is pre-existing (~6 µs pre-I; this workstream widened a hole rather than opening one) and the product consequence needs a signal inside ~1 ms.
+- **Required remediation.** The candidate fix works, tested here:
+  1. **Arm immediately after `build_memory` returns** (before `Ledger::open`, `LamboServer::new`, the heartbeat spawn, the event pump). Closes exactly the regression this workstream introduced; restores the pre-I property. Verified: both durability tests pass, full `store-sqlite,fixtures` suite green (858/0/1).
+  2. **Arm before `build_memory`** — strictly better in target property (covers the lease-acquisition window, which neither pre-I nor option 1 does) and also verified green — **but** it defers rather than honours a startup SIGTERM: measured with an 8 s simulated startup, a SIGTERM at 2 s ran the remaining 6 s before being taken. If `build_memory` ever hangs, the process becomes SIGTERM-immune. Trading a durability hazard for an availability one is not obviously a win.
+  - **Recommendation:** take option 1 for this finding — minimal, restores a property this commit broke, fully tested. Take option 2 only together with racing `build_memory` against the shutdown future (abandon the build, return without a lease) — a real design change deserving its own reasoning, not a ride-along.
+  - Either way, correct the invariant comment at `serve.rs:809-813`: it claims a property that holds only of the serve-level log line, and that comment is part of why the hole survived review.
+
+### I-R2-2 (P3) — The pre-handshake test's sync point matches two different log lines, and fixing only the matcher would turn CI green while leaving the product hole open
+
+- **Evidence:** `tests/serve_pre_handshake_durability.rs` waits on `line.contains("session attached")`; both the memory-level and serve-level lines match; the module docs say "the 'session attached' stderr line", singular.
+- **Impact:** two-sided. The loose matcher is what made the product window visible at all — it probes a wider window than the test was written for, which is how a real hole got caught. It also means the cheapest way to green CI is tightening the matcher — which would leave I-R2-1 unfixed. That is the trap worth writing down.
+- **Required remediation:** fix I-R2-1 first. Then either keep the loose matcher deliberately, with a comment saying it is loose *on purpose* (preferred — it tests the property the invariant claims), or tighten it and add a second test on the memory-level line. Never tighten it alone.
+
+### I-R2-3 (P3) — The new "open blocks" failure-table row misclassifies the drops, and a parked writer is invisible in `lambo_stats` until 1024 lines have accumulated
+
+- **Evidence:** the row reads "the writer thread parks; … lines drop as channel-full". Probed at the binary: 31 tool calls against a reader-less FIFO give `written=0, dropped=0, channel_full=0, write_failed=0` — the lines sit in the channel, uncounted, and are counted only at shutdown as **`write_failed`** via the abandoned-lines path (`abandoned=4 dropped=4`). The row's claim becomes true only after `CHANNEL_CAPACITY` accepted lines.
+- **Impact:** a doc-precision row imprecise in the way it was added to fix; operationally, an operator watching `lambo_stats` on a stalled mount sees `written=0 dropped=0` — "no traffic", not "writer parked". Observability with a blind spot about itself.
+- **Required remediation:** reword the row ("the writer parks; lines queue, then drop as channel-full once the queue fills, and any still queued at shutdown count as `write_failed`"). Better, nearly free: expose queue depth — `accepted − written − dropped` as a `ledger_queued_lines` key, making a parked writer visible immediately.
+
+## Advisory observations (no action required)
+
+- `dropped()` is a computed sum of two relaxed loads; a concurrent snapshot can be momentarily inconsistent with its parts. Monitoring gauge; immaterial.
+- The abandoned-lines count is deliberately pessimistic: a recovering filesystem after `SHUTDOWN_DRAIN` may still write its batch, so `written + dropped` can exceed `accepted`. Over-reporting drops is the right direction on exit.
+- A theoretical undercount in the same arithmetic (`write_failed` entries never `accepted`) is unreachable in the shipped serve path.
+- "keeps this message verbatim" is true of the sentence, not the line — `LamboError::Config` prefixes `config: `, consistent with the sibling error.
+- `warnings.py --json` renamed `blast_radius_warnings_unseen` → `blast_radius_warnings_whose_block_was_cut` — correct rename, no consumer exists yet.
+- The FIFO test leaks one parked OS thread per test-binary run, by design and disclosed (`std::mem::forget` with the reason).
+- `DOGFOOD-SETUP.md` §6's "Two lines for the two calls" is loose — an immediate first heartbeat can occupy a `tail -2` line. A smell check, not an assertion.
+- The ledger-off payload test asserts no `ledger_`-prefixed key and all 17 pre-I keys, but not the total count. Matches round 1's characterisation.
+
+## Gate results
+
+Run sequentially in one script on `49a9b09` with `RUSTFLAGS="-D warnings"`.
+
+| Command / check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | **pass** |
+| clippy ×6 (default / store-sqlite,fixtures / no-default store-sqlite / no-default store-cockroach / ship,fixtures / demo) | **pass ×6** |
+| `cargo test --all --features fixtures` | **pass** — lib 793 / 0 / 1; all binaries green |
+| `cargo test --features store-sqlite,fixtures` | **pass** — lib 858 / 0 / 1; all integration binaries green (incl. `serve_pre_handshake_durability`, locally) |
+| `cargo test --no-default-features --features store-sqlite` | **pass** — 515 / 0 |
+| `cargo test --no-default-features --features store-cockroach` | **pass** — 497 / 0 |
+| `cargo test --features ship,fixtures --lib` | **pass** — 884 / 0 / 8 |
+| `cargo check --no-default-features` / `--features demo` | **pass** |
+| `sqlite-vectors` CI row, verbatim | **pass** — 15 / 0 / 0; all three guards |
+| `scripts/observability/verify.sh` | **pass** — `ALL CHECKS PASSED`, incl. both generated ledgers and the `--floor`-refused check |
+| Every count in the commit message | **exact** — and 793 − 789 = the 4 claimed new tests |
+| Real FIFO serve + SIGTERM | handshake 0.01 s, exit 0, `tail durable` before ledger close, `abandoned=4 dropped=4 written=0` |
+| Real `max_tokens: 1` Canonical recall | `canonical_marker: false`, `blast_radius_warning: true`, `⚑` line present, `[canonical]` absent |
+| Real 15.4 KiB query | field 2 012 chars, line 2 836 bytes |
+| Real `reserve`, empty `agent_id` | `op: "reserve", granted: false` |
+| `lambo_stats` off vs on | OFF 17 keys / zero `ledger_*`; ON 22; delta exactly the 5 ledger keys |
+| Both ledger config errors | exit **1** each; no file created |
+| Adversarial ledger (7 defect classes) | all five reports ran; unknown version + fact-less derive announced in text **and** `--json` |
+| Flakiness: `ledger::tests` ×5, channel-full ×8 | deterministic, 0 failures |
+| `serve_pre_handshake_durability` ×25 under 10 busy loops | 25 pass — not locally reproducible by load |
+| Same test, window widened 400 ms (review flip) | **FAIL, `unix_wait_status(15)`** — the CI failure reproduced (I-R2-1) |
+| Candidate fix (arm above the I-inserted block), widened window | **pass** — `shutdown signal during handshake` → `tail durable` → exit 0 |
+| Candidate fix, full sqlite suite | **pass** — 858/0/1 and every integration binary |
+| Verification-only flips | 5 (`server.rs` ×1, `serve.rs` ×4); all reverted; tree clean |
+
+## Verdict
+
+**REQUEST_CHANGES** — blocking **I-R2-1**.
+
+All twelve round-1 findings are remediated, and every item on round 1's "Re-review must verify" list checks out at the artifact rather than at the comment. The non-blocking P2 and all seven P3s are done too, several better than asked — the observed-floor design, the `const _` cap pin, and the two `verify.sh`-generated adversarial ledgers are improvements on what was requested. Six deviations, all self-reported, all reasonable. Gates green everywhere, every number exact.
+
+What blocks is not in the remediation. It is a durability regression the I implementation introduced and neither round-1 review nor the remediation caught: `LamboServer::new` moved above `shutdown_signal()`, widening the unguarded pre-handshake window from ~6 µs to ~1 130 µs on the default path, where a SIGTERM kills the process with the lease held and the tail unflushed. CI is red on it; the mechanism is confirmed from the diff, the widening measured at 99.4 % I-inserted, and the exact CI failure reproduced by widening the window. The fix is a two-line move, already tested green against both durability tests and the whole sqlite suite.
+
+The pattern is worth naming, because it is the same one round 1 named. Round 1's four blockers were claims written from intent rather than from artifacts. This one is a comment — `serve.rs:809-813` — that was true when written, was quietly falsified by a refactor four lines above it, and stayed in the tree asserting a property the code no longer had. The remediation fixed twelve instances of that pattern with real care; this is the thirteenth, and it is the one with a red CI attached.
+
+**I-R2-2** and **I-R2-3** are P3 advisories. I-R2-2 matters more than its grade suggests: tightening the test's matcher would make CI green without fixing I-R2-1 — handle it after the product fix, never instead of it.
