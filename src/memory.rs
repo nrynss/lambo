@@ -1367,10 +1367,31 @@ impl Memory {
     /// * The **writers gate**, so a concurrent `close()` cannot slip between
     ///   the checks below and the enqueue.
     /// * The **validation pre-pass**, so the errors a caller can actually fix
-    ///   still arrive at call time rather than on a receipt. It is
-    ///   [`crate::graph::derive::validate`], the read-only half of the
-    ///   synchronous path — the same checks, run against the same graph, in the
-    ///   same order.
+    ///   still arrive at call time rather than on a receipt. It is **the
+    ///   pre-pass the session's `match_strategy` actually uses**, and the two
+    ///   are not the same set of rules:
+    ///   * `Hybrid` (the default — see `config.rs`): `hybrid::validate_limits`
+    ///     then `hybrid::validate_graph_inputs`, which is deliberately the
+    ///     **smaller** set. It omits the repeated-`Observation` and
+    ///     single-`Hierarchical`-parent rejections, because hybrid's own write
+    ///     path does not enforce them and validation that disagrees with the
+    ///     write is worse than none (defect 3 in §J3 Status).
+    ///   * `Canonical`: `hybrid::validate_limits` then
+    ///     [`crate::graph::derive::validate`], the read-only half of the
+    ///     synchronous path — the same checks against the same graph in the
+    ///     same order.
+    ///
+    ///   Under `Hybrid`, then, five error classes move from call time to the
+    ///   receipt, and all five need the embedder or the store: embedder
+    ///   failure, an embedder dim/contract mismatch,
+    ///   [`crate::graph::hybrid::HYBRID_IO_TIMEOUT`] expiry,
+    ///   `MAX_HYBRID_REPLANS` exhaustion, and store errors from the vector
+    ///   candidate check. Nothing a *caller* could act on moved, and no rule
+    ///   was removed from the write path: `validate_graph_inputs` still runs
+    ///   inside `derive_planned`'s phase 1. Under `Canonical` nothing moves.
+    ///   (The bullet this replaces claimed "the same checks, run against the
+    ///   same graph, in the same order" for every strategy, three lines above
+    ///   the comment correcting it — J3-R1-4.)
     /// * The **interaction**, which pins this write's place in the `Temporal`
     ///   chain at submission time. That is why the chain cannot be corrupted by
     ///   an out-of-order drain: the drain no longer decides the order.

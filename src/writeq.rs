@@ -2969,37 +2969,28 @@ mod pipeline_tests {
         );
     }
 
-    /// **Backpressure, visibly.** A burst larger than the measured bound is
-    /// dropped, the drops are counted, and the receipts say nothing was
-    /// written.
+    /// **A sealed queue refuses and counts it** — the `DropReason::Closed`
+    /// path, which is what this test always exercised. Renamed from
+    /// `a_burst_past_the_bound_drops_and_counts_it`, which named a property it
+    /// skipped: sealing is not the count bound, and because `Closed` used to
+    /// ride `dropped_queue_full`'s counter the assertion below passed without
+    /// the bound ever binding (J3-R1-5). The real bounds are exercised by the
+    /// three tests that follow.
     #[tokio::test]
-    async fn a_burst_past_the_bound_drops_and_counts_it() {
+    async fn a_sealed_queue_refuses_and_counts_it() {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let rig = Rig::new(
-            "wq-burst",
+            "wq-sealed",
             Arc::new(HeldEmbedder {
                 gate: gate.clone(),
                 inner: FixtureEmbedder::new(),
                 calls: calls.clone(),
             }),
         );
-        // Let the probe through so a bound exists, then close the gate again so
-        // real work parks in the queue. `Hybrid` is what embeds; this rig runs
-        // `Canonical`, so hold the lane by never releasing after the probe.
-        gate.add_permits(PROBE_EMBEDS);
-        let bound = loop {
-            if let Some(c) = rig.pipeline.calibration() {
-                break c.bound;
-            }
-            tokio::task::yield_now().await;
-        };
-        assert!((WRITE_QUEUE_MIN..=WRITE_QUEUE_MAX).contains(&bound));
+        let calibration = calibrate_through_gate(&rig, &gate).await;
+        assert!((WRITE_QUEUE_MIN..=WRITE_QUEUE_MAX).contains(&calibration.bound));
 
-        // Seal the pipeline: a sealed queue refuses admission, which is the
-        // same refusal path a full one takes and the only one a `Canonical`
-        // rig can hold open deterministically (its writes never await, so a
-        // real queue drains as fast as it fills).
         rig.pipeline.seal();
         let agent = AgentId::new("agent-a");
         let refused = rig.derive(&agent, "dropped concept").await;
@@ -3010,17 +3001,220 @@ mod pipeline_tests {
             "a drop must say plainly that nothing was written: {}",
             refused.answer.describe()
         );
-        assert_eq!(rig.pipeline.counters().dropped(), 1);
+        assert!(
+            refused.answer.describe().contains("session is closing"),
+            "a sealed refusal must name its own reason, not the bound's: {}",
+            refused.answer.describe()
+        );
+        let counters = rig.pipeline.counters();
+        assert_eq!(counters.dropped(), 1);
+        // J3-R1-8: a closing refusal is counted apart from a bound refusal, and
+        // `dropped()` is still their sum.
+        assert_eq!(counters.dropped_closed(), 1);
+        assert_eq!(counters.dropped_queue_full(), 0);
+        assert_eq!(counters.dropped_queue_bytes(), 0);
         assert_eq!(
-            rig.pipeline.counters().accepted(),
+            counters.accepted(),
             0,
             "a refused admission must never enter `accepted` — the whole gauge rests on it"
         );
-        assert_eq!(rig.pipeline.counters().outstanding(), 0);
+        assert_eq!(counters.outstanding(), 0);
         // The receipt is still fetchable: a drop is an answer, not a silence.
         assert_eq!(
             rig.pipeline.lookup(&agent, refused.receipt).tag(),
             "dropped"
+        );
+    }
+
+    /// **`DropReason::LaneFull`, exercised for real** (J3-R1-5): one agent
+    /// bursting past its own lane's measured depth, behind an embedder slow
+    /// enough for the queue to hold, with the count bound doing the refusing.
+    #[tokio::test]
+    async fn a_burst_past_the_lane_bound_drops_and_counts_it() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-lane-full",
+            Arc::new(SlowEmbedder {
+                delay: Duration::from_millis(100),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        let agent = AgentId::new("agent-a");
+        // The first submission is what awaits the probe, so the calibration is
+        // known from here on.
+        let first = rig.derive(&agent, "lane concept 0").await;
+        assert_eq!(first.answer.tag(), "pending");
+        let calibration = rig.pipeline.calibration().expect("the probe has landed");
+        assert!(
+            calibration.lane_bound < calibration.bound.max(WRITE_QUEUE_MAX),
+            "a 100 ms/embed serial leg must not clamp: {calibration:?}"
+        );
+
+        let mut refusals = Vec::new();
+        for i in 1..=(calibration.lane_bound + 4) {
+            let submitted = rig.derive(&agent, &format!("lane concept {i}")).await;
+            if submitted.dropped() {
+                refusals.push(submitted);
+            }
+        }
+        assert!(
+            !refusals.is_empty(),
+            "a burst of {} past a lane bound of {} must be refused",
+            calibration.lane_bound + 4,
+            calibration.lane_bound
+        );
+        let counters = rig.pipeline.counters();
+        assert_eq!(counters.dropped_queue_full() as usize, refusals.len());
+        assert_eq!(counters.dropped_closed(), 0, "nothing is closing");
+        assert_eq!(counters.dropped_queue_bytes(), 0, "the payloads are tiny");
+        assert!(
+            counters.accepted() as usize <= calibration.lane_bound,
+            "one lane must never be admitted past its own bound: accepted={} lane_bound={}",
+            counters.accepted(),
+            calibration.lane_bound
+        );
+        for refused in &refusals {
+            let detail = refused.answer.describe();
+            assert!(
+                detail.contains("lane is full") && detail.contains("nothing was written"),
+                "a lane refusal must name the lane and say nothing was written: {detail}"
+            );
+        }
+        // And the population that WAS admitted drains inside the budget.
+        assert_eq!(rig.pipeline.quiesce().await, 0);
+    }
+
+    /// **`DropReason::QueueFull`, exercised for real** (J3-R1-5): enough lanes,
+    /// each inside its own bound, to reach the aggregate one. This is the
+    /// condition that existed before J3-R1-1 and it still has a job — the
+    /// per-lane bound alone would let N agents queue N x lane_bound writes.
+    #[tokio::test]
+    async fn enough_lanes_together_reach_the_aggregate_bound_and_it_counts_them() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-aggregate-full",
+            Arc::new(SlowEmbedder {
+                delay: Duration::from_millis(100),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        let probe_agent = AgentId::new("agent-probe");
+        rig.derive(&probe_agent, "make the probe land").await;
+        let calibration = rig.pipeline.calibration().expect("the probe has landed");
+        assert!(
+            calibration.bound > calibration.lane_bound,
+            "this embedder parallelises, so the aggregate bound must exceed the lane one: \
+             {calibration:?}"
+        );
+        // Enough lanes to overrun the aggregate bound even though no single one
+        // overruns its own.
+        let lanes = calibration.bound / calibration.lane_bound + 2;
+
+        let mut aggregate_refusals = 0usize;
+        for lane in 0..lanes {
+            let agent = AgentId::new(format!("agent-{lane}"));
+            for i in 0..calibration.lane_bound {
+                let submitted = rig
+                    .derive(&agent, &format!("lane {lane} concept {i}"))
+                    .await;
+                if submitted.dropped() {
+                    let detail = submitted.answer.describe();
+                    assert!(
+                        detail.contains("write queue is full"),
+                        "no lane exceeded its own bound, so every refusal here must be the \
+                         aggregate one: {detail}"
+                    );
+                    aggregate_refusals += 1;
+                }
+            }
+        }
+        assert!(
+            aggregate_refusals > 0,
+            "{lanes} lanes of {} must reach the aggregate bound of {}",
+            calibration.lane_bound,
+            calibration.bound
+        );
+        let counters = rig.pipeline.counters();
+        assert_eq!(counters.dropped_queue_full() as usize, aggregate_refusals);
+        assert!(counters.accepted() <= calibration.bound as u64);
+        assert_eq!(counters.dropped_closed(), 0);
+    }
+
+    /// **`DropReason::QueueBytes` and `WRITE_QUEUE_MAX_BYTES`, exercised at
+    /// all** (J3-R1-5): before this test nothing touched `lanes.bytes`, and a
+    /// count is the wrong unit for memory — which is the whole reason the byte
+    /// bound exists.
+    #[tokio::test]
+    async fn a_burst_past_the_byte_cap_drops_and_counts_it() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-byte-cap",
+            Arc::new(HeldEmbedder {
+                gate: gate.clone(),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        // A fixture-fast probe, so the COUNT bounds are far out of reach and
+        // the only bound that can bind is the byte one. Then the gate closes
+        // again, so real jobs park with their payloads still queued. (The
+        // helper feeds the gate on a 1 ms tick, so the serial leg reads a few
+        // hundred items/s rather than the clamp — still two orders of magnitude
+        // above the five jobs below.)
+        let calibration = calibrate_through_gate(&rig, &gate).await;
+        assert!(
+            calibration.lane_bound > 5 && calibration.bound > 5,
+            "the count bounds must be out of reach here: {calibration:?}"
+        );
+
+        // A fifth of the cap per job, so the fourth or fifth crosses it
+        // whether or not the worker has already taken the first off the lane.
+        let chunk = WRITE_QUEUE_MAX_BYTES / 5 + 1;
+        let payload = "x".repeat(chunk);
+        let agent = AgentId::new("agent-a");
+        let mut refusals = Vec::new();
+        for _ in 0..5 {
+            let submitted = rig.derive(&agent, &payload).await;
+            if submitted.dropped() {
+                refusals.push(submitted);
+            }
+        }
+        assert!(
+            !refusals.is_empty(),
+            "five jobs of {chunk} bytes must cross the {WRITE_QUEUE_MAX_BYTES}-byte cap"
+        );
+        let counters = rig.pipeline.counters();
+        assert_eq!(counters.dropped_queue_bytes() as usize, refusals.len());
+        assert_eq!(
+            counters.dropped_queue_full(),
+            0,
+            "the count bounds are clamped wide open here — only the byte cap may refuse"
+        );
+        assert_eq!(counters.dropped_closed(), 0);
+        for refused in &refusals {
+            let detail = refused.answer.describe();
+            assert!(
+                detail.contains("payload cap") && detail.contains("nothing was written"),
+                "a byte-cap refusal must name the cap and say nothing was written: {detail}"
+            );
+        }
+        // The accounting is a gauge, not a running total: releasing the lane
+        // must return the bytes, or a long-lived session would refuse writes
+        // for payloads it applied hours ago.
+        gate.add_permits(16);
+        until(
+            || rig.pipeline.outstanding() == 0,
+            "the parked payloads to drain",
+        )
+        .await;
+        let after = rig.derive(&agent, &payload).await;
+        assert!(
+            !after.dropped(),
+            "a drained lane must accept a payload it had room for: {}",
+            after.answer.describe()
         );
     }
 
