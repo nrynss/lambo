@@ -176,4 +176,30 @@ then metric 5 is "not yet measurable," not a finding.
 
 ---
 
+## 2026-08-20 (later still) — refinement: the corpus is chaff-heavy, so the fair test needs ground truth
+
+Operator observation, accepted: **nothing derived so far deserves canonization or
+veneration** — the graph holds regular history and decisions, and a policy that promoted
+them would be broken in the opposite direction from the one metric 5 worries about. So the
+2026-08-27 fair test cannot be "does anything promote"; it is precision *and* recall
+against ground truth named before the fact.
+
+Ground truth, nominated now (the four genuinely canon-shaped invariants in the store —
+durable constraints other work provably rests on): (1) the lease stays, a proxy moves the
+call not the write; (2) the wedge invariant — never acquire a lease you cannot serve;
+(3) the cooperative-identity ruling; (4) the async-ack rule — a write may be acked
+asynchronously only when its result does not gate the caller's next action. The test on
+2026-08-27: **do these promote while the other ~96 concepts do not.** Either direction
+failing is a finding.
+
+Second refinement, on us rather than the policy: **blast radius cannot fire on concepts
+nobody linked.** The orchestrator's derives are mostly free-floating prose — almost no
+`parent_of` pairs, dependency edges only via `record_action` — so "nothing is
+load-bearing" is partly a statement about how we write, not what we know. The wedge
+invariant genuinely bears J2's future promotion extension, and it was derived as an
+island. Candidate product observation: nothing on the write surface nudges a caller to
+declare what a constraint supports; the ergonomics favour islands.
+
+---
+
 *(next entry appends here)*
