@@ -1051,13 +1051,35 @@ impl LamboServer {
                 "write_queue_bound".into(),
                 json!(calibration.map_or(crate::writeq::WRITE_QUEUE_MIN, |c| c.bound)),
             );
+            // The bound that actually refuses one agent's burst, reported
+            // beside the aggregate one because they come from different
+            // measurements at different widths (J3-R1-1): a lane drains 1-wide
+            // however wide the deployment's embedder is, so this is the number
+            // that explains a drop a single-agent session sees.
+            obj.insert(
+                "write_queue_lane_bound".into(),
+                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_LANE_MIN, |c| c.lane_bound)),
+            );
             obj.insert(
                 "write_queue_measured".into(),
                 json!(calibration.is_some_and(|c| c.measured())),
             );
+            // `probe`, `observed` or `unmeasured`. The probe fires at the
+            // coldest moment of the process's life and measured a 7x spread
+            // across repeats on one host (J3-R1-2), so "measured" is not enough
+            // on its own: an operator needs to know whether the number is a
+            // startup estimate or this deployment's own observed writes.
+            obj.insert(
+                "write_queue_bound_source".into(),
+                json!(calibration.map_or("unmeasured", |c| c.source.tag())),
+            );
             obj.insert(
                 "write_queue_items_per_sec".into(),
                 json!(calibration.and_then(|c| c.items_per_sec)),
+            );
+            obj.insert(
+                "write_queue_serial_items_per_sec".into(),
+                json!(calibration.and_then(|c| c.serial_items_per_sec)),
             );
             obj.insert("write_queue_outstanding".into(), json!(c.outstanding()));
             obj.insert("write_queue_accepted".into(), json!(c.accepted()));
@@ -1065,6 +1087,15 @@ impl LamboServer {
             obj.insert("write_queue_failed".into(), json!(c.failed()));
             obj.insert("write_queue_abandoned".into(), json!(c.abandoned()));
             obj.insert("write_queue_dropped".into(), json!(c.dropped()));
+            // Split out of `write_queue_dropped`'s total, not subtracted from
+            // it (J3-R1-8): "the embedder is the bottleneck" and "the session
+            // is shutting down and refused a tail" are the same count but
+            // opposite diagnoses, and `dropped` remains their sum so no count
+            // vanishes.
+            obj.insert(
+                "write_queue_dropped_closed".into(),
+                json!(c.dropped_closed()),
+            );
             obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));
         }
         payload
@@ -1993,6 +2024,12 @@ impl LamboServer {
                     }
                     _ => queue.lookup(&acting, id),
                 };
+                // Delivered here, explicitly, so `answered`'s piggyback does
+                // not state the same outcome a second time in the same response
+                // (J3-R1-9). Take-once is unaffected — this *is* the take.
+                if answer.is_settled() {
+                    queue.mark_delivered(&acting, id);
+                }
                 Some((id, answer))
             }
         };
@@ -3134,14 +3171,18 @@ mod tests {
         let p = out.structured_content.expect("payload");
         for key in [
             "write_queue_bound",
+            "write_queue_lane_bound",
             "write_queue_measured",
+            "write_queue_bound_source",
             "write_queue_items_per_sec",
+            "write_queue_serial_items_per_sec",
             "write_queue_outstanding",
             "write_queue_accepted",
             "write_queue_applied",
             "write_queue_failed",
             "write_queue_abandoned",
             "write_queue_dropped",
+            "write_queue_dropped_closed",
             "receipts_retained",
         ] {
             assert!(p.get(key).is_some(), "{key} missing from {p}");
@@ -3159,6 +3200,21 @@ mod tests {
             json!(crate::writeq::WRITE_QUEUE_MAX),
             "{p}"
         );
+        // Both bounds are clamped on a fixture embedder, and the per-lane one
+        // is the bound that would refuse this agent's next write (J3-R1-1).
+        assert_eq!(
+            p["write_queue_lane_bound"],
+            json!(crate::writeq::WRITE_QUEUE_MAX),
+            "{p}"
+        );
+        // One real write has been applied, which is under OBSERVED_MIN_SAMPLES,
+        // so the probe's figure is still the one in force.
+        assert_eq!(p["write_queue_bound_source"], json!("probe"), "{p}");
+        assert!(
+            p["write_queue_serial_items_per_sec"].as_f64().unwrap() > 0.0,
+            "the serial leg is the load-bearing measurement: {p}"
+        );
+        assert_eq!(p["write_queue_dropped_closed"], json!(0), "{p}");
         assert_eq!(p["write_queue_accepted"], json!(1), "{p}");
         assert_eq!(p["write_queue_applied"], json!(1), "{p}");
         assert_eq!(p["write_queue_dropped"], json!(0), "{p}");

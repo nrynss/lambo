@@ -155,6 +155,22 @@ fn text_of(v: &serde_json::Value) -> String {
     v.to_string()
 }
 
+/// The J3 piggyback content block(s) of a tool response, joined — empty when
+/// the response carries none.
+fn piggyback_of(v: &serde_json::Value) -> String {
+    v["result"]["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .filter(|t| t.starts_with("write receipts"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
 /// A scratch dir plus a `lambo.toml` pointing at a SQLite file inside it.
 fn scratch(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!(
@@ -302,13 +318,30 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         "the receipt must cross the hop verbatim, not re-rendered: {receipt}"
     );
 
+    // A second write, so the piggyback has something to carry that is not the
+    // receipt being asked about. The lane is per-agent FIFO with one consumer,
+    // so this one settling means the first one already did — which is what
+    // makes the assertions below deterministic rather than a race.
+    let second = b.call(
+        20,
+        "lambo_derive",
+        serde_json::json!({
+            "agent_id": "agent-b",
+            "concepts": [{"content": "a second proxied write, for the piggyback", "concept_type": "logic"}]
+        }),
+    );
+    let receipt_two = second["result"]["structuredContent"]["receipt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the second ack must carry a receipt: {}", text_of(&second)))
+        .to_string();
+
     // Waiting on it through the proxy is the opt-in synchrony, and it is what
     // makes the read below deterministic instead of a race against the
     // holder's background worker.
     let waited = b.call(
         30,
         "lambo_stats",
-        serde_json::json!({"agent_id": "agent-b", "receipt": receipt, "wait_ms": 4000}),
+        serde_json::json!({"agent_id": "agent-b", "receipt": receipt_two, "wait_ms": 4000}),
     );
     assert_eq!(
         waited["result"]["structuredContent"]["receipt"]["state"]
@@ -322,24 +355,41 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
     // byte pipe, in a `content` block the model reads. Per-agent scoping is
     // what makes that true of one hub serving two clients; the proxy neither
     // knows nor needs to.
+    //
+    // Which response carries it is deliberately not asserted: the first write
+    // settles on the holder's own schedule, so its piggyback rides whichever of
+    // B's later responses comes after that. What must hold is that it arrives
+    // exactly once, on one of them.
+    let delivered = format!("{}\n{}", piggyback_of(&second), piggyback_of(&waited));
     assert!(
-        text_of(&waited).contains("write receipts"),
-        "B's response must carry the tagged piggyback: {}",
+        delivered.contains(&receipt),
+        "B must be handed the tagged piggyback for its own earlier receipt: {}\n{}",
+        text_of(&second),
         text_of(&waited)
     );
+    // **J3-R1-9:** and no response may restate the receipt the same call
+    // answered explicitly. One response stating one write's outcome twice is
+    // one write outcome a model reads twice.
     assert!(
-        text_of(&waited).contains(&receipt),
-        "the piggyback must name B's own receipt: {}",
-        text_of(&waited)
+        !piggyback_of(&waited).contains(&receipt_two),
+        "the piggyback must not repeat the receipt this call already answered: {}",
+        piggyback_of(&waited)
     );
+
     // The receipt carries what the ack could not — including the node id the
-    // reserve below needs.
-    let receipt_node = waited["result"]["structuredContent"]["receipt"]["created"][0]
+    // reserve below needs. Fetched by id, which is the surface that exists for
+    // exactly this: the piggyback line is prose, the fetch is structured.
+    let first = b.call(
+        31,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-b", "receipt": receipt, "wait_ms": 0}),
+    );
+    let receipt_node = first["result"]["structuredContent"]["receipt"]["created"][0]
         .as_str()
         .unwrap_or_else(|| {
             panic!(
                 "an applied receipt lists what it created: {}",
-                text_of(&waited)
+                text_of(&first)
             )
         })
         .to_string();

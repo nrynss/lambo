@@ -109,16 +109,25 @@ use crate::types::{
 /// Two things are sized from this single number, and they **must** be the same
 /// number:
 ///
-/// * **Admission.** The queue admits a job only while the projected drain time
-///   of everything already queued — `outstanding / measured_items_per_sec` —
-///   stays inside this budget. That is what makes the bound a function of the
-///   measured ceiling rather than a constant.
+/// * **Admission.** The queue admits a job only while what the drain can
+///   actually retire covers everything already queued. **What the drain can
+///   retire is a per-lane, single-consumer figure** — see
+///   [`Calibration::lane_bound`] and [`DRAIN_PROJECTION_SHARE`] — not a
+///   concurrent-throughput projection. That distinction is J3-R1-1: the first
+///   version of this constant claimed "one constant serves both admission
+///   projection and quiesce, so a queue cannot admit more than shutdown will
+///   wait for", and the claim was **false** because the projection was taken
+///   4-wide while one agent's lane drains 1-wide. Measured: 61 of 80 acked
+///   writes abandoned at a clean `close()`.
 /// * **Quiesce.** [`WritePipeline::quiesce`] waits this long for the queue to
 ///   drain during `close()`.
 ///
 /// A queue that admitted more than shutdown is willing to wait for would
 /// guarantee abandoned writes at every clean close, so the two are one
-/// constant rather than two that can drift.
+/// constant rather than two that can drift — but sharing the constant is only
+/// half the property. The other half is that the *rate* the projection uses
+/// must be the rate the drain retires at, which is what
+/// [`Calibration::serial_items_per_sec`] measures.
 ///
 /// Two seconds, and the ceiling on that choice is `close()`'s own budget:
 /// `lambo serve` wraps `Memory::close` in
@@ -138,6 +147,48 @@ const _: () = assert!(
      queue quiesce runs in series BEFORE the final flush, so it is carved out of close()'s \
      budget, not added to it",
 );
+
+/// Build-time invariant: a sub-second drain budget is a compile-time
+/// divide-by-zero in [`PROBE_CLAMP_RPS`], not a guard failure. Say so here
+/// instead (J3-R1-7).
+const _: () = assert!(
+    WRITE_QUEUE_DRAIN_BUDGET.as_secs() > 0,
+    "WRITE_QUEUE_DRAIN_BUDGET must be at least one whole second — PROBE_CLAMP_RPS divides by \
+     its `as_secs()`, so a sub-second budget is a divide-by-zero at build time rather than a \
+     bound that reads small",
+);
+
+/// The share of [`WRITE_QUEUE_DRAIN_BUDGET`] an admission bound may project
+/// against. Two, i.e. **half the budget; the other half is the slack that
+/// turns a projection into a bound.**
+///
+/// A lane filled to exactly `rate × budget` needs the *whole* budget to drain
+/// with nothing left over for the parts of a job the rate does not cover:
+///
+/// * A probe-derived rate times the **embedder only**. §Measurements' warm
+///   `derive` is 27 ms of which 22–25 ms is the embed, so the remainder is
+///   ~1/5 of the embed time — a factor of two leaves room for double that.
+/// * An observation-derived rate ([`Calibration::observed`]) times the whole
+///   of [`WriteCtx::run`], but not the settle, the lane lock, or the job
+///   already in flight when the quiesce starts.
+///
+/// One share for both sources rather than two, so there is one rule to state:
+/// *a lane may hold what the drain retires in half the budget.*
+pub const DRAIN_PROJECTION_SHARE: u32 = 2;
+
+/// Floor on the **per-lane** bound: one job.
+///
+/// Not [`WRITE_QUEUE_MIN`], which is a floor on the *aggregate* and is
+/// justified by a 4-wide measurement; nothing has been demonstrated about a
+/// single lane's depth. One, because a lane bound of zero refuses every write
+/// an agent ever makes, which is not backpressure but an outage.
+///
+/// **This is the one declared hole in the close-drain invariant** and it is
+/// unavoidable: a single write whose own service time exceeds
+/// [`WRITE_QUEUE_DRAIN_BUDGET`] cannot be made to finish inside it, so at a
+/// clean close it is abandoned — with a receipt that says so. Everything above
+/// one job is bounded by the drain's measured rate.
+pub const WRITE_QUEUE_LANE_MIN: usize = 1;
 
 /// Fallback bound when the calibration probe could not measure anything.
 ///
@@ -171,24 +222,40 @@ pub const WRITE_QUEUE_MIN: usize = PROBE_CONCURRENCY;
 /// not a guess about hardware, and at 1024 it sits 7x above the measured rate.
 pub const WRITE_QUEUE_MAX: usize = MAX_RETAINED_RECEIPTS / 4;
 
-/// Build-time invariant: the queue cannot outgrow the receipt store, or an
-/// in-flight write's receipt could be evicted and answer `expired`.
+/// Build-time invariant: the bounds cannot invert.
+///
+/// **This replaces a vacuous guard** (J3-R1-7): `(N / 4) * 4 <= N` holds for
+/// every `usize` under integer division, so the old assertion could not fail
+/// for any value of `MAX_RETAINED_RECEIPTS` and proved none of the property its
+/// message claimed. The relation that *can* actually be got wrong is this one —
+/// shrink `MAX_RETAINED_RECEIPTS` below `4 × WRITE_QUEUE_MIN` and the clamped
+/// ceiling drops under the floor, at which point `clamp` panics at runtime
+/// rather than at build time. The property the old message reached for —
+/// "oldest-first eviction cannot discard the receipt of a write that is still
+/// running" — is no longer an arithmetic claim at all: [`Receipts::evict`] and
+/// [`Receipts::expire`] both **skip unsettled entries** outright, and
+/// `a_running_jobs_receipt_neither_expires_nor_loses_its_outcome` pins it.
 const _: () = assert!(
-    WRITE_QUEUE_MAX * 4 <= MAX_RETAINED_RECEIPTS,
-    "WRITE_QUEUE_MAX must stay at or under a quarter of MAX_RETAINED_RECEIPTS — every      outstanding job holds a Pending receipt, and oldest-first eviction would otherwise      discard the receipt of a write that is still running",
+    WRITE_QUEUE_MAX >= WRITE_QUEUE_MIN && WRITE_QUEUE_LANE_MIN <= WRITE_QUEUE_MAX,
+    "WRITE_QUEUE_MAX must stay at or above WRITE_QUEUE_MIN and WRITE_QUEUE_LANE_MIN — the \
+     clamped bound would otherwise invert its own floor and ceiling",
 );
 
 /// The measured rate at which the clamp starts to bind, in items/second.
 ///
-/// Derived, not chosen: [`WRITE_QUEUE_MAX`] sustained for one
-/// [`WRITE_QUEUE_DRAIN_BUDGET`]. Reported here because it is the number an
-/// operator needs to read `write_queue_items_per_sec` against — above it, the
-/// bound is retention-limited rather than throughput-limited, and
-/// `lambo_stats` still shows the real measurement beside the clamped bound so
-/// the two can be told apart. Measured on this rig for reference: 110 to 141
-/// items/s against a live llama.cpp BGE-M3 on CPU, and ~98 000 items/s against
-/// [`crate::FixtureEmbedder`], which returns without doing work at all.
-pub const PROBE_CLAMP_RPS: u64 = WRITE_QUEUE_MAX as u64 / WRITE_QUEUE_DRAIN_BUDGET.as_secs();
+/// Derived, not chosen: [`WRITE_QUEUE_MAX`] sustained for the share of
+/// [`WRITE_QUEUE_DRAIN_BUDGET`] a projection may use
+/// ([`DRAIN_PROJECTION_SHARE`]), which is where the `× DRAIN_PROJECTION_SHARE`
+/// comes from. Reported here because it is the number an operator needs to read
+/// `write_queue_serial_items_per_sec` against — above it, the bound is
+/// retention-limited rather than throughput-limited, and `lambo_stats` still
+/// shows the real measurement beside the clamped bound so the two can be told
+/// apart. Measured on this rig for reference: 110 to 141 items/s **4-wide**
+/// against a live llama.cpp BGE-M3 on CPU (≈40–45 items/s serial, from the same
+/// 22–25 ms embed), and ~98 000 items/s against [`crate::FixtureEmbedder`],
+/// which returns without doing work at all.
+pub const PROBE_CLAMP_RPS: u64 =
+    WRITE_QUEUE_MAX as u64 * DRAIN_PROJECTION_SHARE as u64 / WRITE_QUEUE_DRAIN_BUDGET.as_secs();
 
 /// The fastest embedder throughput measured on this rig, in items/second, at
 /// [`PROBE_CONCURRENCY`]: a live llama.cpp BGE-M3 q8_0 on CPU, probed through
@@ -223,45 +290,115 @@ const _: () = assert!(
 /// admits at least one maximal job whole and refuses a second.
 pub const WRITE_QUEUE_MAX_BYTES: usize = MAX_CONTENT_BYTES * 1024;
 
-/// Width of the calibration probe.
+/// Width of the calibration probe's **concurrent** leg.
 ///
-/// Four, because throughput rather than latency is what has to be measured
-/// (see [`Calibration`]) and the phase doc's parallelism figure is a 4-wide
-/// one. The probe re-measures it per deployment; the 4 fixes only how wide the
-/// measurement is taken.
+/// Four, because the phase doc's parallelism figure is a 4-wide one (4 recalls:
+/// 380 ms sequential against 64 ms concurrent). The probe re-measures the rate
+/// per deployment; the 4 fixes only how wide that leg is taken. It sizes the
+/// *aggregate* bound only — the per-lane bound comes from the serial leg, since
+/// a lane has one consumer (J3-R1-1).
 pub const PROBE_CONCURRENCY: usize = 4;
 
-/// Bound on the calibration probe.
+/// Embeds the probe throws away before it starts timing.
+///
+/// One, and it is the fix for J3-R1-2: the probe fires at session build, the
+/// coldest moment in the process's life, and four consecutive runs of the same
+/// binary against the same llama-server measured **21.2, 101.0, 150.2 and
+/// 134.7 items/s** — a 7× swing in the load-bearing number, every one of them
+/// reported as `measured: true`. A discarded first embed pays the model-load
+/// cost out of the probe's budget instead of out of the measurement. It is not
+/// the whole fix: the observed rate ([`OBSERVED_MIN_SAMPLES`]) is what makes
+/// the durability property independent of *which* reading the probe caught.
+pub const PROBE_WARMUP_EMBEDS: usize = 1;
+
+/// Embeds one calibration probe performs in total: a discarded warm-up, one
+/// timed **alone** (the serial leg, which is the width a lane drains at), then
+/// [`PROBE_CONCURRENCY`] together.
+pub const PROBE_EMBEDS: usize = PROBE_WARMUP_EMBEDS + 1 + PROBE_CONCURRENCY;
+
+/// Real writes observed before their measured service time replaces the
+/// probe's serial figure.
+///
+/// [`PROBE_CONCURRENCY`], so the observed rate never rests on fewer embeds than
+/// the probe's own leg did. This is J3-R1-2's remediation (a): the worker
+/// already has the timings, a lane is single-consumer so those timings *are*
+/// serial service time, and it covers the whole of [`WriteCtx::run`] rather
+/// than the embed alone. Once it takes over, a cold probe stops being a
+/// sentence the whole session has to live with — including a probe that failed
+/// outright and floored the bound.
+pub const OBSERVED_MIN_SAMPLES: u64 = PROBE_CONCURRENCY as u64;
+
+/// EWMA weight for observed service time, as a divisor: the new sample gets
+/// `1 / OBSERVED_EWMA_WEIGHT`.
+///
+/// [`PROBE_CONCURRENCY`] again, so the average moves most of the way in about
+/// one probe's width of samples. A weight of 1 would make the bound track a
+/// single slow write and oscillate; a much larger one would keep a warm figure
+/// long after the embedder degraded, which is the J3-R1-3 scenario.
+pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
+
+/// Bound on the calibration probe — **all [`PROBE_EMBEDS`] of its embeds
+/// together**, so it is still the worst case an admission can wait.
 ///
 /// The probe is *spawned*, not awaited, at session build, so this is not
 /// startup latency in any real deployment. It is nonetheless the worst case an
 /// admission can wait, because admission blocks on the probe's result rather
-/// than falling back to a constant bound — so it is bounded, and bounded
-/// generously: a cold llama.cpp first token can take seconds, and treating that
-/// as "unmeasurable" would put a warm deployment on the floor bound for its
-/// whole life.
+/// than falling back to a constant bound.
+///
+/// Unchanged at 5 s even though the probe now takes six embeds rather than
+/// four, and that is a deliberate trade: raising it would raise the worst ack
+/// latency, and a deployment too cold to answer six embeds in 5 s is better
+/// served by starting on the floor and being **corrected by observation**
+/// ([`OBSERVED_MIN_SAMPLES`]) than by believing a number taken while its model
+/// was still loading. Before the observed rate existed, "unmeasurable" meant
+/// the floor for the whole session's life, which is why this was generous.
 pub const PROBE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Text the probe embeds. Short, fixed, and content-free: it is measuring the
 /// deployment's embedder, not its own input.
 pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 
-/// How long a settled receipt's outcome is held.
+/// How long a **settled** receipt's outcome is held, measured **from the
+/// settle**, not from the issue.
 ///
-/// Above the **227 s** worst `flush_lag` observed on the rig (§Measurements),
-/// because that is the window in which a write is applied in RAM but not yet
-/// durable — and a receipt that expired inside it would leave the widened crash
-/// window unauditable from the surface that exists to describe it.
+/// Above the [`MEASURED_WORST_FLUSH_LAG_SECS`] worst `flush_lag` observed on the
+/// rig (§Measurements), because that is the window in which a write is applied
+/// in RAM but not yet durable — and a receipt that expired inside it would
+/// leave the widened crash window unauditable from the surface that exists to
+/// describe it. Keying the window on the settle rather than the issue is what
+/// makes that comparison the right one: the applied-but-not-durable window
+/// *starts* when the write applies.
+///
+/// An **unsettled** receipt never expires at all (J3-R1-3). Nothing caps how
+/// long a job sits in a lane, so issue-time expiry could — and did, measured —
+/// answer `expired` about a job that was still running, after which
+/// [`settle_one`] discarded its outcome.
 pub const RECEIPT_RETENTION: Duration = Duration::from_secs(300);
 
-/// Build-time invariant: a receipt must outlive its own job under every bound
-/// in the tree, or "expired" would be reachable for a job still running.
+/// The worst `flush_lag` measured on this rig, in seconds (§Measurements).
+///
+/// A constant rather than a sentence for the same reason
+/// [`MEASURED_LOCAL_EMBEDDER_RPS`] is one: it lets the relation below be a
+/// build invariant.
+pub const MEASURED_WORST_FLUSH_LAG_SECS: u64 = 227;
+
+/// Build-time invariant: a receipt must outlive the applied-but-not-durable
+/// window, or the crash window J3 widened is unauditable from the surface that
+/// describes it.
+///
+/// **This replaces a false guard** (J3-R1-3). The old one asserted
+/// `RETENTION > HYBRID_IO_TIMEOUT + WRITE_QUEUE_DRAIN_BUDGET` and stated the
+/// conclusion "…so a receipt could not expire while its own write is still
+/// running" — which it did not prove, because expiry keyed on *issue* time and
+/// the drain budget is a projection of queue residency rather than a bound on
+/// it. That property is now structural ([`Receipts::expire`] skips unsettled
+/// entries) and pinned by test, so the guard here is free to assert the
+/// relation that actually decides this number.
 const _: () = assert!(
-    RECEIPT_RETENTION.as_secs()
-        > hybrid::HYBRID_IO_TIMEOUT.as_secs() + WRITE_QUEUE_DRAIN_BUDGET.as_secs(),
-    "RECEIPT_RETENTION must exceed the longest a single job can take (HYBRID_IO_TIMEOUT) plus \
-     the longest it can wait to start (WRITE_QUEUE_DRAIN_BUDGET), or a receipt could expire \
-     while its own write is still running",
+    RECEIPT_RETENTION.as_secs() > MEASURED_WORST_FLUSH_LAG_SECS,
+    "RECEIPT_RETENTION must exceed the worst flush_lag measured on the rig — a receipt that \
+     expired inside the applied-but-not-durable window would leave the crash window J3 widened \
+     unauditable from the surface that exists to describe it",
 );
 
 /// Ids listed in one retained receipt, before it switches to a count.
@@ -271,21 +408,36 @@ const _: () = assert!(
 /// agent did not name as a concept.
 pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 
-/// Retained receipts, oldest evicted first.
+/// Retained receipts, oldest **settled** one evicted first.
 ///
-/// Derived from a stated ~10 MiB retention budget at the door's own worst case:
-/// a receipt holds a summary plus at most [`MAX_RECEIPT_IDS`] × 36-byte node
-/// ids ≈ 2.4 KiB, so 4096 of them is ≈ 9.4 MiB. The time bound alone could not
-/// do this job — [`RECEIPT_RETENTION`] against `serve`'s own sustained abuse
+/// **The memory arithmetic, recomputed honestly (J3-R1-6).** The figure quoted
+/// here was "a summary plus at most `MAX_RECEIPT_IDS` × 36-byte node ids
+/// ≈ 2.4 KiB, so 4096 of them is ≈ 9.4 MiB", and it counted **one of two id
+/// lists**: [`AppliedSummary`] carries `created` *and* `matched`, each
+/// truncated at [`MAX_RECEIPT_IDS`]. Corrected, at the door's own worst case:
+/// `2 × MAX_RECEIPT_IDS` = 128 ids, each a 36-char UUID `String` (36 bytes of
+/// text plus a 24-byte header) ≈ 7.5 KiB, plus the one-line summary ≈ 8 KiB per
+/// receipt — so **≈ 31 MiB, not ~10 MiB**. A plain `derive` cannot reach it
+/// (its `created` and `matched` together cannot exceed
+/// [`MAX_CONCEPTS_PER_DERIVE`], so ≈ 16 MiB is the realistic ceiling), but
+/// `record_action`'s three resource lists and `derive`'s `parent_of` fan-out
+/// can both push `created` past 64 on their own.
+///
+/// The corrected figure does **not** move the constant, and that is worth
+/// stating rather than hiding: 4096 is driven by
+/// `PROBE_CLAMP_RPS > 3 × MEASURED_LOCAL_EMBEDDER_RPS`, which needs
+/// `WRITE_QUEUE_MAX ≥ 424` and therefore `MAX_RETAINED_RECEIPTS ≥ 1696`. The
+/// memory budget is the sanity check on that, not its source, and 31 MiB of
+/// worst-case receipts against a process that holds an entire session graph in
+/// RAM is a cost worth naming and paying. The time bound alone could not do
+/// this job either — [`RECEIPT_RETENTION`] against `serve`'s own sustained abuse
 /// bound ([`crate::mcp::DEFAULT_RATE_LIMIT_RPS`], 50/s) is 15 000 receipts.
 ///
 /// **[`WRITE_QUEUE_MAX`] is defined from this**, so raising or lowering it
-/// moves the queue's clamp with it. That coupling is the point: a queue deeper
-/// than the receipt store can hold would evict a running write's receipt.
-/// 10 MiB rather than the 2.4 MiB this started at, because at 1024 the derived
-/// clamp bound (256) sat *below* the throughput measured on an ordinary local
-/// embedder, which made the per-deployment measurement decorative on exactly
-/// the deployments it was written for.
+/// moves the queue's clamp with it. 4096 rather than the 1024 this started at,
+/// because at 1024 the derived clamp bound sat *below* the throughput measured
+/// on an ordinary local embedder, which made the per-deployment measurement
+/// decorative on exactly the deployments it was written for.
 pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
 /// Longest a caller may block waiting for its own write to apply.
@@ -581,7 +733,12 @@ impl ReceiptAnswer {
 /// Why a job was refused admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropReason {
-    /// The count bound, derived from the measured ceiling.
+    /// **This agent's own lane** is full: the per-lane count bound, derived
+    /// from the serial rate its single consumer drains at. The usual refusal —
+    /// see [`Calibration::lane_bound`].
+    LaneFull,
+    /// All lanes together are full: the aggregate count bound, derived from the
+    /// concurrent rate.
     QueueFull,
     /// The payload-byte bound.
     QueueBytes,
@@ -592,6 +749,10 @@ pub enum DropReason {
 impl DropReason {
     fn describe(self, bound: usize) -> String {
         match self {
+            DropReason::LaneFull => format!(
+                "this agent's background write lane is full ({bound} outstanding, a bound \
+                 measured at the rate one lane drains at on this deployment's embedder)"
+            ),
             DropReason::QueueFull => format!(
                 "the background write queue is full ({bound} outstanding, a bound measured on \
                  this deployment's embedder)"
@@ -609,58 +770,157 @@ impl DropReason {
 // Calibration
 // ---------------------------------------------------------------------------
 
-/// The measured ceiling and the bound derived from it.
+/// Where the rate a bound rests on came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalibrationSource {
+    /// Nothing measured: the probe failed or timed out, and the bounds are
+    /// floors. Reported as `write_queue_measured: false`.
+    Unmeasured,
+    /// The calibration probe, at session build.
+    Probe,
+    /// Real write service times, observed by the lane workers
+    /// ([`OBSERVED_MIN_SAMPLES`]) — strictly better evidence than the probe,
+    /// because it is this deployment doing this deployment's actual work.
+    Observed,
+}
+
+impl CalibrationSource {
+    /// Stable machine tag for `lambo_stats`' `write_queue_bound_source`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            CalibrationSource::Unmeasured => "unmeasured",
+            CalibrationSource::Probe => "probe",
+            CalibrationSource::Observed => "observed",
+        }
+    }
+}
+
+/// The measured rates and the two bounds derived from them.
 ///
-/// **Throughput, not latency, is what is measured.** The figure that motivated
+/// **Throughput, not latency, is what is measured** — the figure that motivated
 /// a per-deployment probe is a *parallelism* figure (4 recalls: 380 ms
 /// sequential, 64 ms concurrent, 5.94x — §Measurements), and the case the spec
-/// names — a hosted embedder that is slower per call but parallelises far
-/// better — inverts per-call latency while raising throughput. A bound derived
-/// from per-call latency would get that case exactly backwards.
+/// names, a hosted embedder that is slower per call but parallelises far
+/// better, inverts per-call latency while raising throughput.
+///
+/// **But throughput has a width, and the drain's width is one** (J3-R1-1).
+/// [`Lanes`] gives each agent a single consumer that awaits each job before
+/// popping the next, so a bound projected from the 4-wide rate admits four
+/// times what one agent's lane can retire. Hence two rates and two bounds:
+///
+/// | rate | width | bounds |
+/// | --- | --- | --- |
+/// | [`Calibration::serial_items_per_sec`] | 1 | [`Calibration::lane_bound`] — what **one lane** may hold |
+/// | [`Calibration::items_per_sec`] | [`PROBE_CONCURRENCY`] | [`Calibration::bound`] — what **all lanes together** may hold |
+///
+/// Both projections use [`DRAIN_PROJECTION_SHARE`] of
+/// [`WRITE_QUEUE_DRAIN_BUDGET`], and admission requires **both** to hold.
+/// The aggregate one is the honest limit of the measurement: nothing here
+/// measures throughput at more than [`PROBE_CONCURRENCY`] active lanes, so the
+/// aggregate bound assumes throughput does not *fall* as lanes grow past four.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Calibration {
-    /// Measured items/second, or `None` when the probe could not measure.
+    /// Measured **serial** (1-wide) items/second — the rate one lane's single
+    /// consumer retires at, and the load-bearing number for durability.
+    /// `None` when nothing measured it.
+    pub serial_items_per_sec: Option<f64>,
+    /// Measured **concurrent** ([`PROBE_CONCURRENCY`]-wide) items/second.
+    /// `None` when nothing measured it.
     pub items_per_sec: Option<f64>,
-    /// The queue's count bound.
+    /// Bound on one agent's lane.
+    pub lane_bound: usize,
+    /// Bound on all lanes together.
     pub bound: usize,
+    /// Where [`Calibration::serial_items_per_sec`] came from.
+    pub source: CalibrationSource,
 }
 
 impl Calibration {
-    /// The floor, used when the probe failed. Says so, rather than presenting a
-    /// number it did not measure.
+    /// The floors, used when nothing could be measured. Says so, rather than
+    /// presenting a number it did not measure.
     pub fn unmeasured() -> Self {
-        Self {
-            items_per_sec: None,
-            bound: WRITE_QUEUE_MIN,
-        }
+        Self::from_rates(None, None, CalibrationSource::Unmeasured)
     }
 
-    /// Derive the bound from a measured wall time for [`PROBE_CONCURRENCY`]
-    /// concurrent embeds.
-    pub fn from_probe(wall: Duration) -> Self {
-        let secs = wall.as_secs_f64();
-        // A zero or absurd wall time is the FixtureEmbedder case; the clamp
-        // below is what it is for, so it must not divide by zero first.
-        let rate = if secs <= 0.0 {
-            PROBE_CLAMP_RPS as f64
-        } else {
-            PROBE_CONCURRENCY as f64 / secs
+    /// Derive both bounds from the probe's two timed legs: one embed **alone**,
+    /// then [`PROBE_CONCURRENCY`] embeds **together**.
+    pub fn from_probe(serial_wall: Duration, concurrent_wall: Duration) -> Self {
+        Self::from_rates(
+            Some(rate_of(1, serial_wall)),
+            Some(rate_of(PROBE_CONCURRENCY, concurrent_wall)),
+            CalibrationSource::Probe,
+        )
+    }
+
+    /// Replace the serial rate with one observed from real writes, keeping the
+    /// probe's concurrent figure for the aggregate bound.
+    ///
+    /// The observed rate is better evidence about the drain than the probe's
+    /// serial leg is — it times the whole of [`WriteCtx::run`] rather than the
+    /// embed alone, and it keeps tracking an embedder that degrades after
+    /// startup — so it wins outright rather than being averaged in.
+    pub fn with_observed_serial(&self, serial_items_per_sec: f64) -> Self {
+        Self::from_rates(
+            Some(serial_items_per_sec),
+            self.items_per_sec,
+            CalibrationSource::Observed,
+        )
+    }
+
+    fn from_rates(serial: Option<f64>, concurrent: Option<f64>, source: CalibrationSource) -> Self {
+        // The RAW rates survive; only the bounds are clamped. An operator
+        // comparing the two is how "this deployment is retention-limited, not
+        // embedder-limited" becomes readable.
+        let lane_bound = match serial {
+            Some(rate) => project(rate).clamp(WRITE_QUEUE_LANE_MIN, WRITE_QUEUE_MAX),
+            None => WRITE_QUEUE_LANE_MIN,
         };
-        // `items_per_sec` keeps the RAW measurement; only the bound is
-        // clamped. An operator comparing the two is how "this deployment is
-        // retention-limited, not embedder-limited" becomes readable.
-        let projected = rate * WRITE_QUEUE_DRAIN_BUDGET.as_secs_f64();
-        let bound = (projected.ceil() as usize).clamp(WRITE_QUEUE_MIN, WRITE_QUEUE_MAX);
+        let bound = match concurrent {
+            Some(rate) => project(rate).clamp(WRITE_QUEUE_MIN, WRITE_QUEUE_MAX),
+            None => WRITE_QUEUE_MIN,
+        }
+        // The aggregate bound can never be the reason a single lane is refused
+        // below its own measured depth: noise can put a concurrent leg under a
+        // serial one, and an unmeasured probe leaves the aggregate at its floor
+        // while observation raises the lane's.
+        .max(lane_bound);
         Self {
-            items_per_sec: Some(rate),
+            serial_items_per_sec: serial,
+            items_per_sec: concurrent,
+            lane_bound,
             bound,
+            source,
         }
     }
 
-    /// `true` when the bound rests on a measurement of this deployment's own
-    /// embedder.
+    /// `true` when the bounds rest on a measurement of this deployment's own
+    /// embedder — by probe or by observation.
     pub fn measured(&self) -> bool {
-        self.items_per_sec.is_some()
+        self.source != CalibrationSource::Unmeasured
+    }
+}
+
+/// `n` items in `wall`, as items/second. A zero or absurd wall time is the
+/// [`crate::FixtureEmbedder`] case; the clamp is what handles it, so this must
+/// not divide by zero first.
+fn rate_of(n: usize, wall: Duration) -> f64 {
+    let secs = wall.as_secs_f64();
+    if secs <= 0.0 {
+        PROBE_CLAMP_RPS as f64
+    } else {
+        n as f64 / secs
+    }
+}
+
+/// What a rate retires within [`DRAIN_PROJECTION_SHARE`] of the drain budget,
+/// rounded up. Unclamped — the callers clamp against different floors.
+fn project(items_per_sec: f64) -> usize {
+    let budget = WRITE_QUEUE_DRAIN_BUDGET.as_secs_f64() / DRAIN_PROJECTION_SHARE as f64;
+    let projected = (items_per_sec * budget).ceil();
+    if projected.is_finite() && projected >= 0.0 {
+        projected as usize
+    } else {
+        WRITE_QUEUE_MAX
     }
 }
 
@@ -684,6 +944,15 @@ pub struct WriteQueueCounters {
     abandoned: AtomicU64,
     dropped_queue_full: AtomicU64,
     dropped_queue_bytes: AtomicU64,
+    /// Refusals because the session was closing or fenced — **a third drop
+    /// class, not a subtraction** (J3-R1-8). It rides its own counter and is
+    /// summed into [`WriteQueueCounters::dropped`], so no count vanishes and
+    /// the gauge's exclusivity argument is untouched: like the other two, a
+    /// refusal never enters `accepted`. Split out because
+    /// `write_queue_dropped` is the key the operator reads for "a burst
+    /// degraded", and "the embedder is the bottleneck" and "the session is
+    /// shutting down and refused a tail" want opposite responses.
+    dropped_closed: AtomicU64,
 }
 
 impl WriteQueueCounters {
@@ -705,10 +974,16 @@ impl WriteQueueCounters {
     pub fn dropped_queue_bytes(&self) -> u64 {
         self.dropped_queue_bytes.load(Ordering::Relaxed)
     }
+    pub fn dropped_closed(&self) -> u64 {
+        self.dropped_closed.load(Ordering::Relaxed)
+    }
 
-    /// Every refused admission, whatever the bound that refused it.
+    /// Every refused admission, whatever the bound that refused it. The three
+    /// classes are disjoint and this is their sum, so splitting
+    /// `dropped_closed` out of `dropped_queue_full` moved no count and lost
+    /// none (J3-R1-8).
     pub fn dropped(&self) -> u64 {
-        self.dropped_queue_full() + self.dropped_queue_bytes()
+        self.dropped_queue_full() + self.dropped_queue_bytes() + self.dropped_closed()
     }
 
     /// Jobs accepted and not yet settled.
@@ -980,8 +1255,25 @@ impl WriteCtx {
 
 struct Entry {
     agent: AgentId,
-    issued: DateTime<Utc>,
+    /// When the answer became terminal, and therefore when
+    /// [`RECEIPT_RETENTION`] starts. `None` while the write is queued or
+    /// running — and an entry with `None` here is **never** expired and never
+    /// evicted (J3-R1-3).
+    settled_at: Option<DateTime<Utc>>,
     answer: ReceiptAnswer,
+}
+
+impl Entry {
+    /// Settle this entry, stamping the retention clock. Returns `false` when it
+    /// was already settled, so no outcome can be overwritten by a later sweep.
+    fn settle(&mut self, answer: ReceiptAnswer, now: DateTime<Utc>) -> bool {
+        if self.answer.is_settled() {
+            return false;
+        }
+        self.answer = answer;
+        self.settled_at = Some(now);
+        true
+    }
 }
 
 #[derive(Default)]
@@ -997,7 +1289,15 @@ struct Receipts {
 }
 
 impl Receipts {
-    /// Drop entries past [`RECEIPT_RETENTION`], oldest first.
+    /// Drop **settled** entries whose retention window has passed, oldest
+    /// first.
+    ///
+    /// **An unsettled entry is skipped, never expired** (J3-R1-3). Nothing caps
+    /// how long a job sits in a lane, so the old issue-time sweep could answer
+    /// `expired` about a job that was still running — measured, with
+    /// `outstanding = 1` — after which [`settle_one`] discarded its outcome
+    /// because it swept before it settled. Skipped ids are pushed back in
+    /// order, so `order` stays issue-ordered and the sweep stays O(popped).
     fn expire(&mut self, now: DateTime<Utc>) {
         let cutoff = match chrono::Duration::from_std(RECEIPT_RETENTION) {
             Ok(d) => now - d,
@@ -1005,17 +1305,33 @@ impl Receipts {
             // panic in a sweep that runs on every lookup.
             Err(_) => return,
         };
+        let mut unsettled: Vec<ReceiptId> = Vec::new();
         while let Some(&oldest) = self.order.front() {
-            let stale = self
-                .entries
-                .get(&oldest)
-                .map(|e| e.issued < cutoff)
-                .unwrap_or(true);
-            if !stale {
-                break;
+            match self.entries.get(&oldest) {
+                // An id in `order` with no entry is already gone; drop the
+                // bookkeeping.
+                None => {
+                    self.order.pop_front();
+                }
+                Some(entry) => match entry.settled_at {
+                    None => {
+                        self.order.pop_front();
+                        unsettled.push(oldest);
+                    }
+                    Some(settled) if settled < cutoff => {
+                        self.order.pop_front();
+                        self.forget(&oldest);
+                    }
+                    // Issue order is settle order only loosely, but the first
+                    // entry still inside its window is where the cheap sweep
+                    // has to stop: anything behind it is younger by issue and
+                    // will be reached by a later sweep or by `evict`.
+                    Some(_) => break,
+                },
             }
-            self.order.pop_front();
-            self.forget(&oldest);
+        }
+        for id in unsettled.into_iter().rev() {
+            self.order.push_front(id);
         }
     }
 
@@ -1030,13 +1346,32 @@ impl Receipts {
         }
     }
 
-    /// Evict oldest-first down to [`MAX_RETAINED_RECEIPTS`].
+    /// Evict oldest-**settled**-first down to [`MAX_RETAINED_RECEIPTS`].
+    ///
+    /// **Unsettled entries are skipped here too.** The count side used to rest
+    /// on an arithmetic argument — `WRITE_QUEUE_MAX ≤ MAX_RETAINED_RECEIPTS / 4`
+    /// — which bounds the outstanding *set* but not the number of receipts
+    /// issued while one job is parked: refusals get receipts as well, so a
+    /// sustained drop storm could push a running write's `Pending` entry out of
+    /// the newest quarter. Skipping it makes the property structural, in the
+    /// same move as [`Receipts::expire`]. The scan can always find a victim,
+    /// because unsettled entries are bounded by the admission bound
+    /// (`≤ WRITE_QUEUE_MAX`, a quarter of this cap); if it somehow cannot, the
+    /// store grows rather than dropping a live receipt, and `receipts_retained`
+    /// says so.
     fn evict(&mut self) {
+        let mut unsettled: Vec<ReceiptId> = Vec::new();
         while self.entries.len() > MAX_RETAINED_RECEIPTS {
             match self.order.pop_front() {
-                Some(oldest) => self.forget(&oldest),
+                Some(oldest) => match self.entries.get(&oldest) {
+                    Some(entry) if entry.settled_at.is_none() => unsettled.push(oldest),
+                    _ => self.forget(&oldest),
+                },
                 None => break,
             }
+        }
+        for id in unsettled.into_iter().rev() {
+            self.order.push_front(id);
         }
     }
 }
@@ -1059,13 +1394,66 @@ struct Lanes {
     bytes: usize,
     /// Jobs a worker has taken off a lane and not yet settled.
     running: usize,
+    /// The same count per lane. At most one per lane today (one consumer), but
+    /// kept as a count so it stays correct if a lane ever gets more, and
+    /// maintained at exactly the two sites that move `running`.
+    running_per_lane: HashMap<AgentId, usize>,
     /// `true` once the pipeline refuses admission (closing, or fenced).
     sealed: bool,
+}
+
+/// Serial write service time, as an EWMA over real writes.
+///
+/// A lane has one consumer, so the time [`WriteCtx::run`] takes on it **is**
+/// serial service time — better evidence about the drain than the probe's
+/// embed-only leg, and it keeps tracking an embedder that degrades after
+/// startup rather than freezing the first reading of the session (J3-R1-2).
+#[derive(Debug, Default)]
+struct ObservedRate {
+    mean_secs: f64,
+    samples: u64,
+}
+
+impl ObservedRate {
+    fn sample(&mut self, secs: f64) {
+        if !secs.is_finite() || secs < 0.0 {
+            return;
+        }
+        self.samples = self.samples.saturating_add(1);
+        if self.samples == 1 {
+            self.mean_secs = secs;
+            return;
+        }
+        let weight = 1.0 / OBSERVED_EWMA_WEIGHT as f64;
+        self.mean_secs = self.mean_secs * (1.0 - weight) + secs * weight;
+    }
+
+    /// items/second, or `None` while the sample count is still under
+    /// [`OBSERVED_MIN_SAMPLES`] — until then the probe's figure stands.
+    fn items_per_sec(&self) -> Option<f64> {
+        if self.samples < OBSERVED_MIN_SAMPLES {
+            return None;
+        }
+        if self.mean_secs <= 0.0 {
+            // A fixture-fast deployment. The clamp is what handles it.
+            return Some(PROBE_CLAMP_RPS as f64);
+        }
+        Some(1.0 / self.mean_secs)
+    }
 }
 
 impl Lanes {
     fn outstanding(&self) -> usize {
         self.queued + self.running
+    }
+
+    /// Outstanding jobs **on one lane** — queued plus the one being run by that
+    /// lane's own consumer. This is the population
+    /// [`Calibration::lane_bound`] bounds, and the reason a global gauge could
+    /// not do the job: the drain is per-lane and serial (J3-R1-1).
+    fn lane_outstanding(&self, agent: &AgentId) -> usize {
+        self.queues.get(agent).map_or(0, VecDeque::len)
+            + self.running_per_lane.get(agent).copied().unwrap_or(0)
     }
 }
 
@@ -1092,6 +1480,9 @@ pub struct WritePipeline {
     /// [`MAX_CONCURRENT_RECEIPT_WAITS`]).
     wait_slots: Arc<Semaphore>,
     calibration: watch::Receiver<Option<Calibration>>,
+    /// Service time observed on real writes, which **replaces** the probe's
+    /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
+    observed: Arc<PlMutex<ObservedRate>>,
     probe: PlMutex<Option<JoinHandle<()>>>,
     epoch: u64,
     seq: AtomicU64,
@@ -1132,9 +1523,12 @@ impl WritePipeline {
                 Some(rate) => tracing::info!(
                     session = %session,
                     items_per_sec = rate,
+                    serial_items_per_sec = calibration.serial_items_per_sec,
                     bound = calibration.bound,
+                    lane_bound = calibration.lane_bound,
                     concurrency = PROBE_CONCURRENCY,
-                    "write queue: bound measured on this deployment's embedder"
+                    "write queue: bounds measured on this deployment's embedder — the lane bound \
+                     from the serial leg, the aggregate from the concurrent one"
                 ),
                 None => tracing::warn!(
                     session = %session,
@@ -1156,6 +1550,7 @@ impl WritePipeline {
             settled: Arc::new(Notify::new()),
             wait_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIPT_WAITS)),
             calibration: rx,
+            observed: Arc::new(PlMutex::new(ObservedRate::default())),
             probe: PlMutex::new(Some(probe)),
             epoch: rand_epoch(),
             seq: AtomicU64::new(0),
@@ -1169,9 +1564,21 @@ impl WritePipeline {
         &self.counters
     }
 
-    /// The calibration, if the probe has published one.
+    /// The calibration in force: the probe's, with its serial rate replaced by
+    /// the observed one once enough real writes have been seen.
+    ///
+    /// `None` only before either has anything to say. The observed leg can
+    /// stand alone — a probe that failed publishes nothing, and a session must
+    /// still be able to earn a real bound after starting on the floor.
     pub fn calibration(&self) -> Option<Calibration> {
-        *self.calibration.borrow()
+        let probe = *self.calibration.borrow();
+        let observed = self.observed.lock().items_per_sec();
+        match (probe, observed) {
+            (Some(probe), Some(rate)) => Some(probe.with_observed_serial(rate)),
+            (Some(probe), None) => Some(probe),
+            (None, Some(rate)) => Some(Calibration::unmeasured().with_observed_serial(rate)),
+            (None, None) => None,
+        }
     }
 
     fn bound_snapshot(&self) -> usize {
@@ -1196,8 +1603,14 @@ impl WritePipeline {
     /// nothing measured.
     async fn await_calibration(&self) -> Calibration {
         let mut rx = self.calibration.clone();
-        if let Some(c) = *rx.borrow_and_update() {
-            return c;
+        let observed = || self.observed.lock().items_per_sec();
+        if rx.borrow_and_update().is_some() {
+            // Read through `calibration()` so the observed rate is applied: the
+            // probe's figure is an opening estimate, not the last word.
+            return self.calibration().expect("the probe has published");
+        }
+        if let Some(rate) = observed() {
+            return Calibration::unmeasured().with_observed_serial(rate);
         }
         let waited = tokio::time::timeout(PROBE_BUDGET, async {
             loop {
@@ -1210,12 +1623,18 @@ impl WritePipeline {
             }
         })
         .await;
-        match waited {
+        let probe = match waited {
             Ok(Some(c)) => c,
             // The probe's own budget is the same constant, so an outer timeout
             // here means the probe task itself was lost (aborted with the
-            // session). The floor, declared as unmeasured.
+            // session). The floor, declared as unmeasured — and no longer a
+            // sentence for the session's life: the observed rate takes over
+            // after OBSERVED_MIN_SAMPLES real writes (J3-R1-2).
             Ok(None) | Err(_) => Calibration::unmeasured(),
+        };
+        match observed() {
+            Some(rate) => probe.with_observed_serial(rate),
+            None => probe,
         }
     }
 
@@ -1241,14 +1660,20 @@ impl WritePipeline {
         let kind = payload.kind();
         let now = (self.clock)();
 
+        // Both count conditions, and the per-lane one first because it is the
+        // one that binds in the case J3-R1-1 measured: one busy agent, whose
+        // single-consumer lane drains 1-wide however wide the deployment's
+        // embedder is.
         let refusal = {
             let mut lanes = self.lanes.lock();
             if lanes.sealed {
-                Some(DropReason::Closed)
+                Some((DropReason::Closed, calibration.lane_bound))
+            } else if lanes.lane_outstanding(&agent) >= calibration.lane_bound {
+                Some((DropReason::LaneFull, calibration.lane_bound))
             } else if lanes.outstanding() >= calibration.bound {
-                Some(DropReason::QueueFull)
+                Some((DropReason::QueueFull, calibration.bound))
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
-                Some(DropReason::QueueBytes)
+                Some((DropReason::QueueBytes, calibration.bound))
             } else {
                 lanes.queued += 1;
                 lanes.bytes += bytes;
@@ -1274,7 +1699,7 @@ impl WritePipeline {
         let mut receipts = self.receipts.lock();
         receipts.expire(now);
         match refusal {
-            Some(reason) => {
+            Some((reason, bound)) => {
                 match reason {
                     DropReason::QueueBytes => {
                         self.counters
@@ -1282,10 +1707,16 @@ impl WritePipeline {
                             .fetch_add(1, Ordering::Relaxed);
                     }
                     // A refusal because the session is closing is still a
-                    // refusal by a bound, and the count must not vanish: it
-                    // rides the count bound's counter, and the receipt says
-                    // which it was.
-                    DropReason::QueueFull | DropReason::Closed => {
+                    // refusal by a bound and its count must not vanish — but it
+                    // gets its **own** counter rather than riding the count
+                    // bound's (J3-R1-8): `write_queue_dropped` is what an
+                    // operator reads for "a burst degraded", and a refused
+                    // shutdown tail is a different diagnosis with a different
+                    // response. Both are summed into `dropped()`.
+                    DropReason::Closed => {
+                        self.counters.dropped_closed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    DropReason::LaneFull | DropReason::QueueFull => {
                         self.counters
                             .dropped_queue_full
                             .fetch_add(1, Ordering::Relaxed);
@@ -1297,19 +1728,23 @@ impl WritePipeline {
                     tracing::warn!(
                         session = %self.ctx.session,
                         agent = %agent,
+                        lane_bound = calibration.lane_bound,
                         bound = calibration.bound,
                         measured = calibration.measured(),
+                        source = calibration.source.tag(),
                         "write queue: dropping writes — {}. This message is logged once; the \
                          running count is lambo_stats' write_queue_dropped",
-                        reason.describe(calibration.bound)
+                        reason.describe(bound)
                     );
                 }
-                let answer = ReceiptAnswer::Dropped(reason.describe(calibration.bound));
+                let answer = ReceiptAnswer::Dropped(reason.describe(bound));
                 receipts.entries.insert(
                     receipt,
                     Entry {
                         agent: agent.clone(),
-                        issued: now,
+                        // A refusal is born settled, so its retention window
+                        // starts now.
+                        settled_at: Some(now),
                         answer: answer.clone(),
                     },
                 );
@@ -1332,7 +1767,9 @@ impl WritePipeline {
                     receipt,
                     Entry {
                         agent,
-                        issued: now,
+                        // Unsettled, and therefore never expired and never
+                        // evicted until it settles (J3-R1-3).
+                        settled_at: None,
                         answer: ReceiptAnswer::Pending,
                     },
                 );
@@ -1389,6 +1826,7 @@ impl WritePipeline {
         let counters = self.counters.clone();
         let settled = self.settled.clone();
         let clock = self.clock.clone();
+        let observed = self.observed.clone();
         tokio::spawn(async move {
             loop {
                 let job = {
@@ -1398,6 +1836,7 @@ impl WritePipeline {
                             l.queued -= 1;
                             l.bytes = l.bytes.saturating_sub(job.bytes);
                             l.running += 1;
+                            *l.running_per_lane.entry(agent.clone()).or_insert(0) += 1;
                             job
                         }
                         None => {
@@ -1408,6 +1847,7 @@ impl WritePipeline {
                             // here detaches a task that is about to return.
                             l.queues.remove(&agent);
                             l.workers.remove(&agent);
+                            l.running_per_lane.remove(&agent);
                             return;
                         }
                     }
@@ -1425,7 +1865,16 @@ impl WritePipeline {
                         ctx.session
                     ))
                 } else {
-                    ctx.run(&job).await.map_err(|e| e.to_string())
+                    // Timed, because this lane is single-consumer: the wall
+                    // clock around one `run` *is* the serial service time the
+                    // admission bound needs, embedder warmth and all (J3-R1-2).
+                    // A fenced refusal above is deliberately not sampled — it
+                    // never entered `run`, and calling it a fast write would
+                    // bias the rate upward, which is the dangerous direction.
+                    let started = tokio::time::Instant::now();
+                    let outcome = ctx.run(&job).await.map_err(|e| e.to_string());
+                    observed.lock().sample(started.elapsed().as_secs_f64());
+                    outcome
                 };
 
                 // No `.await` from here to the end of the iteration: an
@@ -1435,6 +1884,9 @@ impl WritePipeline {
                 {
                     let mut l = lanes.lock();
                     l.running -= 1;
+                    if let Some(n) = l.running_per_lane.get_mut(&agent) {
+                        *n = n.saturating_sub(1);
+                    }
                 }
                 let answer = match outcome {
                     Ok(summary) => {
@@ -1523,6 +1975,28 @@ impl WritePipeline {
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return self.lookup(agent, id);
             }
+        }
+    }
+
+    /// Take one receipt out of the piggyback queue because it has just been
+    /// delivered **explicitly**, in the response to a fetch of that id.
+    ///
+    /// J3-R1-9: `answered` wraps every tool, so a `lambo_stats(receipt = R)`
+    /// used to carry both the explicit `receipt` block for R *and* a piggyback
+    /// note naming R — one model reading its own write outcome twice in one
+    /// message. Take-once is unaffected: the receipt is delivered exactly once
+    /// either way, and this is the delivery.
+    pub fn mark_delivered(&self, agent: &AgentId, id: ReceiptId) {
+        let mut r = self.receipts.lock();
+        let empty = match r.undelivered.get_mut(agent) {
+            Some(queue) => {
+                queue.retain(|held| held != &id);
+                queue.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            r.undelivered.remove(agent);
         }
     }
 
@@ -1648,19 +2122,17 @@ impl WritePipeline {
                 .collect();
             for id in pending.iter().chain(orphans.iter()) {
                 if let Some(entry) = r.entries.get_mut(id) {
-                    if entry.answer.is_settled() {
-                        continue;
-                    }
-                    entry.answer = ReceiptAnswer::Failed(format!(
+                    let answer = ReceiptAnswer::Failed(format!(
                         "session {session} closed before this write was applied; nothing was \
                          written"
                     ));
-                    let agent = entry.agent.clone();
-                    r.undelivered.entry(agent).or_default().push_back(*id);
-                    abandoned += 1;
+                    if entry.settle(answer, now) {
+                        let agent = entry.agent.clone();
+                        r.undelivered.entry(agent).or_default().push_back(*id);
+                        abandoned += 1;
+                    }
                 }
             }
-            let _ = now;
         }
         if abandoned > 0 {
             let n = abandoned as u64;
@@ -1670,6 +2142,7 @@ impl WritePipeline {
         {
             let mut lanes = self.lanes.lock();
             lanes.running = 0;
+            lanes.running_per_lane.clear();
             lanes.queued = 0;
             lanes.bytes = 0;
         }
@@ -1698,6 +2171,13 @@ impl WritePipeline {
     }
 }
 
+/// Record one outcome against its receipt.
+///
+/// **Settle first, sweep second** (J3-R1-3). The first version expired before it
+/// looked the entry up, so a receipt swept while its own job was still running
+/// took the job's outcome with it: the counters moved, and no receipt recorded
+/// what happened. The sweep now runs after, and cannot touch an entry settled
+/// this instant because [`RECEIPT_RETENTION`] is measured from the settle.
 fn settle_one(
     receipts: &PlMutex<Receipts>,
     id: &ReceiptId,
@@ -1705,12 +2185,13 @@ fn settle_one(
     now: DateTime<Utc>,
 ) {
     let mut r = receipts.lock();
-    r.expire(now);
     if let Some(entry) = r.entries.get_mut(id) {
-        entry.answer = answer;
-        let agent = entry.agent.clone();
-        r.undelivered.entry(agent).or_default().push_back(*id);
+        if entry.settle(answer, now) {
+            let agent = entry.agent.clone();
+            r.undelivered.entry(agent).or_default().push_back(*id);
+        }
     }
+    r.expire(now);
 }
 
 /// What a submission handed back: the receipt and its state at ack time.
@@ -1731,22 +2212,50 @@ impl Submitted {
     }
 }
 
-/// Measure the deployment's embedder: [`PROBE_CONCURRENCY`] concurrent embeds
-/// of [`PROBE_TEXT`], wall-clocked.
+/// Measure the deployment's embedder in three legs, all inside one
+/// [`PROBE_BUDGET`]:
+///
+/// 1. **Warm-up** — [`PROBE_WARMUP_EMBEDS`] embeds, timed and **thrown away**.
+///    The probe fires at session build, the coldest moment in the process's
+///    life; four consecutive runs of the same binary against the same
+///    llama-server measured 21.2 → 150.2 items/s, a 7× swing, every one of them
+///    reported as a measurement (J3-R1-2).
+/// 2. **Serial** — one embed **alone**, wall-clocked. This is the width a lane
+///    drains at, so it is what [`Calibration::lane_bound`] is projected from
+///    (J3-R1-1).
+/// 3. **Concurrent** — [`PROBE_CONCURRENCY`] embeds together, wall-clocked, for
+///    the aggregate bound and for the parallelism figure an operator reads.
+///
+/// Any leg failing or the budget running out means the same thing: this
+/// deployment's ceiling is not known, and saying so beats inventing a number.
+/// Unlike before, saying so is not a life sentence — the observed rate replaces
+/// it after [`OBSERVED_MIN_SAMPLES`] real writes.
 async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
-    let started = tokio::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
+
+    for _ in 0..PROBE_WARMUP_EMBEDS {
+        match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
+            Ok(Ok(_)) => {}
+            _ => return Calibration::unmeasured(),
+        }
+    }
+
+    let serial_started = tokio::time::Instant::now();
+    match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
+        Ok(Ok(_)) => {}
+        _ => return Calibration::unmeasured(),
+    }
+    let serial_wall = serial_started.elapsed();
+
+    let concurrent_started = tokio::time::Instant::now();
     let mut set = Vec::with_capacity(PROBE_CONCURRENCY);
     for _ in 0..PROBE_CONCURRENCY {
         set.push(embedder.embed(PROBE_TEXT));
     }
-    let joined = tokio::time::timeout(PROBE_BUDGET, futures_join_all(set)).await;
-    match joined {
+    match tokio::time::timeout_at(deadline, futures_join_all(set)).await {
         Ok(results) if results.iter().all(Result::is_ok) => {
-            Calibration::from_probe(started.elapsed())
+            Calibration::from_probe(serial_wall, concurrent_started.elapsed())
         }
-        // Either the embedder refused or it did not answer in time. Both mean
-        // the same thing here: this deployment's ceiling is not known, and
-        // saying so beats inventing a number.
         _ => Calibration::unmeasured(),
     }
 }
@@ -1832,48 +2341,131 @@ mod tests {
     #[test]
     fn the_measured_bound_is_clamped_at_both_ends() {
         // An instant embedder (the FixtureEmbedder case) is clamped to the
-        // credible ceiling, not believed.
-        let fast = Calibration::from_probe(Duration::from_nanos(1));
+        // credible ceiling, not believed — both bounds.
+        let fast = Calibration::from_probe(Duration::from_nanos(1), Duration::from_nanos(1));
         assert_eq!(fast.bound, WRITE_QUEUE_MAX);
+        assert_eq!(fast.lane_bound, WRITE_QUEUE_MAX);
         assert!(fast.measured());
+        assert_eq!(fast.source, CalibrationSource::Probe);
         assert!(
             fast.items_per_sec.expect("measured") > PROBE_CLAMP_RPS as f64,
             "the RAW rate must survive the clamp, or an operator cannot tell a \
              retention-limited bound from an embedder-limited one"
         );
+        assert!(fast.serial_items_per_sec.expect("measured") > PROBE_CLAMP_RPS as f64);
 
         // A zero wall time must not divide by zero.
-        let zero = Calibration::from_probe(Duration::ZERO);
+        let zero = Calibration::from_probe(Duration::ZERO, Duration::ZERO);
         assert_eq!(zero.bound, WRITE_QUEUE_MAX);
+        assert_eq!(zero.lane_bound, WRITE_QUEUE_MAX);
 
-        // A very slow embedder floors at WRITE_QUEUE_MIN rather than at zero:
-        // a bound of 0 would refuse every write.
-        let slow = Calibration::from_probe(Duration::from_secs(600));
+        // A very slow embedder floors rather than reaching zero: a bound of 0
+        // would refuse every write. The lane floor is ONE job
+        // (WRITE_QUEUE_LANE_MIN) because nothing has been demonstrated about a
+        // single lane's depth; the aggregate floor is the 4-wide
+        // WRITE_QUEUE_MIN, and it can never sit under the lane's.
+        let slow = Calibration::from_probe(Duration::from_secs(600), Duration::from_secs(600));
+        assert_eq!(slow.lane_bound, WRITE_QUEUE_LANE_MIN);
         assert_eq!(slow.bound, WRITE_QUEUE_MIN);
         assert!(slow.measured());
 
         // The unmeasured fallback says so, which is what lambo_stats reports.
         let none = Calibration::unmeasured();
         assert_eq!(none.bound, WRITE_QUEUE_MIN);
+        assert_eq!(none.lane_bound, WRITE_QUEUE_LANE_MIN);
         assert!(!none.measured());
+        assert_eq!(none.source.tag(), "unmeasured");
+        assert!(none.items_per_sec.is_none() && none.serial_items_per_sec.is_none());
     }
 
+    /// **The J3-R1-1 arithmetic, pinned.** The lane bound comes from the
+    /// SERIAL leg and the aggregate bound from the concurrent one, and both are
+    /// projected against [`DRAIN_PROJECTION_SHARE`] of the drain budget.
     #[test]
-    fn the_bound_tracks_the_measurement_between_the_clamps() {
-        // The phase doc's own 4-wide figure: PROBE_CONCURRENCY embeds in 64 ms
-        // is 4 / 0.064 = 62.5 items/s, and a 2 s drain budget makes that 125.
-        let rig = Calibration::from_probe(Duration::from_millis(64));
-        assert_eq!(rig.bound, 125);
-        // And this rig's own measured live figure, 141 items/s at 4-wide (i.e.
-        // 4 / 0.0284 s), must land UNDER the clamp — the property the
-        // re-derivation exists for.
-        let live = Calibration::from_probe(Duration::from_micros(28_400));
-        assert_eq!(live.bound, 282);
+    fn the_bounds_track_their_own_legs_between_the_clamps() {
+        // The phase doc's own figures: 4 recalls, 380 ms sequential against
+        // 64 ms concurrent. Serial is therefore 95 ms per item (10.53 items/s,
+        // one second of projection budget → 11) and concurrent is
+        // 4 / 0.064 = 62.5 items/s → 63.
+        let rig = Calibration::from_probe(Duration::from_millis(95), Duration::from_millis(64));
+        assert_eq!(rig.lane_bound, 11);
+        assert_eq!(rig.bound, 63);
+        // This rig's own live BGE-M3: 22.5 ms per embed serial (44.4 items/s →
+        // 45) and 141 items/s at 4-wide (4 / 0.0284 s → 141). Both must land
+        // UNDER the clamp — the property the re-derivation exists for.
+        let live =
+            Calibration::from_probe(Duration::from_micros(22_500), Duration::from_micros(28_400));
+        assert_eq!(live.lane_bound, 45);
+        assert_eq!(live.bound, 141);
         assert!(
-            live.bound < WRITE_QUEUE_MAX,
+            live.bound < WRITE_QUEUE_MAX && live.lane_bound < WRITE_QUEUE_MAX,
             "a real embedder must not be clamped"
         );
         assert!(rig.bound > WRITE_QUEUE_MIN && rig.bound < WRITE_QUEUE_MAX);
+        // **The whole point:** the lane bound is a QUARTER of the aggregate one
+        // on an embedder that parallelises, and a lane drains 1-wide. Admitting
+        // the aggregate figure on one lane is what abandoned 61 of 80 acked
+        // writes at a clean close.
+        assert!(
+            live.lane_bound * 3 <= live.bound,
+            "the lane bound must stay a fraction of the aggregate one on an embedder that \
+             parallelises: lane {} vs aggregate {}",
+            live.lane_bound,
+            live.bound
+        );
+    }
+
+    /// The observed rate replaces the probe's serial figure, and only after
+    /// [`OBSERVED_MIN_SAMPLES`] — the J3-R1-2 remediation.
+    #[test]
+    fn an_observed_rate_replaces_the_probes_serial_figure_after_enough_samples() {
+        let mut observed = ObservedRate::default();
+        for _ in 0..(OBSERVED_MIN_SAMPLES - 1) {
+            observed.sample(0.1);
+            assert!(
+                observed.items_per_sec().is_none(),
+                "the probe's figure must stand until {OBSERVED_MIN_SAMPLES} writes are in"
+            );
+        }
+        observed.sample(0.1);
+        let rate = observed.items_per_sec().expect("enough samples");
+        assert!((rate - 10.0).abs() < 0.001, "{rate}");
+
+        // A hot probe over-estimating the lane by 7x (the measured swing) is
+        // corrected by observation rather than believed for the session's life.
+        let hot = Calibration::from_probe(Duration::from_millis(7), Duration::from_millis(7));
+        assert_eq!(hot.lane_bound, 143);
+        let corrected = hot.with_observed_serial(rate);
+        assert_eq!(corrected.lane_bound, 10, "10 items/s for one second");
+        assert_eq!(corrected.source, CalibrationSource::Observed);
+        assert!(corrected.measured());
+        assert_eq!(
+            corrected.items_per_sec, hot.items_per_sec,
+            "the concurrent leg is not re-measured by observation, so it survives unchanged"
+        );
+
+        // A degrading embedder moves the average within about one probe's
+        // width of samples, in the direction that shrinks the bound.
+        for _ in 0..8 {
+            observed.sample(1.0);
+        }
+        let degraded = observed.items_per_sec().expect("samples");
+        assert!(degraded < 2.0, "{degraded}");
+        assert_eq!(
+            hot.with_observed_serial(degraded).lane_bound,
+            2,
+            "≈1.1 items/s retires two jobs in the projection budget, not 143"
+        );
+
+        // An unmeasured probe still earns a real bound from observation, which
+        // is what stops a cold or failed probe being a life sentence.
+        let recovered = Calibration::unmeasured().with_observed_serial(rate);
+        assert_eq!(recovered.lane_bound, 10);
+        assert!(recovered.measured());
+        assert!(
+            recovered.bound >= recovered.lane_bound,
+            "the aggregate bound can never refuse a lane below its own measured depth"
+        );
     }
 
     /// The `ledger_queued_lines` lesson, re-derived here: the gauge is correct
@@ -1999,12 +2591,26 @@ mod tests {
         // items/s at PROBE_CONCURRENCY). The margin is the whole point of the
         // re-derivation: a clamp below the real embedder's throughput would
         // make the per-deployment measurement decorative.
-        assert_eq!(PROBE_CLAMP_RPS, 512);
+        assert_eq!(PROBE_CLAMP_RPS, 1024);
+        assert_eq!(
+            PROBE_CLAMP_RPS,
+            WRITE_QUEUE_MAX as u64 * DRAIN_PROJECTION_SHARE as u64
+                / WRITE_QUEUE_DRAIN_BUDGET.as_secs()
+        );
+        assert_eq!(DRAIN_PROJECTION_SHARE, 2);
+        assert_eq!(WRITE_QUEUE_LANE_MIN, 1);
+        assert_eq!(PROBE_EMBEDS, 6);
+        assert_eq!(PROBE_EMBEDS, PROBE_WARMUP_EMBEDS + 1 + PROBE_CONCURRENCY);
+        assert_eq!(OBSERVED_MIN_SAMPLES, PROBE_CONCURRENCY as u64);
+        assert_eq!(OBSERVED_EWMA_WEIGHT, PROBE_CONCURRENCY as u32);
+        assert_eq!(MEASURED_WORST_FLUSH_LAG_SECS, 227);
         assert_eq!(WRITE_QUEUE_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(MAX_RECEIPT_IDS, MAX_CONCEPTS_PER_DERIVE);
-        // Above the worst flush_lag measured on the rig (227 s), which is the
-        // applied-but-not-durable window a receipt has to outlive.
-        assert!(RECEIPT_RETENTION.as_secs() > 227);
+        // Above the worst flush_lag measured on the rig, which is the
+        // applied-but-not-durable window a receipt has to outlive — and the
+        // window now starts at the SETTLE, which is what makes that the right
+        // comparison (J3-R1-3).
+        assert!(RECEIPT_RETENTION.as_secs() > MEASURED_WORST_FLUSH_LAG_SECS);
         // The quiesce cannot be why a close() misses the deadline serve gives
         // it. Duplicated from the const assert on purpose: the build guard
         // proves the relation, this proves the numbers a reader is quoted.
@@ -2213,30 +2819,36 @@ mod pipeline_tests {
         );
     }
 
-    /// Eviction is oldest-first, which is what lets it collapse into `expired`
-    /// rather than becoming a fifth answer. Asserted on the store directly:
-    /// filling `MAX_RETAINED_RECEIPTS` through the pipeline would be 1024 real
-    /// writes.
+    /// Eviction is oldest-**settled**-first, which is what lets it collapse
+    /// into `expired` rather than becoming a fifth answer — **and it never
+    /// evicts a receipt whose write is still outstanding** (J3-R1-3). Asserted
+    /// on the store directly: filling `MAX_RETAINED_RECEIPTS` through the
+    /// pipeline would be 4096 real writes.
     #[test]
-    fn eviction_is_oldest_first_so_an_evicted_id_is_older_than_everything_held() {
-        let mut r = Receipts::default();
+    fn eviction_is_oldest_settled_first_and_never_takes_a_running_writes_receipt() {
         let base = Utc::now();
+        let entry = |seq: u64, settled: bool| Entry {
+            agent: AgentId::new("agent-a"),
+            settled_at: settled.then_some(base + chrono::Duration::milliseconds(seq as i64)),
+            answer: if settled {
+                ReceiptAnswer::Failed("settled".into())
+            } else {
+                ReceiptAnswer::Pending
+            },
+        };
+        let id_at = |seq: u64| ReceiptId {
+            epoch: 7,
+            issued_ms: base.timestamp_millis() + seq as i64,
+            seq,
+        };
+
+        // All settled: plain oldest-first.
+        let mut r = Receipts::default();
         let mut ids = Vec::new();
         for seq in 1..=(MAX_RETAINED_RECEIPTS as u64 + 8) {
-            let id = ReceiptId {
-                epoch: 7,
-                issued_ms: base.timestamp_millis() + seq as i64,
-                seq,
-            };
+            let id = id_at(seq);
             ids.push(id);
-            r.entries.insert(
-                id,
-                Entry {
-                    agent: AgentId::new("agent-a"),
-                    issued: base + chrono::Duration::milliseconds(seq as i64),
-                    answer: ReceiptAnswer::Pending,
-                },
-            );
+            r.entries.insert(id, entry(seq, true));
             r.order.push_back(id);
             r.highest_seq = seq;
             r.evict();
@@ -2251,7 +2863,38 @@ mod pipeline_tests {
         let oldest_held = ids[8];
         assert!(
             ids[..8].iter().all(|e| e.issued_ms < oldest_held.issued_ms),
-            "an evicted id must be older than everything held, or 'expired' would be a lie"
+            "an evicted settled id must be older than everything held, or 'expired' would be a lie"
+        );
+
+        // The oldest entry is a write still in flight, and the store is then
+        // driven past its cap by refusals — which get receipts of their own, so
+        // the count argument that used to protect this ("the outstanding set is
+        // always inside the newest quarter") does not hold on its own.
+        let mut r = Receipts::default();
+        let running = id_at(1);
+        r.entries.insert(running, entry(1, false));
+        r.order.push_back(running);
+        for seq in 2..=(MAX_RETAINED_RECEIPTS as u64 + 8) {
+            let id = id_at(seq);
+            r.entries.insert(id, entry(seq, true));
+            r.order.push_back(id);
+            r.highest_seq = seq;
+            r.evict();
+        }
+        assert!(
+            r.entries.contains_key(&running),
+            "the receipt of a RUNNING write must never be evicted — it would answer 'expired' \
+             about a job in flight, which is the one promise the taxonomy rests on"
+        );
+        assert_eq!(r.entries.len(), MAX_RETAINED_RECEIPTS);
+        assert_eq!(
+            r.order.front().copied(),
+            Some(running),
+            "a skipped entry must go back at the FRONT, or `order` stops being issue order"
+        );
+        assert!(
+            !r.entries.contains_key(&id_at(2)),
+            "the oldest SETTLED entry is the one that must have gone instead"
         );
     }
 
@@ -2275,8 +2918,10 @@ mod pipeline_tests {
             }),
         );
         // Canonical strategy never embeds, so the gate only holds the probe.
-        // Release it so calibration lands.
-        gate.add_permits(PROBE_CONCURRENCY);
+        // Release its whole allowance (PROBE_EMBEDS, not PROBE_CONCURRENCY —
+        // the probe warms up and times a serial leg before its concurrent one)
+        // so calibration lands.
+        gate.add_permits(PROBE_EMBEDS);
 
         let a = AgentId::new("agent-a");
         let b = AgentId::new("agent-b");
@@ -2342,7 +2987,7 @@ mod pipeline_tests {
         // Let the probe through so a bound exists, then close the gate again so
         // real work parks in the queue. `Hybrid` is what embeds; this rig runs
         // `Canonical`, so hold the lane by never releasing after the probe.
-        gate.add_permits(PROBE_CONCURRENCY);
+        gate.add_permits(PROBE_EMBEDS);
         let bound = loop {
             if let Some(c) = rig.pipeline.calibration() {
                 break c.bound;
@@ -2438,5 +3083,281 @@ mod pipeline_tests {
         // And the queue is sealed against anything new.
         let after = rig.derive(&agent, "after close").await;
         assert!(after.dropped(), "{:?}", after.answer);
+    }
+
+    // -----------------------------------------------------------------------
+    // The J3-R1-1 cluster: a projection is not a bound
+    // -----------------------------------------------------------------------
+
+    /// A store that advertises `VECTOR_SEARCH`, because `hybrid::derive` skips
+    /// the embedder entirely when the store has none — and a queue test whose
+    /// jobs never embed measures nothing about the drain. The same load-bearing
+    /// wrapper as `the_ack_lands_before_the_embedder_is_called`'s.
+    struct VectorCapable(MemoryStore);
+
+    #[async_trait::async_trait]
+    impl GraphStore for VectorCapable {
+        fn capabilities(&self) -> crate::store::Capabilities {
+            crate::store::Capabilities::VECTOR_SEARCH
+        }
+        async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+            self.0.init_schema().await
+        }
+        fn vector_dimensions(&self) -> Option<usize> {
+            self.0.vector_dimensions()
+        }
+        async fn flush(
+            &self,
+            batch: &crate::types::MutationBatch,
+            token: Option<u64>,
+        ) -> Result<(), crate::types::StoreError> {
+            self.0.flush(batch, token).await
+        }
+        async fn load_session(
+            &self,
+            session: &SessionId,
+        ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+            self.0.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+            self.0.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+            self.0.vector_candidates(session, embedding, limit).await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, crate::types::StoreError> {
+            self.0.blast_radius(session, node, min_edge_age, now).await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+            self.0.interaction_span(session, node, min_age, now).await
+        }
+        async fn record_canonization(
+            &self,
+            event: &crate::types::CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), crate::types::StoreError> {
+            self.0.record_canonization(event, token).await
+        }
+    }
+
+    /// An embedder that costs a fixed wall-clock delay per call and
+    /// parallelises perfectly — **the exact shape a concurrent probe rewards
+    /// and a single-consumer lane cannot exploit.** Four of these together
+    /// finish in one delay; four in a row take four.
+    struct SlowEmbedder {
+        delay: Duration,
+        inner: FixtureEmbedder,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for SlowEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.delay).await;
+            self.inner.embed(text).await
+        }
+    }
+
+    impl Rig {
+        /// A rig whose writes actually embed: `Hybrid` against a store that
+        /// advertises `VECTOR_SEARCH`.
+        fn hybrid(session: &str, embedder: Arc<dyn Embedder>) -> Self {
+            let mut rig = Self::new(session, embedder);
+            let ctx = Arc::get_mut(&mut rig.pipeline.ctx).expect("sole owner at build");
+            ctx.match_strategy = MatchStrategy::Hybrid;
+            ctx.store = Arc::new(VectorCapable(MemoryStore::new()));
+            rig
+        }
+    }
+
+    /// Spin until `cond` holds, with a deadline, so a broken invariant fails
+    /// the test instead of hanging the suite.
+    async fn until(mut cond: impl FnMut() -> bool, what: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !cond() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Let the calibration probe through a gated embedder without knowing how
+    /// many embeds it takes, then take back whatever it did not use so real
+    /// work still parks.
+    async fn calibrate_through_gate(rig: &Rig, gate: &tokio::sync::Semaphore) -> Calibration {
+        let calibration = loop {
+            if let Some(c) = rig.pipeline.calibration() {
+                break c;
+            }
+            gate.add_permits(1);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        while gate.available_permits() > 0 {
+            if let Ok(p) = gate.try_acquire() {
+                p.forget();
+            }
+        }
+        calibration
+    }
+
+    /// **J3-R1-1, as a test.** One agent's lane has one consumer, so its jobs
+    /// are strictly serial. A bound projected from a *concurrent* measurement
+    /// therefore admits a population that lane cannot retire inside
+    /// [`WRITE_QUEUE_DRAIN_BUDGET`], and a clean `close()` abandons the
+    /// remainder — the acked-but-never-applied hazard this whole workstream
+    /// exists to exclude, reached on the clean path with no adversary.
+    ///
+    /// Measured at `528ade6` with these exact parameters: bound 80, **19
+    /// applied, 61 acked writes abandoned**. The assertion is the invariant:
+    /// every acked write either applied before `close()` returned or was
+    /// refused at the door.
+    #[tokio::test]
+    async fn one_agents_burst_never_outruns_its_own_lanes_drain_at_a_clean_close() {
+        const EMBED: Duration = Duration::from_millis(100);
+        const BURST: usize = 80;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-lane-drain",
+            Arc::new(SlowEmbedder {
+                delay: EMBED,
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        let agent = AgentId::new("agent-a");
+
+        let mut receipts = Vec::with_capacity(BURST);
+        for i in 0..BURST {
+            receipts.push(rig.derive(&agent, &format!("burst concept {i}")).await);
+        }
+        let counters = rig.pipeline.counters();
+        let accepted = counters.accepted();
+        assert!(accepted > 0, "the queue must admit something");
+        assert!(
+            counters.dropped() > 0,
+            "a {BURST}-deep burst behind a {EMBED:?} embedder must degrade visibly"
+        );
+        assert_eq!(
+            accepted + counters.dropped(),
+            BURST as u64,
+            "every submission is either accepted or refused"
+        );
+
+        let started = tokio::time::Instant::now();
+        let abandoned = rig.pipeline.quiesce().await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            abandoned,
+            0,
+            "a clean close abandoned {abandoned} of {accepted} ACKED writes in {elapsed:?} \
+             (applied={}, failed={}, embeds={}) — the admission bound projected more than this \
+             agent's own lane can drain",
+            counters.applied(),
+            counters.failed(),
+            calls.load(Ordering::Relaxed)
+        );
+        assert_eq!(counters.applied(), accepted, "every acked write applied");
+        assert_eq!(counters.abandoned(), 0);
+        assert_eq!(counters.outstanding(), 0);
+
+        // The truth table, per receipt: applied, or refused at the door. Never
+        // pending, never failed, never silent.
+        for submitted in &receipts {
+            let answer = rig.pipeline.lookup(&agent, submitted.receipt);
+            match answer {
+                ReceiptAnswer::Applied(_) => {}
+                ReceiptAnswer::Dropped(_) => assert!(
+                    answer.describe().contains("nothing was written"),
+                    "{}",
+                    answer.describe()
+                ),
+                other => panic!("an acked write ended {other:?}"),
+            }
+        }
+    }
+
+    /// **J3-R1-3, as a test.** A receipt whose job is still queued or running
+    /// must never answer `expired`, and its outcome must never be discarded
+    /// when it finally lands: expiry keyed on *issue* time does both, because
+    /// nothing caps how long a job sits in a lane.
+    #[tokio::test]
+    async fn a_running_jobs_receipt_neither_expires_nor_loses_its_outcome() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-running-receipt",
+            Arc::new(HeldEmbedder {
+                gate: gate.clone(),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        calibrate_through_gate(&rig, &gate).await;
+        let agent = AgentId::new("agent-a");
+
+        let before = calls.load(Ordering::Relaxed);
+        let submitted = rig.derive(&agent, "parked in the embedder").await;
+        assert_eq!(submitted.answer.tag(), "pending");
+        until(
+            || calls.load(Ordering::Relaxed) > before,
+            "the worker to reach the embedder",
+        )
+        .await;
+        assert_eq!(rig.pipeline.outstanding(), 1, "the job is still in flight");
+
+        // Retention elapses while the job is parked.
+        let base = *rig.now.lock();
+        *rig.now.lock() = base
+            + chrono::Duration::from_std(RECEIPT_RETENTION).unwrap()
+            + chrono::Duration::seconds(1);
+        assert_eq!(
+            rig.pipeline.lookup(&agent, submitted.receipt).tag(),
+            "pending",
+            "a receipt for a RUNNING job must never expire out from under it"
+        );
+
+        // And when the write lands, its outcome is recorded rather than swept.
+        gate.add_permits(8);
+        let answer = rig
+            .pipeline
+            .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        assert_eq!(answer.tag(), "applied", "{answer:?}");
+        assert_eq!(
+            rig.pipeline.lookup(&agent, submitted.receipt).tag(),
+            "applied",
+            "the outcome of a write that applied must not be silently discarded"
+        );
+        assert_eq!(rig.pipeline.counters().applied(), 1);
     }
 }
