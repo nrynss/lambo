@@ -803,10 +803,22 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
 /// Slack added to a lease's own remaining time before the election decides
 /// whether waiting for it is worth doing.
 ///
-/// Absorbs store-clock skew and one missed refresh interval: a row whose
-/// `expires_at` is a second away may still be refreshed by a live holder, and a
-/// clock that disagrees slightly must not make the election give up a moment too
-/// early.
+/// Absorbs store-clock skew and a refresh landing between the row read and this
+/// decision: a row whose `expires_at` is a second away may already have been
+/// pushed out by a live holder, and a clock that disagrees slightly must not make
+/// the election give up a moment too early.
+///
+/// It does **not** absorb "one missed refresh interval", which is what this
+/// docstring used to claim (J2-R2-2's sweep). That interval is
+/// [`lease::LEASE_HEARTBEAT_INTERVAL`] = 15s, three times this value, and it does
+/// not need absorbing: a holder that misses a refresh has two more chances
+/// inside one [`lease::LEASE_TTL`], and if it misses all three the lease is
+/// *supposed* to lapse. 5s covers the race between reading the row and acting on
+/// it, which is the only thing that can make an honest arithmetic answer wrong.
+///
+/// Where the number lands is worked out at [`ELECTION_BUDGET`]: it is subtracted
+/// from the budget, so the largest lapse the election will wait out is
+/// `ELECTION_BUDGET - ELECTION_SLACK`.
 const ELECTION_SLACK: Duration = Duration::from_secs(5);
 
 /// The longest the startup election may block the client that spawned this
@@ -837,12 +849,64 @@ const ELECTION_SLACK: Duration = Duration::from_secs(5);
 /// row lapses inside this budget it waits exactly that long and takes the
 /// session; if it does not, it refuses **immediately** and names the seconds. A
 /// fast, actionable refusal beats spending a client's entire startup gate to
-/// arrive at the same place — and in the majority of real cases (a lease
-/// expires uniformly somewhere inside its TTL) the wait still succeeds.
+/// arrive at the same place.
+///
+/// # What the wait actually catches, derived from the constants (J2-R2-2)
+///
+/// This docstring used to end "— and in the majority of real cases (a lease
+/// expires uniformly somewhere inside its TTL) the wait still succeeds". The
+/// parenthesis was false and it carried the conclusion with it. A lease's
+/// remaining time is **not** uniform on `[0, LEASE_TTL]`: a live holder refreshes
+/// every [`lease::LEASE_HEARTBEAT_INTERVAL`] and each refresh sets
+/// `expires_at = now + LEASE_TTL`, so an **abrupt** death (a `kill -9`, a panic,
+/// a lost machine — the case this budget exists for) leaves
+/// `[LEASE_TTL - LEASE_HEARTBEAT_INTERVAL, LEASE_TTL]` = **[30s, 45s]** of lease
+/// behind. Never less than 30.
+///
+/// [`waiting_fits`] waits only while `lapses_in + ELECTION_SLACK <= left`, so it
+/// refuses whenever `lapses_in` exceeds `ELECTION_BUDGET - ELECTION_SLACK` = 15s
+/// at the very best, and about 13s in practice once the attach attempt and the
+/// endpoint probe have spent some of the budget. Every value in [30, 45] is above
+/// that. Therefore:
+///
+/// * **a client starting promptly after an abrupt holder death is refused —
+///   always**, not in a minority of cases. Measured live: lease freshly
+///   refreshed with 40s remaining, holder `kill -9`'d, a fresh serve started
+///   immediately, refused in **2.12s** with "does not lapse for 38s … Retry in
+///   39s".
+/// * the wait succeeds for a client starting roughly **17–32s after** the death —
+///   late enough that under ~13s of lease remains, early enough that the row has
+///   not already lapsed.
+/// * once the lease has lapsed there is no wait at all: the next start attaches.
+///
+/// **None of this is an argument for moving the budget**, and the refuse-fast
+/// behaviour is correct: `opencode`'s measured 31.96s tolerance means the
+/// pre-J2-L2 50s wait failed that client anyway, so a 2.12s refusal carrying a
+/// retry interval is strictly better for it. What changed is that the
+/// justification written down is now the one that survives contact with the
+/// constants — the third instance of the register failure J2-R1-7 was — and that
+/// [`waiting_fits`] exists so a test asserts the arithmetic instead of a
+/// docstring asserting it.
 const ELECTION_BUDGET: Duration = Duration::from_secs(20);
 
 /// How often the startup election retries while no holder is reachable.
 const ELECTION_RETRY: Duration = Duration::from_secs(1);
+
+/// Would waiting for the current holder's lease to lapse fit inside the budget
+/// that is left? (J2-L2's arithmetic, extracted so J2-R2-2 can pin it.)
+///
+/// `lapses_in` is the row's `expires_at` minus now; `left` is what remains of
+/// [`ELECTION_BUDGET`]. [`ELECTION_SLACK`] is added to the lapse, not subtracted
+/// from the budget, because it exists to cover the holder possibly refreshing
+/// once more — see its own doc.
+///
+/// A function rather than an inline comparison because the *claim about* it was
+/// wrong twice in two rounds. See [`ELECTION_BUDGET`] for what the numbers make
+/// true, and `an_abrupt_holder_death_outlasts_the_election_budget` for the
+/// assertion.
+fn waiting_fits(lapses_in: Duration, left: Duration) -> bool {
+    lapses_in + ELECTION_SLACK <= left
+}
 
 /// What this process turned out to be.
 enum Role {
@@ -877,9 +941,42 @@ async fn probe_holder(
             drop(stream);
             Ok(())
         }
-        Err(e) => Err(format!(
-            "the holder's endpoint is not accepting connections ({e})"
-        )),
+        Err(e) => Err(format!("{ENDPOINT_NOT_ACCEPTING} ({e})")),
+    }
+}
+
+/// The one probe outcome that is strong evidence the holder is **gone** rather
+/// than merely unreachable (J2-R2-3).
+///
+/// A named constant, not a literal at each site, so
+/// [`correct_the_refresh_claim`] cannot drift out of step with the message it
+/// looks for — the class of bug this whole round is about.
+const ENDPOINT_NOT_ACCEPTING: &str = "the holder's endpoint is not accepting connections";
+
+/// What replaces `crate::memory::STILL_REFRESHING_CLAUSE` when the probe says the endpoint is not answering.
+const PROBABLY_DEAD: &str = "has not yet let its lease lapse — but its endpoint is not \
+     answering, so it has most likely died";
+
+/// Repair the lease refusal before folding a probe outcome into it (J2-R2-3).
+///
+/// `build_attach`'s message says the holder "is still refreshing" its lease,
+/// which is the right thing to say to a serve that simply lost a race. J2-L2
+/// newly composes that message with [`probe_holder`]'s outcome, and when the
+/// outcome is [`ENDPOINT_NOT_ACCEPTING`] the composition contradicts itself
+/// inside one paragraph — with the **false half first**, so an operator reading
+/// the opening sentence goes looking for a live process that no longer exists.
+/// The probe is the better evidence of the two: a lease row is a claim made up to
+/// [`lease::LEASE_HEARTBEAT_INTERVAL`] ago, a refused connect is now.
+///
+/// Only that one clause changes, and only on that one outcome. Every other
+/// refusal — another host, no endpoint published, a foreign address name — is a
+/// live holder this process merely cannot forward to, and "is still refreshing
+/// it" is exactly true for it.
+fn correct_the_refresh_claim(message: &str, outcome: &str) -> String {
+    if outcome.contains(ENDPOINT_NOT_ACCEPTING) {
+        message.replacen(crate::memory::STILL_REFRESHING_CLAUSE, PROBABLY_DEAD, 1)
+    } else {
+        message.to_string()
     }
 }
 
@@ -984,14 +1081,14 @@ async fn resolve_role(
             .to_std()
             .unwrap_or(Duration::ZERO);
         let left = deadline.saturating_duration_since(Instant::now());
-        if lapses_in + ELECTION_SLACK > left {
+        if !waiting_fits(lapses_in, left) {
             return Err(LamboError::Conflict(format!(
                 "{} {outcome} That holder's lease does not lapse for {}s, and this process will \
                  not block the client that spawned it for longer than {}s waiting — an MCP \
                  client that gives up on a slow server reports NO TOOLS rather than 'starting', \
                  which would be a worse outcome than this message. Retry in {}s, or stop the \
                  other holder.",
-                held.message,
+                correct_the_refresh_claim(&held.message, &outcome),
                 lapses_in.as_secs(),
                 ELECTION_BUDGET.as_secs(),
                 lapses_in.as_secs() + 1
@@ -1010,7 +1107,7 @@ async fn resolve_role(
             return Err(LamboError::Conflict(format!(
                 "{} {outcome} Waited {}s for that holder's lease to lapse or its endpoint to \
                  answer, and neither happened.",
-                held.message,
+                correct_the_refresh_claim(&held.message, &outcome),
                 ELECTION_BUDGET.as_secs()
             )));
         }
@@ -1797,6 +1894,102 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // J2-R2-2 / J2-R2-3 — the election's arithmetic and the refusal it composes
+    // -----------------------------------------------------------------------
+
+    /// J2-R2-2: the claim [`ELECTION_BUDGET`]'s docstring makes, asserted.
+    ///
+    /// The docstring used to say the wait "still succeeds" in "the majority of
+    /// real cases" because "a lease expires uniformly somewhere inside its TTL".
+    /// It does not expire uniformly: every refresh sets `expires_at` to
+    /// `now + LEASE_TTL` and refreshes come every `LEASE_HEARTBEAT_INTERVAL`, so
+    /// an abrupt death leaves at least `LEASE_TTL - LEASE_HEARTBEAT_INTERVAL`.
+    /// This test is what makes that arithmetic falsifiable instead of asserted in
+    /// prose — moving any of the three constants into a shape where a prompt
+    /// restart could be waited out turns it red.
+    #[test]
+    fn an_abrupt_holder_death_outlasts_the_election_budget() {
+        // The whole reachable range after an abrupt death, both ends.
+        let least = lease::LEASE_TTL - lease::LEASE_HEARTBEAT_INTERVAL;
+        assert_eq!(least, Duration::from_secs(30), "the floor moved");
+        for lapses_in in [least, lease::LEASE_TTL] {
+            assert!(
+                !waiting_fits(lapses_in, ELECTION_BUDGET),
+                "a client starting promptly after an abrupt holder death must be refused, not \
+                 waited out: {lapses_in:?} of lease against a {ELECTION_BUDGET:?} budget"
+            );
+        }
+        // And the window that IS waited out, at its exact boundary: a client
+        // arriving late enough that only the slack separates the lapse from the
+        // budget.
+        let widest = ELECTION_BUDGET - ELECTION_SLACK;
+        assert!(
+            waiting_fits(widest, ELECTION_BUDGET),
+            "the largest lapse the budget can absorb must still be waited out"
+        );
+        assert!(
+            !waiting_fits(widest + Duration::from_secs(1), ELECTION_BUDGET),
+            "one second past it must refuse"
+        );
+        // The floor is above the widest waitable lapse — which is the whole
+        // finding in one line.
+        assert!(
+            least > widest,
+            "if this ever inverts, the docstring's 'a prompt start is refused by design' is \
+             no longer true and must be rewritten with it"
+        );
+    }
+
+    /// J2-R2-3: the refusal must not tell an operator that a dead holder "is
+    /// still refreshing" its lease.
+    ///
+    /// The false clause came *first* in the composed paragraph and the probe's
+    /// contradiction second, so the opening sentence sent an operator looking for
+    /// a process that no longer exists.
+    #[test]
+    fn a_dead_holders_refusal_does_not_claim_it_is_still_refreshing() {
+        let held = format!(
+            "session s is already held by another writer (a@h#1) — it acquired the \
+             single-writer lease 4s ago and {}. Refusing to open a second writer.",
+            crate::memory::STILL_REFRESHING_CLAUSE
+        );
+        let refused = format!("{ENDPOINT_NOT_ACCEPTING} (Connection refused (os error 61))");
+        let corrected = correct_the_refresh_claim(&held, &refused);
+        assert!(
+            !corrected.contains(crate::memory::STILL_REFRESHING_CLAUSE),
+            "the probe is the better evidence and the claim must go: {corrected}"
+        );
+        assert!(
+            corrected.contains("most likely died"),
+            "and it must be replaced by what the probe actually found: {corrected}"
+        );
+        // J2-R1-9's rule, applied to the new literal: a continuation that lost
+        // its `\\` shows up as a double space, and a phrase that spans one shows
+        // up nowhere. Assert both.
+        assert!(
+            !corrected.contains("  "),
+            "a broken string continuation leaves a double space: {corrected}"
+        );
+        assert!(
+            corrected.contains("endpoint is not answering"),
+            "the phrase spanning the continuation must survive it: {corrected}"
+        );
+        // Narrow on purpose: every other refusal is a LIVE holder this process
+        // merely cannot forward to, and the clause is true for it.
+        for other in [
+            "That holder published no endpoint, so there is nothing to forward tool calls to",
+            "That holder is on another host (a@elsewhere#2)",
+            "the holder's endpoint is not safe to dial (a directory check failed)",
+        ] {
+            assert!(
+                correct_the_refresh_claim(&held, other)
+                    .contains(crate::memory::STILL_REFRESHING_CLAUSE),
+                "a live-but-unforwardable holder IS still refreshing its lease: {other}"
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // I1 / I2 — ledger flags and the heartbeat timer

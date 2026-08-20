@@ -772,6 +772,15 @@ that **both residuals become reachable in practice for the first time.**
   holder that stopped answering*. Handed to J4 rather than taken here, because
   a ledger in the proxy is a second `Ledger::open` on a startup path whose
   ordering J2 already moved once.
+* **The pump's two frame writes are still unbounded arm-body awaits** (J2-R2-1, round 3).
+  `send` to the holder and `send` to the client's stdout are neither raced against shutdown
+  nor budgeted, because a write abandoned mid-frame delivers a torn JSON line and this pipe
+  may never do that (`Framed::Torn` exists for the receiving half of the same rule). Each is
+  bounded by its peer draining the socket — a different shape from the lease-row read
+  `DIAL_BUDGET` replaced, since a peer that never reads is itself already wedged, whereas a
+  row read stuck behind a flush at the connection pool wedged a *healthy* proxy talking to a
+  *healthy* holder. Closing it means deciding what to do with a partially-written frame to a
+  live peer, which is a behaviour decision rather than a bound, and is not taken here.
 * No async ack, no receipts (J3). No auth. No lease weakening. No durable
   write-intent queue.
 
@@ -853,8 +862,10 @@ code did.
   already honest and took ~2s.
 
 * **J2-R1-1 (P1, the blocker) — an in-flight forwarded request was never answered when the
-  holder's connection closed.** `HubProxy::run`'s own docstring promises "every forwarded
-  call fails honestly and immediately (never hangs)"; the pump only answered frames whose
+  holder's connection closed.** `HubProxy::run`'s own docstring promised "every forwarded
+  call fails honestly and immediately (never hangs)" (round 3 re-derived that sentence — the
+  three bounds it rounded to "immediately" are now written out, J2-R2-1); the pump only
+  answered frames whose
   *write* failed. A frame written successfully and then lost with the holder got no reply
   and no error — and the wedge was permanent rather than transient, because the reconnect
   lives in the `client_rx` arm: a client politely awaiting its response sends nothing, so
@@ -951,6 +962,14 @@ code did.
   being torn by cancellation (an attack the review checked and cleared), so arm-body awaits
   do not go away; only the *unbounded* one was the defect.
 
+  **Round 3 overturned the number and with it the deviation (J2-R2-1).** "2 ×
+  `CONNECT_BUDGET`" was true of `connect` and `replay` and false of the arm body, which also
+  contains `dial()`'s opening `store.read_lease` — bounded by nothing here, and in practice
+  by sqlite's 8s `busy_timeout` or cockroach's 20s `statement_timeout` *behind* sqlx's
+  30s default pool acquire, i.e. ≈38s and ≈50s. The deviation had been argued against 4s.
+  Re-made at the real number: the dial is now raced against the shutdown future and capped
+  at a chosen `DIAL_BUDGET` (6s). See the round-3 section below.
+
 **Two further P2s, from the live two-client probe** (real products — `cursor-agent` 2026.08.11
 as the holder side, `opencode` 1.18.18 as the proxy side — against `bbac803`; timeline and
 per-run logs were produced by the probe agent). Both are in the code this remediation was
@@ -1010,19 +1029,27 @@ lambo's own internals when it had to be chosen from what a real client does.
   `expires_at`, so each pass asks whether the lapse falls inside the budget that is left, and
   refuses **immediately** with the seconds named when it does not. That is strictly better
   than the old behaviour in both directions — the cases that can succeed inside a client's
-  patience still do (a lease expires uniformly somewhere inside its TTL, and the probe's own
-  dead-holder election took 10.2s), and the cases that cannot now say so in milliseconds with
+  patience still do (a client that starts ~17–32s after a holder's death finds under ~13s of
+  lease left and waits it out; the probe's own dead-holder election took 10.2s), and the
+  cases that cannot now say so in milliseconds with
   an actionable number instead of spending the client's whole startup gate to reach the same
   refusal. Pinned at the binary: a CLI-shaped holder with a full TTL left is refused in under
   10s; under the mutation restoring the 50s budget and removing the arithmetic, the same test
   measures **45.1s**.
 
-  **What this does not fix, stated:** a holder that dies immediately after a heartbeat leaves
-  ~45s of lease, which no 20s budget can outlast, so that start refuses instead of recovering.
-  The client's next start succeeds. Removing that last case needs the wait not to block the
-  MCP `initialize` response at all, which means serving a client from a role that can still
-  become a holder — in-process promotion, which §J2 scoped out with an argument this
-  remediation does not reopen.
+  **What this does not fix, stated (corrected in round 3 — J2-R2-2).** *Any* abrupt holder
+  death leaves 30–45s of lease, not just one "immediately after a heartbeat": refreshes come
+  every `LEASE_HEARTBEAT_INTERVAL` = 15s and each sets `expires_at = now + LEASE_TTL` = 45s,
+  so the remaining lease is always in `[LEASE_TTL − LEASE_HEARTBEAT_INTERVAL, LEASE_TTL]`,
+  and the election refuses above ~13s. So a client starting promptly after an abrupt death is
+  refused **always**, by design, with the retry interval named — and "the client's next start
+  succeeds" was false as written: at kill+5s about 33s of lease remains and the next start is
+  refused too. The refusal's own "Retry in 39s" is the honest number. Removing the case
+  needs the wait not to block the MCP `initialize` response at all, which means serving a
+  client from a role that can still become a holder — in-process promotion, which §J2 scoped
+  out with an argument this remediation does not reopen. Pinned by
+  `an_abrupt_holder_death_outlasts_the_election_budget` over the extracted `waiting_fits`
+  predicate, so the arithmetic is asserted rather than described.
 
 **The thirteen P3s**, all closed: `unreachable_reply` now requires a `method`, so a client
 *response* frame is never answered with an error keyed to the holder's own request id
@@ -1064,6 +1091,203 @@ invocation was. Recorded here so the next reviewer does not have to guess.
 
 Counts are the sum over every test binary the invocation runs, which is why they exceed the
 `--lib` figures a per-crate reading gives.
+
+### J2 round-2 review remediation
+
+Against `adve-review-mooshik-J2-round2.md` at `920e096` — **REQUEST_CHANGES, 2 P2 / 5 P3**,
+with all 23 round-1 and live-probe findings verified closed at the artifact. The reviewer
+framed **both** P2s as doc-precision. The operator overturned that for the first one, and the
+ruling is the interesting part of this round.
+
+**J2-R2-1 (P2) — the SIGTERM-deafness bound. Operator ruling: a code fix, not a doc fix.**
+
+The finding: `CONNECT_BUDGET`'s docstring claimed the pump is deaf to SIGTERM inside one
+`client_rx` arm body for at most 2 × `CONNECT_BUDGET` = 4s. True of `connect` and `replay`,
+false of the arm body, which also contains `dial()`'s opening `store.read_lease` — under no
+budget of this module's at all. The reviewer prescribed naming the store timeouts in the
+sentence. The operator declined that: **the 4s figure is the number the round-1 deviation
+used to decline the reconnect hoist**, and a serve deaf to SIGTERM for tens of seconds is the
+same defect class three I rounds were spent closing. Re-make the decision at the true number,
+and make the worst case a *chosen* constant rather than an emergent store timeout.
+
+*The true number, re-derived from both adapters at source* (and it is worse than the review's
+estimate, because neither adapter overrides sqlx's pool acquire):
+
+| Term | sqlite | cockroach |
+| --- | --- | --- |
+| pool acquire | 30s (sqlx 0.8.6 `PoolOptions::default`, not overridden; `max_connections(1)`, so a concurrent flush queues the read here) | 30s (same default; a lazy pool's acquire includes TCP connect + auth) |
+| the statement | 8s `busy_timeout` (`SqliteStore::connect`) | 20s `statement_timeout` (`cockroach::STATEMENT_TIMEOUT`) |
+| connect | `CONNECT_BUDGET + CONNECT_RETRY` + one attempt ≈ 2.1s | same |
+| replay | `CONNECT_BUDGET` = 2s | same |
+| **worst case** | **≈ 38s** | **≈ 50s** |
+
+*The shape chosen, of the two the operator offered: **(b), the middle**, and deliberately not
+(a) the full hoist.* The hoist would move the reconnect out of the arm body behind a
+`pending_frame` state machine. Round 1's argument against it survives the new number
+unchanged, because it was never about the number: **every `send` in this pump is also awaited
+in an arm body**, and that is what keeps frames from being torn by `select!` cancellation. The
+hoist removes one arm-body await and leaves the others, at the cost of a state machine in the
+one loop J2-R1-1 exists to make reliable. What the new number *does* change is that the
+unbounded await had to stop being unbounded — which needs neither the state machine nor the
+restructuring:
+
+* **Deafness is answered by racing, not by a budget.** `HubProxy::dial_bounded` polls the
+  whole dial against the shutdown future, `biased`, shutdown first. A SIGTERM mid-dial is
+  honoured at the next poll whatever the store is doing, so there is no longer a store
+  timeout in the deafness path for a constant to under-state. The dial is the *only* arm-body
+  await that can be abandoned at any instant without consequence: the connection it is
+  building belongs to nobody yet, so a torn `initialize` goes into a socket closed in the same
+  statement. The frame writes do not have that property and are still un-raced.
+* **The client's wait is answered by a chosen constant.** `DIAL_BUDGET` = **6s** caps the
+  whole dial — row read, connect, replay. Chosen from both directions: above the sum of the
+  budgets the dial's own steps carry (`2 × CONNECT_BUDGET + CONNECT_RETRY` ≈ 4.1s, pinned by
+  a `const _: () = assert!`, which fails the build at 4s), so a healthy-but-slow holder is
+  never cut off by the outer cap and each inner step still raises its own better-attributed
+  error; and below the smallest store-emergent bound in the table (sqlite's 8s
+  `busy_timeout`), so the number an operator reads at the constant is the number that
+  governs. Past it the call is answered with `HUB_UNREACHABLE_MESSAGE` and the next call
+  re-reads the row.
+* **The first dial moved inside the raced region too.** `run` awaited it *above* the
+  `tokio::pin!`, so a proxy was deaf for a whole store timeout before its loop ever started —
+  the pre-handshake shape of the same defect. `tokio::pin!` now precedes it and a shutdown
+  there returns `Ok(())`.
+
+*Pinned, red-first, three tests, all on a paused clock so they cost no wall time.* The seam is
+an injected `GraphStore` whose `read_lease` never returns (`HungLeaseStore` — the `BatchSink`
+precedent: inject at the trait the production type already takes, rather than reproducing a
+store's configuration).
+
+| Test | Mutation | Result |
+| --- | --- | --- |
+| `a_shutdown_during_the_dial_is_honoured_and_not_left_to_the_store` | drop the `biased` shutdown arm | **red**, cleanly — the cap still returns, so it fails on the variant *and* the elapsed time rather than hanging |
+| `a_shutdown_during_the_proxys_first_dial_exits_cleanly` | same | **red** |
+| `a_hung_lease_read_is_cut_off_at_the_chosen_dial_budget` | `DIAL_BUDGET` → 3600s (i.e. "let the store decide") | **red** — "waited 3600s" |
+| the `const _: () = assert!` | `DIAL_BUDGET` → 4s | **build fails** with the assertion's own text |
+
+The reviewer's `proxy.run(std::future::pending())` negative control is untouched and still
+red: with a shutdown future that never completes, nothing in this change makes the proxy exit.
+
+*What is still unbounded in the arm body — a NEW residual, stated rather than hidden.* The two
+frame writes that share it (`send` to the holder, `send` to the client's stdout) are neither
+raced nor budgeted, because a write abandoned mid-frame delivers a torn JSON line, which this
+pipe may never do. Each is bounded by its peer draining the socket. That is a different shape
+from the store read: a peer that never reads is itself already wedged, whereas a row read
+stuck behind a flush at the pool wedged a **healthy** proxy talking to a **healthy** holder.
+Abandoning a client-facing write is a behaviour decision of its own and is not taken here.
+
+**J2-R2-2 (P2) — "the majority of real cases … the wait still succeeds", refuted by the
+tree's own constants.** Doc + test, as the reviewer prescribed and the operator confirmed;
+the refuse-fast behaviour is correct and unchanged. `LEASE_TTL` = 45s and
+`LEASE_HEARTBEAT_INTERVAL` = 15s, and every refresh sets `expires_at = now + LEASE_TTL`, so an
+abrupt death leaves `[30s, 45s]` — never uniform on `[0, 45]`. The election refuses whenever
+`lapses_in > ELECTION_BUDGET − ELECTION_SLACK` = 15s at best, ~13s once the attach attempt and
+the probe have spent some budget. Every value in [30, 45] is above it, so a prompt restart is
+refused **always, by design** — measured live at 2.12s with 40s of lease left. Three edits:
+`ELECTION_BUDGET`'s docstring carries the derivation and the ~17–32s window that *does* wait;
+§J2's residual says *any* abrupt death rather than "immediately after a heartbeat" and drops
+"The client's next start succeeds" (false — at kill+5s about 33s remains and the next start is
+refused too); and the Done-when box states the exclusion in the operator's words. Pinned by
+`an_abrupt_holder_death_outlasts_the_election_budget` over a predicate extracted for the
+purpose (`waiting_fits`) — red under the mutation restoring the 50s budget, which is exactly
+the shape the claim would have been true for.
+
+**The five P3s, all closed.**
+
+* **J2-R2-3 — the refusal told an operator a `kill -9`'d holder "is still refreshing it"**,
+  false half first, contradicted by its own next clause. The clause is `build_attach`'s and is
+  contractually byte-identical to pre-J2 `build`'s, so it is not `serve`'s to reword — but the
+  *composition* with the probe outcome is J2-L2's, and that is where it is repaired.
+  `correct_the_refresh_claim` replaces the clause with "has not yet let its lease lapse — but
+  its endpoint is not answering, so it has most likely died", **only** when the outcome is
+  `ENDPOINT_NOT_ACCEPTING`; every other refusal is a live holder this process merely cannot
+  forward to, and the clause is true for it. Both literals are now shared constants
+  (`memory::STILL_REFRESHING_CLAUSE`, `serve::ENDPOINT_NOT_ACCEPTING`) rather than duplicated
+  strings, so a reword at either end cannot silently turn the correction into a no-op. Pinned
+  at the unit level and at the binary
+  (`a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing`, a published endpoint
+  that was never bound), with the *narrow* half asserted in
+  `a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once`: that holder is a live
+  CLI verb, and it must keep saying "is still refreshing it". The unit test also carries
+  J2-R1-9's two message rules on the new literal (no double space, and the phrase spanning
+  the continuation survives it) — which is not decoration: it caught a genuinely broken
+  string continuation in `PROBABLY_DEAD` before this commit, rendering "is not      answering"
+  in an operator-facing refusal.
+* **J2-R2-4 — the headline "proxying to the session holder" line named the derived address,
+  not the dialled one.** Under J2-L1 half (2) those differ by construction, so the line an
+  operator greps for named a file that does not exist. `dial` now returns the address it
+  connected to, `Dialled::Hub` carries it, and both the headline line and the reconnect line
+  log `dialled=` and `derived=`, named for what they are.
+* **J2-R2-5 — the dangling-symlink window.** `canonical_store_path`'s "the same store reached
+  by a symlink and reached directly derives **one** address" is false while the target does not
+  exist: `realpath(3)` fails with `ENOENT` on a dangling link, so the link resolves to its own
+  name, `create_if_missing` then creates the target, and the next process resolves to the
+  target — one store, two identities, one on each side of the file's creation. Claim narrowed
+  with the mechanism and the consequence (a `proxyable` refusal whose message blames three
+  things that are not true; safe, because the lease still serialises the writers). Not closed:
+  a hand-rolled link-chain resolver beside `canonicalize` is a second path resolver for a
+  configuration no documented wiring produces.
+* **J2-R2-6 — `proxyable` accepted a relative or bare published path**, which `dial_dir` then
+  turned into `parent() == Some("")` (an empty path in an operator-facing message) or `.`
+  (this process's cwd). One line: `published.is_absolute()` or `EndpointIsNotOurs`. The trust
+  boundary is unchanged and is still the store; this is the directory check not being handed a
+  relative path. Both spellings added to
+  `a_holder_publishing_a_different_address_name_is_not_proxyable`, red without the check.
+* **J2-R2-7 — the unbounded, linearly-scanned `inflight` list. Deviation, argued: documented
+  with its real ceiling, not capped.** Growth and the O(n) scan are bounded by the same real
+  quantity — the client's own in-flight window, and the client is the local, trusted party
+  that spawned this process. It is *not* `MAX_FRAME_BYTES`'s shape: that grew on bytes a peer
+  chose to send with no reply expected. A cap was considered and declined for a specific
+  reason — answering the oldest id early to make room lets the holder's real answer arrive
+  afterwards, match nothing, and be forwarded as a **second** response to an id the client has
+  already been given an error for, a protocol violation manufactured to fix a growth with no
+  real cause; tearing the connection down instead puts a new failure mode into the path
+  J2-R1-1 exists to make reliable. What is added instead is the observability the argument
+  depends on: `INFLIGHT_DEPTH_WARN` = 64 (two orders above the claimed ceiling, so it cannot
+  fire on real traffic) logs once if the ceiling ever stops holding. **J3 is the reason that
+  matters** — receipts lengthen how long an entry stays outstanding, so the ceiling should be
+  re-derived there rather than inherited.
+
+**Register sweep (claim-family rule; the false-stated-reason family is J2's recurring
+defect — this is instance four, five and six).** Per file, including the nulls:
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/mcp/proxy.rs` | every numeric claim in the arm-body neighbourhood, re-derived from the constants | 4 corrected: the `2 × CONNECT_BUDGET` bound itself; `connect`'s own bound (`CONNECT_BUDGET + CONNECT_RETRY` + one attempt ≈ 2.1s, not 2.0s); `run`'s "fails honestly and **immediately**", which rounded three different numbers to one word (now written out — µs for a lost in-flight call, ≈2.1s for a dial onto a refusing socket, `DIAL_BUDGET` for the whole dial); "an honest error in **microseconds**", where the live measurement is 2.6 ms |
+| `src/mcp/proxy.rs` | premises invalidated by the race | 1 corrected: `Handshake::replay`'s "so the shutdown branch cannot be polled while this runs" — the premise the budgets-only argument rested on, now false and replaced by what is true |
+| `src/mcp/serve.rs` | the election's distribution claim and everything leaning on it | **2 corrected.** `ELECTION_BUDGET`'s parenthesis and its conclusion; and `ELECTION_SLACK`'s "absorbs store-clock skew and **one missed refresh interval**" — a second false-stated reason found by the sweep and not by the review. 5s is not one refresh interval (`LEASE_HEARTBEAT_INTERVAL` is 15s, three times it), and a missed interval needs no absorbing: a holder gets three chances inside one TTL and is *supposed* to lose the lease if it misses all of them. What 5s actually covers is the race between reading the row and acting on it. The `resolve_role` "what it waits for" section and the 31.96s / 20s / 50s figures re-checked and **still true** |
+| `src/mcp/endpoint.rs` | the canonicalisation rule's four bullets | 1 narrowed (symlinks); the not-exists, neither-resolves and URI bullets re-read and **still true** |
+| `src/memory.rs` | the "byte-identical to what `build` returns" claim, after extracting the clause to a const | **still true** — the const preserves the bytes exactly; nothing else stale |
+| `tests/serve_proxy_multi_client.rs` | test docstrings whose measured numbers my edits touch | **nothing** — the 50s / 31.96s / 45s figures are all about the election, which did not change |
+| `dev-diary/lambo-for-mooshik/J-multi-client.md` | the two P2 claim families plus the docstring it quotes verbatim | 4 corrected: the round-1 record's quotation of `run`'s docstring (now past tense, with a pointer); the J2-R1-8 entry's `2 × CONNECT_BUDGET` and the deviation it justified; the uniform-expiry parenthesis; the "dies immediately after a heartbeat" residual and "The client's next start succeeds" |
+| `dev-diary/lambo-for-mooshik/J-multi-client.md` | the Done-when boxes | 1 amended: the `[~]` unclean-kill box now states the prompt-restart exclusion |
+| `docs/`, `AGENTS.md`, `README.md`, `dev-diary/PHASE-8-surface.md`, `dev-diary/notes/remediation-tasks.md` | `rg` for `CONNECT_BUDGET`, `DIAL_BUDGET`, `ELECTION_BUDGET`, `four seconds`, `uniformly`, `next start succeeds`, `never hangs`, `canonical_store_path`, `proxyable`, `inflight`, `does not lapse for`, `NO TOOLS`, `proxying to the session holder` | **nothing** — not one of the changed claims is mirrored outside the three source files and this phase doc |
+| `docs/reference/cli.mdx`, `docs/reference/end-to-end.mdx` | `is still refreshing it` — the clause J2-R2-3 corrects | **checked, deliberately NOT changed.** Both are `lambo derive` transcripts, where the message comes from `build`'s `LamboError::Conflict` with no endpoint probe anywhere near it. A CLI verb that lost the lease genuinely is talking about a live holder, so the clause is true there. The correction is `serve`'s election composition only, which is what J2-L2 introduced and what `correct_the_refresh_claim`'s narrowness test pins |
+
+**Gate invocations, with the count each one produces at this remediation's head.** Baselines
+are `920e096`, the review head. Run in the `wt/j2` worktree with a shared `CARGO_TARGET_DIR`.
+
+| Invocation | Count |
+| --- | --- |
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --no-default-features --features store-cockroach,embed-fixture -- -D warnings` | clean |
+| `cargo test --all --features fixtures` | 858/0/3 (853/0/3 at `920e096`) |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | 946/0/3 (940/0/3) |
+| `cargo test --no-default-features --features store-cockroach` | 550/0/0 (545/0/0) |
+| `bash scripts/observability/verify.sh` | ALL CHECKS PASSED (40 ok) |
+
+Every delta reconciles to a named test. **+5 lib tests**, which is the whole cockroach and
+`--all` delta: `a_shutdown_during_the_dial_is_honoured_and_not_left_to_the_store`,
+`a_hung_lease_read_is_cut_off_at_the_chosen_dial_budget`,
+`a_shutdown_during_the_proxys_first_dial_exits_cleanly`,
+`an_abrupt_holder_death_outlasts_the_election_budget`,
+`a_dead_holders_refusal_does_not_claim_it_is_still_refreshing`. **+6 on sqlite**: those five
+plus `a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing`, which needs a
+real store. No test was renamed or removed;
+`a_holder_publishing_a_different_address_name_is_not_proxyable` gained two cases inside one
+existing test, which is why J2-R2-6 shows no count change.
 
 ## J3 — Writes acknowledged before the embedder
 
@@ -1199,7 +1423,12 @@ Every figure is one rig, not a property of lambo.
       pinned with a bounded wait, so a hang fails the test; "electable" holds literally (the
       lease lapses and the next serve *start* wins it, including `resolve_role`'s in-process
       startup election) but NOT in the strong sense of a running proxy electing itself
-      mid-session, which the wedge invariant forbids until promotion exists
+      mid-session, which the wedge invariant forbids until promotion exists. **Excluded
+      by design, stated (J2-R2-2):** a client starting *promptly* after an abrupt holder
+      death is refused within that start, with an actionable retry interval — not recovered.
+      Any abrupt death leaves 30–45s of lease and the client-tolerance election budget is
+      20s, so the arithmetic cannot be waited out; "electable within one `LEASE_TTL`" means
+      the start *after* the lease lapses, and the refusal names when that is
 - [ ] Two clients on one machine, both wired over stdio, both fully working — verified with
       two different client products, not two sessions of one (J2) — **needs the operator**:
       the committed test drives two `lambo serve` subprocesses of one binary, which is

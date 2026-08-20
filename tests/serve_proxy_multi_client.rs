@@ -1047,6 +1047,107 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
         err.contains("NO TOOLS"),
         "and why waiting would be worse — a client that gives up reports no tools: {err}"
     );
+    // J2-R2-3, the narrow half. This holder published no endpoint, so it is a
+    // CLI verb that really is alive and really is refreshing its lease — the
+    // clause is TRUE here and must survive. The correction applies only where the
+    // probe found the endpoint refusing connections; see the test below.
+    assert!(
+        err.contains("is still refreshing it"),
+        "a live-but-unforwardable holder is still refreshing its lease, and the refusal must \
+         keep saying so: {err}"
+    );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2-R2-3, at the binary: a holder whose endpoint refuses connections must not
+/// be described as one that "is still refreshing" its lease.
+///
+/// The refusal is composed from two sources — the memory-level lease message,
+/// which knows only the row, and the election's own endpoint probe, which knows
+/// *now*. J2-L2 is what first put them in one paragraph, and it put the row's
+/// (stale, optimistic) half first: an operator who read the opening sentence went
+/// hunting for a live process that had been `kill -9`'d seconds earlier. The
+/// probe wins, because a refused connect is newer evidence than a lease row that
+/// may be a whole `LEASE_HEARTBEAT_INTERVAL` old.
+#[test]
+fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let (dir, cfg, db) = scratch("deadendpoint");
+    provision(&db);
+
+    let store_cfg = lambo::store::StoreConfig {
+        kind: lambo::store::StoreKind::Sqlite,
+        path: Some(db.clone()),
+        ..lambo::store::StoreConfig::default()
+    };
+    let ours = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
+        .expect("a file-backed store is shareable");
+    let name = ours.path().file_name().unwrap().to_owned();
+
+    // A private, self-owned directory so the dial-side directory check passes and
+    // the probe gets as far as the connect — which is the outcome under test.
+    // Nothing is ever bound at the path, which is exactly what an abruptly dead
+    // holder leaves behind once its socket has been cleaned up.
+    let gone = std::path::PathBuf::from(format!("/tmp/lbdead{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&gone);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&gone)
+        .expect("a private directory for an endpoint that is not there");
+    let sock = gone.join(&name);
+
+    let holder =
+        lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("dead-holder"))
+            .reachable_at(sock.to_string_lossy().into_owned());
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let store = SqliteStore::connect(&db).unwrap();
+            let outcome = store
+                .acquire_lease(&SessionId::from(SESSION), &holder, Duration::from_secs(45))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, lambo::store::LeaseOutcome::Acquired(_)));
+        });
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "serve",
+            "--session",
+            SESSION,
+            "--agent",
+            "late-arrival",
+            "--transport",
+            "stdio",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn");
+
+    assert!(!out.status.success(), "it must refuse, not serve");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("not accepting connections"),
+        "this test is only meaningful if the probe reached the connect: {err}"
+    );
+    assert!(
+        !err.contains("is still refreshing it"),
+        "the refusal contradicted itself: the holder is not refreshing anything, and the \
+         message's own next clause says so: {err}"
+    );
+    assert!(
+        err.contains("most likely died"),
+        "and the operator needs the conclusion the probe supports: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&gone);
     let _ = std::fs::remove_dir_all(&dir);
 }

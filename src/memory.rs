@@ -389,6 +389,18 @@ fn spawn_lease_heartbeat(
 
 /// Builder for [`Memory`] — spec §6.1.
 ///
+/// The clause [`Attach::Held`]'s message uses for a holder that still looks
+/// live — named, not inlined, because `mcp::serve` has to be able to *correct*
+/// it (J2-R2-3).
+///
+/// The refusal is composed here from the lease row alone, which is evidence up to
+/// one `LEASE_HEARTBEAT_INTERVAL` old. `serve`'s election then probes the
+/// holder's endpoint, and a refused connect is better evidence: it replaces this
+/// clause rather than contradicting it a sentence later. Sharing the literal is
+/// what keeps the two ends from drifting — a reword here that left `serve`
+/// looking for the old text would silently turn the correction into a no-op.
+pub(crate) const STILL_REFRESHING_CLAUSE: &str = "is still refreshing it";
+
 /// What a session lease refusal tells the loser (J2).
 ///
 /// The refusal has always carried this information; before J2 it was formatted
@@ -714,8 +726,8 @@ impl MemoryBuilder {
                 // and `build` still returns it as `LamboError::Conflict`.
                 let message = format!(
                     "session {session} is already held by another writer ({}) — it acquired the \
-                     single-writer lease {}s ago and is still refreshing it. Refusing to open a \
-                     second writer. If that holder is wedged, an operator can force a takeover \
+                     single-writer lease {}s ago and {STILL_REFRESHING_CLAUSE}. Refusing to open \
+                     a second writer. If that holder is wedged, an operator can force a takeover \
                      (see the single-writer lease note in docs/reference/cli.mdx)",
                     current.holder,
                     age.as_secs(),

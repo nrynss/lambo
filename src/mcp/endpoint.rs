@@ -545,12 +545,28 @@ fn store_identity(store: &StoreConfig) -> String {
 ///
 /// # The rule, and what it decides
 ///
-/// * **Symlinks are resolved.** `std::fs::canonicalize` on an existing file
-///   means the same store reached by a symlink and reached directly derives
-///   **one** address. That is the deliberate choice: one store must be one
-///   socket, or the second holder unlinks the first's. The cost is that two
-///   spellings which *look* different are correctly treated as one thing, which
-///   is the point.
+/// * **Symlinks are resolved — once their target exists.** `std::fs::canonicalize`
+///   on an existing file means the same store reached by a symlink and reached
+///   directly derives **one** address. That is the deliberate choice: one store
+///   must be one socket, or the second holder unlinks the first's. The cost is
+///   that two spellings which *look* different are correctly treated as one
+///   thing, which is the point.
+///
+///   The qualifier is load-bearing and the claim used to be stated without it
+///   (J2-R2-5). `canonicalize` requires the **whole** path to exist, and
+///   `realpath(3)` fails with `ENOENT` on a *dangling* symlink, so a link whose
+///   target has not been created yet takes the not-exists branch below and
+///   resolves to the **link's own** name. `create_if_missing` then writes
+///   through the link and creates the target, and the next process resolves to
+///   the **target's** name: one store, two identities, one on each side of the
+///   file's creation. The consequence is a `proxyable` refusal
+///   (`EndpointIsNotOurs`) whose message blames a different session, store or
+///   scheme — none of which is true — and it degrades safely, because the lease
+///   still serialises the writers and no graph is at risk. Narrowed rather than
+///   closed: resolving the link chain by hand would put a second, subtly
+///   different path resolver beside `canonicalize` for a configuration
+///   (a store reached through a symlink to a file that does not exist yet) that
+///   no documented wiring produces.
 /// * **A file that does not exist yet** is resolved through its parent
 ///   directory, keeping the file name literal. The parent is where a relative
 ///   path's ambiguity lives, so this is enough to make `./lambo.db` from two
