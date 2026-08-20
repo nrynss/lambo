@@ -772,14 +772,18 @@ that **both residuals become reachable in practice for the first time.**
   holder that stopped answering*. Handed to J4 rather than taken here, because
   a ledger in the proxy is a second `Ledger::open` on a startup path whose
   ordering J2 already moved once.
-* **The pump's two frame writes are still unbounded arm-body awaits** (J2-R2-1, round 3).
-  `send` to the holder and `send` to the client's stdout are neither raced against shutdown
-  nor budgeted, because a write abandoned mid-frame delivers a torn JSON line and this pipe
-  may never do that (`Framed::Torn` exists for the receiving half of the same rule). Each is
-  bounded by its peer draining the socket — a different shape from the lease-row read
-  `DIAL_BUDGET` replaced, since a peer that never reads is itself already wedged, whereas a
-  row read stuck behind a flush at the connection pool wedged a *healthy* proxy talking to a
-  *healthy* holder. Closing it means deciding what to do with a partially-written frame to a
+* **The pump's frame writes are still unbounded arm-body awaits — six `Self::send` sites,
+  not two** (J2-R2-1, round 3; count corrected J2-R3-3). Writes to the holder and to the
+  client's stdout are neither raced against shutdown nor budgeted, because a write abandoned
+  mid-frame delivers a torn JSON line and this pipe may never do that (`Framed::Torn` exists
+  for the receiving half of the same rule). Each is bounded by its peer draining the socket —
+  a different shape from the lease-row read `DIAL_BUDGET` replaced, since a peer that never
+  reads is itself already wedged, whereas a row read stuck behind a flush at the connection
+  pool wedged a *healthy* proxy talking to a *healthy* holder. **One site couples this to the
+  other declined bound (J2-R3-3): `answer_lost`'s write burst is as long as the `inflight`
+  list, whose cap J2-R2-7 declined — so the receipt ceiling J3 must derive bounds BOTH
+  residuals at once, and they should be closed together.**
+  Closing it means deciding what to do with a partially-written frame to a
   live peer, which is a behaviour decision rather than a bound, and is not taken here.
 * No async ack, no receipts (J3). No auth. No lease weakening. No durable
   write-intent queue.
@@ -1161,19 +1165,22 @@ store's configuration).
 | --- | --- | --- |
 | `a_shutdown_during_the_dial_is_honoured_and_not_left_to_the_store` | drop the `biased` shutdown arm | **red**, cleanly — the cap still returns, so it fails on the variant *and* the elapsed time rather than hanging |
 | `a_shutdown_during_the_proxys_first_dial_exits_cleanly` | same | **red** |
-| `a_hung_lease_read_is_cut_off_at_the_chosen_dial_budget` | `DIAL_BUDGET` → 3600s (i.e. "let the store decide") | **red** — "waited 3600s" |
+| `a_hung_lease_read_is_cut_off_at_the_chosen_dial_budget` | `DIAL_BUDGET` → 3600s (i.e. "let the store decide") | **red** — on the `< 8s` ceiling assertion (the wait itself completes instantly under `start_paused`, so the "waited …s" message is not what fires; corrected J2-R3-2) |
 | the `const _: () = assert!` | `DIAL_BUDGET` → 4s | **build fails** with the assertion's own text |
 
 The reviewer's `proxy.run(std::future::pending())` negative control is untouched and still
 red: with a shutdown future that never completes, nothing in this change makes the proxy exit.
 
-*What is still unbounded in the arm body — a NEW residual, stated rather than hidden.* The two
-frame writes that share it (`send` to the holder, `send` to the client's stdout) are neither
-raced nor budgeted, because a write abandoned mid-frame delivers a torn JSON line, which this
-pipe may never do. Each is bounded by its peer draining the socket. That is a different shape
-from the store read: a peer that never reads is itself already wedged, whereas a row read
-stuck behind a flush at the pool wedged a **healthy** proxy talking to a **healthy** holder.
-Abandoning a client-facing write is a behaviour decision of its own and is not taken here.
+*What is still unbounded in the arm body — a NEW residual, stated rather than hidden.* The
+frame writes that share it — six `Self::send` sites writing to the holder or to the client's
+stdout (count corrected J2-R3-3) — are neither raced nor budgeted, because a write abandoned
+mid-frame delivers a torn JSON line, which this pipe may never do. Each is bounded by its peer
+draining the socket. That is a different shape from the store read: a peer that never reads is
+itself already wedged, whereas a row read stuck behind a flush at the pool wedged a **healthy**
+proxy talking to a **healthy** holder. One of the six is `answer_lost`, whose burst length is
+the `inflight` list J2-R2-7 declined to cap — the two residuals are coupled, and J3's receipt
+ceiling bounds both. Abandoning a client-facing write is a behaviour decision of its own and is
+not taken here.
 
 **J2-R2-2 (P2) — "the majority of real cases … the wait still succeeds", refuted by the
 tree's own constants.** Doc + test, as the reviewer prescribed and the operator confirmed;
@@ -1429,11 +1436,17 @@ Every figure is one rig, not a property of lambo.
       Any abrupt death leaves 30–45s of lease and the client-tolerance election budget is
       20s, so the arithmetic cannot be waited out; "electable within one `LEASE_TTL`" means
       the start *after* the lease lapses, and the refusal names when that is
-- [ ] Two clients on one machine, both wired over stdio, both fully working — verified with
-      two different client products, not two sessions of one (J2) — **needs the operator**:
-      the committed test drives two `lambo serve` subprocesses of one binary, which is
-      exactly the "two sessions of one product" this box excludes. The mechanism is pinned;
-      the two-product claim is not, and cannot be from inside `cargo test`
+- [x] Two clients on one machine, both wired over stdio, both fully working — verified with
+      two different client products, not two sessions of one (J2). **Verified live,
+      2026-08-20, twice**: an agent-run probe with `cursor-agent 2026.08.11` +
+      `opencode 1.18.18` against the implementation build (found J2-L1/J2-L2), and the
+      round-2 review's re-run against the remediated build — proxying, cross-product
+      read-your-writes both directions, on unmodified default wiring even with divergent
+      endpoint directories (`adve-review-mooshik-J2-round2.md`). The committed test still
+      drives two subprocesses of one binary — the two-product claim lives in those live
+      runs and in DOGFOOD-FINDINGS, not inside `cargo test`, and re-verifying it after a
+      re-pin is a runbook act (the probe harness is reusable). pi was unusable (no ready
+      generative provider) and is NOT covered by this box
 - [ ] `lambo_derive` returns after validation without waiting on the embedder, and its call
       time drops to the round-trip floor (J3)
 - [ ] Every write ack carries a receipt; outcomes are retrievable by it; expired and

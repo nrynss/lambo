@@ -199,14 +199,17 @@ const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(100)
 ///
 /// # What is still unbounded in the arm body, stated
 ///
-/// The two frame writes that share it — `send` to the holder and `send` to the
-/// client's stdout — are neither raced nor budgeted, and that is the J2-R1-8
-/// deviation's real argument rather than an oversight: a write abandoned
-/// mid-frame delivers a torn JSON line, which this pipe may never do (see
-/// [`Framed::Torn`]). Each is bounded by its peer draining the socket. That is a
-/// *different shape* from the store read this constant replaced — a peer that
-/// never reads is itself already wedged, whereas a row read stuck behind a
-/// flush at the pool wedged a **healthy** proxy talking to a **healthy** holder.
+/// The frame writes that share it — six `Self::send` sites writing to the
+/// holder or to the client's stdout (J2-R3-3: six, not the two first counted) —
+/// are neither raced nor budgeted, and that is the J2-R1-8 deviation's real
+/// argument rather than an oversight: a write abandoned mid-frame delivers a
+/// torn JSON line, which this pipe may never do (see [`Framed::Torn`]). Each is
+/// bounded by its peer draining the socket. That is a *different shape* from
+/// the store read this constant replaced — a peer that never reads is itself
+/// already wedged, whereas a row read stuck behind a flush at the pool wedged a
+/// **healthy** proxy talking to a **healthy** holder. One of the six is
+/// `answer_lost`, whose burst length is the `inflight` list whose cap J2-R2-7
+/// declined — the two residuals are coupled; J3's receipt ceiling bounds both.
 /// Carried as a named residual in §J2 rather than fixed here, because abandoning
 /// a client-facing write is a behaviour decision of its own.
 const DIAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
@@ -1289,6 +1292,7 @@ impl HubProxy {
                                 tracing::info!(
                                     generation,
                                     dialled = %dialled.display(),
+                                    derived = %self.endpoint.path().display(),
                                     "lambo serve: proxy reconnected to the current session holder"
                                 );
                                 // Whatever the new holder said before answering

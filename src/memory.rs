@@ -387,8 +387,6 @@ fn spawn_lease_heartbeat(
 // Builder
 // ---------------------------------------------------------------------------
 
-/// Builder for [`Memory`] — spec §6.1.
-///
 /// The clause [`Attach::Held`]'s message uses for a holder that still looks
 /// live — named, not inlined, because `mcp::serve` has to be able to *correct*
 /// it (J2-R2-3).

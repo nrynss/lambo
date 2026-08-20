@@ -94,9 +94,12 @@ pub const LEASE_TTL: Duration = Duration::from_secs(45);
 /// How often a live holder refreshes its lease — one third of [`LEASE_TTL`].
 ///
 /// A third means a holder survives two consecutive missed refreshes (a transient
-/// store blip) before its lease can lapse, while a genuinely crashed holder's
-/// lease still expires within one full TTL. Refresh is the heartbeat: a live
-/// process keeps its lease; a dead one lets it go.
+/// store blip), while a genuinely crashed holder's lease still expires within
+/// one full TTL. Precisely (J2-R3-4): the third attempt lands *at* expiry, not
+/// before it, so survival there is not the row still being valid — it is the
+/// holder re-acquiring a just-lapsed row that nothing else has contended for.
+/// Refresh is the heartbeat: a live process keeps its lease; a dead one lets it
+/// go.
 pub const LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The operator override for a wedged-but-heartbeating squatter (documented, not
