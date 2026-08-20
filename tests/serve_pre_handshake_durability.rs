@@ -161,8 +161,10 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
             // This matcher is LOOSE ON PURPOSE — do not tighten it (I-R2-2).
             // Two stderr lines contain "session attached": the memory-level
             // "Memory session attached (daemon + flush + canonization running)",
-            // emitted from inside `build_memory` right after the single-writer
-            // lease is taken, and the later serve-level "lambo serve: session
+            // emitted from inside the `Memory` build that `resolve_role` drives,
+            // right after the single-writer lease is taken (it was
+            // `build_memory` before J2, which `serve` no longer calls at all —
+            // J2-R1-7), and the later serve-level "lambo serve: session
             // attached". Substring-matching fires on the FIRST, so the SIGTERM
             // lands in the wider window that starts at lease acquisition rather
             // than the narrow one after the arming — which is precisely how

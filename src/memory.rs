@@ -522,7 +522,7 @@ impl MemoryBuilder {
     /// the store/embedder/embedding — `backends.config` is consumed and
     /// dropped. A writer built from a resolved backend MUST also pass
     /// `.config(backends.config.clone())` (before or after — the two fields
-    /// commute), as `open_writer` and `serve::build_memory` do; otherwise the
+    /// commute), as `open_writer` and `serve`'s `serve_builder` do; otherwise the
     /// `[daemon]` cadence overrides the resolver applied are silently lost and
     /// the session behaves as `Config::default()`.
     pub fn backends(mut self, backends: ResolvedBackends) -> Self {

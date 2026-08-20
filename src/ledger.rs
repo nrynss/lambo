@@ -250,8 +250,9 @@ impl Ledger {
     /// can delay or wedge the caller. That distinction is the whole reason the
     /// probe is not here: `serve` calls this **after** the single-writer lease
     /// is taken and — since I-R2-1 — **after** the SIGTERM handler is armed
-    /// (`shutdown_signal()` is the first statement once `build_memory` returns;
-    /// this call is the next one). What that ordering would change, were the
+    /// (`shutdown_signal()` is the first statement once `resolve_role` returns a
+    /// `Role::Holder`; this call is the next one. It was `build_memory` before
+    /// J2, which `serve` no longer calls — J2-R1-7). What that ordering would change, were the
     /// probe ever moved back here, is the hazard *class*: it would be an
     /// **availability** hazard rather than the durability one it used to be. A
     /// blocking `open` here would wedge `serve` between the lease and the

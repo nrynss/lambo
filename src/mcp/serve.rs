@@ -338,9 +338,11 @@ fn resolve_auth_token_from(
 /// J2 made every holder bind a **second** listener — the session endpoint, a
 /// unix socket, bound even under `--transport stdio` so a refused serve can
 /// proxy to it. That threatened this function's ordering argument, which is that
-/// running before `build_memory` means *"refusing here means no lease is
-/// taken"*, so a misconfigured start leaves nothing behind and the operator's
-/// retry is not blocked by a lease their own refused start is holding.
+/// running before the lease-taking attach means *"refusing here means no lease
+/// is taken"*, so a misconfigured start leaves nothing behind and the operator's
+/// retry is not blocked by a lease their own refused start is holding. (That
+/// attach was `build_memory` before J2 and is `resolve_role` after it — see
+/// J2-R1-7; `serve` does not call `build_memory` at all any more.)
 ///
 /// **That sentence is still literally true, by construction rather than by
 /// luck.** The endpoint's *address* is derived (a function of session and store
@@ -693,10 +695,26 @@ async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duratio
 /// [`ResolvedBackends`].
 ///
 /// **Level B, single construction site.** This function deliberately does *not*
-/// resolve: the caller (`main`) resolves once and hands the result in, so there
-/// is exactly one store and one embedder per process and no second config pass.
+/// resolve: the caller resolves once and hands the result in, so there is
+/// exactly one store and one embedder per process and no second config pass.
 /// Fail-closed behaviour — uncompiled `kind`, unknown TOML key, store×embedder
 /// dim mismatch — lives in that one resolve; see [`resolve_serve_backends`].
+///
+/// # `serve` does not call this any more (J2-R1-7)
+///
+/// It is a **library entry point**, kept because it is `pub` and re-exported at
+/// `crate::mcp`, and because "build the one `Memory` a serve-shaped process
+/// owns, with the `[daemon]` cadence applied" is a useful thing for an embedder
+/// to be able to ask for in one call. J2 replaced the serve path's use of it
+/// with [`serve_builder`] plus `resolve_role`, because the startup election has
+/// to retry the *attach* against the same configuration and therefore needs the
+/// builder rather than the built `Memory`. `rg build_memory` finds no call site
+/// in this tree.
+///
+/// The consequence for a reader: comments describing serve startup name
+/// `resolve_role`, not this function. The round-1 review found nine sites that
+/// still named this one; they were rewritten in the same commit as this
+/// paragraph.
 ///
 /// [`ResolvedBackends`]: crate::resolve::ResolvedBackends
 pub async fn build_memory(
@@ -720,7 +738,9 @@ pub async fn build_memory(
 /// backend inside it is an `Arc`, so a retry is a clone rather than a second
 /// resolve. Level B's single construction site is unchanged — `main` still
 /// resolves once and this is still the only place `Memory::builder()` is called
-/// on the serve path.
+/// on the serve path. Since that split, this — not `build_memory` — is what the
+/// serve path uses; `build_memory` became a library-only entry point that
+/// delegates here (J2-R1-7).
 fn serve_builder(
     opts: &ServeOptions,
     backends: ResolvedBackends,
@@ -923,9 +943,11 @@ async fn resolve_role(
 /// it has run. Its error is surfaced: an `Err` from `close()` means the tail is
 /// *not* durable and was kept (T8.1 semantics).
 ///
-/// **The single-writer lease (T8.6) rides the same exit paths.** `build_memory`
-/// acquired the lease as this process attached (failing closed here if another
-/// writer holds it — see [`build_memory`]); a successful `close()` **releases**
+/// **The single-writer lease (T8.6) rides the same exit paths.** `resolve_role`
+/// acquired the lease as this process attached — failing closed here if another
+/// writer holds it *and* cannot be proxied to, and returning `Role::Proxy`
+/// rather than reaching this function if it can (J2). A successful `close()`
+/// **releases**
 /// it so the next writer takes over at once. On the one exit that abandons
 /// `close()` — the `close_bounded` timeout or a second signal — the lease is
 /// *not* released and instead lapses at [`lease::LEASE_TTL`], exactly as it would
@@ -943,7 +965,7 @@ async fn resolve_role(
 /// signal in *any* of those still reaches [`Memory::close`] instead of hitting
 /// the default disposition and killing the process with the tail un-flushed.
 pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
-    // T8.7, and it runs FIRST — before `build_memory`, which attaches to the
+    // T8.7, and it runs FIRST — before `resolve_role`, which attaches to the
     // store and takes the single-writer lease. A misconfigured bind must cost
     // nothing and leave nothing behind: refusing here means no lease is taken,
     // so the operator's retry after setting a token is not blocked by the
@@ -991,7 +1013,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             // pump's `select!` learns to stop, so SIGTERM ends the proxy with a
             // log line and a closed socket instead of a bare kill. It is polled
             // first in that `select!`, so this does not make the process
-            // SIGTERM-immune the way arming above a blocking `build_memory`
+            // SIGTERM-immune the way arming above the lease-taking attach
             // would.
             //
             // Nothing else on this branch is skipped by accident: a proxy opens
@@ -1006,7 +1028,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 
     // One signal registration for the whole life of the transport, armed HERE —
     // the first statement after the lease-taking attach returns (`resolve_role`,
-    // which calls the same `Memory` build `build_memory` does), and
+    // which builds through the same `serve_builder` `MemoryBuilder`), and
     // before ANY of the startup work below it (`Ledger::open`, `LamboServer::new`
     // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the J2
     // session-endpoint bind and its accept loop, the event pump, and the
@@ -1016,10 +1038,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // tail reaches the store, and the single-writer lease is released.
     //
     // The precise property, stated where the previous comment overclaimed
-    // (I-R2-1): the guard begins the instant `build_memory` returns. It does NOT
-    // cover `build_memory` itself, so the memory-level "Memory session attached
-    // (daemon + flush + canonization running)" line — emitted from inside
-    // `build_memory`, after the lease is taken — is still followed by a residual
+    // (I-R2-1): the guard begins the instant `resolve_role` returns. It does NOT
+    // cover `resolve_role` itself, so the memory-level "Memory session attached
+    // (daemon + flush + canonization running)" line — emitted from inside the
+    // `Memory` build, after the lease is taken — is still followed by a residual
     // unguarded window until this arming, exactly as it was pre-I. The
     // serve-level "lambo serve: session attached" line below is fully guarded.
     // The earlier wording claimed the stronger property for both lines; it was
@@ -1027,11 +1049,21 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // inside `serve_stdio` widened that residual window from ~6 µs to ~1.1 ms,
     // which is the durability regression I-R2-1 records.
     //
-    // Arming *before* `build_memory` would shrink the residual window to zero,
-    // but only by making a hung `build_memory` SIGTERM-immune (the signal is
-    // deferred, not honoured, until the build finishes). That trade — a
-    // durability hazard for an availability one — needs `build_memory` raced
-    // against the shutdown future to be a win, which is a design change and is
+    // Arming *before* the attach would shrink the residual window to zero, and
+    // pre-J2 the argument against it was a trade: a durability hazard for an
+    // availability one, since the signal would be deferred rather than honoured
+    // until a hung build finished. **J2 makes that argument much stronger, and
+    // this is the sentence the round-1 review found missing (J2-R1-7).** The
+    // thing that would be made SIGTERM-immune is no longer `build_memory` —
+    // which `serve` does not call at all any more — but `resolve_role`, and
+    // `resolve_role` is a loop that can *legitimately* run for
+    // `LEASE_TTL + ELECTION_SLACK` = **50 seconds**: that is its designed
+    // behaviour when the holder it lost to is not proxyable yet, not a hang.
+    // Arming above it would therefore make every such start unkillable for the
+    // better part of a minute, on purpose, in exchange for closing a ~1.1 ms
+    // durability window in a process that holds no lease and no tail while it
+    // waits. The residual window is real and worth closing, but only by racing
+    // the attach against the shutdown future, which is a design change and is
     // deferred; see I-R2-1's recommendation.
     //
     // A fresh registration in `close_bounded` re-arms it for the close phase.
@@ -1629,9 +1661,11 @@ async fn serve_http_bounded(
 /// runtime immediately and buffers a signal that arrives before `recv()` is
 /// polled, so calling this before the attach log closes that window. Eagerness
 /// only makes the arming *point* effective; it does not move it. Everything
-/// before the call site in [`serve`] — `build_memory`, which takes the lease —
+/// before the call site in [`serve`] — `resolve_role`, which takes the lease —
 /// is still unguarded, which is why the call site sits as early as it does
-/// (I-R2-1).
+/// (I-R2-1). It cannot move above `resolve_role`: that loop is allowed to run
+/// for 50 seconds by design, and arming over it would make the wait unkillable
+/// (J2-R1-7).
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {

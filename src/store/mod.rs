@@ -332,6 +332,18 @@ pub trait GraphStore: Send + Sync {
     /// an advisory store stores no lease, so it can report none. The three real
     /// backends override it. A caller must treat `None` as "no reachable
     /// holder" and fail honestly rather than guess an address.
+    ///
+    /// **A real adapter MUST override this** (J2-R1-13). The default exists so
+    /// the in-tree `GraphStore` test doubles — which store no lease — need no
+    /// edit, not as a behaviour any adapter should inherit. An adapter that
+    /// keeps it silently disables proxying for every session on that store, and
+    /// the symptom is indistinguishable from a legitimate one: a refused serve
+    /// reports `HolderPublishedNoEndpoint` ("that holder published no
+    /// endpoint"), which is exactly what a CLI verb holding the lease looks
+    /// like. So the failure reads as "wait it out" and never resolves. If you
+    /// are writing an adapter, the check is that a `read_lease` immediately
+    /// after your own `acquire_lease` returns `Some` with the endpoint you
+    /// published.
     async fn read_lease(&self, _session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
         Ok(None)
     }

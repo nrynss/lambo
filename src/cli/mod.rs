@@ -88,7 +88,7 @@ pub(crate) async fn open_writer(
     agent: &str,
 ) -> Result<Memory, CliError> {
     // Cadence overrides from `[daemon]` reach the writer here (T2), mirroring
-    // `mcp::serve::build_memory`. Every full-resolve CLI writer verb (`derive` /
+    // `mcp::serve`'s `serve_builder`. Every full-resolve CLI writer verb (`derive` /
     // `record-action` / `reserve` / `release`) opens its one Memory through this
     // site; `serve` and `demo` use their own builders. So a lowered
     // `gc_interval` in lambo.toml is now honoured by these writer verbs too,

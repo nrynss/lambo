@@ -35,6 +35,20 @@ your agent should carry on rather than block on it. Forwarding is local-only and
 the stdio transport; a second `--transport http` serve on a held session still refuses to
 start, and says which process holds it.
 
+The socket lives in a private per-user directory: `$XDG_RUNTIME_DIR/lambo` if that variable is
+set, otherwise `$TMPDIR/lambo-<uid>`, otherwise `/tmp/lambo-<uid>`. The directory must be mode
+700 and owned by you — `lambo serve` creates it that way and refuses to bind into one that is
+not, since a socket in a directory other accounts can reach would let any local account issue
+writes against your session. If you see that refusal, remove the directory or set
+`XDG_RUNTIME_DIR` to one you own. A very long base directory can also leave no room for a
+socket address (the limit is 104 bytes for the whole path); a serve on such a machine still
+serves its own client normally and logs the reason, and only the forwarding stops working.
+
+The socket file itself is disposable. Deleting it while a holder is running makes that holder
+unreachable to other clients until it restarts — the holder keeps working for its own client
+and no data is at risk. Deleting one left behind by a crashed process is always safe; so is
+leaving it, because the next holder clears it under the session lease.
+
 ## What every tool expects
 
 Every tool takes an `agent_id`, and every tool rejects any argument it does not define, so a typo fails rather than being ignored.

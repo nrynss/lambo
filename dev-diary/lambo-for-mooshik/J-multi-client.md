@@ -545,7 +545,9 @@ halves — `recall` takes no lease, `stats` marks writer-only fields unavailable
 ### J2 Status — landed
 
 **Status: implemented on `wt/j2`, five stages, `7f51bb6` → `8e64fc8` → `275b418`
-(+ this note).** The outage that created workstream J is closed on the path it
+(+ this note), then remediated in four commits after the round-1 review — see
+[J2 round-1 review remediation](#j2-round-1-review-remediation), which is where
+every claim below that the remediation changed is corrected.** The outage that created workstream J is closed on the path it
 happened on: two clients on one machine, both wired over stdio, no client
 configuration change, both with full read, full write and a usable lock. The
 2026-08-19 probe is a committed test.
@@ -571,11 +573,13 @@ configuration change, both with full read, full write and a usable lock. The
   per connection, all against the one `Memory`, capped by the same
   `--max-sessions` ceiling the HTTP transport uses.
 * **A refused stdio serve proxies** (`src/mcp/proxy.rs`) instead of exiting 1.
-* **No `Cargo.toml` change at all.** `UnixStream` is already an rmcp transport:
+* **No `Cargo.toml` change *for the transport*.** `UnixStream` is already an rmcp transport:
   the `transport-io` feature in use pulls `transport-async-rw`, whose
   `IntoTransport` covers any `AsyncRead + AsyncWrite`, and the wire is the same
   newline-delimited JSON-RPC stdio speaks. The `client` feature was not needed
-  because the proxy is not an MCP client.
+  because the proxy is not an MCP client. (The stages landed with **no**
+  `Cargo.toml` change at all; the round-1 remediation added one line, `libc`, for
+  `geteuid` — see J2-R1-3.)
 
 **Design decisions, and why.**
 
@@ -592,17 +596,23 @@ configuration change, both with full read, full write and a usable lock. The
   dispatch sites — larger, needs a JSON-RPC client, re-serializes arguments, and
   duplicates or diverges the schemas. It is kept in reserve because it is the
   only shape that supports in-process promotion.
-* **The socket address is derived, and the store is in the hash.** A pure,
-  I/O-free function of session id and store identity:
-  `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo`, else `/tmp/lambo` (created
-  0700 **and its mode checked**, which is what makes the shared `/tmp` fallback
-  safe rather than assumed safe — a world-writable directory an attacker
-  pre-created is refused, not bound into), plus a cosmetic 16-char session
-  prefix and 16 hex of FNV-1a. The store half is load-bearing: two serves under
+* **The socket address is derived, and the store is in the hash.** A function of
+  session id and store identity that creates nothing and binds nothing:
+  `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo-<uid>`, else `/tmp/lambo-<uid>`
+  (created 0700 and then checked three ways — not a symlink, owned by this euid,
+  mode granting nothing to group or other — which together with the per-uid name
+  is what makes the shared `/tmp` fallback safe rather than assumed safe), plus a
+  cosmetic 16-char session prefix and 16 hex of FNV-1a. *(The stages shipped
+  `.../lambo` on both fallbacks with a follow-the-symlink mode check and an
+  "I/O-free" claim; the uid suffix, the other two checks and the corrected claim
+  are J2-R1-2/J2-R1-3.)* The store half is load-bearing: two serves under
   one session name against *different* stores are two graphs, and a session-only
   path would have them fight over one socket and let a proxy forward into the
-  wrong one. Hashing also keeps a DSN's password out of both the filesystem and
-  the lease row. FNV-1a is written out rather than `DefaultHasher`, which is
+  wrong one — and the store's *identity*, not its spelling, is what is hashed:
+  the sqlite path half is canonicalized first, because `path = "./lambo.db"`
+  names a different file from every cwd and hashing it verbatim gave two graphs
+  one socket (J2-R1-2). Hashing also keeps a DSN's password out of both the
+  filesystem and the lease row. FNV-1a is written out rather than `DefaultHasher`, which is
   explicitly unstable across Rust releases — this hash is baked into a path two
   processes must agree on across builds, so a compiler upgrade must not move a
   session's endpoint out from under a running holder. `SUN_PATH_MAX` is checked
@@ -637,9 +647,11 @@ configuration change, both with full read, full write and a usable lock. The
   the winner. `authorize_bind`'s sentence — "refusing here means no lease is
   taken" — is therefore still **literally true**: a loser binds nothing, creates
   nothing and unlinks nothing. That function gained a "What J2 changed" section
-  restating the claim rather than letting the new behaviour quietly falsify it,
-  and the one new pre-lease refusal (the `sun_path` length check) joins the same
-  group because `resolve` does no I/O. Two further benefits fell out: the row
+  restating the claim rather than letting the new behaviour quietly falsify it.
+  J2 adds no new pre-lease **refusal** at all: the `sun_path` length check
+  degrades to "no endpoint" rather than stopping the serve (J2-R1-5), and the
+  derivation stays in the pre-lease group for the reason that group exists — it
+  creates nothing and binds nothing. Two further benefits fell out: the row
   carries the endpoint from the instant the lease exists, so there is no window
   in which a refused racer reads a leased row with no endpoint; and **the lease
   is what licenses the stale-socket unlink** — while we hold it, a socket file at
@@ -652,7 +664,8 @@ configuration change, both with full read, full write and a usable lock. The
   could save. Arming for durability would be theatre. A registration **is**
   installed for **liveness** — it is how the pump's `select!` learns to stop —
   and it is polled first, so this cannot make the process SIGTERM-immune the way
-  arming above a blocking `build_memory` would. `serve_pre_handshake_durability`
+  arming above the lease-taking attach would — which under J2 would mean arming
+  above `resolve_role`, a loop allowed to run 50 seconds by design (J2-R1-7). `serve_pre_handshake_durability`
   gained the proxy case with **its own sync point**, `"proxying to the session
   holder"`, precisely because the review was right that the loose
   `"session attached"` matcher never fires for a proxy — anchoring on it would
@@ -690,7 +703,8 @@ state lived in the dead holder. So `Handshake` records the client's own
 `initialize` and `notifications/initialized` frames verbatim and replays them
 into each new connection, swallowing the duplicate `initialize` response through
 the *same* `BufReader` the pump then owns (a fresh reader could drop bytes the
-first had already buffered). This is **reconnect, not promotion** — no lease is
+first had already buffered). The swallow is matched by **id** and bounded in both
+time and frame count, which it was not at the stages (J2-R1-8, J2-R1-12). This is **reconnect, not promotion** — no lease is
 taken and the wedge invariant is untouched. Residual, stated at the type: the
 client keeps the *old* holder's `serverInfo` / `capabilities` /
 `protocolVersion` view. Identical for two holders of one binary, which is every
@@ -754,7 +768,9 @@ that **both residuals become reachable in practice for the first time.**
 * No async ack, no receipts (J3). No auth. No lease weakening. No durable
   write-intent queue.
 
-**Sweep 1 — serve-startup ordering claims (11 sites, 3 stale).**
+**Sweep 1 — serve-startup ordering claims (11 sites, 3 stale at the stages; 4th
+found by the round-1 review, and the family's central noun was the miss — see
+J2-R1-7. The table below carries the corrected verdicts.)**
 
 | Site | Claim | Verdict |
 | --- | --- | --- |
@@ -762,7 +778,8 @@ that **both residuals become reachable in practice for the first time.**
 | `mcp/serve.rs` `serve()` arming comment | enumerates the startup work below the arming | **STALE** — the endpoint bind and its accept loop were missing; added |
 | `PHASE-8-surface.md` `src/mcp/serve.rs` entry | "both transports" | **STALE** — annotated with the third listener + the new module |
 | `PHASE-8-surface.md` Level B note | "`build_memory` takes `ResolvedBackends`, not a config path" | **STALE-adjacent** — still true; annotated with the added parameter and why one-resolve is unchanged |
-| `ledger.rs:253` | "`shutdown_signal()` is the first statement once `build_memory` returns; this call is the next one" | still TRUE — the bind sits below `LamboServer`, so `Ledger::open` is still next |
+| `ledger.rs:253` | "`shutdown_signal()` is the first statement once `build_memory` returns; this call is the next one" | **STALE — sweep 1 missed this (J2-R1-7).** The second clause was checked and passed ("the bind sits below `LamboServer`, so `Ledger::open` is still next", which is true); the *first* clause went stale, because `serve()` does not call `build_memory` at all any more. Rewritten to name `resolve_role` |
+| the `build_memory` noun itself, tree-wide | nine sites describe serve startup in its terms | **STALE — the family's central noun (J2-R1-7).** `rg build_memory` finds zero call sites; it survives as a `pub` library entry point re-exported at `mcp::`. All nine rewritten to name `resolve_role`, and `build_memory` docstringed as the library-only entry point it now is. One of the nine (`serve.rs`'s arming comment) carried a materially **better** argument left unwritten: the thing arming-above would make SIGTERM-immune is now a loop allowed to run 50 seconds by design, not a build that might hang — written in |
 | `ledger.rs:804` | "the SIGTERM handler is armed *before* this call" | still TRUE |
 | `PHASE-8-surface.md:1756` | "the refusal runs as the *first statement* in `serve()`" | still TRUE |
 | `serve_pre_handshake_durability.rs` module doc | the window it probes | still TRUE; **extended** with the proxy case |
@@ -809,6 +826,155 @@ internal link to a `/lambo/...` prefix, and `mcp.mdx`'s site copy has a whole
 J5 actually needs is a gate over the shared prose with link prefixes normalised
 and site-only sections excluded — a different and larger job than a `diff`, and
 worth costing before it is promised.
+
+### J2 round-1 review remediation
+
+Reviewed **REQUEST_CHANGES** at `bbac803` — one P1, seven P2, thirteen P3
+([adve-review-mooshik-J2-round1.md](../adversarial-review/adve-review-mooshik-J2-round1.md)).
+All twenty-one are closed in four commits (`58faeac` the P1, `fdb3225` the rest of
+`proxy.rs`, `8daf389` `endpoint.rs`, and this note). Nothing is carried. The design is
+untouched: the byte pipe, the wedge invariant, the derived address and the declared
+deviation all stand — the blockers were gaps between what the design argued and what the
+code did.
+
+* **J2-R1-1 (P1, the blocker) — an in-flight forwarded request was never answered when the
+  holder's connection closed.** `HubProxy::run`'s own docstring promises "every forwarded
+  call fails honestly and immediately (never hangs)"; the pump only answered frames whose
+  *write* failed. A frame written successfully and then lost with the holder got no reply
+  and no error — and the wedge was permanent rather than transient, because the reconnect
+  lives in the `client_rx` arm: a client politely awaiting its response sends nothing, so
+  the proxy never reconnects either. The generation filter was the other half of the same
+  hole, dropping both a late response from a superseded connection *and* that connection's
+  `Closed`. The reviewer reproduced the whole sequence from unmutated pump code.
+
+  The pump now tracks every forwarded request id, tagged with the hub connection it went
+  out on; a genuine response (a `result` or `error`, no `method`) retires its id from any
+  generation, and a connection's `Closed` answers every id still outstanding on it. **The
+  text is a different text and the code is a different code**: `HUB_UNREACHABLE_MESSAGE`
+  says "NOTHING WAS READ OR WRITTEN", which is true of a frame that never left this
+  process and false of one that reached the holder, so in-flight loss gets its own
+  `-32002` and its own wording — the outcome is *unknown*, and the one instruction that
+  resolves it safely is *recall before re-deriving*. A caller can tell "did not happen"
+  from "nobody knows", which is the only thing it can act on.
+
+  **Nothing is retried, argued rather than assumed.** Retrying idempotent reads needs this
+  process to know which calls are idempotent — parsing `params.name` and knowing what the
+  seven tools do, i.e. exactly the tool-level understanding the byte pipe is chosen not to
+  have. Nor would it be cheap: a reconnect can only succeed once a new holder exists, up to
+  `LEASE_TTL + ELECTION_SLACK` away, so "retry the read" means holding the caller open for
+  the better part of a minute — the hang J2 removes, reintroduced for the calls least in
+  need of it. Reconnect stays lazy for the same reason: the client now *has* its answer, so
+  its next request drives it.
+
+  Pinned by `a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost`, which
+  drives a real `lambo serve` subprocess as the proxy against a hand-written holder that
+  answers `initialize` and then drops the connection on the first tool call — the
+  reviewer's scenario, deterministic, no signal race. Against the pre-fix pump it fails at
+  the harness's 30s bound; with the fix the whole test is 1.2s.
+
+* **J2-R1-2 (P2) — `store_identity` hashed the store's *spelling*.** `path = "./lambo.db"`
+  is what every published example shows and `SqliteConnectOptions` resolves it against each
+  process's own cwd, so two clients launched from two directories were two SQLite files
+  with **one** derived socket: two leases, and the second holder's `AddrInUse` branch
+  unlinking the first holder's live socket, after which a proxy of graph A forwarded writes
+  into graph B. The path half is now canonicalized first. Symlinks are **resolved**, so one
+  store reached two ways is one socket; a file that does not exist yet resolves through its
+  parent directory (the common case, since `SqliteStore::connect` builds a *lazy* pool); a
+  URI spelling is left verbatim, because `cwd.join` on a URI would make one store's
+  identity cwd-dependent — the same bug from the other side.
+* **J2-R1-3 (P2) — the endpoint directory lost its per-uid discriminator, and the mode
+  check followed symlinks.** This one was **graph↔code drift**: the decision recorded in
+  the project graph was `$TMPDIR/lambo-<uid>` / `/tmp/lambo-<uid>`, the code shipped
+  `.../lambo`, and this note was written to match the code. Without the suffix the first
+  uid to run `lambo serve` creates `/tmp/lambo` at 0700 and every other uid's bind fails
+  `EACCES` — a cross-user lockout on a case that worked before J2, with `/tmp`'s sticky bit
+  preventing the second user from clearing it. Restored on both fallbacks (not on
+  `XDG_RUNTIME_DIR`, which already carries a uid and would cost `sun_path` bytes for
+  nothing). The mode check moved to `symlink_metadata` and gained an ownership assertion:
+  `std::fs::metadata` followed a pre-placed `/tmp/lambo-<uid> → /tmp/theirs`, and a 0700
+  directory owned by *another* uid that we can still write into passed too. The graph now
+  carries the correction, so graph and code agree again.
+* **J2-R1-4 (P2) — a torn final frame was forwarded as a complete one.** `tokio::io::Lines`
+  yields an unterminated remainder as a line, so the half of a JSON object that reached the
+  socket before a holder died was delivered to the client's MCP wire as a frame. Replaced
+  by one bounded, resynchronising `read_frame`, which also closes J2-R1-17 (a non-UTF-8
+  byte ended the pump) and J2-R1-18 (no length cap) — three findings, one reader. A torn
+  frame is dropped with a WARN and followed by `Closed`; an oversize or non-UTF-8 frame is
+  dropped *through its newline*, so the stream survives.
+* **J2-R1-5 (P2) — the over-long `sun_path` refused the whole serve while a failed bind
+  degraded.** The harsher outcome sat on the cheaper problem, and made a long `TMPDIR` a
+  hard startup failure on a machine that served fine before J2. `for_store` now returns
+  `Option` (there is no failure left to report), logging the reason at ERROR. Pinned at the
+  binary with an 80-character `TMPDIR`: the client's session works and the lease row's
+  `endpoint` is NULL, which is the honest row for a holder nothing can reach.
+* **J2-R1-6 (P2) — the reconnect's re-read was unpinned and its stated reason was false.**
+  It said the address is never cached "because a new holder is a new endpoint"; the address
+  is a *pure function* of session and store, so every holder binds the same path — which is
+  why `bind` needs a stale-socket branch at all. The real value is liveness and honest
+  errors: the row is the authority on whether there is a holder. Docstring and test comment
+  rewritten. The pin needed a window the review's prescription did not have — at the
+  existing release point the proxy's writer is live, so `dial` is never entered — so it is a
+  separate test that creates the discriminating state (writer `None`, a live listener, no
+  row) and is red under the reviewer's exact `dial()` mutation while the other three tests
+  in the file stay green.
+* **J2-R1-7 (P2) — sweep 1 missed the family's central noun.** Sweep 1's table above is
+  corrected rather than left claiming a result the tree no longer matches. All nine sites
+  rewritten; `build_memory` kept and docstringed as the library-only entry point it now is
+  rather than deleted, because deleting a `pub`, re-exported API is a wider act than a
+  remediation should take in passing — noted as a candidate for J5. The better argument the
+  review found unwritten is now written at `serve.rs`'s arming comment: arming above the
+  attach would no longer risk deferring a signal past a build that *might* hang, it would
+  make a loop that is *designed* to run up to 50 seconds unkillable for all of it.
+* **J2-R1-8 (P2) — the replay swallow was an unbounded read inside a `select!` arm body**,
+  so a holder that accepted and never answered parked the pump and made the process deaf to
+  SIGTERM. Bounded by `CONNECT_BUDGET` and `MAX_REPLAY_FRAMES`, with the consequence stated
+  at the constant: worst-case deafness inside one arm body is 2 × `CONNECT_BUDGET`, bounded
+  and written down. **Deviation, argued:** the review's stronger option — hoist the
+  reconnect out of the arm body behind a `pending_frame` state machine — is not taken.
+  Every `send` in this pump is also awaited in an arm body, which is what keeps writes from
+  being torn by cancellation (an attack the review checked and cleared), so arm-body awaits
+  do not go away; only the *unbounded* one was the defect.
+
+**The thirteen P3s**, all closed: `unreachable_reply` now requires a `method`, so a client
+*response* frame is never answered with an error keyed to the holder's own request id
+(J2-R1-10); the lost post-initialize session state is stated at `Handshake` with the
+argument for documenting rather than enumerating the protocol (J2-R1-11); the swallow is
+id-matched and forwards what came before it (J2-R1-12); `read_lease`'s default `Ok(None)`
+now says a real adapter must override it and what the silent failure looks like (J2-R1-13);
+`HUB_UNREACHABLE_MESSAGE`'s "45 seconds" is pinned by a `const` assertion against
+`LEASE_TTL` (J2-R1-14); the vacuous handshake test now drives `replay` and asserts no bytes
+were written (J2-R1-15); the verbatim-`agent_id` claim is pinned with `agent-b `, an id a
+trimming forwarder would break (J2-R1-16); the four collapsed message literals are
+re-broken and two tests assert both a phrase spanning a continuation and the absence of a
+double space (J2-R1-9); `biased` now covers only the shutdown arm, with the two traffic
+directions nested in an unbiased inner `select!` (J2-R1-21); and the endpoint's operational
+surface — where the socket lives, the directory rule, the two env vars, and when it is safe
+to delete — is one paragraph in `mcp.mdx` and its site mirror, byte-identical in both
+(J2-R1-19).
+
+**J2-R1-20 — the cockroach count, resolved: `524/0/0` *was* right.** It reproduces exactly
+at `bbac803` with `cargo test --no-default-features --features store-cockroach` — no
+`--lib`, no `embed-fixture`. The reviewer tried four other invocations and none of them was
+that one, which is the whole finding: the count was never the problem, the missing
+invocation was. Recorded here so the next reviewer does not have to guess.
+
+**Gate invocations, with the count each one produces at the remediation head.** Run in the
+`wt/j2` worktree with a shared `CARGO_TARGET_DIR`.
+
+| Invocation | Count |
+| --- | --- |
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --no-default-features --features store-cockroach,embed-fixture -- -D warnings` | clean |
+| `cargo test --all --features fixtures` | 850/0/3 (832 at `bbac803`) |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | 935/0/3 (914 at `bbac803`) |
+| `cargo test --no-default-features --features store-cockroach` | 542/0/0 (524 at `bbac803`) |
+| `bash scripts/observability/verify.sh` | ALL CHECKS PASSED |
+
+Counts are the sum over every test binary the invocation runs, which is why they exceed the
+`--lib` figures a per-crate reading gives.
 
 ## J3 — Writes acknowledged before the embedder
 
@@ -1010,7 +1176,13 @@ that edit has to work through, written while the changes were fresh.
   load-bearing than it was, and the re-pin should be all-at-once on a machine.
 * **§6 "Smoke test"** gains a cheap and worthwhile check: after wiring two clients, confirm
   the lease row names one holder and carries an `endpoint`, and that the socket exists. That
-  is the one-line proof the hub is real rather than assumed.
+  is the one-line proof the hub is real rather than assumed. **Add one more, from the
+  round-1 review (J2-R1-3/J2-R1-19):** confirm the *directory* holding it is 0700 and owned
+  by you — `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo-<uid>`, else `/tmp/lambo-<uid>`.
+  "The socket exists" is already on this list; "the directory is 0700 and yours" is the
+  check that actually fails on a shared box, and `lambo serve` refuses to bind rather than
+  degrade when it is not. The user-facing half of this now lives in `mcp.mdx`, so the
+  runbook can point at it instead of restating it.
 * **New, and worth its own line:** the operator-visible artifact of a proxying serve is a
   stderr line, `lambo serve: proxying to the session holder`. Nothing reaches the ledger
   (J4's), so "which of my serves is the hub" is answered from the lease row or from that
