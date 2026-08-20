@@ -34,6 +34,20 @@
 //! pick up a spurious conflict naming the wrong writer. Erring toward detection
 //! is deliberate; see `ConflictHit::writer` for the residual ambiguity.
 //!
+//! **J1 made this path non-degenerate, and it is the one place in this module
+//! whose *accuracy* changed** (J1-R1-8). Before per-call `agent_id`, every
+//! interaction in a `serve` carried the process's own `--agent`, so a same-instant
+//! tie collapsed to one agent whichever rule was applied and the residual
+//! ambiguity could not be observed. Two clients writing through one `serve` in the
+//! same instant are now genuinely different agents, so this rule starts producing
+//! real multi-agent sets, and `writer` — "smallest interaction id at that instant"
+//! — becomes a deterministic choice between two *live* agents rather than a
+//! formality. The behaviour is unchanged and still correct for its purpose
+//! (detection over precision, since the §13 sentence's job is to make the reader
+//! look): what changed is that the sentence can now name the wrong one of two real
+//! agents. J2 and J3 interleave far harder than J1 does, so J3's Done-when carries
+//! this as something to measure rather than assume.
+//!
 //! ## "Active agent"
 //!
 //! Spec §9 requires "two or more active agents with edges to the same node" but

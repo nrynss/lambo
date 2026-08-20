@@ -1,5 +1,15 @@
 # MCP server evidence — stdio and HTTP (2026-08-14)
 
+**Superseded in part by J1 (`206f977`).** Per-call `agent_id` is now honoured, so
+two things captured below no longer exist: the `attribution:` warning is deleted
+outright (the caller's id *is* what gets recorded, so a warning saying otherwise
+would be false), and the blanket cross-agent refusal is gone — a foreign id takes
+and releases its own lock, and losing a race for a held node is a §11 conflict
+naming the holder and the expiry. The "Lock survived" row still holds: a
+non-holder still cannot release. Everything here is kept unedited as the
+2026-08-14 capture, `.jsonl` transcripts included — they are wire captures, and a
+capture is only evidence while it stays byte-exact.
+
 Captured against `target/debug/lambo` built with
 default features (`store-memory`, `embed-bge`, `embed-fixture`, `fixtures`).
 

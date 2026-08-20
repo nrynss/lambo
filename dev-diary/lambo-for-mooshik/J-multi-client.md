@@ -109,7 +109,7 @@ watching it go red.
 
 ## J1 — Per-call agent identity
 
-**Status: done.** Landed as one commit on `wt/j1`; see the J1 Status note at the end of this section for what shipped and what it decided.
+**Status: done.** Landed on `wt/j1` as one implementation commit plus one round-1 review remediation commit; see the J1 Status note and the round-1 remediation note at the end of this section for what shipped, what it decided, and what the review changed.
 
 The serve applies its own `--agent` to every connected client, so per-call `agent_id` is
 accepted, warned about, and ignored. Under a shared writer there is no correct value for
@@ -167,7 +167,8 @@ when made.
   untouched by per-call ids because no new handle is created, so `SecondSessionWriter`
   detection is neither weakened nor spuriously tripped by a foreign per-call id.
 * **`LamboServer::attribution` is gone**, replaced by `check_agent_id` (shape only:
-  non-empty, size cap) and `caller_agent` (→ `AgentId` for the write path). The mismatch
+  non-empty, size cap, and — since the round-1 remediation below — single-line) and
+  `caller_agent` (→ `AgentId` for the write path). The mismatch
   warning was **deleted rather than reworded**: after J1 the caller's id is what gets
   recorded, so a warning saying otherwise is simply false. The id is taken **verbatim and
   untrimmed** — normalising would silently merge two callers' locks, the one failure mode
@@ -209,6 +210,10 @@ today), and `skills/lambo-cloudops/SKILL.md`'s "every MCP tool takes your `agent
 its "do not run two writer processes against one session" — both still true, the second
 because the lease is untouched. `PHASE-8-surface.md`'s T8.2 finding, which promised exactly
 this change, gained a one-line closure pointer rather than an edit to its narrative.
+Missed by this sweep and corrected in the round-1 remediation: `evidence/mcp-client-stdio/`,
+whose README carried the deleted refusal and the deleted warning in the present tense. Its
+treatment is an annotation, not a rewrite — a capture is only evidence while it stays
+byte-exact, so the header now declares what J1 superseded and every transcript is untouched.
 
 **The four kit scripts, read against a two-agent ledger** (synthetic, interleaved
 `agent-a`/`agent-b` traffic with one restart mid-file). Nothing is wrong; all four were
@@ -253,6 +258,12 @@ foreign-id grant line, and `error_kind="conflict"` for the refusal);
 `warnings_reach_the_text_content_not_only_structured_content` (retargeted onto
 `lambo_reserve`'s advisory warning, since the attribution warning it used to ride on is
 gone, and extended to assert recall names another agent's lock holder).
+Added by the round-1 remediation:
+`a_multiline_agent_id_cannot_inject_lines_into_another_agents_context` (the reviewer's probe,
+both render paths, plus a recall as an innocent agent) and
+`every_tool_refuses_an_unusable_agent_id` (the whole refusal set × all seven tools);
+`two_agents_through_one_server_hold_distinct_locks` extended to pin the holder and the
+expiry in the conflict text.
 
 **Uncosted consumer dependency (J0 round 1):** the observability kit becomes genuinely
 multi-agent the moment J1 lands. `recall_first.py` groups compliance by agent,
@@ -261,6 +272,67 @@ multi-agent the moment J1 lands. `recall_first.py` groups compliance by agent,
 one-agent-per-file assumption that one serve stamping one `--agent` makes degenerate
 today — none of them declares it. J1's Done-when includes re-reading those four against
 a two-agent ledger, not just the server side.
+
+### J1 round-1 review remediation
+
+Reviewed **REQUEST_CHANGES** at `00cf4c9` — one P1, one P2, six P3
+([adve-review-mooshik-J1-round1.md](../adversarial-review/adve-review-mooshik-J1-round1.md)).
+All eight are closed in the round-1 remediation commit; nothing is carried. The design
+decision is untouched: everything below is a guard, a rendering, or a declaration.
+
+* **J1-R1-1 (P1, the blocker) — a caller-asserted `agent_id` could inject whole lines
+  into another agent's context block.** `check_size` allows `\n` and `\t` on purpose,
+  because both are legitimate inside a concept's `content`; this id is not content. Since
+  J1 it is rendered verbatim into the T5.3 block *another* agent reads, by two renderers
+  that do not sanitise — the soft-lock holder (`recall::format::reservation_warning`) and
+  the §13 conflict sentence's writer (`recall::format::conflict_warning`, which needs no
+  lock at all, just one `lambo_derive`). The reviewer's probe landed a line wearing
+  Lambo's own `⚑ CANONICAL` marker; it is now a committed test that fails without the
+  guard. **The guard refuses `\n`, `\r` and `\t` in `check_agent_id`** (`\r` is already
+  refused upstream; named so the rule reads complete if the caps exception table changes),
+  and the refusal names the parameter, the codepoint and the reason.
+  **At the door, not in `AgentId::new`:** the type is also built from the operator's own
+  `--agent` by the CLI and by library callers — trusted input on the same side of the
+  boundary as the process — so tightening the type would change its semantics for every
+  caller, which is not J1's to do. `check_agent_id` is the single place an unauthenticated
+  remote string becomes a write identity and a lock name. Nothing was added to
+  `recall::format`: sanitising there would put the guard downstream of the graph, where a
+  poisoned id is already durable.
+  **Length deliberately not tightened, and the consequence declared rather than dropped:**
+  an over-long id forges no structure, and an MCP-only cap would diverge from `--agent` and
+  from `AgentId` itself — but because assembly keeps the longest score-ordered prefix that
+  *fits* `max_tokens`, dropping whole blocks, a 16 KiB holder id can evict the very block it
+  annotates from another agent's context. That is a rendering-side bound, and it is J2's to
+  weigh, when the blast radius stops being one machine's clients.
+* **J1-R1-2 (P2) — the loser of a race was told `conflict` and nothing else.** `tool_err`'s
+  N4 policy discards a `Memory` error's message because it can interpolate a DSN, a store
+  URL or a driver string. §11's two conflict messages carry none of that — a node id the
+  caller just sent, the holder's id, an expiry — and the last two are *already* model-facing,
+  since recall renders the same pair into the context block. They are also exactly what
+  "coordinate by ids" needs. So the reserve path gets `conflict_err`: **one variant on one
+  path**, not a general opening of N4. Everything else on that path still goes through
+  `tool_err`, the ledger books the same `error_kind="conflict"`, and the message is folded to
+  one line on the way out as defence in depth for a holder that entered by another path.
+* **J1-R1-3 (P3)** — the four `warnings` vectors that could no longer hold a warning are
+  gone; `structuredContent` keeps its `warnings` key (response shape) as a literal `[]`, with
+  a comment at `derive_impl` saying a future warning must also go through `attach_warnings`.
+* **J1-R1-4 (P3)** — the split `use crate::types::` imports are one line.
+* **J1-R1-5 (P3)** — both over-long lines rewrapped to their local width: the `attach_warnings`
+  doc comment to ~78, and the `mcp.mdx` fenced instructions block to ~88 in both mirrors, wrapped
+  the way the rest of that block is rather than mirroring the Rust string's breaks. The two
+  remaining >100-char lines in `src/mcp/server.rs` are pre-existing `json!` bodies inside tests,
+  which `rustfmt` does not reformat and J1 did not touch.
+* **J1-R1-6 (P3)** — `evidence/mcp-client-stdio/` annotated, not rewritten; see the sweep above.
+* **J1-R1-7 (P3)** — `every_tool_refuses_an_unusable_agent_id` pins empty, blank, `\n`, `\r\n`,
+  `\t` and oversize across all seven tools, and asserts each refusal *names* `agent_id` so a
+  downstream failure cannot pass for the guard. Written as its own test rather than folded into
+  `bad_parameters_are_refused_as_readable_tool_errors`, whose table is per-tool parameters; this
+  one is the parameter all seven share.
+* **J1-R1-8 (P3)** — declared in `src/daemon/conflict.rs`'s NEW-4 block: J1 is what makes
+  same-instant collisions non-degenerate, so `writer` ("smallest interaction id at that instant")
+  is now a deterministic choice between two *live* agents. Behaviour unchanged and still right for
+  its purpose — the §13 sentence's job is to make the reader look — but it can now name the wrong
+  one of two real agents, which is why J3's Done-when asks for it to be measured.
 
 ## J2 — A losing serve proxies instead of exiting
 
@@ -454,7 +526,10 @@ Every figure is one rig, not a property of lambo.
 - [ ] Waiting on a receipt restores read-your-writes for a caller that asks (J3)
 - [ ] The queue bound comes from a ceiling measured on the deployment's own embedder, drops
       are counted in `lambo_stats`, and a burst degrades visibly (J3)
-- [ ] One agent's writes apply in submission order, pinning the `Temporal` chain (J3)
+- [ ] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
+      with two agents interleaving through one process, the §13 conflict sentence's `writer`
+      is **measured** rather than assumed: J1 made the same-instant collision path
+      non-degenerate (J1-R1-8)
 - [ ] A refused lease acquisition appears in the ledger from both sides (J4)
 - [ ] Docs state the multi-client default and the every-layer config rule (J5)
 - [ ] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
