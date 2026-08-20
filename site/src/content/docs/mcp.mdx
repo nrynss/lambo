@@ -20,6 +20,21 @@ On loopback the HTTP transport is unauthenticated by default. Binding anywhere e
 The process behind the HTTP endpoint is a session writer, and it is not open to the world. Unless you bind only to loopback, configure a bearer token or `lambo serve` refuses to start, and once you do, every request must carry `Authorization: Bearer <token>`. Protect it as a writer, not as a read-only service.
 </Warning>
 
+### More than one client on one machine
+
+Starting a second `lambo serve` for the same session no longer fails. The first process to
+start holds the session and becomes the hub; later ones connect to it over a local socket and
+forward every tool call, so each client gets full read, full write, and real read-your-writes
+against one graph rather than one client getting memory and the rest getting none. There is
+nothing to configure — point each client at `lambo serve --session <id>` the ordinary way.
+
+Two things are worth knowing. Writes still happen in the holder, so `lambo_stats` reports the
+holder's process; and if the holder dies, forwarded calls return a clear error saying nothing
+was read or written and that memory returns once a `lambo serve` holds the session again —
+your agent should carry on rather than block on it. Forwarding is local-only and applies to
+the stdio transport; a second `--transport http` serve on a held session still refuses to
+start, and says which process holds it.
+
 ## What every tool expects
 
 Every tool takes an `agent_id`, and every tool rejects any argument it does not define, so a typo fails rather than being ignored.

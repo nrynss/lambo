@@ -466,8 +466,10 @@ are closed here; nothing is carried. The design decision is untouched for a seco
 
 On refusal, become a thin proxy to the holder and forward every tool call.
 
-* Add an `endpoint` column to `session_leases` (today: `session_id`, `holder`,
-  `acquired_at`, `expires_at`, `current_token`).
+* Add an `endpoint` column to `session_leases` (before J2: `session_id`, `holder`,
+  `acquired_at`, `expires_at`, `current_token` — **six columns since**, and that
+  five-column list is the one this section's own sweep instruction predicted
+  would go stale).
 * `serve` always binds a local endpoint, a unix socket keyed by session, even under
   `--transport stdio`. Being reachable stops being a transport choice.
 * A refused serve reads the endpoint from the lease it lost, connects, proxies. First
@@ -539,6 +541,274 @@ against the durable store and returning the lease conflict from write verbs as a
 result. Strictly worse: a store reader trails the holder's in-RAM tail by up to one flush
 interval, so every response would need a freshness label. The CLI already models both
 halves — `recall` takes no lease, `stats` marks writer-only fields unavailable.
+
+### J2 Status — landed
+
+**Status: implemented on `wt/j2`, five stages, `7f51bb6` → `8e64fc8` → `275b418`
+(+ this note).** The outage that created workstream J is closed on the path it
+happened on: two clients on one machine, both wired over stdio, no client
+configuration change, both with full read, full write and a usable lock. The
+2026-08-19 probe is a committed test.
+
+**What shipped.**
+
+* **`session_leases` gained a nullable `endpoint`** — both `001_init.sql` files,
+  both SQL adapters with an idempotent converge (`ensure_column` on sqlite,
+  `ADD COLUMN IF NOT EXISTS` on cockroach) so an already-provisioned store needs
+  **no re-provision**, and `MemoryStore` for parity. `LeaseHolder` and
+  `LeaseInfo` carry it; `GraphStore::read_lease` reads it. It rides on
+  `LeaseHolder` rather than on `acquire_lease`'s signature, which kept ~20 call
+  sites untouched, and it is deliberately **not** part of `LeaseHolder::token()`:
+  the token is the identity a refresh and a release match on, and it must stay
+  stable even if a holder's reachability changed under it.
+* **Nullable, no default, and the absence is meaningful.** Only `serve`
+  publishes an endpoint, because only a serve process is reachable. A CLI writer
+  holds the lease for one verb and is not proxyable, so its row says NULL and a
+  refused serve reads that as "no hub here" and waits rather than dialling
+  nothing. A fabricated address would be worse than an honest absence.
+* **Every holder binds a session endpoint** (`src/mcp/endpoint.rs`), under either
+  transport, serving the same `LamboServer` over a unix socket — one MCP session
+  per connection, all against the one `Memory`, capped by the same
+  `--max-sessions` ceiling the HTTP transport uses.
+* **A refused stdio serve proxies** (`src/mcp/proxy.rs`) instead of exiting 1.
+* **No `Cargo.toml` change at all.** `UnixStream` is already an rmcp transport:
+  the `transport-io` feature in use pulls `transport-async-rw`, whose
+  `IntoTransport` covers any `AsyncRead + AsyncWrite`, and the wire is the same
+  newline-delimited JSON-RPC stdio speaks. The `client` feature was not needed
+  because the proxy is not an MCP client.
+
+**Design decisions, and why.**
+
+* **The proxy is a byte-level JSON-RPC line pipe, not a tool-level forwarder.**
+  It copies frames without deserializing them. Four consequences decided it: the
+  caller's per-call `agent_id` crosses **verbatim** by construction, so J1's
+  untrimmed-id contract cannot be violated in transit (that is *why* J1 gated
+  J2, and a forwarder that rebuilt arguments is exactly where that regression
+  would appear); the tool surface cannot drift, because schemas, descriptions
+  and protocol negotiation all come from the real holder; notifications, `ping`,
+  cancellation and progress forward for free; and it runs no `store::load`, holds
+  no graph and needs no embedder, so N clients cost one graph. **Rejected:** a
+  backend enum on `LamboServer` (`Local(Arc<Memory>) | Remote(hub)`) with seven
+  dispatch sites — larger, needs a JSON-RPC client, re-serializes arguments, and
+  duplicates or diverges the schemas. It is kept in reserve because it is the
+  only shape that supports in-process promotion.
+* **The socket address is derived, and the store is in the hash.** A pure,
+  I/O-free function of session id and store identity:
+  `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo`, else `/tmp/lambo` (created
+  0700 **and its mode checked**, which is what makes the shared `/tmp` fallback
+  safe rather than assumed safe — a world-writable directory an attacker
+  pre-created is refused, not bound into), plus a cosmetic 16-char session
+  prefix and 16 hex of FNV-1a. The store half is load-bearing: two serves under
+  one session name against *different* stores are two graphs, and a session-only
+  path would have them fight over one socket and let a proxy forward into the
+  wrong one. Hashing also keeps a DSN's password out of both the filesystem and
+  the lease row. FNV-1a is written out rather than `DefaultHasher`, which is
+  explicitly unstable across Rust releases — this hash is baked into a path two
+  processes must agree on across builds, so a compiler upgrade must not move a
+  session's endpoint out from under a running holder. `SUN_PATH_MAX` is checked
+  at 104 (macOS/BSD) on every platform, so a path that works here works
+  everywhere; the headroom arithmetic against the tightest measured base
+  directory is written at the prefix constant, and widening it spends that
+  headroom deliberately.
+* **A store no second process can see gets no endpoint and no proxy.**
+  `MemoryStore` and an in-memory SQLite database have no address to hash, so two
+  such holders would derive the *same* path and the second's stale-socket
+  cleanup would unlink the first's live socket — and they cannot collide across
+  processes anyway, so there is nothing to proxy. A refused serve there behaves
+  exactly as it did before J2.
+* **`Attach`, not a new `LamboError` variant.** J1-R2-2's rule is that a code
+  path must never be selected by matching an error variant with several
+  producers. The cheaper way to honour it was not to widen the enum at all:
+  `MemoryBuilder::build` still returns the byte-identical
+  `LamboError::Conflict`, and the one caller that needs the structure calls
+  `build_attach` instead. No `err_class` change, no N4 question, no CLI text or
+  exit-code movement, no test churn downstream.
+* **Migration is additive, not a re-provision.** Existing rows get NULL, which
+  reads as what a pre-J2 holder in fact did. Pinned by
+  `a_pre_j2_lease_table_gains_the_endpoint_column_on_init`, which builds the old
+  five-column table by hand and runs the real `init_schema` over it. The dogfood
+  rig's `lambo-dev.db` survives.
+
+**The two J0 catches, answered rather than routed around.**
+
+* **The `authorize_bind` collision is dissolved by construction.** The endpoint's
+  *address* is derived, so it is published into the lease row by the very acquire
+  that takes the lease, while the *socket* is bound only afterwards and only by
+  the winner. `authorize_bind`'s sentence — "refusing here means no lease is
+  taken" — is therefore still **literally true**: a loser binds nothing, creates
+  nothing and unlinks nothing. That function gained a "What J2 changed" section
+  restating the claim rather than letting the new behaviour quietly falsify it,
+  and the one new pre-lease refusal (the `sun_path` length check) joins the same
+  group because `resolve` does no I/O. Two further benefits fell out: the row
+  carries the endpoint from the instant the lease exists, so there is no window
+  in which a refused racer reads a leased row with no endpoint; and **the lease
+  is what licenses the stale-socket unlink** — while we hold it, a socket file at
+  this path cannot belong to a live holder, so it is a crashed one's. Unlinking
+  before winning the lease would delete a healthy hub's socket.
+* **The proxy branch is deliberately not armed for durability**, and the comment
+  at the branch says so. The hazard was real, but the answer was to notice that
+  the *hole is not there*: what the arming protects is `Memory::close`, and a
+  proxy has no lease, no write-behind tail and no graph, so nothing a handler
+  could save. Arming for durability would be theatre. A registration **is**
+  installed for **liveness** — it is how the pump's `select!` learns to stop —
+  and it is polled first, so this cannot make the process SIGTERM-immune the way
+  arming above a blocking `build_memory` would. `serve_pre_handshake_durability`
+  gained the proxy case with **its own sync point**, `"proxying to the session
+  holder"`, precisely because the review was right that the loose
+  `"session attached"` matcher never fires for a proxy — anchoring on it would
+  have produced a test that passed without signalling anything. Negative control
+  run: replacing the proxy's shutdown future with `pending()` turns the new case
+  red.
+
+**The wedge invariant (operator ruling, and the most important thing here).**
+
+**A proxy never acquires the lease.** It reads the row and nothing more.
+Winning a lapsed lease mid-session is the obvious and wrong move: this process
+cannot serve its own client afterwards, because that client's MCP session was
+established with the dead holder — so it would sit *heartbeating* a session it
+cannot answer, wedging every process on the machine for as long as it lived. That
+is strictly worse than the exit-1 J2 replaces. **Acquisition and promotion are
+one decision, not two**; while there is no promotion, acquisition is forbidden.
+It is stated at `HubProxy::run`, where a future author would violate it, and
+pinned by `a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed`.
+
+The one place that *may* acquire is `resolve_role`, the startup election, and the
+reason is exactly the invariant's: it runs before a single byte has been
+exchanged with this process's own client, so a win there makes a real holder that
+can actually serve. It waits up to one `LEASE_TTL` plus 5s for either a reachable
+holder or a lapsed lease, logging progress. A ~50s worst-case startup that ends
+in working memory beats a fast exit 1, which is the defect being removed — but it
+*is* a startup delay, and a client with a short spawn timeout would see it.
+
+**One deviation from the plan, forced by evidence.** Deferring the recorded-
+initialize replay was the instruction, and it turned out to be incompatible with
+the requirement it accompanied ("kill the holder, start a fresh serve, the
+proxy's next call succeeds with no proxy restart"). Written first without a
+replay, that case **hung**: a new holder's rmcp server does not answer
+`tools/call` on a connection that never sent `initialize`, because MCP session
+state lived in the dead holder. So `Handshake` records the client's own
+`initialize` and `notifications/initialized` frames verbatim and replays them
+into each new connection, swallowing the duplicate `initialize` response through
+the *same* `BufReader` the pump then owns (a fresh reader could drop bytes the
+first had already buffered). This is **reconnect, not promotion** — no lease is
+taken and the wedge invariant is untouched. Residual, stated at the type: the
+client keeps the *old* holder's `serverInfo` / `capabilities` /
+`protocolVersion` view. Identical for two holders of one binary, which is every
+case on one machine; possibly stale across lambo versions. A narrower failure
+than "memory is gone until you restart the client".
+
+**The two J1 residuals — does J2 change their exposure? Yes, and this is the
+answer, not a deferral.**
+
+Neither residual's *attacker set* widens. The endpoint socket is 0600 inside a
+0700 directory, so only the same uid can reach it — and the same uid could
+already open the store directly, which is strictly more power. What changes is
+that **both residuals become reachable in practice for the first time.**
+
+* Before J2, N clients on one machine produced one live graph and N−1 dead
+  processes. The instruction-shaped `agent_id` rendered into *another agent's*
+  T5.3 block needed two agents sharing one live graph, which the outage made
+  rare. After J2 that is the **normal** configuration: agent A really does read
+  the id agent B chose for itself, on all three paths (`reservation_warning`,
+  `conflict_warning` → `agent_display`, and `conflict_err`'s refusal). J2 does
+  not widen who can attack; it makes the residual live. **The
+  neutralise-on-render half is therefore now the load-bearing one**, and its
+  priority should rise accordingly. The length half stays closed for any
+  realistic budget.
+* The `--agent` CLI door (`check_size_cli` passes `\n`, so
+  `lambo derive --agent $'x\ninjected'` writes a durable multi-line interaction
+  author) is untouched by J2 — same door, same trusted-local-operator framing.
+  Its **blast radius** widens the same way: a poisoned durable author used to be
+  rendered into that one process's own recalls, and is now rendered into every
+  client attached to the hub. Still P3, still one operator poisoning their own
+  graph, but the "it outlives the process" property now meets an audience.
+
+**Not done, deliberately.**
+
+* **No in-process promotion**, so *"a new holder is electable within one
+  `LEASE_TTL`"* holds in its literal sense — the lease lapses and the next
+  `serve` **start** wins it, which `resolve_role`'s election does inside one
+  process at startup — but **not** in the strong sense of an already-running
+  proxy electing itself mid-session. That is an accepted residual. Whoever
+  builds it inherits two things: the wedge invariant above (acquisition may only
+  be unlocked *together* with promotion), and the shape that fits a byte pipe —
+  the proxy already dials "the current endpoint" on every reconnect, so a
+  promoted proxy binds the socket and connects to **itself**, which localises the
+  work to the replay that already exists. Measured cost of that self-loop: the
+  hop is 0.31–0.48 ms, under 1% of any call that embeds.
+* **`--transport http` keeps working exactly as-is.** A refused http serve still
+  exits 1: its client-facing wire is not line-framed, so the pipe does not
+  apply, and the outage J2 exists to fix is the stdio one, where the client
+  spawns the process itself and never chose a port.
+  `serve_single_writer_lease.rs` moved its fail-closed assertion onto that
+  transport, where a refusal is the designed outcome rather than a missing
+  feature; asserting exit-1 on the stdio path would pin the defect J2 removed.
+* **A proxy books no ledger lines of its own.** It opens no ledger, spawns no
+  heartbeat and builds no `LamboServer` — it is a pipe. The proxy-degraded state
+  therefore has no artifact beyond its stderr, which is **J4's** "a refused
+  lease acquisition appears in the ledger from both sides", now with a second
+  side worth recording: not only *refused* but *proxying*, and *proxying to a
+  holder that stopped answering*. Handed to J4 rather than taken here, because
+  a ledger in the proxy is a second `Ledger::open` on a startup path whose
+  ordering J2 already moved once.
+* No async ack, no receipts (J3). No auth. No lease weakening. No durable
+  write-intent queue.
+
+**Sweep 1 — serve-startup ordering claims (11 sites, 3 stale).**
+
+| Site | Claim | Verdict |
+| --- | --- | --- |
+| `mcp/serve.rs` `authorize_bind` docstring | "runs FIRST … refusing here means no lease is taken" | **restated deliberately** with a new J2 section; still true |
+| `mcp/serve.rs` `serve()` arming comment | enumerates the startup work below the arming | **STALE** — the endpoint bind and its accept loop were missing; added |
+| `PHASE-8-surface.md` `src/mcp/serve.rs` entry | "both transports" | **STALE** — annotated with the third listener + the new module |
+| `PHASE-8-surface.md` Level B note | "`build_memory` takes `ResolvedBackends`, not a config path" | **STALE-adjacent** — still true; annotated with the added parameter and why one-resolve is unchanged |
+| `ledger.rs:253` | "`shutdown_signal()` is the first statement once `build_memory` returns; this call is the next one" | still TRUE — the bind sits below `LamboServer`, so `Ledger::open` is still next |
+| `ledger.rs:804` | "the SIGTERM handler is armed *before* this call" | still TRUE |
+| `PHASE-8-surface.md:1756` | "the refusal runs as the *first statement* in `serve()`" | still TRUE |
+| `serve_pre_handshake_durability.rs` module doc | the window it probes | still TRUE; **extended** with the proxy case |
+| `cli/serve_web.rs` `authorize_bind_web` | "mirrors `mcp::serve::authorize_bind`" | one clause added: it mirrors the rule, not the J2 section — a reader takes no lease and binds no endpoint |
+| `I-observability.md:294-319` | history of the I-R2-1 arming move | left alone: narrative about I, not a claim about today |
+| `main.rs:503` | `authorize_ledger` keeps the CLI's wording verbatim | untouched |
+
+**Sweep 2 — the lease/endpoint schema claim-family (11 sites, 3 stale).**
+
+| Site | Claim | Verdict |
+| --- | --- | --- |
+| this section's own bullet | the five-column list | **STALE by construction** — corrected above |
+| `migrations/sqlite/001_init.sql` | DDL + header | updated |
+| `migrations/cockroach/001_init.sql` | DDL + header | updated |
+| `store/sqlite.rs` `INSERT INTO session_leases (…)` + its read-back | two duplicated column lists | updated, and collapsed into one `LeaseRowText` + one `LEASE_ROW_SQL` so they cannot drift in shape again |
+| `store/cockroach.rs` same pair | same | same, via `LeaseRowTs` |
+| `store/lease.rs` `LeaseInfo` docstring | "identity, timing and fencing token" | **STALE** — a three-item list over a four-member struct; corrected |
+| `PHASE-8-surface.md:1215` | `LeaseHolder` / `LeaseInfo` member lists | **STALE** — annotated with the fourth member |
+| `PHASE-8-surface.md:1219` | "three new methods" on `GraphStore` | **STALE** — annotated with `read_lease` as a fourth |
+| `scripts/provision.sh:34` | enumerates the schema's **tables** | clean — a column is not a table |
+| `scripts/loadtest/check_durability.py:136` | `SELECT holder, expires_at, current_token` | clean — named columns, not `SELECT *` |
+| `docs/reference/*` + `site/src/content/docs/*` | four mirrors | clean — they carry **no** lease-schema claim at all |
+| `t8.8-surface-audit.md` doc-count table | "185 missing docs left" | clean — every new `pub` item carries rustdoc |
+
+**Sweep 3 — "what happens to a second writer", run because the register rule
+demanded it and neither planned sweep covered it (5 pairs, 1 falsified).**
+
+| Site | Claim | Verdict |
+| --- | --- | --- |
+| `end-to-end.mdx` + its site mirror | "A second writer … is refused … **whether it arrives as another `serve`** or as a command line write" | **FALSIFIED** — a second stdio `serve` is exactly what J2 stopped refusing. Rewritten in both copies to split the two cases, with a link to the new mcp.mdx section |
+| `skills/lambo-cloudops/SKILL.md:30` | "do not run two writer processes against one session" | **STALE as advice** — true about *writers*, wrong about *processes*. J1's sweep passed it as "still true because the lease is untouched", which it is; what changed is what a second process does. Narrowed to "two CLI writers", with the serve case stated |
+| `api.mdx:125` + mirror | "A session has exactly one writer" | clean — the lease is untouched, and the proxy is not a writer |
+| `cli.mdx:167` + mirror | a command line write is refused and names the holder | clean — CLI verbs are not serves and do not proxy |
+| `mcp.mdx` + mirror | transports | **extended**, not corrected: a new "More than one client on one machine" section, byte-identical prose in both copies with each copy's own link convention |
+
+**A correction for §J5, found while looking for the drift gate it asks for.**
+§J5 says the four `docs/reference` ↔ `site/src/content/docs` files are "kept as
+**byte-identical** pairs with no drift gate". The second half is true; the first
+is **already false at HEAD**, and deliberately so. `cli.mdx` differs on 16 lines
+and `mcp.mdx` on 43: the site copies carry Astro component imports, rewrite every
+internal link to a `/lambo/...` prefix, and `mcp.mdx`'s site copy has a whole
+"Verified clients" section the docs copy does not. So the one-line `diff` gate
+§J5 proposes would be **red on the day it landed**, and J2 did not add it. What
+J5 actually needs is a gate over the shared prose with link prefixes normalised
+and site-only sections excluded — a different and larger job than a `diff`, and
+worth costing before it is promised.
 
 ## J3 — Writes acknowledged before the embedder
 
@@ -661,16 +931,25 @@ Every figure is one rig, not a property of lambo.
 - [x] A client whose `agent_id` differs from the serve's can take and release a soft lock,
       and two clients through one hub hold distinct locks (J1) — through one serve process;
       the proxy sense of "hub" is J2's
-- [ ] `lambo serve` against a held session starts as a proxy instead of exiting 1, and every
-      tool call including writes succeeds through it (J2)
-- [ ] A write through a proxy is durable in the holder and visible to that client's next
-      recall, pinning read-your-writes across the hop (J2)
-- [ ] `session_leases` carries the holder's endpoint and `serve` binds a local socket even
+- [x] `lambo serve` against a held session starts as a proxy instead of exiting 1, and every
+      tool call including writes succeeds through it (J2) — `--transport stdio`;
+      `--transport http` still exits 1 by design, see the status note
+- [x] A write through a proxy is durable in the holder and visible to that client's next
+      recall, pinning read-your-writes across the hop (J2) — and to the *hub's* client too,
+      which is the "one graph, not N" half
+- [x] `session_leases` carries the holder's endpoint and `serve` binds a local socket even
       under `--transport stdio` (J2)
-- [ ] Killing the holder uncleanly leaves proxies failing honestly rather than hanging, and
-      a new holder is electable within one `LEASE_TTL` (J2)
+- [~] Killing the holder uncleanly leaves proxies failing honestly rather than hanging, and
+      a new holder is electable within one `LEASE_TTL` (J2) — the honest-failure half is
+      pinned with a bounded wait, so a hang fails the test; "electable" holds literally (the
+      lease lapses and the next serve *start* wins it, including `resolve_role`'s in-process
+      startup election) but NOT in the strong sense of a running proxy electing itself
+      mid-session, which the wedge invariant forbids until promotion exists
 - [ ] Two clients on one machine, both wired over stdio, both fully working — verified with
-      two different client products, not two sessions of one (J2)
+      two different client products, not two sessions of one (J2) — **needs the operator**:
+      the committed test drives two `lambo serve` subprocesses of one binary, which is
+      exactly the "two sessions of one product" this box excludes. The mechanism is pinned;
+      the two-product claim is not, and cannot be from inside `cargo test`
 - [ ] `lambo_derive` returns after validation without waiting on the embedder, and its call
       time drops to the round-trip floor (J3)
 - [ ] Every write ack carries a receipt; outcomes are retrievable by it; expired and
@@ -684,7 +963,8 @@ Every figure is one rig, not a property of lambo.
       non-degenerate (J1-R1-8)
 - [ ] A refused lease acquisition appears in the ledger from both sides (J4)
 - [ ] Docs state the multi-client default and the every-layer config rule (J5)
-- [ ] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
+- [x] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
+      (J2) — `tests/serve_proxy_multi_client.rs`
 
 ---
 
@@ -703,3 +983,35 @@ and let the heartbeat's `git_sha` change be the proof, per §2.
 Status note: this machine's rig was re-pinned to `0f672f1` (the I-close, ledger-carrying
 binary) on 2026-08-20; other machines re-pin per the runbook whenever they next set up —
 nothing else re-pins tonight.
+
+### What J2 makes stale in DOGFOOD-SETUP.md — recorded, not yet edited
+
+J2 did **not** touch the runbook, on purpose: the re-pin and the runbook edit are one act
+(above), and editing it now would describe a binary no machine is running. This is the list
+that edit has to work through, written while the changes were fresh.
+
+* **§5 "The one-writer reality" shrinks to a pointer**, exactly as its own last paragraph
+  predicts — but only for `--transport stdio`. Both interim rules can go for stdio: "one
+  client registered at a time" is no longer needed, and "more than one client ⇒ HTTP" stops
+  being a requirement (it stays a legitimate *choice*, and J5 still owns the default). The
+  paragraph describing the losers as exiting 1 with no error reaching the agent becomes
+  **history** and should be marked as such rather than deleted — it is the defect the
+  workstream exists for.
+* **§4 "Client wiring" changes meaning without changing text.** The per-client stdio blocks
+  are now correct as written: the first serve to start becomes the hub and later ones proxy.
+  What the section should gain is one sentence saying *which* process holds the lease is
+  whichever started first, and that this is invisible to the client — because an operator
+  debugging "why is one client slow to start" needs to know a losing serve may wait for a
+  dead holder's lease to lapse (up to ~50s) before it either proxies or takes over.
+* **§2 "The pinned binary"** — the endpoint's socket path is derived from the session **and
+  the store identity**, so two machines with different store paths do not collide, but two
+  *different binaries* on one machine serving one session will refuse to proxy to each other
+  if their endpoint schemes ever diverge. That makes "binaries do not travel" slightly more
+  load-bearing than it was, and the re-pin should be all-at-once on a machine.
+* **§6 "Smoke test"** gains a cheap and worthwhile check: after wiring two clients, confirm
+  the lease row names one holder and carries an `endpoint`, and that the socket exists. That
+  is the one-line proof the hub is real rather than assumed.
+* **New, and worth its own line:** the operator-visible artifact of a proxying serve is a
+  stderr line, `lambo serve: proxying to the session holder`. Nothing reaches the ledger
+  (J4's), so "which of my serves is the hub" is answered from the lease row or from that
+  line, and the runbook should say which.

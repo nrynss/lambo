@@ -149,7 +149,9 @@ For flush lag and write-log depth, ask the writer through the `lambo_stats` tool
 
 ## One writer, enforced across processes
 
-A second writer on the same session is refused while the first holds the lease, whether it arrives as another `serve` or as a command line write. The refusal names the holder, so you know which process to stop.
+A second **command line write** on the same session is refused while a `serve` holds the lease. The refusal names the holder, so you know which process to stop.
+
+A second `serve` is different, and is not refused: over stdio it connects to the holder and forwards your calls, so the session still has exactly one writer while every client gets full access. See [MCP tools](/lambo/mcp/#more-than-one-client-on-one-machine) for that. Over HTTP a second `serve` is refused like a command line write.
 
 ```bash
 $ lambo --config lambo.toml derive --session demo --agent agent-b --content "x" --kind entity

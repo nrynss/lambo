@@ -27,8 +27,10 @@ would break a load-bearing resource is caught before it happens.
     `lambo_derive`, `lambo_record_action`, `lambo_reserve`, `lambo_inspect`,
     `lambo_saints`, `lambo_stats`. Every MCP tool takes your `agent_id`.
 - Writers (`derive`, `record-action`, `reserve`) hold the session's
-  single-writer lease. Sequence your writes; do not run two writer processes
+  single-writer lease. Sequence your writes; do not run two CLI writers
   against one session. Readers are read-only and may run freely.
+  A second `lambo serve` on a held session is fine over stdio — it forwards to
+  the holder, so the session keeps exactly one writer while every client works.
 - Never send a timestamp. The server stamps interactions and edges; a
   client-supplied timestamp would corrupt the age gates that canonization
   depends on.
