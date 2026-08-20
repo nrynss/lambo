@@ -697,6 +697,25 @@ pub async fn build_memory(
     // Cadence overrides from `[daemon]` reach the writer here. Without this the
     // daemon always runs at Config::default() and `gc_interval` in lambo.toml
     // would parse, validate, and then do nothing at all.
+    serve_builder(opts, backends, endpoint)
+        .build()
+        .await
+        .map_err(explain_startup_failure)
+}
+
+/// The one [`MemoryBuilder`] a serve process configures.
+///
+/// Split out of [`build_memory`] so J2's startup election can retry the attach
+/// against the **same** configuration: `MemoryBuilder` is `Clone` and every
+/// backend inside it is an `Arc`, so a retry is a clone rather than a second
+/// resolve. Level B's single construction site is unchanged — `main` still
+/// resolves once and this is still the only place `Memory::builder()` is called
+/// on the serve path.
+fn serve_builder(
+    opts: &ServeOptions,
+    backends: ResolvedBackends,
+    endpoint: Option<&SessionEndpoint>,
+) -> crate::memory::MemoryBuilder {
     let config = backends.config.clone();
     let mut builder = Memory::builder()
         .session(opts.session.clone())
@@ -710,11 +729,7 @@ pub async fn build_memory(
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint(endpoint.published());
     }
-    builder
-        .backends(backends)
-        .build()
-        .await
-        .map_err(explain_startup_failure)
+    builder.backends(backends)
 }
 
 /// Turn a raw driver error at attach time into an actionable message.
@@ -753,6 +768,142 @@ fn explain_startup_failure(err: LamboError) -> LamboError {
 /// every fail-closed check live inside `resolve_from_config_path`.
 pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends, LamboError> {
     resolve_from_config_path(config).map_err(|e| LamboError::Config(e.to_string()))
+}
+
+/// How much longer than one [`lease::LEASE_TTL`] the startup election waits for
+/// an unreachable holder's lease to lapse before giving up.
+///
+/// The election is bounded by the TTL because that is the guarantee the lease
+/// gives: a holder that stopped heartbeating loses its row within one TTL, so a
+/// wait of one TTL plus slack either finds a live hub or wins the lease. The
+/// slack absorbs store-clock skew and one missed refresh interval.
+const ELECTION_SLACK: Duration = Duration::from_secs(5);
+
+/// How often the startup election retries while no holder is reachable.
+const ELECTION_RETRY: Duration = Duration::from_secs(1);
+
+/// What this process turned out to be.
+enum Role {
+    /// It won the lease: a real writer, with a graph, a tail and a socket to
+    /// bind. Boxed for the same reason [`crate::memory::Attach`] boxes it.
+    Holder(Box<Memory>),
+    /// The lease is held by a reachable local holder: forward to it (J2).
+    Proxy(Box<crate::mcp::proxy::HubProxy>),
+}
+
+/// Decide whether this process holds the session or proxies to whoever does.
+///
+/// # The election, and why it lives HERE and not in the proxy
+///
+/// This function may re-attempt the acquire — that is the whole election — and
+/// it is the **only** place allowed to. It runs before a single byte has been
+/// exchanged with this process's own MCP client, so winning the lease here makes
+/// this process a real holder that can actually serve. Once
+/// [`crate::mcp::proxy::HubProxy::run`] is entered the client has handshaken
+/// with the *holder*, and a lease won after that point could not be served —
+/// the process would heartbeat a session it cannot answer, wedging every other
+/// process on the machine. `HubProxy` therefore only ever reads the row.
+/// Acquisition and promotion are one decision; see that function's invariant.
+///
+/// # What it waits for, and what it refuses
+///
+/// A refusal returns immediately, unchanged from pre-J2 behaviour, when there is
+/// no prospect of proxying at all:
+///
+/// * `--transport http` — the proxy's client-facing wire is a line pipe and
+///   streamable HTTP is not line-framed. Exits 1 exactly as before.
+/// * a store no second process can see, so there is no endpoint at all.
+///
+/// Otherwise it waits, up to one `LEASE_TTL` plus [`ELECTION_SLACK`], for either
+/// a reachable holder (→ proxy) or the lease to lapse (→ hold). Waiting is the
+/// right trade even though it can delay startup by ~50 s in the worst case: the
+/// alternative is the exit-1 this workstream exists to remove, and a slow start
+/// that ends in working memory beats a fast start that ends in none. Progress is
+/// logged so the delay is never silent.
+async fn resolve_role(
+    opts: &ServeOptions,
+    builder: &crate::memory::MemoryBuilder,
+    endpoint: Option<&SessionEndpoint>,
+) -> Result<Role, LamboError> {
+    let our_host =
+        lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(&opts.agent)).host;
+    let deadline = Instant::now() + lease::LEASE_TTL + ELECTION_SLACK;
+    let mut waited_for = None;
+    loop {
+        let held = match builder
+            .clone()
+            .build_attach()
+            .await
+            .map_err(explain_startup_failure)?
+        {
+            crate::memory::Attach::Attached(mem) => {
+                if let Some(reason) = waited_for {
+                    tracing::info!(
+                        %reason,
+                        "lambo serve: the previous holder's lease lapsed — taking the session"
+                    );
+                }
+                return Ok(Role::Holder(mem));
+            }
+            crate::memory::Attach::Held(held) => held,
+        };
+
+        // No prospect of proxying: refuse now, with exactly the message a
+        // pre-J2 serve produced.
+        if opts.transport != Transport::Stdio {
+            tracing::warn!(
+                "lambo serve: --transport http cannot proxy to the session holder (its \
+                 client-facing wire is not line-framed); refusing as it did before J2"
+            );
+            return Err(LamboError::Conflict(held.message));
+        }
+        let Some(endpoint) = endpoint else {
+            return Err(LamboError::Conflict(held.message));
+        };
+
+        // Can we forward to this holder? Three checks, no guessing.
+        let outcome = match crate::mcp::proxy::proxyable(&held.current, endpoint, &our_host) {
+            Ok(()) => match crate::mcp::proxy::connect(endpoint).await {
+                Ok(stream) => {
+                    // Probe only: `HubProxy::run` re-reads the row and dials the
+                    // holder that is current at *that* moment, so this
+                    // connection is dropped rather than carried in.
+                    drop(stream);
+                    return Ok(Role::Proxy(Box::new(crate::mcp::proxy::HubProxy::new(
+                        crate::types::SessionId::new(&opts.session),
+                        endpoint.clone(),
+                        Arc::clone(&held.store),
+                        our_host,
+                    ))));
+                }
+                Err(e) => format!("the holder's endpoint is not accepting connections ({e})"),
+            },
+            Err(why) => why.explain(),
+        };
+
+        // Not proxyable *yet*. The two live cases are a CLI verb holding the
+        // lease for one command and a holder that died without releasing; both
+        // resolve inside one TTL, the first by finishing and the second by
+        // lapsing.
+        if Instant::now() >= deadline {
+            return Err(LamboError::Conflict(format!(
+                "{} {outcome} Waited {}s for that holder's lease to lapse or its endpoint to \
+                 answer, and neither happened.",
+                held.message,
+                (lease::LEASE_TTL + ELECTION_SLACK).as_secs()
+            )));
+        }
+        if waited_for.as_deref() != Some(outcome.as_str()) {
+            tracing::info!(
+                reason = %outcome,
+                budget_secs = (lease::LEASE_TTL + ELECTION_SLACK).as_secs(),
+                "lambo serve: the session is held by a writer this process cannot forward to — \
+                 waiting for its lease to lapse so this process can take the session"
+            );
+        }
+        waited_for = Some(outcome);
+        tokio::time::sleep(ELECTION_RETRY).await;
+    }
 }
 
 /// Run the MCP server to completion, then close the session.
@@ -798,10 +949,47 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // unconditional binding quietly falsify it.
     let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg)?;
 
-    let mem = Arc::new(build_memory(&opts, backends, endpoint.as_ref()).await?);
+    // J2 — the fork in the road. Everything above is pre-lease; `resolve_role`
+    // is where the lease is attempted, and where a loss stops being fatal.
+    let builder = serve_builder(&opts, backends, endpoint.as_ref());
+    let mem: Arc<Memory> = match resolve_role(&opts, &builder, endpoint.as_ref()).await? {
+        Role::Holder(mem) => Arc::from(mem),
+        Role::Proxy(proxy) => {
+            // **The proxy branch is deliberately NOT armed for durability, and
+            // this is the design decision the J0 review asked for by name.**
+            //
+            // The hazard it warned about is real: a refused serve never reaches
+            // the holder path below, so naive proxy code would run above the
+            // arming point — I-R2-1's pre-handshake hole through a new door. The
+            // answer is not to move the arming but to notice that *the hole is
+            // not there*. What that arming protects is `Memory::close`: a lease
+            // taken, an in-RAM write-behind tail, a graph. A proxy has none of
+            // the three. It holds no lease (`resolve_role` returned this branch
+            // precisely because it lost), no tail (every write happens inside
+            // the holder, under the holder's fencing token) and no graph. There
+            // is nothing a signal handler could save, so arming for durability
+            // would be theatre — a handler that logs.
+            //
+            // A registration is still installed, for **liveness**: it is how the
+            // pump's `select!` learns to stop, so SIGTERM ends the proxy with a
+            // log line and a closed socket instead of a bare kill. It is polled
+            // first in that `select!`, so this does not make the process
+            // SIGTERM-immune the way arming above a blocking `build_memory`
+            // would.
+            //
+            // Nothing else on this branch is skipped by accident: a proxy opens
+            // no ledger (it books no calls of its own — that is J4's, and §J2
+            // records it), spawns no heartbeat, binds no socket and builds no
+            // `LamboServer`. It is a pipe.
+            let outcome = proxy.run(shutdown_signal()).await;
+            tracing::info!("lambo serve: proxy closed (no lease was ever taken by this process)");
+            return outcome;
+        }
+    };
 
     // One signal registration for the whole life of the transport, armed HERE —
-    // the first statement after the lease-taking `build_memory` returns, and
+    // the first statement after the lease-taking attach returns (`resolve_role`,
+    // which calls the same `Memory` build `build_memory` does), and
     // before ANY of the startup work below it (`Ledger::open`, `LamboServer::new`
     // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the J2
     // session-endpoint bind and its accept loop, the event pump, and the

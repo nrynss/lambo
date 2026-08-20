@@ -10,6 +10,7 @@
 //! to inspect the store underneath (spec §12.1).
 
 pub mod endpoint;
+pub mod proxy;
 pub mod serve;
 pub mod server;
 

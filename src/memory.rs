@@ -389,13 +389,63 @@ fn spawn_lease_heartbeat(
 
 /// Builder for [`Memory`] — spec §6.1.
 ///
+/// What a session lease refusal tells the loser (J2).
+///
+/// The refusal has always carried this information; before J2 it was formatted
+/// into a string and the structure was thrown away, which is why a losing
+/// `serve` could only exit. `mcp::serve` needs the holder's *endpoint* to proxy
+/// to it, and the host inside `holder` to know whether that endpoint means
+/// anything on this machine.
+#[derive(Clone)]
+pub struct LeaseHeldElsewhere {
+    /// The operator-facing refusal, byte-identical to the message
+    /// [`MemoryBuilder::build`] returns as [`LamboError::Conflict`].
+    pub message: String,
+    /// The lease row as the store reported it — holder token, fencing token,
+    /// timings, and the holder's published `endpoint`.
+    pub current: crate::store::lease::LeaseInfo,
+    /// How long the current holder has held it.
+    pub age: Duration,
+    /// The store this attach was refused against.
+    ///
+    /// Handed back so a caller that becomes a proxy can **re-read** the lease
+    /// row on every reconnect attempt without opening a second connection —
+    /// Level B's "one store per process" is preserved, and the proxy still runs
+    /// no `store::load` and holds no in-RAM graph.
+    pub store: Arc<dyn GraphStore>,
+}
+
+/// The outcome of an attach: this process owns the session, or someone else does.
+///
+/// **Why a type rather than a new [`LamboError`] variant.** J1-R2-2's lesson is
+/// that a code path must never be selected by matching an error *variant* with
+/// several producers. The other way to honour that is not to widen the error
+/// enum at all: [`MemoryBuilder::build`] still returns exactly the
+/// `LamboError::Conflict` it always did — same bytes, same `err_class`, same N4
+/// treatment, same CLI text and exit code — and the one caller that needs the
+/// structure asks for it by calling [`MemoryBuilder::build_attach`] instead.
+/// Nothing downstream of `build` moved.
+pub enum Attach {
+    /// The lease is ours; the session is live. Boxed because a `Memory` handle
+    /// is an order of magnitude larger than the refusal report, and every
+    /// caller moves it straight out of the enum anyway.
+    Attached(Box<Memory>),
+    /// A live lease is held by another writer.
+    Held(Box<LeaseHeldElsewhere>),
+}
+
 /// The named setters below (`match_strategy`, `flush_interval`,
 /// `scoring_weights`) override the corresponding [`Config`] field and are
 /// applied at `build()` time, so they commute with [`MemoryBuilder::config`].
 /// Everything else the session needs already has a `Config` knob, so pass a
 /// whole [`Config`] rather than looking for more setters. **No new knobs are
 /// introduced by this type.**
-#[derive(Default)]
+/// `Clone` is deliberate and load-bearing (J2): `mcp::serve` retries the attach
+/// when the session's lease is held by a holder that turns out to be
+/// unreachable, and it must retry the *same* configuration — one store, one
+/// embedder, one contract, all behind `Arc`s, so a clone is cheap and does not
+/// violate Level B's single construction site.
+#[derive(Clone, Default)]
 pub struct MemoryBuilder {
     session: Option<SessionId>,
     agent: Option<AgentId>,
@@ -563,6 +613,17 @@ impl MemoryBuilder {
     /// a resumed session publishes its whole restored condition set on that
     /// first cycle).
     pub async fn build(self) -> Result<Memory, LamboError> {
+        match self.build_attach().await? {
+            Attach::Attached(mem) => Ok(*mem),
+            // The exact error this function returned before J2 — see `Attach`.
+            Attach::Held(held) => Err(LamboError::Conflict(held.message)),
+        }
+    }
+
+    /// [`MemoryBuilder::build`], reporting a lease refusal as data rather than
+    /// as an error (J2). See [`Attach`] for why this is a second method rather
+    /// than a change to `build`'s error type.
+    pub async fn build_attach(self) -> Result<Attach, LamboError> {
         let session = self.session.ok_or_else(|| {
             LamboError::Config("Memory::builder: .session(..) is required".into())
         })?;
@@ -647,15 +708,24 @@ impl MemoryBuilder {
             // presents it and the store rejects a stale one after a takeover.
             LeaseOutcome::Acquired(info) => info.token,
             LeaseOutcome::Held { current, age } => {
-                // Fail closed, naming the current holder and its age.
-                return Err(LamboError::Conflict(format!(
+                // Fail closed, naming the current holder and its age. Reported
+                // as data (J2) so `mcp::serve` can proxy to the holder; the
+                // message is byte-identical to what `build` has always returned,
+                // and `build` still returns it as `LamboError::Conflict`.
+                let message = format!(
                     "session {session} is already held by another writer ({}) — it acquired the \
                      single-writer lease {}s ago and is still refreshing it. Refusing to open a \
                      second writer. If that holder is wedged, an operator can force a takeover \
                      (see the single-writer lease note in docs/reference/cli.mdx)",
                     current.holder,
                     age.as_secs(),
-                )));
+                );
+                return Ok(Attach::Held(Box::new(LeaseHeldElsewhere {
+                    message,
+                    current,
+                    age,
+                    store,
+                })));
             }
         };
 
@@ -795,7 +865,7 @@ impl MemoryBuilder {
         // a successful `close()` (R2-4) or, failing that, by `Drop` (T81-8).
         register_session(&session, &agent);
 
-        Ok(Memory {
+        Ok(Attach::Attached(Box::new(Memory {
             session,
             agent,
             config,
@@ -822,7 +892,7 @@ impl MemoryBuilder {
             lease_released: AtomicBool::new(false),
             lease_lost,
             clock,
-        })
+        })))
     }
 }
 

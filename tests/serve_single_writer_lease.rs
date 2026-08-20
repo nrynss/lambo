@@ -9,6 +9,25 @@
 //! closed** — exit non-zero, naming the current holder — rather than open a
 //! second diverging writer.
 //!
+//! ## What J2 changed here, and what it did not
+//!
+//! **The lease is untouched.** What changed is what a *loser* does: since J2 a
+//! refused `--transport stdio` serve becomes a thin proxy to the holder instead
+//! of exiting 1, which was the whole point (two clients on one machine each
+//! spawning their own serve turned a correct process lock into an agent-level
+//! outage). So "B exits non-zero" is no longer the default-path behaviour, and
+//! asserting it there would pin the defect J2 removed.
+//!
+//! B is therefore launched with `--transport http`, where the refusal **still**
+//! holds and always will: the proxy's client-facing wire is a line pipe and
+//! streamable HTTP is not line-framed, so an http serve that loses the lease has
+//! nothing to become. That keeps this file testing exactly what it was written to
+//! test — cross-process, store-enforced, fail-closed single-writer enforcement,
+//! naming the holder — on a path where the refusal is the designed outcome
+//! rather than a missing feature. The proxy path has its own subprocess test in
+//! `serve_proxy_multi_client.rs`; between them, both halves of "one writer, many
+//! clients" are pinned across a real process boundary.
+//!
 //! SQLite on a shared file is deliberate: cross-process enforcement can only be
 //! observed through a store two processes actually share. Gated on
 //! `store-sqlite`, so the default `cargo test` gate skips it; run with
@@ -50,7 +69,7 @@ fn write_frame(stdin: &mut impl Write, frame: &str) {
     stdin.flush().expect("flush frame");
 }
 
-fn serve_cmd(cfg_path: &std::path::Path, agent: &str) -> Command {
+fn serve_cmd_on(cfg_path: &std::path::Path, agent: &str, transport: &str) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
     cmd.args([
         "--config",
@@ -61,9 +80,13 @@ fn serve_cmd(cfg_path: &std::path::Path, agent: &str) -> Command {
         "--agent",
         agent,
         "--transport",
-        "stdio",
+        transport,
     ]);
     cmd
+}
+
+fn serve_cmd(cfg_path: &std::path::Path, agent: &str) -> Command {
+    serve_cmd_on(cfg_path, agent, "stdio")
 }
 
 #[test]
@@ -128,9 +151,13 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
         "A did not complete initialize: {init}"
     );
 
-    // Process B: same session, same store file, different agent. It must fail
-    // closed at build time — before it ever serves.
-    let b = serve_cmd(&cfg_path, "agent-b")
+    // Process B: same session, same store file, different agent, on the ONE
+    // transport where losing the lease is still terminal (see the module doc —
+    // an http serve has no line-framed client wire to proxy over, so J2 leaves
+    // its refusal exactly as it was). It must fail closed at build time, before
+    // it ever serves. A free port is not needed: the refusal happens before any
+    // bind.
+    let b = serve_cmd_on(&cfg_path, "agent-b", "http")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -159,6 +186,14 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
         !b_out.status.success(),
         "the second process must fail closed (non-zero exit); got {:?}",
         b_out.status
+    );
+    // And refused for the LEASE, not for anything J2 added: a regression that
+    // made an http loser fall into the proxy branch (whose wire it cannot speak)
+    // would show up here as a different failure, or as success.
+    let b_stderr_early = String::from_utf8_lossy(&b_out.stderr);
+    assert!(
+        b_stderr_early.contains("already held by another writer"),
+        "B must be refused by the lease itself; stderr was:\n{b_stderr_early}"
     );
     let b_stderr = String::from_utf8_lossy(&b_out.stderr);
     assert!(

@@ -27,6 +27,26 @@
 //! SQLite (not MemoryStore) is deliberate, and the test is gated on
 //! `store-sqlite` exactly like its sibling: durability across a process boundary
 //! can only be observed through a store that outlives the process.
+//!
+//! ## The second case, added by J2
+//!
+//! J2 gave `serve` a branch this file could not previously reach: a serve that
+//! loses the single-writer lease becomes a **proxy** rather than exiting 1. The
+//! J0 review flagged the hazard before J2 was written — a refused serve never
+//! reaches the holder path, so proxy work would run above the shutdown-arming
+//! point, I-R2-1's hole through a new door — and flagged that this test could
+//! not see it either: **its loose `"session attached"` matcher never fires for a
+//! proxy**, which does not attach a session and never logs that line. Anchoring
+//! the new case on it would have produced a test that passed without ever
+//! signalling anything.
+//!
+//! So the proxy case has its own sync point, `"proxying to the session holder"`,
+//! a line only the proxy emits, and it asserts the property that actually
+//! matters on that branch. A proxy holds no lease, no write-behind tail and no
+//! graph, so a signal to it is **not** a durability event and must not become
+//! one: it must exit cleanly, and the holder it was forwarding to must be
+//! untouched and still durable afterwards. That is the pair — clean proxy exit,
+//! intact holder — that a naive proxy branch would break.
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader};
@@ -212,5 +232,205 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
         );
     });
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2: a SIGTERM to a **proxy** in its own pre-handshake window.
+///
+/// The holder attaches and holds the lease. A second serve is launched on the
+/// same session and store, loses the lease, and becomes a proxy; its client
+/// sends NOTHING, so it is parked exactly where the case above parks a holder.
+/// SIGTERM the proxy.
+///
+/// Two assertions, and both are about the branch rather than about durability:
+/// the proxy exits **cleanly** (a signal on that branch is handled, not fatal),
+/// and the holder is **untouched** — still live, still the lease holder, and its
+/// own tail still durable when it closes. A proxy that had taken a lease, or
+/// held a tail, or unlinked the holder's socket on its way out, fails one of
+/// them.
+#[test]
+fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact() {
+    let dir = std::env::temp_dir().join(format!(
+        "lambo-pre-handshake-proxy-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let db_str = dir
+        .join("durability.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let cfg_path = dir.join("lambo.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{db_str}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n"
+        ),
+    )
+    .expect("write config");
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("connect for provision");
+        store.init_schema().await.expect("init_schema");
+    });
+
+    let spawn = |agent: &str| {
+        Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .args([
+                "--config",
+                cfg_path.to_str().unwrap(),
+                "serve",
+                "--session",
+                SESSION,
+                "--agent",
+                agent,
+                "--transport",
+                "stdio",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn lambo serve")
+    };
+
+    /// Pump a child's stderr onto a channel so a sync line can be waited for.
+    fn watch(child: &mut std::process::Child) -> mpsc::Receiver<String> {
+        let stderr = child.stderr.take().expect("child stderr");
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Some(Ok(line)) = lines.next() {
+                eprintln!("[serve stderr] {line}");
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        rx
+    }
+
+    fn wait_for(rx: &mpsc::Receiver<String>, needle: &str) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(25)) {
+                Ok(line) if line.contains(needle) => return true,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    // The holder. Wait for the serve-level attach so the lease is provably held
+    // before the second process races for it.
+    let mut holder = spawn("agent-a");
+    let holder_pid = holder.id();
+    let holder_err = watch(&mut holder);
+    let holder_out = holder.stdout.take().expect("holder stdout");
+    let holder_drain = std::thread::spawn(move || {
+        let mut lines = BufReader::new(holder_out).lines();
+        while let Some(Ok(_)) = lines.next() {}
+    });
+    assert!(
+        wait_for(&holder_err, "lambo serve: session attached"),
+        "the holder never attached; cannot set up the proxy case"
+    );
+
+    // The proxy. Its client sends nothing at all — same pre-handshake parking as
+    // the case above, on the other branch.
+    let mut proxy = spawn("agent-b");
+    let proxy_pid = proxy.id();
+    let proxy_err = watch(&mut proxy);
+    let proxy_out = proxy.stdout.take().expect("proxy stdout");
+    let proxy_drain = std::thread::spawn(move || {
+        let mut lines = BufReader::new(proxy_out).lines();
+        while let Some(Ok(_)) = lines.next() {}
+    });
+    // The sync point that exists BECAUSE "session attached" cannot serve here:
+    // a proxy attaches no session and never logs that line (J0 round 1).
+    assert!(
+        wait_for(&proxy_err, "proxying to the session holder"),
+        "the second serve never became a proxy — it may have exited 1 as it did before J2"
+    );
+
+    sigterm(proxy_pid);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(proxy.wait());
+    });
+    match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(status) => assert!(
+            status.expect("wait on proxy").success(),
+            "a SIGTERM to a proxy must be handled, not fatal"
+        ),
+        Err(_) => {
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(proxy_pid.to_string())
+                .status();
+            sigterm(holder_pid);
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("the proxy did not exit within 15s of a SIGTERM — its shutdown is not wired");
+        }
+    }
+
+    // The holder is untouched: it still holds the lease, with its endpoint still
+    // published. A proxy that took a lease on its way through, or unlinked the
+    // holder's socket on exit, fails here.
+    let row = rt
+        .block_on(async {
+            let store = SqliteStore::connect(&db_str).expect("reconnect");
+            store.read_lease(&SessionId::from(SESSION)).await
+        })
+        .expect("read lease")
+        .expect("the holder's lease row must still exist");
+    assert!(
+        row.holder.starts_with("agent-a@"),
+        "the proxy must not have become the holder: {}",
+        row.holder
+    );
+    let endpoint = row
+        .endpoint
+        .expect("the holder still publishes its endpoint");
+    assert!(
+        std::path::Path::new(&endpoint).exists(),
+        "the proxy must not unlink the holder's socket on its way out: {endpoint}"
+    );
+
+    // And the holder's own tail is still durable when IT is asked to close.
+    sigterm(holder_pid);
+    let (htx, hrx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = htx.send(holder.wait());
+    });
+    match hrx.recv_timeout(Duration::from_secs(20)) {
+        Ok(status) => assert!(
+            status.expect("wait on holder").success(),
+            "the holder must still close cleanly after a proxy came and went"
+        ),
+        Err(_) => {
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(holder_pid.to_string())
+                .status();
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("the holder did not exit within 20s — a proxy's lifecycle damaged it");
+        }
+    }
+    let _ = holder_drain.join();
+    let _ = proxy_drain.join();
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("reconnect");
+        store
+            .load_session(&SessionId::from(SESSION))
+            .await
+            .expect("the holder's session row must be durable");
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
