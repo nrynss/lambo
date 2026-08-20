@@ -151,4 +151,29 @@ dogfood needs it.
 
 ---
 
+## 2026-08-20 (later) — correction: the canonization entry overclaimed
+
+The metric-5 entry above says 0 promotions in 94 cycles is "C's motivating claim observed
+on our own rig." Operator pushback, sustained: **at this age it is expected under any
+policy.** The swarm path wants recurrence across three or more distinct sessions separated
+by 24+ hours, and the rig is barely a day old — zero promotions is what a correct policy
+produces on a day-old store, and blast-radius silence follows trivially (nothing has been
+in the graph long enough to be load-bearing). "Consistent with C's claim" is the most the
+data supports.
+
+What survives the correction is the structural half: this rig runs a pre-J1 binary, so
+every write from every subagent is attributed to `claude-orchestrator` — from the graph's
+side there has only ever been **one agent**, which makes *independent multi-agent
+convergence* impossible regardless of elapsed time, not merely slow. That is an
+attribution artifact, resolved by the J1 re-pin, and it means the clock on a fair test of
+the swarm policy has not started yet.
+
+The fair test, written down before the fact: after the rig re-pins to a J1-carrying
+binary, run a week of real sessions with distinct per-call ids. If concepts that genuinely
+recur across cycles (the review conventions, the register-sweep rule) have promoted
+nothing by **2026-08-27**, that becomes evidence about the policy on this workload; until
+then metric 5 is "not yet measurable," not a finding.
+
+---
+
 *(next entry appends here)*
