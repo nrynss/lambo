@@ -672,6 +672,19 @@ impl GraphStore for SqliteStore {
             "ALTER TABLE session_leases ADD COLUMN current_token INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // J2. Additive and nullable, so an ALREADY-PROVISIONED store (the
+        // dogfood rig's `lambo-dev.db` among them) converges here on the next
+        // attach without a re-provision: existing rows get NULL, which reads as
+        // "this holder published no endpoint" — exactly what a pre-J2 holder
+        // did. No default, deliberately: a fabricated address would be worse
+        // than an honest absence.
+        ensure_column(
+            self.pool(),
+            "session_leases",
+            "endpoint",
+            "ALTER TABLE session_leases ADD COLUMN endpoint TEXT",
+        )
+        .await?;
         Ok(())
     }
 
@@ -707,6 +720,15 @@ impl GraphStore for SqliteStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         acquire_or_refresh(self.pool(), session, holder, ttl).await
+    }
+
+    async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        let row: Option<LeaseRowText> = sqlx::query_as(LEASE_ROW_SQL)
+            .bind(&session.0)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| db_err("read lease", e))?;
+        row.map(lease_info_from_text).transpose()
     }
 
     async fn release_lease(
@@ -1426,11 +1448,12 @@ async fn acquire_or_refresh(
     let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
     let token = holder.token();
     const ACQUIRE_SQL: &str = "\
-        INSERT INTO session_leases (session_id, holder, acquired_at, expires_at, current_token) \
+        INSERT INTO session_leases \
+            (session_id, holder, acquired_at, expires_at, current_token, endpoint) \
         VALUES (?1, ?2, \
                 strftime('%Y-%m-%dT%H:%M:%fZ','now'), \
                 strftime('%Y-%m-%dT%H:%M:%fZ','now', ?3), \
-                1) \
+                1, ?4) \
         ON CONFLICT (session_id) DO UPDATE SET \
             holder = excluded.holder, \
             acquired_at = CASE WHEN session_leases.holder = excluded.holder \
@@ -1438,16 +1461,18 @@ async fn acquire_or_refresh(
             expires_at = excluded.expires_at, \
             current_token = CASE WHEN session_leases.holder = excluded.holder \
                                  THEN session_leases.current_token \
-                                 ELSE session_leases.current_token + 1 END \
+                                 ELSE session_leases.current_token + 1 END, \
+            endpoint = excluded.endpoint \
         WHERE session_leases.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') \
            OR session_leases.holder = excluded.holder \
-        RETURNING holder, acquired_at, expires_at, current_token";
+        RETURNING holder, acquired_at, expires_at, current_token, endpoint";
 
     for _ in 0..3 {
-        let won: Option<(String, String, String, i64)> = sqlx::query_as(ACQUIRE_SQL)
+        let won: Option<LeaseRowText> = sqlx::query_as(ACQUIRE_SQL)
             .bind(&session.0)
             .bind(&token)
             .bind(&ttl_modifier)
+            .bind(holder.endpoint.as_deref())
             .fetch_optional(pool)
             .await
             .map_err(|e| db_err("acquire lease", e))?;
@@ -1455,14 +1480,11 @@ async fn acquire_or_refresh(
             return Ok(LeaseOutcome::Acquired(lease_info_from_text(row)?));
         }
         // Guard was false — someone else holds a live lease. Read it back.
-        let current: Option<(String, String, String, i64)> = sqlx::query_as(
-            "SELECT holder, acquired_at, expires_at, current_token \
-             FROM session_leases WHERE session_id = ?1",
-        )
-        .bind(&session.0)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| db_err("read current lease", e))?;
+        let current: Option<LeaseRowText> = sqlx::query_as(LEASE_ROW_SQL)
+            .bind(&session.0)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| db_err("read current lease", e))?;
         match current {
             Some(row) => {
                 let info = lease_info_from_text(row)?;
@@ -1480,14 +1502,26 @@ async fn acquire_or_refresh(
     ))
 }
 
-fn lease_info_from_text(row: (String, String, String, i64)) -> Result<LeaseInfo, StoreError> {
-    let (holder, acquired_at, expires_at, current_token) = row;
+/// The lease row as SQLite hands it back — see [`LEASE_ROW_SQL`] for the
+/// column order this tuple mirrors. Named so the acquire's `RETURNING` and the
+/// standalone read cannot drift apart in shape (J2 added a sixth column and the
+/// two lists were already duplicated).
+type LeaseRowText = (String, String, String, i64, Option<String>);
+
+/// Every column [`LeaseInfo`] needs, in [`LeaseRowText`] order.
+const LEASE_ROW_SQL: &str = "\
+    SELECT holder, acquired_at, expires_at, current_token, endpoint \
+    FROM session_leases WHERE session_id = ?1";
+
+fn lease_info_from_text(row: LeaseRowText) -> Result<LeaseInfo, StoreError> {
+    let (holder, acquired_at, expires_at, current_token, endpoint) = row;
     Ok(LeaseInfo {
         holder,
         token: u64::try_from(current_token)
             .map_err(|_| StoreError::Backend("lease row has a negative current_token".into()))?,
         acquired_at: text_to_ts(&acquired_at)?,
         expires_at: text_to_ts(&expires_at)?,
+        endpoint,
     })
 }
 
@@ -6081,6 +6115,7 @@ mod tests {
 
     fn lease_holder(agent: &str, pid: u32) -> LeaseHolder {
         LeaseHolder {
+            endpoint: None,
             agent: AgentId::new(agent),
             pid,
             host: "test-host".into(),
@@ -6139,6 +6174,138 @@ mod tests {
             .await
             .unwrap()
             .is_acquired());
+    }
+
+    /// J2: the endpoint a holder publishes round-trips through the real SQL —
+    /// out of the acquire's `RETURNING`, out of the loser's `Held` read-back,
+    /// and out of the standalone `read_lease` the proxy path uses — and a
+    /// refresh republishes it rather than dropping it.
+    ///
+    /// The NULL half is asserted too, and it is the load-bearing one: every
+    /// writer that is not a `serve` process leaves the column NULL, and a
+    /// refused serve must be able to tell "no hub here" from "a hub at <path>".
+    #[tokio::test]
+    async fn the_lease_endpoint_round_trips_and_a_refresh_republishes_it() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("s");
+        let hub = lease_holder("agent-a", 100).reachable_at("/run/lambo/s-abc.sock");
+        let loser = lease_holder("agent-b", 200);
+        let ttl = Duration::from_secs(30);
+
+        let LeaseOutcome::Acquired(taken) = store.acquire_lease(&sid, &hub, ttl).await.unwrap()
+        else {
+            panic!("the hub must win a fresh lease");
+        };
+        assert_eq!(taken.endpoint.as_deref(), Some("/run/lambo/s-abc.sock"));
+
+        // The refusal a proxying serve reads: the endpoint arrives with the
+        // holder, so one round trip tells the loser where to forward.
+        match store.acquire_lease(&sid, &loser, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => {
+                assert_eq!(current.holder, hub.token());
+                assert_eq!(current.endpoint.as_deref(), Some("/run/lambo/s-abc.sock"));
+            }
+            other => panic!("expected Held, got {other:?}"),
+        }
+
+        // The read the proxy repeats on every reconnect attempt.
+        let row = store.read_lease(&sid).await.unwrap().expect("a live row");
+        assert_eq!(row.endpoint.as_deref(), Some("/run/lambo/s-abc.sock"));
+        assert_eq!(row.holder, hub.token());
+
+        // A refresh is the heartbeat; it must not blank the address.
+        let LeaseOutcome::Acquired(refreshed) = store.refresh_lease(&sid, &hub, ttl).await.unwrap()
+        else {
+            panic!("the hub's own refresh must succeed");
+        };
+        assert_eq!(refreshed.endpoint.as_deref(), Some("/run/lambo/s-abc.sock"));
+
+        // A writer that is not a serve process publishes nothing, and the row
+        // says so — "no hub here" is a fact, not missing data.
+        store.release_lease(&sid, &hub).await.unwrap();
+        let LeaseOutcome::Acquired(cli) = store.acquire_lease(&sid, &loser, ttl).await.unwrap()
+        else {
+            panic!("a released lease must be re-acquirable");
+        };
+        assert_eq!(cli.endpoint, None);
+        assert_eq!(
+            store.read_lease(&sid).await.unwrap().unwrap().endpoint,
+            None
+        );
+    }
+
+    /// J2: `read_lease` on a session no writer has ever leased is `None`, not an
+    /// error — a proxy must be able to distinguish "nobody holds this" from a
+    /// store failure, because only the first one is worth retrying.
+    #[tokio::test]
+    async fn read_lease_is_none_for_an_unleased_session() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        assert!(store
+            .read_lease(&SessionId::from("never-leased"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// J2: an ALREADY-PROVISIONED store converges on the next attach — the
+    /// dogfood rig's `lambo-dev.db` must not need a re-provision. Built by
+    /// creating the pre-J2 five-column table by hand, then running the real
+    /// `init_schema` over it.
+    #[tokio::test]
+    async fn a_pre_j2_lease_table_gains_the_endpoint_column_on_init() {
+        let store = test_store();
+        // The exact DDL that shipped before J2 (five columns).
+        sqlx::query(
+            "CREATE TABLE session_leases (\
+                 session_id  TEXT PRIMARY KEY, \
+                 holder      TEXT NOT NULL, \
+                 acquired_at TEXT NOT NULL, \
+                 expires_at  TEXT NOT NULL, \
+                 current_token INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_leases VALUES \
+                 ('legacy', 'old@host#1', '2026-01-01T00:00:00.000Z', \
+                  '2026-01-01T00:00:01.000Z', 7)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        store.init_schema().await.unwrap();
+
+        // The pre-existing row survives and reads as "published no endpoint",
+        // which is exactly what a pre-J2 holder did.
+        let legacy = store
+            .read_lease(&SessionId::from("legacy"))
+            .await
+            .unwrap()
+            .expect("the pre-J2 row must survive the ALTER");
+        assert_eq!(legacy.endpoint, None);
+        assert_eq!(legacy.token, 7);
+        // And the column is now writable.
+        let sid = SessionId::from("fresh");
+        let hub = lease_holder("a", 1).reachable_at("/run/lambo/fresh.sock");
+        assert!(store
+            .acquire_lease(&sid, &hub, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .is_acquired());
+        assert_eq!(
+            store
+                .read_lease(&sid)
+                .await
+                .unwrap()
+                .unwrap()
+                .endpoint
+                .as_deref(),
+            Some("/run/lambo/fresh.sock")
+        );
     }
 
     /// T8.6: expiry-after-crash on sqlite — an unreleased lease blocks before the

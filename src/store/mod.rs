@@ -311,7 +311,29 @@ pub trait GraphStore: Send + Sync {
             acquired_at: now,
             expires_at: now
                 + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0)),
+            // Advisory default: nothing is stored, so nothing can be read back
+            // — see `read_lease`, whose default is `None` for the same reason.
+            endpoint: holder.endpoint.clone(),
         }))
+    }
+
+    /// Read the session's lease row without touching it (J2).
+    ///
+    /// **Read-only, and that is load-bearing.** This is how a `serve` that lost
+    /// the lease finds the current holder's `endpoint` so it can proxy, and how
+    /// it re-finds it on every reconnect attempt. It must never acquire,
+    /// refresh, or steal: a proxy that took the lease would heartbeat and hold
+    /// a session it cannot serve, wedging every process on the machine — which
+    /// is strictly worse than the exit-1 J2 exists to replace. See
+    /// `mcp::serve`'s proxy loop, where the invariant is restated at the site
+    /// that could violate it.
+    ///
+    /// `Ok(None)` means "no row", which the default returns unconditionally:
+    /// an advisory store stores no lease, so it can report none. The three real
+    /// backends override it. A caller must treat `None` as "no reachable
+    /// holder" and fail honestly rather than guess an address.
+    async fn read_lease(&self, _session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        Ok(None)
     }
 
     /// Heartbeat: extend our own lease by `ttl` (spec §2.2). Same atomic

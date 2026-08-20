@@ -32,6 +32,9 @@ struct LeaseRow {
     current_token: u64,
     acquired_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    /// Where the holder can be reached (J2). `None` for every writer that is
+    /// not a `lambo serve` process — see `store::lease::LeaseHolder::endpoint`.
+    endpoint: Option<String>,
 }
 
 fn row_info(row: &LeaseRow) -> LeaseInfo {
@@ -40,6 +43,7 @@ fn row_info(row: &LeaseRow) -> LeaseInfo {
         token: row.current_token,
         acquired_at: row.acquired_at,
         expires_at: row.expires_at,
+        endpoint: row.endpoint.clone(),
     }
 }
 
@@ -349,6 +353,11 @@ impl GraphStore for MemoryStore {
                     current_token: row.current_token,
                     acquired_at: row.acquired_at,
                     expires_at,
+                    // A refresh republishes the holder's CURRENT endpoint, the
+                    // same `endpoint = excluded.endpoint` the two SQL adapters
+                    // apply: the row must describe where this holder can be
+                    // reached now, not where it could be when it first won.
+                    endpoint: holder.endpoint.clone(),
                 };
                 let info = row_info(&updated);
                 leases.insert(session.0.clone(), updated);
@@ -362,6 +371,7 @@ impl GraphStore for MemoryStore {
                     current_token: row.current_token + 1,
                     acquired_at: now,
                     expires_at,
+                    endpoint: holder.endpoint.clone(),
                 };
                 let info = row_info(&fresh);
                 leases.insert(session.0.clone(), fresh);
@@ -374,6 +384,7 @@ impl GraphStore for MemoryStore {
                     current_token: 1,
                     acquired_at: now,
                     expires_at,
+                    endpoint: holder.endpoint.clone(),
                 };
                 let info = row_info(&fresh);
                 leases.insert(session.0.clone(), fresh);
@@ -391,6 +402,10 @@ impl GraphStore for MemoryStore {
         // Identical atomic upsert; the acquire arm for "our own lease" is the
         // heartbeat path.
         self.acquire_lease(session, holder, ttl).await
+    }
+
+    async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        Ok(self.leases.read().get(&session.0).map(row_info))
     }
 
     async fn release_lease(
@@ -765,6 +780,7 @@ mod tests {
 
     fn holder(agent: &str, pid: u32) -> LeaseHolder {
         LeaseHolder {
+            endpoint: None,
             agent: AgentId::new(agent),
             pid,
             host: "test-host".into(),
@@ -807,6 +823,54 @@ mod tests {
             .await
             .unwrap()
             .is_acquired());
+    }
+
+    /// J2: MemoryStore is the parity reference for the two SQL adapters — the
+    /// endpoint is published by the acquire, carried on the loser's `Held`, read
+    /// back by `read_lease`, republished by a refresh, and absent (`None`) for a
+    /// writer that is not a `serve` process.
+    #[tokio::test]
+    async fn the_lease_endpoint_round_trips_and_a_refresh_republishes_it() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("s");
+        let hub = holder("agent-a", 1).reachable_at("/run/lambo/s.sock");
+        let cli = holder("agent-b", 2);
+        let ttl = Duration::from_secs(30);
+
+        let LeaseOutcome::Acquired(taken) = store.acquire_lease(&sid, &hub, ttl).await.unwrap()
+        else {
+            panic!("fresh acquire");
+        };
+        assert_eq!(taken.endpoint.as_deref(), Some("/run/lambo/s.sock"));
+        match store.acquire_lease(&sid, &cli, ttl).await.unwrap() {
+            LeaseOutcome::Held { current, .. } => {
+                assert_eq!(current.endpoint.as_deref(), Some("/run/lambo/s.sock"));
+            }
+            other => panic!("expected Held, got {other:?}"),
+        }
+        assert_eq!(
+            store
+                .read_lease(&sid)
+                .await
+                .unwrap()
+                .unwrap()
+                .endpoint
+                .as_deref(),
+            Some("/run/lambo/s.sock")
+        );
+        let LeaseOutcome::Acquired(refreshed) = store.refresh_lease(&sid, &hub, ttl).await.unwrap()
+        else {
+            panic!("own refresh");
+        };
+        assert_eq!(refreshed.endpoint.as_deref(), Some("/run/lambo/s.sock"));
+
+        store.release_lease(&sid, &hub).await.unwrap();
+        assert!(store.read_lease(&sid).await.unwrap().is_none());
+        let LeaseOutcome::Acquired(taken) = store.acquire_lease(&sid, &cli, ttl).await.unwrap()
+        else {
+            panic!("re-acquire after release");
+        };
+        assert_eq!(taken.endpoint, None);
     }
 
     /// T8.6: a stale release (holder no longer owns the row) must not evict the

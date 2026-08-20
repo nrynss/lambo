@@ -141,6 +141,11 @@ CREATE TABLE IF NOT EXISTS reservations (
 -- same-holder refresh, 0 = never leased (seed/fixture parity bypass). The
 -- adapter's acquire is a single INSERT ... ON CONFLICT guarded by an expiry
 -- check, so two processes opening the same DB file serialize on this row.
+-- `endpoint` (J2) is where the holder can be reached — a unix socket path for a
+-- `lambo serve` holder, NULL for every other writer (a CLI verb holds the lease
+-- for one command and is not proxyable, so NULL means "no hub here", not
+-- missing data). It is written by the same acquire that takes the lease, so a
+-- live row always carries the current holder's address.
 -- External SQL readers of a *live* holder MUST filter
 -- `WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')` — an expired row
 -- persists until the next acquire overwrites it. Operator override (force a
@@ -151,7 +156,8 @@ CREATE TABLE IF NOT EXISTS session_leases (
     holder      TEXT NOT NULL,
     acquired_at TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
-    current_token INTEGER NOT NULL DEFAULT 0
+    current_token INTEGER NOT NULL DEFAULT 0,
+    endpoint    TEXT
 );
 
 -- Flush stats published by the writer's FlushTask (T85-3): one row per

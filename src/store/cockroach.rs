@@ -1336,8 +1336,9 @@ impl CockroachStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         const ACQUIRE_SQL: &str = "\
-            INSERT INTO session_leases (session_id, holder, acquired_at, expires_at, current_token) \
-            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second'), 1) \
+            INSERT INTO session_leases \
+                (session_id, holder, acquired_at, expires_at, current_token, endpoint) \
+            VALUES ($1, $2, now(), now() + ($3 * INTERVAL '1 second'), 1, $4) \
             ON CONFLICT (session_id) DO UPDATE SET \
                 holder = excluded.holder, \
                 acquired_at = CASE WHEN session_leases.holder = excluded.holder \
@@ -1345,10 +1346,11 @@ impl CockroachStore {
                 expires_at = excluded.expires_at, \
                 current_token = CASE WHEN session_leases.holder = excluded.holder \
                                      THEN session_leases.current_token \
-                                     ELSE session_leases.current_token + 1 END \
+                                     ELSE session_leases.current_token + 1 END, \
+                endpoint = excluded.endpoint \
             WHERE session_leases.expires_at <= now() \
                OR session_leases.holder = excluded.holder \
-            RETURNING holder, acquired_at, expires_at, current_token";
+            RETURNING holder, acquired_at, expires_at, current_token, endpoint";
         let pool = self.pool().await?;
         let token = holder.token();
         let ttl_secs = ttl.as_secs_f64();
@@ -1363,52 +1365,32 @@ impl CockroachStore {
         // vanished-row case (empty RETURNING then empty read-back).
         let session_id = &session.0;
         let token_ref = token.as_str();
+        let endpoint_ref = holder.endpoint.as_deref();
         tx_retry(|| async move {
             for _ in 0..3 {
-                let won: Option<(String, DateTime<Utc>, DateTime<Utc>, i64)> =
-                    sqlx::query_as(ACQUIRE_SQL)
-                        .bind(session_id)
-                        .bind(token_ref)
-                        .bind(ttl_secs)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
-                if let Some((holder, acquired_at, expires_at, current_token)) = won {
-                    return Ok(LeaseOutcome::Acquired(LeaseInfo {
-                        holder,
-                        token: u64::try_from(current_token).map_err(|_| {
-                            StoreError::Backend("lease row has a negative current_token".into())
-                        })?,
-                        acquired_at,
-                        expires_at,
-                    }));
+                let won: Option<LeaseRowTs> = sqlx::query_as(ACQUIRE_SQL)
+                    .bind(session_id)
+                    .bind(token_ref)
+                    .bind(ttl_secs)
+                    .bind(endpoint_ref)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| map_write_err(e, |m| format!("acquire lease: {m}")))?;
+                if let Some(row) = won {
+                    return Ok(LeaseOutcome::Acquired(lease_info_from_ts(row)?));
                 }
-                let current: Option<(String, DateTime<Utc>, DateTime<Utc>, i64)> = sqlx::query_as(
-                    "SELECT holder, acquired_at, expires_at, current_token \
-                     FROM session_leases WHERE session_id = $1",
-                )
-                .bind(session_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(backend)?;
+                let current: Option<LeaseRowTs> = sqlx::query_as(LEASE_ROW_SQL)
+                    .bind(session_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(backend)?;
                 match current {
-                    Some((holder, acquired_at, expires_at, current_token)) => {
-                        let age = (Utc::now() - acquired_at)
+                    Some(row) => {
+                        let current = lease_info_from_ts(row)?;
+                        let age = (Utc::now() - current.acquired_at)
                             .to_std()
                             .unwrap_or(Duration::ZERO);
-                        return Ok(LeaseOutcome::Held {
-                            current: LeaseInfo {
-                                holder,
-                                token: u64::try_from(current_token).map_err(|_| {
-                                    StoreError::Backend(
-                                        "lease row has a negative current_token".into(),
-                                    )
-                                })?,
-                                acquired_at,
-                                expires_at,
-                            },
-                            age,
-                        });
+                        return Ok(LeaseOutcome::Held { current, age });
                     }
                     None => continue,
                 }
@@ -1757,6 +1739,28 @@ async fn apply_canonization(
     Ok(())
 }
 
+/// The lease row as Cockroach hands it back — the column order
+/// [`LEASE_ROW_SQL`] and the acquire's `RETURNING` both use. Named so the two
+/// duplicated column lists cannot drift in shape (J2 added a sixth column).
+type LeaseRowTs = (String, DateTime<Utc>, DateTime<Utc>, i64, Option<String>);
+
+/// Every column [`LeaseInfo`] needs, in [`LeaseRowTs`] order.
+const LEASE_ROW_SQL: &str = "\
+    SELECT holder, acquired_at, expires_at, current_token, endpoint \
+    FROM session_leases WHERE session_id = $1";
+
+fn lease_info_from_ts(row: LeaseRowTs) -> Result<LeaseInfo, StoreError> {
+    let (holder, acquired_at, expires_at, current_token, endpoint) = row;
+    Ok(LeaseInfo {
+        holder,
+        token: u64::try_from(current_token)
+            .map_err(|_| StoreError::Backend("lease row has a negative current_token".into()))?,
+        acquired_at,
+        expires_at,
+        endpoint,
+    })
+}
+
 #[async_trait]
 impl GraphStore for CockroachStore {
     async fn init_schema(&self) -> Result<(), StoreError> {
@@ -1781,6 +1785,14 @@ impl GraphStore for CockroachStore {
         .execute(pool)
         .await
         .map_err(backend)?;
+        // J2. Same idempotent-ALTER convergence, and nullable on purpose: an
+        // existing cluster's rows get NULL, which reads as "this holder
+        // published no endpoint" — what every pre-J2 holder in fact did. No
+        // default: a fabricated address is worse than an honest absence.
+        sqlx::query("ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS endpoint STRING")
+            .execute(pool)
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 
@@ -1808,6 +1820,16 @@ impl GraphStore for CockroachStore {
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
         self.acquire_or_refresh_lease(session, holder, ttl).await
+    }
+
+    async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        let pool = self.pool().await?;
+        let row: Option<LeaseRowTs> = sqlx::query_as(LEASE_ROW_SQL)
+            .bind(&session.0)
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?;
+        row.map(lease_info_from_ts).transpose()
     }
 
     async fn release_lease(
@@ -3312,11 +3334,13 @@ mod conformance {
         // Unique session per run so a shared cluster never cross-contaminates.
         let sid = SessionId::from(format!("t8.6-lease-{}", Uuid::new_v4()));
         let a = LeaseHolder {
+            endpoint: None,
             agent: AgentId::new("proc-a"),
             pid: 111,
             host: "host-a".into(),
         };
         let b = LeaseHolder {
+            endpoint: None,
             agent: AgentId::new("proc-b"),
             pid: 222,
             host: "host-b".into(),
@@ -3351,6 +3375,49 @@ mod conformance {
             panic!("A refresh 2");
         };
         assert_eq!(first.acquired_at, refreshed.acquired_at);
+
+        // J2: the endpoint column, on the live cluster. A holds no endpoint
+        // (it was built without one), so the row says so; republishing as a
+        // reachable holder writes it, `read_lease` reads it back without
+        // touching the lease, and a refresh does not blank it.
+        assert_eq!(first.endpoint, None);
+        assert_eq!(
+            store_a
+                .read_lease(&sid)
+                .await
+                .expect("read A")
+                .unwrap()
+                .endpoint,
+            None
+        );
+        let a_hub = a.clone().reachable_at("/run/lambo/crdb.sock");
+        let LeaseOutcome::Acquired(published) =
+            store_a.acquire_lease(&sid, &a_hub, ttl).await.unwrap()
+        else {
+            panic!("A republish as a reachable holder");
+        };
+        assert_eq!(published.endpoint.as_deref(), Some("/run/lambo/crdb.sock"));
+        assert_eq!(
+            store_b
+                .read_lease(&sid)
+                .await
+                .expect("B reads A's row")
+                .unwrap()
+                .endpoint
+                .as_deref(),
+            Some("/run/lambo/crdb.sock"),
+            "a losing process must be able to read the holder's endpoint from \
+             another pool — that read IS the proxy path"
+        );
+        let LeaseOutcome::Acquired(after_refresh) =
+            store_a.refresh_lease(&sid, &a_hub, ttl).await.unwrap()
+        else {
+            panic!("A refresh 3");
+        };
+        assert_eq!(
+            after_refresh.endpoint.as_deref(),
+            Some("/run/lambo/crdb.sock")
+        );
 
         // Release → B takes it.
         store_a.release_lease(&sid, &a).await.expect("A release");

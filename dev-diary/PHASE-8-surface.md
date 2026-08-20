@@ -1216,10 +1216,16 @@ test (`#[ignore]`d without `LAMBO_COCKROACH_DSN`, matching the existing conventi
   `agent@host#pid`), `LeaseInfo` (holder token + `acquired_at` + `expires_at`), `LeaseOutcome`
   (`Acquired` | `Held { current, age }`), `LEASE_TTL = 45s`, `LEASE_HEARTBEAT_INTERVAL = 15s`,
   and `OPERATOR_OVERRIDE` (the DELETE string).
+  **Since J2 both structs carry a fourth member, `endpoint: Option<String>`** — where the
+  holder can be reached, published by the acquire and read by a refused `serve` that proxies
+  to it. It is deliberately NOT part of `token()`: the token is the identity a refresh and a
+  release match on, and it stays stable. See `J-multi-client.md` §J2.
 - **`GraphStore` trait** (`src/store/mod.rs`) — three new methods `acquire_lease` /
   `refresh_lease` / `release_lease`, each with an **advisory default** (always-grants,
   persists nothing) so the ~15 test-double impls keep their prior behaviour untouched. The
-  three real backends override with enforcement.
+  three real backends override with enforcement. **J2 added a fourth, `read_lease`** — a
+  read-only row fetch whose default is `Ok(None)`, so the same test doubles stayed untouched
+  again. It must never acquire: see §J2's wedge invariant.
 - **`MemoryStore`** — a per-instance keyed lease map (`RwLock<HashMap<String, LeaseRow>>`),
   one map lock held for the whole decision (the in-RAM analogue of the SQL atomic upsert).
   Makes the same-*store* collision enforced, not just logged.

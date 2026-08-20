@@ -194,6 +194,12 @@ CREATE TABLE IF NOT EXISTS reservations (
 -- argument (F18) — which is the authority two processes actually share. The
 -- adapter's acquire is a single INSERT ... ON CONFLICT DO UPDATE guarded by an
 -- expiry check, so concurrent acquirers serialize with no read-then-write race.
+-- `endpoint` (J2) is where the holder can be reached — a unix socket path for a
+-- `lambo serve` holder, NULL for every other writer (a CLI verb holds the lease
+-- for one command and is not proxyable, so NULL means "no hub here", not
+-- missing data). It is written by the same acquire that takes the lease. Note
+-- it is a path on the HOLDER's machine: `holder` carries the host, and a reader
+-- on a different host must not dial it — see `mcp::serve`'s proxy checks.
 -- A live holder's row has expires_at > now(); an expired row lingers until the
 -- next acquire steals it. Operator override — force a takeover from a
 -- wedged-but-still-heartbeating holder (no auto-preemption by design):
@@ -203,7 +209,8 @@ CREATE TABLE IF NOT EXISTS session_leases (
     holder      STRING NOT NULL,
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL,
-    current_token INT NOT NULL DEFAULT 0
+    current_token INT NOT NULL DEFAULT 0,
+    endpoint    STRING
 );
 
 -- Flush stats published by the writer's FlushTask (T85-3): one row per

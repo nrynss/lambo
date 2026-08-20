@@ -131,6 +131,14 @@ pub struct LeaseHolder {
     pub agent: AgentId,
     pub pid: u32,
     pub host: String,
+    /// Where this holder can be reached, published into
+    /// `session_leases.endpoint` by the acquire (J2). `None` — the default, and
+    /// what every CLI writer verb uses — means "not reachable": the row then
+    /// says so, and a refused `serve` fails honestly instead of dialling
+    /// nothing. Deliberately **not** part of [`LeaseHolder::token`]: the token
+    /// is the identity a refresh and a release match on, and it must stay
+    /// stable even if a holder's reachability ever changed under it.
+    pub endpoint: Option<String>,
 }
 
 impl LeaseHolder {
@@ -146,7 +154,20 @@ impl LeaseHolder {
             agent: agent.clone(),
             pid: std::process::id(),
             host: detect_host(),
+            endpoint: None,
         }
+    }
+
+    /// Publish an endpoint alongside this holder's identity (J2).
+    ///
+    /// Only [`crate::mcp::serve`] calls this: a serve process is the only writer
+    /// another process can forward tool calls to, so it is the only one whose
+    /// reachability is worth recording. A CLI writer holds the lease for the
+    /// length of one verb and is not proxyable, which is why the column is
+    /// nullable and why the absence is *meaningful* rather than missing data.
+    pub fn reachable_at(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
     }
 
     /// The stable string persisted in the lease row's `holder` column.
@@ -165,7 +186,10 @@ impl std::fmt::Display for LeaseHolder {
     }
 }
 
-/// A lease row's identity, timing and fencing token, as the store reports it.
+/// A lease row's identity, timing, fencing token and reachability, as the store
+/// reports it. Four things, not three: `endpoint` joined the row in J2 so a
+/// writer refused by a live lease can find the holder rather than only be told
+/// about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaseInfo {
     /// The holder token ([`LeaseHolder::token`]) currently written to the row.
@@ -180,6 +204,12 @@ pub struct LeaseInfo {
     pub acquired_at: DateTime<Utc>,
     /// When the lease lapses if not refreshed.
     pub expires_at: DateTime<Utc>,
+    /// Where the holder said it can be reached — `session_leases.endpoint`
+    /// (J2), as written by the holder's own acquire. `None` means the holder
+    /// published no endpoint: either a pre-J2 row, or a writer that is not a
+    /// `serve` process. A refused `serve` treats `None` as "no hub here" and
+    /// fails honestly rather than guessing an address.
+    pub endpoint: Option<String>,
 }
 
 /// Store-side fence check (GitHub issue #1): may a write presenting `presented`
@@ -267,8 +297,12 @@ mod tests {
             agent: AgentId::new("agent-a"),
             pid: 4213,
             host: "host-7".into(),
+            endpoint: None,
         };
         assert_eq!(h.token(), "agent-a@host-7#4213");
+        // J2: an endpoint is reachability, not identity — the token a refresh
+        // and a release match on must not move when one is published.
+        assert_eq!(h.clone().reachable_at("/tmp/x.sock").token(), h.token());
         // Stable: the same holder always produces the same token (refresh /
         // release depend on it).
         assert_eq!(h.token(), h.clone().token());

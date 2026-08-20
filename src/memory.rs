@@ -412,6 +412,7 @@ pub struct MemoryBuilder {
     scoring_weights: Option<ScoringWeights>,
     // Crate-private, and not a knob: see `MemoryBuilder::clock`.
     clock: Option<Clock>,
+    endpoint: Option<String>,
 }
 
 impl MemoryBuilder {
@@ -523,6 +524,20 @@ impl MemoryBuilder {
         self
     }
 
+    /// Where this writer can be reached, published into the lease row's
+    /// `endpoint` column when the lease is acquired (J2).
+    ///
+    /// Set by [`crate::mcp::serve`] and by nothing else. A `serve` process is
+    /// the only writer another process can forward MCP tool calls to, so it is
+    /// the only one whose address is worth recording; unset — every CLI writer
+    /// verb, every library caller, every test — leaves the column NULL, which a
+    /// refused `serve` reads as "no hub here" and reports honestly instead of
+    /// dialling nothing. See `store::lease::LeaseHolder::endpoint`.
+    pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
     /// Base [`Config`] for every knob the named setters do not cover.
     ///
     /// Order-independent: `match_strategy` / `flush_interval` /
@@ -613,7 +628,14 @@ impl MemoryBuilder {
         // this holder-scoped lease below. A process crash can still only be
         // recovered by TTL, but a clean refusal must never look like a crash to
         // the next invocation.
-        let lease_holder = LeaseHolder::for_this_process(&agent);
+        let lease_holder = match &self.endpoint {
+            // J2: reachability is published by the same acquire that takes the
+            // lease, so a live row always names the current holder's address —
+            // there is no window in which a refused racer can read a leased row
+            // with no endpoint in it.
+            Some(endpoint) => LeaseHolder::for_this_process(&agent).reachable_at(endpoint.clone()),
+            None => LeaseHolder::for_this_process(&agent),
+        };
         let lease_token = match store
             .acquire_lease(&session, &lease_holder, LEASE_TTL)
             .await
@@ -3798,6 +3820,48 @@ mod tests {
         first.close().await.unwrap();
         let second = memory_on(store, "leased").await;
         second.close().await.unwrap();
+    }
+
+    /// J2: `MemoryBuilder::endpoint` reaches the lease row, and its absence is
+    /// the default. This is the holder half of the proxy path — the loser's read
+    /// is only useful if the winner actually published where it listens.
+    #[tokio::test]
+    async fn the_builders_endpoint_is_published_into_the_lease_row() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let sid = crate::types::SessionId::from("published");
+
+        // A CLI-shaped writer sets no endpoint: the row says "no hub here".
+        let cli = memory_on(store.clone(), "published").await;
+        assert_eq!(
+            store.read_lease(&sid).await.unwrap().unwrap().endpoint,
+            None,
+            "a writer that is not a serve process must publish no endpoint"
+        );
+        cli.close().await.unwrap();
+
+        // A serve-shaped writer does, and the row carries it verbatim.
+        let hub = Memory::builder()
+            .session("published")
+            .agent("agent-hub")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .endpoint("/run/lambo/published.sock")
+            .build()
+            .await
+            .expect("the hub must attach");
+        assert_eq!(
+            store
+                .read_lease(&sid)
+                .await
+                .unwrap()
+                .unwrap()
+                .endpoint
+                .as_deref(),
+            Some("/run/lambo/published.sock")
+        );
+        hub.close().await.unwrap();
     }
 
     /// A degenerate cadence must fail `build()` with a `Config` error BEFORE
