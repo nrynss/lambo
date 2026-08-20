@@ -64,7 +64,23 @@ use crate::types::LamboError;
 /// not one of the reserved codes: this is not a bad request, a missing method or
 /// an internal fault in the holder — it is *this process* being unable to reach
 /// the holder at all, which is a distinct thing for a client to log.
+///
+/// **It means the call never left this process.** That is why it is a different
+/// code from [`HUB_LOST_CODE`]: the two differ in whether a retry is safe, which
+/// is the only thing a caller can act on.
 const HUB_UNREACHABLE_CODE: i64 = -32001;
+
+/// JSON-RPC error code returned for a call that **was** forwarded and then lost
+/// with the holder (J2-R1-1).
+///
+/// A separate code from [`HUB_UNREACHABLE_CODE`] on purpose. The two situations
+/// are indistinguishable in the logs and opposite in consequence: an
+/// unreachable holder means the call did not happen and a bare retry is safe,
+/// while a lost in-flight call means *nobody knows* whether it happened and a
+/// bare retry of a write may duplicate it. Collapsing them into one code would
+/// force every caller to guess, and the honest answer here is "unknown", not
+/// "nothing".
+const HUB_LOST_CODE: i64 = -32002;
 
 /// What a caller is told when the holder cannot be reached.
 ///
@@ -79,6 +95,26 @@ const HUB_UNREACHABLE_MESSAGE: &str = "lambo: this client reaches memory through
      Memory recovers on its own once a lambo serve holds the session again — the previous \
      holder's lease lapses within 45 seconds — so retry later. Do not block on memory: carry \
      on with the work and record it when memory answers again.";
+
+/// What a caller is told when its call was already inside the holder when the
+/// holder stopped answering (J2-R1-1).
+///
+/// Same N4 discipline as [`HUB_UNREACHABLE_MESSAGE`] — model-facing, no socket
+/// path, no store URL, no errno — but deliberately **not** the same claim.
+/// `HUB_UNREACHABLE_MESSAGE` says "NOTHING WAS READ OR WRITTEN" because the
+/// frame never left this process. Here the frame did leave, and this process
+/// cannot know what the holder did with it before it died: an embed that had
+/// already committed, or one that had not. Telling a model "nothing happened"
+/// in that state is a lie that costs a duplicate write, so the text says
+/// *unknown* and gives the one instruction that resolves it — recall before
+/// re-deriving.
+const HUB_LOST_MESSAGE: &str = "lambo: this call had already been handed to the process that \
+     holds this session when that process stopped answering, so its outcome is UNKNOWN. It may \
+     have been applied or it may not — if it was a write, treat it as neither done nor undone; \
+     if it was a read, you received nothing. Memory recovers on its own once a lambo serve holds \
+     the session again, so retry later. When it answers, recall before re-deriving: repeating a \
+     write that did land duplicates it, and repeating one that did not is the fix. Do not block \
+     on memory: carry on with the work.";
 
 /// How long the initial connect to the holder is retried before the endpoint is
 /// treated as dead.
@@ -186,28 +222,79 @@ fn holder_is_on_host(holder: &str, our_host: &str) -> bool {
     host == our_host
 }
 
-/// Synthesize the JSON-RPC error a client gets for a call the proxy could not
-/// forward — or `None` when the frame needs no answer.
+/// The `id` of a client frame that is a **request** — the only kind of frame
+/// this process may ever answer on the holder's behalf.
 ///
-/// A request carries an `id` and gets an error keyed to it. A **notification**
-/// has no `id`, so by JSON-RPC there is nothing to answer and inventing a
-/// response would corrupt the stream: it is dropped. An unparseable line is also
-/// dropped, for the same reason — with no `id` there is no honest reply to make,
-/// and the client is the one that wrote it.
-pub fn unreachable_reply(client_frame: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(client_frame).ok()?;
+/// Three exclusions, each of which would corrupt the client's stream if it were
+/// answered:
+///
+/// * a **notification** has no `id` (or a null one), so by JSON-RPC there is
+///   nothing to answer and inventing a response would invent a frame;
+/// * an unparseable line has no `id` to key a reply to, and the client is the
+///   one that wrote it;
+/// * a **response** — an `id` and *no* `method` — is the client's own answer to
+///   a server-initiated request (`sampling/createMessage`, `roots/list`), and
+///   that id belongs to the *holder*. Answering it would send the holder's own
+///   request id back to the client as an error it never asked for (J2-R1-10).
+///
+/// So the `method` key is what separates "a call this process owes an answer to"
+/// from "traffic that merely carries an id".
+fn request_id(frame: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(frame).ok()?;
+    // A request has a method. A response does not.
+    value.get("method")?.as_str()?;
     let id = value.get("id")?;
     if id.is_null() {
         return None;
     }
-    Some(
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": HUB_UNREACHABLE_CODE, "message": HUB_UNREACHABLE_MESSAGE },
-        })
-        .to_string(),
-    )
+    Some(id.clone())
+}
+
+/// The `id` a **holder frame** answers, when it is a response at all.
+///
+/// The mirror of [`request_id`], and it is what retires an in-flight id: a
+/// `result` or an `error` keyed to an id the client is waiting on. A holder
+/// frame with a `method` is a notification or a server-initiated request, not an
+/// answer, so it retires nothing — a `notifications/progress` carrying the
+/// original id must not be mistaken for the call completing.
+fn response_id(frame: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(frame).ok()?;
+    if value.get("method").is_some() {
+        return None;
+    }
+    if value.get("result").is_none() && value.get("error").is_none() {
+        return None;
+    }
+    let id = value.get("id")?;
+    if id.is_null() {
+        return None;
+    }
+    Some(id.clone())
+}
+
+/// One JSON-RPC error response, keyed to `id`.
+fn error_frame(id: &serde_json::Value, code: i64, message: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    })
+    .to_string()
+}
+
+/// Synthesize the JSON-RPC error a client gets for a call the proxy could not
+/// forward — or `None` when the frame needs no answer (see [`request_id`]).
+///
+/// This is the *never left this process* case: nothing was read or written.
+pub fn unreachable_reply(client_frame: &str) -> Option<String> {
+    request_id(client_frame)
+        .map(|id| error_frame(&id, HUB_UNREACHABLE_CODE, HUB_UNREACHABLE_MESSAGE))
+}
+
+/// The error a client gets for a call that was forwarded and then lost with the
+/// holder (J2-R1-1) — the *outcome unknown* case.
+fn lost_reply(id: &serde_json::Value) -> String {
+    error_frame(id, HUB_LOST_CODE, HUB_LOST_MESSAGE)
 }
 
 /// Our own client's stdout failed — the pipe is gone, so there is nobody left
@@ -430,6 +517,40 @@ impl HubProxy {
     /// What a dead holder gets instead: every forwarded call fails honestly and
     /// immediately (never hangs), and the next call re-reads the row, so the
     /// moment a new holder exists this proxy is working again with no restart.
+    ///
+    /// # Why the pump tracks in-flight ids (J2-R1-1)
+    ///
+    /// "Never hangs" is a promise about the call that matters most — the one
+    /// already inside the holder when the holder died — and a byte pipe that
+    /// only answers frames it *failed to write* does not keep it. A frame
+    /// written successfully and then lost with its connection got no reply and
+    /// no error, and the recovery path made that permanent rather than
+    /// transient: the reconnect lives in the `client_rx` arm, so a client
+    /// politely awaiting its response sends nothing, and a proxy waiting for a
+    /// client byte reconnects to nothing. Two halves of one wedge, and the
+    /// review that found it reproduced it from unmutated pump code.
+    ///
+    /// So the pump keeps every forwarded request id, tagged with the hub
+    /// connection ("generation") it went out on, and retires it when a response
+    /// answers it. When a connection ends, every id still outstanding **on that
+    /// connection** is answered with [`HUB_LOST_MESSAGE`] — outcome *unknown*,
+    /// not "nothing happened", because this process genuinely cannot tell. The
+    /// client then has its answer, sends its next request, and that request
+    /// drives the reconnect exactly as before. The wedge closes at both halves.
+    ///
+    /// **Nothing is retried, deliberately.** A retry would need this process to
+    /// know which calls are idempotent, which means parsing `params.name` and
+    /// knowing what the seven tools do — the tool-level understanding the byte
+    /// pipe exists *not* to have, and the thing that keeps `agent_id` crossing
+    /// verbatim and the tool surface from drifting. It would not even be cheap:
+    /// the reconnect can only succeed once a new holder exists, which is up to
+    /// one `LEASE_TTL` plus the election slack away, so "retry the read" means
+    /// holding the caller's call open for the better part of a minute — the
+    /// exact hang J2 exists to remove, reintroduced for the calls least in need
+    /// of it. An honest error in microseconds lets the model decide, which is
+    /// what AGENTS.md's "never block on memory" asks for, and the error text
+    /// tells it the one thing it needs to decide safely: recall before
+    /// re-deriving.
     pub async fn run(
         &self,
         shutdown: impl std::future::Future<Output = ()>,
@@ -464,6 +585,11 @@ impl HubProxy {
         let (hub_tx, mut hub_rx) = tokio::sync::mpsc::channel::<(u64, FromHub)>(64);
         let mut generation: u64 = 0;
         let mut writer = Self::split_hub(first, generation, &hub_tx);
+        // Every request forwarded and not yet answered, tagged with the hub
+        // connection it went out on. This list is what makes "never hangs" true
+        // for the call in flight at the holder's death — see this function's
+        // docs and [`HubProxy::answer_lost`].
+        let mut inflight: Vec<(u64, serde_json::Value)> = Vec::new();
 
         tokio::pin!(shutdown);
         loop {
@@ -507,7 +633,17 @@ impl HubProxy {
                         Some(w) => Self::send(w, &frame).await.is_ok(),
                         None => false,
                     };
-                    if !sent {
+                    if sent {
+                        // Now this process owes the client an answer even if the
+                        // holder never gives one (J2-R1-1). Recorded AFTER the
+                        // write, because a frame that failed to write is
+                        // answered below instead — and recorded against the
+                        // generation it went out on, so the connection that
+                        // loses it is the one that answers for it.
+                        if let Some(id) = request_id(&frame) {
+                            inflight.push((generation, id));
+                        }
+                    } else {
                         writer = None;
                         if let Some(reply) = unreachable_reply(&frame) {
                             Self::send(&mut stdout, &reply).await.map_err(client_gone)?;
@@ -515,20 +651,66 @@ impl HubProxy {
                     }
                 }
                 Some((gen, event)) = hub_rx.recv() => {
-                    if gen != generation {
-                        continue;
-                    }
                     match event {
                         FromHub::Frame(frame) => {
+                            // A response retires the id it answers, from ANY
+                            // generation. A late answer from a connection this
+                            // pump has already replaced is still the holder's
+                            // answer to a call the client is waiting on, and
+                            // dropping it on the generation filter was the
+                            // second half of J2-R1-1 — the id it answered was
+                            // then never answered at all.
+                            let answers = response_id(&frame)
+                                .and_then(|id| {
+                                    inflight.iter().position(|(_, waiting)| *waiting == id)
+                                });
+                            if let Some(i) = answers {
+                                inflight.remove(i);
+                                Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
+                                continue;
+                            }
+                            if gen != generation {
+                                // Not an answer anyone is waiting for, from a
+                                // connection we no longer talk to: a
+                                // notification, or a server-initiated request
+                                // whose reply would go into a socket that is
+                                // gone. Dropping it is honest; forwarding it
+                                // would invite the client to answer nobody.
+                                tracing::warn!(
+                                    generation = gen,
+                                    current = generation,
+                                    "lambo serve: dropped a frame from a superseded holder \
+                                     connection — it answers nothing this client is waiting for"
+                                );
+                                continue;
+                            }
                             Self::send(&mut stdout, &frame).await.map_err(client_gone)?
                         }
                         FromHub::Closed => {
-                            tracing::warn!(
-                                generation = gen,
-                                "lambo serve: the session holder closed the connection — the next \
-                                 call will re-read the lease and try the current holder"
-                            );
-                            writer = None;
+                            // Answer what this connection owes BEFORE deciding
+                            // what its ending means for the pump: those ids are
+                            // owed an answer whether or not the connection was
+                            // still the current one.
+                            let lost =
+                                Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
+                            if lost > 0 {
+                                tracing::warn!(
+                                    generation = gen,
+                                    lost,
+                                    "lambo serve: the session holder closed the connection with \
+                                     calls still in flight — each was answered with an honest \
+                                     'outcome unknown' error, because this process cannot know \
+                                     whether the holder applied them before it died"
+                                );
+                            }
+                            if gen == generation {
+                                tracing::warn!(
+                                    generation = gen,
+                                    "lambo serve: the session holder closed the connection — the \
+                                     next call will re-read the lease and try the current holder"
+                                );
+                                writer = None;
+                            }
                         }
                     }
                 }
@@ -536,6 +718,42 @@ impl HubProxy {
         }
         client_reader.abort();
         Ok(())
+    }
+
+    /// Answer every request still outstanding on `generation`, then forget it.
+    ///
+    /// This is the mechanism behind "never hangs" for the one call that used to
+    /// hang forever (J2-R1-1). It runs when a hub connection ends — for the
+    /// current connection and for a superseded one alike, because a client
+    /// waiting on an id does not care which connection carried it.
+    ///
+    /// The reply is [`HUB_LOST_MESSAGE`], not [`HUB_UNREACHABLE_MESSAGE`]: these
+    /// frames *were* written to the holder, so "nothing was read or written" is
+    /// false for them and a model that believed it would re-derive a write that
+    /// may already have landed.
+    ///
+    /// Returns how many were answered, so the caller can log the count without
+    /// logging when there is nothing to say.
+    async fn answer_lost<W: AsyncWriteExt + Unpin>(
+        client: &mut W,
+        inflight: &mut Vec<(u64, serde_json::Value)>,
+        generation: u64,
+    ) -> Result<usize, LamboError> {
+        let mut lost = Vec::new();
+        inflight.retain(|(gen, id)| {
+            if *gen == generation {
+                lost.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for id in &lost {
+            Self::send(client, &lost_reply(id))
+                .await
+                .map_err(client_gone)?;
+        }
+        Ok(lost.len())
     }
 
     /// Hand a fresh hub connection to the pump: the read half becomes a task
@@ -743,6 +961,12 @@ mod tests {
 
     /// A notification has no id, so JSON-RPC has nothing to answer and
     /// inventing a response would corrupt the client's stream.
+    ///
+    /// A **client response** is the third case (J2-R1-10): it carries an id and
+    /// no method, but that id was minted by the *holder* for a server-initiated
+    /// request (`sampling/createMessage`, `roots/list`). Answering it would send
+    /// the holder's own request id back to the client as an error the client
+    /// never asked for.
     #[test]
     fn a_notification_and_a_broken_frame_are_not_answered() {
         assert!(
@@ -752,5 +976,117 @@ mod tests {
         assert!(unreachable_reply(r#"{"jsonrpc":"2.0","id":null,"method":"x"}"#).is_none());
         assert!(unreachable_reply("not json at all").is_none());
         assert!(unreachable_reply("").is_none());
+        // The client's own answer to a server-initiated request: an id, no
+        // method. Not ours to answer.
+        assert!(
+            unreachable_reply(r#"{"jsonrpc":"2.0","id":11,"result":{"model":"x"}}"#).is_none(),
+            "a client RESPONSE must not be answered — that id belongs to the holder"
+        );
+        assert!(unreachable_reply(
+            r#"{"jsonrpc":"2.0","id":11,"error":{"code":-1,"message":"no"}}"#
+        )
+        .is_none());
+    }
+
+    /// What retires an in-flight id, and what must not.
+    ///
+    /// The pump answers every id still outstanding when a hub connection ends
+    /// (J2-R1-1), so a frame wrongly treated as an answer means a call the
+    /// client is still waiting on gets no error — the original defect, one step
+    /// removed. A `notifications/progress` echoes the request's id and is
+    /// emphatically not an answer.
+    #[test]
+    fn only_a_response_retires_an_in_flight_id() {
+        assert_eq!(
+            response_id(r#"{"jsonrpc":"2.0","id":4,"result":{"content":[]}}"#),
+            Some(serde_json::json!(4))
+        );
+        assert_eq!(
+            response_id(r#"{"jsonrpc":"2.0","id":"c-4","error":{"code":-1,"message":"x"}}"#),
+            Some(serde_json::json!("c-4"))
+        );
+        // Progress on a call that is still running: same id, not an answer.
+        assert_eq!(
+            response_id(
+                r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"id":4},"id":4}"#
+            ),
+            None,
+            "a notification carrying the id is not the call completing"
+        );
+        // A server-initiated request the holder sends mid-call.
+        assert_eq!(
+            response_id(r#"{"jsonrpc":"2.0","id":4,"method":"roots/list"}"#),
+            None
+        );
+        // Neither result nor error: not a response at all.
+        assert_eq!(response_id(r#"{"jsonrpc":"2.0","id":4}"#), None);
+        assert_eq!(response_id("not json"), None);
+    }
+
+    /// The two failures a proxy can have are opposite in consequence, so they
+    /// must not share their text or their code (J2-R1-1).
+    ///
+    /// "Nothing was read or written" is true of a frame that never left this
+    /// process and **false** of one that reached the holder. A model told the
+    /// wrong one re-derives a write that may already have landed.
+    #[test]
+    fn a_lost_in_flight_call_is_told_unknown_not_nothing() {
+        let lost = lost_reply(&serde_json::json!(4));
+        let v: serde_json::Value = serde_json::from_str(&lost).unwrap();
+        assert_eq!(v["id"], 4);
+        assert_eq!(v["error"]["code"], HUB_LOST_CODE);
+        assert_ne!(
+            HUB_LOST_CODE, HUB_UNREACHABLE_CODE,
+            "a caller must be able to tell 'did not happen' from 'unknown'"
+        );
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("UNKNOWN"), "{msg}");
+        assert!(
+            !msg.contains("NOTHING WAS READ OR WRITTEN"),
+            "the never-forwarded claim must not be reused here: {msg}"
+        );
+        // The one instruction that resolves the uncertainty safely.
+        assert!(msg.contains("recall before re-deriving"), "{msg}");
+        assert!(msg.contains("Do not block on memory"), "{msg}");
+        // N4, same as the unreachable text: no path, no store URL.
+        assert!(!msg.contains('/'), "no socket path may leak: {msg}");
+        assert!(!msg.contains("://"), "no store URL may leak: {msg}");
+    }
+
+    /// `answer_lost` is per-connection: a reconnect does not retire the ids the
+    /// *previous* connection is still on the hook for, and answering a
+    /// generation twice would send the client two errors for one id.
+    #[tokio::test]
+    async fn lost_calls_are_answered_per_connection_and_only_once() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut inflight = vec![
+            (0, serde_json::json!(1)),
+            (0, serde_json::json!("two")),
+            (1, serde_json::json!(3)),
+        ];
+        let answered = HubProxy::answer_lost(&mut out, &mut inflight, 0)
+            .await
+            .unwrap();
+        assert_eq!(answered, 2);
+        assert_eq!(
+            inflight,
+            vec![(1, serde_json::json!(3))],
+            "the surviving connection's call is still outstanding"
+        );
+        let text = String::from_utf8(out.clone()).unwrap();
+        let ids: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![serde_json::json!(1), serde_json::json!("two")]);
+        // Draining the same generation again answers nothing: one error per id.
+        out.clear();
+        assert_eq!(
+            HubProxy::answer_lost(&mut out, &mut inflight, 0)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(out.is_empty());
     }
 }

@@ -453,3 +453,191 @@ fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
     let _ = c.child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// J2-R1-1, the reviewer's exact scenario: a call is **already inside the
+/// holder** when the holder stops answering.
+///
+/// This is the case the round-1 review reproduced from unmutated pump code and
+/// that the shipped pump wedged on permanently. The frame had been written
+/// successfully, so nothing on the write-failure path fired; the holder's
+/// `Closed` only logged and cleared the writer; and the reconnect lived in the
+/// client arm, so a client politely awaiting its response never sent the byte
+/// that would have triggered one. No answer, no error, no recovery — for a
+/// client with no per-call timeout, forever.
+///
+/// **The holder here is the test itself, not a `lambo serve`, and that is the
+/// point.** The window this pins is the one between "the holder has the frame"
+/// and "the holder has answered it" — hundreds of milliseconds on a real write,
+/// but not a window a test can *aim* at by racing a signal against a real
+/// server. A hand-written holder that reads the call and then drops the
+/// connection lands in it every time. Everything else is real: a real `lambo
+/// serve` subprocess, a real lease row it loses to, all three `proxyable`
+/// checks passing against a real socket, and the client's own frames crossing
+/// the byte pipe.
+///
+/// What must arrive: a JSON-RPC error keyed to the **in-flight id**, promptly,
+/// saying the outcome is unknown. Not "nothing happened" — the frame reached the
+/// holder, and a model told nothing happened would re-derive a write that may
+/// already have landed.
+#[test]
+fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixListener;
+
+    let (dir, cfg, db) = scratch("inflight");
+    provision(&db);
+
+    // The endpoint the spawned serve will derive for this session and store.
+    // Derived here through the same public function it uses, so the socket the
+    // fake holder binds is the one the proxy's `proxyable` check demands.
+    let store_cfg = lambo::store::StoreConfig {
+        kind: lambo::store::StoreKind::Sqlite,
+        path: Some(db.clone()),
+        ..lambo::store::StoreConfig::default()
+    };
+    let endpoint = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
+        .expect("a file-backed store derives an endpoint")
+        .expect("a file-backed store is shareable");
+    let sock = endpoint.path().to_path_buf();
+    let _ = std::fs::remove_file(&sock);
+
+    // Take the lease as the fake holder, publishing that endpoint — the row the
+    // spawned serve loses to, and the row it checks before dialling.
+    let holder =
+        lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("fake-holder"))
+            .reachable_at(endpoint.published());
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let store = SqliteStore::connect(&db).unwrap();
+            let outcome = store
+                .acquire_lease(&SessionId::from(SESSION), &holder, Duration::from_secs(45))
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, lambo::store::LeaseOutcome::Acquired(_)),
+                "the fake holder must actually hold the lease: {outcome:?}"
+            );
+        });
+    }
+
+    // Bind before spawning: `resolve_role` probes the endpoint with a real
+    // connect before it commits to proxying, so an unbound socket would make the
+    // serve wait out the TTL instead of becoming a proxy.
+    let listener = UnixListener::bind(&sock).expect("bind the fake holder's endpoint");
+    let holder_thread = std::thread::spawn(move || {
+        // Connection 1 is `resolve_role`'s probe, which closes immediately.
+        // Connection 2 is the pump's. Accept until one of them hands us a call.
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut w = stream.try_clone().expect("clone the holder side");
+            let mut reader = std::io::BufReader::new(stream);
+            let mut killed = false;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                match v.get("method").and_then(serde_json::Value::as_str) {
+                    Some("initialize") => {
+                        // Answer the handshake, so the proxy's client reaches the
+                        // state that matters: a live session with a call to make.
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": v.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "serverInfo": {"name": "j2-fake-holder", "version": "1"},
+                            },
+                        });
+                        writeln!(w, "{reply}").expect("answer initialize");
+                        w.flush().expect("flush initialize");
+                    }
+                    Some("notifications/initialized") => {}
+                    Some(_) => {
+                        // A REQUEST IS NOW IN FLIGHT. Die without answering it —
+                        // exactly what a holder SIGKILLed mid-embed does.
+                        killed = true;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            drop(w);
+            drop(reader);
+            if killed {
+                // Stop listening too: the holder is gone, not merely quiet.
+                break;
+            }
+        }
+    });
+
+    let mut b = Serve::spawn(&cfg, "agent-b");
+    b.initialize(1);
+
+    // The call that will be lost. Sent, not `call`ed, so the assertion below can
+    // time how long the answer took.
+    let started = std::time::Instant::now();
+    b.send(
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "lambo_derive",
+                "arguments": {
+                    "agent_id": "agent-b",
+                    "concepts": [{"content": "a write lost with its holder", "concept_type": "logic"}],
+                },
+            },
+        })
+        .to_string(),
+    );
+
+    // THE ASSERTION J2 EXISTS FOR. `response` is bounded, so the pre-fix wedge
+    // fails here rather than stalling the suite.
+    let answer = b.response(2, "a call in flight when the holder died");
+    let elapsed = started.elapsed();
+    assert!(
+        !answer["error"].is_null(),
+        "an in-flight call lost with its holder must come back as an error: {answer}"
+    );
+    let msg = answer["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    // Write-uncertainty, not the "nothing happened" claim: this frame reached
+    // the holder, so a model must not be told it did not.
+    assert!(
+        msg.contains("UNKNOWN"),
+        "the caller must be told the outcome is unknown, not that nothing happened: {msg}"
+    );
+    assert!(
+        !msg.contains("NOTHING WAS READ OR WRITTEN"),
+        "the never-forwarded text must NOT be reused for a forwarded call: {msg}"
+    );
+    assert!(
+        msg.contains("recall before re-deriving"),
+        "and told how to resolve the uncertainty safely: {msg}"
+    );
+    // N4: a tool error reaches the model, so no path and no store URL.
+    assert!(!msg.contains(".sock"), "N4: no socket path: {msg}");
+    assert!(!msg.contains("://"), "N4: no store URL: {msg}");
+    // Promptly. The pre-fix behaviour was an answer that never came; an answer
+    // that only arrives at the harness bound is the same defect wearing a
+    // timeout.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the error must arrive when the connection drops, not at some timeout: {elapsed:?}"
+    );
+
+    b.sigterm();
+    let _ = b.child.wait();
+    let _ = holder_thread.join();
+    let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_dir_all(&dir);
+}
