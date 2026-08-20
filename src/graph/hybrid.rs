@@ -390,6 +390,45 @@ pub fn validate_limits(
     Ok(())
 }
 
+/// [`derive`](fn@derive)'s graph-dependent pre-pass: `parent_of` reflexivity
+/// and empty canonical keys, resolved against the graph.
+///
+/// **Hybrid's pre-pass is not the synchronous path's.** It deliberately omits
+/// `graph::derive`'s repeated-`Observation` and single-`Hierarchical`-parent
+/// rejections — hybrid matches semantically and resolves `Observation`s through
+/// a different path — so J3's asynchronous ack has to run *this* one when the
+/// session's strategy is `Hybrid`. Running the synchronous path's pre-pass here
+/// instead would refuse writes hybrid has always accepted, which is what it did
+/// on the first attempt: a concurrent re-derive of one content started failing
+/// with a `store error` at ack time.
+///
+/// Read-only: [`canonicalize`] writes nothing.
+pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
+    for &(parent, child) in parent_of.pairs() {
+        if parent == child {
+            return Err(LamboError::Store(StoreError::Invariant(format!(
+                "hybrid derive: parent_of pair ({parent}, {child}) is reflexive — a \
+                 Hierarchical self-loop is a cycle (spec §5.7)"
+            ))));
+        }
+        let pk = match canonicalize(parent, graph)? {
+            CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
+        };
+        let ck = match canonicalize(child, graph)? {
+            CanonicalizeResult::Matched { key, .. } | CanonicalizeResult::Unmatched { key } => key,
+        };
+        reject_empty_key(parent, &pk)?;
+        reject_empty_key(child, &ck)?;
+        if pk == ck {
+            return Err(LamboError::Store(StoreError::Invariant(format!(
+                "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same \
+                 canonical key ({pk:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
+            ))));
+        }
+    }
+    Ok(())
+}
+
 /// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
@@ -428,32 +467,7 @@ async fn derive_planned(
             };
             let stamped = g.embedding().cloned();
 
-            // Step 1 — validate every parent_of reflexivity + empty key up front
-            // (mirror derive validate-then-mutate; nothing written yet).
-            for &(parent, child) in parent_of.pairs() {
-                if parent == child {
-                    return Err(LamboError::Store(StoreError::Invariant(format!(
-                        "hybrid derive: parent_of pair ({parent}, {child}) is reflexive — a \
-                     Hierarchical self-loop is a cycle (spec §5.7)"
-                    ))));
-                }
-                let pk = match canonicalize(parent, &g)? {
-                    CanonicalizeResult::Matched { key, .. }
-                    | CanonicalizeResult::Unmatched { key } => key,
-                };
-                let ck = match canonicalize(child, &g)? {
-                    CanonicalizeResult::Matched { key, .. }
-                    | CanonicalizeResult::Unmatched { key } => key,
-                };
-                reject_empty_key(parent, &pk)?;
-                reject_empty_key(child, &ck)?;
-                if pk == ck {
-                    return Err(LamboError::Store(StoreError::Invariant(format!(
-                        "hybrid derive: parent_of pair ({parent}, {child}) resolves to the same \
-                     canonical key ({pk:?}) — a Hierarchical self-loop is a cycle (spec §5.7)"
-                    ))));
-                }
-            }
+            validate_graph_inputs(&g, parent_of)?;
 
             // Step 2 — dedup by content + canonicalize. Items are the unique concepts
             // of this call with their resolution so far (canonical match id if any).

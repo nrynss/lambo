@@ -280,6 +280,41 @@ mod tests {
         }
     }
 
+    /// Wait for a J3 ack's write to be applied.
+    ///
+    /// The CLI half of this differential writes synchronously (`Memory::derive`
+    /// is unchanged); the MCP half acks before the embedder. Comparing the two
+    /// without waiting compares a written graph against an unwritten one — so
+    /// the wait is not test scaffolding around a defect, it is the differential
+    /// being honest about which surface is asynchronous.
+    async fn await_receipt(
+        server: &crate::mcp::LamboServer,
+        agent_id: &str,
+        ack: &rmcp::model::CallToolResult,
+    ) {
+        let id: crate::writeq::ReceiptId = ack.structured_content.as_ref().expect("ack payload")
+            ["receipt"]
+            .as_str()
+            .expect("ack carries a receipt id")
+            .parse()
+            .expect("a well-formed receipt id");
+        let answer = server
+            .memory()
+            .pipeline()
+            .wait(
+                &crate::types::AgentId::new(agent_id),
+                id,
+                crate::writeq::RECEIPT_WAIT_MAX,
+            )
+            .await;
+        assert_eq!(
+            answer.tag(),
+            "applied",
+            "the MCP write did not apply: {}",
+            answer.describe()
+        );
+    }
+
     fn hit_contents(context: &str) -> Vec<String> {
         // T5.3 hit lines start with the concept text before ` [`.
         let mut out: Vec<String> = context
@@ -355,6 +390,11 @@ mod tests {
             })
             .await;
         assert_eq!(mcp_derived.is_error, Some(false), "{mcp_derived:?}");
+        // J3: the MCP write is acked before it is applied, so the differential
+        // has to wait for it — otherwise it compares a CLI graph against an
+        // MCP graph that has not been written yet. This is the read-your-writes
+        // surface doing its job, and using it here is the point.
+        await_receipt(&server, "agent-a", &mcp_derived).await;
 
         let recorded = crate::cli::record_action::run(
             backends_on(cli_store.clone()),
@@ -381,6 +421,7 @@ mod tests {
             })
             .await;
         assert_eq!(mcp_action.is_error, Some(false), "{mcp_action:?}");
+        await_receipt(&server, "agent-a", &mcp_action).await;
 
         let cli_ctx = crate::cli::recall::run(
             &backends_on(cli_store.clone()),

@@ -1390,14 +1390,26 @@ impl Memory {
         parent_of: &ParentOf<'_>,
     ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
-        // The pre-pass, on the call path. `hybrid::derive` re-runs its own
-        // planning validation in the background; this one exists so the common
-        // errors do not have to be collected from a receipt.
+        // The pre-pass, on the call path. The background path re-runs its own
+        // planning validation; this one exists so the common errors do not have
+        // to be collected from a receipt.
+        //
+        // **The pre-pass must be the one the strategy actually uses.** Hybrid's
+        // and the synchronous path's are different sets of rules — hybrid omits
+        // the repeated-`Observation` and single-`Hierarchical`-parent
+        // rejections — so running the wrong one here would refuse writes the
+        // background path would have accepted, and validation that disagrees
+        // with the write is worse than none.
+        hybrid::validate_limits(concepts, parent_of, self.config.semantic_match_threshold)?;
         {
             let g = self.graph.read();
-            crate::graph::derive::validate(&g, concepts, parent_of)?;
+            match self.config.match_strategy {
+                MatchStrategy::Hybrid => hybrid::validate_graph_inputs(&g, parent_of)?,
+                MatchStrategy::Canonical => {
+                    crate::graph::derive::validate(&g, concepts, parent_of)?
+                }
+            }
         }
-        hybrid::validate_limits(concepts, parent_of, self.config.semantic_match_threshold)?;
         let prompt = concepts
             .iter()
             .map(|(content, _)| *content)

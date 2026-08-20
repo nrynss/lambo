@@ -420,9 +420,30 @@ pub struct AppliedSummary {
     pub created: Vec<String>,
     /// Node ids matched to existing concepts, truncated to [`MAX_RECEIPT_IDS`].
     pub matched: Vec<String>,
-    /// Ids elided by the truncation, so a truncated list never reads as a short
-    /// one.
-    pub elided: usize,
+    /// The **true** number created, which may exceed `created.len()` because
+    /// the list is truncated at [`MAX_RECEIPT_IDS`]. Carried separately so a
+    /// truncated list can never read as a short one, and because this is the
+    /// number I1's metric 2 counts.
+    pub created_count: usize,
+    /// The true number matched, for the same reason.
+    pub matched_count: usize,
+    /// Hybrid semantic merges — `derive` only.
+    ///
+    /// **This and the two fields below are I1's DOGFOOD metric 2 fact set,
+    /// relocated rather than dropped.** Before J3 they rode the ledger call
+    /// line, which J3's ack can no longer carry: at ack time the write has not
+    /// happened. Keeping them on the receipt means the metric-2 distinction
+    /// (`semantic_merged`, a similarity merge that adds no `Derives` edge,
+    /// against `matched`, a re-derive that does) is still recoverable — from
+    /// the receipt instead of from the line.
+    pub semantic_merged: Option<usize>,
+    /// Duplicate natural-key writes that reinforced an existing edge —
+    /// `derive` only.
+    pub reinforced: Option<usize>,
+    /// Edges newly inserted — `record_action` only. `None` for `derive`, which
+    /// reports [`AppliedSummary::reinforced`] instead; a zero here would claim
+    /// a derive wrote no edges, which is not what it means.
+    pub edges: Option<usize>,
 }
 
 /// The answer to "what happened to this receipt?".
@@ -771,15 +792,14 @@ pub(crate) fn mirror_concepts(
     }
 }
 
-fn truncate_ids(ids: &[NodeId]) -> (Vec<String>, usize) {
-    let elided = ids.len().saturating_sub(MAX_RECEIPT_IDS);
-    (
-        ids.iter()
-            .take(MAX_RECEIPT_IDS)
-            .map(|n| n.0.to_string())
-            .collect(),
-        elided,
-    )
+/// The first [`MAX_RECEIPT_IDS`] ids as strings. The true count travels beside
+/// the list in [`AppliedSummary::created_count`] / `matched_count`, so a
+/// truncated list is never mistaken for a short one.
+fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
+    ids.iter()
+        .take(MAX_RECEIPT_IDS)
+        .map(|n| n.0.to_string())
+        .collect()
 }
 
 impl WriteCtx {
@@ -834,8 +854,8 @@ impl WriteCtx {
                 touched.extend(outcome.matched.iter().copied());
                 mirror_concepts(&self.graph, &self.index, &touched);
                 self.daemon_wake.notify_one();
-                let (created, elided_c) = truncate_ids(&outcome.created);
-                let (matched, elided_m) = truncate_ids(&outcome.matched);
+                let created = truncate_ids(&outcome.created);
+                let matched = truncate_ids(&outcome.matched);
                 Ok(AppliedSummary {
                     kind: WriteKind::Derive,
                     summary: format!(
@@ -846,7 +866,11 @@ impl WriteCtx {
                     ),
                     created,
                     matched,
-                    elided: elided_c + elided_m,
+                    created_count: outcome.created.len(),
+                    matched_count: outcome.matched.len(),
+                    semantic_merged: Some(outcome.semantic_merged.len()),
+                    reinforced: Some(outcome.reinforced),
+                    edges: None,
                 })
             }
             JobPayload::Action {
@@ -876,7 +900,7 @@ impl WriteCtx {
                 touched.push(outcome.action_node);
                 mirror_concepts(&self.graph, &self.index, &touched);
                 self.daemon_wake.notify_one();
-                let (created, elided) = truncate_ids(&outcome.created);
+                let created = truncate_ids(&outcome.created);
                 Ok(AppliedSummary {
                     kind: WriteKind::RecordAction,
                     summary: format!(
@@ -886,7 +910,11 @@ impl WriteCtx {
                     ),
                     created,
                     matched: Vec::new(),
-                    elided,
+                    created_count: outcome.created.len(),
+                    matched_count: 0,
+                    semantic_merged: None,
+                    reinforced: None,
+                    edges: Some(outcome.edges),
                 })
             }
         }
@@ -1829,7 +1857,11 @@ mod tests {
                 summary: "x".into(),
                 created: Vec::new(),
                 matched: Vec::new(),
-                elided: 0,
+                created_count: 0,
+                matched_count: 0,
+                semantic_merged: Some(0),
+                reinforced: Some(0),
+                edges: None,
             }),
             ReceiptAnswer::Failed("x".into()),
             ReceiptAnswer::Dropped("x".into()),

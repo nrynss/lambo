@@ -52,6 +52,7 @@ use crate::memory::Memory;
 use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
 use crate::types::{AgentId, ConceptType, LamboError, NodeId, RecallQuery, RecallResult};
+use crate::writeq::{ReceiptAnswer, ReceiptId};
 
 // ---------------------------------------------------------------------------
 // Parameters
@@ -248,6 +249,24 @@ pub struct StatsParams {
     /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
+    /// A write receipt id from a `lambo_derive` or `lambo_record_action` ack.
+    /// Answers what happened to that one write: applied, failed, dropped,
+    /// pending, expired, restart-lost or never-issued. Receipts are scoped to
+    /// the agent that created them.
+    #[schemars(length(max = 16_384))]
+    pub receipt: Option<String>,
+    /// With `receipt`, wait up to this many milliseconds for the write to be
+    /// applied before answering — the opt-in synchrony that restores
+    /// read-your-writes when you need it. Clamped to the server's own maximum.
+    /// Ignored without `receipt`.
+    ///
+    /// The published maximum is [`crate::writeq::RECEIPT_WAIT_MAX`] in
+    /// milliseconds — a client that sends more is clamped to it rather than
+    /// refused, and `the_published_wait_maximum_is_the_real_one` pins the
+    /// literal below to the constant (T88-H4 requires a *published* maximum,
+    /// and `schemars` takes a literal).
+    #[schemars(range(min = 0, max = 4_000))]
+    pub wait_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +762,49 @@ fn attach_warnings(out: &mut CallToolResult, warnings: &[String]) {
     out.content.push(ContentBlock::text(text));
 }
 
+/// Piggyback settled write receipts onto a tool result (J3 shape part 3).
+///
+/// **Why this and not an MCP notification.** A notification lands in the
+/// client's log, not in the model's context — the exact failure workstream J
+/// exists to fix, where a serve refusal reached nobody. A tagged text block on
+/// the next response the agent reads is the one delivery channel the model is
+/// guaranteed to see.
+///
+/// **Per-caller through a shared hub.** The agent is the caller-asserted
+/// `agent_id` of *this* call, so several clients through one hub — or through a
+/// J2 proxy, which forwards the response bytes untouched — each get only their
+/// own receipts. Receipts are per-agent scoped in the store as well (J1), so
+/// this is a lookup, not a filter.
+///
+/// **Take-once**, so a settled receipt is not re-announced forever. A response
+/// that never reaches its client loses its piggyback, which is why the
+/// fetch-by-id surface on `lambo_stats` exists as well.
+///
+/// URLs are redacted (N3): a `failed` answer carries a `LamboError`, and a
+/// store error can name a DSN.
+fn attach_receipts(
+    out: &mut CallToolResult,
+    taken: &[(ReceiptId, ReceiptAnswer)],
+    remaining: usize,
+) {
+    if taken.is_empty() {
+        return;
+    }
+    let mut text = String::from("write receipts (your earlier writes, now settled):");
+    for (id, answer) in taken {
+        text.push_str("\n- ");
+        text.push_str(&id.to_string());
+        text.push_str(": ");
+        text.push_str(&redact_urls(&answer.describe()));
+    }
+    if remaining > 0 {
+        text.push_str(&format!(
+            "\n({remaining} more settled receipt(s) will arrive on your next call)"
+        ));
+    }
+    out.content.push(ContentBlock::text(text));
+}
+
 /// Run a tool body with panic containment (R1/T82-5).
 ///
 /// The MCP boundary is fed arbitrary client input, and a panicking handler used
@@ -965,6 +1027,46 @@ impl LamboServer {
                 json!(ledger.counters().queued()),
             );
         }
+        // J3. Unconditional, unlike the `ledger_*` keys above, and the
+        // difference is not an inconsistency: the ledger is an optional
+        // subsystem, so "off by default means no behaviour change" is a promise
+        // that can be kept for it byte-for-byte. The write queue has no off
+        // switch — every `lambo_derive` goes through it — so there is no
+        // baseline payload left to preserve, and hiding the keys behind a
+        // condition that is always true would only make them look optional.
+        //
+        // `write_queue_bound` is the measured bound and `write_queue_measured`
+        // says whether anything measured it; reporting the first without the
+        // second would present the unmeasured floor as a measurement.
+        // `write_queue_accepted` is here so the gauge is re-derivable from the
+        // payload — `outstanding = accepted − applied − failed` — which is the
+        // property I-R2-3 asked `ledger_queued_lines` for and the reason
+        // `dropped` sits beside them rather than inside them.
+        {
+            let queue = self.mem.pipeline();
+            let c = queue.counters();
+            let calibration = queue.calibration();
+            let obj = payload.as_object_mut().expect("json! built an object");
+            obj.insert(
+                "write_queue_bound".into(),
+                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_MIN, |c| c.bound)),
+            );
+            obj.insert(
+                "write_queue_measured".into(),
+                json!(calibration.is_some_and(|c| c.measured())),
+            );
+            obj.insert(
+                "write_queue_items_per_sec".into(),
+                json!(calibration.and_then(|c| c.items_per_sec)),
+            );
+            obj.insert("write_queue_outstanding".into(), json!(c.outstanding()));
+            obj.insert("write_queue_accepted".into(), json!(c.accepted()));
+            obj.insert("write_queue_applied".into(), json!(c.applied()));
+            obj.insert("write_queue_failed".into(), json!(c.failed()));
+            obj.insert("write_queue_abandoned".into(), json!(c.abandoned()));
+            obj.insert("write_queue_dropped".into(), json!(c.dropped()));
+            obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));
+        }
         payload
     }
 
@@ -1074,6 +1176,40 @@ impl LamboServer {
         self.check_agent_id(agent_id)?;
         Ok(AgentId::new(agent_id))
     }
+
+    /// Run a tool through [`LamboServer::observed`] and then piggyback this
+    /// caller's settled write receipts onto the result (J3).
+    ///
+    /// **One wrapper, so it cannot be forgotten for one tool.** The same
+    /// reasoning that keeps every `*_impl` behind [`contain_panic`] applies
+    /// here: the piggyback is the delivery channel for outcomes that no longer
+    /// arrive on the write's own response, and a tool that skipped it would be
+    /// a tool after which an agent silently never hears about its writes. It
+    /// deliberately does not live inside `observed`, which returns early when
+    /// no ledger is attached — that would have made receipt delivery depend on
+    /// `--ledger`.
+    ///
+    /// Every tool carries it, `lambo_derive` included: a derive whose own ack
+    /// is a receipt is exactly the call after which an *earlier* write is most
+    /// likely to have settled.
+    async fn answered(
+        &self,
+        tool: &'static str,
+        agent_id: String,
+        fut: impl Future<Output = CallToolResult>,
+    ) -> CallToolResult {
+        let mut out = self.observed(tool, self.ledger_agent(&agent_id), fut).await;
+        // Only for an id the door would accept. A refused id owns no receipts
+        // by construction (nothing could have been written under it), so this
+        // is about not doing a lookup on an unvalidated string rather than
+        // about hiding anything.
+        if self.check_agent_id(&agent_id).is_ok() {
+            let acting = AgentId::new(&agent_id);
+            let (taken, remaining) = self.mem.pipeline().take_piggyback(&acting);
+            attach_receipts(&mut out, &taken, remaining);
+        }
+        out
+    }
 }
 
 // Each `#[tool]` handler is a thin, panic-contained wrapper (R1/T82-5) around a
@@ -1093,8 +1229,8 @@ impl LamboServer {
                        (canonical markers, blast-radius warnings, conflict lines)."
     )]
     async fn lambo_recall(&self, Parameters(p): Parameters<RecallParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_recall", agent_id, self.recall_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_recall", agent_id, self.recall_impl(p))
             .await
     }
 
@@ -1105,11 +1241,15 @@ impl LamboServer {
     #[tool(
         name = "lambo_derive",
         description = "Derive concepts from the current interaction into session memory. \
-                       Timestamps are stamped server-side; do not send one."
+                       Timestamps are stamped server-side; do not send one. Returns as soon \
+                       as the input is validated and ordered — the write is applied in the \
+                       background and the ack carries a receipt id. The outcome is \
+                       piggybacked on your next tool response; to wait for it, call \
+                       lambo_stats with that receipt and a wait_ms."
     )]
     async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_derive", agent_id, self.derive_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_derive", agent_id, self.derive_impl(p))
             .await
     }
 
@@ -1118,14 +1258,17 @@ impl LamboServer {
     #[tool(
         name = "lambo_record_action",
         description = "Record an action the agent took, with what it produces, modifies and \
-                       depends on. Timestamps are stamped server-side; do not send one."
+                       depends on. Timestamps are stamped server-side; do not send one. \
+                       Returns as soon as the input is validated and ordered — the write is \
+                       applied in the background and the ack carries a receipt id, resolved \
+                       the same way as lambo_derive's."
     )]
     async fn lambo_record_action(
         &self,
         Parameters(p): Parameters<RecordActionParams>,
     ) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_record_action", agent_id, self.record_action_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_record_action", agent_id, self.record_action_impl(p))
             .await
     }
 
@@ -1153,8 +1296,8 @@ impl LamboServer {
                        sharing an id share the lock."
     )]
     async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_reserve", agent_id, self.reserve_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_reserve", agent_id, self.reserve_impl(p))
             .await
     }
 
@@ -1165,8 +1308,8 @@ impl LamboServer {
                        status, blast radius and typed edges out to a depth."
     )]
     async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_inspect", agent_id, self.inspect_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_inspect", agent_id, self.inspect_impl(p))
             .await
     }
 
@@ -1177,20 +1320,23 @@ impl LamboServer {
                        status through the audited transition path."
     )]
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_saints", agent_id, self.saints_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_saints", agent_id, self.saints_impl(p))
             .await
     }
 
     /// Session health — the spec §2.4 observable durability bound.
     #[tool(
         name = "lambo_stats",
-        description = "Session health: flush lag, write-behind log depth, node/edge/concept \
-                       counts, canonization progress and degraded state."
+        description = "Session health: flush lag, write-behind log depth, background write \
+                       queue depth, node/edge/concept counts, canonization progress and \
+                       degraded state. Pass a receipt from a lambo_derive or \
+                       lambo_record_action ack to ask what happened to that one write, and \
+                       wait_ms to wait for it to be applied first."
     )]
     async fn lambo_stats(&self, Parameters(p): Parameters<StatsParams>) -> CallToolResult {
-        let agent_id = self.ledger_agent(&p.agent_id);
-        self.observed("lambo_stats", agent_id, self.stats_impl(p))
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_stats", agent_id, self.stats_impl(p))
             .await
     }
 }
@@ -1375,42 +1521,69 @@ impl LamboServer {
             ParentOf::from_pairs(&pairs)
         };
 
-        let outcome = match self.mem.derive_as(&acting, &concepts, &parent_of).await {
-            Ok(o) => o,
+        // J3: acknowledged after validation, before the embedder. The
+        // validation pre-pass and the interaction that pins this write's place
+        // in the `Temporal` chain both happen inside this call; the embed,
+        // canonicalize and insert happen in the background.
+        let submitted = match self
+            .mem
+            .derive_async_as(&acting, &concepts, &parent_of)
+            .await
+        {
+            Ok(s) => s,
             Err(e) => return tool_err("lambo_derive", e),
         };
 
-        // I1 (DOGFOOD metric 2, re-derivation savings). `demoted` is NOT here
-        // and is not an oversight: in this codebase demotion is
-        // `Memory::demote`'s context-overflow split and the canonization
-        // task's Canonical→Venerable regression, neither of which `derive`
-        // can perform — `DeriveOutcome` has no such count to report. What
-        // derive DOES distinguish is `semantic_merged` (a hybrid similarity
-        // merge, which adds no `Derives` edge) from `matched` (a re-derive
-        // that does), and that distinction is the one metric 2 turns on.
+        // I1 (DOGFOOD metric 2, re-derivation savings) — **changed by J3, and
+        // this is the honest statement of what changed.** `created`, `matched`,
+        // `semantic_merged` and `reinforced` are no longer knowable when this
+        // line is written: the whole point of the async ack is that the write
+        // has not happened yet. They are not lost — they are on the receipt,
+        // and `receipt` is emitted here so a reader can join the two — but
+        // `scripts/observability/dedup_rate.py` and `duplicates.py` read them
+        // off the ledger line, so for MCP-driven sessions those two tools now
+        // see zero derive facts. CLI-driven sessions are unaffected: they use
+        // the synchronous `Memory::derive`, which still reports everything.
+        //
+        // The fix is a background-completion ledger line, which is a ledger
+        // *schema* change and therefore not J3's (see §J3's handoff note). What
+        // J3 owes is that the loss is visible rather than silent, which is what
+        // `admitted` and `receipt` on this line are for.
         note_facts(|| {
             json!({
-                "created": outcome.created.len(),
-                "matched": outcome.matched.len(),
-                "semantic_merged": outcome.semantic_merged.len(),
-                "reinforced": outcome.reinforced,
                 "concepts_requested": concepts.len(),
+                "admitted": !submitted.dropped(),
+                "receipt": submitted.receipt.to_string(),
             })
         });
 
-        let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
-        let matched: Vec<String> = outcome.matched.iter().map(|n| n.0.to_string()).collect();
-        let summary = format!(
-            "derived {} concept(s): {} created, {} matched existing",
-            concepts.len(),
-            created.len(),
-            matched.len()
-        );
-        let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
+        let summary = if submitted.dropped() {
+            format!(
+                "{} concept(s) were NOT written: {}",
+                concepts.len(),
+                submitted.answer.describe()
+            )
+        } else {
+            format!(
+                "accepted {} concept(s) for background write; validated and ordered, not yet \
+                 applied",
+                concepts.len()
+            )
+        };
+        let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
+            "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
+             for it, call lambo_stats with receipt={} (add wait_ms to block).",
+            submitted.receipt,
+            redact_urls(&submitted.answer.describe()),
+            submitted.receipt,
+        ))]);
+        // `created` / `matched` are deliberately ABSENT rather than empty: an
+        // empty list here would claim nothing was created, which is not what
+        // this ack knows. They live on the receipt.
         out.structured_content = Some(json!({
             "summary": summary,
-            "created": created,
-            "matched": matched,
+            "receipt": submitted.receipt.to_string(),
+            "receipt_state": submitted.answer.tag(),
             "warnings": [],
         }));
         out
@@ -1472,87 +1645,72 @@ impl LamboServer {
             }
         }
 
-        // N1: `Memory::record_action` is synchronous and takes the graph write
-        // lock for its whole body. Called inline it occupies a Tokio *worker*
-        // thread until it returns, so a burst of large calls can starve the
-        // runtime of workers — including the one that would run `Memory::close`
-        // on SIGTERM. `spawn_blocking` moves the work to the blocking pool
-        // (`Memory` is `Arc`-shared and already `Send + Sync`, as the HTTP
-        // factory and the event pump rely on), keeping the worker threads free
-        // for the shutdown path.
+        // N1, superseded by J3 and worth saying why rather than deleting.
+        // `Memory::record_action` is synchronous and takes the graph write lock
+        // for its whole body, so calling it inline occupied a Tokio *worker*
+        // thread until it returned and a burst of large calls could starve the
+        // runtime — including the worker that would run `Memory::close` on
+        // SIGTERM. N1 moved it to the blocking pool with `spawn_blocking`.
         //
-        // Defense-in-depth, NOT load-bearing — and deliberately not test-pinned
-        // (R4). Reverting this to a direct inline `mem.record_action(&action)`
-        // keeps every test green (as does `mem.record_action_as(&acting, &action)`):
-        // the load-bearing anti-hang guarantee is
-        // `serve`'s `CLOSE_GRACE` bound (src/mcp/serve.rs), which force-exits a
-        // stalled shutdown regardless of worker starvation. A regression test
-        // here would have to *provoke* starvation, which is inherently timing-
-        // dependent and flaky, so we pin the bound instead of the offload. Keep
-        // this offload anyway: it turns a worst-case hang-until-`CLOSE_GRACE`
-        // into no stall at all. Do not delete it thinking a test will catch you.
-        let mem = Arc::clone(&self.mem);
-        let action_owned = p.action.clone();
-        // The acting agent moves into the blocking closure with everything else
-        // it borrows (J1): `record_action_as` needs it by reference, and `p`
-        // does not outlive the spawn.
-        let acting = acting.clone();
-        let record = tokio::task::spawn_blocking(move || {
-            let produces: Vec<&str> = produces.iter().map(String::as_str).collect();
-            let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
-            let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
-            let action = Action {
-                action: action_owned.as_str(),
-                produces: &produces,
-                modifies: &modifies,
-                depends_on: &depends_on,
-            };
-            mem.record_action_as(&acting, &action)
-        })
-        .await;
-        let outcome = match record {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return tool_err("lambo_record_action", e),
-            Err(join) => {
-                // The blocking task panicked. `spawn_blocking` surfaces that as a
-                // `JoinError` rather than unwinding into this task, so the outer
-                // `contain_panic` never sees it — contain it here to the same
-                // policy: log the detail, return a class to the client.
-                tracing::error!(
-                    tool = "lambo_record_action",
-                    error = %join,
-                    "mcp: record_action task failed — contained and reported as a tool error"
-                );
-                return CallToolResult::error(vec![ContentBlock::text(
-                    "lambo_record_action: internal error (the failure was logged \
-                     server-side); the call may not have been recorded"
-                        .to_string(),
-                )]);
-            }
+        // J3 removes the shape instead of offloading it: the graph write now
+        // happens on a background pipeline worker and this call does validation
+        // plus one brief `begin_interaction_as` lock, neither of which can
+        // occupy a worker for long. So the `spawn_blocking` hop is gone, and
+        // what it was defending is defended better. The load-bearing anti-hang
+        // guarantee is unchanged and still `serve`'s `CLOSE_GRACE` bound
+        // (src/mcp/serve.rs), which force-exits a stalled shutdown regardless.
+        let produces: Vec<&str> = produces.iter().map(String::as_str).collect();
+        let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
+        let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+        let action = Action {
+            action: p.action.as_str(),
+            produces: &produces,
+            modifies: &modifies,
+            depends_on: &depends_on,
+        };
+        // J3: acknowledged after validation, before the graph write. Unlike
+        // `derive` this path has no embedder hop, so what asynchrony buys here
+        // is ORDERING with derive — see `Memory::record_action_async_as`.
+        let submitted = match self.mem.record_action_async_as(&acting, &action).await {
+            Ok(s) => s,
+            Err(e) => return tool_err("lambo_record_action", e),
         };
 
-        // I1: the edge count is the point — `record_action` is how the
-        // dependency structure blast radius is computed from gets written.
+        // I1: `created` and `edges` are not knowable at ack time — see the
+        // matching note in `derive_impl` for what that costs and where the
+        // numbers went.
         note_facts(|| {
             json!({
-                "created": outcome.created.len(),
-                "edges": outcome.edges,
+                "admitted": !submitted.dropped(),
+                "receipt": submitted.receipt.to_string(),
             })
         });
-
-        let created: Vec<String> = outcome.created.iter().map(|n| n.0.to_string()).collect();
-        let summary = format!(
-            "recorded action '{}': {} concept(s) created, {} edge(s) added",
-            p.action,
-            created.len(),
-            outcome.edges
-        );
-        let mut out = CallToolResult::success(vec![ContentBlock::text(summary.clone())]);
+        let summary = if submitted.dropped() {
+            format!(
+                "action '{}' was NOT recorded: {}",
+                p.action,
+                submitted.answer.describe()
+            )
+        } else {
+            format!(
+                "accepted action '{}' for background write; validated and ordered, not yet \
+                 applied",
+                p.action
+            )
+        };
+        let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
+            "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
+             for it, call lambo_stats with receipt={} (add wait_ms to block).",
+            submitted.receipt,
+            redact_urls(&submitted.answer.describe()),
+            submitted.receipt,
+        ))]);
+        // `action_node`, `created` and `edges` are ABSENT rather than zeroed:
+        // this ack does not know them. They are on the receipt.
         out.structured_content = Some(json!({
             "summary": summary,
-            "action_node": outcome.action_node.0.to_string(),
-            "created": created,
-            "edges": outcome.edges,
+            "receipt": submitted.receipt.to_string(),
+            "receipt_state": submitted.answer.tag(),
             "warnings": [],
         }));
         out
@@ -1827,13 +1985,90 @@ impl LamboServer {
         // `ledger_*` keys are appended (I1: the dropped-line counter has to be
         // reachable from `lambo_stats`, or silence is invisible).
         let mut payload = self.stats_json();
+
+        // J3's fetch-by-id surface. See the tool doc for why it lives on
+        // `lambo_stats` rather than on an eighth tool.
+        let receipt = match &p.receipt {
+            None => None,
+            Some(raw) => {
+                let id = match raw.trim().parse::<crate::writeq::ReceiptId>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        return bad_param(
+                            "receipt must be a receipt id from a lambo_derive or \
+                             lambo_record_action ack",
+                        )
+                    }
+                };
+                let acting = match self.caller_agent(&p.agent_id) {
+                    Ok(a) => a,
+                    Err(e) => return e,
+                };
+                let queue = self.mem.pipeline();
+                let answer = match p.wait_ms {
+                    // A wait of 0 is a fetch, not a wait; both go through the
+                    // same clamp so the difference is only the budget.
+                    Some(ms) if ms > 0 => {
+                        queue
+                            .wait(&acting, id, std::time::Duration::from_millis(ms))
+                            .await
+                    }
+                    _ => queue.lookup(&acting, id),
+                };
+                Some((id, answer))
+            }
+        };
+
+        let mut lines = vec![text.clone()];
+        if let Some((id, answer)) = &receipt {
+            // Redacted like every other model-facing string (N3): a `failed`
+            // answer carries a `LamboError`, and a store error can name a DSN.
+            lines.push(format!("receipt {id}: {}", redact_urls(&answer.describe())));
+        }
+        let text = lines.join("\n");
+
         {
             let obj = payload.as_object_mut().expect("stats_json built an object");
             obj.insert("summary".into(), json!(text));
             obj.insert("warnings".into(), json!([]));
+            if let Some((id, answer)) = &receipt {
+                let mut r = json!({
+                    "id": id.to_string(),
+                    "state": answer.tag(),
+                    "detail": redact_urls(&answer.describe()),
+                });
+                // The node ids the ack could not report. Present only on
+                // `applied`, and absent — not empty — otherwise, for the same
+                // reason the ack omits them: an empty list would be a claim.
+                // An agent that needs a node id to reserve it gets it here.
+                if let ReceiptAnswer::Applied(s) = answer {
+                    let obj = r.as_object_mut().expect("json! built an object");
+                    obj.insert("kind".into(), json!(s.kind.tool()));
+                    obj.insert("created".into(), json!(s.created));
+                    obj.insert("matched".into(), json!(s.matched));
+                    // I1's DOGFOOD metric 2 fact set, relocated here from the
+                    // ledger call line — see `AppliedSummary`. The `_count`
+                    // pair is the TRUE count beside a list truncated at
+                    // MAX_RECEIPT_IDS; the other three are emitted only for the
+                    // write kind that has one, so an absent key never reads as
+                    // a zero.
+                    for (key, value) in [
+                        ("created_count", Some(s.created_count)),
+                        ("matched_count", Some(s.matched_count)),
+                        ("semantic_merged", s.semantic_merged),
+                        ("reinforced", s.reinforced),
+                        ("edges", s.edges),
+                    ] {
+                        if let Some(v) = value {
+                            obj.insert(key.into(), json!(v));
+                        }
+                    }
+                }
+                obj.insert("receipt".into(), r);
+            }
         }
 
-        let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
+        let mut out = CallToolResult::success(vec![ContentBlock::text(text)]);
         out.structured_content = Some(payload);
         out
     }
@@ -2102,7 +2337,7 @@ mod tests {
                 vec!["agent_id", "node_id", "release", "ttl_seconds"],
             ),
             ("lambo_saints", vec!["agent_id"]),
-            ("lambo_stats", vec!["agent_id"]),
+            ("lambo_stats", vec!["agent_id", "receipt", "wait_ms"]),
         ]
         .into_iter()
         .collect();
@@ -2341,7 +2576,135 @@ mod tests {
     /// covered end-to-end by the real Claude Code client run captured in
     /// `dev-diary/evidence/t8.2-mcp-client/`, which is stronger evidence than a
     /// hand-built context would be.
+    /// Drive a tool and, for a J3 write, **wait for it to be applied** before
+    /// returning.
+    ///
+    /// This is the default harness entry point because "call the tool and let
+    /// it finish" is what almost every test in this module means; an assertion
+    /// about the graph immediately after an asynchronous ack is a race, not a
+    /// test. Tests that are *about* the ack — its shape, a drop, a pending
+    /// receipt — use [`call_raw`] instead.
+    ///
+    /// The wait goes through `pipeline().wait` rather than through the shipped
+    /// `lambo_stats` receipt surface **on purpose**: a second tool call here
+    /// would append a second ledger line, and several tests in this module
+    /// count lines per call. The shipped surface is exercised by
+    /// `waiting_on_a_receipt_through_lambo_stats_restores_read_your_writes`,
+    /// which is the test that owns that claim.
     async fn call(s: &LamboServer, name: &str, args: serde_json::Value) -> CallToolResult {
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let out = call_raw(s, name, args).await;
+        let receipt = out
+            .structured_content
+            .as_ref()
+            .and_then(|v| v.get("receipt"))
+            .and_then(|v| v.as_str())
+            .and_then(|r| r.parse::<crate::writeq::ReceiptId>().ok());
+        if let Some(id) = receipt {
+            let answer = s
+                .mem
+                .pipeline()
+                .wait(
+                    &AgentId::new(&agent_id),
+                    id,
+                    crate::writeq::RECEIPT_WAIT_MAX,
+                )
+                .await;
+            assert!(
+                answer.is_settled(),
+                "{name}'s receipt did not settle within RECEIPT_WAIT_MAX: {}",
+                answer.tag()
+            );
+        }
+        out
+    }
+
+    /// Derive and return the node ids it created, read off the **receipt**
+    /// through the shipped `lambo_stats` surface.
+    ///
+    /// Before J3 the ids were in `lambo_derive`'s own `structuredContent`.
+    /// They cannot be: an ack issued before the write has no ids to report. So
+    /// this is the shape a real agent now uses when it needs a node id — derive,
+    /// then wait on the receipt — and every test that used to read
+    /// `derived["created"][0]` goes through it.
+    async fn derive_created(
+        s: &LamboServer,
+        agent_id: &str,
+        concepts: serde_json::Value,
+    ) -> Vec<String> {
+        let ack = call_raw(
+            s,
+            "lambo_derive",
+            serde_json::json!({"agent_id": agent_id, "concepts": concepts}),
+        )
+        .await;
+        assert_eq!(ack.is_error, Some(false), "derive failed: {ack:?}");
+        let receipt = ack.structured_content.as_ref().expect("ack payload")["receipt"]
+            .as_str()
+            .expect("ack carries a receipt id")
+            .to_string();
+        let waited = call_raw(
+            s,
+            "lambo_stats",
+            serde_json::json!({
+                "agent_id": agent_id,
+                "receipt": receipt,
+                "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64,
+            }),
+        )
+        .await;
+        let payload = waited.structured_content.expect("stats payload");
+        assert_eq!(
+            payload["receipt"]["state"].as_str(),
+            Some("applied"),
+            "receipt did not apply: {}",
+            payload["receipt"]
+        );
+        payload["receipt"]["created"]
+            .as_array()
+            .expect("an applied derive receipt lists what it created")
+            .iter()
+            .map(|v| v.as_str().expect("node id string").to_string())
+            .collect()
+    }
+
+    /// Derive, wait, and return the `receipt` object from the `lambo_stats`
+    /// payload — the whole relocated fact set, as a client sees it.
+    async fn receipt_payload(
+        s: &LamboServer,
+        agent_id: &str,
+        concepts: serde_json::Value,
+    ) -> serde_json::Value {
+        let ack = call_raw(
+            s,
+            "lambo_derive",
+            serde_json::json!({"agent_id": agent_id, "concepts": concepts}),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("ack payload")["receipt"]
+            .as_str()
+            .expect("ack carries a receipt id")
+            .to_string();
+        let waited = call_raw(
+            s,
+            "lambo_stats",
+            serde_json::json!({
+                "agent_id": agent_id,
+                "receipt": receipt,
+                "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64,
+            }),
+        )
+        .await;
+        waited.structured_content.expect("stats payload")["receipt"].clone()
+    }
+
+    /// The raw tool call: no receipt wait, so a J3 ack is observed as the ack
+    /// it is.
+    async fn call_raw(s: &LamboServer, name: &str, args: serde_json::Value) -> CallToolResult {
         fn parse<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Parameters<T> {
             Parameters(serde_json::from_value(v).expect("tool params deserialize"))
         }
@@ -2624,20 +2987,13 @@ mod tests {
     #[tokio::test]
     async fn a_multiline_agent_id_cannot_inject_lines_into_another_agents_context() {
         let s = server("mcp-agentid-injection").await;
-        let node = call(
+        let node = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-a",
-                "concepts": [{"content": "cache layer", "concept_type": "entity"}]
-            }),
+            "agent-a",
+            serde_json::json!([{"content": "cache layer", "concept_type": "entity"}]),
         )
         .await
-        .structured_content
-        .unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .remove(0);
 
         // Path 1: the reservation holder (`recall/format.rs` reservation line).
         let held = call(
@@ -2901,19 +3257,13 @@ mod tests {
     #[tokio::test]
     async fn reserve_takes_and_releases_a_soft_lock() {
         let s = server("mcp-reserve").await;
-        let derived = call(
+        let created = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-a",
-                "concepts": [{"content": "session store", "concept_type": "entity"}]
-            }),
+            "agent-a",
+            serde_json::json!([{"content": "session store", "concept_type": "entity"}]),
         )
-        .await;
-        let created = derived.structured_content.unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .await
+        .remove(0);
 
         let held = call(
             &s,
@@ -2977,19 +3327,13 @@ mod tests {
     #[tokio::test]
     async fn two_agents_through_one_server_hold_distinct_locks() {
         let s = server("mcp-reserve-foreign").await;
-        let derived = call(
+        let node = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-a",
-                "concepts": [{"content": "shared config", "concept_type": "entity"}]
-            }),
+            "agent-a",
+            serde_json::json!([{"content": "shared config", "concept_type": "entity"}]),
         )
-        .await;
-        let node = derived.structured_content.unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .await
+        .remove(0);
 
         let a = call(
             &s,
@@ -3071,20 +3415,13 @@ mod tests {
 
         // Distinct locks: `agent-b` holds its own on a different node while
         // `agent-a` holds this one. Two clients, one serve, two locks.
-        let other_node = call(
+        let other_node = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-b",
-                "concepts": [{"content": "b's own node", "concept_type": "entity"}]
-            }),
+            "agent-b",
+            serde_json::json!([{"content": "b's own node", "concept_type": "entity"}]),
         )
         .await
-        .structured_content
-        .unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .remove(0);
         let b_own = call(
             &s,
             "lambo_reserve",
@@ -3164,19 +3501,13 @@ mod tests {
     #[tokio::test]
     async fn a_lease_lost_reserve_does_not_disclose_the_operator_override() {
         let s = server("mcp-lease-lost").await;
-        let derived = call(
+        let node = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-a",
-                "concepts": [{"content": "shared config", "concept_type": "entity"}]
-            }),
+            "agent-a",
+            serde_json::json!([{"content": "shared config", "concept_type": "entity"}]),
         )
-        .await;
-        let node = derived.structured_content.unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .await
+        .remove(0);
 
         // The heartbeat would latch this on its next tick; drive it directly.
         s.mem.simulate_lease_loss();
@@ -3244,20 +3575,13 @@ mod tests {
     #[tokio::test]
     async fn warnings_reach_the_text_content_not_only_structured_content() {
         let s = server("mcp-warn-text").await;
-        let node = call(
+        let node = derive_created(
             &s,
-            "lambo_derive",
-            serde_json::json!({
-                "agent_id": "agent-a",
-                "concepts": [{"content": "cache layer", "concept_type": "entity"}]
-            }),
+            "agent-a",
+            serde_json::json!([{"content": "cache layer", "concept_type": "entity"}]),
         )
         .await
-        .structured_content
-        .unwrap()["created"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
+        .remove(0);
 
         let out = call(
             &s,
@@ -4151,47 +4475,66 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// **I1 acceptance.** A derive line carries created / matched, so metric 2
-    /// (re-derivation savings) is answerable from the ledger alone. The second
-    /// derive of the same content must show up as `matched`, not `created`.
+    /// **I1 acceptance, relocated by J3.** The metric-2 counts moved from the
+    /// ledger call line to the **receipt**, because an ack issued before the
+    /// write has no counts to report. This test pins both halves: what the line
+    /// carries now, and that the distinction metric 2 turns on
+    /// (`created` against `matched` on a re-derive) is still recoverable.
     #[tokio::test]
-    async fn i1_derive_lines_carry_created_and_matched_counts() {
+    async fn i1_derive_lines_carry_the_admission_and_the_receipt_carries_the_counts() {
         let dir = ledger_dir("derive-counts");
         let path = dir.join("calls.jsonl");
         let s = server_with_ledger("i1-derive-counts", &path).await;
         let ledger = Arc::clone(s.ledger().expect("ledger attached"));
 
-        let args = json!({
-            "agent_id": "agent-a",
-            "concepts": [{"content": "recall before you derive", "concept_type": "logic"}],
-        });
-        call(&s, "lambo_derive", args.clone()).await;
-        call(&s, "lambo_derive", args).await;
+        let concepts = json!([{"content": "recall before you derive", "concept_type": "logic"}]);
+        let first = receipt_payload(&s, "agent-a", concepts.clone()).await;
+        let second = receipt_payload(&s, "agent-a", concepts).await;
 
-        let lines = read_ledger(&ledger, 2);
+        // The receipt: metric 2, unchanged in meaning.
         assert_eq!(
-            lines[0]["created"],
+            first["created_count"],
             json!(1),
-            "first derive creates: {}",
-            lines[0]
+            "first derive creates: {first}"
         );
-        assert_eq!(lines[0]["matched"], json!(0), "{}", lines[0]);
+        assert_eq!(first["matched_count"], json!(0), "{first}");
         assert_eq!(
-            lines[1]["created"],
+            second["created_count"],
             json!(0),
-            "re-deriving the same content creates nothing: {}",
-            lines[1]
+            "re-deriving the same content creates nothing: {second}"
         );
         assert_eq!(
-            lines[1]["matched"],
+            second["matched_count"],
             json!(1),
-            "re-deriving the same content MATCHES — this is metric 2: {}",
-            lines[1]
+            "re-deriving the same content MATCHES — this is metric 2: {second}"
         );
-        for line in &lines {
-            assert!(line["semantic_merged"].is_u64(), "{line}");
-            assert!(line["reinforced"].is_u64(), "{line}");
+        for r in [&first, &second] {
+            assert!(r["semantic_merged"].is_u64(), "{r}");
+            assert!(r["reinforced"].is_u64(), "{r}");
+            // `edges` belongs to record_action; a zero here would be a claim.
+            assert!(r.get("edges").is_none(), "{r}");
         }
+
+        // The line: what the ack knew when it was written. Two derive calls
+        // and two stats calls, in that interleaved order.
+        let lines = read_ledger(&ledger, 4);
+        for i in [0usize, 2] {
+            let line = &lines[i];
+            assert_eq!(line["tool"], json!("lambo_derive"), "{line}");
+            assert_eq!(line["concepts_requested"], json!(1), "{line}");
+            assert_eq!(line["admitted"], json!(true), "{line}");
+            assert!(
+                line["receipt"].is_string(),
+                "the line must name the receipt its counts moved to: {line}"
+            );
+            assert!(
+                line["created"].is_null() && line["matched"].is_null(),
+                "created/matched must be ABSENT, not zero — the ack does not know them: {line}"
+            );
+        }
+        // The join works: the line's receipt is the receipt the counts are on.
+        assert_eq!(lines[0]["receipt"], first["id"], "{}", lines[0]);
+        assert_eq!(lines[2]["receipt"], second["id"], "{}", lines[2]);
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
@@ -4259,11 +4602,16 @@ mod tests {
         let lines = read_ledger(&ledger, 4);
         let action = &lines[0];
         assert_eq!(action["tool"], json!("lambo_record_action"));
+        // J3: `edges` and `created` moved to the receipt — an ack issued before
+        // the write cannot count either. The line names the receipt so the two
+        // can be joined; `i1_derive_lines_carry_the_admission_and_the_receipt_carries_the_counts`
+        // pins the counts themselves on the derive side of the same change.
+        assert_eq!(action["admitted"], json!(true), "{action}");
+        assert!(action["receipt"].is_string(), "{action}");
         assert!(
-            action["edges"].as_u64().expect("edge count") >= 2,
-            "one produces + one modifies is at least two edges: {action}"
+            action["edges"].is_null() && action["created"].is_null(),
+            "edges/created must be ABSENT, not zero: {action}"
         );
-        assert!(action["created"].is_u64(), "{action}");
 
         let granted = &lines[1];
         assert_eq!(granted["op"], json!("reserve"), "{granted}");
@@ -4491,10 +4839,14 @@ mod tests {
         for line in &lines {
             assert_eq!(line["kind"], json!("call"));
             assert_eq!(line["tool"], json!("lambo_derive"));
+            // J3: the facts a derive line can carry at ack time. `created` /
+            // `matched` moved to the receipt (see `derive_impl`'s I1 note), so
+            // asserting them here would assert the pre-J3 shape.
             assert!(
-                line["created"].is_u64() && line["matched"].is_u64(),
+                line["concepts_requested"].is_u64() && line["admitted"] == json!(true),
                 "{line}"
             );
+            assert!(line["receipt"].is_string(), "{line}");
         }
         assert_eq!(ledger.counters().dropped(), 0, "no drops at this rate");
 
