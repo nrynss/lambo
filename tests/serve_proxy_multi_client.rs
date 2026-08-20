@@ -516,8 +516,7 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
         ..lambo::store::StoreConfig::default()
     };
     let endpoint = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
-        .expect("a file-backed store derives an endpoint")
-        .expect("a file-backed store is shareable");
+        .expect("a file-backed store is shareable and derives an endpoint");
     let sock = endpoint.path().to_path_buf();
     let _ = std::fs::remove_file(&sock);
 
@@ -751,5 +750,104 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
     c.sigterm();
     let _ = b.child.wait();
     let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2-R1-5 at the binary: a base directory too long for a socket address must
+/// cost this process its *endpoint*, not its *start*.
+///
+/// Before the remediation `SessionEndpoint::for_store`'s length refusal
+/// propagated out of `serve` and the process exited — on a machine that served
+/// fine before J2, for a feature the operator never asked for. A long `TMPDIR`
+/// is not exotic: a deep per-user path, a container mount, a long username.
+///
+/// The observable degradation, both halves: the client's session works, and the
+/// lease row's `endpoint` is NULL, which is the honest row for a holder nothing
+/// can reach — a proxy reading it gets `HolderPublishedNoEndpoint` and refuses
+/// rather than dialling.
+#[test]
+fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
+    let (dir, cfg, db) = scratch("longtmp");
+    provision(&db);
+
+    // Long enough that `<dir>/lambo-<uid>/<38-byte filename>` cannot fit the
+    // 104-byte sun_path bound. Real, because TMPDIR has to be usable.
+    let long_tmp = std::env::temp_dir().join("x".repeat(80));
+    std::fs::create_dir_all(&long_tmp).expect("a long but real TMPDIR");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "serve",
+            "--session",
+            SESSION,
+            "--agent",
+            "agent-long",
+            "--transport",
+            "stdio",
+        ])
+        .env("TMPDIR", &long_tmp)
+        .env_remove("XDG_RUNTIME_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn");
+    let pid = child.id();
+    let stdout = child.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(Ok(line)) = lines.next() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"j2-test","version":"1"}}}
+"#,
+        )
+        .expect("write initialize");
+    stdin.flush().expect("flush");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let answered = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "a serve with an unusable endpoint path must still serve its own client — it used to \
+             exit instead"
+        );
+        let Ok(line) = rx.recv_timeout(remaining) else {
+            panic!("the serve produced no initialize response — it exited instead of degrading");
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            if v.get("id").and_then(serde_json::Value::as_u64) == Some(1) {
+                break v;
+            }
+        }
+    };
+    assert!(
+        answered["result"]["serverInfo"].is_object(),
+        "the degraded serve must be a real server: {answered}"
+    );
+
+    // And it advertises nothing, honestly.
+    let row = lease_row(&db).expect("the degraded serve still holds the lease");
+    assert_eq!(
+        row.endpoint, None,
+        "a holder with no endpoint must publish NULL, not an address nothing is listening on"
+    );
+
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&long_tmp);
     let _ = std::fs::remove_dir_all(&dir);
 }

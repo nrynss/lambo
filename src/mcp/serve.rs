@@ -343,14 +343,24 @@ fn resolve_auth_token_from(
 /// retry is not blocked by a lease their own refused start is holding.
 ///
 /// **That sentence is still literally true, by construction rather than by
-/// luck.** The endpoint's *address* is derived (a pure function of session and
-/// store — see [`crate::mcp::endpoint::SessionEndpoint`]) so it can be published
-/// into the lease row by the very acquire that takes the lease, while the
-/// *socket* is bound only afterwards, only by the winner. A serve that loses the
-/// lease therefore binds nothing, creates nothing and unlinks nothing — exactly
-/// the property this ordering exists to give. The one new pre-lease refusal, the
-/// endpoint's `sun_path` length check, joins this group for the same reason:
-/// [`crate::mcp::endpoint::SessionEndpoint::resolve`] does no I/O.
+/// luck.** The endpoint's *address* is derived (a function of session and store
+/// — see [`crate::mcp::endpoint::SessionEndpoint`]) so it can be published into
+/// the lease row by the very acquire that takes the lease, while the *socket* is
+/// bound only afterwards, only by the winner. A serve that loses the lease
+/// therefore binds nothing, creates nothing and unlinks nothing — exactly the
+/// property this ordering exists to give.
+///
+/// **And J2 adds no new pre-lease refusal at all.** The round-1 review found
+/// that the endpoint's `sun_path` length check made an over-long base directory
+/// a hard startup failure while a *failed bind* deliberately degraded, so the
+/// harsher outcome sat on the cheaper problem (J2-R1-5). It now degrades too:
+/// `SessionEndpoint::for_store` logs at ERROR and yields `None`, and this
+/// function is still the only pre-lease *refusal* on the serve path besides
+/// `authorize_ledger`. The endpoint derivation is still in the pre-lease group,
+/// for the reason that group exists — it creates nothing and binds nothing. Its
+/// one filesystem access is a read-only `canonicalize` of the store path
+/// (J2-R1-2), which leaves nothing behind and so cannot block an operator's
+/// retry.
 fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -942,12 +952,19 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // Same argument as the bind check: refuse before any lease is taken.
     authorize_ledger(&opts)?;
     // J2, and it belongs in this pre-lease group for the same reason the two
-    // above do: `resolve` performs no I/O — it derives an address and checks it
-    // fits a `sun_path` — so an unusable endpoint costs nothing and leaves no
-    // lease behind. Nothing is created or bound here. See `authorize_bind`'s
-    // "What J2 changed" section, which restates that claim rather than letting
-    // unconditional binding quietly falsify it.
-    let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg)?;
+    // above do: it creates nothing and binds nothing (its one filesystem access
+    // is a read-only `canonicalize` of the store path, which is what makes the
+    // derived address a store IDENTITY rather than a store spelling — J2-R1-2),
+    // so deriving it costs nothing and leaves no lease behind. See
+    // `authorize_bind`'s "What J2 changed" section, which restates that claim
+    // rather than letting unconditional binding quietly falsify it.
+    //
+    // It cannot refuse the start (J2-R1-5): an unusable path degrades to `None`,
+    // logged at ERROR inside `for_store`, and this process serves its own client
+    // exactly as it did before J2. A losing serve on such a machine then refuses
+    // as it did before J2 too, because a proxy needs the holder to have bound —
+    // one client working instead of none.
+    let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg);
 
     // J2 — the fork in the road. Everything above is pre-lease; `resolve_role`
     // is where the lease is attempted, and where a loss stops being fatal.
@@ -1418,7 +1435,8 @@ async fn serve_endpoint(
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
             tracing::warn!(
                 max_sessions,
-                "lambo serve: session endpoint at the concurrent-session ceiling — refusing a                  connection (raise --max-sessions if this is a real workload)"
+                "lambo serve: session endpoint at the concurrent-session ceiling — \
+                 refusing a connection (raise --max-sessions if this is a real workload)"
             );
             drop(stream);
             continue;

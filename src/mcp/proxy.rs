@@ -1187,9 +1187,7 @@ mod tests {
             path: Some("/a.db".into()),
             ..StoreConfig::default()
         };
-        SessionEndpoint::for_store("s", &store)
-            .unwrap()
-            .expect("a file-backed store is shareable")
+        SessionEndpoint::for_store("s", &store).expect("a file-backed store is shareable")
     }
 
     #[test]

@@ -59,6 +59,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2.0.20"
 anyhow = "1.0.104"
 bitflags = "2.13.1"
+# J2-R1-3: `geteuid` for the per-uid endpoint directory and its ownership check.
+# std has no equivalent, and the alternative (stat'ing a file we assume we own)
+# is a guess where this needs a fact. Already in Cargo.lock transitively via
+# tokio, so this line adds a direct edge and nothing else — `cargo build`
+# downloads nothing new. The crate is unix-only regardless (tokio's
+# `UnixListener`, `std::os::unix::fs`), so the dependency is not conditional.
+libc = "0.2"
 
 # --- optional: Level B adapters (see dev-diary/notes/level-b-pluggability.md) ---
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }

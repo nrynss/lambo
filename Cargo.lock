@@ -2265,6 +2265,7 @@ dependencies = [
  "chrono",
  "clap",
  "httpmock",
+ "libc",
  "parking_lot",
  "reqwest",
  "rmcp",

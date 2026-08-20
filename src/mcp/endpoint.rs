@@ -17,12 +17,19 @@
 //!
 //! ## The path is derived, not chosen
 //!
-//! [`SessionEndpoint::resolve`] is a pure function of the session id and the
-//! store's identity, plus environment. It performs **no I/O**, which is what
-//! lets `serve` refuse an unusable endpoint *before* it takes the lease —
-//! joining `authorize_bind` and `authorize_ledger` in the pre-lease group whose
-//! whole point is that a misconfigured start costs nothing and leaves no lease
-//! behind.
+//! [`SessionEndpoint::resolve`] is a function of the session id and the store's
+//! **identity**, plus environment. It **creates nothing and binds nothing** —
+//! the only filesystem access it makes is the read-only `canonicalize` that
+//! turns a store path into a store identity (see `store_identity`), which
+//! leaves nothing behind on any code path. That is what lets `serve` derive an
+//! endpoint *before* it takes the lease, beside `authorize_bind` and
+//! `authorize_ledger`, whose group exists so that a misconfigured start costs
+//! nothing and leaves no lease behind.
+//!
+//! (Before J2's round-1 remediation this said "performs **no I/O**", and the
+//! sun_path length check was a pre-lease *refusal*. Both changed: the identity
+//! needs a stat to be an identity at all — J2-R1-2 — and an unusable endpoint
+//! now degrades to `None` rather than refusing the start — J2-R1-5.)
 //!
 //! **The store discriminator is load-bearing.** Two `lambo serve` processes with
 //! the same `--session` but different `lambo.toml` stores are two different
@@ -33,12 +40,21 @@
 //! is also what keeps a DSN (which can carry a password) out of both the
 //! filesystem and the lease row.
 //!
+//! **And identity is not spelling** (J2-R1-2). `path = "./lambo.db"` — the
+//! spelling every published example uses — names a *different file* from every
+//! different cwd, because `SqliteConnectOptions` resolves a relative path
+//! against each process's own working directory. Hashing it verbatim gave two
+//! graphs **one** socket, at which point the second holder's stale-socket unlink
+//! removes the first holder's live socket and a proxy of graph A forwards writes
+//! into graph B — verbatim the outcome this discriminator exists to prevent. So
+//! the file half of the identity is canonicalized before it is hashed.
+//!
 //! The published value is still read from the row rather than assumed, because
 //! the row is the authority on where *this* holder listens: a proxy compares the
 //! row against its own derivation and refuses honestly when they disagree,
 //! rather than dialling a path the holder never bound.
 
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::store::{StoreConfig, StoreKind};
@@ -60,9 +76,15 @@ const SUN_PATH_MAX: usize = 104;
 /// The filename is therefore at most `16 + 1 + 16 + 5 = 38` bytes, which is
 /// what makes the whole path fit [`SUN_PATH_MAX`] on the tightest real base
 /// directory measured: macOS's per-user `TMPDIR` is a fixed-shape
-/// `/var/folders/XX/<28>/T/` (46 bytes), plus `lambo/` (6) plus 38 is 90, one
-/// short of 91 with the NUL — 13 bytes of headroom. Widening this constant
-/// spends that headroom, so it is a deliberate act, not a tidy-up.
+/// `/var/folders/XX/<28>/T/` (46 bytes), plus `lambo-<euid>/` (10 for a 3-digit
+/// uid, 13 for a 6-digit one) plus 38 is 94 to 97, or 95 to 98 with the NUL —
+/// 6 to 9 bytes of headroom. Widening this constant spends that headroom, so it
+/// is a deliberate act, not a tidy-up.
+///
+/// The per-uid suffix (J2-R1-3) is what took this from 13 bytes of headroom to
+/// 6–9, and it was worth it: without it a shared `/tmp` locks out every uid but
+/// the first. `the_ambient_environment_yields_a_bindable_endpoint` is what keeps
+/// this arithmetic honest on whatever machine runs the suite.
 const SESSION_PREFIX_CHARS: usize = 16;
 
 /// Where a holder listens, and the string it publishes into the lease row.
@@ -89,21 +111,62 @@ impl SessionEndpoint {
     /// serve on such a store behaves exactly as it did before J2. That is not a
     /// regression, because the multi-client outage J2 fixes cannot occur on a
     /// store no second process can see.
-    pub fn for_store(session: &str, store: &StoreConfig) -> Result<Option<Self>, LamboError> {
-        if !store_is_shareable(store) {
-            return Ok(None);
-        }
-        Self::resolve(session, store).map(Some)
+    ///
+    /// # `None` is also what an unusable path gets (J2-R1-5)
+    ///
+    /// An over-long `sun_path` used to propagate out of here and **stop the
+    /// serve**. Two roads to the same operator situation — "this process cannot
+    /// have an endpoint" — then ended in opposite outcomes: a *failed bind*
+    /// deliberately does not stop the process ("a bind failure does not stop
+    /// this process serving memory — the same posture `Ledger::open` takes"),
+    /// while a base directory too long for a socket address was fatal. The
+    /// harsher outcome was attached to the cheaper problem, and it made a long
+    /// `TMPDIR` (a deep per-user path, a container mount, a long username) a
+    /// hard startup failure on a machine that served fine before J2, for a
+    /// feature the operator never asked for.
+    ///
+    /// The pre-lease argument was never about the refusal being fatal — it is
+    /// about *where* the check may live, since it leaves nothing behind. So the
+    /// check stays here and its message is unchanged; only the outcome changes.
+    /// The consequence, stated: on such a machine a losing serve refuses as it
+    /// did before J2, because a proxy needs the holder to have bound. That is
+    /// the correct degradation — one client keeps working instead of none.
+    pub fn for_store(session: &str, store: &StoreConfig) -> Option<Self> {
+        Self::for_store_in(&endpoint_dir(), session, store)
     }
 
-    /// Derive this session's endpoint. **Pure** apart from reading environment;
-    /// no directory is created and nothing is bound, so a caller can refuse an
-    /// unusable one before taking any lease.
+    /// [`SessionEndpoint::for_store`] with the base directory supplied, for the
+    /// same reason [`SessionEndpoint::resolve_in`] exists.
+    fn for_store_in(dir: &Path, session: &str, store: &StoreConfig) -> Option<Self> {
+        if !store_is_shareable(store) {
+            return None;
+        }
+        match Self::resolve_in(dir, session, store) {
+            Ok(endpoint) => Some(endpoint),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "lambo serve: this session can have no local endpoint — this process still \
+                     serves its own client normally, but other clients on this machine CANNOT \
+                     attach to this session, and a serve that loses the lease here will refuse \
+                     as it did before J2 instead of proxying"
+                );
+                None
+            }
+        }
+    }
+
+    /// Derive this session's endpoint. **Creates nothing and binds nothing**, so
+    /// a caller can call it before taking any lease; the one filesystem access
+    /// is `store_identity`'s read-only `canonicalize`.
     ///
     /// Fails only when the derived path cannot fit [`SUN_PATH_MAX`], which is a
     /// property of the *base directory*, not of the session name — the name's
     /// contribution is bounded by construction. The message therefore points at
-    /// the thing the operator can change.
+    /// the thing the operator can change. [`SessionEndpoint::for_store`] turns
+    /// that failure into `None` rather than a refused start (J2-R1-5); this
+    /// function still reports it, because a caller that wants the reason should
+    /// be able to have it.
     pub fn resolve(session: &str, store: &StoreConfig) -> Result<Self, LamboError> {
         Self::resolve_in(&endpoint_dir(), session, store)
     }
@@ -129,10 +192,11 @@ impl SessionEndpoint {
         let len = path.as_os_str().as_encoded_bytes().len();
         if len + 1 > SUN_PATH_MAX {
             return Err(LamboError::Config(format!(
-                "refusing to start: this session's local endpoint would be {len} bytes, over the \
-                 {SUN_PATH_MAX}-byte limit a unix socket address has room for. The session name \
-                 is not the problem — its contribution is bounded — the base directory is. Set \
-                 XDG_RUNTIME_DIR (or TMPDIR) to a shorter path and retry."
+                "this session can have no local endpoint: the address would be {len} bytes, over \
+                 the {SUN_PATH_MAX}-byte limit a unix socket address has room for. The session \
+                 name is not the problem — its contribution is bounded — the base directory is. \
+                 Set XDG_RUNTIME_DIR (or TMPDIR) to a shorter path so other clients on this \
+                 machine can attach to this session."
             )));
         }
         Ok(Self { path })
@@ -162,12 +226,29 @@ impl SessionEndpoint {
     ///    removing it is safe. Unlinking *before* winning the lease would delete
     ///    a healthy hub's socket out from under it.
     ///
-    /// The directory is created 0700 and **its permissions are checked**, which
-    /// is what makes the shared `/tmp` fallback safe rather than assumed safe: a
-    /// directory an attacker pre-created world-writable is refused rather than
-    /// bound into. A directory they own with 0700 fails our bind with `EACCES`,
-    /// which is also a refusal. Same-uid processes are not in the threat model —
-    /// they can already read the store.
+    /// The directory is created 0700 and then **checked three ways** — it is not
+    /// a symlink, it is owned by this euid, and its mode grants nothing to group
+    /// or other. Together with the per-uid name (see [`endpoint_dir`]) that is
+    /// what makes the shared `/tmp` fallback safe rather than assumed safe.
+    ///
+    /// Each check answers a distinct attack, and the first two were added by
+    /// J2-R1-3:
+    ///
+    /// * **Not a symlink.** The mode was previously read with
+    ///   `std::fs::metadata`, which *follows* symlinks, so an attacker-placed
+    ///   `/tmp/lambo-<uid> → /tmp/theirs` with `/tmp/theirs` at 0700 passed the
+    ///   mode gate and we bound a socket inside a directory they control.
+    ///   `symlink_metadata` asks about the entry itself.
+    /// * **Owned by us.** A 0700 directory owned by a *different* uid that we
+    ///   can nonetheless write into — an ACL grant on macOS, a group-writable
+    ///   ancestor — passed the mode gate too. The old docstring claimed the mode
+    ///   check was "what makes the shared /tmp fallback safe"; for that case it
+    ///   was not.
+    /// * **Mode 0700.** A directory an attacker pre-created world-writable is
+    ///   refused rather than bound into.
+    ///
+    /// Same-uid processes remain out of the threat model — they can already read
+    /// the store.
     pub fn bind(&self) -> Result<tokio::net::UnixListener, LamboError> {
         let dir = self.path.parent().ok_or_else(|| {
             LamboError::Config(format!(
@@ -185,19 +266,43 @@ impl SessionEndpoint {
                     dir.display()
                 ))
             })?;
-        let mode = std::fs::metadata(dir)
-            .map_err(|e| {
-                LamboError::Config(format!(
-                    "endpoint directory {} could not be inspected: {e}",
-                    dir.display()
-                ))
-            })?
-            .permissions()
-            .mode()
-            & 0o777;
+        // `symlink_metadata`, not `metadata`: this must be a statement about the
+        // directory entry we just created, not about wherever a pre-placed
+        // symlink points (J2-R1-3).
+        let meta = std::fs::symlink_metadata(dir).map_err(|e| {
+            LamboError::Config(format!(
+                "endpoint directory {} could not be inspected: {e}",
+                dir.display()
+            ))
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(LamboError::Config(format!(
+                "refusing to bind the session endpoint: {} is a symbolic link, not a \
+                 directory. Its target's permissions say nothing about who can reach a \
+                 socket placed through it, so this process will not follow it. Remove \
+                 that link, or set XDG_RUNTIME_DIR to a private directory.",
+                dir.display()
+            )));
+        }
+        // SAFETY: as in `endpoint_dir` — `geteuid` cannot fail.
+        let ours = unsafe { libc::geteuid() };
+        if meta.uid() != ours {
+            return Err(LamboError::Config(format!(
+                "refusing to bind the session endpoint: {} is owned by uid {}, not by \
+                 this process's uid {ours}. Even at mode 700 its owner controls what is \
+                 in it, so a socket there is not this session's to trust. Remove that \
+                 directory, or set XDG_RUNTIME_DIR to one you own.",
+                dir.display(),
+                meta.uid()
+            )));
+        }
+        let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(LamboError::Config(format!(
-                "refusing to bind the session endpoint: {} is mode {mode:o}, reachable by other                  users. A socket there would let any local account issue writes against this                  session. Remove or chmod 700 that directory, or set XDG_RUNTIME_DIR to a                  private one.",
+                "refusing to bind the session endpoint: {} is mode {mode:o}, reachable by \
+                 other users. A socket there would let any local account issue writes \
+                 against this session. Remove or chmod 700 that directory, or set \
+                 XDG_RUNTIME_DIR to a private one.",
                 dir.display()
             )));
         }
@@ -209,12 +314,15 @@ impl SessionEndpoint {
                 // holder cannot be here, so this file is a crashed one's.
                 tracing::warn!(
                     endpoint = %self.path.display(),
-                    "lambo serve: a stale session endpoint was left by an earlier holder —                      removing it (this process holds the single-writer lease, so no live holder                      can be listening there)"
+                    "lambo serve: a stale session endpoint was left by an earlier holder — \
+                     removing it (this process holds the single-writer lease, so no \
+                     live holder can be listening there)"
                 );
                 let _ = std::fs::remove_file(&self.path);
                 tokio::net::UnixListener::bind(&self.path).map_err(|e| {
                     LamboError::Config(format!(
-                        "session endpoint {} could not be bound even after clearing a stale                          socket: {e}",
+                        "session endpoint {} could not be bound even after clearing a \
+                         stale socket: {e}",
                         self.path.display()
                     ))
                 })?
@@ -267,22 +375,62 @@ impl SessionEndpoint {
 /// The directory endpoints live in, in preference order.
 ///
 /// * `$XDG_RUNTIME_DIR/lambo` — the correct home on Linux: already per-user,
-///   already 0700, cleaned up at logout.
-/// * `$TMPDIR/lambo` — the macOS answer, where `XDG_RUNTIME_DIR` is unset and
-///   `TMPDIR` is already a per-user `/var/folders/...` directory.
-/// * `/tmp/lambo` — the last resort, and the only one that is *shared*. The
-///   directory-permission check in [`SessionEndpoint::bind`] is what makes this
-///   fallback safe rather than assumed-safe.
+///   already 0700, cleaned up at logout. **No uid suffix, because the base
+///   directory already carries one** (`/run/user/<uid>`), and spending path
+///   bytes on a discriminator that is already there would eat the `sun_path`
+///   headroom for nothing.
+/// * `$TMPDIR/lambo-<euid>` — the macOS answer, where `XDG_RUNTIME_DIR` is unset
+///   and `TMPDIR` is a per-user `/var/folders/…` directory. The suffix is *not*
+///   redundant here: `TMPDIR` is an ordinary environment variable and is
+///   routinely set to `/tmp` in containers and CI, at which point this branch
+///   and the one below are the same directory.
+/// * `/tmp/lambo-<euid>` — the last resort, reached whenever neither variable is
+///   set: bare containers, `ssh` without `pam_systemd`, cron.
+///
+/// # Why the last resort is per-uid (J2-R1-3)
+///
+/// The suffix is what makes the shared fallback safe **by construction** rather
+/// than by check, and losing it was a regression, not merely a missed hardening.
+/// Without it the first uid to run `lambo serve` creates `/tmp/lambo` mode 0700
+/// owned by itself, and every other uid's `bind` then fails `EACCES` — for every
+/// holder, since every holder binds. `/tmp`'s sticky bit means the second user
+/// cannot even clear it. A case that worked fine before J2 becomes a hard
+/// cross-user lockout, curable only by the first user logging in.
+///
+/// This restores the decision recorded in the project graph, which the shipped
+/// stage-2 code dropped on both fallbacks; the graph and the code now agree.
 fn endpoint_dir() -> PathBuf {
-    for var in ["XDG_RUNTIME_DIR", "TMPDIR"] {
-        if let Ok(base) = std::env::var(var) {
-            let base = base.trim_end_matches('/');
-            if !base.is_empty() {
-                return PathBuf::from(base).join("lambo");
-            }
-        }
+    // SAFETY: `geteuid` is always successful and touches no memory the caller
+    // owns. There is no std equivalent.
+    let uid = unsafe { libc::geteuid() };
+    endpoint_dir_from(
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        std::env::var("TMPDIR").ok().as_deref(),
+        uid,
+    )
+}
+
+/// [`endpoint_dir`] with the environment supplied — pure, so the preference
+/// order and the uid discriminator are testable without `set_var`, which is
+/// process-global and makes two tests racing on `TMPDIR` look like a real defect
+/// on a loaded runner.
+fn endpoint_dir_from(xdg: Option<&str>, tmpdir: Option<&str>, uid: u32) -> PathBuf {
+    if let Some(base) = xdg.and_then(non_empty_dir) {
+        return base.join("lambo");
     }
-    PathBuf::from("/tmp/lambo")
+    if let Some(base) = tmpdir.and_then(non_empty_dir) {
+        return base.join(format!("lambo-{uid}"));
+    }
+    PathBuf::from(format!("/tmp/lambo-{uid}"))
+}
+
+/// A set, non-empty, trailing-slash-trimmed base directory.
+fn non_empty_dir(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// A filesystem-safe, length-bounded prefix of the session name — for a human
@@ -311,13 +459,95 @@ fn sanitize_prefix(session: &str) -> String {
 /// Deliberately *not* published anywhere: a DSN can carry a password, and the
 /// point of hashing is that neither the filesystem nor the lease row ever holds
 /// one.
+///
+/// The DSN half is taken verbatim — it is already an absolute, host-qualified
+/// address. The path half is **canonicalized** first, because a path is a
+/// spelling and this function must produce an identity; see
+/// [`canonical_store_path`] and J2-R1-2.
 fn store_identity(store: &StoreConfig) -> String {
     format!(
         "{:?}\u{1f}{}\u{1f}{}",
         store.kind,
         store.dsn.as_deref().unwrap_or(""),
-        store.path.as_deref().unwrap_or("")
+        canonical_store_path(store.path.as_deref().unwrap_or(""))
     )
+}
+
+/// Turn a store path *spelling* into a store *identity* (J2-R1-2).
+///
+/// # Why this is not cosmetic
+///
+/// `path = "./lambo.db"` is what `docs/reference/config.mdx`,
+/// `installation.mdx`, `end-to-end.mdx` and `lambo.example.toml` all show, and
+/// `SqliteConnectOptions::from_str` resolves it against **each process's own
+/// cwd**. Two agent clients launched from two directories with the documented
+/// config are therefore two different SQLite files — and, before this function,
+/// one derived socket. Both win their own lease (two databases, two rows), the
+/// second holder's `bind` takes the `AddrInUse` branch and unlinks the *first
+/// holder's live socket*, and a proxy belonging to graph A then dials the path
+/// and reaches holder B. The licence [`SessionEndpoint::bind`] argues for that
+/// unlink — "while we hold the lease, a socket file at this path cannot belong
+/// to a live holder" — is only true when the path is unique per store, which is
+/// what this restores.
+///
+/// # The rule, and what it decides
+///
+/// * **Symlinks are resolved.** `std::fs::canonicalize` on an existing file
+///   means the same store reached by a symlink and reached directly derives
+///   **one** address. That is the deliberate choice: one store must be one
+///   socket, or the second holder unlinks the first's. The cost is that two
+///   spellings which *look* different are correctly treated as one thing, which
+///   is the point.
+/// * **A file that does not exist yet** is resolved through its parent
+///   directory, keeping the file name literal. The parent is where a relative
+///   path's ambiguity lives, so this is enough to make `./lambo.db` from two
+///   cwds two identities and `./lambo.db` and `/abs/cwd/lambo.db` one. It also
+///   matters in practice: `SqliteStore::connect` builds a *lazy* pool with
+///   `create_if_missing`, so the file often does not exist when a serve derives
+///   its endpoint.
+/// * **Neither resolves** — the parent directory is missing too — and the value
+///   is used as-is after `cwd.join`. This is best-effort by construction: SQLite
+///   cannot create a file in a directory that does not exist, so a process on
+///   this branch is failing for a louder reason a moment later.
+/// * **A URI spelling is kept verbatim.** `file:x?mode=rwc`, `sqlite://…`: these
+///   are not filesystem paths, `canonicalize` would fail on them, and the
+///   `cwd.join` fallback would then make one store's identity depend on the cwd
+///   — reintroducing this very bug from the other side. (The in-memory
+///   spellings never reach here: [`store_is_shareable`] rejects them first.)
+fn canonical_store_path(raw: &str) -> String {
+    if raw.is_empty() || looks_like_uri(raw) {
+        return raw.to_string();
+    }
+    let p = Path::new(raw);
+    if let Ok(resolved) = std::fs::canonicalize(p) {
+        return resolved.to_string_lossy().into_owned();
+    }
+    // Not there yet. The parent carries the ambiguity, so resolve that and keep
+    // the file name as written.
+    if let Some(name) = p.file_name() {
+        let parent = match p.parent() {
+            // `Path::new("lambo.db").parent()` is `Some("")`, which is the cwd.
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => Path::new("."),
+        };
+        if let Ok(resolved) = std::fs::canonicalize(parent) {
+            return resolved.join(name).to_string_lossy().into_owned();
+        }
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).to_string_lossy().into_owned(),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// Is this store path a URI spelling rather than a filesystem path?
+///
+/// Conservative on purpose: anything that might be a URI is left alone, because
+/// the failure mode of canonicalizing a URI (a cwd-dependent identity) is the
+/// bug [`canonical_store_path`] exists to fix.
+fn looks_like_uri(raw: &str) -> bool {
+    raw.contains('?') || raw.starts_with("file:") || raw.starts_with("sqlite:")
 }
 
 /// Can a second process see this store at all?
@@ -373,6 +603,45 @@ mod tests {
         SessionEndpoint::resolve_in(Path::new("/run/lambo"), session, store).unwrap()
     }
 
+    /// A unique scratch directory for the tests that need real files — the
+    /// canonicalization ones do, since that is the whole point of them.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-endpoint-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A scratch directory short enough to hold a socket address — the bind
+    /// tests need a real directory AND a path under [`SUN_PATH_MAX`], and macOS's
+    /// `TMPDIR` is 46 bytes before anything is joined to it.
+    fn short_scratch(tag: &str) -> PathBuf {
+        let dir = PathBuf::from(format!(
+            "/tmp/lb{tag}{}{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                % 100_000
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn path_of(root: &Path, sub: &str) -> String {
+        root.join(sub)
+            .join("lambo.db")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn the_same_session_on_two_stores_is_two_endpoints() {
         let a = at("lambo-dev", &cfg(StoreKind::Sqlite, Some("/a.db"), None));
@@ -426,8 +695,10 @@ mod tests {
         assert!(!name.contains(".."), "no traversal survives: {name}");
     }
 
+    /// The derivation still *reports* an unusable base directory, with the
+    /// message pointing at the thing the operator can change.
     #[test]
-    fn an_over_long_base_directory_is_refused_before_any_lease() {
+    fn an_over_long_base_directory_is_reported_by_the_derivation() {
         let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
         let long = PathBuf::from(format!("/{}", "x".repeat(120)));
         let err = SessionEndpoint::resolve_in(&long, "s", &store)
@@ -438,6 +709,237 @@ mod tests {
             msg.contains("XDG_RUNTIME_DIR"),
             "names what the operator can change: {msg}"
         );
+    }
+
+    /// J2-R1-5: but it must not stop the serve.
+    ///
+    /// A *failed bind* deliberately does not — "a bind failure does not stop
+    /// this process serving memory" — and this is the same operator situation
+    /// reached by a cheaper road, so it degrades the same way. The consequence
+    /// is that a losing serve on such a machine refuses as it did before J2,
+    /// which is one client working instead of none.
+    #[test]
+    fn an_unusable_base_directory_degrades_to_no_endpoint_rather_than_refusing() {
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        let long = PathBuf::from(format!("/{}", "x".repeat(120)));
+        assert_eq!(
+            SessionEndpoint::for_store_in(&long, "s", &store),
+            None,
+            "an over-long base directory must cost this process its endpoint, not its start"
+        );
+        // And a usable one still yields an endpoint through the same door.
+        assert!(SessionEndpoint::for_store_in(Path::new("/run/lambo"), "s", &store).is_some());
+    }
+
+    /// J2-R1-2, the headline case: `path = "./lambo.db"` is what every published
+    /// example shows, and it names a **different file** from every different
+    /// cwd.
+    ///
+    /// Asserted by composition rather than by `set_current_dir`, which is
+    /// process-global and would race every other test in this binary: a relative
+    /// spelling resolves to *this* process's cwd, so two processes with two cwds
+    /// resolve to two paths — and `two_stores_with_one_file_name_in_two_
+    /// directories_are_two_endpoints` shows two such paths are two endpoints.
+    #[test]
+    fn a_relative_store_path_is_resolved_against_this_process_cwd() {
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let want = cwd.join("lambo.db").to_string_lossy().into_owned();
+        assert_eq!(canonical_store_path("./lambo.db"), want);
+        assert_eq!(canonical_store_path("lambo.db"), want);
+        // Before the fix this was the literal string, identical in every process
+        // regardless of cwd — which is how two graphs got one socket.
+        assert_ne!(canonical_store_path("./lambo.db"), "./lambo.db");
+    }
+
+    /// Two graphs, two sockets. Before the fix these two collided, and the
+    /// second holder's stale-socket unlink removed the first holder's live
+    /// socket.
+    #[test]
+    fn two_stores_with_one_file_name_in_two_directories_are_two_endpoints() {
+        let root = scratch("two-dirs");
+        for sub in ["a", "b"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+            std::fs::write(root.join(sub).join("lambo.db"), b"x").unwrap();
+        }
+        let a = at(
+            "s",
+            &cfg(StoreKind::Sqlite, Some(&path_of(&root, "a")), None),
+        );
+        let b = at(
+            "s",
+            &cfg(StoreKind::Sqlite, Some(&path_of(&root, "b")), None),
+        );
+        assert_ne!(a, b, "two SQLite files must never derive one socket");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One graph, one socket — the other half of the decision, and the reason
+    /// symlinks are **resolved** rather than merely made absolute.
+    ///
+    /// Two spellings of one store must not derive two addresses: the loser's
+    /// `proxyable` check would then refuse with a message blaming "a different
+    /// lambo version, or a different XDG_RUNTIME_DIR", none of which is true.
+    #[test]
+    fn one_store_reached_two_ways_is_one_endpoint() {
+        let root = scratch("one-store");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real").join("lambo.db"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let store = |p: PathBuf| cfg(StoreKind::Sqlite, Some(&p.to_string_lossy()), None);
+        let direct = at("s", &store(root.join("real").join("lambo.db")));
+        assert_eq!(
+            direct,
+            at("s", &store(root.join("link").join("lambo.db"))),
+            "a store reached through a symlink is the same store"
+        );
+        assert_eq!(
+            direct,
+            at("s", &store(root.join("real").join(".").join("lambo.db"))),
+            "a redundant spelling is the same store"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file that does not exist yet resolves through its parent, which is
+    /// where a relative path's ambiguity lives. This is the common case on the
+    /// serve path: `SqliteStore::connect` builds a **lazy** pool with
+    /// `create_if_missing`, so the file is often not there when the endpoint is
+    /// derived.
+    #[test]
+    fn a_store_file_that_does_not_exist_yet_still_resolves_through_its_parent() {
+        let root = scratch("not-yet");
+        std::fs::create_dir_all(&root).unwrap();
+        let real = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            canonical_store_path(&root.join("lambo.db").to_string_lossy()),
+            real.join("lambo.db").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A URI spelling is left verbatim: `canonicalize` cannot resolve it, and
+    /// the `cwd.join` fallback would then make one store's identity depend on
+    /// the cwd — J2-R1-2 from the other side.
+    #[test]
+    fn a_uri_store_spelling_is_not_canonicalized() {
+        for uri in ["file:x?mode=rwc", "sqlite://data.db", "file:/abs/x.db"] {
+            assert_eq!(canonical_store_path(uri), uri, "{uri} must be left alone");
+        }
+        assert_eq!(canonical_store_path(""), "");
+    }
+
+    /// J2-R1-3: the shared fallbacks carry the euid; `XDG_RUNTIME_DIR` does not,
+    /// because it already does.
+    #[test]
+    fn the_shared_endpoint_directories_are_per_uid() {
+        assert_eq!(
+            endpoint_dir_from(Some("/run/user/501"), Some("/tmp"), 501),
+            PathBuf::from("/run/user/501/lambo"),
+            "XDG_RUNTIME_DIR is already per-user; spending path bytes twice would eat the \
+             sun_path headroom for nothing"
+        );
+        assert_eq!(
+            endpoint_dir_from(None, Some("/var/folders/x/T/"), 501),
+            PathBuf::from("/var/folders/x/T/lambo-501")
+        );
+        assert_eq!(
+            endpoint_dir_from(None, None, 501),
+            PathBuf::from("/tmp/lambo-501")
+        );
+        // The case that makes the TMPDIR suffix necessary rather than tidy:
+        // TMPDIR is an ordinary env var and is routinely /tmp in containers, so
+        // this branch and the last resort are then the same shared directory.
+        assert_eq!(
+            endpoint_dir_from(None, Some("/tmp"), 501),
+            PathBuf::from("/tmp/lambo-501")
+        );
+        // Set-but-empty is not set.
+        assert_eq!(
+            endpoint_dir_from(Some(""), Some("/"), 501),
+            PathBuf::from("/tmp/lambo-501")
+        );
+        // The property the whole finding is about: no two uids share a
+        // directory on a shared base, so the first user cannot lock the rest out.
+        assert_ne!(
+            endpoint_dir_from(None, None, 501),
+            endpoint_dir_from(None, None, 502)
+        );
+        // And the bare shared directory that caused the lockout is unreachable.
+        for dir in [
+            endpoint_dir_from(None, None, 0),
+            endpoint_dir_from(None, Some("/tmp"), 0),
+            endpoint_dir(),
+        ] {
+            assert_ne!(dir, PathBuf::from("/tmp/lambo"), "{}", dir.display());
+        }
+    }
+
+    /// J2-R1-3: the mode check must be about the directory entry we created, not
+    /// about wherever a pre-placed symlink points.
+    ///
+    /// `std::fs::metadata` follows symlinks, so `/tmp/lambo-<uid> → /tmp/theirs`
+    /// with `/tmp/theirs` at 0700 passed the old gate and we bound a socket
+    /// inside a directory someone else controls.
+    ///
+    /// The ownership half of the check is not reachable from in-process — faking
+    /// a foreign-owned directory needs root — so it is one `!=` against
+    /// `geteuid()` with no test. The symlink half is the one an attacker
+    /// actually has, and it is pinned here.
+    #[test]
+    fn a_symlinked_endpoint_directory_is_refused_rather_than_followed() {
+        let root = short_scratch("s");
+        let target = root.join("t");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&target)
+            .unwrap();
+        let link = root.join("l");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        let err = SessionEndpoint::resolve_in(&link, "s", &store)
+            .unwrap()
+            .bind()
+            .expect_err("a symlinked endpoint directory must be refused");
+        assert!(
+            err.to_string().contains("symbolic link"),
+            "the refusal must say what it refused: {err}"
+        );
+        // J2-R1-9: these literals are `\`-continued, and a collapsed
+        // continuation leaves the continuation indent INSIDE the string. `cargo
+        // fmt` cannot see it and nothing else would.
+        assert!(
+            !err.to_string().contains("  "),
+            "an operator message must not carry a collapsed continuation indent: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The mode gate itself, which the old docstring over-credited but which is
+    /// still real: a directory an attacker pre-created world-writable is refused
+    /// rather than bound into.
+    #[test]
+    fn a_world_writable_endpoint_directory_is_refused() {
+        let root = short_scratch("w");
+        // `DirBuilder` honours the umask, so set the mode explicitly.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        let err = SessionEndpoint::resolve_in(&root, "s", &store)
+            .unwrap()
+            .bind()
+            .expect_err("a world-writable endpoint directory must be refused");
+        assert!(
+            err.to_string().contains("reachable by other users"),
+            "the refusal must name the consequence: {err}"
+        );
+        // J2-R1-9: these literals are `\`-continued, and a collapsed
+        // continuation leaves the continuation indent INSIDE the string. `cargo
+        // fmt` cannot see it and nothing else would.
+        assert!(
+            !err.to_string().contains("  "),
+            "an operator message must not carry a collapsed continuation indent: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The real derivation on the real environment must fit on THIS machine —
@@ -467,22 +969,19 @@ mod tests {
             cfg(StoreKind::Sqlite, Some("file:x?mode=memory"), None),
         ] {
             assert_eq!(
-                SessionEndpoint::for_store("s", &store).unwrap(),
+                SessionEndpoint::for_store("s", &store),
                 None,
                 "{store:?} is private to this process"
             );
         }
         // A real file, and a cluster, are both reachable by a second process.
         assert!(
-            SessionEndpoint::for_store("s", &cfg(StoreKind::Sqlite, Some("/a.db"), None))
-                .unwrap()
-                .is_some()
+            SessionEndpoint::for_store("s", &cfg(StoreKind::Sqlite, Some("/a.db"), None)).is_some()
         );
         assert!(SessionEndpoint::for_store(
             "s",
             &cfg(StoreKind::Cockroach, None, Some("postgres://h/db"))
         )
-        .unwrap()
         .is_some());
     }
 
