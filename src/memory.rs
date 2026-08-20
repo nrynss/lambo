@@ -1373,7 +1373,7 @@ impl Memory {
     }
 
     /// Acquire or extend a soft lock on `node` for this handle's agent
-    /// (spec §11). Cross-agent contention returns [`LamboError::Conflict`].
+    /// (spec §11). Cross-agent contention returns [`LamboError::SoftLock`].
     ///
     /// # Not durable (pinned upstream contract S5)
     ///
@@ -1391,7 +1391,7 @@ impl Memory {
     /// locks work for more than one client of one process.
     ///
     /// Contention is now genuine: two distinct ids reserving one node produce a
-    /// [`LamboError::Conflict`] for the second, and [`Memory::release_as`]
+    /// [`LamboError::SoftLock`] for the second, and [`Memory::release_as`]
     /// refuses an id that does not hold the lock. Two callers passing the *same*
     /// id share one lock and can release each other's — cooperative by design,
     /// and the MCP layer says so in the tool description. Nothing here
@@ -1408,14 +1408,19 @@ impl Memory {
     }
 
     /// Release this agent's soft lock on `node` — the pair of
-    /// [`Memory::reserve`]. A non-owner gets [`LamboError::Conflict`].
+    /// [`Memory::reserve`]. A non-owner gets [`LamboError::SoftLock`].
     pub fn release(&self, node: NodeId) -> Result<(), LamboError> {
         self.release_as(&self.agent, node)
     }
 
     /// [`Memory::release`] on behalf of `agent` (J1). A caller that does not
-    /// hold the lock under this id gets [`LamboError::Conflict`] and the lock
+    /// hold the lock under this id gets [`LamboError::SoftLock`] and the lock
     /// stands — which is what stops one client dropping another's lock.
+    ///
+    /// The gate comes first, so a fenced handle fails here with a
+    /// [`LamboError::Conflict`] — a *different* variant, deliberately, because
+    /// its message is operator-only and `mcp::server` must be able to tell the
+    /// two apart without reading either (J1-R2-2).
     pub fn release_as(&self, agent: &AgentId, node: NodeId) -> Result<(), LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
@@ -2128,12 +2133,23 @@ impl Memory {
     /// [`LEASE_HEARTBEAT_INTERVAL`] (15s), so a test drives the fence directly
     /// after arranging a real store-level takeover.
     ///
-    /// Gate matches the sole caller's tests module (not bare `test`): under
-    /// `--no-default-features` feature combos that module is compiled out and
+    /// Gate matches both callers' tests modules (not bare `test`): under
+    /// `--no-default-features` feature combos those modules are compiled out and
     /// a bare `#[cfg(test)]` method becomes a dead-code error under
     /// `-D warnings` (CI feature-matrix).
+    ///
+    /// `pub(crate)` since J1-R2-2, so `mcp::server`'s tests can latch the fence
+    /// too. Before that they could not, and the reserve path's lease-lost arm
+    /// had no MCP-level test at all — which is how a `Conflict`-variant match
+    /// came to render `lease_lost_error`'s operator SQL to a model without a
+    /// single test going red. Widening a test hook by one crate is the cheaper
+    /// half of that trade: the alternative (driving a real store-level takeover
+    /// from `mcp::server::tests`, as `memory.rs`'s own fence test does) needs a
+    /// second `Memory` on a shared store plus a lease acquisition, none of which
+    /// the MCP assertion is about. The hook stays `#[cfg(test)]`, so it does not
+    /// exist in a shipped binary.
     #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
-    fn simulate_lease_loss(&self) {
+    pub(crate) fn simulate_lease_loss(&self) {
         self.lease_lost.store(true, Ordering::Release);
     }
 

@@ -156,6 +156,19 @@ pub fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usiz
 /// variation selectors and the combining grapheme joiner, which legitimate
 /// Persian, Indic and emoji text needs. Those stay in `content` and are erased
 /// from `canonical_key`, so allowing them cannot fork one concept into two.
+///
+/// **`U+2028`/`U+2029` are deliberately absent, and that is a decision rather
+/// than an oversight (J1-R2-1).** They are invisible structural characters,
+/// which is this table's stated criterion, and they are caught by nothing else:
+/// they are not `Cc`, so `is_control()` misses them, and the ranges jump
+/// `\u{2060}`–`\u{2064}` and `\u{2066}`–`\u{206F}`, skipping the `202A`–`202E`
+/// bidi family's neighbours at `2028`/`2029`. For `content` nothing is gained by
+/// adding them: `content` already permits `\n`, so a forced line break buys an
+/// author nothing it could not already have. Where a *single-line* invariant is
+/// the whole point they are refused at the door that promises it —
+/// `mcp::server`'s `breaks_one_line`, which guards `agent_id`. If `content` ever
+/// stops permitting `\n`, revisit this together with that predicate rather than
+/// in isolation.
 fn is_disallowed_format(c: char) -> bool {
     is_invisible(c) && !is_text_required_invisible(c)
 }
@@ -224,6 +237,21 @@ pub fn check_size(field: &str, value: &str) -> Result<(), String> {
 }
 
 /// [`check_size`] mapped to a CLI usage error.
+///
+/// **Known residual, deliberately not guarded here (J1-R2-4).** This is what
+/// gates the CLI's `--agent` (`derive`, `record-action`, `reserve`, `release`),
+/// and [`check_size`] passes `\n` on purpose, so `lambo derive --agent
+/// $'x\ninjected'` writes a genuinely multi-line interaction author — which,
+/// unlike an MCP soft-lock holder, is **durable**, and which a later `serve`'s
+/// recall renders verbatim through `recall::format::conflict_warning`.
+/// `mcp::server::LamboServer::check_agent_id`'s single-line rule guards the MCP
+/// door only, by design: that door is where an *unauthenticated remote* string
+/// becomes an identity, while `--agent` is the trusted local operator naming
+/// themselves, and tightening it would change `AgentId`'s semantics for every
+/// library caller. So this is an operator poisoning their own graph — P3 — but
+/// it is the one residual that outlives the process, and it is recorded under
+/// §J2 in `dev-diary/lambo-for-mooshik/J-multi-client.md` rather than only here,
+/// because J2 is where clients stop being local.
 pub fn check_size_cli(field: &str, value: &str) -> Result<(), CliError> {
     check_size(field, value).map_err(CliError::Usage)
 }

@@ -53,7 +53,7 @@ Send the id of the agent making the call. Lambo honours it: your work is recorde
 The id is **caller-asserted and unverified**. Nothing authenticates it: over stdio the client owns the process, and over HTTP one bearer token authenticates the server rather than each agent. So identity here is a cooperative declaration, which is the same trust level Lambo's soft locks already have — they are advisory and live in RAM. In practice:
 
 - Use one stable id per agent, such as `claude-orchestrator` or `codex-agent`.
-- Send the id on one line, at most 256 characters. `agent_id` refuses newlines, tabs, and length over 256 even though other strings accept them, because your id is rendered into other agents' context blocks as the holder of your locks: a line break there would let you write lines into someone else's context, and a very long id could push the block it annotates out of a budgeted context entirely.
+- Send the id on one line, at most 256 characters. `agent_id` refuses newlines, tabs, any other control character, the Unicode line and paragraph separators `U+2028`/`U+2029`, and length over 256 even though other strings accept some of them, because your id is rendered into other agents' context blocks as the holder of your locks: a line break there would let you write lines into someone else's context, and a very long id could push the block it annotates out of a budgeted context entirely.
 - Distinct ids get distinct locks and contend honestly: one agent reserving a node another holds gets a conflict that names the holder and the expiry, so it can wait or work elsewhere.
 - Two callers sending the **same** id share one lock and can release each other's. That is by design, and worth knowing before you let two clients default to the same name.
 
@@ -68,9 +68,10 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 | A string over the size cap | The field, the cap, and the size given. |
 | A string carrying a control or invisible character | The field, the offending codepoint, and which class of character was refused. |
 | A focus that matches several concepts | The candidate list with node ids, so you can name one exactly. |
-| An `agent_id` that is not a single line | That the id must be one line with no tabs, and the codepoint found. |
+| An `agent_id` that is not a single line | That the id must be one line with no tabs, control or line-separator characters, and the codepoint found. |
 | An `agent_id` over 256 characters | The cap and the length given. |
 | A lock another agent holds | Who holds the node and until when, and that nothing was reserved or released. |
+| The server losing its single-writer lease | The class `conflict` and a note that the detail was logged. The holder and expiry are shown only for a lock another agent holds; the lease's own state is not model-facing. |
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
 

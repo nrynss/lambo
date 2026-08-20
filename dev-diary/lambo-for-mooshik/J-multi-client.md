@@ -290,9 +290,13 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   the §13 conflict sentence's writer (`recall::format::conflict_warning`, which needs no
   lock at all, just one `lambo_derive`). The reviewer's probe landed a line wearing
   Lambo's own `⚑ CANONICAL` marker; it is now a committed test that fails without the
-  guard. **The guard refuses `\n`, `\r` and `\t` in `check_agent_id`** (`\r` is already
-  refused upstream; named so the rule reads complete if the caps exception table changes),
-  and the refusal names the parameter, the codepoint and the reason.
+  guard. **The guard refuses a line-forging character *class* in
+  `check_agent_id`** — every `Cc` control (so `\n`, `\r` and `\t`, the three round 1
+  named, plus the rest) and `U+2028`/`U+2029`, the whole of `Zl`/`Zp`. Round-1
+  remediation refused the three literals; that list was incomplete the day it was written,
+  and round 2 found the gap (see **J1-R2-1** below), so the rule is now a predicate shared
+  with `conflict_err`'s fold. The refusal names the parameter, the codepoint and the
+  reason.
   **At the door, not in `AgentId::new`:** the type is also built from the operator's own
   `--agent` by the CLI and by library callers — trusted input on the same side of the
   boundary as the process — so tightening the type would change its semantics for every
@@ -311,17 +315,29 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   `--agent`/`AgentId` is deliberate (that door is where unauthenticated remote identity is
   policed; trusted process-side callers keep the type's semantics). Boundary pinned from
   both sides in `every_tool_refuses_an_unusable_agent_id`: 257 refused on all seven tools,
-  exactly 256 accepted. The rendering-side bound question is thereby closed for J2 —
-  eviction needed the uniform cap's headroom, which no longer reaches the graph.
+  exactly 256 accepted.
+  **The cap reduces the eviction vector by roughly 64×; it does not close it** — round 2
+  measured a 256-char holder still evicting the block it annotates at `max_tokens` 40 and
+  80, surviving only from ~160 up, and found the reservation warning line rendered
+  *outside* the token budget altogether (at `max_tokens=1` the block is 53 chars with a
+  1-char holder and 308 with a 256-char one). Eviction never needed the uniform cap's
+  headroom, only a holder line that is a large fraction of the budget. So the **length**
+  half is closed for any realistic budget, and the **neutralise-on-render** half stays
+  open — carried as a §J2 residual, not closed here (**J1-R2-3**).
 * **J1-R1-2 (P2) — the loser of a race was told `conflict` and nothing else.** `tool_err`'s
   N4 policy discards a `Memory` error's message because it can interpolate a DSN, a store
   URL or a driver string. §11's two conflict messages carry none of that — a node id the
   caller just sent, the holder's id, an expiry — and the last two are *already* model-facing,
   since recall renders the same pair into the context block. They are also exactly what
-  "coordinate by ids" needs. So the reserve path gets `conflict_err`: **one variant on one
+  "coordinate by ids" needs. So the reserve path gets `conflict_err`: **one producer on one
   path**, not a general opening of N4. Everything else on that path still goes through
   `tool_err`, the ledger books the same `error_kind="conflict"`, and the message is folded to
   one line on the way out as defence in depth for a holder that entered by another path.
+  Round-1 remediation selected that exception by matching the `LamboError::Conflict`
+  *variant*, which opened it for every producer of that variant — including the lease-lost
+  fence, whose message carries operator-only SQL. Round 2 caught that as a live regression
+  (**J1-R2-2** below); the selection is now its own variant, `LamboError::SoftLock`,
+  produced by `graph::reserve` and nowhere else.
 * **J1-R1-3 (P3)** — the four `warnings` vectors that could no longer hold a warning are
   gone; `structuredContent` keeps its `warnings` key (response shape) as a literal `[]`, with
   a comment at `derive_impl` saying a future warning must also go through `attach_warnings`.
@@ -332,10 +348,11 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   string's breaks. The two remaining >100-char lines in `src/mcp/server.rs` are pre-existing
   `json!` bodies inside tests, which `rustfmt` does not reformat and J1 did not touch.
 * **J1-R1-6 (P3)** — `evidence/mcp-client-stdio/` annotated, not rewritten; see the sweep above.
-* **J1-R1-7 (P3)** — `every_tool_refuses_an_unusable_agent_id` pins empty, blank, `\n`,
-  `\r\n`, `\t`, oversize, and over-cap (257) across all seven tools, and asserts each
-  refusal *names* `agent_id` so a downstream failure cannot pass for the guard; exactly 256
-  is asserted accepted. Written as its own test rather than folded into
+* **J1-R1-7 (P3)** — `every_tool_refuses_an_unusable_agent_id` pins **nine** bad ids
+  across all seven tools — empty, blank, `\n`, `\r\n`, `\t`, `U+2028`, `U+2029` (the last
+  two added by J1-R2-1), oversize, and over-cap (257) — and asserts each refusal *names*
+  `agent_id` so a downstream failure cannot pass for the guard; exactly 256 is asserted
+  accepted. Written as its own test rather than folded into
   `bad_parameters_are_refused_as_readable_tool_errors`, whose table is per-tool parameters;
   this one is the parameter all seven share.
 * **J1-R1-8 (P3)** — declared in `src/daemon/conflict.rs`'s NEW-4 block: J1 is what makes
@@ -344,6 +361,101 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   still right for its purpose — the §13 sentence's job is to make the reader look — but it
   can now name the wrong one of two real agents, which is why J3's Done-when asks for it to
   be measured.
+
+### J1 round-2 review remediation
+
+Reviewed **REQUEST_CHANGES** at `8963b2e` — two P2, two P3
+([adve-review-mooshik-J1-round2.md](../adversarial-review/adve-review-mooshik-J1-round2.md)).
+All eight round-1 findings were verified closed at the artifact, under mutation in both
+directions; the two blockers are defects **in the round-1 remediation itself**. All four
+are closed here; nothing is carried. The design decision is untouched for a second round.
+
+* **J1-R2-1 (P2) — the single-line guard enforced a narrower rule than its own docstring
+  claimed.** `U+2028 LINE SEPARATOR` and `U+2029 PARAGRAPH SEPARATOR` slipped every
+  layer: they are `Zl`/`Zp`, and Rust's `char::is_control()` is `Cc`-only, so `check_size`
+  passes them; they are absent from `INVISIBLE_RANGES`, so the invisible-character table
+  passes them; and the guard looked for three literal characters. The reviewer's probe made
+  both the soft-lock holder and landed the raw codepoint in another agent's T5.3 block.
+  P2 rather than P1 because to a tokenizer it is still one line — but they are *forced*
+  line and paragraph breaks in CSS text layout, and `cli::serve_web` serves the context
+  block verbatim into a page, where the forged break becomes real while a terminal shows
+  nothing.
+  **Fixed as a class, not as two more literals.** One predicate, `breaks_one_line`
+  (`c.is_control() || c == '\u{2028}' || c == '\u{2029}'`), used by both
+  `check_agent_id`'s guard and `conflict_err`'s fold so the two cannot disagree about what
+  "one line" means — they did. `is_control()` is named for the *category* `Cc`, so the rule
+  stays complete if `check_size`'s `\n`/`\t` exception table is ever widened again;
+  `U+2028`/`U+2029` are written out because they are the entire membership of `Zl` and `Zp`
+  and this crate has no Unicode-category dependency to test the property with. Two
+  neighbouring rules were considered and rejected in the comment: *any* `White_Space`
+  character (too wide — an ordinary space must stay legal, since ids are untrimmed and
+  `"a"` and `"a "` are deliberately two agents) and the review's line-break classes
+  `BK`/`CR`/`LF`/`NL` (a strict subset of `Cc ∪ Zl ∪ Zp`, and it drops `\t`). Anything
+  merely invisible stays `check_size`'s business; this predicate answers one question only.
+  Pinned on both users of the class: `every_tool_refuses_an_unusable_agent_id` gained the
+  two codepoints (nine bad ids × seven tools), and
+  `conflict_err_folds_every_line_forging_character` calls the fold directly —
+  deliberately, since the door now makes such an id unreachable
+  through a tool, and the fold exists precisely for the ids that never pass the door.
+  Mutation-checked: reverting the fold to the three literals turns it red.
+  Whether `U+2028`/`U+2029` also belong in `INVISIBLE_RANGES` for `content` is left to
+  `caps.rs`, as the review asked — `content` already permits `\n`, so nothing is gained
+  there, and the decision is now recorded at `is_disallowed_format` rather than made
+  silently.
+* **J1-R2-2 (P2, the regression) — `conflict_err` opened N4 for a *variant*, and
+  `graph::reserve` is not its only producer.** `Memory::reserve_as`/`release_as` enter
+  `begin_write_sync()` **before** the graph, and a fenced handle's `lease_lost_error()` is
+  a `Conflict` too — one interpolating `store::lease::OPERATOR_OVERRIDE`. So after the
+  round-1 remediation `lambo_reserve` handed a model
+  `… force a takeover: DELETE FROM session_leases WHERE session_id = '<session>';`, a raw
+  statement against an internal table that reads as an instruction, where the parent had
+  returned `conflict (the detail was logged server-side)`. `redact_urls` was never the
+  missing piece: the string has no `://`.
+  **Discriminated structurally, and in the direction that fails closed.** `graph::reserve`
+  and `graph::release` now return a variant of their own, `LamboError::SoftLock`, and
+  `conflict_err` is selected against *that*. Three options were weighed. Tagging the lease
+  loss instead (a `LeaseLost` variant) would have fixed this instance and left the next
+  `Conflict` producer under `reserve_as` leaking again — it keeps the default open. A typed
+  §11 payload (`{node, holder, expiry}`) is the strongest containment on paper, but the two
+  §11 messages differ in shape — release names the *caller*, not an expiry — so it needs
+  optional fields or two variants and touches far more code for no extra guarantee.
+  Matching at the `reserve_impl` site is not available: `reserve_as` returns one `Result`,
+  so the two sources are not distinguishable there without changing `Memory` anyway. The
+  chosen split inverts the default — every `Conflict`, present or future, flattens through
+  `tool_err` without anyone having to remember the docstring — and costs nothing
+  observable: `Display` is byte-identical (`"conflict: {0}"`), so the CLI's text and its
+  subprocess matchers stand, and `err_class` maps both variants to `"conflict"`, so the
+  ledger's `error_kind` does not move. The "wait for the expiry or work elsewhere" advice
+  the review flagged is true again for the same reason: a §11 soft lock expires, the fenced
+  handle it used to reach never does.
+  **The test gap the review named is closed too.** `Memory::simulate_lease_loss` is now
+  `pub(crate)` (still `#[cfg(test)]`, so it does not exist in a shipped binary), which is
+  what let `a_lease_lost_reserve_does_not_disclose_the_operator_override` exist at all: it
+  latches the fence and asserts both arms of `lambo_reserve` flatten to the class, with
+  `DELETE FROM`, `session_leases`, the lease state and the soft-lock-only advice all
+  absent. Widening a test hook by one crate is the cheaper half of the trade — the
+  alternative, driving a real store-level takeover from `mcp::server::tests` as
+  `memory.rs`'s own fence test does, needs a second `Memory` on a shared store and a lease
+  acquisition, none of which the assertion is about. Before this commit the reserve path's
+  lease-lost arm had **no** MCP-level test, which is how a variant match came to render
+  operator SQL without anything going red.
+* **J1-R2-3 (P3) — the cap ruling told J2 the rendering-side question was closed.** It is
+  not: measured, a 256-char holder still evicts the block it annotates below ~160
+  `max_tokens`, so the vector is reduced ~64×, not closed, and the reservation line renders
+  outside the budget entirely. The ruling paragraph above now says that, and the residual
+  is carried under §J2 where its consumer reads it. `conflict_err`'s docstring, which still
+  called it a J2 question, now points at §J2 too, so source and phase doc agree.
+* **J1-R2-4 (P3) — the residual that *is* real lived only in a docstring J2 has no reason
+  to open.** The reasoning stands and no code change was asked for: a cooperative-identity
+  design cannot also promise a self-chosen name is inert, and sanitising in
+  `recall::format` would sit downstream of the graph where a poisoned id is already
+  durable. What moved is where it is written down — two §J2 bullets below, plus the second
+  half the review found: `check_size_cli` passes `\n`, so `--agent $'x\ninjected'` writes a
+  **durable** multi-line interaction author that `conflict_warning` renders unsanitised.
+  Trusted local operator poisoning their own graph, so P3 — but it outlives the process,
+  which the RAM-only reservations do not. Documented at the CLI door (`check_size_cli`'s
+  docstring, naming why the MCP guard is deliberately not mirrored there) and carried in
+  §J2; no guard added, per the review.
 
 ## J2 — A losing serve proxies instead of exiting
 
@@ -380,6 +492,30 @@ after unclean holder death (bounded by the 45s TTL), a busier startup path.
   here means no lease is taken" stops being true the moment every serve binds a socket.
   That sentence and the ordering it justifies must be restated deliberately, not
   falsified in passing.
+
+**Two rendering-side residuals handed over by J1 (round 2, J1-R2-3 / J1-R2-4):**
+
+* **A single-line, instruction-shaped `agent_id` is still rendered verbatim into other
+  agents' context, on three paths** — the soft-lock holder
+  (`recall::format::reservation_warning`), the §13 conflict sentence's writer
+  (`recall::format::conflict_warning` → `agent_display`, which needs no lock at all, just
+  one `lambo_derive`), and `conflict_err`'s refusal to the loser of a race. J1 refused the
+  *unrenderable* id and capped its length; it deliberately did not neutralise a renderable
+  one, because the cooperative-identity design declares out loud that a caller names
+  itself and sanitising downstream of the graph would arrive after the id is durable. J2
+  is where that comes due: this is exactly the weighing that changes when clients stop
+  being local and one bearer token authenticates the server rather than each agent. The
+  length half is closed for any realistic budget (256 chars), with the measured residual
+  recorded in §J1 — under ~160 `max_tokens` a max-length holder still evicts the block it
+  annotates, and the reservation line is rendered outside the budget.
+* **The single-line guard is on the MCP door only, so a durable multi-line author can
+  still enter through `--agent`.** `check_size_cli` passes `\n` (legitimate inside
+  `content`), so `lambo derive --agent $'x\ninjected'` writes a genuinely multi-line
+  interaction author, which **persists** and which a later `serve`'s recall renders
+  unsanitised through `conflict_warning`. That is a trusted local operator poisoning their
+  own graph — P3 — but reservations are RAM-only and per-process while interactions are
+  durable, so it is the one J1 residual that outlives the process, and it is the shape J2's
+  shared-graph model makes interesting. Recorded at the door in `cli::caps::check_size_cli`.
 
 Per the claim-family rule above: J2 runs **two sweeps** before it lands — startup-ordering
 claims, and the lease/endpoint schema (this section's own column list, both

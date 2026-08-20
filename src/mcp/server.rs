@@ -530,7 +530,12 @@ fn err_class(err: &LamboError) -> &'static str {
         LamboError::Store(_) => "store error",
         LamboError::Embed(_) => "embedding error",
         LamboError::Config(_) => "configuration error",
+        // J1-R2-2: two variants, one class. The split exists so N4 can tell a
+        // model-safe §11 refusal from a lease-lost one; an operator and the
+        // ledger see the same `error_kind` either way, so nothing downstream of
+        // this function moved.
         LamboError::Conflict(_) => "conflict",
+        LamboError::SoftLock(_) => "conflict",
         LamboError::Other(_) => "internal error",
     }
 }
@@ -541,11 +546,13 @@ fn err_class(err: &LamboError) -> &'static str {
 /// client gets a class and a pointer to the log — never the raw error, which
 /// can carry a store URL or driver message.
 ///
-/// **One documented exception**, added by J1-R1-2: [`conflict_err`] renders a
-/// §11 soft-lock `Conflict` with its message intact on the reserve path, because
-/// that message is a node id, a holder and an expiry — nothing N4 exists to hide,
-/// and the only way a caller can learn who to wait for. Every other error on
-/// every path, that variant included elsewhere, still comes through here.
+/// **One documented exception**, added by J1-R1-2 and narrowed by J1-R2-2:
+/// [`conflict_err`] renders a [`LamboError::SoftLock`] with its message intact
+/// on the reserve path, because that message is a node id, a holder and an
+/// expiry — nothing N4 exists to hide, and the only way a caller can learn who
+/// to wait for. Every other error on every path comes through here, including
+/// every [`LamboError::Conflict`]: the lease-lost fence is one, and its message
+/// is exactly the operator-only detail N4 exists for.
 fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     tracing::error!(
         tool = what,
@@ -560,34 +567,98 @@ fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     ))])
 }
 
-/// Render a §11 soft-lock `Conflict` from the reserve path as a model-facing
+/// `true` for a character that would break the promise that a string is **one
+/// field on one line** (J1-R2-1).
+///
+/// Stated as a *class* rather than as the literal characters a review happened
+/// to name, because a list of literals rots and a class does not:
+///
+/// * [`char::is_control`] is exactly the `Cc` general category — every C0/C1
+///   control, so `\n`, `\r`, `\t`, `U+000B`, `U+000C` and `U+0085` all land
+///   here. Round 1 prescribed the three literals `\n`/`\r`/`\t`; naming the
+///   category instead means this rule stays complete if `check_size`'s
+///   exception table (which passes `\n` and `\t`, both legitimate inside a
+///   concept's `content`) is ever widened again.
+/// * `U+2028` and `U+2029` are the *only* members of `Zl` and `Zp` — the two
+///   general categories whose entire semantic is "line break". They are not
+///   `Cc`, so `is_control` misses them; they are absent from
+///   `graph::canonical::INVISIBLE_RANGES`, so `check_size` misses them too. In
+///   CSS text layout they are *forced* line and paragraph breaks, and
+///   `cli::serve_web` serves the recall context block verbatim into a page —
+///   so there the forged break becomes a real one, while a terminal shows
+///   nothing at all. They are written out rather than tested by property
+///   because this crate has no Unicode-category dependency and will not grow
+///   one for two codepoints; the honest spelling of this whole predicate, if
+///   one ever arrives, is `general_category(c) ∈ {Cc, Zl, Zp}`.
+///
+/// Two neighbouring rules were considered and rejected. **Any `White_Space`
+/// character** is too wide: an ordinary space must stay legal, since ids are
+/// taken untrimmed and `"a"` and `"a "` are deliberately two agents
+/// ([`LamboServer::caller_agent`]). **Unicode line-break classes
+/// `BK`/`CR`/`LF`/`NL`** — the review's alternative — is too narrow *and* needs
+/// a table: that set is `{U+000B, U+000C, U+2028, U+2029} ∪ {CR, LF, U+0085}`,
+/// a strict subset of what the two arms below already give, and it would also
+/// drop `\t`, which forges a column rather than a line but is refused for the
+/// same reason. Anything merely *invisible* stays `check_size`'s business
+/// (`INVISIBLE_RANGES`, which runs first and names the codepoint it refuses);
+/// this predicate answers one question only — does this character forge a line
+/// or a column — so widening it would duplicate a table that already exists
+/// and then drift from it.
+fn breaks_one_line(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
+/// Render a §11 soft-lock refusal from the reserve path as a model-facing
 /// refusal that still carries its detail (J1-R1-2).
 ///
 /// [`tool_err`]'s N4 policy discards a `Memory` error's message because it can
 /// interpolate a DSN, a store URL, a file path or a driver string — none of
-/// which the model needs. `graph::reserve`'s two conflict messages carry none of
-/// that: they are built from a node id the caller just sent, the holder's
-/// `agent_id`, and an expiry — and the last two are *already* model-facing,
-/// since `recall` renders that same holder and expiry into the context block.
-/// They are also precisely what the loser of a race needs, because the whole
+/// which the model needs. `graph::reserve`'s two messages carry none of that:
+/// they are built from a node id the caller just sent, the holder's `agent_id`,
+/// and an expiry — and the last two are *already* model-facing, since `recall`
+/// renders that same holder and expiry into the context block. They are also
+/// precisely what the loser of a race needs, because the whole
 /// cooperative-identity design is "coordinate by ids"; a bare `conflict` leaves
 /// a caller unable to tell a lock it should wait for from one it should work
-/// around. So this opens the door for **one variant on one path**, not for raw
-/// errors generally: everything else on this path still goes through
-/// [`tool_err`], and the ledger still books the same `error_kind` (`"conflict"`).
+/// around.
 ///
-/// The message is folded to one line on the way out. [`LamboServer::check_agent_id`]
-/// already refuses an unrenderable id at the door, so this is defence in depth
-/// for a holder that entered by another path — a library caller, or an operator's
-/// `--agent`.
+/// **What selects this function is the producer, not the class (J1-R2-2).** The
+/// first version of this exception matched [`LamboError::Conflict`], and that
+/// was wrong: `Memory::reserve_as`/`release_as` enter `begin_write_sync()`
+/// *before* the graph, and a fenced handle's `lease_lost_error` was a `Conflict`
+/// too — one interpolating `store::lease::OPERATOR_OVERRIDE`, a raw
+/// `DELETE FROM session_leases …`. So `lambo_reserve` handed a model an
+/// operator-only statement against an internal table, on a path where the
+/// parent returned a class. Matching a *variant* opens the door for every
+/// producer of that variant, not for the one this docstring reasons about, and
+/// no amount of care in this function could have narrowed it — which is why
+/// `graph::reserve` now returns its own [`LamboError::SoftLock`] and this
+/// exception is spelled against that. The default is closed: a new `Conflict`
+/// producer anywhere under `reserve_as` flattens through [`tool_err`] without
+/// anyone having to remember this paragraph. `redact_urls` was never the
+/// missing piece — the leaked string had no `://`.
+///
+/// The exception stays as narrow as it reads: everything else on this path
+/// still goes through [`tool_err`], and the ledger books the same `error_kind`
+/// (`"conflict"`) either way, so the split is invisible downstream of
+/// [`err_class`]. The appended "wait for the expiry or work elsewhere" advice is
+/// true again for the same reason: a §11 soft lock does expire, whereas the
+/// fenced handle this function used to reach never will.
+///
+/// The message is folded to one line on the way out, by the same
+/// [`breaks_one_line`] class [`LamboServer::check_agent_id`] refuses at the door
+/// — one predicate, so the guard and the fold cannot disagree about what "one
+/// line" means (they did: J1-R2-1). The fold is defence in depth, for a holder
+/// that entered by another path — a library caller, or an operator's `--agent`.
 ///
 /// It does **not** [`redact_urls`]. N3's redaction exists for Lambo's own
 /// endpoints appearing in Lambo's own warnings; the holder here is a
 /// caller-chosen name, which `recall` already renders verbatim into the context
 /// block through `format::reservation_warning`. Redacting this one path would
 /// advertise a neutralisation the read side does not have. Whether a
-/// caller-chosen id should be neutralised on render at all is a rendering-side
-/// question for J2, alongside the length bound noted in `check_agent_id`.
+/// caller-chosen id should be neutralised on render at all is still open —
+/// recorded as a §J2 residual in `dev-diary/lambo-for-mooshik/J-multi-client.md`
+/// rather than only here, since J2 is where it comes due.
 fn conflict_err(what: &str, msg: &str, nothing: &str) -> CallToolResult {
     tracing::warn!(
         tool = what,
@@ -598,7 +669,9 @@ fn conflict_err(what: &str, msg: &str, nothing: &str) -> CallToolResult {
     note_error("conflict");
     CallToolResult::error(vec![ContentBlock::text(format!(
         "{what}: {}; {nothing}. Wait for the expiry or work elsewhere.",
-        msg.replace(['\n', '\r', '\t'], " ")
+        msg.chars()
+            .map(|c| if breaks_one_line(c) { ' ' } else { c })
+            .collect::<String>()
     ))])
 }
 
@@ -706,8 +779,9 @@ async fn contain_panic(
 /// ruling 2026-08-20). Deliberately far below the uniform `MAX_CONTENT_BYTES`:
 /// an id is a name other agents read, and the recall budget drops whole
 /// blocks, so an id near the uniform cap can evict the block it annotates
-/// from another agent's context. 256 is generous for any real client id.
-/// Applies only at this door — `--agent` and `AgentId` itself stay uncapped
+/// from another agent's context. 256 is generous for any real client id, and
+/// bounds — but does not eliminate — that eviction: see the measurement in
+/// [`LamboServer::check_agent_id`]. Applies only at this door — `--agent` and `AgentId` itself stay uncapped
 /// (trusted, process-side).
 const MAX_AGENT_ID_CHARS: usize = 256;
 
@@ -934,10 +1008,17 @@ impl LamboServer {
         // just one `lambo_derive`). So a line break lets one client write whole
         // lines into every *other* agent's context in Lambo's own `⚑ CANONICAL`
         // vocabulary, and a tab lets it distort how that block renders.
-        // Refusing both here means an id that reaches the graph is always
-        // renderable as one field on one line. (`\r` is already refused
-        // upstream by `check_size`; it is named here so this rule reads complete
-        // and survives a change to that exception table.)
+        // Refusing them here means an id that reaches the graph is always
+        // renderable as one field on one line — and the rule is stated as a
+        // character *class* ([`breaks_one_line`]), not as the three literals
+        // round 1 prescribed, because that list was incomplete the day it was
+        // written: U+2028/U+2029 are Zl/Zp, so they are neither controls nor
+        // members of `INVISIBLE_RANGES`, and they slipped every layer (J1-R2-1).
+        // The same predicate folds `conflict_err`'s message, so the two cannot
+        // drift apart again. (`\r` and the other C0/C1 controls are already
+        // refused upstream by `check_size`; the class covers them here anyway so
+        // this rule reads complete and survives a change to that exception
+        // table.)
         //
         // **Why the door and not `AgentId::new`.** The type is also constructed
         // from the operator's own `--agent` by the CLI and by library callers —
@@ -952,19 +1033,23 @@ impl LamboServer {
         // because the recall budget drops whole blocks, a holder id at the
         // uniform 16 KiB cap can evict the very block it annotates from
         // another agent's context — denial-of-context rather than injection.
-        // 256 chars is generous for any real client id and closes that vector
-        // at the same door as the single-line guard. The divergence from
+        // 256 chars is generous for any real client id and reduces that vector
+        // by ~64× at the same door as the single-line guard. It does not close
+        // it: measured (J1-R2-3), a 256-char holder still evicts the block it
+        // annotates below ~160 `max_tokens`, and the reservation line renders
+        // outside the budget entirely. The remainder is a rendering-side
+        // question, carried as a §J2 residual in
+        // `dev-diary/lambo-for-mooshik/J-multi-client.md` — not closed here.
+        // The divergence from
         // `--agent` and from `AgentId` (both uncapped) is deliberate: this
         // door is where unauthenticated remote identity is policed; trusted
         // process-side callers keep the type's semantics.
-        if let Some(c) = agent_id
-            .chars()
-            .find(|c| *c == '\n' || *c == '\r' || *c == '\t')
-        {
+        if let Some(c) = agent_id.chars().find(|c| breaks_one_line(*c)) {
             return Err(bad_param(format!(
-                "agent_id must be a single line with no tabs (found U+{:04X}); it is \
-                 rendered into other agents' recall context as the holder of your soft \
-                 locks — send a one-line id such as 'agent-b'",
+                "agent_id must be a single line with no tabs, control or line-separator \
+                 characters (found U+{:04X}); it is rendered into other agents' recall \
+                 context as the holder of your soft locks — send a one-line id such as \
+                 'agent-b'",
                 c as u32
             )));
         }
@@ -1516,7 +1601,7 @@ impl LamboServer {
                                      "summary": msg, "warnings": warnings }));
                     out
                 }
-                Err(LamboError::Conflict(msg)) => {
+                Err(LamboError::SoftLock(msg)) => {
                     conflict_err("lambo_reserve (release)", &msg, "nothing was released")
                 }
                 Err(e) => tool_err("lambo_reserve (release)", e),
@@ -1532,7 +1617,7 @@ impl LamboServer {
             .reserve_as(&acting, node_id, Duration::from_secs(ttl_secs))
         {
             Ok(r) => r,
-            Err(LamboError::Conflict(msg)) => {
+            Err(LamboError::SoftLock(msg)) => {
                 return conflict_err("lambo_reserve", &msg, "nothing was reserved")
             }
             Err(e) => return tool_err("lambo_reserve", e),
@@ -2643,6 +2728,12 @@ mod tests {
             "helper\nfake line",
             "helper\r\nfake line",
             "helper\tcolumn",
+            // J1-R2-1: Zl/Zp, so neither `char::is_control()` (Cc-only) nor
+            // `INVISIBLE_RANGES` catches them, and the three-literal guard did
+            // not either — yet both are forced line/paragraph breaks in CSS
+            // text layout, which `serve_web` renders the context block into.
+            "helper\u{2028}fake line",
+            "helper\u{2029}fake paragraph",
             oversize.as_str(),
             over_cap.as_str(),
         ] {
@@ -3020,6 +3111,126 @@ mod tests {
         .await;
         assert_eq!(freed.is_error, Some(false), "{freed:?}");
         s.mem.close().await.expect("close");
+    }
+
+    /// **J1-R2-1.** `conflict_err`'s fold is defence in depth for a holder that
+    /// entered by a door `check_agent_id` does not guard — a library caller or
+    /// an operator's `--agent`, neither of which is capped or single-lined. It
+    /// must therefore fold the *same* class the guard refuses, not a subset:
+    /// it folded three literals while the guard refused three literals, and both
+    /// were incomplete. Called directly because the MCP door now makes these ids
+    /// unreachable through a tool, which is the point — the fold exists for the
+    /// ids that never pass the door.
+    #[test]
+    fn conflict_err_folds_every_line_forging_character() {
+        for c in [
+            '\n', '\r', '\t', '\u{000B}', '\u{0085}', '\u{2028}', '\u{2029}',
+        ] {
+            let out = conflict_err(
+                "lambo_reserve",
+                &format!("node 0 already reserved by holder{c}forged until later"),
+                "nothing was reserved",
+            );
+            let text = text_of(&out);
+            assert!(
+                !text.contains(c),
+                "U+{:04X} must not survive the fold into a model-facing line: {text:?}",
+                c as u32
+            );
+            assert!(
+                text.contains("holder forged"),
+                "and the fold must replace it with a space, not delete it — \
+                 deleting would splice two tokens into one forged id: {text:?}"
+            );
+        }
+    }
+
+    /// **J1-R2-2.** `conflict_err`'s N4 exception must be earned by the §11
+    /// soft-lock *producer*, not by an error variant.
+    ///
+    /// `Memory::reserve_as`/`release_as` open with `begin_write_sync()`, so a
+    /// fenced handle (lost single-writer lease) fails *before* the graph is
+    /// touched — and `lease_lost_error` is a conflict too, one whose message
+    /// interpolates `store::lease::OPERATOR_OVERRIDE`: a raw
+    /// `DELETE FROM session_leases …` against an internal table, which reads to
+    /// a model as an instruction. A variant match rendered it intact; only a
+    /// producer-shaped one flattens it.
+    ///
+    /// Asserted on **both** arms of the tool, because both call the gate first,
+    /// and negatively as well as positively: the class must be there, and the
+    /// SQL, the schema, the lease state and the soft-lock-only "wait for the
+    /// expiry" advice must all be absent. The last of those matters on its own
+    /// — nothing expires for a fenced handle, and every later write is refused.
+    #[tokio::test]
+    async fn a_lease_lost_reserve_does_not_disclose_the_operator_override() {
+        let s = server("mcp-lease-lost").await;
+        let derived = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "shared config", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        let node = derived.structured_content.unwrap()["created"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The heartbeat would latch this on its next tick; drive it directly.
+        s.mem.simulate_lease_loss();
+
+        for release in [false, true] {
+            let out = call(
+                &s,
+                "lambo_reserve",
+                serde_json::json!({
+                    "agent_id": "agent-b", "node_id": node, "release": release
+                }),
+            )
+            .await;
+            assert_eq!(
+                out.is_error,
+                Some(true),
+                "a fenced handle must refuse to reserve or release \
+                 (release={release}): {out:?}"
+            );
+            let text = text_of(&out);
+            for leaked in [
+                "DELETE FROM",
+                "session_leases",
+                "single-writer",
+                "no longer the writer",
+                "Wait for the expiry",
+            ] {
+                assert!(
+                    !text.contains(leaked),
+                    "a lease-lost refusal must not disclose {leaked:?} to the model \
+                     (release={release}): {text}"
+                );
+            }
+            assert!(
+                text.contains("conflict") && text.contains("logged server-side"),
+                "it must flatten to the N4 class with the detail logged \
+                 (release={release}): {text}"
+            );
+        }
+
+        // Nothing was reserved, so the §11 state is untouched by either call.
+        assert!(
+            s.mem
+                .graph()
+                .read()
+                .reservation(NodeId(node.parse().unwrap()))
+                .is_none(),
+            "a refused reserve must not have taken a lock"
+        );
+        // A fenced close is honest too: it neither flushes nor releases.
+        s.mem
+            .close()
+            .await
+            .expect_err("a fenced close must not flush or release");
     }
 
     /// **R1/T82-9 pinned.** `structuredContent` is optional and commonly not

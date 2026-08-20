@@ -766,9 +766,34 @@ pub enum LamboError {
     /// The configuration is unusable.
     #[error("config: {0}")]
     Config(String),
-    /// Another writer holds this session, or another agent holds this node.
+    /// Another writer holds this session — the T8.6 single-writer lease, at
+    /// build time or lost mid-flight ([`crate::Memory`]'s lease-lost fence).
+    ///
+    /// Its message carries session-private state and an operator-only override,
+    /// so it is **not** model-facing: `mcp::server`'s N4 policy flattens it to a
+    /// class. The §11 soft-lock refusal that *is* safe to render is
+    /// [`LamboError::SoftLock`], a separate variant for exactly that reason
+    /// (J1-R2-2).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Another agent holds this node's §11 soft lock, or this agent does not
+    /// hold the lock it tried to release.
+    ///
+    /// Split out of [`LamboError::Conflict`] by J1-R2-2 so that "a soft-lock
+    /// refusal" is a *type*, not a string or a guess about which of a variant's
+    /// producers ran. Produced by `graph::reserve::{reserve, release}` and
+    /// nowhere else: those two messages are built from a node id the caller
+    /// just sent, the holder's `agent_id` and an expiry — all three already
+    /// model-facing, since `recall` renders the last two into the context
+    /// block — which is what lets `mcp::server` render this variant intact
+    /// while every other error class is flattened.
+    ///
+    /// `Display` is deliberately identical to [`LamboError::Conflict`]'s: this
+    /// is the same *class* to an operator and to the ledger (`error_kind` stays
+    /// `"conflict"`), and the CLI keeps the text its subprocess tests match. The
+    /// split is about who may read the detail, not about renaming the failure.
+    #[error("conflict: {0}")]
+    SoftLock(String),
     /// Any other failure, kept whole.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

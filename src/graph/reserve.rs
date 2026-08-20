@@ -19,7 +19,7 @@
 //! * Same-agent re-reservation **extends**: `expires_at` is replaced with
 //!   `now + ttl`; node and agent are unchanged.
 //! * Cross-agent re-reservation of a **live** lock returns
-//!   [`LamboError::Conflict`] naming the holder and expiry.
+//!   [`LamboError::SoftLock`] naming the holder and expiry.
 //! * Cross-agent re-reservation of an **expired** lock is a takeover: the new
 //!   agent's reservation replaces the dead one.
 //!
@@ -63,7 +63,7 @@ impl From<ReserveError> for LamboError {
 /// * No reservation -> create, `expires_at = now + ttl`.
 /// * Same agent -> extend (replace `expires_at` with `now + ttl`; node and
 ///   agent unchanged).
-/// * Cross-agent, unexpired -> `LamboError::Conflict` naming the holder and
+/// * Cross-agent, unexpired -> `LamboError::SoftLock` naming the holder and
 ///   expiry; the existing reservation is left untouched.
 /// * Cross-agent, expired -> takeover (new reservation for `agent`).
 pub fn reserve(
@@ -112,7 +112,12 @@ pub fn reserve(
         },
         // Cross-agent, still live — deny; existing lock untouched.
         Some((holder, expiry)) if now < expiry => {
-            return Err(LamboError::Conflict(format!(
+            // J1-R2-2: `SoftLock`, not `Conflict`. This message and
+            // `release`'s below are the only two the MCP layer renders to a
+            // model intact, and the variant is what earns them that — so
+            // keep them built from nothing but the caller's own node id, the
+            // holder and the expiry.
+            return Err(LamboError::SoftLock(format!(
                 "node {node} already reserved by {holder} until {expiry}"
             )));
         }
@@ -132,7 +137,7 @@ pub fn reserve(
 /// Release the soft lock on `node` held by `agent`.
 ///
 /// * Owner -> clears the reservation.
-/// * Non-owner -> `LamboError::Conflict`.
+/// * Non-owner -> `LamboError::SoftLock`.
 /// * No reservation -> `StoreError::NotFound`.
 pub fn release(graph: &mut Graph, node: NodeId, agent: &AgentId) -> Result<(), LamboError> {
     let held = graph.reservation(node).map(|r| r.agent_id.clone());
@@ -144,7 +149,9 @@ pub fn release(graph: &mut Graph, node: NodeId, agent: &AgentId) -> Result<(), L
             graph.clear_reservation(node);
             Ok(())
         }
-        Some(holder) => Err(LamboError::Conflict(format!(
+        // J1-R2-2: see `reserve` — model-facing intact, so caller-supplied
+        // and already-rendered fields only.
+        Some(holder) => Err(LamboError::SoftLock(format!(
             "node {node} is reserved by {holder}, not by {agent}"
         ))),
     }
@@ -240,7 +247,7 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            LamboError::Conflict(msg) => {
+            LamboError::SoftLock(msg) => {
                 assert!(msg.contains("alice"), "message should name holder: {msg}");
                 assert!(
                     msg.contains(&original.expires_at.to_string()),
@@ -251,7 +258,7 @@ mod tests {
                     "message should be about the node: {msg}"
                 );
             }
-            other => panic!("expected Conflict, got {other:?}"),
+            other => panic!("expected SoftLock, got {other:?}"),
         }
 
         // Existing reservation untouched by the denial.
@@ -289,11 +296,11 @@ mod tests {
 
         let err = release(&mut g, n, &agent("bob")).unwrap_err();
         match err {
-            LamboError::Conflict(msg) => assert!(
+            LamboError::SoftLock(msg) => assert!(
                 msg.contains("alice") && msg.contains("bob"),
                 "message should name both agents: {msg}"
             ),
-            other => panic!("expected Conflict, got {other:?}"),
+            other => panic!("expected SoftLock, got {other:?}"),
         }
 
         // Non-owner release must not clear the lock.
@@ -438,13 +445,13 @@ mod tests {
         // identity alone: a non-owner is still denied...
         let err = release(&mut g, n, &agent("bob")).unwrap_err();
         match err {
-            LamboError::Conflict(msg) => {
+            LamboError::SoftLock(msg) => {
                 assert!(
                     msg.contains("alice") && msg.contains("bob"),
                     "message should name both agents: {msg}"
                 )
             }
-            other => panic!("expected Conflict, got {other:?}"),
+            other => panic!("expected SoftLock, got {other:?}"),
         }
         assert!(
             g.reservation(n).is_some(),
