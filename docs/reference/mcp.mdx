@@ -34,13 +34,21 @@ the stdio transport; a second `--transport http` serve on a held session still r
 start, and says which process holds it.
 
 The socket lives in a private per-user directory: `$XDG_RUNTIME_DIR/lambo` if that variable is
-set, otherwise `$TMPDIR/lambo-<uid>`, otherwise `/tmp/lambo-<uid>`. The directory must be mode
-700 and owned by you — `lambo serve` creates it that way and refuses to bind into one that is
-not, since a socket in a directory other accounts can reach would let any local account issue
-writes against your session. If you see that refusal, remove the directory or set
-`XDG_RUNTIME_DIR` to one you own. A very long base directory can also leave no room for a
-socket address (the limit is 104 bytes for the whole path); a serve on such a machine still
-serves its own client normally and logs the reason, and only the forwarding stops working.
+set, otherwise `/tmp/lambo-<uid>`. Those are the only two, and `TMPDIR` is deliberately not
+among them — some clients pass it through to the servers they spawn and some scrub it, so
+keying a shared address on it made two clients on one machine disagree about where the socket
+was. The directory must be mode 700 and owned by you; `lambo serve` creates it that way and
+refuses both to bind into and to forward into one that is not, since a socket in a directory
+other accounts can reach would let any local account issue writes against your session. If you
+see that refusal, remove the directory or point `XDG_RUNTIME_DIR` at one you own. A very long
+`XDG_RUNTIME_DIR` can also leave no room for a socket address (the limit is 104 bytes for the
+whole path); a serve on such a machine still serves its own client normally and logs the
+reason, and only the forwarding stops working.
+
+Clients that disagree about the directory anyway still work. The socket's file name is derived
+from the session and the store, so a serve that finds a holder listening somewhere else
+forwards to wherever the holder actually published, and refuses only when the *name* differs —
+which means a different session or a different store, not a different environment.
 
 The socket file itself is disposable. Deleting it while a holder is running makes that holder
 unreachable to other clients until it restarts — the holder keeps working for its own client

@@ -73,18 +73,22 @@ const SUN_PATH_MAX: usize = 104;
 /// `ls` output. Identity comes from the hash, never from this prefix, so
 /// truncating it cannot collide two sessions.
 ///
-/// The filename is therefore at most `16 + 1 + 16 + 5 = 38` bytes, which is
-/// what makes the whole path fit [`SUN_PATH_MAX`] on the tightest real base
-/// directory measured: macOS's per-user `TMPDIR` is a fixed-shape
-/// `/var/folders/XX/<28>/T/` (46 bytes), plus `lambo-<euid>/` (10 for a 3-digit
-/// uid, 13 for a 6-digit one) plus 38 is 94 to 97, or 95 to 98 with the NUL —
-/// 6 to 9 bytes of headroom. Widening this constant spends that headroom, so it
-/// is a deliberate act, not a tidy-up.
+/// The filename is therefore at most `16 + 1 + 16 + 5 = 38` bytes. Against the
+/// two base directories [`endpoint_dir`] can produce:
 ///
-/// The per-uid suffix (J2-R1-3) is what took this from 13 bytes of headroom to
-/// 6–9, and it was worth it: without it a shared `/tmp` locks out every uid but
-/// the first. `the_ambient_environment_yields_a_bindable_endpoint` is what keeps
-/// this arithmetic honest on whatever machine runs the suite.
+/// * `/tmp/lambo-<euid>/` — 15 bytes for a 3-digit uid, 18 for a 6-digit one,
+///   plus 38 is 53 to 56, or 54 to 57 with the NUL: **47 to 50 bytes of
+///   headroom**;
+/// * `$XDG_RUNTIME_DIR/lambo/` — unbounded in principle, `/run/user/<uid>/` in
+///   practice, which is 21 bytes for a 5-digit uid, so 60 with the NUL and 44
+///   bytes of headroom.
+///
+/// Widening this constant spends that headroom, so it is a deliberate act, not a
+/// tidy-up. Dropping the `TMPDIR` rung (J2-L1) is what made the arithmetic
+/// comfortable: macOS's `TMPDIR` is a fixed-shape `/var/folders/XX/<28>/T/`
+/// (46 bytes) and left only 6 to 9 bytes.
+/// `the_ambient_environment_yields_a_bindable_endpoint` keeps this honest on
+/// whatever machine runs the suite, since `XDG_RUNTIME_DIR` can be anything.
 const SESSION_PREFIX_CHARS: usize = 16;
 
 /// Where a holder listens, and the string it publishes into the lease row.
@@ -121,9 +125,9 @@ impl SessionEndpoint {
     /// this process serving memory — the same posture `Ledger::open` takes"),
     /// while a base directory too long for a socket address was fatal. The
     /// harsher outcome was attached to the cheaper problem, and it made a long
-    /// `TMPDIR` (a deep per-user path, a container mount, a long username) a
-    /// hard startup failure on a machine that served fine before J2, for a
-    /// feature the operator never asked for.
+    /// runtime directory (a deep per-user path, a container mount, a long
+    /// username) a hard startup failure on a machine that served fine before J2,
+    /// for a feature the operator never asked for.
     ///
     /// The pre-lease argument was never about the refusal being fatal — it is
     /// about *where* the check may live, since it leaves nothing behind. So the
@@ -195,8 +199,9 @@ impl SessionEndpoint {
                 "this session can have no local endpoint: the address would be {len} bytes, over \
                  the {SUN_PATH_MAX}-byte limit a unix socket address has room for. The session \
                  name is not the problem — its contribution is bounded — the base directory is. \
-                 Set XDG_RUNTIME_DIR (or TMPDIR) to a shorter path so other clients on this \
-                 machine can attach to this session."
+                 Unset XDG_RUNTIME_DIR to fall back to a short private directory under tmp, or \
+                 point it at a shorter path, so other clients on this machine can attach to \
+                 this session."
             )));
         }
         Ok(Self { path })
@@ -266,46 +271,7 @@ impl SessionEndpoint {
                     dir.display()
                 ))
             })?;
-        // `symlink_metadata`, not `metadata`: this must be a statement about the
-        // directory entry we just created, not about wherever a pre-placed
-        // symlink points (J2-R1-3).
-        let meta = std::fs::symlink_metadata(dir).map_err(|e| {
-            LamboError::Config(format!(
-                "endpoint directory {} could not be inspected: {e}",
-                dir.display()
-            ))
-        })?;
-        if meta.file_type().is_symlink() {
-            return Err(LamboError::Config(format!(
-                "refusing to bind the session endpoint: {} is a symbolic link, not a \
-                 directory. Its target's permissions say nothing about who can reach a \
-                 socket placed through it, so this process will not follow it. Remove \
-                 that link, or set XDG_RUNTIME_DIR to a private directory.",
-                dir.display()
-            )));
-        }
-        // SAFETY: as in `endpoint_dir` — `geteuid` cannot fail.
-        let ours = unsafe { libc::geteuid() };
-        if meta.uid() != ours {
-            return Err(LamboError::Config(format!(
-                "refusing to bind the session endpoint: {} is owned by uid {}, not by \
-                 this process's uid {ours}. Even at mode 700 its owner controls what is \
-                 in it, so a socket there is not this session's to trust. Remove that \
-                 directory, or set XDG_RUNTIME_DIR to one you own.",
-                dir.display(),
-                meta.uid()
-            )));
-        }
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(LamboError::Config(format!(
-                "refusing to bind the session endpoint: {} is mode {mode:o}, reachable by \
-                 other users. A socket there would let any local account issue writes \
-                 against this session. Remove or chmod 700 that directory, or set \
-                 XDG_RUNTIME_DIR to a private one.",
-                dir.display()
-            )));
-        }
+        assert_private_dir(dir, "bind the session endpoint")?;
 
         let listener = match tokio::net::UnixListener::bind(&self.path) {
             Ok(l) => l,
@@ -372,22 +338,18 @@ impl SessionEndpoint {
     }
 }
 
-/// The directory endpoints live in, in preference order.
+/// The directory endpoints live in — **two rungs, deliberately, not three.**
 ///
 /// * `$XDG_RUNTIME_DIR/lambo` — the correct home on Linux: already per-user,
-///   already 0700, cleaned up at logout. **No uid suffix, because the base
-///   directory already carries one** (`/run/user/<uid>`), and spending path
+///   already 0700, cleaned up at logout, and on a system using `PrivateTmp` it
+///   is the *only* rung two processes can share. **No uid suffix, because the
+///   base directory already carries one** (`/run/user/<uid>`), and spending path
 ///   bytes on a discriminator that is already there would eat the `sun_path`
 ///   headroom for nothing.
-/// * `$TMPDIR/lambo-<euid>` — the macOS answer, where `XDG_RUNTIME_DIR` is unset
-///   and `TMPDIR` is a per-user `/var/folders/…` directory. The suffix is *not*
-///   redundant here: `TMPDIR` is an ordinary environment variable and is
-///   routinely set to `/tmp` in containers and CI, at which point this branch
-///   and the one below are the same directory.
-/// * `/tmp/lambo-<euid>` — the last resort, reached whenever neither variable is
-///   set: bare containers, `ssh` without `pam_systemd`, cron.
+/// * `/tmp/lambo-<euid>` — everywhere else: macOS, bare containers, `ssh`
+///   without `pam_systemd`, cron.
 ///
-/// # Why the last resort is per-uid (J2-R1-3)
+/// # Why the fallback is per-uid (J2-R1-3)
 ///
 /// The suffix is what makes the shared fallback safe **by construction** rather
 /// than by check, and losing it was a regression, not merely a missed hardening.
@@ -399,27 +361,53 @@ impl SessionEndpoint {
 ///
 /// This restores the decision recorded in the project graph, which the shipped
 /// stage-2 code dropped on both fallbacks; the graph and the code now agree.
+///
+/// # Why `TMPDIR` was removed (J2-L1)
+///
+/// `TMPDIR` was the second of three rungs, and the live two-client probe showed
+/// it is **the wrong kind of variable to key a shared address on**: it varies
+/// per *client product*, by accident, for one user on one machine. Measured on
+/// macOS with `XDG_RUNTIME_DIR` unset in both children:
+///
+/// * `cursor-agent` **scrubs** `TMPDIR` from the environment of the MCP server
+///   it spawns → the derivation fell through to `/tmp/lambo`;
+/// * `opencode` **passes** macOS's per-user `TMPDIR` through →
+///   `$TMPDIR/lambo`.
+///
+/// Same binary, same store, same session, two addresses. The losing serve
+/// compared the row's published endpoint against its own derivation, refused to
+/// forward ("it is running a different endpoint scheme"), waited out its
+/// election budget, and the client declared the server failed. Cross-client
+/// memory was silently absent on **unmodified default wiring** — the exact
+/// failure J2 exists to remove, reintroduced through the environment.
+///
+/// Two rungs make that case disappear at the source: with `XDG_RUNTIME_DIR`
+/// unset, *every* client lands on `/tmp/lambo-<euid>` no matter what it does
+/// with `TMPDIR`. `XDG_RUNTIME_DIR` stays because it is a different kind of
+/// variable — set once per login session by the platform, not per child by a
+/// client — and because it is the rung that works where `/tmp` is not shared.
+/// It can still be scrubbed by one client and not another, which is why
+/// [`crate::mcp::proxy::proxyable`] no longer *requires* the directories to
+/// match; nothing here has to be perfect, only unsurprising.
+///
+/// Losing the rung costs nothing else: `/tmp/lambo-<euid>` is *shorter* than
+/// macOS's `TMPDIR`, so it gives the `sun_path` bound more headroom rather than
+/// less (see [`SESSION_PREFIX_CHARS`]), and privacy comes from the 0700 mode and
+/// the ownership check either way.
 fn endpoint_dir() -> PathBuf {
     // SAFETY: `geteuid` is always successful and touches no memory the caller
     // owns. There is no std equivalent.
     let uid = unsafe { libc::geteuid() };
-    endpoint_dir_from(
-        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
-        std::env::var("TMPDIR").ok().as_deref(),
-        uid,
-    )
+    endpoint_dir_from(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), uid)
 }
 
 /// [`endpoint_dir`] with the environment supplied — pure, so the preference
 /// order and the uid discriminator are testable without `set_var`, which is
-/// process-global and makes two tests racing on `TMPDIR` look like a real defect
-/// on a loaded runner.
-fn endpoint_dir_from(xdg: Option<&str>, tmpdir: Option<&str>, uid: u32) -> PathBuf {
+/// process-global and makes two tests racing on an environment variable look
+/// like a real defect on a loaded runner.
+fn endpoint_dir_from(xdg: Option<&str>, uid: u32) -> PathBuf {
     if let Some(base) = xdg.and_then(non_empty_dir) {
         return base.join("lambo");
-    }
-    if let Some(base) = tmpdir.and_then(non_empty_dir) {
-        return base.join(format!("lambo-{uid}"));
     }
     PathBuf::from(format!("/tmp/lambo-{uid}"))
 }
@@ -431,6 +419,71 @@ fn non_empty_dir(value: &str) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(trimmed))
+}
+
+/// Refuse a directory that is not a private, self-owned one.
+///
+/// Shared by [`SessionEndpoint::bind`] and by the proxy's dial
+/// ([`crate::mcp::proxy::dial_dir`]), and **symmetry is the point**: a directory
+/// this process would refuse to *place* a socket in is one it must refuse to
+/// *reach* a socket in, since J2-L1 lets a proxy dial the directory the holder
+/// published rather than only its own derivation. `what` names the action for the
+/// message, which is operator-facing on stderr.
+///
+/// Three checks, each answering a distinct attack (J2-R1-3):
+///
+/// * **Not a symlink.** `std::fs::metadata` *follows* symlinks, so an
+///   attacker-placed `/tmp/lambo-<uid> → /tmp/theirs` with `/tmp/theirs` at 0700
+///   passed a mode-only gate. `symlink_metadata` asks about the entry itself.
+/// * **Owned by this euid.** A 0700 directory owned by a *different* uid that we
+///   can nonetheless write into — an ACL grant on macOS, a group-writable
+///   ancestor — passed a mode-only gate too.
+/// * **Mode 0700.** A directory an attacker pre-created world-writable is
+///   refused rather than used.
+///
+/// Same-uid processes remain out of the threat model — they can already read the
+/// store.
+pub(crate) fn assert_private_dir(dir: &Path, what: &str) -> Result<(), LamboError> {
+    // `symlink_metadata`, not `metadata`: this must be a statement about this
+    // directory entry, not about wherever a pre-placed symlink points.
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| {
+        LamboError::Config(format!(
+            "endpoint directory {} could not be inspected: {e}",
+            dir.display()
+        ))
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(LamboError::Config(format!(
+            "refusing to {what}: {} is a symbolic link, not a directory. Its \
+             target's permissions say nothing about who can reach a socket placed \
+             through it, so this process will not follow it. Remove that link, or \
+             set XDG_RUNTIME_DIR to a private directory.",
+            dir.display()
+        )));
+    }
+    // SAFETY: as in `endpoint_dir` — `geteuid` cannot fail.
+    let ours = unsafe { libc::geteuid() };
+    if meta.uid() != ours {
+        return Err(LamboError::Config(format!(
+            "refusing to {what}: {} is owned by uid {}, not by this process's uid \
+             {ours}. Even at mode 700 its owner controls what is in it, so a socket \
+             there is not this session's to trust. Remove that directory, or set \
+             XDG_RUNTIME_DIR to one you own.",
+            dir.display(),
+            meta.uid()
+        )));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(LamboError::Config(format!(
+            "refusing to {what}: {} is mode {mode:o}, reachable by other users. A \
+             socket there would let any local account issue writes against this \
+             session. Remove or chmod 700 that directory, or set XDG_RUNTIME_DIR to \
+             a private one.",
+            dir.display()
+        )));
+    }
+    Ok(())
 }
 
 /// A filesystem-safe, length-bounded prefix of the session name — for a human
@@ -828,50 +881,64 @@ mod tests {
         assert_eq!(canonical_store_path(""), "");
     }
 
-    /// J2-R1-3: the shared fallbacks carry the euid; `XDG_RUNTIME_DIR` does not,
+    /// J2-R1-3: the shared fallback carries the euid; `XDG_RUNTIME_DIR` does not,
     /// because it already does.
     #[test]
-    fn the_shared_endpoint_directories_are_per_uid() {
+    fn the_shared_endpoint_directory_is_per_uid() {
         assert_eq!(
-            endpoint_dir_from(Some("/run/user/501"), Some("/tmp"), 501),
+            endpoint_dir_from(Some("/run/user/501"), 501),
             PathBuf::from("/run/user/501/lambo"),
             "XDG_RUNTIME_DIR is already per-user; spending path bytes twice would eat the \
              sun_path headroom for nothing"
         );
         assert_eq!(
-            endpoint_dir_from(None, Some("/var/folders/x/T/"), 501),
-            PathBuf::from("/var/folders/x/T/lambo-501")
-        );
-        assert_eq!(
-            endpoint_dir_from(None, None, 501),
-            PathBuf::from("/tmp/lambo-501")
-        );
-        // The case that makes the TMPDIR suffix necessary rather than tidy:
-        // TMPDIR is an ordinary env var and is routinely /tmp in containers, so
-        // this branch and the last resort are then the same shared directory.
-        assert_eq!(
-            endpoint_dir_from(None, Some("/tmp"), 501),
+            endpoint_dir_from(None, 501),
             PathBuf::from("/tmp/lambo-501")
         );
         // Set-but-empty is not set.
         assert_eq!(
-            endpoint_dir_from(Some(""), Some("/"), 501),
+            endpoint_dir_from(Some(""), 501),
+            PathBuf::from("/tmp/lambo-501")
+        );
+        assert_eq!(
+            endpoint_dir_from(Some("/"), 501),
             PathBuf::from("/tmp/lambo-501")
         );
         // The property the whole finding is about: no two uids share a
-        // directory on a shared base, so the first user cannot lock the rest out.
-        assert_ne!(
-            endpoint_dir_from(None, None, 501),
-            endpoint_dir_from(None, None, 502)
-        );
+        // directory on the shared base, so the first user cannot lock the rest
+        // out.
+        assert_ne!(endpoint_dir_from(None, 501), endpoint_dir_from(None, 502));
         // And the bare shared directory that caused the lockout is unreachable.
-        for dir in [
-            endpoint_dir_from(None, None, 0),
-            endpoint_dir_from(None, Some("/tmp"), 0),
-            endpoint_dir(),
-        ] {
+        for dir in [endpoint_dir_from(None, 0), endpoint_dir()] {
             assert_ne!(dir, PathBuf::from("/tmp/lambo"), "{}", dir.display());
         }
+    }
+
+    /// J2-L1, measured live: `cursor-agent` scrubs `TMPDIR` from its MCP child
+    /// and `opencode` passes macOS's per-user `TMPDIR` through, so with the old
+    /// three-rung scheme two client products derived two directories for one
+    /// session on one store — and cross-client memory was silently absent on
+    /// unmodified default wiring.
+    ///
+    /// `TMPDIR` is no longer in the scheme, so the *whole class* is gone: what
+    /// a client does to that variable cannot move this address.
+    #[test]
+    fn what_a_client_does_to_tmpdir_cannot_move_the_endpoint() {
+        // The two observed environments, reduced to their difference.
+        let scrubbed = endpoint_dir_from(None, 501);
+        let inherited = endpoint_dir_from(None, 501);
+        assert_eq!(
+            scrubbed, inherited,
+            "TMPDIR is not an input any more, so the two products agree by construction"
+        );
+        assert_eq!(scrubbed, PathBuf::from("/tmp/lambo-501"));
+        // And the full derivation agrees too, which is the property that matters
+        // — one dialable address for one session on one store.
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        assert_eq!(
+            SessionEndpoint::resolve_in(&scrubbed, "s", &store).unwrap(),
+            SessionEndpoint::resolve_in(&inherited, "s", &store).unwrap()
+        );
     }
 
     /// J2-R1-3: the mode check must be about the directory entry we created, not

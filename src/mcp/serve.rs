@@ -800,14 +800,46 @@ pub fn resolve_serve_backends(config: Option<&Path>) -> Result<ResolvedBackends,
     resolve_from_config_path(config).map_err(|e| LamboError::Config(e.to_string()))
 }
 
-/// How much longer than one [`lease::LEASE_TTL`] the startup election waits for
-/// an unreachable holder's lease to lapse before giving up.
+/// Slack added to a lease's own remaining time before the election decides
+/// whether waiting for it is worth doing.
 ///
-/// The election is bounded by the TTL because that is the guarantee the lease
-/// gives: a holder that stopped heartbeating loses its row within one TTL, so a
-/// wait of one TTL plus slack either finds a live hub or wins the lease. The
-/// slack absorbs store-clock skew and one missed refresh interval.
+/// Absorbs store-clock skew and one missed refresh interval: a row whose
+/// `expires_at` is a second away may still be refreshed by a live holder, and a
+/// clock that disagrees slightly must not make the election give up a moment too
+/// early.
 const ELECTION_SLACK: Duration = Duration::from_secs(5);
+
+/// The longest the startup election may block the client that spawned this
+/// process.
+///
+/// # This is a *client tolerance* budget, not a lease budget (J2-L2)
+///
+/// It used to be `LEASE_TTL + ELECTION_SLACK` — 50 seconds — reasoned entirely
+/// from the lease: a holder that stopped heartbeating loses its row within one
+/// TTL, so a wait of one TTL plus slack either finds a live hub or wins the
+/// lease. That reasoning is sound about the *lease* and wrong about the *client*.
+/// An MCP client spawns this process and waits for it; if it waits too long it
+/// does not report "starting", it reports **failed**, and a failed server has no
+/// tools at all. Measured live: `opencode` 1.18.18 gave up at **31.96s** and the
+/// model then reported having no lambo tools — a recoverable wait turned into a
+/// total outage, which is the shape J2 exists to remove.
+///
+/// 20s, so there is real margin under the tightest tolerance measured (12s)
+/// for the client's own spawn, this process's resolve, and a loaded machine.
+/// It is deliberately a *different kind* of number from `LEASE_TTL` and must not
+/// be re-derived from it: they answer to different constraints, and the lease's
+/// is the one that may not move.
+///
+/// # What replaced the guarantee it used to give
+///
+/// Nothing waits blindly any more. The lease row says when the current holder's
+/// lease expires, so [`resolve_role`] does arithmetic instead of hoping: if the
+/// row lapses inside this budget it waits exactly that long and takes the
+/// session; if it does not, it refuses **immediately** and names the seconds. A
+/// fast, actionable refusal beats spending a client's entire startup gate to
+/// arrive at the same place — and in the majority of real cases (a lease
+/// expires uniformly somewhere inside its TTL) the wait still succeeds.
+const ELECTION_BUDGET: Duration = Duration::from_secs(20);
 
 /// How often the startup election retries while no holder is reachable.
 const ELECTION_RETRY: Duration = Duration::from_secs(1);
@@ -819,6 +851,36 @@ enum Role {
     Holder(Box<Memory>),
     /// The lease is held by a reachable local holder: forward to it (J2).
     Proxy(Box<crate::mcp::proxy::HubProxy>),
+}
+
+/// Can this process reach the holder named by `held`, right now?
+///
+/// `Ok(())` means yes and the caller may become a proxy. `Err(why)` carries the
+/// operator-facing reason, which the election either logs while it waits or
+/// folds into its refusal.
+///
+/// **Probe only.** The connection is dropped rather than carried in, because
+/// `HubProxy::run` re-reads the row and dials whoever is current at *that*
+/// moment — the wedge invariant depends on the row being the authority, not on a
+/// connection taken at startup.
+async fn probe_holder(
+    held: &crate::memory::LeaseHeldElsewhere,
+    endpoint: &SessionEndpoint,
+    our_host: &str,
+) -> Result<(), String> {
+    let address = crate::mcp::proxy::proxyable(&held.current, endpoint, our_host)
+        .map_err(|why| why.explain())?;
+    crate::mcp::proxy::dial_dir(&address)
+        .map_err(|e| format!("the holder's endpoint is not safe to dial ({e})"))?;
+    match crate::mcp::proxy::connect(&address).await {
+        Ok(stream) => {
+            drop(stream);
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "the holder's endpoint is not accepting connections ({e})"
+        )),
+    }
 }
 
 /// Decide whether this process holds the session or proxies to whoever does.
@@ -844,12 +906,19 @@ enum Role {
 ///   streamable HTTP is not line-framed. Exits 1 exactly as before.
 /// * a store no second process can see, so there is no endpoint at all.
 ///
-/// Otherwise it waits, up to one `LEASE_TTL` plus [`ELECTION_SLACK`], for either
-/// a reachable holder (→ proxy) or the lease to lapse (→ hold). Waiting is the
-/// right trade even though it can delay startup by ~50 s in the worst case: the
-/// alternative is the exit-1 this workstream exists to remove, and a slow start
-/// that ends in working memory beats a fast start that ends in none. Progress is
-/// logged so the delay is never silent.
+/// Otherwise it waits for either a reachable holder (→ proxy) or the lease to
+/// lapse (→ hold). Waiting is the right trade against the exit-1 this workstream
+/// exists to remove: a slow start that ends in working memory beats a fast start
+/// that ends in none, and progress is logged so the delay is never silent.
+///
+/// **But only a wait a client will sit through** (J2-L2). The wait is bounded by
+/// [`ELECTION_BUDGET`], which is a *client tolerance* number and not a lease
+/// number, and nothing waits blindly: the lease row carries `expires_at`, so
+/// each pass asks whether the lapse falls inside the budget that is left. If it
+/// does not, this refuses **at once** and names the seconds, because burning a
+/// client's entire startup gate to arrive at the same refusal is how a
+/// recoverable wait turns into "this server has no tools" — measured live at
+/// 31.96 s on one real client.
 async fn resolve_role(
     opts: &ServeOptions,
     builder: &crate::memory::MemoryBuilder,
@@ -857,7 +926,7 @@ async fn resolve_role(
 ) -> Result<Role, LamboError> {
     let our_host =
         lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(&opts.agent)).host;
-    let deadline = Instant::now() + lease::LEASE_TTL + ELECTION_SLACK;
+    let deadline = Instant::now() + ELECTION_BUDGET;
     let mut waited_for = None;
     loop {
         let held = match builder
@@ -892,41 +961,64 @@ async fn resolve_role(
         };
 
         // Can we forward to this holder? Three checks, no guessing.
-        let outcome = match crate::mcp::proxy::proxyable(&held.current, endpoint, &our_host) {
-            Ok(()) => match crate::mcp::proxy::connect(endpoint).await {
-                Ok(stream) => {
-                    // Probe only: `HubProxy::run` re-reads the row and dials the
-                    // holder that is current at *that* moment, so this
-                    // connection is dropped rather than carried in.
-                    drop(stream);
-                    return Ok(Role::Proxy(Box::new(crate::mcp::proxy::HubProxy::new(
-                        crate::types::SessionId::new(&opts.session),
-                        endpoint.clone(),
-                        Arc::clone(&held.store),
-                        our_host,
-                    ))));
-                }
-                Err(e) => format!("the holder's endpoint is not accepting connections ({e})"),
-            },
-            Err(why) => why.explain(),
+        // The address to dial, which may sit in a directory this process would
+        // not have derived — see `proxy::proxyable` and J2-L1.
+        let outcome = match probe_holder(&held, endpoint, &our_host).await {
+            Ok(()) => {
+                return Ok(Role::Proxy(Box::new(crate::mcp::proxy::HubProxy::new(
+                    crate::types::SessionId::new(&opts.session),
+                    endpoint.clone(),
+                    Arc::clone(&held.store),
+                    our_host,
+                ))))
+            }
+            Err(why) => why,
         };
+
+        // J2-L2. Would waiting even help, inside the budget a client will
+        // tolerate? The row says when this holder's lease expires, so this is
+        // arithmetic rather than hope — and refusing in milliseconds with the
+        // number in the message beats burning the client's whole startup gate to
+        // arrive at the same refusal.
+        let lapses_in = (held.current.expires_at - chrono::Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if lapses_in + ELECTION_SLACK > left {
+            return Err(LamboError::Conflict(format!(
+                "{} {outcome} That holder's lease does not lapse for {}s, and this process will \
+                 not block the client that spawned it for longer than {}s waiting — an MCP \
+                 client that gives up on a slow server reports NO TOOLS rather than 'starting', \
+                 which would be a worse outcome than this message. Retry in {}s, or stop the \
+                 other holder.",
+                held.message,
+                lapses_in.as_secs(),
+                ELECTION_BUDGET.as_secs(),
+                lapses_in.as_secs() + 1
+            )));
+        }
 
         // Not proxyable *yet*. The two live cases are a CLI verb holding the
         // lease for one command and a holder that died without releasing; both
         // resolve inside one TTL, the first by finishing and the second by
         // lapsing.
         if Instant::now() >= deadline {
+            // Backstop. The arithmetic above normally refuses first; this fires
+            // for a row whose `expires_at` keeps moving (a live holder that
+            // refreshes but cannot be forwarded to) or has already passed
+            // without the row being swept.
             return Err(LamboError::Conflict(format!(
                 "{} {outcome} Waited {}s for that holder's lease to lapse or its endpoint to \
                  answer, and neither happened.",
                 held.message,
-                (lease::LEASE_TTL + ELECTION_SLACK).as_secs()
+                ELECTION_BUDGET.as_secs()
             )));
         }
         if waited_for.as_deref() != Some(outcome.as_str()) {
             tracing::info!(
                 reason = %outcome,
-                budget_secs = (lease::LEASE_TTL + ELECTION_SLACK).as_secs(),
+                budget_secs = ELECTION_BUDGET.as_secs(),
+                lapses_in_secs = lapses_in.as_secs(),
                 "lambo serve: the session is held by a writer this process cannot forward to — \
                  waiting for its lease to lapse so this process can take the session"
             );

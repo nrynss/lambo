@@ -273,10 +273,14 @@ pub enum NotProxyable {
     /// the *holder's* filesystem and `session_leases.holder` carries the host,
     /// so a same-shaped path here would be a different socket — or nothing.
     HolderIsOnAnotherHost { holder: String },
-    /// The row's endpoint is not the one this build derives for this session and
-    /// store. The holder is running a different endpoint scheme (a different
-    /// lambo version, a different `XDG_RUNTIME_DIR`), so this process cannot
-    /// know that the socket it would dial serves the graph it means.
+    /// The row's endpoint does not carry the address *identity* this build
+    /// derives for this session and store — the hashed file name differs, so the
+    /// holder is answering for a different `(session, store)` pair or is running
+    /// a different endpoint scheme altogether. This process cannot know that the
+    /// socket it would dial serves the graph it means.
+    ///
+    /// The **directory** differing is *not* this case (J2-L1) — see
+    /// [`proxyable`].
     EndpointIsNotOurs { published: String },
 }
 
@@ -299,25 +303,55 @@ impl NotProxyable {
                  --transport http against the holder, or run this session's writer here."
             ),
             Self::EndpointIsNotOurs { published } => format!(
-                "That holder published the endpoint {published}, which is not the address this \
-                 build derives for this session and store. It is running a different endpoint \
-                 scheme — a different lambo version, or a different XDG_RUNTIME_DIR/TMPDIR — so \
-                 forwarding there could reach a socket serving a different graph. Refusing to \
-                 guess. Align the two processes' environments, or stop the other holder."
+                "That holder published the endpoint {published}, whose name does not carry the \
+                 address identity this build derives for this session and store. Only the \
+                 directory may differ between two clients; the name is a hash of the session \
+                 and the store, so a different name means a different session, a different \
+                 store, or a lambo whose endpoint scheme is not this one — and forwarding \
+                 there could reach a socket serving a different graph. Refusing to guess. Run \
+                 both processes from the same lambo build against the same store, or stop the \
+                 other holder."
             ),
         }
     }
 }
 
-/// Decide whether the holder named by a lease row can be proxied to.
+/// Decide whether the holder named by a lease row can be proxied to, and return
+/// **the path to dial**.
 ///
 /// Pure: three checks, no I/O, so it is unit-testable and so the *reason* a
 /// refusal happened is a value rather than a log line.
+///
+/// # Why the directory may differ but the name may not (J2-L1)
+///
+/// This used to require the published endpoint to equal this process's own
+/// derivation, byte for byte. The live two-client probe showed that is too
+/// strict in the one configuration J2 exists for: `cursor-agent` scrubs `TMPDIR`
+/// from the environment of the MCP server it spawns and `opencode` passes
+/// macOS's per-user `TMPDIR` through, so the two products' serves derived two
+/// **directories** for one session on one store. The loser refused to forward,
+/// waited out its election budget, and the client reported no tools —
+/// cross-client memory silently absent on unmodified default wiring.
+///
+/// The address's **file name** is what carries identity: a cosmetic session
+/// prefix plus 16 hex of FNV-1a over the session id and the *canonicalized*
+/// store identity (J2-R1-2 is what makes that half trustworthy — before it, the
+/// hash covered a store's spelling). So a matching name means the same session
+/// on the same store, and the directory only decides *reachability*. Trusting
+/// the published directory is therefore benign by construction, while a
+/// differing name is the real different-graph case and is still refused.
+///
+/// **The trust boundary is unchanged: it is the store.** The published path is
+/// store data, so a writer who could forge it could already write graph content
+/// the model reads, which is strictly more power. The one thing added on top is
+/// symmetry — [`HubProxy::dial`] runs the published directory through the same
+/// private-directory check `bind` runs, so a directory this process would refuse
+/// to place a socket in is one it refuses to reach a socket in.
 pub fn proxyable(
     row: &LeaseInfo,
     ours: &SessionEndpoint,
     our_host: &str,
-) -> Result<(), NotProxyable> {
+) -> Result<std::path::PathBuf, NotProxyable> {
     let Some(published) = row.endpoint.as_deref() else {
         return Err(NotProxyable::HolderPublishedNoEndpoint);
     };
@@ -328,12 +362,16 @@ pub fn proxyable(
             holder: row.holder.clone(),
         });
     }
-    if published != ours.published() {
+    let published = std::path::Path::new(published);
+    // The name, not the whole path. An empty or directory-only published value
+    // has no name and cannot match.
+    let ours_name = ours.path().file_name();
+    if published.file_name().is_none() || published.file_name() != ours_name {
         return Err(NotProxyable::EndpointIsNotOurs {
-            published: published.to_string(),
+            published: published.display().to_string(),
         });
     }
-    Ok(())
+    Ok(published.to_path_buf())
 }
 
 /// Does a `agent@host#pid` holder token name this host?
@@ -647,6 +685,22 @@ enum Step {
     FromHub(Option<(u64, FromHub)>),
 }
 
+/// Refuse to dial into a directory this process would refuse to bind in.
+///
+/// The symmetric half of J2-L1: a proxy may now dial the directory the *holder*
+/// published rather than only its own derivation, so the private-directory check
+/// has to run on the dial side too. Same three checks, same messages, one
+/// action word apart.
+pub(crate) fn dial_dir(address: &std::path::Path) -> Result<(), LamboError> {
+    let dir = address.parent().ok_or_else(|| {
+        LamboError::Conflict(format!(
+            "the holder published the endpoint {}, which has no parent directory",
+            address.display()
+        ))
+    })?;
+    crate::mcp::endpoint::assert_private_dir(dir, "forward to the session holder")
+}
+
 /// Connect to the holder's endpoint, retrying inside [`CONNECT_BUDGET`].
 ///
 /// The retry exists for the holder's own acquire→bind window: the endpoint's
@@ -654,11 +708,11 @@ enum Step {
 /// so a proxy that raced in between would otherwise see `ECONNREFUSED` on a
 /// perfectly healthy session.
 pub(crate) async fn connect(
-    endpoint: &SessionEndpoint,
+    path: &std::path::Path,
 ) -> Result<tokio::net::UnixStream, std::io::Error> {
     let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
     loop {
-        match tokio::net::UnixStream::connect(endpoint.path()).await {
+        match tokio::net::UnixStream::connect(path).await {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 if tokio::time::Instant::now() >= deadline {
@@ -763,9 +817,24 @@ impl HubProxy {
                     self.session
                 ))
             })?;
-        proxyable(&row, &self.endpoint, &self.our_host)
+        let address = proxyable(&row, &self.endpoint, &self.our_host)
             .map_err(|why| LamboError::Conflict(why.explain()))?;
-        connect(&self.endpoint)
+        dial_dir(&address)?;
+        if address != self.endpoint.path() {
+            // J2-L1. Logged at INFO, not WARN: it is the expected shape when two
+            // client products pass different environment to their serve, and the
+            // name matching is what makes it benign. An operator asking "why is
+            // the socket not where I expected" needs to see it.
+            tracing::info!(
+                published = %address.display(),
+                derived = %self.endpoint.path().display(),
+                "lambo serve: the holder's endpoint directory differs from this process's — \
+                 forwarding to the published path, because the address name (a hash of the \
+                 session and the store) matches, so this is the same session on the same store \
+                 reached through a different environment"
+            );
+        }
+        connect(&address)
             .await
             .map_err(|e| LamboError::Conflict(format!("holder endpoint not reachable: {e}")))
     }
@@ -1241,12 +1310,91 @@ mod tests {
     #[test]
     fn a_local_holder_publishing_our_endpoint_is_proxyable() {
         let ours = ours();
-        assert!(proxyable(
-            &row("a@this-host#4213", Some(&ours.published())),
-            &ours,
-            "this-host"
-        )
-        .is_ok());
+        assert_eq!(
+            proxyable(
+                &row("a@this-host#4213", Some(&ours.published())),
+                &ours,
+                "this-host"
+            )
+            .expect("our own derivation is proxyable"),
+            ours.path().to_path_buf(),
+            "the address to dial is the published one, which here equals ours"
+        );
+    }
+
+    /// J2-L1, measured live: `cursor-agent` scrubs `TMPDIR` from the environment
+    /// of the MCP server it spawns and `opencode` passes macOS's per-user
+    /// `TMPDIR` through, so before this the two products' serves derived two
+    /// **directories** for one session on one store and the loser refused to
+    /// forward — cross-client memory silently absent on default wiring.
+    ///
+    /// The directory may differ. The **name** may not: it is a hash of the
+    /// session and the canonicalized store identity, so a match means the same
+    /// session on the same store and the directory decides only reachability.
+    #[test]
+    fn a_holder_publishing_the_same_address_in_another_directory_is_proxyable() {
+        let ours = ours();
+        let name = ours
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // The two directories the live probe actually produced, in shape.
+        for dir in [
+            "/var/folders/q1/4dwfdvt563ng8lwybj8bry_c0000gn/T/lambo-501",
+            "/run/user/501/lambo",
+        ] {
+            let published = format!("{dir}/{name}");
+            let address = proxyable(&row("a@this-host#1", Some(&published)), &ours, "this-host")
+                .unwrap_or_else(|e| {
+                    panic!("a matching address name must be proxyable: {}", e.explain())
+                });
+            assert_eq!(
+                address,
+                std::path::PathBuf::from(&published),
+                "the address to DIAL is the holder's published path, not this process's \
+                 derivation — that is the whole fix"
+            );
+            assert_ne!(
+                address,
+                ours.path(),
+                "and this test is only meaningful because the two differ"
+            );
+        }
+    }
+
+    /// The other side of the same decision: a differing **name** is the real
+    /// different-graph case and stays a refusal, because the name is the only
+    /// thing carrying identity.
+    #[test]
+    fn a_holder_publishing_a_different_address_name_is_not_proxyable() {
+        let ours = ours();
+        let dir = ours.path().parent().unwrap().display().to_string();
+        for published in [
+            // Same directory, another session or another store.
+            format!("{dir}/other-0000000000000000.sock"),
+            // Our own name with the hash altered by one nibble.
+            {
+                let name = ours
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                format!("{dir}/{}", name.replacen(".sock", "x.sock", 1))
+            },
+            // No name at all.
+            "/".to_string(),
+            String::new(),
+        ] {
+            let err = proxyable(&row("a@this-host#1", Some(&published)), &ours, "this-host")
+                .expect_err("a different address name must be refused");
+            assert!(
+                matches!(err, NotProxyable::EndpointIsNotOurs { .. }),
+                "{published:?} gave {err:?}"
+            );
+        }
     }
 
     /// J1 takes `agent_id` untrimmed and unnormalised, so an agent may name

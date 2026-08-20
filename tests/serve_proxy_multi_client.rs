@@ -758,8 +758,13 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
 ///
 /// Before the remediation `SessionEndpoint::for_store`'s length refusal
 /// propagated out of `serve` and the process exited — on a machine that served
-/// fine before J2, for a feature the operator never asked for. A long `TMPDIR`
-/// is not exotic: a deep per-user path, a container mount, a long username.
+/// fine before J2, for a feature the operator never asked for. A long runtime
+/// directory is not exotic: a deep per-user path, a container mount, a long
+/// username.
+///
+/// Driven through `XDG_RUNTIME_DIR`, which after J2-L1 is the only environment
+/// variable in the derivation — `TMPDIR` was removed from it precisely because
+/// two client products disagreed about passing it through.
 ///
 /// The observable degradation, both halves: the client's session works, and the
 /// lease row's `endpoint` is NULL, which is the honest row for a holder nothing
@@ -770,10 +775,10 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
     let (dir, cfg, db) = scratch("longtmp");
     provision(&db);
 
-    // Long enough that `<dir>/lambo-<uid>/<38-byte filename>` cannot fit the
-    // 104-byte sun_path bound. Real, because TMPDIR has to be usable.
-    let long_tmp = std::env::temp_dir().join("x".repeat(80));
-    std::fs::create_dir_all(&long_tmp).expect("a long but real TMPDIR");
+    // Long enough that `<dir>/lambo/<38-byte filename>` cannot fit the 104-byte
+    // sun_path bound. Real, because a runtime directory has to be usable.
+    let long_tmp = std::path::PathBuf::from(format!("/tmp/{}", "x".repeat(80)));
+    std::fs::create_dir_all(&long_tmp).expect("a long but real runtime directory");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
         .args([
@@ -787,8 +792,7 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
             "--transport",
             "stdio",
         ])
-        .env("TMPDIR", &long_tmp)
-        .env_remove("XDG_RUNTIME_DIR")
+        .env("XDG_RUNTIME_DIR", &long_tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -849,5 +853,200 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
         .status();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&long_tmp);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2-L1, at the binary: **two client products derive two endpoint directories
+/// for one session on one store, and forwarding must still work.**
+///
+/// Measured live against `bbac803`: `cursor-agent` scrubs `TMPDIR` from the
+/// environment of the MCP server it spawns (so the derivation fell through to
+/// `/tmp/lambo`) while `opencode` passes macOS's per-user `TMPDIR` through (so it
+/// derived `$TMPDIR/lambo`). Same binary, same store, same session, two
+/// addresses. The losing serve compared the row's published endpoint against its
+/// own derivation, refused ("it is running a different endpoint scheme"), waited
+/// out its budget, and the client reported no tools at all — the exact outage J2
+/// exists to remove, arriving through the environment on unmodified default
+/// wiring.
+///
+/// Two changes answer it. The `TMPDIR` rung is gone, so that specific
+/// divergence cannot happen; and `proxyable` now compares the **address name**
+/// rather than the whole path, because the name is a hash of the session and the
+/// canonicalized store identity while the directory decides only reachability.
+/// This test pins the second, which is the general one: a holder publishing our
+/// address name in a directory we would never derive is dialled, not refused.
+#[test]
+fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
+    use std::io::Write as _;
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::os::unix::net::UnixListener;
+
+    let (dir, cfg, db) = scratch("crossdir");
+    provision(&db);
+
+    let store_cfg = lambo::store::StoreConfig {
+        kind: lambo::store::StoreKind::Sqlite,
+        path: Some(db.clone()),
+        ..lambo::store::StoreConfig::default()
+    };
+    let ours = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
+        .expect("a file-backed store is shareable");
+    let name = ours.path().file_name().unwrap().to_owned();
+
+    // A directory the spawned serve will NOT derive — standing in for the other
+    // client product's inherited environment. Private and self-owned, because
+    // the dial side runs the same check the bind side does.
+    let elsewhere = std::path::PathBuf::from(format!("/tmp/lbx{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&elsewhere)
+        .expect("a private directory the serve would not derive");
+    let sock = elsewhere.join(&name);
+    assert_ne!(
+        sock.as_path(),
+        ours.path(),
+        "this test is only meaningful if the two directories differ"
+    );
+
+    let holder =
+        lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("other-product"))
+            .reachable_at(sock.to_string_lossy().into_owned());
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let store = SqliteStore::connect(&db).unwrap();
+            let outcome = store
+                .acquire_lease(&SessionId::from(SESSION), &holder, Duration::from_secs(45))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, lambo::store::LeaseOutcome::Acquired(_)));
+        });
+    }
+
+    let listener = UnixListener::bind(&sock).expect("bind the other product's endpoint");
+    let holder_thread = std::thread::spawn(move || {
+        let mut served = 0usize;
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let mut w = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                    continue;
+                };
+                if v.get("method").and_then(serde_json::Value::as_str) == Some("initialize") {
+                    let reply = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": v.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "serverInfo": {"name": "other-product-holder", "version": "1"},
+                        },
+                    });
+                    writeln!(w, "{reply}").unwrap();
+                    w.flush().unwrap();
+                    served += 1;
+                }
+            }
+            if served > 0 {
+                break;
+            }
+        }
+    });
+
+    // The losing serve. Before J2-L1 this refused and waited out its budget.
+    let mut b = Serve::spawn(&cfg, "this-product");
+    let init = b.initialize(1);
+    assert_eq!(
+        init["result"]["serverInfo"]["name"], "other-product-holder",
+        "the handshake must have been answered by the HOLDER, through a directory this \
+         process would never have derived: {init}"
+    );
+
+    b.sigterm();
+    let _ = b.child.wait();
+    let _ = holder_thread.join();
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2-L2, at the binary: a serve that **cannot** win inside a client's patience
+/// must say so at once, not spend that patience discovering it.
+///
+/// Measured live: the election waited `LEASE_TTL + ELECTION_SLACK` = 50s, and
+/// `opencode` 1.18.18 declared the server failed at 31.96s — after which the
+/// model had no lambo tools at all. A recoverable wait became a total outage.
+///
+/// The budget is now a client-tolerance number (20s), and nothing waits blindly:
+/// the row says when the holder's lease expires, so a lease with a full TTL left
+/// is refused immediately with the seconds named. Here the holder is a CLI-shaped
+/// writer — it publishes no endpoint, so it is not proxyable and the only route
+/// to the session is its lease lapsing, 45s away.
+#[test]
+fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
+    let (dir, cfg, db) = scratch("budget");
+    provision(&db);
+
+    // A holder with no endpoint: exactly what a `lambo derive` holding the lease
+    // for the length of one verb looks like in the row.
+    let holder =
+        lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("cli-writer"));
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let store = SqliteStore::connect(&db).unwrap();
+            store
+                .acquire_lease(&SessionId::from(SESSION), &holder, Duration::from_secs(45))
+                .await
+                .unwrap();
+        });
+    }
+
+    let started = std::time::Instant::now();
+    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "serve",
+            "--session",
+            SESSION,
+            "--agent",
+            "late-arrival",
+            "--transport",
+            "stdio",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn");
+    let elapsed = started.elapsed();
+
+    assert!(!out.status.success(), "it must refuse, not serve");
+    // Fast. The pre-fix behaviour was 50s; the client observed here gave up at 32s.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the refusal must not spend the client's startup budget to reach the same answer: \
+         {elapsed:?}"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains("does not lapse for"),
+        "the refusal must name how long the wait would be: {err}"
+    );
+    assert!(
+        err.contains("NO TOOLS"),
+        "and why waiting would be worse — a client that gives up reports no tools: {err}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -598,14 +598,15 @@ configuration change, both with full read, full write and a usable lock. The
   only shape that supports in-process promotion.
 * **The socket address is derived, and the store is in the hash.** A function of
   session id and store identity that creates nothing and binds nothing:
-  `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo-<uid>`, else `/tmp/lambo-<uid>`
+  `$XDG_RUNTIME_DIR/lambo`, else `/tmp/lambo-<uid>` — **two rungs, not three**
   (created 0700 and then checked three ways — not a symlink, owned by this euid,
   mode granting nothing to group or other — which together with the per-uid name
   is what makes the shared `/tmp` fallback safe rather than assumed safe), plus a
   cosmetic 16-char session prefix and 16 hex of FNV-1a. *(The stages shipped
-  `.../lambo` on both fallbacks with a follow-the-symlink mode check and an
+  three rungs ending `.../lambo`, with a follow-the-symlink mode check and an
   "I/O-free" claim; the uid suffix, the other two checks and the corrected claim
-  are J2-R1-2/J2-R1-3.)* The store half is load-bearing: two serves under
+  are J2-R1-2/J2-R1-3, and the `TMPDIR` rung's removal is J2-L1 — it varied per
+  client product, which is the one thing a shared address may not do.)* The store half is load-bearing: two serves under
   one session name against *different* stores are two graphs, and a session-only
   path would have them fight over one socket and let a proxy forward into the
   wrong one — and the store's *identity*, not its spelling, is what is hashed:
@@ -688,10 +689,16 @@ pinned by `a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed`.
 The one place that *may* acquire is `resolve_role`, the startup election, and the
 reason is exactly the invariant's: it runs before a single byte has been
 exchanged with this process's own client, so a win there makes a real holder that
-can actually serve. It waits up to one `LEASE_TTL` plus 5s for either a reachable
-holder or a lapsed lease, logging progress. A ~50s worst-case startup that ends
-in working memory beats a fast exit 1, which is the defect being removed — but it
-*is* a startup delay, and a client with a short spawn timeout would see it.
+can actually serve. It waits for either a reachable holder or a lapsed lease,
+logging progress — but only for as long as a client will sit through
+(`ELECTION_BUDGET`, 20s), and it does arithmetic on the row's `expires_at` rather
+than waiting blindly: a lease that will not lapse inside the budget is refused at
+once with the seconds named. *(The stages waited one `LEASE_TTL` plus 5s = ~50s
+and argued that "a ~50s startup that ends in working memory beats a fast exit 1,
+but it is a startup delay and a client with a short spawn timeout would see it."
+The live probe turned that caveat into a measurement — `opencode` 1.18.18 gave up
+at 31.96s and the model then had **no** lambo tools — so the trade was wrong in
+the direction the caveat pointed. J2-L2.)*
 
 **One deviation from the plan, forced by evidence.** Deferring the recorded-
 initialize replay was the instruction, and it turned out to be incompatible with
@@ -832,10 +839,18 @@ worth costing before it is promised.
 Reviewed **REQUEST_CHANGES** at `bbac803` — one P1, seven P2, thirteen P3
 ([adve-review-mooshik-J2-round1.md](../adversarial-review/adve-review-mooshik-J2-round1.md)).
 All twenty-one are closed in four commits (`58faeac` the P1, `fdb3225` the rest of
-`proxy.rs`, `8daf389` `endpoint.rs`, and this note). Nothing is carried. The design is
+`proxy.rs`, `8daf389` `endpoint.rs`, and this note), plus a fifth for the two P2s the live
+two-client probe found in the same code (J2-L1, J2-L2). Nothing is carried. The design is
 untouched: the byte pipe, the wedge invariant, the derived address and the declared
 deviation all stand — the blockers were gaps between what the design argued and what the
 code did.
+
+* **J2-R1-1's live confirmation.** The probe reproduced the P1 against `bbac803` with a
+  20s-delayed embedder to widen the window: the holder was killed mid-embed, the proxy logged
+  the closed connection in **18ms**, sent the client **nothing**, and the call hung for the
+  client's full 120s timeout before failing. Exactly the finding's prediction, and exactly what
+  `58faeac` turns into an immediate honest error. The idle-death path (no call in flight) was
+  already honest and took ~2s.
 
 * **J2-R1-1 (P1, the blocker) — an in-flight forwarded request was never answered when the
   holder's connection closed.** `HubProxy::run`'s own docstring promises "every forwarded
@@ -905,8 +920,9 @@ code did.
   degraded.** The harsher outcome sat on the cheaper problem, and made a long `TMPDIR` a
   hard startup failure on a machine that served fine before J2. `for_store` now returns
   `Option` (there is no failure left to report), logging the reason at ERROR. Pinned at the
-  binary with an 80-character `TMPDIR`: the client's session works and the lease row's
-  `endpoint` is NULL, which is the honest row for a holder nothing can reach.
+  binary with an 80-character `XDG_RUNTIME_DIR` (the only environment variable left in the
+  derivation after J2-L1): the client's session works and the lease row's `endpoint` is NULL,
+  which is the honest row for a holder nothing can reach.
 * **J2-R1-6 (P2) — the reconnect's re-read was unpinned and its stated reason was false.**
   It said the address is never cached "because a new holder is a new endpoint"; the address
   is a *pure function* of session and store, so every holder binds the same path — which is
@@ -934,6 +950,79 @@ code did.
   Every `send` in this pump is also awaited in an arm body, which is what keeps writes from
   being torn by cancellation (an attack the review checked and cleared), so arm-body awaits
   do not go away; only the *unbounded* one was the defect.
+
+**Two further P2s, from the live two-client probe** (real products — `cursor-agent` 2026.08.11
+as the holder side, `opencode` 1.18.18 as the proxy side — against `bbac803`; timeline and
+per-run logs were produced by the probe agent). Both are in the code this remediation was
+already editing, and both are the *same* defect seen twice: a number or an input chosen from
+lambo's own internals when it had to be chosen from what a real client does.
+
+* **J2-L1 (P2) — endpoint derivation depended on client-inherited environment, so two client
+  products derived two directories for one session on one store.** Measured:
+  `cursor-agent` **scrubs** `TMPDIR` from the environment of the MCP server it spawns (so the
+  derivation fell through to `/tmp/lambo`), `opencode` **passes** macOS's per-user `TMPDIR`
+  through (`$TMPDIR/lambo`). Same binary, same store, same session, two addresses. The losing
+  serve compared the row's published endpoint against its own derivation, refused ("it is
+  running a different endpoint scheme … could reach a socket serving a different graph"),
+  waited out its 50s budget, and `opencode` declared the server failed at 31.96s. Net:
+  cross-client memory silently absent on **unmodified default wiring** — precisely the outage
+  J2 exists to remove, arriving through a door J2 opened.
+
+  **Both halves of the fix, because they answer different things.** (1) `TMPDIR` is out of the
+  derivation: it is a per-child, per-client-product variable, which is the one kind of input a
+  *shared* address may not have, and losing it costs nothing — `/tmp/lambo-<uid>` is shorter
+  than macOS's `TMPDIR`, so the `sun_path` headroom goes from 6–9 bytes to 47–50.
+  `XDG_RUNTIME_DIR` stays: it is set once per login session by the platform rather than per
+  child by a client, and it is the only rung that works where `/tmp` is not shared. (2)
+  `proxyable` now compares the address's **file name**, not the whole path, and returns the
+  path to dial. The name is a hash of the session and the *canonicalized* store identity — so
+  J2-R1-2 is what makes it trustworthy — and it therefore decides *which graph*, while the
+  directory decides only *reachability*. A matching name in an unexpected directory is benign
+  by construction and is dialled, with an INFO line naming both paths; a differing name is the
+  real different-graph case and is still refused. Half (1) removes the observed incidence,
+  half (2) removes the class, including `XDG_RUNTIME_DIR` being scrubbed by one client and not
+  another.
+
+  **The trust boundary is unchanged: the store.** The published path is store data, so a
+  writer who could forge it could already write graph content the model reads, which is
+  strictly more power. One hardening rides along for symmetry: the private-directory check
+  (not a symlink, owned by this euid, mode 0700) is factored out of `bind` and now runs on the
+  **dial** side too, so a directory this process would refuse to place a socket in is one it
+  refuses to reach a socket in.
+
+  Pinned three ways: two unit tests over `proxyable` (a matching name in each of the two
+  directory shapes the probe actually produced → the published path; a differing name, an
+  altered hash, and a nameless path → refusal), one that `TMPDIR` is no longer an input at
+  all, and an integration test that spawns a real serve against a holder listening in a
+  directory that serve would never derive. Red under the mutation that restores whole-path
+  comparison — both the unit test and the integration test.
+
+* **J2-L2 (P2) — the election budget was a lease number where it had to be a client number.**
+  It was `LEASE_TTL + ELECTION_SLACK` = 50s, reasoned entirely from the lease: a holder that
+  stops heartbeating loses its row within one TTL, so one TTL plus slack either finds a live
+  hub or wins the lease. Sound about the lease, wrong about the client — an MCP client that
+  waits too long does not report "starting", it reports **failed**, and a failed server has no
+  tools at all. Measured: `opencode` gave up at 31.96s.
+
+  `ELECTION_BUDGET` is now 20s, documented at the constant as a client-tolerance number that
+  must **not** be re-derived from `LEASE_TTL` — the two answer to different constraints and the
+  lease's is the one that may not move. And nothing waits blindly any more: the row carries
+  `expires_at`, so each pass asks whether the lapse falls inside the budget that is left, and
+  refuses **immediately** with the seconds named when it does not. That is strictly better
+  than the old behaviour in both directions — the cases that can succeed inside a client's
+  patience still do (a lease expires uniformly somewhere inside its TTL, and the probe's own
+  dead-holder election took 10.2s), and the cases that cannot now say so in milliseconds with
+  an actionable number instead of spending the client's whole startup gate to reach the same
+  refusal. Pinned at the binary: a CLI-shaped holder with a full TTL left is refused in under
+  10s; under the mutation restoring the 50s budget and removing the arithmetic, the same test
+  measures **45.1s**.
+
+  **What this does not fix, stated:** a holder that dies immediately after a heartbeat leaves
+  ~45s of lease, which no 20s budget can outlast, so that start refuses instead of recovering.
+  The client's next start succeeds. Removing that last case needs the wait not to block the
+  MCP `initialize` response at all, which means serving a client from a role that can still
+  become a holder — in-process promotion, which §J2 scoped out with an argument this
+  remediation does not reopen.
 
 **The thirteen P3s**, all closed: `unreachable_reply` now requires a `method`, so a client
 *response* frame is never answered with an error keyed to the holder's own request id
@@ -968,9 +1057,9 @@ invocation was. Recorded here so the next reviewer does not have to guess.
 | `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | clean |
 | `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | clean |
 | `cargo clippy --all-targets --no-default-features --features store-cockroach,embed-fixture -- -D warnings` | clean |
-| `cargo test --all --features fixtures` | 850/0/3 (832 at `bbac803`) |
-| `cargo test --features store-sqlite,embed-fixture,fixtures` | 935/0/3 (914 at `bbac803`) |
-| `cargo test --no-default-features --features store-cockroach` | 542/0/0 (524 at `bbac803`) |
+| `cargo test --all --features fixtures` | 853/0/3 (832 at `bbac803`) |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | 940/0/3 (914 at `bbac803`) |
+| `cargo test --no-default-features --features store-cockroach` | 545/0/0 (524 at `bbac803`) |
 | `bash scripts/observability/verify.sh` | ALL CHECKS PASSED |
 
 Counts are the sum over every test binary the invocation runs, which is why they exceed the
@@ -1168,7 +1257,8 @@ that edit has to work through, written while the changes were fresh.
   What the section should gain is one sentence saying *which* process holds the lease is
   whichever started first, and that this is invisible to the client — because an operator
   debugging "why is one client slow to start" needs to know a losing serve may wait for a
-  dead holder's lease to lapse (up to ~50s) before it either proxies or takes over.
+  dead holder's lease to lapse (up to `ELECTION_BUDGET`, 20s) before it either proxies, takes
+  over, or refuses with the remaining lease time named.
 * **§2 "The pinned binary"** — the endpoint's socket path is derived from the session **and
   the store identity**, so two machines with different store paths do not collide, but two
   *different binaries* on one machine serving one session will refuse to proxy to each other
@@ -1178,7 +1268,7 @@ that edit has to work through, written while the changes were fresh.
   the lease row names one holder and carries an `endpoint`, and that the socket exists. That
   is the one-line proof the hub is real rather than assumed. **Add one more, from the
   round-1 review (J2-R1-3/J2-R1-19):** confirm the *directory* holding it is 0700 and owned
-  by you — `$XDG_RUNTIME_DIR/lambo`, else `$TMPDIR/lambo-<uid>`, else `/tmp/lambo-<uid>`.
+  by you — `$XDG_RUNTIME_DIR/lambo`, else `/tmp/lambo-<uid>`.
   "The socket exists" is already on this list; "the directory is 0700 and yours" is the
   check that actually fails on a shared box, and `lambo serve` refuses to bind rather than
   degrade when it is not. The user-facing half of this now lives in `mcp.mdx`, so the
