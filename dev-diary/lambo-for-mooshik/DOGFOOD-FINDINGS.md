@@ -202,4 +202,43 @@ declare what a constraint supports; the ergonomics favour islands.
 
 ---
 
+## 2026-08-20 — the first agent-run two-product live probe (J2 pre-remediation)
+
+An agent drove **cursor-agent 2026.08.11 + opencode 1.18.18** — two real client products,
+project-scoped configs only — against a `bbac803` (J2 implementation) build on a scratch
+store. pi 0.84.2 was unusable (no ready generative provider; its `local` provider is
+hardwired to the embedding server). Full timeline and per-run artifacts in the session
+scratchpad; curated export pending review.
+
+What only a two-product probe could find:
+
+* **Endpoint derivation trusts client-inherited env, and clients disagree** (J2-L1, P2).
+  cursor-agent scrubs `TMPDIR` from its MCP child; opencode passes macOS's per-user
+  `TMPDIR` through. Same binary, store, session — two derived endpoint directories; the
+  losing serve refused to forward ("could reach a socket serving a different graph") and
+  opencode declared the server failed at 31.96s. **Cross-client memory silently absent on
+  default wiring** — the exact outage J exists to fix, reachable through an env variable
+  no same-binary test varies. Routed to the in-flight round-1 remediation.
+* **Server-side wait budgets must fit under client spawn gates** (J2-L2, P2): serve's 50s
+  lease-lapse wait exceeds opencode's ~32s MCP startup tolerance, converting a
+  recoverable wait into "server unavailable, no tools".
+* **J2-R1-1 (the round-1 P1) reproduced against real products**: holder killed mid-call →
+  proxy detected the closed connection in 18ms, sent the client nothing, client hung
+  **121.7s = exactly its configured timeout** (`MCP error -32001`). The idle-death path
+  was honest (~2s), and a fresh start self-healed in 43.6s. The round-2 review re-runs
+  this same harness on the remediated tree; the hang must become an immediate honest
+  error carrying the in-flight id.
+* With `TMPDIR` aligned, **everything J2 promises worked across products**: proxy line
+  verbatim, cross-product read-your-writes both directions, one holder + live socket in
+  the lease row, opencode's whole run 10s.
+* Operator frictions worth the runbook's attention: cursor-agent needs `--trust` and
+  `--force` (else every MCP tool call is silently rejected); macOS has no `timeout(1)`.
+
+Process note: the "two different client products" Done-when box — previously assumed to
+need a human at the keyboard — was run end-to-end by an agent, including the attended
+holder-kill. The box itself stays unticked until the remediated tree passes the same
+probe.
+
+---
+
 *(next entry appends here)*
