@@ -1880,9 +1880,15 @@ Every figure is one rig, not a property of lambo.
       session-wide chain on `agent_id`
       (`interleaved_agents_each_keep_their_own_order_on_the_temporal_chain`, which also
       asserts the chain *actually* interleaves or the filter would prove nothing). Stronger
-      than specified in one respect and it is worth stating: the interaction is opened on
-      the call path, so chain order is submission order **by construction** and cannot be
-      corrupted by an out-of-order drain at all. Per-agent FIFO lanes are still enforced in
+      than specified in one respect and it is worth stating, **scoped as J3-R1-10 scoped
+      it**: the interaction is opened on the call path, so for writes one agent sends
+      *sequentially* chain order is submission order by construction and cannot be corrupted
+      by an out-of-order drain at all. Two calls that agent has in flight **simultaneously**
+      are outside the claim — `begin_interaction_as` and `admit`'s lane lock are two critical
+      sections with no ordering between them across threads — and the scoped statement lives
+      at `writeq`'s §Ordering, in `derive_async_as`, in the tool instructions and in both
+      `mcp.mdx` mirrors. This line is ~470 lines from that scoping, which is why it repeats
+      it rather than pointing at it (J3-R2-6). Per-agent FIFO lanes are still enforced in
       the drain, for the separate reason that insertion order decides which of two identical
       concepts is `created` and which is `matched`
       (`each_agents_writes_drain_in_that_agents_submission_order`)

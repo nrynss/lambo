@@ -35,15 +35,21 @@
 //!
 //! # Ordering
 //!
+//! **Scope first, because the strong sentence used to come first and its
+//! retraction came nine lines later** (J3-R2-6): everything in this section is
+//! a claim about **one agent's writes sent one after another**. Two calls one
+//! agent has in flight *simultaneously* are outside it, for the reason spelled
+//! out below.
+//!
 //! The interaction is opened **synchronously, on the call path**, before the
 //! job is queued. [`crate::Memory::begin_interaction_as`] takes the graph write
-//! lock only briefly and never awaits, so this is cheap — and it makes
-//! submission order *be* `Temporal`-chain order by construction. That is
-//! strictly stronger than ordering the drain: the chain no longer depends on
-//! drain order at all, so an out-of-order drain cannot corrupt it. Since J1 the
-//! chain is session-wide (see `Memory::begin_interaction_as`), so "one agent's
-//! writes apply in submission order" is read off the chain by filtering it on
-//! `agent_id`.
+//! lock only briefly and never awaits, so this is cheap — and for a sequential
+//! caller it makes submission order *be* `Temporal`-chain order by
+//! construction. That is strictly stronger than ordering the drain: the chain
+//! no longer depends on drain order at all, so an out-of-order drain cannot
+//! corrupt it. Since J1 the chain is session-wide (see
+//! `Memory::begin_interaction_as`), so "one agent's writes apply in submission
+//! order" is read off the chain by filtering it on `agent_id`.
 //!
 //! Per-agent FIFO is **still** enforced in the drain, for a second reason:
 //! insertion order decides which of two identical concepts is `created` and
@@ -52,8 +58,8 @@
 //! submission order; lanes run concurrently, because interleaving *across*
 //! agents is fine.
 //!
-//! **The scope of that promise is one agent's *sequential* submissions**
-//! (J3-R1-10). The chain position is pinned by `begin_interaction_as` and the
+//! **The scope of both promises, stated once more where the mechanism is**
+//! (J3-R1-10): one agent's *sequential* submissions. The chain position is pinned by `begin_interaction_as` and the
 //! lane position by the `lanes.lock()` inside [`WritePipeline::admit`], and
 //! those are two critical sections with no ordering between them across
 //! threads. So for two `lambo_derive` calls one agent has in flight *at the
@@ -76,12 +82,23 @@
 //! **A measurement has a width, and so does the drain** (J3-R1-1). A lane has
 //! one consumer, so admission is bounded per lane by the *serial* rate and in
 //! aggregate by the concurrent one, and both projections take
-//! [`DRAIN_PROJECTION_SHARE`] of [`WRITE_QUEUE_DRAIN_BUDGET`]. The probe's
-//! reading is an opening estimate rather than the last word: real write service
-//! times replace its serial figure ([`OBSERVED_MIN_SAMPLES`]), because the
-//! probe fires at the coldest moment in the process's life and measured a 7×
-//! spread across repeats on one host. The drop policy is fixed regardless —
-//! bound, drop, log once, count in `lambo_stats`.
+//! [`DRAIN_PROJECTION_SHARE`] of [`WRITE_QUEUE_DRAIN_BUDGET`].
+//!
+//! **And a measurement is only a bound for the workload it sampled**
+//! (J3-R2-1). The probe embeds a text; a lane runs whatever the caller wrote,
+//! at whatever length the caller chose, and a transformer's latency is
+//! first-order in that length — 35 bytes against 1 KiB is 4.4× on this rig's
+//! own BGE-M3. So the probe's reading is not merely an *opening* estimate, it
+//! is an estimate about a different workload, and it is treated as one: it
+//! sizes nothing above [`PROBE_LANE_CEILING`] per lane, and real write service
+//! times take over after [`OBSERVED_MIN_SAMPLES`] completed writes — the
+//! measurement that samples the workload itself. The probe still measures two
+//! input sizes rather than one ([`PROBE_TEXT_BYTES`]) and publishes the slower,
+//! so the number an operator reads is honest even while it is not load-bearing;
+//! it survives the takeover on
+//! [`Calibration::probe_serial_items_per_sec`] so the two can be compared. The
+//! drop policy is fixed regardless — bound, drop, log once, count in
+//! `lambo_stats`.
 //!
 //! # Accounting (the `ledger_queued_lines` lesson, re-derived)
 //!
@@ -3488,10 +3505,16 @@ mod pipeline_tests {
     /// **Per-agent FIFO under interleaving.** Two agents submit alternately;
     /// each agent's own writes must apply in that agent's submission order.
     ///
-    /// The `Temporal` chain is pinned by construction (the interaction is
-    /// opened on the call path), so what this test has to prove is the other
-    /// half: the *drain* order within a lane, which is what decides which of
-    /// two identical concepts is `created` and which is `matched`.
+    /// The `Temporal` chain is pinned by construction **for writes an agent
+    /// sends one after another**, which is what this test submits: the
+    /// interaction is opened on the call path, so a sequential caller's chain
+    /// position is fixed before its lane position is. Two calls the same agent
+    /// has in flight *simultaneously* are not covered — `begin_interaction_as`
+    /// and `admit`'s `lanes.lock()` are two critical sections with no ordering
+    /// between them across threads (J3-R1-10). So what this test has to prove
+    /// is the other half: the *drain* order within a lane, which is what
+    /// decides which of two identical concepts is `created` and which is
+    /// `matched`.
     #[tokio::test]
     async fn each_agents_writes_drain_in_that_agents_submission_order() {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));

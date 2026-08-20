@@ -384,6 +384,20 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         "lambo_stats",
         serde_json::json!({"agent_id": "agent-b", "receipt": receipt, "wait_ms": 0}),
     );
+    // **J3-R2-9:** and `mark_delivered` REMOVED it rather than suppressing it.
+    // The J3-R1-9 assertion above proves the just-answered receipt is absent
+    // from the answering call's own piggyback, which an implementation that
+    // merely skipped any receipt settled during the current call would satisfy
+    // unchanged. This is the response where such an implementation would
+    // resurface it: a later call, with `receipt_two` long settled and nothing
+    // suppressing it.
+    assert!(
+        !piggyback_of(&first).contains(&receipt_two),
+        "a receipt taken out of the queue by mark_delivered must never come back on a later \
+         response: {}",
+        piggyback_of(&first)
+    );
+
     let receipt_node = first["result"]["structuredContent"]["receipt"]["created"][0]
         .as_str()
         .unwrap_or_else(|| {

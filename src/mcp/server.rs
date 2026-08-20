@@ -3316,7 +3316,10 @@ mod tests {
     /// Since J1 the chain is SESSION-wide, so the per-agent claim is read by
     /// filtering the chain on `agent_id`. That is not a workaround: the chain
     /// records arrival order across a shared session, and one agent's slice of
-    /// it is exactly that agent's submission order.
+    /// it is that agent's submission order **for calls it sends one after
+    /// another** — which is what this test sends, and the only scope the
+    /// property holds in (J3-R1-10; two calls one agent has in flight
+    /// simultaneously can be chained in one order and drained in the other).
     #[tokio::test]
     async fn interleaved_agents_each_keep_their_own_order_on_the_temporal_chain() {
         let s = server("mcp-j3-chain").await;
