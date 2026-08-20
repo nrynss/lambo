@@ -128,13 +128,99 @@ const HUB_LOST_MESSAGE: &str = "lambo: this call had already been handed to the 
 /// [`Handshake::replay`] reuses it rather than defining a second budget: both
 /// are "this holder is not answering the door", and a connection that lands in
 /// the backlog of a stopped accept loop is indistinguishable from a slow one
-/// until the deadline says otherwise (J2-R1-8). The two together bound how long
-/// the pump can be deaf to SIGTERM inside one `client_rx` arm body at
-/// 2 × `CONNECT_BUDGET`.
+/// until the deadline says otherwise (J2-R1-8).
+///
+/// **Neither of them bounds the arm body, and this docstring used to say they
+/// did** — "the two together bound how long the pump can be deaf to SIGTERM
+/// inside one `client_rx` arm body at 2 × `CONNECT_BUDGET`" (J2-R2-1). That
+/// sentence was true about `connect` and `replay` and false about the arm body,
+/// which also contains the store read that *starts* [`HubProxy::dial`]. The bound
+/// that is true, and the reasoning behind the number, live at [`DIAL_BUDGET`];
+/// read that constant, not this one, for what a SIGTERM costs.
+///
+/// One smaller number corrected in the same pass: `connect` below tests its
+/// deadline only *after* a failed attempt, so its own worst case is
+/// `CONNECT_BUDGET + CONNECT_RETRY` plus one attempt — about 2.1s, not 2.0s.
 pub(crate) const CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Interval between connect attempts inside [`CONNECT_BUDGET`].
 const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The chosen wall-clock bound on one whole dial — the lease-row read, the
+/// connect and the handshake replay together (J2-R2-1).
+///
+/// # Why a third budget, when connect and replay already have one
+///
+/// [`HubProxy::dial`] **begins** with `store.read_lease`, and nothing in this
+/// module bounded it. What bounded it was whatever the store adapter happens to
+/// be tuned for, which is not a number anybody chose for a proxy's shutdown
+/// latency:
+///
+/// * **sqlite** — `busy_timeout` 8s inside the statement (set in
+///   `SqliteStore::connect`, pinned by `file_backed_wal_and_busy_timeout_applied`)
+///   on a pool of `max_connections(1)`, so a concurrent flush holding that one
+///   connection makes the read wait at the *pool* first — and neither adapter
+///   overrides sqlx's default `acquire_timeout`, which is **30s** (sqlx 0.8.6,
+///   `PoolOptions::default`). Worst case ≈ 38s.
+/// * **cockroach** — `statement_timeout` 20s per statement
+///   (`cockroach::STATEMENT_TIMEOUT`), behind the same 30s pool acquire, which
+///   for a lazily-created pool includes the TCP connect and the auth handshake.
+///   Worst case ≈ 50s.
+///
+/// So the real pre-J2-R2 bound on arm-body SIGTERM deafness was not four seconds
+/// but tens of seconds, chosen by a store's *flush* tuning. That is the same
+/// defect class three I rounds were spent closing, and it is not something a
+/// docstring can fix by describing it more precisely — hence a code change here
+/// rather than the doc-precision the review prescribed.
+///
+/// # What is chosen instead — two answers, two questions
+///
+/// * **Deafness** is answered by *racing*, not by a budget. The dial is polled
+///   against the shutdown future ([`HubProxy::dial_bounded`]), so a SIGTERM
+///   arriving mid-dial is honoured at the next poll whatever the store is doing.
+///   There is no store timeout left in the deafness path for a constant to
+///   under-state.
+/// * **The client's wait** is what this constant bounds. A proxy's client is
+///   blocked on the very call that triggered the dial, and a store wedged at the
+///   pool must not turn that into a 38-second silence: past `DIAL_BUDGET` the
+///   dial is abandoned and the call is answered with
+///   [`HUB_UNREACHABLE_MESSAGE`] — "nothing happened, retry later", which is
+///   exactly what AGENTS.md's "never block on memory" asks for.
+///
+/// **6s, chosen from both directions.** It sits *above* the budgets the dial's
+/// own steps already carry — `CONNECT_BUDGET + CONNECT_RETRY` for the connect and
+/// `CONNECT_BUDGET` for the replay, ≈4.1s, asserted below — so a
+/// healthy-but-slow holder is never cut off by the outer cap and each inner step
+/// still raises its own, better-attributed error. And it sits *below* the
+/// smallest store-emergent bound listed above (sqlite's 8s `busy_timeout`), so
+/// the number an operator reads here is the number that actually governs. A
+/// store contended for longer than that costs one honest error and a retry on
+/// the next call, because the row is re-read on every dial.
+///
+/// # What is still unbounded in the arm body, stated
+///
+/// The two frame writes that share it — `send` to the holder and `send` to the
+/// client's stdout — are neither raced nor budgeted, and that is the J2-R1-8
+/// deviation's real argument rather than an oversight: a write abandoned
+/// mid-frame delivers a torn JSON line, which this pipe may never do (see
+/// [`Framed::Torn`]). Each is bounded by its peer draining the socket. That is a
+/// *different shape* from the store read this constant replaced — a peer that
+/// never reads is itself already wedged, whereas a row read stuck behind a
+/// flush at the pool wedged a **healthy** proxy talking to a **healthy** holder.
+/// Carried as a named residual in §J2 rather than fixed here, because abandoning
+/// a client-facing write is a behaviour decision of its own.
+const DIAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Build-time invariant: [`DIAL_BUDGET`] must not undercut the budgets of the
+/// steps it wraps. If it did, the outer cap rather than the inner step would
+/// decide a slow holder's fate, and the inner step is the one that knows whether
+/// the holder failed to answer the door or failed to answer the handshake.
+const _: () = assert!(
+    DIAL_BUDGET.as_millis() > 2 * CONNECT_BUDGET.as_millis() + CONNECT_RETRY.as_millis(),
+    "DIAL_BUDGET must exceed the connect budget (CONNECT_BUDGET + CONNECT_RETRY) plus the \
+     replay budget (CONNECT_BUDGET) it wraps, or the outer cap decides instead of the inner \
+     step — and the inner step is the one with the accurate error message."
+);
 
 /// The largest single frame either peer may send, in bytes.
 ///
@@ -154,6 +240,17 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// deadline. Generous, because every frame before the response is legitimate
 /// traffic that gets forwarded.
 const MAX_REPLAY_FRAMES: usize = 64;
+
+/// The in-flight depth past which the pump says so, once (J2-R2-7).
+///
+/// Not a cap: nothing is refused or dropped at this depth, and the list is
+/// argued unbounded-by-construction at its declaration in [`HubProxy::run`]. This
+/// is the number that makes that argument falsifiable — a request/response MCP
+/// client has one call outstanding and a pipelining one a handful, so 64 is two
+/// orders above the ceiling the argument claims and cannot fire on real traffic.
+/// It reuses [`MAX_REPLAY_FRAMES`]'s order of magnitude for the same reason: past
+/// it, the peer is doing something no legitimate client does.
+const INFLIGHT_DEPTH_WARN: usize = 64;
 
 /// The `LEASE_TTL` figure quoted verbatim in [`HUB_UNREACHABLE_MESSAGE`].
 ///
@@ -280,7 +377,9 @@ pub enum NotProxyable {
     /// socket it would dial serves the graph it means.
     ///
     /// The **directory** differing is *not* this case (J2-L1) — see
-    /// [`proxyable`].
+    /// [`proxyable`]. A published path that is not **absolute** is (J2-R2-6): the
+    /// column holds a path on the holder's filesystem, and a bare or
+    /// `./`-relative spelling names nothing there.
     EndpointIsNotOurs { published: String },
 }
 
@@ -363,6 +462,24 @@ pub fn proxyable(
         });
     }
     let published = std::path::Path::new(published);
+    // J2-R2-6. Only the **name** is compared below, so a row publishing the bare
+    // `sess-<hash>.sock`, or `./sess-<hash>.sock`, matched and was returned as a
+    // path to dial. `dial_dir` then took `address.parent()` — `Some("")` for a
+    // bare name, which `assert_private_dir` reported as "endpoint directory
+    // could not be inspected", with an empty path, in an operator-facing
+    // message; and `.` for the relative spelling, which is *this* process's cwd
+    // and could pass the private-directory check on its own merits. Neither is a
+    // reachable endpoint on the holder's filesystem, which is what the column
+    // means, so both are the same refusal as a name that does not match.
+    //
+    // The trust boundary is still the store (see this function's doc): a writer
+    // who can forge the row can already write graph content. This is the
+    // directory check not being handed a relative path, not a new defence.
+    if !published.is_absolute() {
+        return Err(NotProxyable::EndpointIsNotOurs {
+            published: published.display().to_string(),
+        });
+    }
     // The name, not the whole path. An empty or directory-only published value
     // has no name and cannot match.
     let ours_name = ours.path().file_name();
@@ -560,15 +677,25 @@ impl Handshake {
     /// # Bounded, because this runs inside the pump's arm body (J2-R1-8)
     ///
     /// `reconnect_and_replay` is awaited *in* the `client_rx` arm, not as a
-    /// `select!` branch, so the shutdown branch cannot be polled while this
-    /// runs. A `UnixStream::connect` succeeds as soon as the connection lands in
-    /// the listener's backlog, so "accepted but never answered" needs no hostile
-    /// peer — a holder whose accept loop is starved is enough — and an unbounded
-    /// read here made the process deaf to SIGTERM as well as wedged. Bounded by
-    /// [`CONNECT_BUDGET`] in time and [`MAX_REPLAY_FRAMES`] in count. Reusing the
-    /// connect budget is deliberate: both are "this holder is not answering the
-    /// door", and the *other* wait — for a dead holder's lease to lapse — is the
-    /// TTL's job, not this function's.
+    /// `select!` branch. A `UnixStream::connect` succeeds as soon as the
+    /// connection lands in the listener's backlog, so "accepted but never
+    /// answered" needs no hostile peer — a holder whose accept loop is starved is
+    /// enough — and an unbounded read here made the process deaf to SIGTERM as
+    /// well as wedged. Bounded by [`CONNECT_BUDGET`] in time and
+    /// [`MAX_REPLAY_FRAMES`] in count. Reusing the connect budget is deliberate:
+    /// both are "this holder is not answering the door", and the *other* wait —
+    /// for a dead holder's lease to lapse — is the TTL's job, not this
+    /// function's.
+    ///
+    /// This paragraph used to add "so the shutdown branch cannot be polled while
+    /// this runs". That is no longer true, and it was the premise under which the
+    /// arm body's deafness had to be bounded by budgets alone (J2-R2-1): the
+    /// whole dial, this replay included, is now polled *against* the shutdown
+    /// future by [`HubProxy::dial_bounded`], and capped by [`DIAL_BUDGET`]. The
+    /// budget here still earns its keep — it is what distinguishes "the holder
+    /// did not answer the handshake" from "the dial ran out of time" in the
+    /// operator's log — but it is no longer the only thing standing between a
+    /// silent holder and an unkillable process.
     ///
     /// Returns the frames read before the response, in order, for the caller to
     /// forward to its client.
@@ -668,6 +795,27 @@ type HubHalves = (
     BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedWriteHalf,
 );
+
+/// What one bounded, shutdown-raced dial produced (J2-R2-1).
+///
+/// Three outcomes rather than a `Result`, because the third one is not a failure
+/// and must not be reported as one: a dial cut short by the shutdown signal means
+/// *stop*, not *answer this call honestly and carry on*. Collapsing it into the
+/// error arm would have the pump log "cannot reach a session holder" on a clean
+/// SIGTERM and then try the next frame.
+enum Dialled {
+    /// A live connection, already replayed into; whatever the holder emitted
+    /// before answering the replayed `initialize` (J2-R1-12); and **the address
+    /// that was actually dialled**, which under J2-L1 need not be the one this
+    /// process derives (J2-R2-4).
+    Hub(HubHalves, Vec<String>, std::path::PathBuf),
+    /// No connection. Carries the operator-facing reason; the caller answers its
+    /// own client with [`HUB_UNREACHABLE_MESSAGE`].
+    Failed(LamboError),
+    /// The shutdown future completed while the dial was in flight. The caller
+    /// must stop.
+    ShutdownRequested,
+}
 
 /// Which side of the pipe spoke, as one value.
 ///
@@ -783,7 +931,7 @@ impl HubProxy {
     ///
     /// **This function reads the lease and must never acquire it.** See
     /// [`HubProxy::run`].
-    async fn reconnect(&self) -> Result<tokio::net::UnixStream, LamboError> {
+    async fn reconnect(&self) -> Result<(tokio::net::UnixStream, std::path::PathBuf), LamboError> {
         self.dial().await
     }
 
@@ -796,16 +944,71 @@ impl HubProxy {
     async fn reconnect_and_replay(
         &self,
         handshake: &Handshake,
-    ) -> Result<(HubHalves, Vec<String>), LamboError> {
-        let (read, mut write) = self.reconnect().await?.into_split();
+    ) -> Result<(HubHalves, Vec<String>, std::path::PathBuf), LamboError> {
+        let (stream, dialled) = self.reconnect().await?;
+        let (read, mut write) = stream.into_split();
         let mut read = BufReader::new(read);
         let before = handshake.replay(&mut read, &mut write).await.map_err(|e| {
             LamboError::Conflict(format!("holder rejected the session handshake: {e}"))
         })?;
-        Ok(((read, write), before))
+        Ok(((read, write), before, dialled))
     }
 
-    async fn dial(&self) -> Result<tokio::net::UnixStream, LamboError> {
+    /// [`HubProxy::reconnect_and_replay`], raced against the shutdown future and
+    /// capped at [`DIAL_BUDGET`] (J2-R2-1).
+    ///
+    /// This is the whole of the J2-R2-1 fix, and it is deliberately the *only*
+    /// await in a `client_rx` arm body that is raced. The dial is the one arm-body
+    /// await that can be abandoned at any instant without consequence: the
+    /// connection it is building belongs to nobody yet, so dropping it mid-replay
+    /// leaves a torn `initialize` in a socket that is closed in the same
+    /// statement — the holder's per-connection reader sees a bad frame and an EOF
+    /// on a connection it never served, and no graph state is involved. The frame
+    /// writes in the same arm body do not have that property (a torn frame
+    /// reaches a *real* peer mid-conversation), which is why they stay
+    /// un-raced — see [`DIAL_BUDGET`]'s last section.
+    ///
+    /// `biased`, shutdown first, for the same reason the pump's own `select!` is
+    /// (J2-R1-21): a store that answers instantly on every poll must not be able
+    /// to starve the signal.
+    async fn dial_bounded(
+        &self,
+        handshake: &Handshake,
+        shutdown: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    ) -> Dialled {
+        tokio::select! {
+            biased;
+            () = shutdown => Dialled::ShutdownRequested,
+            outcome = tokio::time::timeout(DIAL_BUDGET, self.reconnect_and_replay(handshake)) => {
+                match outcome {
+                    Ok(Ok((halves, before, dialled))) => Dialled::Hub(halves, before, dialled),
+                    Ok(Err(e)) => Dialled::Failed(e),
+                    // The unbudgeted term was the lease-row read; name it, because
+                    // "the store did not answer" and "the holder did not answer"
+                    // send an operator to different places.
+                    Err(_) => Dialled::Failed(LamboError::Conflict(format!(
+                        "no connection to the session holder within {}s — the lease row read, \
+                         the connect and the handshake replay together did not finish inside \
+                         the dial budget (a store blocked at its connection pool looks like \
+                         this)",
+                        DIAL_BUDGET.as_secs()
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// Read the row, check it is ours to forward to, and connect.
+    ///
+    /// **The row read is the term no budget in this module covers**, and that is
+    /// the whole of J2-R2-1: `read_lease` is bounded only by the store adapter's
+    /// own tuning (sqlite's `busy_timeout` and cockroach's `statement_timeout`,
+    /// both behind sqlx's 30s default pool acquire — the arithmetic is at
+    /// [`DIAL_BUDGET`]), which is a number chosen for a *flush* and inherited
+    /// here by accident. Callers therefore reach this function through
+    /// [`HubProxy::dial_bounded`], never directly, so that the store's number is
+    /// never the one that decides how long this process ignores a SIGTERM.
+    async fn dial(&self) -> Result<(tokio::net::UnixStream, std::path::PathBuf), LamboError> {
         let row = self
             .store
             .read_lease(&self.session)
@@ -834,9 +1037,12 @@ impl HubProxy {
                  reached through a different environment"
             );
         }
-        connect(&address)
+        let stream = connect(&address)
             .await
-            .map_err(|e| LamboError::Conflict(format!("holder endpoint not reachable: {e}")))
+            .map_err(|e| LamboError::Conflict(format!("holder endpoint not reachable: {e}")))?;
+        // The address goes back with the stream so the pump's log lines can name
+        // what was dialled rather than what was derived (J2-R2-4).
+        Ok((stream, address))
     }
 
     /// Pump frames between this process's client and the session holder until
@@ -861,8 +1067,18 @@ impl HubProxy {
     /// this process can then be a real holder.
     ///
     /// What a dead holder gets instead: every forwarded call fails honestly and
-    /// immediately (never hangs), and the next call re-reads the row, so the
+    /// *bounded* — never hangs — and the next call re-reads the row, so the
     /// moment a new holder exists this proxy is working again with no restart.
+    ///
+    /// "Bounded" is three different numbers and the docstring used to round them
+    /// all to "immediately" (J2-R2-1). Re-derived from the constants: a call
+    /// already inside the dead holder is answered the moment its connection
+    /// closes, which is microseconds of local work (2.6 ms end to end, measured
+    /// at the two-client probe); a *new* call has to dial, and a dead holder
+    /// whose socket file is still on disk refuses the connect, so that dial
+    /// spends `CONNECT_BUDGET + CONNECT_RETRY` ≈ 2.1s retrying before it gives up
+    /// (the probe measured ~2s for exactly this path); and the whole dial,
+    /// including the lease-row read that opens it, is capped at [`DIAL_BUDGET`].
     ///
     /// # Why the pump tracks in-flight ids (J2-R1-1)
     ///
@@ -893,7 +1109,7 @@ impl HubProxy {
     /// one `LEASE_TTL` plus the election slack away, so "retry the read" means
     /// holding the caller's call open for the better part of a minute — the
     /// exact hang J2 exists to remove, reintroduced for the calls least in need
-    /// of it. An honest error in microseconds lets the model decide, which is
+    /// of it. An honest error in milliseconds lets the model decide, which is
     /// what AGENTS.md's "never block on memory" asks for, and the error text
     /// tells it the one thing it needs to decide safely: recall before
     /// re-deriving.
@@ -901,13 +1117,43 @@ impl HubProxy {
         &self,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Result<(), LamboError> {
+        // Pinned HERE, before the first dial, and not at the loop (J2-R2-1). The
+        // first dial runs the same unbudgeted lease-row read as every later one,
+        // so arming only at the loop left a startup window in which this process
+        // was deaf to SIGTERM for as long as the store took — the pre-handshake
+        // shape of the very defect the I rounds closed at `serve`.
+        tokio::pin!(shutdown);
+
         // The first connection needs no replay: the client has sent nothing
         // yet, so its own `initialize` will be the first frame through.
         let mut handshake = Handshake::default();
-        let (first, _no_preamble) = self.reconnect_and_replay(&handshake).await?;
+        let (first, _no_preamble, dialled) =
+            match self.dial_bounded(&handshake, shutdown.as_mut()).await {
+                Dialled::Hub(halves, before, dialled) => (halves, before, dialled),
+                Dialled::Failed(e) => return Err(e),
+                Dialled::ShutdownRequested => {
+                    // Nothing to unwind and nothing to answer: no lease, no tail, no
+                    // client byte exchanged, and the stdin task below is not spawned
+                    // yet. This is the clean exit the `serve` proxy branch expects.
+                    tracing::info!(
+                        "lambo serve: shutdown signal during the proxy's first dial — exiting \
+                     without opening a connection to the session holder"
+                    );
+                    return Ok(());
+                }
+            };
+        // J2-R2-4: `dialled`, not `endpoint`. The old line logged
+        // `self.endpoint` — this process's own derivation — which under J2-L1
+        // half (2) is by construction not necessarily the socket that was
+        // connected to, so an operator greping the headline line for the socket
+        // (which J2-R1-19's doc paragraph tells them to do) was sent to a file
+        // that does not exist. Both are logged, named for what they are: the
+        // truth is `dialled`, and `derived` is what makes the divergence visible
+        // without reading the earlier directory-differs line.
         tracing::info!(
             session = %self.session,
-            endpoint = %self.endpoint.path().display(),
+            dialled = %dialled.display(),
+            derived = %self.endpoint.path().display(),
             "lambo serve: proxying to the session holder (this process takes no lease and holds \
              no graph; every write happens in the holder, under the holder's fencing token)"
         );
@@ -970,9 +1216,38 @@ impl HubProxy {
         // connection it went out on. This list is what makes "never hangs" true
         // for the call in flight at the holder's death — see this function's
         // docs and [`HubProxy::answer_lost`].
+        //
+        // # Why it is neither capped nor indexed (J2-R2-7)
+        //
+        // It grows one entry per forwarded request and shrinks on the response or
+        // on `Closed`, and both the growth and the O(n) `position` scan below are
+        // bounded by the same real quantity: **the client's own in-flight
+        // window**. The client here is the local, trusted party that spawned this
+        // process; a request/response MCP client has one outstanding call, and
+        // even a pipelining one has a handful, so n is a handful and the scan is
+        // faster than a map would be. `MAX_FRAME_BYTES` was added for the
+        // analogous unbounded case (J2-R1-18) and is *not* the same shape: that
+        // one grew on bytes a peer chose to send with no reply expected, so a
+        // single broken frame could OOM the process, whereas an entry here costs
+        // a request the client is still waiting on.
+        //
+        // A cap was considered and declined for a specific reason: answering the
+        // oldest id early to make room would let the holder's real answer arrive
+        // afterwards, match nothing, and be forwarded as a **second** response to
+        // an id the client has already been given an error for — a protocol
+        // violation manufactured to fix a growth that has no real cause. Tearing
+        // the connection down instead would put a new failure mode into the very
+        // path J2-R1-1 exists to make reliable.
+        //
+        // What is here instead is the observability the argument depends on: the
+        // WARN below fires once the list passes a depth no real client explains,
+        // so if the ceiling ever stops holding it is a log line rather than a
+        // slow leak. **J3 is the reason that matters**: receipts lengthen how long
+        // an entry can stay outstanding, so this ceiling should be re-derived
+        // there rather than inherited.
         let mut inflight: Vec<(u64, serde_json::Value)> = Vec::new();
+        let mut inflight_warned = false;
 
-        tokio::pin!(shutdown);
         loop {
             // Shutdown first and unconditionally; the two traffic directions
             // then compete on equal terms. See [`Step`].
@@ -1003,13 +1278,17 @@ impl HubProxy {
                     if writer.is_none() {
                         // Reconnect on the call, not on a timer: the row is
                         // re-read here, so a new holder is picked up by the
-                        // first call after it appears.
-                        match self.reconnect_and_replay(&handshake).await {
-                            Ok((halves, before)) => {
+                        // first call after it appears. Raced against shutdown and
+                        // capped at `DIAL_BUDGET` (J2-R2-1): this is the await the
+                        // old "2 × CONNECT_BUDGET" bound was wrong about, because
+                        // `dial` starts with a store read that no budget covered.
+                        match self.dial_bounded(&handshake, shutdown.as_mut()).await {
+                            Dialled::Hub(halves, before, dialled) => {
                                 generation += 1;
                                 writer = Self::split_hub(halves, generation, &hub_tx);
                                 tracing::info!(
                                     generation,
+                                    dialled = %dialled.display(),
                                     "lambo serve: proxy reconnected to the current session holder"
                                 );
                                 // Whatever the new holder said before answering
@@ -1019,11 +1298,23 @@ impl HubProxy {
                                     Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
                                 }
                             }
-                            Err(e) => tracing::warn!(
+                            Dialled::Failed(e) => tracing::warn!(
                                 error = %e,
                                 "lambo serve: proxy cannot reach a session holder — failing this \
                                  call honestly"
                             ),
+                            Dialled::ShutdownRequested => {
+                                // The frame that triggered this dial goes
+                                // unanswered, exactly as any frame in flight at a
+                                // SIGTERM does. Answering it would mean writing to
+                                // a client whose process is being torn down while
+                                // the signal waits.
+                                tracing::info!(
+                                    "lambo serve: shutdown signal while dialling the session \
+                                     holder — closing the proxy"
+                                );
+                                break;
+                            }
                         }
                     }
                     let sent = match writer.as_mut() {
@@ -1039,6 +1330,18 @@ impl HubProxy {
                         // loses it is the one that answers for it.
                         if let Some(id) = request_id(&frame) {
                             inflight.push((generation, id));
+                            if inflight.len() > INFLIGHT_DEPTH_WARN && !inflight_warned {
+                                inflight_warned = true;
+                                tracing::warn!(
+                                    outstanding = inflight.len(),
+                                    threshold = INFLIGHT_DEPTH_WARN,
+                                    "lambo serve: the proxy is holding more unanswered forwarded \
+                                     requests than any real client explains — the holder may be \
+                                     accepting frames without answering them. Every one of them \
+                                     is still owed an answer and will get one when this \
+                                     connection ends (J2-R2-7)"
+                                );
+                            }
                         }
                     } else {
                         writer = None;
@@ -1250,6 +1553,103 @@ mod tests {
         }
     }
 
+    /// `GraphStore` whose lease-row read **never returns**, and whose every other
+    /// surface is `unreachable!` — the injection seam for J2-R2-1.
+    ///
+    /// A hung `read_lease` is precisely the shape the finding is about: nothing
+    /// in this module bounded it, and what *did* bound it was the store adapter's
+    /// own tuning — sqlite's `busy_timeout` behind a `max_connections(1)` pool,
+    /// cockroach's `statement_timeout` behind the same 30s sqlx default acquire
+    /// (the arithmetic is at [`DIAL_BUDGET`]). Injecting the pathology at the
+    /// trait the production type already takes, rather than provoking a real
+    /// store into it, is the [`crate::ledger`] `BatchSink` precedent: neither the
+    /// timing nor the store's configuration has to be reproduced for the bound to
+    /// be falsifiable.
+    struct HungLeaseStore;
+
+    #[async_trait::async_trait]
+    impl crate::store::GraphStore for HungLeaseStore {
+        async fn read_lease(
+            &self,
+            _session: &crate::types::SessionId,
+        ) -> Result<Option<LeaseInfo>, crate::types::StoreError> {
+            // Never resolves. The dial's own bound must be what ends this.
+            std::future::pending().await
+        }
+        async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+            unreachable!("a proxy never initializes schema")
+        }
+        fn capabilities(&self) -> crate::store::Capabilities {
+            unreachable!("a proxy never asks a store what it can do")
+        }
+        async fn flush(
+            &self,
+            _batch: &crate::types::MutationBatch,
+            _token: Option<u64>,
+        ) -> Result<(), crate::types::StoreError> {
+            unreachable!("a proxy holds no tail and never flushes")
+        }
+        async fn load_session(
+            &self,
+            _session: &crate::types::SessionId,
+        ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+            unreachable!("a proxy holds no graph and never loads")
+        }
+        async fn keyword_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _tokens: &[String],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, crate::types::StoreError>
+        {
+            unreachable!("a proxy never queries")
+        }
+        async fn vector_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, crate::types::StoreError>
+        {
+            unreachable!("a proxy never queries")
+        }
+        async fn blast_radius(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<Utc>,
+        ) -> Result<u64, crate::types::StoreError> {
+            unreachable!("a proxy never queries")
+        }
+        async fn interaction_span(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_age: std::time::Duration,
+            _now: chrono::DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+            unreachable!("a proxy never queries")
+        }
+        async fn record_canonization(
+            &self,
+            _event: &crate::types::CanonizationEvent,
+            _token: Option<u64>,
+        ) -> Result<(), crate::types::StoreError> {
+            unreachable!("a proxy never canonizes")
+        }
+    }
+
+    /// A proxy whose every dial parks forever in the lease-row read.
+    fn proxy_onto_a_hung_store() -> HubProxy {
+        HubProxy::new(
+            crate::types::SessionId::new("j2-r2-1"),
+            ours(),
+            Arc::new(HungLeaseStore),
+            "this-host".to_string(),
+        )
+    }
+
     fn ours() -> SessionEndpoint {
         let store = StoreConfig {
             kind: crate::store::StoreKind::Sqlite,
@@ -1387,6 +1787,17 @@ mod tests {
             // No name at all.
             "/".to_string(),
             String::new(),
+            // J2-R2-6: the RIGHT name, published relatively. `dial_dir` would
+            // have taken `parent()` — `Some("")` for the bare spelling, which
+            // reached `assert_private_dir` as an empty path in an
+            // operator-facing message, and `.` for the other, which is this
+            // process's cwd rather than anywhere on the holder's filesystem.
+            ours.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            format!("./{}", ours.path().file_name().unwrap().to_string_lossy()),
         ] {
             let err = proxyable(&row("a@this-host#1", Some(&published)), &ours, "this-host")
                 .expect_err("a different address name must be refused");
@@ -1720,6 +2131,113 @@ mod tests {
         // N4, same as the unreachable text: no path, no store URL.
         assert!(!msg.contains('/'), "no socket path may leak: {msg}");
         assert!(!msg.contains("://"), "no store URL may leak: {msg}");
+    }
+
+    /// J2-R2-1: a SIGTERM arriving during a dial is honoured at the next poll,
+    /// whatever the store is doing.
+    ///
+    /// This is the property the old `2 × CONNECT_BUDGET` sentence claimed and the
+    /// code did not have. Under a hung `read_lease` the pre-fix arm body waited
+    /// for the store — 38s on sqlite, 50s on cockroach, computed at
+    /// [`DIAL_BUDGET`] — and this test would have measured `DIAL_BUDGET` at best
+    /// and never returned at worst.
+    ///
+    /// **Its own negative control.** Remove the `biased` shutdown arm from
+    /// `dial_bounded` and the call still returns, at `DIAL_BUDGET`, with
+    /// `Dialled::Failed` — so the mutation lands as a failed assertion on the
+    /// variant *and* on the elapsed time, not as a hung suite. Remove the
+    /// `tokio::time::timeout` as well and it hangs, which is the honest signal for
+    /// that mutation.
+    ///
+    /// Time is paused, so the test costs no wall clock: the runtime auto-advances
+    /// to the shutdown timer the instant the hung read is the only pending work —
+    /// exactly the state a store wedged at its connection pool produces.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_during_the_dial_is_honoured_and_not_left_to_the_store() {
+        let proxy = proxy_onto_a_hung_store();
+        let handshake = Handshake::default();
+        let shutdown = tokio::time::sleep(std::time::Duration::from_millis(50));
+        tokio::pin!(shutdown);
+        let start = tokio::time::Instant::now();
+        let outcome = proxy.dial_bounded(&handshake, shutdown.as_mut()).await;
+        let waited = start.elapsed();
+        assert!(
+            matches!(outcome, Dialled::ShutdownRequested),
+            "a shutdown against a hung lease-row read must end the dial at once; \
+             `Dialled::Failed` here means the race is gone and the budget cap answered instead"
+        );
+        assert!(
+            waited < DIAL_BUDGET,
+            "the signal, not the budget, must decide this one: waited {waited:?}"
+        );
+    }
+
+    /// J2-R2-1: with no shutdown in sight, a hung lease-row read is cut off at
+    /// the **chosen** bound rather than at the store's.
+    ///
+    /// The client on the other side of this dial is blocked on the call that
+    /// triggered it, so the second half of the fix is that `DIAL_BUDGET` — a
+    /// number chosen here — decides, and not `busy_timeout` / `statement_timeout`
+    /// / sqlx's default pool acquire, which are numbers chosen for a flush.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_lease_read_is_cut_off_at_the_chosen_dial_budget() {
+        // The half of the argument that is arithmetic, asserted rather than
+        // asserted-in-prose: the chosen bound has to sit under the smallest
+        // store-emergent one, or the store is still what governs. 8s is sqlite's
+        // `busy_timeout`, set in `SqliteStore::connect` and pinned there by
+        // `file_backed_wal_and_busy_timeout_applied`.
+        assert!(
+            DIAL_BUDGET < std::time::Duration::from_secs(8),
+            "DIAL_BUDGET must stay below sqlite's 8s busy_timeout, or the number an operator \
+             reads at the constant is not the number that decides"
+        );
+        let proxy = proxy_onto_a_hung_store();
+        let handshake = Handshake::default();
+        let shutdown = std::future::pending::<()>();
+        tokio::pin!(shutdown);
+        let start = tokio::time::Instant::now();
+        let outcome = proxy.dial_bounded(&handshake, shutdown.as_mut()).await;
+        let waited = start.elapsed();
+        assert!(
+            waited >= DIAL_BUDGET && waited < DIAL_BUDGET + std::time::Duration::from_secs(1),
+            "the dial must end at the budget, not at the store: waited {waited:?}"
+        );
+        let Dialled::Failed(e) = outcome else {
+            panic!("a hung store read must fail the dial, not produce a connection")
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains(&format!("within {}s", DIAL_BUDGET.as_secs())),
+            "the operator needs the bound that fired named in the line: {text}"
+        );
+        assert!(
+            text.contains("connection pool"),
+            "and the likeliest cause, since 'the holder is not answering' would send them to \
+             the wrong process: {text}"
+        );
+    }
+
+    /// J2-R2-1 at the entry point: the **first** dial is inside the raced region
+    /// too, which it was not before — `run` used to await it above the
+    /// `tokio::pin!`, so a proxy was deaf for a whole store timeout before its
+    /// loop ever started.
+    ///
+    /// `run` returns `Ok(())`, the clean exit `serve`'s proxy branch expects, and
+    /// it does so before the stdin task is spawned — which is why this test can
+    /// drive `run` at all without touching the suite's real stdio.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_during_the_proxys_first_dial_exits_cleanly() {
+        let proxy = proxy_onto_a_hung_store();
+        let start = tokio::time::Instant::now();
+        proxy
+            .run(tokio::time::sleep(std::time::Duration::from_millis(50)))
+            .await
+            .expect("a shutdown before the first connection is a clean exit, not a failure");
+        let waited = start.elapsed();
+        assert!(
+            waited < DIAL_BUDGET,
+            "the first dial must be raced against the signal, not merely capped: {waited:?}"
+        );
     }
 
     /// `answer_lost` is per-connection: a reconnect does not retire the ids the
