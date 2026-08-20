@@ -158,17 +158,20 @@ pub fn clamp_cfg_default(name: &str, value: usize, lo: usize, hi: usize) -> usiz
 /// from `canonical_key`, so allowing them cannot fork one concept into two.
 ///
 /// **`U+2028`/`U+2029` are deliberately absent, and that is a decision rather
-/// than an oversight (J1-R2-1).** They are invisible structural characters,
-/// which is this table's stated criterion, and they are caught by nothing else:
-/// they are not `Cc`, so `is_control()` misses them, and the ranges jump
-/// `\u{2060}`–`\u{2064}` and `\u{2066}`–`\u{206F}`, skipping the `202A`–`202E`
-/// bidi family's neighbours at `2028`/`2029`. For `content` nothing is gained by
-/// adding them: `content` already permits `\n`, so a forced line break buys an
-/// author nothing it could not already have. Where a *single-line* invariant is
-/// the whole point they are refused at the door that promises it —
-/// `mcp::server`'s `breaks_one_line`, which guards `agent_id`. If `content` ever
-/// stops permitting `\n`, revisit this together with that predicate rather than
-/// in isolation.
+/// than an oversight (J1-R2-1, argument corrected J1-R3-3).** This table's
+/// criterion is *invisibility* — characters that survive human review while
+/// changing what the model reads or what the canonical key becomes — and on
+/// that criterion the line separators do not qualify for `content`: they render
+/// as visible line breaks (that is their entire function), and they cannot fork
+/// a canonical key, because [`crate::graph::canonical::normalize_tokens`]
+/// splits tokens on `char::is_whitespace()`, whose Unicode `White_Space` set
+/// contains both — two contents differing only in `\u{2028}` vs `\n` normalize
+/// to one key. Where a *single-line* invariant is the whole point they are
+/// refused at the door that promises it — `mcp::server`'s `breaks_one_line`,
+/// which guards `agent_id`. **Revisit trigger:** if `normalize_tokens` ever
+/// stops splitting on `is_whitespace()` (a narrower splitter re-opens the
+/// key-forking question), or if any renderer starts treating them as other
+/// than a line break — not merely if `content`'s `\n` policy changes.
 fn is_disallowed_format(c: char) -> bool {
     is_invisible(c) && !is_text_required_invisible(c)
 }

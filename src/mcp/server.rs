@@ -781,8 +781,8 @@ async fn contain_panic(
 /// blocks, so an id near the uniform cap can evict the block it annotates
 /// from another agent's context. 256 is generous for any real client id, and
 /// bounds — but does not eliminate — that eviction: see the measurement in
-/// [`LamboServer::check_agent_id`]. Applies only at this door — `--agent` and `AgentId` itself stay uncapped
-/// (trusted, process-side).
+/// [`LamboServer::check_agent_id`]. Applies only at this door — `--agent` and
+/// `AgentId` itself stay uncapped (trusted, process-side).
 const MAX_AGENT_ID_CHARS: usize = 256;
 
 impl LamboServer {

@@ -403,11 +403,13 @@ time is mocked in tests):
 - `reserve(graph, node, agent, ttl, now) -> Result<Reservation, LamboError>`:
   missing node -> `StoreError::NotFound`; no lock -> create
   (`expires_at = now + ttl`); same agent -> extend (expiry replaced, node +
-  agent unchanged); cross-agent live -> `LamboError::Conflict` naming holder +
+  agent unchanged); cross-agent live -> `LamboError::SoftLock` naming holder +
   expiry (`"node {n} already reserved by {holder} until {expiry}"`); cross-agent
-  expired (`now >= expires_at`) -> takeover.
+  expired (`now >= expires_at`) -> takeover. (Was `Conflict` until J1 round 2
+  split the §11 soft-lock refusal from the lease-lost fence so the MCP layer can
+  surface one without disclosing the other — `SoftLock` is produced only here.)
 - `release(graph, node, agent) -> Result<(), LamboError>`: owner clears;
-  non-owner -> `Conflict` (lock untouched); no reservation -> `NotFound`.
+  non-owner -> `SoftLock` (lock untouched); no reservation -> `NotFound`.
 - `active_reservation(graph, node, now) -> Option<&Reservation>`: `None` when
   expired. **Expiry is half-open: active iff `now < expires_at`** (at
   `now == expires_at` the lock is dead).
