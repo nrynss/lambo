@@ -26,7 +26,7 @@ caller's identity, and `lambo_reserve` is already broken without it. Renumbered.
 | J0 | Carryover from workstream I, round 3 (CLEAN) — **DONE `0c81419`** | nothing |
 | J1 | Per-call agent identity — **DONE** | nothing |
 | J2 | A losing serve proxies instead of exiting | J1 |
-| J3 | Writes acknowledged before the embedder | J1 (receipt scoping) |
+| J3 | Writes acknowledged before the embedder — **DONE (`wt/j3`, awaiting review)** | J1 (receipt scoping) |
 | J4 | Lease conflicts leave an artifact | I1 |
 | J5 | Transport defaults and config layering | nothing |
 
@@ -1298,6 +1298,11 @@ existing test, which is why J2-R2-6 shows no count change.
 
 ## J3 — Writes acknowledged before the embedder
 
+**Status: implemented — see [§J3 Status](#j3-status--landed) below** for what
+shipped, the measured latency, the deviations argued (fetch-by-id on
+`lambo_stats` rather than an eighth tool; the declared metric-2 regression), and
+every constant's derivation. The spec below is the spec it was built against.
+
 A warm `lambo_derive` is 27ms, of which 22 to 25ms is the embedding call. Durability is
 *already* async: write-behind returns long before anything reaches disk. The wait buys the
 agent nothing it is waiting for.
@@ -1350,6 +1355,218 @@ when matching happens.
   being obviously right. Re-derive it against the new counter sites;
   `adve-review-mooshik-I-round3.md`'s flip D is the map for the never-`accepted`
   classes.
+
+### J3 Status — landed
+
+**Status: implemented on `wt/j3`, awaiting review.** Four staged commits
+(`427fabf` pipeline, `dcf29de` MCP surface, `f9abfbb` tests, `3e1bea4` two
+defects found by measuring the binary), plus this note.
+
+#### The latency claim, measured
+
+Measured 2026-08-20 at the **release binary** over real stdio MCP, SQLite store,
+one concept per call, 20 calls after a warm-up call, median of the per-call wall
+clock as a client sees it. `base` is `166a3c8` (pre-J3, synchronous); `J3` is
+this branch. The real embedder is the rig's live llama.cpp BGE-M3 q8_0 on CPU at
+`127.0.0.1:8080`.
+
+| Embedder | base median | J3 median | J3 min / max |
+| --- | --- | --- | --- |
+| `FixtureEmbedder` (no work) | 0.101 ms | 0.076 ms | 0.040 / 0.160 ms |
+| **BGE-M3 q8_0 on CPU (live)** | **14.111 ms** | **0.048 ms** | 0.033 / 0.093 ms |
+
+The claim is verified in the strong form: with the real embedder, J3's ack
+(0.048 ms) is *at or below* the fixture-embedder ack (0.076 ms), which is what
+"the embedder is no longer in the call" means — the ack is indistinguishable
+from a call that does no embedding at all. Both runs applied all 21 concepts
+(`write_queue_applied: 21`, `concept_count: 21`), so the fast number is not a
+fast no-op.
+
+Two figures differ from §Measurements and the difference is the rig, not J3:
+that table's 27 ms warm derive was measured through the dogfood client stack on
+the pinned `3039b82`, while this is a release binary driven by a raw pipe against
+an already-warm llama-server. The *delta* is what J3 owns.
+
+Probe output from the same runs, which is where the queue bound comes from:
+
+| Embedder | measured `items_per_sec` | bound | clamped? |
+| --- | --- | --- | --- |
+| BGE-M3 q8_0 on CPU | 131.9 (110–141 across repeats) | 264 | no |
+| `FixtureEmbedder` | ~21 000 (98 000 in one run) | 1024 | yes |
+
+#### Design decisions
+
+* **Queue at `Memory` level, delivery at MCP level.** Only `Memory`'s worker can
+  produce an outcome; only the server knows how to render one to a model. The
+  synchronous `derive` / `record_action` are **unchanged** and the async path is
+  additive (`derive_async_as`, `record_action_async_as`) — making the existing
+  surface async would silently remove read-your-writes from every embedded
+  owner and every derive-then-assert test, a far larger change than J3 is.
+* **The interaction is opened on the call path.** `begin_interaction_as` is
+  synchronous and cheap, so submission order *is* `Temporal`-chain order by
+  construction — strictly stronger than ordering the drain, because the chain
+  stops depending on drain order at all. Per-agent FIFO lanes are still enforced
+  in the drain, because insertion order decides which of two identical concepts
+  is `created` and which is `matched`, and the receipt reports that.
+* **Fetch-by-id lives on `lambo_stats`, not on an eighth tool.** This deviates
+  from the shape sketched above and the reason is the register, not taste: spec
+  §6.2 enumerates exactly seven tools, two tests pin that list with messages
+  saying an eighth is a spec change, and "seven tools" is asserted in 40+ places
+  including `evidence/` files that are *records of past runs* — rewriting those
+  would falsify history rather than update a register. §J3 asks for outcomes
+  "fetchable by id", not for a tool. `lambo_stats` is already the introspection
+  surface, already grows this change's queue keys, and a receipt is the per-write
+  grain of exactly the question its `flush_lag` / `log_depth` answer at session
+  grain. `receipt` + `wait_ms` are its two new parameters; `wait_ms` clamps
+  rather than refuses.
+* **Receipt ids are self-describing** — process epoch, issue time, sequence — so
+  `expired`, `restart_lost` and `never_issued` are distinguishable with no
+  history kept. Eviction is oldest-first, so an evicted id is older than
+  everything retained and `expired` is the honest answer for it too: eviction
+  collapses into expiry instead of becoming a fifth class. Seven states, none of
+  them "unknown". `restart_lost`'s wording is kept word-for-word consistent with
+  the proxy's `HUB_LOST_CODE` (-32002): outcome UNKNOWN, recall before
+  re-deriving.
+* **`close()` quiesces the queue before it takes the writers gate**, and that
+  order is forced rather than chosen: the gate's write side is held for the rest
+  of `close`, so a worker passing through the gate could never finish and a
+  `close` waiting for it would deadlock. Workers therefore never touch the gate;
+  latching `closed` stops new jobs and the quiesce stops the workers. Anything
+  past the budget is abandoned — aborted **and joined**, because aborting alone
+  proves nothing (the R3-1 lesson) — and settled `failed` with a session-closed
+  reason rather than left `pending` forever in an exiting process.
+* **The daemon's wake is unchanged**: a background write pokes it through the
+  same `Notify` the synchronous path uses, via a new `Daemon::waker`.
+* **`lambo_stats` gains ten unconditional keys.** The difference from the
+  `ledger_*` keys' gating is not an inconsistency: the ledger is an optional
+  subsystem, so "off means byte-identical" is a promise that can be kept for it;
+  the write queue has no off switch, so there is no baseline payload left to
+  preserve. `write_queue_bound` never appears without `write_queue_measured`, or
+  the unmeasured floor would read as a measurement, and
+  `write_queue_items_per_sec` reports the **raw** rate even when the bound was
+  clamped so the two cases can be told apart.
+
+#### The coupled residual J2 handed over, discharged
+
+J2-R2-7 / J2-R3-3 described the pump's uncapped `inflight` list and its un-raced
+write burst as one item, and asked J3 to bound both. **The mechanism is receipt
+*waiting*, and the correction belongs in the record:** a non-waiting ack returns
+immediately and never enters the pump's `inflight` list, so the queue bound is
+not the burst length. A *waiting* `lambo_stats` call is what occupies an
+in-flight slot for its whole duration, and `answer_lost` writes one un-raced
+frame per slot. So both ends of the waiting surface are bounded —
+`RECEIPT_WAIT_MAX` (4 s) caps how long one wait holds a slot,
+`MAX_CONCURRENT_RECEIPT_WAITS` (16) caps how many exist — and the link is a
+build guard, `const _: () = assert!(MAX_CONCURRENT_RECEIPT_WAITS * 2 <=
+INFLIGHT_DEPTH_WARN)`, which is why `INFLIGHT_DEPTH_WARN` became `pub(crate)`.
+Half the warn threshold is left for ordinary traffic, so receipt waits alone
+cannot be what trips it. Neither ceiling can now move without the other being
+considered.
+
+#### The `ledger_queued_lines` arithmetic, re-derived
+
+The queue keeps its **own** counters and never touches `LedgerCounters`, so
+`accepted − written − write_failed` keeps its exclusivity argument intact: no
+new class enters the ledger's `accepted`. The queue mirrors the discipline
+deliberately — a queue-full or byte-cap reject never enters the queue's
+`accepted`, `outstanding = accepted − applied − failed` is one expression
+serving both the live gauge and the shutdown count, and `abandoned` is a **label
+on a subset of `failed`**, not a fourth term. Pinned by
+`outstanding_excludes_refusals_because_they_never_reached_accepted`, which
+asserts both wrong formulas wrong — and the naive one *panics* on
+subtract-with-overflow in a debug build, which is why `outstanding()` is
+saturating rather than relying on the invariant.
+
+#### A declared regression: I1's metric-2 facts moved to the receipt
+
+`created`, `matched`, `semantic_merged`, `reinforced` and `edges` cannot ride an
+ack issued before the write. They are **relocated, not dropped**: the receipt
+carries all five plus true `created_count` / `matched_count` beside the
+id lists (truncated at 64), and the ledger line carries `concepts_requested`,
+`admitted` and `receipt` so the two join. The cost is real and named:
+`scripts/observability/dedup_rate.py` and `duplicates.py` read those keys off
+the line, so for **MCP-driven sessions** they now see no derive facts. CLI-driven
+sessions are unaffected (they use the synchronous path), and `duplicates.py`'s
+store-side half reads the graph, so its cross-check still works.
+
+**Handed forward, not fixed here:** the repair is a ledger line for the write's
+*completion*, carrying the same fact keys. That is a ledger **schema** change —
+it moves `_ledger.py`, `dedup_rate.py`, `duplicates.py`, the observability
+README and `verify.sh` — and doing it inside J3 would have meant two append
+paths for one tool, which is precisely the drift hazard I-round3's flip D warns
+about. It belongs with whoever next owns ledger artifacts. The README says all
+of this at the fact table, so nobody reads a zero as a zero.
+
+#### Two defects found by measuring the binary, not by a test
+
+Both are worth recording because a test suite that was fully green did not see
+either.
+
+1. **`lambo_stats` with a `wait_ms` reported the session as it was before the
+   wait.** The payload was snapshotted first and the receipt resolved after, so
+   a call that blocked for a write returned `write_queue_applied: 0` and
+   `concept_count: 0` *beside a receipt in the same payload saying `applied`
+   with a created node id*. A payload that contradicts itself is worse than a
+   slow one. Fixed by resolving the receipt first; pinned by
+   `a_waiting_stats_call_reports_the_session_after_the_wait`.
+2. **The queue clamp was a false stated reason.** `PROBE_MAX_CREDIBLE_RPS = 128`
+   claimed to mark where a probe stops being credible, reasoning from
+   §Measurements' 4-wide recall figure (4 / 64 ms ≈ 62 items/s) that twice that
+   was implausible. Probing this machine's own llama.cpp BGE-M3 measured
+   **110–141 items/s** — above the "implausible" ceiling — so the clamp would
+   have decided the bound on an ordinary local embedder while claiming to guard
+   against stubs, and "a ceiling measured on the deployment's own embedder"
+   would have been decorative on exactly the deployment it was written for.
+   Re-derived from a property of the module instead: every outstanding job holds
+   a `Pending` receipt and eviction is oldest-first, so a queue deeper than the
+   receipt store could evict the receipt of a *running* write and answer
+   `expired` about it. Hence `WRITE_QUEUE_MAX = MAX_RETAINED_RECEIPTS / 4`
+   (1024), with `MAX_RETAINED_RECEIPTS` raised 1024 → 4096 (~10 MiB at the
+   door's worst case) because at 1024 the derived clamp was still under the
+   measured rate. `MEASURED_LOCAL_EMBEDDER_RPS = 141` is now a constant and
+   `PROBE_CLAMP_RPS > 3 * MEASURED_LOCAL_EMBEDDER_RPS` is a build guard — the
+   guard the first version failed.
+
+A third, found while wiring: the first version ran `graph::derive::validate` on
+the call path for every strategy, but hybrid's pre-pass is a *different* set of
+rules (it omits the repeated-`Observation` and single-`Hierarchical`-parent
+rejections), so a concurrent re-derive began failing at ack with a `store error`
+on writes hybrid had always accepted. Validation that disagrees with the write is
+worse than none; the pre-pass is now chosen by `match_strategy`.
+
+And one in the new test rig itself, recorded because it cost a 120 s watchdog:
+`*m.lock() = *m.lock() + d` on a `parking_lot::Mutex` keeps the right-hand guard
+alive across the left-hand acquire and self-deadlocks.
+
+#### Constants, and where each number comes from
+
+| Constant | Value | Derived from |
+| --- | --- | --- |
+| `WRITE_QUEUE_DRAIN_BUDGET` | 2 s | A quarter of `CLOSE_FLUSH_GRACE` (8 s), *carved out of* it rather than added, so the quiesce cannot be why a `close` misses the window `serve` gives it. One constant serves both admission projection and quiesce, so a queue cannot admit more than shutdown will wait for. Build-guarded. |
+| `WRITE_QUEUE_MIN` | 4 | `PROBE_CONCURRENCY`, and defined from it: the floor must not drop work a 4-wide measurement has shown the deployment absorbs. |
+| `WRITE_QUEUE_MAX` | 1024 | `MAX_RETAINED_RECEIPTS / 4` — see defect 2. Build-guarded. |
+| `PROBE_CLAMP_RPS` | 512 | Derived: `WRITE_QUEUE_MAX / WRITE_QUEUE_DRAIN_BUDGET`. Build-guarded above 3× the measured local embedder. |
+| `WRITE_QUEUE_MAX_BYTES` | 16 MiB | `MAX_CONTENT_BYTES × 1024` — a thousand maximal strings. A count is the wrong unit for memory: at the door's caps one maximal `derive` retains ≈ 9 MiB, so this admits one whole and refuses a second. |
+| `PROBE_CONCURRENCY` | 4 | §Measurements' parallelism figure is a 4-wide one; the probe re-measures the rate per deployment, this fixes only the width. |
+| `PROBE_BUDGET` | 5 s | The worst an admission can wait, since admission blocks on the probe rather than falling back to a constant. Generous because a cold llama.cpp first token takes seconds and calling that "unmeasurable" would floor a warm deployment for life. |
+| `RECEIPT_RETENTION` | 300 s | Above the **227 s** worst `flush_lag` in §Measurements — the applied-but-not-durable window a receipt has to outlive, or the widened crash window is unauditable from the surface that describes it. Build-guarded above `HYBRID_IO_TIMEOUT + WRITE_QUEUE_DRAIN_BUDGET`, so `expired` is unreachable for a running job. |
+| `MAX_RETAINED_RECEIPTS` | 4096 | A ~10 MiB budget at the door's worst case (2.4 KiB per receipt: a summary plus 64 × 36-byte ids). The time bound alone cannot do this job — 300 s against `DEFAULT_RATE_LIMIT_RPS` (50/s) is 15 000 receipts. |
+| `MAX_RECEIPT_IDS` | 64 | `MAX_CONCEPTS_PER_DERIVE`, and defined from it. |
+| `RECEIPT_WAIT_MAX` | 4 s | Two drain budgets: a job admitted when the queue was full is projected to *start* at one, so the second is its own service time plus slack. Build-guarded, because a wait shorter than the admission promise would time out on the very jobs it exists for. |
+| `MAX_CONCURRENT_RECEIPT_WAITS` | 16 | Half of `INFLIGHT_DEPTH_WARN` (64) left for ordinary traffic. Build-guarded against it — the J2-R2-7 / J2-R3-3 link. |
+| `MAX_PIGGYBACK_RECEIPTS` | 8 | One screen of one-line notes; the rest stay queued and the note says how many. |
+
+#### What J3 did not change
+
+No new transport. No change to `lambo_reserve`'s synchrony — its result *is* the
+caller's next action. No MCP notifications: a notification lands in a client log
+rather than the model's context, which is the failure this workstream exists to
+fix. No change to the lease, the fencing token, or the proxy's forwarding — the
+receipt rides *inside* tool responses, so the byte pipe forwards it untouched,
+and `src/mcp/proxy.rs` has no J3 change at all beyond one `const` becoming
+`pub(crate)` for a build guard. Dedup is unaffected: embedding still precedes
+insertion. Not J4's ledger lines (see the declared regression), not J5's docs
+beyond the two `mcp.mdx` mirrors this change's own surface required.
 
 ## J4 — Lease conflicts leave an artifact
 
@@ -1447,17 +1664,53 @@ Every figure is one rig, not a property of lambo.
       runs and in DOGFOOD-FINDINGS, not inside `cargo test`, and re-verifying it after a
       re-pin is a runbook act (the probe harness is reusable). pi was unusable (no ready
       generative provider) and is NOT covered by this box
-- [ ] `lambo_derive` returns after validation without waiting on the embedder, and its call
-      time drops to the round-trip floor (J3)
-- [ ] Every write ack carries a receipt; outcomes are retrievable by it; expired and
-      restart-lost answer distinctly, never "unknown" (J3)
-- [ ] Waiting on a receipt restores read-your-writes for a caller that asks (J3)
-- [ ] The queue bound comes from a ceiling measured on the deployment's own embedder, drops
-      are counted in `lambo_stats`, and a burst degrades visibly (J3)
-- [ ] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
+- [x] `lambo_derive` returns after validation without waiting on the embedder, and its call
+      time drops to the round-trip floor (J3) — **measured at the release binary over real
+      stdio against the rig's live BGE-M3 on CPU: 14.111 ms median before, 0.048 ms median
+      after**, which is at or below the same binary's ack against an embedder that does no
+      work at all (0.076 ms). See §J3 Status for the full table and why those absolute
+      figures differ from §Measurements' 27 ms. Pinned in `cargo test` as a *property*
+      rather than a stopwatch (`the_ack_lands_before_the_embedder_is_called`: the ack
+      returns with the write parked in a gated embedder), because a timing assertion in CI
+      would be flaky
+- [x] Every write ack carries a receipt; outcomes are retrievable by it; expired and
+      restart-lost answer distinctly, never "unknown" (J3) — seven states, `expired` /
+      `restart_lost` / `never_issued` all distinct, and `forbidden` for another agent's
+      receipt (per-agent scoping, J1). Retrieval is `lambo_stats(receipt=…)`, **not an
+      eighth tool** — deviation argued in §J3 Status. `restart_lost`'s wording is
+      word-for-word consistent with the proxy's -32002
+- [x] Waiting on a receipt restores read-your-writes for a caller that asks (J3) —
+      `lambo_stats(receipt=…, wait_ms=…)`, clamped to `RECEIPT_WAIT_MAX` rather than
+      refused, and exercised end to end through a **proxy** as well as in-process. A
+      timed-out wait answers `pending`, which is honest rather than a failure
+- [~] The queue bound comes from a ceiling measured on the deployment's own embedder, drops
+      are counted in `lambo_stats`, and a burst degrades visibly (J3) — measured by a 4-wide
+      concurrent probe of the deployment's own embedder, spawned at build so it costs
+      startup nothing, and admission *awaits* it rather than falling back to a constant, so
+      there is no constant-bounded window. Verified at the binary: the live BGE-M3 measured
+      131.9 items/s and got bound 264, **not** clamped. Drops are `write_queue_dropped`
+      beside nine other keys and each drop says so on its own receipt.
+      **Tilde, and here is the honest limit:** a probe *failure* falls back to
+      `WRITE_QUEUE_MIN` and reports `write_queue_measured: false`, so a deployment whose
+      embedder is down at startup runs on a floor nothing measured until it restarts — the
+      probe is one-shot, not retried. And an embedder above `PROBE_CLAMP_RPS` (512 items/s)
+      is clamped by receipt retention rather than by its own throughput; that is by design
+      and `write_queue_items_per_sec` still shows the raw rate, but on such a deployment the
+      bound is not the embedder's ceiling. Neither case is a burst that degrades invisibly,
+      which is what the box is for; both are reasons not to tick it flat
+- [x] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
       with two agents interleaving through one process, the §13 conflict sentence's `writer`
       is **measured** rather than assumed: J1 made the same-instant collision path
-      non-degenerate (J1-R1-8)
+      non-degenerate (J1-R1-8). Satisfied as the amendment requires, by filtering the
+      session-wide chain on `agent_id`
+      (`interleaved_agents_each_keep_their_own_order_on_the_temporal_chain`, which also
+      asserts the chain *actually* interleaves or the filter would prove nothing). Stronger
+      than specified in one respect and it is worth stating: the interaction is opened on
+      the call path, so chain order is submission order **by construction** and cannot be
+      corrupted by an out-of-order drain at all. Per-agent FIFO lanes are still enforced in
+      the drain, for the separate reason that insertion order decides which of two identical
+      concepts is `created` and which is `matched`
+      (`each_agents_writes_drain_in_that_agents_submission_order`)
 - [ ] A refused lease acquisition appears in the ledger from both sides (J4)
 - [ ] Docs state the multi-client default and the every-layer config rule (J5)
 - [x] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
@@ -1481,7 +1734,7 @@ Status note: this machine's rig was re-pinned to `0f672f1` (the I-close, ledger-
 binary) on 2026-08-20; other machines re-pin per the runbook whenever they next set up —
 nothing else re-pins tonight.
 
-### What J2 makes stale in DOGFOOD-SETUP.md — recorded, not yet edited
+### What J2 and J3 make stale in DOGFOOD-SETUP.md — recorded, not yet edited
 
 J2 did **not** touch the runbook, on purpose: the re-pin and the runbook edit are one act
 (above), and editing it now would describe a binary no machine is running. This is the list
@@ -1519,3 +1772,18 @@ that edit has to work through, written while the changes were fresh.
   stderr line, `lambo serve: proxying to the session holder`. Nothing reaches the ledger
   (J4's), so "which of my serves is the hub" is answered from the lease row or from that
   line, and the runbook should say which.
+* **J3, §7's agent protocol.** The instruction the runbook hands agents — derive
+  decisions-with-why, then recall — now needs one clause: `lambo_derive` and
+  `lambo_record_action` return before the write is applied, so an agent that must
+  *read back* what it just wrote calls `lambo_stats` with the ack's receipt and a
+  `wait_ms` first. Nothing else about the protocol changes, and the common case
+  (write, keep working, read the outcome off the next response's `write receipts:`
+  block) needs no instruction at all. The MCP server's own `instructions` string
+  already says this to every model that connects; the runbook line is for the
+  operator reading a transcript and wondering why a recall came back empty.
+* **J3, §2's startup line.** A J3-carrying serve logs one more INFO at startup,
+  `write queue: bound measured on this deployment's embedder`, with the measured
+  `items_per_sec` and the bound. That line is the fastest way to tell whether the
+  rig's llama-server was reachable at startup — a `WARN` in its place means the
+  queue is on its unmeasured floor — so it belongs in §6's smoke test beside the
+  lease-row check.

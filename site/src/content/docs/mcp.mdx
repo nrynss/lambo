@@ -24,9 +24,12 @@ The process behind the HTTP endpoint is a session writer, and it is not open to 
 
 Starting a second `lambo serve` for the same session no longer fails. The first process to
 start holds the session and becomes the hub; later ones connect to it over a local socket and
-forward every tool call, so each client gets full read, full write, and real read-your-writes
-against one graph rather than one client getting memory and the rest getting none. There is
-nothing to configure — point each client at `lambo serve --session <id>` the ordinary way.
+forward every tool call, so each client gets full read, full write, and read-your-writes on
+request against one graph rather than one client getting memory and the rest getting none.
+"On request" because writes are applied in the background and acknowledged with a receipt
+(see [`lambo_derive`](#lambo_derive)); waiting on that receipt works through the hop exactly
+as it does in the hub. There is nothing to configure — point each client at
+`lambo serve --session <id>` the ordinary way.
 
 Two things are worth knowing. Writes still happen in the holder, so `lambo_stats` reports the
 holder's process; and if the holder dies, forwarded calls return a clear error saying nothing
@@ -158,6 +161,13 @@ Recall still works without a vector leg. You get matches on the words you use ra
 
 Store new concepts learned from the current interaction.
 
+**This call returns before the write is applied.** Lambo validates your input, fixes this write's place in the session's order, and answers — the embedding and the graph insert happen in the background. A warm derive against a local BGE-M3 embedder went from a 14 ms call to a 0.05 ms call this way, because the embedder is no longer inside it. Two consequences worth planning around:
+
+* The ack carries a **receipt id** instead of the node ids, because it does not yet know them. Its outcome — what was created, what matched an existing concept, or why it failed — is delivered two ways: piggybacked onto your next tool response as a `write receipts:` text block, and fetchable at any time by passing the receipt to [`lambo_stats`](#lambo_stats).
+* If you need a write visible to your very next read, pass the receipt to `lambo_stats` with a `wait_ms` first. That is the only thing you have to do differently, and only when you actually need it.
+
+Your own writes are applied in the order you sent them, whatever other agents are doing through the same server. Duplicate detection is unaffected: the embedding still happens before the insert.
+
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
@@ -177,15 +187,21 @@ Store new concepts learned from the current interaction.
 ```
 
 ```json
-{"content": [{"type": "text", "text": "derived 1 concept(s): 1 created, 0 matched existing"}],
- "structuredContent": {"created": ["ddbc8bc8-52ed-465b-9a2a-b0066bda51ad"], "matched": [],
-   "summary": "derived 1 concept(s): 1 created, 0 matched existing", "warnings": []},
+{"content": [{"type": "text", "text": "accepted 1 concept(s) for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.15: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.15 (add wait_ms to block)."}],
+ "structuredContent": {"summary": "accepted 1 concept(s) for background write; validated and ordered, not yet applied",
+   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.15", "receipt_state": "pending", "warnings": []},
  "isError": false}
 ```
+
+`created` and `matched` are **absent** rather than empty. An empty list would be a claim about a write that has not run; the ids live on the receipt.
+
+A write refused for backpressure answers the same shape with `receipt_state` of `dropped` and a summary that says plainly that nothing was written. It is not an error: the call succeeded, the write did not.
 
 ### lambo_record_action
 
 Record something the agent did, along with what it produces, modifies, and depends on. The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
+
+**Like `lambo_derive`, this returns before the write is applied**, and its ack carries a receipt resolved the same way. It has no embedding step of its own, so what asynchrony buys here is ordering: both write tools feed one queue per agent, so an action you record and then derive from is applied in that order.
 
 | Argument | Type | Required | Notes |
 |---|---|---|---|
@@ -200,10 +216,13 @@ Record something the agent did, along with what it produces, modifies, and depen
 ```
 
 ```json
-{"content": [{"type": "text", "text": "recorded action 'created migrations/003.sql': 2 concept(s) created, 2 edge(s) added"}],
- "structuredContent": {"action_node": "2ff7aecd-7627-4be5-9cde-59821ea0a590", "edges": 2, "warnings": []},
+{"content": [{"type": "text", "text": "accepted action 'created migrations/003.sql' for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.16: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.16 (add wait_ms to block)."}],
+ "structuredContent": {"summary": "accepted action 'created migrations/003.sql' for background write; validated and ordered, not yet applied",
+   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.16", "receipt_state": "pending", "warnings": []},
  "isError": false}
 ```
+
+`action_node`, `created` and `edges` are on the receipt, for the reason `lambo_derive`'s ids are.
 
 ### lambo_reserve
 
@@ -247,11 +266,35 @@ List the session's canonical memories, which are the concepts Lambo has promoted
 
 ### lambo_stats
 
-Report session health: flush lag, write-behind log depth, node, edge, and concept counts, canonization progress, and whether the session is degraded. This tool takes only `agent_id`.
+Report session health: flush lag, write-behind log depth, background write queue depth, node, edge, and concept counts, canonization progress, and whether the session is degraded. It is also where you ask what happened to a write.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `receipt` | string | No | A receipt id from a `lambo_derive` or `lambo_record_action` ack. Answers what happened to that one write. |
+| `wait_ms` | integer | No | `0` to `4000`. With `receipt`, wait this long for the write to be applied before answering. A larger value is clamped, not refused. |
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
 
-When the server was started with `serve --ledger`, the payload also carries `ledger_path`, `ledger_written_lines`, `ledger_dropped_lines`, `ledger_dropped_channel_full`, `ledger_dropped_write_failed`, and `ledger_queued_lines`. The dropped total is the one to read first: the call ledger drops lines rather than delay a tool call, so a non-zero value means any count taken from the ledger file is a lower bound. The two keys beside it say which kind of drop it was — `channel_full` is backpressure (the writer fell behind, so the filesystem is slow), `write_failed` is everything else (a batch whose write or open failed, a batch abandoned at shutdown, or an append after shutdown, so the path is wrong) — and they sum to the total. `ledger_queued_lines` is the writer's queue depth: lines accepted but not yet on disk. Read it when the drop counters are all zero but the file is not growing — on a path whose `open` blocks (a reader-less FIFO, a hung mount) the writer parks before its first write, so `written` and both drop counters stay at zero until the queue fills, and only this key distinguishes a parked writer from an idle server. Without `--ledger` all six keys are absent and the payload is unchanged.
+**Asking about one write.** Pass `receipt` and the payload gains a `receipt` object: an `id`, a `state`, and a `detail` sentence written for a model to read. On `applied` it also carries `created`, `matched`, `created_count`, `matched_count`, and the `semantic_merged` / `reinforced` / `edges` counts — everything the ack could not know. Add `wait_ms` and the call blocks until the write lands, which is how you get read-your-writes when you need it; the session figures in the same payload are read after that wait, so they never disagree with the receipt beside them.
+
+The `state` is one of seven, and none of them is "unknown":
+
+| State | What it means |
+|---|---|
+| `applied` | The write is in the graph. Its ids are in the same object. |
+| `pending` | Admitted and ordered, not yet applied. Ask again, or ask with `wait_ms`. |
+| `failed` | Attempted and rejected. Nothing was written; `detail` says why. |
+| `dropped` | Never attempted — the queue was full when you were acked. Nothing was written. |
+| `expired` | This server issued the receipt and no longer holds its outcome. Receipts are kept for 300 seconds. Recall to see whether the write is there. |
+| `restart_lost` | A **different** server process issued it. The outcome is unknowable from here: the write may or may not have been applied before that process ended. Recall before re-deriving. |
+| `never_issued` | This server has never handed out that id. |
+
+A receipt is scoped to the agent that created it, so asking about someone else's answers `forbidden` and discloses nothing about the write.
+
+**Write queue keys**, always present because every write goes through the queue: `write_queue_bound`, `write_queue_measured`, `write_queue_items_per_sec`, `write_queue_outstanding`, `write_queue_accepted`, `write_queue_applied`, `write_queue_failed`, `write_queue_abandoned`, `write_queue_dropped`, and `receipts_retained`. The bound is not a constant — Lambo measures your own embedder's throughput once, at startup, and sizes the queue from it, so a slow embedder gets a shallow queue rather than a deep one it can never drain. `write_queue_measured` says whether that measurement succeeded; when it is `false` the bound is a conservative floor and nothing measured it. `write_queue_items_per_sec` is the raw measurement even when the bound was clamped, so you can tell a queue limited by your embedder from one limited by how many receipts Lambo will hold. Read `write_queue_dropped` first: a non-zero value means acked writes did not happen, and each one says so on its own receipt.
+
+When the server was started with `serve --ledger`, the payload also carries `ledger_path`, `ledger_written_lines`, `ledger_dropped_lines`, `ledger_dropped_channel_full`, `ledger_dropped_write_failed`, and `ledger_queued_lines`. The dropped total is the one to read first: the call ledger drops lines rather than delay a tool call, so a non-zero value means any count taken from the ledger file is a lower bound. The two keys beside it say which kind of drop it was — `channel_full` is backpressure (the writer fell behind, so the filesystem is slow), `write_failed` is everything else (a batch whose write or open failed, a batch abandoned at shutdown, or an append after shutdown, so the path is wrong) — and they sum to the total. `ledger_queued_lines` is the writer's queue depth: lines accepted but not yet on disk. Read it when the drop counters are all zero but the file is not growing — on a path whose `open` blocks (a reader-less FIFO, a hung mount) the writer parks before its first write, so `written` and both drop counters stay at zero until the queue fills, and only this key distinguishes a parked writer from an idle server. Without `--ledger` all six keys are absent. The write queue keys above have no such switch, because there is no mode in which writes bypass the queue.
 
 ## How the server introduces itself
 
@@ -265,9 +308,11 @@ lambo_saints / lambo_stats to look around. Every tool takes your agent_id: it is
 caller-asserted and unverified, so send one stable id of your own — work is recorded under
 it, soft locks are held under it, distinct ids get distinct locks, and callers sharing an
 id share locks. Never send a timestamp: the server stamps them. Ordering is yours to
-manage: a read sees a write only after that write's own tool call has returned, so
-sequence a lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant
-to see it.
+manage, and writes are applied in the BACKGROUND: lambo_derive and lambo_record_action
+return once your input is validated and ordered, and their ack carries a receipt id.
+Their outcome arrives on your next tool response. If you need a write visible to the very
+next read, call lambo_stats with that receipt and a wait_ms first; otherwise carry on —
+your writes are applied in the order you sent them.
 ```
 
 ## Verified clients
@@ -322,8 +367,10 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Reservation TTL | 3600 seconds |
 | Neighbours rendered by `lambo_inspect` | 200 |
 | Candidates listed for an ambiguous focus | 10 |
+| `wait_ms` on `lambo_stats` | 4000 milliseconds |
+| Write receipts kept | 300 seconds, or 4096 receipts, whichever binds first |
 
-Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused.
+Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused. `wait_ms` is the one limit that **clamps rather than refuses**: a larger value waits the maximum instead of erroring, because a client asking to wait longer than Lambo will wait is asking for something harmless.
 
 <Warning>
 The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.

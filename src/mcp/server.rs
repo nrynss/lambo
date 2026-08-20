@@ -2103,10 +2103,13 @@ impl ServerHandler for LamboServer {
                  caller-asserted and unverified, so send one stable id of your own — \
                  work is recorded under it, soft locks are held under it, distinct ids \
                  get distinct locks, and callers sharing an id share locks. Never send \
-                 a timestamp: the server stamps them. Ordering is yours to manage: a \
-                 read sees a write only after that write's own tool call has returned, \
-                 so sequence a lambo_derive/lambo_record_action before the \
-                 lambo_recall/lambo_inspect meant to see it.",
+                 a timestamp: the server stamps them. Ordering is yours to manage, and \
+                 writes are applied in the BACKGROUND: lambo_derive and \
+                 lambo_record_action return once your input is validated and ordered, \
+                 and their ack carries a receipt id. Their outcome arrives on your next \
+                 tool response. If you need a write visible to the very next read, call \
+                 lambo_stats with that receipt and a wait_ms first; otherwise carry on \
+                 — your writes are applied in the order you sent them.",
             self.mem.session().0
         ));
         info
@@ -2444,6 +2447,15 @@ mod tests {
             ("lambo_recall", "traversal_depth", 0, 5),
             ("lambo_inspect", "depth", 0, 5),
             ("lambo_reserve", "ttl_seconds", 1, 3_600),
+            // J3. The literal in `StatsParams` must BE `RECEIPT_WAIT_MAX`:
+            // schemars takes a literal, so this is the only thing keeping the
+            // published maximum and the enforced one the same number.
+            (
+                "lambo_stats",
+                "wait_ms",
+                0,
+                crate::writeq::RECEIPT_WAIT_MAX.as_millis() as i64,
+            ),
         ];
 
         for t in tools(&s) {
@@ -4775,6 +4787,26 @@ mod tests {
             instructions.contains("Ordering is yours to manage"),
             "instructions should tell the model that write-then-read ordering is its \
              responsibility (N7)"
+        );
+        // J3 made the old wording FALSE: a write's tool call returning no
+        // longer means the write is visible. The instructions are the one place
+        // every model reads before it acts, so they must name the receipt and
+        // the way to wait on it.
+        assert!(
+            instructions.contains("applied in the BACKGROUND"),
+            "instructions must say writes are asynchronous (J3): {instructions}"
+        );
+        assert!(
+            instructions.contains("receipt"),
+            "instructions must name the receipt: {instructions}"
+        );
+        assert!(
+            instructions.contains("wait_ms"),
+            "instructions must say how to wait for a write (J3): {instructions}"
+        );
+        assert!(
+            !instructions.contains("a read sees a write only after that write's own tool call"),
+            "the pre-J3 ordering sentence is now false and must not survive: {instructions}"
         );
         s.mem.close().await.expect("close");
     }

@@ -934,7 +934,8 @@ impl MemoryBuilder {
 // Memory
 // ---------------------------------------------------------------------------
 
-/// An attached session: graph + index + store + embedder + three tasks.
+/// An attached session: graph + index + store + embedder, three background
+/// tasks, and (since J3) the asynchronous write pipeline.
 ///
 /// One process owns one session (spec §2.2). Every method takes `&self`, so a
 /// `Memory` behind an `Arc` serves concurrent MCP tool calls; each call carries
@@ -1941,7 +1942,8 @@ impl Memory {
     /// buffer. So:
     ///
     /// 0. **Shut the writers up — the surface's own, then the tasks'.** Latch
-    ///    `closed` so new calls are refused, take the write side of
+    ///    `closed` so new calls are refused, drain J3's asynchronous write
+    ///    queue (see the note at the end of this step), take the write side of
     ///    `Memory::writers`, which waits out every write already in flight on
     ///    a caller task (T81-1), and only then stop the two mutation producers,
     ///    canonization first and the daemon second. It takes both halves for
@@ -1953,6 +1955,19 @@ impl Memory {
     ///    task at its next `.await`, so until the join returns an aborted
     ///    producer can still finish a synchronous stretch — and append to the
     ///    log (R3-1).
+    ///
+    ///    **J3's write pipeline is drained inside this step, and BEFORE the
+    ///    gate is taken** ([`crate::writeq::WritePipeline::quiesce`]). The
+    ///    order is forced, not chosen: the gate's write side is held for the
+    ///    rest of this method, so a background worker that had to pass through
+    ///    the gate could never finish and a `close` waiting for it would
+    ///    deadlock. The workers therefore never touch the gate — latching
+    ///    `closed` is what stops new jobs, and the quiesce is what makes
+    ///    "nothing new lands after the drain" true of the workers. Bounded by
+    ///    [`crate::writeq::WRITE_QUEUE_DRAIN_BUDGET`]; anything still
+    ///    outstanding is abandoned (aborted **and joined**), its receipt
+    ///    settled `failed`, and counted in `lambo_stats`'
+    ///    `write_queue_abandoned`.
     /// 1. [`FlushTask::stop`] — the loop finishes its current `cycle()` (an
     ///    in-flight flush and its retry/backoff complete; a post-retry
     ///    `RETAINED_BACKOFF` hold is *not* waited out), re-appends `pending` to
@@ -1978,7 +1993,12 @@ impl Memory {
     /// Bounded by the flush loop's current cycle (worst case
     /// `FLUSH_ATTEMPT_TIMEOUT × (retries + 1)`), plus the slowest write in
     /// flight at step 0 — the gate waits for it rather than losing it — plus
-    /// one `FLUSH_ATTEMPT_TIMEOUT` for step 4.
+    /// one [`crate::writeq::WRITE_QUEUE_DRAIN_BUDGET`] for the write-queue
+    /// quiesce inside step 0, plus one `FLUSH_ATTEMPT_TIMEOUT` for step 4. That
+    /// quiesce budget is *carved out of*
+    /// the window `serve` gives `close` rather than added to it (see that
+    /// constant), so this does not move the number an operator has sized a
+    /// supervisor timeout against.
     ///
     /// Step 0 is itself bounded now (R2-5): every store call a gated write can
     /// be parked in has a timeout — `RETRACT_IO_TIMEOUT` for `retract`'s

@@ -19,9 +19,12 @@ Schema (from `src/ledger.rs`; every line carries `v`, currently 1):
                 only when that phase-1 leg produced the hit. An EMPTY legs
                 object means the hit was not a phase-1 candidate at all: it
                 arrived through phase-2 traversal expansion.
-    + derive    created, matched, semantic_merged, reinforced,
-                concepts_requested
-    + record_action  created, edges
+    + derive    concepts_requested, admitted, receipt
+                (J3: created / matched / semantic_merged / reinforced moved to
+                the RECEIPT — the ack precedes the write and cannot know them.
+                `receipt` joins the line to lambo_stats(receipt=...).)
+    + record_action  admitted, receipt
+                (J3: created / edges are on the receipt, same reason.)
     + reserve   op ("reserve"|"release"), granted, ttl_seconds (grants only)
     + inspect   depth, fuzzy
     + saints    canonical_count

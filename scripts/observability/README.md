@@ -289,9 +289,14 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
                     A key is present ONLY when that phase-1 leg produced the hit.
                     An EMPTY object means the hit was not a phase-1 candidate at
                     all — it arrived through phase-2 traversal expansion.
-lambo_derive        created, matched, semantic_merged, reinforced,
-                    concepts_requested
-lambo_record_action created, edges
+lambo_derive        concepts_requested, admitted, receipt
+                    (J3: created / matched / semantic_merged / reinforced are
+                    NOT here — the ack is issued before the write, so it does
+                    not know them. They are on the RECEIPT, reachable with
+                    lambo_stats(receipt=...). `receipt` on this line is what
+                    joins the two.)
+lambo_record_action admitted, receipt
+                    (J3: created / edges are on the receipt, same reason.)
 lambo_reserve       op ("reserve"|"release"), granted, ttl_seconds (grants only)
 lambo_inspect       depth, fuzzy
 lambo_saints        canonical_count
@@ -359,3 +364,21 @@ perform (`DeriveOutcome` in `src/graph/derive.rs` has no such field). Demotions
 are audited in `canonization_events` in the store, which is where to ask about
 them. What `derive` does distinguish is `semantic_merged` from `matched`, and
 that is the distinction metric 2 turns on.
+
+**Since J3, `derive` lines carry no `created` / `matched` counts either, and
+`dedup_rate.py` and `duplicates.py` see nothing from MCP-driven sessions.** This
+IS a regression and it is stated rather than hidden. `lambo_derive` is now
+acknowledged before the write is applied (writes acknowledged before the
+embedder, `dev-diary/lambo-for-mooshik/J-multi-client.md` §J3), so the call line
+is written at a moment when no outcome exists. The counts are not lost — they
+are on the write **receipt**, together with `semantic_merged`, `reinforced` and
+the true `created_count` / `matched_count`, and the line carries the `receipt`
+id so the two can be joined. What is missing is a ledger line for the
+*completion*, which would restore these two tools without a join; that is a
+ledger schema change and belongs to a later workstream, not to J3.
+
+Two things still work unchanged, and are the honest fallback until then:
+CLI-driven sessions (`lambo derive`, `lambo record-action`) use the synchronous
+write path and still report every fact on the line; and `duplicates.py`'s
+store-side half reads the graph rather than the ledger, so its cross-check
+against the store is unaffected.
