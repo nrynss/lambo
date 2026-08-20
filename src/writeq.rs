@@ -149,23 +149,67 @@ const _: () = assert!(
 /// (`write_queue_measured: false`).
 pub const WRITE_QUEUE_MIN: usize = PROBE_CONCURRENCY;
 
-/// Where a probe result stops being credible, in items/second.
+/// Upper clamp on the measured bound — and **derived from receipt retention,
+/// not from throughput.**
 ///
-/// This is **not** a capacity choice; it is the point past which the probe is
-/// measuring something that is not an embedder. The rig's 4-wide concurrent
-/// figure is 4 / 64 ms ≈ 62 items/s, so a deployment parallelising twice as
-/// well as this rig lands near 128 — and anything reporting more is a stub, a
-/// cache, or [`crate::FixtureEmbedder`], which returns without doing work at
-/// all. That last case is not hypothetical: it is what every test in this tree
-/// runs on, and it is the reason the clamp exists rather than a hypothetical
-/// GPU.
-pub const PROBE_MAX_CREDIBLE_RPS: u64 = 128;
+/// Every outstanding job holds a `Pending` receipt, and receipt eviction is
+/// oldest-first, so a queue deeper than [`MAX_RETAINED_RECEIPTS`] could evict
+/// the receipt of a write that is still running — which would answer `expired`
+/// about a job in flight, breaking the one promise the whole taxonomy rests on.
+/// A quarter of the retention capacity is the clamp: it leaves 3x headroom for
+/// *settled* receipts to accumulate behind the outstanding ones, which is what
+/// an agent reading its piggybacks is doing.
+///
+/// This replaced a "where a probe stops being credible" framing that was
+/// **measured wrong**: it put the credible ceiling at 128 items/s on the theory
+/// that a deployment parallelising twice as well as the phase doc's 4-wide
+/// recall figure (4 / 64 ms ≈ 62 items/s) would land there. Probing this
+/// machine's own llama.cpp BGE-M3 measured **110 to 141 items/s**, above that
+/// ceiling — so the "clamp" would have been the operative bound on a perfectly
+/// ordinary local embedder while claiming to be an implausibility guard. The
+/// retention derivation has no such problem: it is a property of this module,
+/// not a guess about hardware, and at 1024 it sits 7x above the measured rate.
+pub const WRITE_QUEUE_MAX: usize = MAX_RETAINED_RECEIPTS / 4;
 
-/// Upper clamp on the measured bound — [`PROBE_MAX_CREDIBLE_RPS`] sustained for
-/// one [`WRITE_QUEUE_DRAIN_BUDGET`]. Defined from both so it cannot drift from
-/// either.
-pub const WRITE_QUEUE_MAX: usize =
-    (PROBE_MAX_CREDIBLE_RPS * WRITE_QUEUE_DRAIN_BUDGET.as_secs()) as usize;
+/// Build-time invariant: the queue cannot outgrow the receipt store, or an
+/// in-flight write's receipt could be evicted and answer `expired`.
+const _: () = assert!(
+    WRITE_QUEUE_MAX * 4 <= MAX_RETAINED_RECEIPTS,
+    "WRITE_QUEUE_MAX must stay at or under a quarter of MAX_RETAINED_RECEIPTS — every      outstanding job holds a Pending receipt, and oldest-first eviction would otherwise      discard the receipt of a write that is still running",
+);
+
+/// The measured rate at which the clamp starts to bind, in items/second.
+///
+/// Derived, not chosen: [`WRITE_QUEUE_MAX`] sustained for one
+/// [`WRITE_QUEUE_DRAIN_BUDGET`]. Reported here because it is the number an
+/// operator needs to read `write_queue_items_per_sec` against — above it, the
+/// bound is retention-limited rather than throughput-limited, and
+/// `lambo_stats` still shows the real measurement beside the clamped bound so
+/// the two can be told apart. Measured on this rig for reference: 110 to 141
+/// items/s against a live llama.cpp BGE-M3 on CPU, and ~98 000 items/s against
+/// [`crate::FixtureEmbedder`], which returns without doing work at all.
+pub const PROBE_CLAMP_RPS: u64 = WRITE_QUEUE_MAX as u64 / WRITE_QUEUE_DRAIN_BUDGET.as_secs();
+
+/// The fastest embedder throughput measured on this rig, in items/second, at
+/// [`PROBE_CONCURRENCY`]: a live llama.cpp BGE-M3 q8_0 on CPU, probed through
+/// the release binary over stdio (2026-08-20; the run reported 110, 131 and 141
+/// across repeats). Recorded as a constant so the guard below can be a build
+/// invariant rather than a sentence.
+pub const MEASURED_LOCAL_EMBEDDER_RPS: u64 = 141;
+
+/// Build-time invariant: the clamp must sit well clear of a real embedder.
+///
+/// This is the guard the first version of these constants failed. A clamp
+/// derived at 128 items/s sat *below* the 141 measured here, which would have
+/// made "a ceiling measured on the deployment's own embedder" decorative on an
+/// ordinary local setup — the bound would have come from the clamp every time.
+/// Three times the measured rate is the margin; if a future edit shrinks
+/// `MAX_RETAINED_RECEIPTS` far enough to violate it, the build says so instead
+/// of the property quietly disappearing.
+const _: () = assert!(
+    PROBE_CLAMP_RPS > 3 * MEASURED_LOCAL_EMBEDDER_RPS,
+    "PROBE_CLAMP_RPS must stay well above the throughput a real local embedder measures, or      the queue bound stops being a per-deployment measurement and becomes a constant",
+);
 
 /// Second admission condition: total queued payload bytes.
 ///
@@ -229,13 +273,20 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 
 /// Retained receipts, oldest evicted first.
 ///
-/// Derived from a stated ~2.5 MiB retention budget at the door's own worst
-/// case: a receipt holds a summary plus at most
-/// [`MAX_RECEIPT_IDS`] × 36-byte node ids ≈ 2.4 KiB, so 1024 of them is
-/// ≈ 2.4 MiB. The time bound alone could not do this job —
-/// [`RECEIPT_RETENTION`] against `serve`'s own sustained abuse bound
-/// ([`crate::mcp::DEFAULT_RATE_LIMIT_RPS`], 50/s) is 15 000 receipts.
-pub const MAX_RETAINED_RECEIPTS: usize = 1024;
+/// Derived from a stated ~10 MiB retention budget at the door's own worst case:
+/// a receipt holds a summary plus at most [`MAX_RECEIPT_IDS`] × 36-byte node
+/// ids ≈ 2.4 KiB, so 4096 of them is ≈ 9.4 MiB. The time bound alone could not
+/// do this job — [`RECEIPT_RETENTION`] against `serve`'s own sustained abuse
+/// bound ([`crate::mcp::DEFAULT_RATE_LIMIT_RPS`], 50/s) is 15 000 receipts.
+///
+/// **[`WRITE_QUEUE_MAX`] is defined from this**, so raising or lowering it
+/// moves the queue's clamp with it. That coupling is the point: a queue deeper
+/// than the receipt store can hold would evict a running write's receipt.
+/// 10 MiB rather than the 2.4 MiB this started at, because at 1024 the derived
+/// clamp bound (256) sat *below* the throughput measured on an ordinary local
+/// embedder, which made the per-deployment measurement decorative on exactly
+/// the deployments it was written for.
+pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
 /// Longest a caller may block waiting for its own write to apply.
 ///
@@ -591,12 +642,14 @@ impl Calibration {
         // A zero or absurd wall time is the FixtureEmbedder case; the clamp
         // below is what it is for, so it must not divide by zero first.
         let rate = if secs <= 0.0 {
-            PROBE_MAX_CREDIBLE_RPS as f64
+            PROBE_CLAMP_RPS as f64
         } else {
             PROBE_CONCURRENCY as f64 / secs
         };
-        let credible = rate.min(PROBE_MAX_CREDIBLE_RPS as f64);
-        let projected = credible * WRITE_QUEUE_DRAIN_BUDGET.as_secs_f64();
+        // `items_per_sec` keeps the RAW measurement; only the bound is
+        // clamped. An operator comparing the two is how "this deployment is
+        // retention-limited, not embedder-limited" becomes readable.
+        let projected = rate * WRITE_QUEUE_DRAIN_BUDGET.as_secs_f64();
         let bound = (projected.ceil() as usize).clamp(WRITE_QUEUE_MIN, WRITE_QUEUE_MAX);
         Self {
             items_per_sec: Some(rate),
@@ -1783,6 +1836,11 @@ mod tests {
         let fast = Calibration::from_probe(Duration::from_nanos(1));
         assert_eq!(fast.bound, WRITE_QUEUE_MAX);
         assert!(fast.measured());
+        assert!(
+            fast.items_per_sec.expect("measured") > PROBE_CLAMP_RPS as f64,
+            "the RAW rate must survive the clamp, or an operator cannot tell a \
+             retention-limited bound from an embedder-limited one"
+        );
 
         // A zero wall time must not divide by zero.
         let zero = Calibration::from_probe(Duration::ZERO);
@@ -1802,10 +1860,19 @@ mod tests {
 
     #[test]
     fn the_bound_tracks_the_measurement_between_the_clamps() {
-        // The rig's own figure: PROBE_CONCURRENCY embeds in 64 ms is
-        // 4 / 0.064 = 62.5 items/s, and a 2 s drain budget makes that 125.
+        // The phase doc's own 4-wide figure: PROBE_CONCURRENCY embeds in 64 ms
+        // is 4 / 0.064 = 62.5 items/s, and a 2 s drain budget makes that 125.
         let rig = Calibration::from_probe(Duration::from_millis(64));
         assert_eq!(rig.bound, 125);
+        // And this rig's own measured live figure, 141 items/s at 4-wide (i.e.
+        // 4 / 0.0284 s), must land UNDER the clamp — the property the
+        // re-derivation exists for.
+        let live = Calibration::from_probe(Duration::from_micros(28_400));
+        assert_eq!(live.bound, 282);
+        assert!(
+            live.bound < WRITE_QUEUE_MAX,
+            "a real embedder must not be clamped"
+        );
         assert!(rig.bound > WRITE_QUEUE_MIN && rig.bound < WRITE_QUEUE_MAX);
     }
 
@@ -1924,11 +1991,15 @@ mod tests {
     #[test]
     fn the_constants_say_what_their_docs_say() {
         assert_eq!(WRITE_QUEUE_MIN, PROBE_CONCURRENCY);
-        assert_eq!(
-            WRITE_QUEUE_MAX,
-            (PROBE_MAX_CREDIBLE_RPS * WRITE_QUEUE_DRAIN_BUDGET.as_secs()) as usize
-        );
-        assert_eq!(WRITE_QUEUE_MAX, 256);
+        assert_eq!(WRITE_QUEUE_MAX, MAX_RETAINED_RECEIPTS / 4);
+        assert_eq!(WRITE_QUEUE_MAX, 1024);
+        assert_eq!(MAX_RETAINED_RECEIPTS, 4096);
+        // The rate at which the clamp starts to bind, against the rate this
+        // machine's own llama.cpp BGE-M3 actually measures (110 to 141
+        // items/s at PROBE_CONCURRENCY). The margin is the whole point of the
+        // re-derivation: a clamp below the real embedder's throughput would
+        // make the per-deployment measurement decorative.
+        assert_eq!(PROBE_CLAMP_RPS, 512);
         assert_eq!(WRITE_QUEUE_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(MAX_RECEIPT_IDS, MAX_CONCEPTS_PER_DERIVE);
         // Above the worst flush_lag measured on the rig (227 s), which is the

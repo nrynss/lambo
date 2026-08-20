@@ -1957,37 +1957,15 @@ impl LamboServer {
             return e;
         }
         // J1-R1-3: no warning is reachable here — see `derive_impl`.
-        let s = self.mem.stats();
-        let text = format!(
-            "session '{}' (owner agent '{}')\n\
-             nodes={} edges={} concepts={} canonical={}\n\
-             flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
-             epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}",
-            s.session.0,
-            s.agent.0,
-            s.node_count,
-            s.edge_count,
-            s.concept_count,
-            s.canonical_count,
-            s.flush_lag,
-            s.log_depth,
-            s.flush_depth,
-            s.dead_lettered,
-            s.degraded,
-            s.epoch,
-            s.daemon_cycles,
-            s.canonization_cycles,
-            s.canonization_failures,
-        );
-        // One payload builder shared with the I2 heartbeat, so a heartbeat can
-        // never report different numbers than the tool. With `--ledger` off
-        // this is exactly the payload it always was; with it on, the six
-        // `ledger_*` keys are appended (I1: the dropped-line counter has to be
-        // reachable from `lambo_stats`, or silence is invisible).
-        let mut payload = self.stats_json();
-
-        // J3's fetch-by-id surface. See the tool doc for why it lives on
-        // `lambo_stats` rather than on an eighth tool.
+        //
+        // **The receipt is resolved FIRST, and the ordering is load-bearing**
+        // (found by measuring the shipped binary, not by a test): a `wait_ms`
+        // blocks for up to `RECEIPT_WAIT_MAX`, so a snapshot taken before it
+        // describes the session as it was before the write the caller was
+        // waiting for. That reported `write_queue_applied: 0` and
+        // `concept_count: 0` beside a receipt that said `applied` — a payload
+        // contradicting itself. Everything below reads the session after the
+        // wait.
         let receipt = match &p.receipt {
             None => None,
             Some(raw) => {
@@ -2018,6 +1996,35 @@ impl LamboServer {
                 Some((id, answer))
             }
         };
+
+        let s = self.mem.stats();
+        let text = format!(
+            "session '{}' (owner agent '{}')\n\
+             nodes={} edges={} concepts={} canonical={}\n\
+             flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
+             epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}",
+            s.session.0,
+            s.agent.0,
+            s.node_count,
+            s.edge_count,
+            s.concept_count,
+            s.canonical_count,
+            s.flush_lag,
+            s.log_depth,
+            s.flush_depth,
+            s.dead_lettered,
+            s.degraded,
+            s.epoch,
+            s.daemon_cycles,
+            s.canonization_cycles,
+            s.canonization_failures,
+        );
+        // One payload builder shared with the I2 heartbeat, so a heartbeat can
+        // never report different numbers than the tool. With `--ledger` off
+        // this is exactly the payload it always was; with it on, the six
+        // `ledger_*` keys are appended (I1: the dropped-line counter has to be
+        // reachable from `lambo_stats`, or silence is invisible).
+        let mut payload = self.stats_json();
 
         let mut lines = vec![text.clone()];
         if let Some((id, answer)) = &receipt {
@@ -3132,8 +3139,9 @@ mod tests {
             json!(true),
             "the fixture embedder IS a measurement of this deployment's embedder: {p}"
         );
-        // The FixtureEmbedder is instant, so the credible-rate clamp is what
-        // decides the bound — the case PROBE_MAX_CREDIBLE_RPS exists for.
+        // The FixtureEmbedder is instant (~98 000 items/s measured), so the
+        // retention-derived clamp is what decides the bound here — a real
+        // embedder measures 110 to 141 items/s and lands well under it.
         assert_eq!(
             p["write_queue_bound"],
             json!(crate::writeq::WRITE_QUEUE_MAX),
@@ -3152,6 +3160,61 @@ mod tests {
             p["write_queue_outstanding"].as_u64().unwrap(),
             "{p}"
         );
+        s.mem.close().await.expect("close");
+    }
+
+    /// A `lambo_stats` that WAITS must report the session **after** the wait.
+    ///
+    /// Found by measuring the shipped binary rather than by a test: the payload
+    /// used to be snapshotted before the wait, so a call that blocked for a
+    /// write and then reported `write_queue_applied: 0` and `concept_count: 0`
+    /// — beside a receipt in the same payload saying `applied` — contradicted
+    /// itself. A payload that disagrees with itself is worse than a slow one.
+    #[tokio::test]
+    async fn a_waiting_stats_call_reports_the_session_after_the_wait() {
+        let s = server("mcp-j3-stats-order").await;
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "counted after the wait", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("payload")["receipt"]
+            .as_str()
+            .expect("receipt")
+            .to_string();
+        let out = call_raw(
+            &s,
+            "lambo_stats",
+            json!({
+                "agent_id": "agent-a",
+                "receipt": receipt,
+                "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64,
+            }),
+        )
+        .await;
+        let p = out.structured_content.expect("payload");
+        assert_eq!(p["receipt"]["state"], json!("applied"), "{p}");
+        assert_eq!(
+            p["write_queue_applied"],
+            json!(1),
+            "the counters must be read after the wait, not before it: {p}"
+        );
+        assert_eq!(p["write_queue_outstanding"], json!(0), "{p}");
+        assert_eq!(
+            p["concept_count"],
+            json!(1),
+            "the graph counts must be read after the wait too: {p}"
+        );
+        // The text block is built from the same snapshot, so it must agree.
+        let text = match &out.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        assert!(text.contains("concepts=1"), "{text}");
         s.mem.close().await.expect("close");
     }
 
