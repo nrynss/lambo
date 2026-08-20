@@ -109,7 +109,9 @@ watching it go red.
 
 ## J1 — Per-call agent identity
 
-**Status: done.** Landed on `wt/j1` as one implementation commit plus one round-1 review remediation commit; see the J1 Status note and the round-1 remediation note at the end of this section for what shipped, what it decided, and what the review changed.
+**Status: done.** Landed on `wt/j1` as one implementation commit plus one round-1 review
+  remediation commit; see the J1 Status note and the round-1 remediation note at the end of this
+  section for what shipped, what it decided, and what the review changed.
 
 The serve applies its own `--agent` to every connected client, so per-call `agent_id` is
 accepted, warned about, and ignored. Under a shared writer there is no correct value for
@@ -298,12 +300,19 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   remote string becomes a write identity and a lock name. Nothing was added to
   `recall::format`: sanitising there would put the guard downstream of the graph, where a
   poisoned id is already durable.
-  **Length deliberately not tightened, and the consequence declared rather than dropped:**
-  an over-long id forges no structure, and an MCP-only cap would diverge from `--agent` and
-  from `AgentId` itself — but because assembly keeps the longest score-ordered prefix that
-  *fits* `max_tokens`, dropping whole blocks, a 16 KiB holder id can evict the very block it
-  annotates from another agent's context. That is a rendering-side bound, and it is J2's to
-  weigh, when the blast radius stops being one machine's clients.
+  **Length deliberately not tightened by the remediation, and the consequence declared
+  rather than dropped:** an over-long id forges no structure, and an MCP-only cap would
+  diverge from `--agent` and from `AgentId` itself — but because assembly keeps the longest
+  score-ordered prefix that *fits* `max_tokens`, dropping whole blocks, a 16 KiB holder id
+  can evict the very block it annotates from another agent's context.
+  **Ruled the same day (operator, 2026-08-20): capped at the door.** `MAX_AGENT_ID_CHARS
+  = 256` in `check_agent_id`, beside the single-line guard — an id is a name other agents
+  read, 256 is generous for any real client id, and the divergence from the uncapped
+  `--agent`/`AgentId` is deliberate (that door is where unauthenticated remote identity is
+  policed; trusted process-side callers keep the type's semantics). Boundary pinned from
+  both sides in `every_tool_refuses_an_unusable_agent_id`: 257 refused on all seven tools,
+  exactly 256 accepted. The rendering-side bound question is thereby closed for J2 —
+  eviction needed the uniform cap's headroom, which no longer reaches the graph.
 * **J1-R1-2 (P2) — the loser of a race was told `conflict` and nothing else.** `tool_err`'s
   N4 policy discards a `Memory` error's message because it can interpolate a DSN, a store
   URL or a driver string. §11's two conflict messages carry none of that — a node id the
@@ -317,22 +326,24 @@ decision is untouched: everything below is a guard, a rendering, or a declaratio
   gone; `structuredContent` keeps its `warnings` key (response shape) as a literal `[]`, with
   a comment at `derive_impl` saying a future warning must also go through `attach_warnings`.
 * **J1-R1-4 (P3)** — the split `use crate::types::` imports are one line.
-* **J1-R1-5 (P3)** — both over-long lines rewrapped to their local width: the `attach_warnings`
-  doc comment to ~78, and the `mcp.mdx` fenced instructions block to ~88 in both mirrors, wrapped
-  the way the rest of that block is rather than mirroring the Rust string's breaks. The two
-  remaining >100-char lines in `src/mcp/server.rs` are pre-existing `json!` bodies inside tests,
-  which `rustfmt` does not reformat and J1 did not touch.
+* **J1-R1-5 (P3)** — both over-long lines rewrapped to their local width: the
+  `attach_warnings` doc comment to ~78, and the `mcp.mdx` fenced instructions block to ~88
+  in both mirrors, wrapped the way the rest of that block is rather than mirroring the Rust
+  string's breaks. The two remaining >100-char lines in `src/mcp/server.rs` are pre-existing
+  `json!` bodies inside tests, which `rustfmt` does not reformat and J1 did not touch.
 * **J1-R1-6 (P3)** — `evidence/mcp-client-stdio/` annotated, not rewritten; see the sweep above.
-* **J1-R1-7 (P3)** — `every_tool_refuses_an_unusable_agent_id` pins empty, blank, `\n`, `\r\n`,
-  `\t` and oversize across all seven tools, and asserts each refusal *names* `agent_id` so a
-  downstream failure cannot pass for the guard. Written as its own test rather than folded into
-  `bad_parameters_are_refused_as_readable_tool_errors`, whose table is per-tool parameters; this
-  one is the parameter all seven share.
+* **J1-R1-7 (P3)** — `every_tool_refuses_an_unusable_agent_id` pins empty, blank, `\n`,
+  `\r\n`, `\t`, oversize, and over-cap (257) across all seven tools, and asserts each
+  refusal *names* `agent_id` so a downstream failure cannot pass for the guard; exactly 256
+  is asserted accepted. Written as its own test rather than folded into
+  `bad_parameters_are_refused_as_readable_tool_errors`, whose table is per-tool parameters;
+  this one is the parameter all seven share.
 * **J1-R1-8 (P3)** — declared in `src/daemon/conflict.rs`'s NEW-4 block: J1 is what makes
-  same-instant collisions non-degenerate, so `writer` ("smallest interaction id at that instant")
-  is now a deterministic choice between two *live* agents. Behaviour unchanged and still right for
-  its purpose — the §13 sentence's job is to make the reader look — but it can now name the wrong
-  one of two real agents, which is why J3's Done-when asks for it to be measured.
+  same-instant collisions non-degenerate, so `writer` ("smallest interaction id at that
+  instant") is now a deterministic choice between two *live* agents. Behaviour unchanged and
+  still right for its purpose — the §13 sentence's job is to make the reader look — but it
+  can now name the wrong one of two real agents, which is why J3's Done-when asks for it to
+  be measured.
 
 ## J2 — A losing serve proxies instead of exiting
 

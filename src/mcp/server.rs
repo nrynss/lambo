@@ -702,6 +702,15 @@ async fn contain_panic(
     }
 }
 
+/// Door-side cap on a caller-asserted `agent_id`, in characters (J1, operator
+/// ruling 2026-08-20). Deliberately far below the uniform `MAX_CONTENT_BYTES`:
+/// an id is a name other agents read, and the recall budget drops whole
+/// blocks, so an id near the uniform cap can evict the block it annotates
+/// from another agent's context. 256 is generous for any real client id.
+/// Applies only at this door — `--agent` and `AgentId` itself stay uncapped
+/// (trusted, process-side).
+const MAX_AGENT_ID_CHARS: usize = 256;
+
 impl LamboServer {
     /// Wrap a live [`Memory`]. The `Arc` is the point: every clone of this
     /// server — one per HTTP request, in the streamable-http transport — shares
@@ -938,13 +947,16 @@ impl LamboServer {
         // unauthenticated, remote string becomes a write identity and a lock
         // name, which makes it the place the renderability requirement belongs.
         //
-        // Length is deliberately left at the uniform cap rather than tightened:
-        // an over-long id does not forge structure, and an MCP-only cap would
-        // diverge from `--agent` and from `AgentId` itself. Declared, not
-        // ignored: because the budget drops whole blocks, a 16 KiB holder id
-        // can evict the block it annotates from another agent's context. That
-        // is a rendering-side bound to weigh in J2, when the blast radius stops
-        // being one machine's clients, not a door-side one.
+        // Length IS tightened here, by operator ruling (2026-08-20, closing
+        // the question round-1 remediation declared): an id is a *name*, and
+        // because the recall budget drops whole blocks, a holder id at the
+        // uniform 16 KiB cap can evict the very block it annotates from
+        // another agent's context — denial-of-context rather than injection.
+        // 256 chars is generous for any real client id and closes that vector
+        // at the same door as the single-line guard. The divergence from
+        // `--agent` and from `AgentId` (both uncapped) is deliberate: this
+        // door is where unauthenticated remote identity is policed; trusted
+        // process-side callers keep the type's semantics.
         if let Some(c) = agent_id
             .chars()
             .find(|c| *c == '\n' || *c == '\r' || *c == '\t')
@@ -954,6 +966,13 @@ impl LamboServer {
                  rendered into other agents' recall context as the holder of your soft \
                  locks — send a one-line id such as 'agent-b'",
                 c as u32
+            )));
+        }
+        if agent_id.chars().count() > MAX_AGENT_ID_CHARS {
+            return Err(bad_param(format!(
+                "agent_id must be at most {MAX_AGENT_ID_CHARS} characters (got {}); it is a \
+                 name other agents read, not content — send a short id such as 'agent-b'",
+                agent_id.chars().count()
             )));
         }
         Ok(())
@@ -2614,6 +2633,10 @@ mod tests {
     async fn every_tool_refuses_an_unusable_agent_id() {
         let s = server("mcp-agentid-shape").await;
         let oversize = "A".repeat(MAX_CONTENT_BYTES + 1);
+        // One past the door cap but far under `MAX_CONTENT_BYTES`, so this case
+        // can only be refused by the J1 length rule — the uniform `check_size`
+        // cap cannot catch it for the guard.
+        let over_cap = "A".repeat(MAX_AGENT_ID_CHARS + 1);
         for bad in [
             "",
             "   ",
@@ -2621,6 +2644,7 @@ mod tests {
             "helper\r\nfake line",
             "helper\tcolumn",
             oversize.as_str(),
+            over_cap.as_str(),
         ] {
             for (tool, rest) in [
                 ("lambo_recall", serde_json::json!({"query": "x"})),
@@ -2655,6 +2679,20 @@ mod tests {
                 );
             }
         }
+        // The boundary from the accept side: exactly `MAX_AGENT_ID_CHARS` is a
+        // legal id, so the cap refuses at N+1 and not before.
+        let at_cap = "A".repeat(MAX_AGENT_ID_CHARS);
+        let out = call(
+            &s,
+            "lambo_stats",
+            serde_json::json!({ "agent_id": at_cap.as_str() }),
+        )
+        .await;
+        assert_ne!(
+            out.is_error,
+            Some(true),
+            "an agent_id of exactly MAX_AGENT_ID_CHARS must be accepted: {out:?}"
+        );
         s.mem.close().await.expect("close");
     }
 
