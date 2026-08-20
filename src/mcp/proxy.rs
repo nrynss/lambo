@@ -116,18 +116,148 @@ const HUB_LOST_MESSAGE: &str = "lambo: this call had already been handed to the 
      write that did land duplicates it, and repeating one that did not is the fix. Do not block \
      on memory: carry on with the work.";
 
-/// How long the initial connect to the holder is retried before the endpoint is
-/// treated as dead.
+/// How long a connect to the holder is retried, and how long the handshake
+/// replay waits for its answer, before the endpoint is treated as dead.
 ///
 /// Covers the holder's own acquire→bind window (the endpoint's address is
 /// published with the lease, the socket is bound microseconds later), plus a
 /// generous margin for a loaded machine. Short, because the *other* wait — for
 /// a dead holder's lease to lapse — is bounded by the TTL and handled by the
 /// caller, not here.
+///
+/// [`Handshake::replay`] reuses it rather than defining a second budget: both
+/// are "this holder is not answering the door", and a connection that lands in
+/// the backlog of a stopped accept loop is indistinguishable from a slow one
+/// until the deadline says otherwise (J2-R1-8). The two together bound how long
+/// the pump can be deaf to SIGTERM inside one `client_rx` arm body at
+/// 2 × `CONNECT_BUDGET`.
 pub(crate) const CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Interval between connect attempts inside [`CONNECT_BUDGET`].
 const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The largest single frame either peer may send, in bytes.
+///
+/// Both directions read newline-delimited frames into a buffer, and a peer that
+/// never sends a newline would grow that buffer without bound — a broken client
+/// or a hostile one can OOM this process (J2-R1-18). 8 MiB is far above any real
+/// MCP frame (the largest thing that crosses is a `lambo_recall` result, tens of
+/// KiB) and far below anything that threatens a machine, so a frame past it is a
+/// defect rather than a big call, and is dropped as one.
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// How many frames the handshake replay will read before giving up on finding
+/// the `initialize` response it is waiting for.
+///
+/// A count bound beside the time bound ([`CONNECT_BUDGET`]): a holder that
+/// streams notifications at speed could otherwise fill memory inside the
+/// deadline. Generous, because every frame before the response is legitimate
+/// traffic that gets forwarded.
+const MAX_REPLAY_FRAMES: usize = 64;
+
+/// The `LEASE_TTL` figure quoted verbatim in [`HUB_UNREACHABLE_MESSAGE`].
+///
+/// Model-facing text cannot be `format!`ed into a `const`, so the number is
+/// written out — and this assertion is what stops it becoming a lie if the TTL
+/// ever moves (J2-R1-14). A build that changes `LEASE_TTL` fails here, at the
+/// sentence that needs rewording.
+const _: () = assert!(
+    crate::store::lease::LEASE_TTL.as_secs() == 45,
+    "HUB_UNREACHABLE_MESSAGE tells the model the previous holder's lease lapses \
+     'within 45 seconds'. LEASE_TTL has changed, so that sentence is now false — \
+     reword it and update this assertion."
+);
+
+/// One frame from a line-framed peer, or the reason there is not one.
+///
+/// # Why this exists rather than `AsyncBufReadExt::lines()`
+///
+/// `tokio::io::Lines` is wrong for a forwarding pipe in three ways, each of
+/// which the round-1 review found as its own defect:
+///
+/// * **It invents a frame boundary.** A trailing line ending is optional, so
+///   `Lines` yields an unterminated remainder as a line. A holder that dies
+///   mid-write therefore had the half of a JSON object that reached the socket
+///   delivered to the client's stdout *as a complete frame* (J2-R1-4). A byte
+///   pipe copies frames without interpreting them, which is exactly why it must
+///   not manufacture one the peer never wrote.
+/// * **It grows without bound** (J2-R1-18).
+/// * **It ends the stream on a decode error.** `while let Ok(Some(line))` treats
+///   a single non-UTF-8 byte as end-of-input, so the client was told "proxy
+///   client disconnected" for what was a bad frame (J2-R1-17).
+///
+/// So: a frame is complete or it is not, an over-long or non-UTF-8 frame is
+/// dropped *and the stream resynchronises at the next newline*, and only a real
+/// EOF ends the stream.
+#[derive(Debug, PartialEq, Eq)]
+enum Framed {
+    /// A complete, newline-terminated, valid-UTF-8 frame, without its newline.
+    Line(String),
+    /// The peer stopped mid-frame: this many bytes arrived with no newline
+    /// after them. Never forwarded — a torn JSON line is never valid to
+    /// deliver — and always followed by end-of-stream.
+    Torn(usize),
+    /// A frame past [`MAX_FRAME_BYTES`], discarded through its newline. The
+    /// stream is still usable.
+    Oversize(usize),
+    /// A complete frame that is not UTF-8, so it cannot be JSON-RPC. Discarded;
+    /// the stream is still usable.
+    NotUtf8(usize),
+    /// The peer closed cleanly, on a frame boundary.
+    Eof,
+}
+
+/// Read one [`Framed`] from a line-framed peer.
+///
+/// Bounded and resynchronising — see [`Framed`] for why neither property is
+/// optional here.
+async fn read_frame<R>(r: &mut R) -> std::io::Result<Framed>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut buf: Vec<u8> = Vec::new();
+    // Set once the frame passes the cap: from then on bytes are counted and
+    // thrown away rather than buffered, up to the newline that ends the frame.
+    let mut over = 0usize;
+    loop {
+        let (consume, terminated) = {
+            let available = r.fill_buf().await?;
+            if available.is_empty() {
+                return Ok(if over > 0 {
+                    Framed::Oversize(buf.len() + over)
+                } else if buf.is_empty() {
+                    Framed::Eof
+                } else {
+                    Framed::Torn(buf.len())
+                });
+            }
+            let (take, terminated) = match available.iter().position(|b| *b == b'\n') {
+                Some(i) => (i, true),
+                None => (available.len(), false),
+            };
+            if over > 0 || buf.len() + take > MAX_FRAME_BYTES {
+                over += take;
+            } else {
+                buf.extend_from_slice(&available[..take]);
+            }
+            (take + usize::from(terminated), terminated)
+        };
+        r.consume(consume);
+        if terminated {
+            if over > 0 {
+                return Ok(Framed::Oversize(buf.len() + over));
+            }
+            // `\r\n` is legal on the wire; `Lines` strips it, so this does too.
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(match String::from_utf8(buf) {
+                Ok(line) => Framed::Line(line),
+                Err(e) => Framed::NotUtf8(e.into_bytes().len()),
+            });
+        }
+    }
+}
 
 /// Why a refused serve cannot proxy to the holder it lost to.
 ///
@@ -327,6 +457,25 @@ fn client_gone(e: std::io::Error) -> LamboError {
 /// differ, and the client would keep the older view. That is a narrower failure
 /// than "memory is gone until you restart the client", which is the alternative.
 ///
+/// **A second residual, and it is a wider one (J2-R1-11).** These two frames are
+/// not the whole of a session's client-side state. Anything else the client
+/// *configured* on the old holder is silently lost on reconnect:
+/// `logging/setLevel`, `notifications/roots/list_changed`, and any subscription
+/// a future protocol revision adds. The new holder starts at its defaults and
+/// the client is never told, because from the client's side nothing happened.
+///
+/// This is documented rather than fixed, deliberately. Recording "the small set
+/// of idempotent session-configuring frames" means this module maintaining a
+/// list of which MCP methods are session state — an enumeration of the protocol,
+/// which is the one thing a byte pipe is chosen to avoid, and one that goes
+/// stale silently on every protocol revision. The two frames replayed here are
+/// not an arbitrary subset: `initialize` and `notifications/initialized` are the
+/// only frames whose absence makes the *next* call fail, which is why they are
+/// the ones measured and the ones replayed. Everything else degrades to a
+/// default. If a future revision makes some other frame load-bearing in the same
+/// way, this is the place that has to learn about it — and the way to notice is
+/// that the reconnect stops working, not that a lint fires.
+///
 /// **This is emphatically NOT promotion.** Replaying into another process's
 /// server is not the same as becoming one. The proxy still takes no lease; see
 /// [`HubProxy::run`].
@@ -359,28 +508,114 @@ impl Handshake {
     /// second answer to an id it already has. Reading it through the same
     /// `BufReader` the task then owns is deliberate: a fresh reader could drop
     /// bytes the first one had already buffered.
-    async fn replay(
-        &self,
-        read: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-        write: &mut tokio::net::unix::OwnedWriteHalf,
-    ) -> std::io::Result<()> {
+    ///
+    /// # What is swallowed, and what is not (J2-R1-12)
+    ///
+    /// The response is found by **id**, not by position. Swallowing the first
+    /// line back assumes the holder says nothing before answering; a holder that
+    /// emits any notification first had that notification eaten and its actual
+    /// `initialize` response forwarded to the client as a duplicate answer to an
+    /// id the client already holds. So every frame before the matching response
+    /// is returned to the caller to be forwarded, and only the response itself
+    /// is dropped.
+    ///
+    /// # Bounded, because this runs inside the pump's arm body (J2-R1-8)
+    ///
+    /// `reconnect_and_replay` is awaited *in* the `client_rx` arm, not as a
+    /// `select!` branch, so the shutdown branch cannot be polled while this
+    /// runs. A `UnixStream::connect` succeeds as soon as the connection lands in
+    /// the listener's backlog, so "accepted but never answered" needs no hostile
+    /// peer — a holder whose accept loop is starved is enough — and an unbounded
+    /// read here made the process deaf to SIGTERM as well as wedged. Bounded by
+    /// [`CONNECT_BUDGET`] in time and [`MAX_REPLAY_FRAMES`] in count. Reusing the
+    /// connect budget is deliberate: both are "this holder is not answering the
+    /// door", and the *other* wait — for a dead holder's lease to lapse — is the
+    /// TTL's job, not this function's.
+    ///
+    /// Returns the frames read before the response, in order, for the caller to
+    /// forward to its client.
+    async fn replay<R, W>(&self, read: &mut R, write: &mut W) -> std::io::Result<Vec<String>>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+        W: AsyncWriteExt + Unpin,
+    {
         let Some(initialize) = &self.initialize else {
             // The client has not handshaken yet, so there is nothing to rebuild
             // — its own `initialize` will flow through in a moment.
-            return Ok(());
+            return Ok(Vec::new());
         };
         HubProxy::send(write, initialize).await?;
-        let mut swallowed = String::new();
-        if read.read_line(&mut swallowed).await? == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "holder closed the connection during handshake replay",
-            ));
-        }
+        let answered = match tokio::time::timeout(
+            CONNECT_BUDGET,
+            Self::swallow_response(read, request_id(initialize)),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "holder accepted the connection but did not answer the replayed \
+                         initialize within {}s",
+                        CONNECT_BUDGET.as_secs()
+                    ),
+                ))
+            }
+        };
         if let Some(initialized) = &self.initialized {
             HubProxy::send(write, initialized).await?;
         }
-        Ok(())
+        Ok(answered)
+    }
+
+    /// Read until the frame answering `want` arrives, returning everything read
+    /// before it. See [`Handshake::replay`] for the bounds and the reasons.
+    async fn swallow_response<R>(
+        read: &mut R,
+        want: Option<serde_json::Value>,
+    ) -> std::io::Result<Vec<String>>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        let mut before = Vec::new();
+        for _ in 0..MAX_REPLAY_FRAMES {
+            match read_frame(read).await? {
+                Framed::Line(line) => {
+                    // A recorded `initialize` with no id is malformed and cannot
+                    // be matched, so fall back to the old positional rule rather
+                    // than reading until the bound.
+                    let matches = match (&want, response_id(&line)) {
+                        (Some(want), Some(got)) => *want == got,
+                        (None, _) => true,
+                        _ => false,
+                    };
+                    if matches {
+                        return Ok(before);
+                    }
+                    before.push(line);
+                }
+                Framed::Eof | Framed::Torn(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "holder closed the connection during handshake replay",
+                    ))
+                }
+                Framed::Oversize(bytes) | Framed::NotUtf8(bytes) => {
+                    tracing::warn!(
+                        bytes,
+                        "lambo serve: the holder sent an unusable frame during the handshake \
+                         replay — dropping it and reading on"
+                    );
+                }
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "holder sent {MAX_REPLAY_FRAMES} frames without answering the replayed initialize"
+            ),
+        ))
     }
 }
 
@@ -388,6 +623,28 @@ impl Handshake {
 enum FromHub {
     Frame(String),
     Closed,
+}
+
+/// The two halves of a hub connection, already split and already replayed into.
+type HubHalves = (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+);
+
+/// Which side of the pipe spoke, as one value.
+///
+/// The pump's `select!` polls shutdown first and unconditionally, then these two
+/// in **random** order. Keeping `biased` over all three made the client arm
+/// starve the hub arm under a client that streams notifications continuously —
+/// self-limiting for a request/response client, not for a streaming one
+/// (J2-R1-21). `tokio::select!` has no per-arm bias, so the fix is to nest: an
+/// outer biased `select!` guarantees shutdown wins, and an inner unbiased one
+/// gives the two traffic directions equal footing. The inner arms only *receive*
+/// — every await that could be cut short lives in the outer arm body — so the
+/// nesting costs no cancellation safety.
+enum Step {
+    FromClient(Option<String>),
+    FromHub(Option<(u64, FromHub)>),
 }
 
 /// Connect to the holder's endpoint, retrying inside [`CONNECT_BUDGET`].
@@ -444,9 +701,31 @@ impl HubProxy {
 
     /// Re-read the lease row and reconnect to whoever holds it **now**.
     ///
-    /// The row is re-read on **every** attempt and the address is never cached:
-    /// a new holder is a new endpoint, and the whole point of recovering after a
-    /// holder dies is to pick up its successor without this process restarting.
+    /// # Why the row is re-read, and why it is NOT about the address (J2-R1-6)
+    ///
+    /// This used to say the address is never cached "because a new holder is a
+    /// new endpoint". That is false, and the false half was load-bearing: the
+    /// endpoint is a **pure function** of `(session, store identity)`
+    /// ([`SessionEndpoint::resolve`]), so *every* holder of a given session on a
+    /// given store binds the **same** path — which is precisely why `bind` needs
+    /// a stale-socket branch at all. Caching the address would cost nothing.
+    ///
+    /// What changes between holders is the **row**: whether there is a holder,
+    /// which host it is on, and whether it published an endpoint at all. So the
+    /// re-read is about *liveness and honest errors*, and the two outcomes it
+    /// buys are the ones a cached address could never produce:
+    ///
+    /// * the row is **gone** (a clean release, or an expired lease swept away) —
+    ///   the honest answer is "there is no holder", and a cached address would
+    ///   instead dial a dead socket and report a connect error, or worse dial a
+    ///   *live* socket belonging to a process that no longer holds the session;
+    /// * the row names a holder this process must **refuse** to forward to — a
+    ///   CLI verb with no endpoint, another host, a different endpoint scheme —
+    ///   each of which [`proxyable`] turns into a reason rather than a guess.
+    ///
+    /// The recovery property is real and is still what the integration test
+    /// pins; it just does not come from the address moving. It comes from the
+    /// row naming a holder that is *alive*.
     ///
     /// **This function reads the lease and must never acquire it.** See
     /// [`HubProxy::run`].
@@ -456,22 +735,20 @@ impl HubProxy {
 
     /// [`HubProxy::reconnect`], then rebuild the client's MCP session on the new
     /// connection ([`Handshake`]).
+    ///
+    /// Also returns any frames the holder emitted *before* answering the
+    /// replayed `initialize` — legitimate traffic that the caller must forward
+    /// to its client rather than swallow (J2-R1-12).
     async fn reconnect_and_replay(
         &self,
         handshake: &Handshake,
-    ) -> Result<
-        (
-            BufReader<tokio::net::unix::OwnedReadHalf>,
-            tokio::net::unix::OwnedWriteHalf,
-        ),
-        LamboError,
-    > {
+    ) -> Result<(HubHalves, Vec<String>), LamboError> {
         let (read, mut write) = self.reconnect().await?.into_split();
         let mut read = BufReader::new(read);
-        handshake.replay(&mut read, &mut write).await.map_err(|e| {
+        let before = handshake.replay(&mut read, &mut write).await.map_err(|e| {
             LamboError::Conflict(format!("holder rejected the session handshake: {e}"))
         })?;
-        Ok((read, write))
+        Ok(((read, write), before))
     }
 
     async fn dial(&self) -> Result<tokio::net::UnixStream, LamboError> {
@@ -558,7 +835,7 @@ impl HubProxy {
         // The first connection needs no replay: the client has sent nothing
         // yet, so its own `initialize` will be the first frame through.
         let mut handshake = Handshake::default();
-        let first = self.reconnect_and_replay(&handshake).await?;
+        let (first, _no_preamble) = self.reconnect_and_replay(&handshake).await?;
         tracing::info!(
             session = %self.session,
             endpoint = %self.endpoint.path().display(),
@@ -570,10 +847,45 @@ impl HubProxy {
         // from noticing that the holder went away.
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel::<String>(64);
         let client_reader = tokio::spawn(async move {
-            let mut lines = BufReader::new(tokio::io::stdin()).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if client_tx.send(line).await.is_err() {
-                    break;
+            let mut stdin = BufReader::new(tokio::io::stdin());
+            loop {
+                match read_frame(&mut stdin).await {
+                    Ok(Framed::Line(line)) => {
+                        if client_tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Framed::Eof) => break,
+                    Ok(Framed::Torn(bytes)) => {
+                        // The client stopped mid-frame. Never forwarded: the
+                        // holder would reject it anyway, and a byte pipe must
+                        // not manufacture a frame boundary (J2-R1-4).
+                        tracing::warn!(
+                            bytes,
+                            "lambo serve: the proxy's client stopped mid-frame — dropping the \
+                             unterminated remainder rather than forwarding a torn JSON line"
+                        );
+                        break;
+                    }
+                    Ok(Framed::Oversize(bytes)) => tracing::warn!(
+                        bytes,
+                        cap = MAX_FRAME_BYTES,
+                        "lambo serve: the proxy's client sent a frame over the size cap — dropped \
+                         (no reply is possible: the frame was discarded before any id could be \
+                         read from it)"
+                    ),
+                    Ok(Framed::NotUtf8(bytes)) => tracing::warn!(
+                        bytes,
+                        "lambo serve: the proxy's client sent a frame that is not UTF-8, so it \
+                         cannot be JSON-RPC — dropped, and this stream is still live (J2-R1-17)"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "lambo serve: the proxy's client stdin failed"
+                        );
+                        break;
+                    }
                 }
             }
         });
@@ -593,13 +905,23 @@ impl HubProxy {
 
         tokio::pin!(shutdown);
         loop {
-            tokio::select! {
+            // Shutdown first and unconditionally; the two traffic directions
+            // then compete on equal terms. See [`Step`].
+            let step = tokio::select! {
                 biased;
                 () = &mut shutdown => {
                     tracing::info!("lambo serve: shutdown signal — closing the proxy");
                     break;
                 }
-                frame = client_rx.recv() => {
+                step = async {
+                    tokio::select! {
+                        frame = client_rx.recv() => Step::FromClient(frame),
+                        event = hub_rx.recv() => Step::FromHub(event),
+                    }
+                } => step,
+            };
+            match step {
+                Step::FromClient(frame) => {
                     let Some(frame) = frame else {
                         // Our own client disconnected. That is a clean exit: a
                         // proxy exists for exactly one client.
@@ -614,13 +936,19 @@ impl HubProxy {
                         // re-read here, so a new holder is picked up by the
                         // first call after it appears.
                         match self.reconnect_and_replay(&handshake).await {
-                            Ok(halves) => {
+                            Ok((halves, before)) => {
                                 generation += 1;
                                 writer = Self::split_hub(halves, generation, &hub_tx);
                                 tracing::info!(
                                     generation,
                                     "lambo serve: proxy reconnected to the current session holder"
                                 );
+                                // Whatever the new holder said before answering
+                                // the replayed handshake is the client's traffic,
+                                // not ours to eat (J2-R1-12).
+                                for frame in before {
+                                    Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
+                                }
                             }
                             Err(e) => tracing::warn!(
                                 error = %e,
@@ -650,7 +978,14 @@ impl HubProxy {
                         }
                     }
                 }
-                Some((gen, event)) = hub_rx.recv() => {
+                Step::FromHub(None) => {
+                    // Unreachable while this pump holds `hub_tx`, and a `break`
+                    // rather than an `unwrap` because "the hub channel closed"
+                    // is an exit condition, not a panic.
+                    tracing::warn!("lambo serve: the proxy's hub channel closed");
+                    break;
+                }
+                Step::FromHub(Some((gen, event))) => {
                     match event {
                         FromHub::Frame(frame) => {
                             // A response retires the id it answers, from ANY
@@ -660,10 +995,9 @@ impl HubProxy {
                             // dropping it on the generation filter was the
                             // second half of J2-R1-1 — the id it answered was
                             // then never answered at all.
-                            let answers = response_id(&frame)
-                                .and_then(|id| {
-                                    inflight.iter().position(|(_, waiting)| *waiting == id)
-                                });
+                            let answers = response_id(&frame).and_then(|id| {
+                                inflight.iter().position(|(_, waiting)| *waiting == id)
+                            });
                             if let Some(i) = answers {
                                 inflight.remove(i);
                                 Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
@@ -691,8 +1025,7 @@ impl HubProxy {
                             // what its ending means for the pump: those ids are
                             // owed an answer whether or not the connection was
                             // still the current one.
-                            let lost =
-                                Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
+                            let lost = Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
                             if lost > 0 {
                                 tracing::warn!(
                                     generation = gen,
@@ -763,20 +1096,57 @@ impl HubProxy {
     /// `UnixStream`, because the handshake replay has to read the swallowed
     /// `initialize` response through the *same* `BufReader` this task then owns.
     fn split_hub(
-        halves: (
-            BufReader<tokio::net::unix::OwnedReadHalf>,
-            tokio::net::unix::OwnedWriteHalf,
-        ),
+        halves: HubHalves,
         generation: u64,
         hub_tx: &tokio::sync::mpsc::Sender<(u64, FromHub)>,
     ) -> Option<tokio::net::unix::OwnedWriteHalf> {
-        let (read, write) = halves;
+        let (mut read, write) = halves;
         let tx = hub_tx.clone();
         tokio::spawn(async move {
-            let mut lines = read.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if tx.send((generation, FromHub::Frame(line))).await.is_err() {
-                    return;
+            loop {
+                match read_frame(&mut read).await {
+                    Ok(Framed::Line(line)) => {
+                        if tx.send((generation, FromHub::Frame(line))).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(Framed::Eof) => break,
+                    Ok(Framed::Torn(bytes)) => {
+                        // J2-R1-4, and this is the direction where it mattered:
+                        // the half of a JSON object that reached the socket
+                        // before the holder died used to be delivered to the
+                        // client's stdout as a complete frame. A torn JSON line
+                        // is never valid to deliver.
+                        tracing::warn!(
+                            generation,
+                            bytes,
+                            "lambo serve: the session holder died mid-frame — dropping the \
+                             unterminated remainder rather than forwarding truncated JSON to the \
+                             client (the calls it left in flight are answered honestly below)"
+                        );
+                        break;
+                    }
+                    Ok(Framed::Oversize(bytes)) => tracing::warn!(
+                        generation,
+                        bytes,
+                        cap = MAX_FRAME_BYTES,
+                        "lambo serve: the session holder sent a frame over the size cap — dropped"
+                    ),
+                    Ok(Framed::NotUtf8(bytes)) => tracing::warn!(
+                        generation,
+                        bytes,
+                        "lambo serve: the session holder sent a frame that is not UTF-8, so it \
+                         cannot be JSON-RPC — dropped, and this connection is still live \
+                         (J2-R1-17)"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            generation,
+                            error = %e,
+                            "lambo serve: reading from the session holder failed"
+                        );
+                        break;
+                    }
                 }
             }
             let _ = tx.send((generation, FromHub::Closed)).await;
@@ -920,14 +1290,167 @@ mod tests {
     /// Before the client has handshaken there is nothing to rebuild, and the
     /// replay must be a no-op rather than an invented `initialize` — the
     /// client's own is about to arrive.
-    #[test]
-    fn a_handshake_that_never_happened_replays_nothing() {
+    ///
+    /// Driven rather than asserted (J2-R1-15): the previous version of this test
+    /// never called `replay`, it checked that `Handshake::default()` has two
+    /// `None`s. What matters is that **no bytes reach the holder**, which is a
+    /// property of `replay`, not of the struct.
+    #[tokio::test]
+    async fn a_handshake_that_never_happened_replays_nothing() {
         let h = Handshake::default();
-        assert!(h.initialize.is_none());
-        // `replay` returns Ok without touching the connection in this state;
-        // pinned here as the precondition, since exercising it needs a socket
-        // pair and the integration test drives the connected path.
-        assert!(h.initialized.is_none());
+        let mut read = BufReader::new(tokio::io::empty());
+        let mut wrote: Vec<u8> = Vec::new();
+        let before = h.replay(&mut read, &mut wrote).await.expect("a no-op");
+        assert!(
+            wrote.is_empty(),
+            "an un-handshaken client must send nothing on reconnect, not an invented initialize"
+        );
+        assert!(before.is_empty());
+        // And it must not have tried to read an answer either: `empty()` is at
+        // EOF, so a swallow would have failed rather than returned Ok.
+    }
+
+    /// The replay finds its answer by **id**, not by position (J2-R1-12).
+    ///
+    /// A holder that says anything before answering used to have that frame
+    /// swallowed and its actual `initialize` response forwarded to the client as
+    /// a duplicate answer to an id the client already holds. The preamble is now
+    /// returned for the caller to forward, and only the response is dropped.
+    #[tokio::test]
+    async fn the_replay_swallows_the_initialize_response_and_forwards_what_came_before_it() {
+        let mut h = Handshake::default();
+        h.observe(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+        h.observe(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        let holder = concat!(
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"h"}}}"#,
+            "\n",
+        );
+        let mut read = BufReader::new(std::io::Cursor::new(holder.as_bytes().to_vec()));
+        let mut wrote: Vec<u8> = Vec::new();
+        let before = h.replay(&mut read, &mut wrote).await.expect("replayed");
+        assert_eq!(
+            before.len(),
+            1,
+            "the notification must be forwarded: {before:?}"
+        );
+        assert!(before[0].contains("notifications/message"));
+        // Both recorded frames went out, byte-identical and in order.
+        let sent = String::from_utf8(wrote).unwrap();
+        let sent: Vec<&str> = sent.lines().collect();
+        assert_eq!(
+            sent,
+            vec![
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            ]
+        );
+    }
+
+    /// J2-R1-8: a holder that accepts and never answers must not park the pump.
+    ///
+    /// `UnixStream::connect` succeeds as soon as the connection lands in the
+    /// listener's backlog, so this needs no hostile peer — a holder whose accept
+    /// loop is starved is enough. The unbounded `read_line` this replaces made
+    /// the process deaf to SIGTERM too, because the replay is awaited inside a
+    /// `select!` arm **body**.
+    ///
+    /// Time is paused, so the 2s budget costs the suite nothing: the runtime
+    /// auto-advances the clock the moment the read is the only pending work,
+    /// which is exactly the state a never-answering holder produces.
+    #[tokio::test(start_paused = true)]
+    async fn a_holder_that_never_answers_the_replay_is_given_up_on() {
+        let mut h = Handshake::default();
+        h.observe(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+        // The far half is held open and silent for the whole call.
+        let (ours, _theirs) = tokio::io::duplex(4096);
+        let mut read = BufReader::new(ours);
+        let mut wrote: Vec<u8> = Vec::new();
+        let err = h
+            .replay(&mut read, &mut wrote)
+            .await
+            .expect_err("a silent holder must not be waited on forever");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            err.to_string()
+                .contains("did not answer the replayed initialize"),
+            "the operator needs to know which holder behaviour this was: {err}"
+        );
+    }
+
+    /// J2-R1-4, the finding that mattered most of the three framing ones: a
+    /// holder that dies mid-write must not have the half-object that reached the
+    /// socket delivered to the client as a frame.
+    #[tokio::test]
+    async fn a_torn_final_frame_is_dropped_not_forwarded() {
+        let torn = br#"{"jsonrpc":"2.0","id":1,"resu"#.to_vec();
+        let mut read = BufReader::new(std::io::Cursor::new(torn));
+        assert_eq!(read_frame(&mut read).await.unwrap(), Framed::Torn(29));
+        // And then end-of-stream, so the pump reports Closed exactly once.
+        assert_eq!(read_frame(&mut read).await.unwrap(), Framed::Eof);
+    }
+
+    /// A complete frame, `\r\n` framing, and an empty line all behave; an EOF on
+    /// a frame boundary is an EOF and nothing else.
+    #[tokio::test]
+    async fn a_complete_frame_is_read_without_its_newline() {
+        let bytes = b"{\"a\":1}\n{\"b\":2}\r\n\n".to_vec();
+        let mut read = BufReader::new(std::io::Cursor::new(bytes));
+        assert_eq!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::Line(r#"{"a":1}"#.to_string())
+        );
+        assert_eq!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::Line(r#"{"b":2}"#.to_string()),
+            "a CRLF-framed peer must not leave a stray carriage return in the frame"
+        );
+        assert_eq!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::Line(String::new())
+        );
+        assert_eq!(read_frame(&mut read).await.unwrap(), Framed::Eof);
+    }
+
+    /// J2-R1-17: one bad byte used to end the pump, and the client was told
+    /// "proxy client disconnected" for what was a decode failure. The frame is
+    /// dropped and the **stream survives**.
+    #[tokio::test]
+    async fn a_non_utf8_frame_is_dropped_and_the_stream_survives() {
+        let mut bytes = b"{\"a\":\"".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\"}\n{\"b\":2}\n");
+        let mut read = BufReader::new(std::io::Cursor::new(bytes));
+        assert!(matches!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::NotUtf8(_)
+        ));
+        assert_eq!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::Line(r#"{"b":2}"#.to_string()),
+            "the next frame must still arrive: a bad frame is not end-of-input"
+        );
+    }
+
+    /// J2-R1-18: neither direction may grow a buffer without bound. The
+    /// over-long frame is discarded **through its newline**, so the stream
+    /// resynchronises instead of splitting the oversize frame into garbage
+    /// frames.
+    #[tokio::test]
+    async fn an_oversize_frame_is_dropped_and_the_stream_resynchronises() {
+        let mut bytes = vec![b'x'; MAX_FRAME_BYTES + 10];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"{\"after\":1}\n");
+        let mut read = BufReader::new(std::io::Cursor::new(bytes));
+        match read_frame(&mut read).await.unwrap() {
+            Framed::Oversize(bytes) => assert_eq!(bytes, MAX_FRAME_BYTES + 10),
+            other => panic!("expected Oversize, got {other:?}"),
+        }
+        assert_eq!(
+            read_frame(&mut read).await.unwrap(),
+            Framed::Line(r#"{"after":1}"#.to_string())
+        );
     }
 
     #[test]

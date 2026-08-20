@@ -198,6 +198,34 @@ fn lease_row(db: &str) -> Option<lambo::store::LeaseInfo> {
     })
 }
 
+/// Release a lease row the way the documented operator override does, given the
+/// `agent@host#pid` token from the row itself.
+///
+/// Release is holder-scoped, so the dead (or unwanted) holder's identity is
+/// reconstructed from the row rather than invented.
+fn release_row(db: &str, holder_token: &str) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = SqliteStore::connect(db).unwrap();
+        let mut parts = holder_token.rsplitn(2, '#');
+        let pid: u32 = parts.next().unwrap().parse().unwrap();
+        let head = parts.next().unwrap();
+        let (agent, host) = head.rsplit_once('@').unwrap();
+        store
+            .release_lease(
+                &SessionId::from(SESSION),
+                &lambo::store::LeaseHolder {
+                    agent: lambo::types::AgentId::new(agent),
+                    pid,
+                    host: host.to_string(),
+                    endpoint: None,
+                },
+            )
+            .await
+            .unwrap();
+    });
+}
+
 /// Done-when, three boxes at once: a refused `serve` starts as a proxy instead
 /// of exiting 1 and every tool call including writes succeeds through it; a
 /// write through the proxy is visible to that client's next recall
@@ -281,19 +309,28 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
     );
 
     // The per-call `agent_id` crossed the hop VERBATIM — J1's contract, and the
-    // reason J1 gated J2. A byte pipe cannot normalise it, and this is what
-    // would go red if the proxy ever started re-serializing arguments.
+    // reason J1 gated J2.
     let hits = &recalled["result"]["structuredContent"]["hits"];
     let node_id = hits[0]["node_id"]
         .as_str()
         .unwrap_or_else(|| panic!("recall must return a node id: {}", text_of(&recalled)))
         .to_string();
 
-    // Two agents, two locks, through the hop. B takes the lock as agent-b...
+    // Two agents, two locks, through the hop. B takes the lock as `agent-b `...
+    //
+    // **The trailing space is the assertion** (J2-R1-16). J1 takes `agent_id`
+    // untrimmed on purpose, because normalising would silently merge two
+    // callers' locks — so "the caller's agent_id crosses verbatim" is only
+    // *tested* by an id a forwarder rebuilding the arguments would change.
+    // `agent-b` survives any normalisation and pins nothing; `agent-b ` does
+    // not. The refusal below renders as "reserved by {holder} until {expiry}",
+    // so a trimmed id shows up as ONE space before "until" where the verbatim
+    // id gives two. That is what would go red if the proxy ever started
+    // re-serializing arguments.
     let taken = b.call(
         4,
         "lambo_reserve",
-        serde_json::json!({"agent_id": "agent-b", "node_id": node_id, "ttl_seconds": 60}),
+        serde_json::json!({"agent_id": "agent-b ", "node_id": node_id, "ttl_seconds": 60}),
     );
     assert!(
         taken["error"].is_null(),
@@ -312,6 +349,11 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
     assert!(
         contended.contains("agent-b"),
         "the loser of a contended lock must be told who holds it: {contended}"
+    );
+    assert!(
+        contended.contains("agent-b  until"),
+        "the holder's agent_id must have crossed the hop UNTRIMMED — one space before 'until' \
+         means a forwarder normalised it, which J1 forbids: {contended}"
     );
 
     // The wedge invariant, at the end of a fully working session: the proxy
@@ -402,29 +444,7 @@ fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
     // Recovery. Clear the dead holder's row the way an operator would (the
     // documented override) so a new holder can start now rather than in 45s,
     // then let C become the hub.
-    {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let store = SqliteStore::connect(&db).unwrap();
-            store
-                .release_lease(&SessionId::from(SESSION), &{
-                    // Release is holder-scoped, so reconstruct the dead holder's
-                    // identity from the row rather than inventing one.
-                    let mut parts = a_holder.rsplitn(2, '#');
-                    let pid: u32 = parts.next().unwrap().parse().unwrap();
-                    let head = parts.next().unwrap();
-                    let (agent, host) = head.rsplit_once('@').unwrap();
-                    lambo::store::LeaseHolder {
-                        agent: lambo::types::AgentId::new(agent),
-                        pid,
-                        host: host.to_string(),
-                        endpoint: None,
-                    }
-                })
-                .await
-                .unwrap();
-        });
-    }
+    release_row(&db, &a_holder);
     let mut c = Serve::spawn(&cfg, "agent-c");
     c.initialize(1);
     let new_row = lease_row(&db).expect("C holds now");
@@ -639,5 +659,97 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     let _ = b.child.wait();
     let _ = holder_thread.join();
     let _ = std::fs::remove_file(&sock);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// J2-R1-6: the lease re-read on the reconnect path, pinned at the mechanism.
+///
+/// The round-1 review mutation-proved this unpinned. With `dial()`
+/// short-circuited to a bare `connect(&self.endpoint)` — no `read_lease`, none
+/// of the three `proxyable` checks — **both** other tests in this file still
+/// passed, because a SIGKILLed holder leaves its socket file behind and a
+/// connect to it fails whether or not the row was read.
+///
+/// The discriminating case is a **live socket with no lease row behind it**, and
+/// reaching it needs a window the other tests do not have: the proxy's writer
+/// must be `None` (only then is `dial` called at all) *while* a live holder is
+/// listening at the endpoint. So: kill the holder so the proxy drops its
+/// connection, start a new holder so the socket answers again, and release that
+/// holder's row before the proxy ever reconnects to it.
+///
+/// With the re-read, the proxy refuses honestly. Without it, the call succeeds —
+/// forwarding into a process whose licence to write has been revoked.
+///
+/// This is also the corrected *reason* the row is re-read (see
+/// `HubProxy::reconnect`): not because the address moved — it never does, it is
+/// a pure function of session and store — but because the **row** is the
+/// authority on whether there is a holder at all.
+#[test]
+fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
+    let (dir, cfg, db) = scratch("orphan");
+    provision(&db);
+
+    let mut a = Serve::spawn(&cfg, "agent-a");
+    a.initialize(1);
+    let a_holder = lease_row(&db).expect("A holds").holder;
+
+    let mut b = Serve::spawn(&cfg, "agent-b");
+    b.initialize(1);
+    let ok = b.call(
+        2,
+        "lambo_recall",
+        serde_json::json!({"agent_id": "agent-b", "query": "anything"}),
+    );
+    assert!(ok["error"].is_null(), "baseline call: {}", text_of(&ok));
+
+    // Kill A so the proxy's hub connection ends and its writer goes to `None`.
+    a.sigkill();
+    let _ = a.child.wait();
+    // Clear A's row so C can take the session now rather than in one TTL. B is
+    // NOT called in between, so its writer stays `None` and the next call it
+    // makes will go through `dial`.
+    release_row(&db, &a_holder);
+
+    // C binds the same endpoint — the address is a pure function of session and
+    // store, so it is literally the same path, stale socket and all.
+    let mut c = Serve::spawn(&cfg, "agent-c");
+    c.initialize(1);
+    let c_holder = lease_row(&db).expect("C holds").holder;
+    assert!(c_holder.starts_with("agent-c@"), "{c_holder}");
+    assert!(
+        std::path::Path::new(
+            &lease_row(&db)
+                .unwrap()
+                .endpoint
+                .expect("C publishes an endpoint")
+        )
+        .exists(),
+        "C's socket must be live — that is the whole point of this test"
+    );
+
+    // Now revoke C's licence without stopping C. Its heartbeat re-acquires every
+    // LEASE_HEARTBEAT_INTERVAL (15s), and the call below is one round trip.
+    release_row(&db, &c_holder);
+    assert!(
+        lease_row(&db).is_none(),
+        "the row must be gone while the socket stays live"
+    );
+
+    let refused = b.call(
+        3,
+        "lambo_recall",
+        serde_json::json!({"agent_id": "agent-b", "query": "a live socket with no lease row"}),
+    );
+    let refused = text_of(&refused);
+    assert!(
+        refused.contains("NOTHING WAS READ OR WRITTEN"),
+        "a live endpoint with no lease row must be REFUSED, not dialled — the row is the \
+         authority on who holds the session, not the socket: {refused}"
+    );
+
+    b.sigterm();
+    c.sigterm();
+    let _ = b.child.wait();
+    let _ = c.child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
