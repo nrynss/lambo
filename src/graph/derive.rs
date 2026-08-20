@@ -214,6 +214,37 @@ pub fn derive(
     };
     let session_id = graph.session_id().clone();
 
+    validate(graph, concepts, parent_of)?;
+
+    derive_after_validation(
+        graph,
+        interaction,
+        agent,
+        concepts,
+        parent_of,
+        max_cooccurrence_per_derive,
+        interaction_created_at,
+        session_id,
+    )
+}
+
+/// [`derive`](fn@derive)'s read-only pre-pass, on its own so a caller can run
+/// it **before** deciding to write.
+///
+/// That caller is J3's asynchronous ack path
+/// ([`crate::Memory::derive_async_as`]): the errors below are the ones an agent
+/// can fix, and they must still surface at call time rather than on a receipt.
+/// Extracted rather than reimplemented — a second copy of these checks would be
+/// a second set of rules, and the whole point of validate-then-mutate is that
+/// there is one.
+///
+/// Read-only: [`canonicalize`] writes nothing, so a failure here leaves the
+/// graph exactly as it was.
+pub fn validate(
+    graph: &Graph,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf,
+) -> Result<(), LamboError> {
     // Pre-pass (read-only): hoist every fallible input check here so the write
     // loop below cannot fail mid-call — derive is validate-then-mutate, never
     // partially applied (muse-spark M4). canonicalize is read-only, so nothing
@@ -273,7 +304,25 @@ pub fn derive(
             &mut pending_hier_parents,
         )?;
     }
+    Ok(())
+}
 
+/// [`derive`](fn@derive)'s write half, after [`validate`] has passed.
+///
+/// Split out only so the pre-pass could be lifted into its own public function
+/// without moving the write loop; the two are still called back to back by
+/// `derive` and by nothing else.
+#[allow(clippy::too_many_arguments)]
+fn derive_after_validation(
+    graph: &mut Graph,
+    interaction: NodeId,
+    agent: &AgentId,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf,
+    max_cooccurrence_per_derive: usize,
+    interaction_created_at: DateTime<Utc>,
+    session_id: SessionId,
+) -> Result<DeriveOutcome, LamboError> {
     let mut outcome = DeriveOutcome::default();
     // Nodes written earlier in THIS call (created, or matched and re-upserted).
     // Their node and Derives edge are already written; a later content that

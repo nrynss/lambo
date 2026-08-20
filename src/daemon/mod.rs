@@ -295,6 +295,15 @@ impl Daemon {
         self.wake.notify_one();
     }
 
+    /// The wake handle itself, for a caller that must poke the daemon from a
+    /// task holding no `Daemon` (J3's background write workers — they carry
+    /// `Arc` clones of shared state rather than a handle on `Memory`, so they
+    /// cannot call [`Daemon::wake`]). Notifying through this is exactly what
+    /// `wake` does.
+    pub(crate) fn waker(&self) -> Arc<Notify> {
+        self.wake.clone()
+    }
+
     /// Snapshot of the daemon-owned score table.
     pub fn scores(&self) -> ScoreTable {
         self.scores.read().clone()

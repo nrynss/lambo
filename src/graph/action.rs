@@ -122,57 +122,11 @@ pub fn record_action(
     };
     let session_id = graph.session_id().clone();
 
-    // Step 2 — resolve + plan concepts (read-only; nothing touches the graph).
-    let mut resolved: HashMap<String, NodeId> = HashMap::new();
-    let mut planned: Vec<PlannedConcept> = Vec::new();
-    let action_node = resolve(
-        graph,
-        &mut resolved,
-        &mut planned,
-        action.action,
-        ConceptType::Resource,
-    )?;
-
-    // Step 3 — plan edges, deduplicated by natural key.
-    let mut planned_edges: Vec<(NodeId, NodeId, EdgeType)> = Vec::new();
-    let mut edge_keys: HashSet<(NodeId, NodeId, EdgeType)> = HashSet::new();
-    for p in action.produces {
-        let tgt = resolve(graph, &mut resolved, &mut planned, p, ConceptType::Resource)?;
-        plan_edge(
-            &mut planned_edges,
-            &mut edge_keys,
-            action_node,
-            tgt,
-            EdgeType::Causal,
-        );
-    }
-    for m in action.modifies {
-        let tgt = resolve(graph, &mut resolved, &mut planned, m, ConceptType::Resource)?;
-        plan_edge(
-            &mut planned_edges,
-            &mut edge_keys,
-            action_node,
-            tgt,
-            EdgeType::Causal,
-        );
-    }
-    for d in action.depends_on {
-        let tgt = resolve(graph, &mut resolved, &mut planned, d, ConceptType::Entity)?;
-        plan_edge(
-            &mut planned_edges,
-            &mut edge_keys,
-            action_node,
-            tgt,
-            EdgeType::Dependency,
-        );
-    }
-
-    // Step 4 — cycle check (read-only). Rejection leaves the graph byte-identical.
-    if let Some((src, tgt, ty)) = closing_edge(graph, &planned_edges) {
-        return Err(LamboError::Store(StoreError::Invariant(format!(
-            "{ty:?} edge {src} -> {tgt} would create a cycle"
-        ))));
-    }
+    let Plan {
+        action_node,
+        planned,
+        planned_edges,
+    } = plan(graph, action)?;
 
     // Step 5 — every check passed; mutate. Concepts first (their Derives edges
     // are emitted by insert_concept), then the planned edges, so the mutation
@@ -231,6 +185,95 @@ pub fn record_action(
         created,
         edges,
     })
+}
+
+/// [`record_action`]'s planned write: what it would create, before it creates
+/// anything.
+struct Plan {
+    action_node: NodeId,
+    planned: Vec<PlannedConcept>,
+    planned_edges: Vec<(NodeId, NodeId, EdgeType)>,
+}
+
+/// [`record_action`]'s read-only steps 2 to 4 — resolve, plan, cycle-check —
+/// with the plan handed back instead of applied.
+///
+/// One function rather than two copies of the same three steps, because J3's
+/// asynchronous ack path has to run exactly these checks on the call path (see
+/// [`validate`]) while `record_action` needs the plan they produce. The cycle
+/// check is inseparable from the planning — it reasons about edges landing on
+/// not-yet-created nodes — so a "cheap validation" that skipped it would not be
+/// the same check.
+fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
+    // Step 2 — resolve + plan concepts (read-only; nothing touches the graph).
+    let mut resolved: HashMap<String, NodeId> = HashMap::new();
+    let mut planned: Vec<PlannedConcept> = Vec::new();
+    let action_node = resolve(
+        graph,
+        &mut resolved,
+        &mut planned,
+        action.action,
+        ConceptType::Resource,
+    )?;
+
+    // Step 3 — plan edges, deduplicated by natural key.
+    let mut planned_edges: Vec<(NodeId, NodeId, EdgeType)> = Vec::new();
+    let mut edge_keys: HashSet<(NodeId, NodeId, EdgeType)> = HashSet::new();
+    for p in action.produces {
+        let tgt = resolve(graph, &mut resolved, &mut planned, p, ConceptType::Resource)?;
+        plan_edge(
+            &mut planned_edges,
+            &mut edge_keys,
+            action_node,
+            tgt,
+            EdgeType::Causal,
+        );
+    }
+    for m in action.modifies {
+        let tgt = resolve(graph, &mut resolved, &mut planned, m, ConceptType::Resource)?;
+        plan_edge(
+            &mut planned_edges,
+            &mut edge_keys,
+            action_node,
+            tgt,
+            EdgeType::Causal,
+        );
+    }
+    for d in action.depends_on {
+        let tgt = resolve(graph, &mut resolved, &mut planned, d, ConceptType::Entity)?;
+        plan_edge(
+            &mut planned_edges,
+            &mut edge_keys,
+            action_node,
+            tgt,
+            EdgeType::Dependency,
+        );
+    }
+
+    // Step 4 — cycle check (read-only). Rejection leaves the graph byte-identical.
+    if let Some((src, tgt, ty)) = closing_edge(graph, &planned_edges) {
+        return Err(LamboError::Store(StoreError::Invariant(format!(
+            "{ty:?} edge {src} -> {tgt} would create a cycle"
+        ))));
+    }
+
+    Ok(Plan {
+        action_node,
+        planned,
+        planned_edges,
+    })
+}
+
+/// [`record_action`]'s read-only pre-pass, for a caller that must validate
+/// **before** deciding to write — J3's asynchronous ack path
+/// ([`crate::Memory::record_action_async_as`]).
+///
+/// Runs the real steps 2 to 4 through [`plan`] and discards the plan, so the
+/// errors an agent can fix (an unresolvable content, an empty canonical key, an
+/// edge that would close a cycle) surface at call time instead of on a receipt.
+/// Nothing is written whether it passes or fails.
+pub fn validate(graph: &Graph, action: &Action) -> Result<(), LamboError> {
+    plan(graph, action).map(|_| ())
 }
 
 /// A concept planned for creation by [`record_action`] — resolved but not yet

@@ -96,6 +96,7 @@ pub mod store;
 #[cfg(test)]
 pub mod test_util;
 pub mod types;
+pub mod writeq;
 
 pub use config::{Config, DaemonConfig, LamboFile, RecallWeights, ScoringWeights};
 #[cfg(feature = "embed-bge")]

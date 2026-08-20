@@ -323,6 +323,40 @@ pub async fn derive(
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
 ) -> Result<DeriveOutcome, LamboError> {
+    validate_limits(concepts, parent_of, semantic_match_threshold)?;
+
+    // Writers outside hybrid (daemon maintenance, future MCP tasks) need not
+    // share a mutex with this function. Epoch validation makes their mutations
+    // visible; a stale gather is discarded and planned again.
+    let io_deadline = tokio::time::Instant::now() + HYBRID_IO_TIMEOUT;
+    derive_planned(
+        graph,
+        store,
+        embedder,
+        embedding,
+        interaction,
+        agent,
+        concepts,
+        parent_of,
+        max_cooccurrence_per_derive,
+        semantic_match_threshold,
+        io_deadline,
+    )
+    .await
+}
+
+/// [`derive`](fn@derive)'s size and range checks, on their own so J3's
+/// asynchronous ack path can run them on the call path.
+///
+/// These are the ones a caller can act on — too many concepts, too many parent
+/// pairs, an over-long string, a threshold outside `[0, 1]` — and they need
+/// neither the graph nor the embedder, so nothing is gained by deferring them
+/// to a receipt.
+pub fn validate_limits(
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    semantic_match_threshold: f64,
+) -> Result<(), LamboError> {
     if !semantic_match_threshold.is_finite() || !(0.0..=1.0).contains(&semantic_match_threshold) {
         return Err(LamboError::Config(format!(
             "semantic_match_threshold must be finite and in [0, 1], got {semantic_match_threshold}"
@@ -353,11 +387,24 @@ pub async fn derive(
             )));
         }
     }
+    Ok(())
+}
 
-    // Writers outside hybrid (daemon maintenance, future MCP tasks) need not
-    // share a mutex with this function. Epoch validation makes their mutations
-    // visible; a stale gather is discarded and planned again.
-    let io_deadline = tokio::time::Instant::now() + HYBRID_IO_TIMEOUT;
+/// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
+#[allow(clippy::too_many_arguments)]
+async fn derive_planned(
+    graph: Arc<RwLock<Graph>>,
+    store: &dyn GraphStore,
+    embedder: &dyn Embedder,
+    embedding: &EmbeddingContract,
+    interaction: NodeId,
+    agent: &AgentId,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    max_cooccurrence_per_derive: usize,
+    semantic_match_threshold: f64,
+    io_deadline: tokio::time::Instant,
+) -> Result<DeriveOutcome, LamboError> {
     for _attempt in 0..MAX_HYBRID_REPLANS {
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).

@@ -110,6 +110,7 @@ use crate::types::{
     LamboError, MatchStrategy, MutationBatch, Node, NodeId, RecallQuery, RecallResult, Reservation,
     SessionId, StoreError,
 };
+use crate::writeq::{Submitted, WriteCtx, WritePipeline};
 
 // ---------------------------------------------------------------------------
 // Value types
@@ -871,11 +872,34 @@ impl MemoryBuilder {
             dim = embedding.dim,
             "Memory session attached (daemon + flush + canonization running)"
         );
+        // J3's background write pipeline. Built here, with `Arc` clones of the
+        // shared state its workers need and deliberately NOT a handle on the
+        // `Memory` being constructed — see `WriteCtx`. `spawn` also starts the
+        // calibration probe that measures this deployment's embedder; it is
+        // spawned rather than awaited, so it costs this startup nothing.
+        let pipeline = Arc::new(WritePipeline::spawn(
+            WriteCtx {
+                session: session.clone(),
+                graph: graph.clone(),
+                index: index.clone(),
+                store: store.clone(),
+                embedder: embedder.clone(),
+                embedding: embedding.clone(),
+                match_strategy: config.match_strategy,
+                max_cooccurrence_per_derive: config.max_cooccurrence_per_derive,
+                semantic_match_threshold: config.semantic_match_threshold,
+                daemon_wake: daemon.waker(),
+                lease_lost: lease_lost.clone(),
+            },
+            clock.clone(),
+        ));
+
         // Last, so nothing registers for a `build()` that failed. Released by
         // a successful `close()` (R2-4) or, failing that, by `Drop` (T81-8).
         register_session(&session, &agent);
 
         Ok(Attach::Attached(Box::new(Memory {
+            pipeline,
             session,
             agent,
             config,
@@ -1082,6 +1106,23 @@ pub struct Memory {
     /// where two writers flush divergent graphs into one session into a loud,
     /// safe stop. Shared (`Arc`) with the heartbeat and the flush task.
     lease_lost: Arc<AtomicBool>,
+    /// **J3's background write pipeline** — bounded per-agent FIFO lanes and
+    /// the receipt store their outcomes land in. Always present: there is no
+    /// "async writes off" mode, because the two tools that use it
+    /// (`lambo_derive`, `lambo_record_action`) are the two whose result does
+    /// not gate the caller's next action.
+    ///
+    /// The synchronous [`Memory::derive`] / [`Memory::record_action`] surface
+    /// does **not** go through it and is unchanged. That is deliberate rather
+    /// than transitional: an owner that derives and then asserts — every
+    /// embedded user, `lambo demo`, and most of this file's own tests — depends
+    /// on read-your-writes, and silently removing it from the existing surface
+    /// would be a far larger change than J3 is. The async path is additive.
+    ///
+    /// `Arc` because the workers, the receipt waiters and the MCP server all
+    /// hold it, and because [`Memory::close`] must reach it before it takes the
+    /// writers gate.
+    pipeline: Arc<WritePipeline>,
     /// Where [`Memory::begin_interaction`] takes its stamp. [`Utc::now`] unless
     /// the *process* replaced it at construction ([`MemoryBuilder::clock`],
     /// crate-private) — never something a caller can reach or vary per write.
@@ -1307,6 +1348,112 @@ impl Memory {
         self.mirror_concepts(&touched);
         self.daemon.wake();
         Ok(outcome)
+    }
+
+    /// The J3 write pipeline and its receipt store.
+    ///
+    /// The MCP server needs it for the two delivery surfaces the pipeline
+    /// deliberately does not own — the piggyback on the next tool response and
+    /// the fetch-by-id tool — and `lambo_stats` needs its counters.
+    pub fn pipeline(&self) -> &Arc<WritePipeline> {
+        &self.pipeline
+    }
+
+    /// [`Memory::derive_as`] **acknowledged before the embedder** (J3).
+    ///
+    /// What stays synchronous, and why each part does:
+    ///
+    /// * The **writers gate**, so a concurrent `close()` cannot slip between
+    ///   the checks below and the enqueue.
+    /// * The **validation pre-pass**, so the errors a caller can actually fix
+    ///   still arrive at call time rather than on a receipt. It is
+    ///   [`crate::graph::derive::validate`], the read-only half of the
+    ///   synchronous path — the same checks, run against the same graph, in the
+    ///   same order.
+    /// * The **interaction**, which pins this write's place in the `Temporal`
+    ///   chain at submission time. That is why the chain cannot be corrupted by
+    ///   an out-of-order drain: the drain no longer decides the order.
+    ///
+    /// What moves off the call path is the embedder wait — 22 to 25 ms of a
+    /// warm 27 ms `derive` — not the 0.4 ms round trip, which is not worth
+    /// removing.
+    ///
+    /// Returns the receipt. **A refused admission is not an `Err`**: the
+    /// receipt carries [`crate::writeq::ReceiptAnswer::Dropped`] and the drop
+    /// is counted in `lambo_stats`. An `Err` here means the call was rejected
+    /// before a receipt existed — a closed or fenced session, or input the
+    /// pre-pass refused.
+    pub async fn derive_async_as(
+        &self,
+        agent: &AgentId,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+    ) -> Result<Submitted, LamboError> {
+        let _writing = self.begin_write().await?;
+        // The pre-pass, on the call path. `hybrid::derive` re-runs its own
+        // planning validation in the background; this one exists so the common
+        // errors do not have to be collected from a receipt.
+        {
+            let g = self.graph.read();
+            crate::graph::derive::validate(&g, concepts, parent_of)?;
+        }
+        hybrid::validate_limits(concepts, parent_of, self.config.semantic_match_threshold)?;
+        let prompt = concepts
+            .iter()
+            .map(|(content, _)| *content)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let interaction = self.begin_interaction_as(agent, Some(prompt))?;
+        Ok(self
+            .pipeline
+            .submit_derive(
+                agent.clone(),
+                interaction,
+                concepts
+                    .iter()
+                    .map(|(c, t)| ((*c).to_string(), *t))
+                    .collect(),
+                parent_of
+                    .pairs()
+                    .iter()
+                    .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+                    .collect(),
+            )
+            .await)
+    }
+
+    /// [`Memory::record_action_as`] acknowledged before the graph write (J3).
+    ///
+    /// `record_action` has no embedder hop of its own, so what asynchrony buys
+    /// here is not latency but **ordering with `derive`**: both tools feed one
+    /// per-agent lane, so an agent that records an action and then derives from
+    /// it gets them applied in that order. Routing only `derive` through the
+    /// queue would have let a later synchronous `record_action` overtake an
+    /// earlier queued `derive` on the same agent's chain.
+    ///
+    /// See [`Memory::derive_async_as`] for what stays on the call path.
+    pub async fn record_action_async_as(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+    ) -> Result<Submitted, LamboError> {
+        let _writing = self.begin_write().await?;
+        {
+            let g = self.graph.read();
+            crate::graph::action::validate(&g, action)?;
+        }
+        let interaction = self.begin_interaction_as(agent, Some(action.action.to_string()))?;
+        Ok(self
+            .pipeline
+            .submit_action(
+                agent.clone(),
+                interaction,
+                action.action.to_string(),
+                action.produces.iter().map(|s| (*s).to_string()).collect(),
+                action.modifies.iter().map(|s| (*s).to_string()).collect(),
+                action.depends_on.iter().map(|s| (*s).to_string()).collect(),
+            )
+            .await)
     }
 
     /// Context-overflow demotion (spec §7): one `Observation` concept per
@@ -1863,6 +2010,19 @@ impl Memory {
         // acknowledged can still be on its way to the log. Held for the rest of
         // `close` — the drain below must be the last word on the log.
         self.closed.store(true, Ordering::Release);
+
+        // 0a — J3's background write queue, drained BEFORE the writers gate is
+        // taken. The order is forced, not chosen: the gate's write side is held
+        // for the rest of this method, so a worker that had to pass through the
+        // gate could never finish and a close waiting for it would deadlock.
+        // The workers therefore do not use the gate; latching `closed` above is
+        // what stops new jobs (the enqueue path is a gated write), and this
+        // quiesce is what makes "nothing new lands after the drain" true of the
+        // workers. Bounded by `WRITE_QUEUE_DRAIN_BUDGET`; anything left over is
+        // abandoned with an honest receipt rather than waited for.
+        self.pipeline.abort_probe();
+        self.pipeline.quiesce().await;
+
         let _quiesced = self.writers.write().await;
 
         // Stop the lease heartbeat before anything else in the shutdown: from
@@ -2077,23 +2237,14 @@ impl Memory {
     }
 
     /// Mirror concept writes into the inverted index (the `src/graph/mod.rs`
-    /// contract). Ids that are not concepts are skipped.
+    /// contract).
     ///
-    /// Lock order is **graph read → index write**, matching the daemon's GC
-    /// sync; taking them the other way round would deadlock against it. Both
-    /// guards are held together on purpose so a concurrent recall — which reads
-    /// (graph, index) as a pair — sees an atomic publication.
+    /// The body lives in [`crate::writeq::mirror_concepts`] — where the lock
+    /// order that makes it safe is documented — because J3's background workers
+    /// hold `Arc` clones of the graph and index rather than a `Memory`, and two
+    /// copies of a lock-order rule is two chances to get it wrong.
     fn mirror_concepts(&self, ids: &[NodeId]) {
-        if ids.is_empty() {
-            return;
-        }
-        let g = self.graph.read();
-        let mut index = self.index.write();
-        for &id in ids {
-            if let Some(Node::Concept(concept)) = g.node(id) {
-                index.add(concept);
-            }
-        }
+        crate::writeq::mirror_concepts(&self.graph, &self.index, ids);
     }
 
     /// Give up this handle's [`ACTIVE_SESSIONS`] slot, at most once (R2-4).
@@ -2391,6 +2542,15 @@ impl Drop for Memory {
         // a handle dropped without a clean close is the crash-shaped path where
         // expiry is the right release. A successful `close()` already released it.
         self.abort_heartbeat();
+        // J3: the background write workers and the calibration probe hold `Arc`
+        // clones of the graph, so a dropped handle's workers would keep writing
+        // into a graph nobody will flush. Aborted without a join and without
+        // settling their receipts — `Drop` cannot await, and a process that is
+        // going away has nobody to answer. This is the same shape as the tail
+        // this method warns about: a handle dropped without a clean close loses
+        // its un-applied writes, which is exactly what the receipt for one says
+        // when the next process is asked (`restart_lost`).
+        self.pipeline.abort_all_sync();
         let mut leaked = false;
         for handle in [&self.daemon_handle, &self.flush_handle, &self.canon_handle] {
             if let Some(handle) = handle.lock().take() {

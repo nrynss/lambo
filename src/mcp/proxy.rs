@@ -253,7 +253,7 @@ const MAX_REPLAY_FRAMES: usize = 64;
 /// orders above the ceiling the argument claims and cannot fire on real traffic.
 /// It reuses [`MAX_REPLAY_FRAMES`]'s order of magnitude for the same reason: past
 /// it, the peer is doing something no legitimate client does.
-const INFLIGHT_DEPTH_WARN: usize = 64;
+pub(crate) const INFLIGHT_DEPTH_WARN: usize = 64;
 
 /// The `LEASE_TTL` figure quoted verbatim in [`HUB_UNREACHABLE_MESSAGE`].
 ///
