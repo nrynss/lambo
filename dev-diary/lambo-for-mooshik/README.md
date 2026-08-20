@@ -38,6 +38,7 @@ has (D).
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
+| [DOGFOOD-FINDINGS](DOGFOOD-FINDINGS.md) | Running log of what dogfooding actually returned: metrics 1-5 read from the live ledger, the embedding-coverage gap, canonical=0 as C's motivating evidence, protocol changes the graph forced |
 
 E (consumption from Mooshik) stays in this file — it is two lines of manifest, not a workstream.
 
