@@ -1081,6 +1081,19 @@ impl LamboServer {
                 "write_queue_serial_items_per_sec".into(),
                 json!(calibration.and_then(|c| c.serial_items_per_sec)),
             );
+            // The probe's own serial figure, kept beside whichever rate is in
+            // force (J3-R2-4). Replacing a number is not a reason to destroy
+            // it: `serial_items_per_sec` alone tells an operator what the
+            // deployment retires at now, while the pair tells them what the
+            // session's first burst was ADMITTED at — and the gap between the
+            // two is the whole diagnosis of J3-R2-1, which a review had to
+            // measure at a release binary because nothing published it. Equal
+            // to `write_queue_serial_items_per_sec` while `bound_source` is
+            // `probe`, and frozen at the probe's reading after that.
+            obj.insert(
+                "write_queue_probe_serial_items_per_sec".into(),
+                json!(calibration.and_then(|c| c.probe_serial_items_per_sec)),
+            );
             obj.insert("write_queue_outstanding".into(), json!(c.outstanding()));
             obj.insert("write_queue_accepted".into(), json!(c.accepted()));
             obj.insert("write_queue_applied".into(), json!(c.applied()));
@@ -3177,6 +3190,7 @@ mod tests {
             "write_queue_bound_source",
             "write_queue_items_per_sec",
             "write_queue_serial_items_per_sec",
+            "write_queue_probe_serial_items_per_sec",
             "write_queue_outstanding",
             "write_queue_accepted",
             "write_queue_applied",
@@ -3193,27 +3207,36 @@ mod tests {
             json!(true),
             "the fixture embedder IS a measurement of this deployment's embedder: {p}"
         );
-        // The FixtureEmbedder is instant (~98 000 items/s measured), so the
-        // retention-derived clamp is what decides the bound here — a real
-        // embedder measures 110 to 141 items/s and lands well under it.
-        assert_eq!(
-            p["write_queue_bound"],
-            json!(crate::writeq::WRITE_QUEUE_MAX),
-            "{p}"
-        );
-        // Both bounds are clamped on a fixture embedder, and the per-lane one
-        // is the bound that would refuse this agent's next write (J3-R1-1).
-        assert_eq!(
-            p["write_queue_lane_bound"],
-            json!(crate::writeq::WRITE_QUEUE_MAX),
-            "{p}"
-        );
         // One real write has been applied, which is under OBSERVED_MIN_SAMPLES,
         // so the probe's figure is still the one in force.
         assert_eq!(p["write_queue_bound_source"], json!("probe"), "{p}");
+        // **And a probe-era bound is capped, however fast the probe read**
+        // (J3-R2-1). The FixtureEmbedder is instant (~98 000 items/s measured),
+        // so before J3-R2-1 both bounds sat on the retention-derived clamp
+        // (`WRITE_QUEUE_MAX`) — a 4096-deep lane authorised by a measurement of
+        // an embedder that does no work. The probe measures an embedder on the
+        // probe's own text; only observation measures the workload, so only
+        // observation may reach `WRITE_QUEUE_MAX`.
+        assert_eq!(
+            p["write_queue_lane_bound"],
+            json!(crate::writeq::PROBE_LANE_CEILING),
+            "{p}"
+        );
+        assert_eq!(
+            p["write_queue_bound"],
+            json!(crate::writeq::PROBE_AGGREGATE_CEILING),
+            "{p}"
+        );
         assert!(
             p["write_queue_serial_items_per_sec"].as_f64().unwrap() > 0.0,
             "the serial leg is the load-bearing measurement: {p}"
+        );
+        // Both rates are published, and while the source is `probe` they are
+        // the same number — the pair only diverges once observation takes over,
+        // and that divergence is the diagnosis J3-R2-4 asked for.
+        assert_eq!(
+            p["write_queue_probe_serial_items_per_sec"], p["write_queue_serial_items_per_sec"],
+            "{p}"
         );
         assert_eq!(p["write_queue_dropped_closed"], json!(0), "{p}");
         assert_eq!(p["write_queue_accepted"], json!(1), "{p}");
@@ -5633,6 +5656,59 @@ mod tests {
         // driven 8-wide to mix the writers.
         const AGENTS: usize = 8;
         const PER_AGENT: usize = 60;
+
+        // **A warm-up that is a precondition, not decoration** (J3-R2-1). Every
+        // call below is `agent-a`, so they share one lane, and a lane's depth
+        // rests on the calibration probe until `OBSERVED_MIN_SAMPLES` real
+        // writes have completed — after which it rests on this deployment's own
+        // observed service time. The probe measures its own text rather than the
+        // caller's content, so a probe-era lane bound is capped at
+        // `PROBE_LANE_CEILING`, and an instantaneous 8-wide burst against a cap
+        // of four is refused for the first few calls. Compressing a day into
+        // milliseconds is the test's artifact; retiring the probe's estimate
+        // first is how the test says so out loud.
+        const WARM: usize = crate::writeq::OBSERVED_MIN_SAMPLES as usize;
+        for i in 0..WARM {
+            let ack = call(
+                &s,
+                "lambo_derive",
+                json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{
+                        "content": format!("warm the observed rate {i}"),
+                        "concept_type": "observation",
+                    }],
+                }),
+            )
+            .await;
+            let receipt: crate::writeq::ReceiptId =
+                ack.structured_content.as_ref().expect("payload")["receipt"]
+                    .as_str()
+                    .expect("an admitted derive carries a receipt")
+                    .parse()
+                    .expect("id");
+            let answer = s
+                .mem
+                .pipeline()
+                .wait(
+                    &AgentId::new("agent-a"),
+                    receipt,
+                    crate::writeq::RECEIPT_WAIT_MAX,
+                )
+                .await;
+            assert_eq!(answer.tag(), "applied", "{answer:?}");
+        }
+        assert_eq!(
+            s.mem
+                .pipeline()
+                .calibration()
+                .expect("the probe has landed")
+                .source
+                .tag(),
+            "observed",
+            "the day below is admitted against an OBSERVED bound, not the probe's estimate"
+        );
+
         let mut handles = Vec::new();
         for a in 0..AGENTS {
             let s = s.clone();
@@ -5657,7 +5733,7 @@ mod tests {
             h.await.expect("agent task");
         }
 
-        let total = (AGENTS * PER_AGENT) as u64;
+        let total = (AGENTS * PER_AGENT + WARM) as u64;
         let lines = read_ledger(&ledger, total);
         assert_eq!(lines.len() as u64, total, "one line per call, none torn");
         for line in &lines {
