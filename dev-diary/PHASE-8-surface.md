@@ -1115,6 +1115,13 @@ existing methods as thin wrappers over `self.agent`. That is a `src/memory.rs` c
 T8.1 re-open, not a T8.2 edit. **T8.4 should treat this as a blocker for the two-agent
 conflict story.**
 
+> **Closed by J1** (`dev-diary/lambo-for-mooshik/J-multi-client.md` §J1). The suggested fix
+> is what shipped: `Memory` gained `derive_as` / `record_action_as` / `reserve_as` /
+> `release_as` (plus a private `begin_interaction_as`) with the existing methods delegating
+> to `self.agent`, and `LamboServer` passes the caller's `agent_id` through. The
+> `attribution:` warning and `require_session_agent`'s refusal described above are both
+> gone. Everything above this line remains an accurate account of the T8.2-era surface.
+
 #### Second flagged finding — no schema bootstrap for a SQLite/Cockroach serve
 
 `serve` against `store.kind = "sqlite"` on a fresh file fails at startup with

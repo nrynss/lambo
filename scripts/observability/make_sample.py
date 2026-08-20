@@ -292,7 +292,11 @@ def lines() -> list[dict]:
             "lambo_reserve",
             "agent-gamma",
             outcome="error",
-            error_kind="refused: foreign agent",
+            # A §11 cross-agent conflict: agent-gamma lost a race for a node
+            # another agent holds. Since J1 this is the ONLY way a reserve is
+            # refused — per-call agent_id is honoured, so the old
+            # "refused: foreign agent" class no longer exists.
+            error_kind="conflict",
             op="reserve",
             granted=False,
         )

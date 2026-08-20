@@ -51,6 +51,7 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
+use crate::types::AgentId;
 use crate::types::{ConceptType, LamboError, NodeId, RecallQuery, RecallResult};
 
 // ---------------------------------------------------------------------------
@@ -116,9 +117,9 @@ impl From<WireConceptType> for ConceptType {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Natural-language query.
@@ -157,9 +158,9 @@ pub struct WireParentOf {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concepts to derive from this interaction.
@@ -178,9 +179,9 @@ pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
@@ -197,10 +198,10 @@ pub struct RecordActionParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReserveParams {
-    /// Id of the agent making this call. Unlike the other tools this one is
-    /// strict: soft locks are taken and released under the single identity this
-    /// server process runs as, so a call from any other id is refused outright
-    /// rather than granted under the wrong name.
+    /// Id of the agent making this call — the identity the lock is held under.
+    /// Caller-asserted and unverified: locks are cooperative. A distinct id
+    /// gets a distinct lock; two callers sending the SAME id share one lock and
+    /// can release each other's. Use one stable id per agent.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Node to reserve, as a UUID string (from `lambo_recall` or
@@ -217,9 +218,9 @@ pub struct ReserveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concept content (or a node UUID) to centre the neighbourhood on.
@@ -233,9 +234,9 @@ pub struct InspectParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaintsParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
 }
@@ -243,9 +244,9 @@ pub struct SaintsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatsParams {
-    /// Id of the agent making this call. Work is recorded under the agent this
-    /// server process runs as, so a different id here does not change
-    /// attribution — the response carries a warning when the two differ.
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
 }
@@ -599,9 +600,9 @@ fn check_size(field: &str, value: &str) -> Result<(), CallToolResult> {
 /// Attach warnings to a result **where the model will actually read them**.
 ///
 /// R1/T82-9: warnings used to live only in `structuredContent`, which MCP
-/// clients treat as optional and commonly do not surface — so the attribution
-/// warning, and `Memory::recall`'s embed-failure degradation warning, reached
-/// nobody. They are now a second text block. `content[0]` is deliberately left
+/// clients treat as optional and commonly do not surface — so
+/// `lambo_reserve`'s advisory-and-RAM-local warning, and `Memory::recall`'s
+/// embed-failure degradation warning, reached nobody. They are now a second text block. `content[0]` is deliberately left
 /// alone: for `lambo_recall` it is the T5.3 context block verbatim, and that is
 /// the artifact the calling agent reads.
 ///
@@ -722,7 +723,7 @@ impl LamboServer {
             return contain_panic(tool, fut).await;
         };
         // `Some` whenever a ledger is attached: `ledger_agent` and `self.ledger`
-        // read the same field. An empty id would be refused by `attribution`
+        // read the same field. An empty id would be refused by `check_agent_id`
         // anyway, and a line is still owed for that refusal.
         let agent_id = agent_id.unwrap_or_default();
         let started = Instant::now();
@@ -842,64 +843,41 @@ impl LamboServer {
         crate::ledger::stats_line(self.stats_json(), self.started_at.elapsed())
     }
 
-    /// Validate `agent_id` and report the attribution gap honestly.
+    /// Validate the caller-asserted `agent_id` (J1).
     ///
     /// Every tool carries `agent_id` because spec §6.2/§2.2 says calls from
     /// several MCP clients are tasks in one process, each identifying itself.
-    /// **`Memory` binds a single `AgentId` at `build()` and exposes no
-    /// per-call override**, so graph-level attribution (the `agent_id` written
-    /// onto interactions, and the identity `reserve` contends on) is the
-    /// process agent, not this one. Rather than silently discard the caller's
-    /// identity, a mismatch is returned as a warning on the result. See the
-    /// T8.2 Handoff Log entry — closing this needs a `Memory` change, which is
-    /// not T8.2's to make.
-    fn attribution(&self, agent_id: &str) -> Result<Vec<String>, CallToolResult> {
+    /// Since J1 that id is **honoured**: write tools stamp it on the
+    /// interaction and contend on it for soft locks, via `Memory`'s `_as`
+    /// surface. There is no attribution gap left to warn about, so this checks
+    /// shape only — non-empty and within the uniform size cap.
+    ///
+    /// **The id is caller-asserted and unauthenticated.** Over stdio the client
+    /// owns the process; over HTTP one bearer token authenticates the server,
+    /// not each agent. So identity here is a cooperative declaration, exactly
+    /// like the soft locks it drives (spec §11: advisory, RAM-only). Distinct
+    /// ids get distinct locks; callers sharing an id share locks knowingly. The
+    /// compensating control is that this is *said out loud* — in every
+    /// `agent_id` param description, in `lambo_reserve`'s tool doc, and in the
+    /// server instructions — not silently assumed.
+    fn check_agent_id(&self, agent_id: &str) -> Result<(), CallToolResult> {
         if agent_id.trim().is_empty() {
             return Err(bad_param("agent_id must be a non-empty string"));
         }
         check_size("agent_id", agent_id)?;
-        let owner = self.mem.agent().0.as_str();
-        if agent_id == owner {
-            Ok(Vec::new())
-        } else {
-            Ok(vec![format!(
-                "attribution: this process owns the session as agent '{owner}'; \
-                 the call from '{agent_id}' is recorded in the graph as '{owner}'. \
-                 Per-call agent attribution needs a Memory-level agent override; \
-                 until then, run one serve process per agent."
-            )])
-        }
+        Ok(())
     }
 
-    /// **Fail closed** when the caller is not the agent this process writes as.
+    /// [`LamboServer::check_agent_id`], returning the acting [`AgentId`] for the
+    /// write path to stamp.
     ///
-    /// R1/T82-3. For the read and write tools, the attribution gap is a
-    /// mis-attribution: the work happens, under the wrong name, and a warning
-    /// says so. For `lambo_reserve` it is a *false safety claim*. `graph::reserve`
-    /// and `graph::release` contend on the one `AgentId` this `Memory` was built
-    /// with, so through MCP one client could take a soft lock another client
-    /// already held, and a third could release it — each told `isError: false`.
-    /// The §11 conflict could not fire, because there was only ever one agent.
-    ///
-    /// Mutual exclusion that reports success without providing exclusion is
-    /// worse than no mutual exclusion, so a foreign `agent_id` is refused here
-    /// until `Memory` grows `reserve_as`/`release_as` (a T8.1 re-open). Refusing
-    /// costs a caller a lock it never really held.
-    fn require_session_agent(&self, agent_id: &str, what: &str) -> Result<(), CallToolResult> {
-        let owner = self.mem.agent().0.as_str();
-        if agent_id == owner {
-            return Ok(());
-        }
-        note_error("refused: foreign agent");
-        Err(CallToolResult::error(vec![ContentBlock::text(format!(
-            "lambo_reserve: refusing to {what} on behalf of '{agent_id}': this process holds \
-             the session as agent '{owner}' and soft locks are taken and released under that \
-             single identity, so a reservation made for you could not be told apart from \
-             '{owner}'s own — and you could release a lock you do not hold. \
-             NOTHING WAS RESERVED OR RELEASED. Per-call agent identity needs a Memory-level \
-             agent override. Until then, call \
-             lambo_reserve with agent_id '{owner}', or run one serve process per agent."
-        ))]))
+    /// The id is taken untrimmed and verbatim, so `"a"` and `"a "` are two
+    /// agents holding two locks. Normalising here would silently merge two
+    /// callers' locks — the one failure mode J1's whole design is arranged to
+    /// avoid — so the mismatch is left visible to the caller instead.
+    fn caller_agent(&self, agent_id: &str) -> Result<AgentId, CallToolResult> {
+        self.check_agent_id(agent_id)?;
+        Ok(AgentId::new(agent_id))
     }
 }
 
@@ -960,13 +938,24 @@ impl LamboServer {
     ///
     /// Not durable: reservations are RAM-local to this process (pinned contract
     /// S5). "No reservation" after a restart does **not** mean nobody else is
-    /// working on the node. A call whose `agent_id` is not this process's own
-    /// agent is refused outright — see [`LamboServer::require_session_agent`].
+    /// working on the node.
+    ///
+    /// **Cooperative, and said so out loud (J1).** The lock is held under the
+    /// caller-asserted `agent_id`, which nothing here authenticates — over stdio
+    /// the client owns the process, over HTTP one token authenticates the server
+    /// rather than each agent. So: distinct ids get distinct locks and contend
+    /// honestly; callers that send the same id share one lock and can release
+    /// each other's. That is the same trust level §11 soft locks always had
+    /// (advisory, RAM-only, never blocking a write); what J1 removed was the
+    /// blanket refusal of foreign ids, which left every client but one of a
+    /// shared serve with no mutual-exclusion primitive at all.
     #[tool(
         name = "lambo_reserve",
         description = "Take a soft lock on a memory node before editing it (or release one). \
-                       Reservations are advisory, do not survive a server restart, and are \
-                       only accepted from the agent this server session runs as."
+                       Reservations are advisory and do not survive a server restart. The \
+                       lock is held under the agent_id you send, which is caller-asserted \
+                       and unverified: a distinct id gets a distinct lock, and callers \
+                       sharing an id share the lock."
     )]
     async fn lambo_reserve(&self, Parameters(p): Parameters<ReserveParams>) -> CallToolResult {
         let agent_id = self.ledger_agent(&p.agent_id);
@@ -1021,10 +1010,10 @@ impl LamboServer {
 /// close failed still needs `lambo_stats` to answer.
 impl LamboServer {
     pub(crate) async fn recall_impl(&self, p: RecallParams) -> CallToolResult {
-        let mut warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
-            Err(e) => return e,
-        };
+        if let Err(e) = self.check_agent_id(&p.agent_id) {
+            return e;
+        }
+        let mut warnings: Vec<String> = Vec::new();
         if p.query.trim().is_empty() {
             return bad_param("query must be a non-empty string");
         }
@@ -1128,10 +1117,11 @@ impl LamboServer {
     }
 
     pub(crate) async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
-        let warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
+        let acting = match self.caller_agent(&p.agent_id) {
+            Ok(a) => a,
             Err(e) => return e,
         };
+        let warnings: Vec<String> = Vec::new();
         if p.concepts.is_empty() {
             return bad_param("concepts must contain at least one entry");
         }
@@ -1183,7 +1173,7 @@ impl LamboServer {
             ParentOf::from_pairs(&pairs)
         };
 
-        let outcome = match self.mem.derive(&concepts, &parent_of).await {
+        let outcome = match self.mem.derive_as(&acting, &concepts, &parent_of).await {
             Ok(o) => o,
             Err(e) => return tool_err("lambo_derive", e),
         };
@@ -1226,10 +1216,11 @@ impl LamboServer {
     }
 
     pub(crate) async fn record_action_impl(&self, p: RecordActionParams) -> CallToolResult {
-        let warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
+        let acting = match self.caller_agent(&p.agent_id) {
+            Ok(a) => a,
             Err(e) => return e,
         };
+        let warnings: Vec<String> = Vec::new();
         if p.action.trim().is_empty() {
             return bad_param("action must be a non-empty string");
         }
@@ -1291,7 +1282,8 @@ impl LamboServer {
         //
         // Defense-in-depth, NOT load-bearing — and deliberately not test-pinned
         // (R4). Reverting this to a direct inline `mem.record_action(&action)`
-        // keeps every test green: the load-bearing anti-hang guarantee is
+        // keeps every test green (as does `mem.record_action_as(&acting, &action)`):
+        // the load-bearing anti-hang guarantee is
         // `serve`'s `CLOSE_GRACE` bound (src/mcp/serve.rs), which force-exits a
         // stalled shutdown regardless of worker starvation. A regression test
         // here would have to *provoke* starvation, which is inherently timing-
@@ -1300,6 +1292,10 @@ impl LamboServer {
         // into no stall at all. Do not delete it thinking a test will catch you.
         let mem = Arc::clone(&self.mem);
         let action_owned = p.action.clone();
+        // The acting agent moves into the blocking closure with everything else
+        // it borrows (J1): `record_action_as` needs it by reference, and `p`
+        // does not outlive the spawn.
+        let acting = acting.clone();
         let record = tokio::task::spawn_blocking(move || {
             let produces: Vec<&str> = produces.iter().map(String::as_str).collect();
             let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
@@ -1310,7 +1306,7 @@ impl LamboServer {
                 modifies: &modifies,
                 depends_on: &depends_on,
             };
-            mem.record_action(&action)
+            mem.record_action_as(&acting, &action)
         })
         .await;
         let outcome = match record {
@@ -1365,30 +1361,24 @@ impl LamboServer {
     async fn reserve_impl(&self, p: ReserveParams) -> CallToolResult {
         let releasing = p.release.unwrap_or(false);
         // I1: grant/refusal for EVERY exit of this tool, set before the first
-        // one can be taken — which means before `attribution`, not after. Each
-        // success path overwrites it with `granted: true`; anything that returns
-        // early — an empty or oversized `agent_id`, the foreign-agent refusal
-        // below, a bad node_id, a `Conflict` from a lock another agent holds —
-        // leaves this standing, so a refusal can never be recorded as a grant by
-        // a path somebody forgot to annotate. `attribution` used to run first,
-        // which left its own two exits reporting `op=None granted=None`.
+        // one can be taken — which means before the `agent_id` check, not after.
+        // Each success path overwrites it with `granted: true`; anything that
+        // returns early — an empty or oversized `agent_id`, a bad node_id, a
+        // `Conflict` from a lock another agent holds — leaves this standing, so a
+        // refusal can never be recorded as a grant by a path somebody forgot to
+        // annotate. The id check used to run first, which left its own two exits
+        // reporting `op=None granted=None`.
         let op = if releasing { "release" } else { "reserve" };
         note_facts(|| json!({ "op": op, "granted": false }));
-        let mut warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
+        // J1: the caller's id IS the lock identity. No refusal here any more —
+        // two clients through one serve contend for real, each under its own
+        // name, which is the whole point. The id is unauthenticated, and the
+        // tool description says so rather than this code pretending otherwise.
+        let acting = match self.caller_agent(&p.agent_id) {
+            Ok(a) => a,
             Err(e) => return e,
         };
-        // Fail closed before touching the graph (R1/T82-3).
-        if let Err(e) = self.require_session_agent(
-            &p.agent_id,
-            if releasing {
-                "release a soft lock"
-            } else {
-                "take a soft lock"
-            },
-        ) {
-            return e;
-        }
+        let mut warnings: Vec<String> = Vec::new();
         // N5: node_id is a client string too — size- and control-checked before
         // it is parsed, so the same uniform guard covers every field.
         if let Err(e) = check_size("node_id", &p.node_id) {
@@ -1400,7 +1390,7 @@ impl LamboServer {
         };
 
         if releasing {
-            return match self.mem.release(node_id) {
+            return match self.mem.release_as(&acting, node_id) {
                 Ok(()) => {
                     note_facts(|| json!({ "op": "release", "granted": true }));
                     let msg = format!("released {}", node_id.0);
@@ -1419,7 +1409,10 @@ impl LamboServer {
         if ttl_secs == 0 || ttl_secs > MAX_RESERVE_TTL_SECS {
             return bad_param(format!("ttl_seconds must be in 1..={MAX_RESERVE_TTL_SECS}"));
         }
-        let reservation = match self.mem.reserve(node_id, Duration::from_secs(ttl_secs)) {
+        let reservation = match self
+            .mem
+            .reserve_as(&acting, node_id, Duration::from_secs(ttl_secs))
+        {
             Ok(r) => r,
             Err(e) => return tool_err("lambo_reserve", e),
         };
@@ -1446,10 +1439,10 @@ impl LamboServer {
     }
 
     async fn inspect_impl(&self, p: InspectParams) -> CallToolResult {
-        let mut warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
-            Err(e) => return e,
-        };
+        if let Err(e) = self.check_agent_id(&p.agent_id) {
+            return e;
+        }
+        let mut warnings: Vec<String> = Vec::new();
         if p.focus.trim().is_empty() {
             return bad_param("focus must be a non-empty string");
         }
@@ -1551,10 +1544,10 @@ impl LamboServer {
     }
 
     async fn saints_impl(&self, p: SaintsParams) -> CallToolResult {
-        let warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
-            Err(e) => return e,
-        };
+        if let Err(e) = self.check_agent_id(&p.agent_id) {
+            return e;
+        }
+        let warnings: Vec<String> = Vec::new();
         let saints = self.mem.canonical_memories();
         note_facts(|| json!({ "canonical_count": saints.len() }));
         let mut text = format!(
@@ -1597,10 +1590,10 @@ impl LamboServer {
     }
 
     async fn stats_impl(&self, p: StatsParams) -> CallToolResult {
-        let warnings = match self.attribution(&p.agent_id) {
-            Ok(w) => w,
-            Err(e) => return e,
-        };
+        if let Err(e) = self.check_agent_id(&p.agent_id) {
+            return e;
+        }
+        let warnings: Vec<String> = Vec::new();
         let s = self.mem.stats();
         let text = format!(
             "session '{}' (owner agent '{}')\n\
@@ -1660,7 +1653,10 @@ impl ServerHandler for LamboServer {
                  acting on a task to load relevant prior memory, lambo_derive and \
                  lambo_record_action to write what you learned and did, lambo_reserve \
                  before editing a shared concept, and lambo_inspect / lambo_saints / \
-                 lambo_stats to look around. Every tool takes your agent_id. Never send \
+                 lambo_stats to look around. Every tool takes your agent_id: it is \
+                 caller-asserted and unverified, so send one stable id of your own — \
+                 work is recorded under it, soft locks are held under it, distinct ids \
+                 get distinct locks, and callers sharing an id share locks. Never send \
                  a timestamp: the server stamps them. Ordering is yours to manage: a \
                  read sees a write only after that write's own tool call has returned, \
                  so sequence a lambo_derive/lambo_record_action before the \
@@ -2403,10 +2399,26 @@ mod tests {
         s.mem.close().await.expect("close");
     }
 
-    /// The attribution gap is *reported*, never silent: `Memory` binds one
-    /// agent, so a call from a different `agent_id` must say so.
+    /// Every interaction's `agent_id`, in temporal-chain order — the order the
+    /// writes actually happened in. `Graph::interactions()` is map order, so a
+    /// test that reads authors from it is a coin flip.
+    fn interaction_authors(s: &LamboServer) -> Vec<String> {
+        let g = s.mem.graph().read();
+        g.temporal_chain()
+            .iter()
+            .filter_map(|id| match g.node(*id) {
+                Some(crate::types::Node::Interaction(i)) => Some(i.agent_id.0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **J1.** There is no attribution gap left to report: a call from an
+    /// `agent_id` the process was not started with is honoured, and the old
+    /// "recorded in the graph as '<owner>'" warning must be gone — a warning
+    /// that says the caller's id was discarded is now simply false.
     #[tokio::test]
-    async fn a_foreign_agent_id_is_reported_not_silently_dropped() {
+    async fn a_foreign_agent_id_is_honoured_without_an_attribution_warning() {
         let s = server("mcp-attribution").await;
         let out = call(
             &s,
@@ -2414,11 +2426,86 @@ mod tests {
             serde_json::json!({"agent_id": "agent-b"}),
         )
         .await;
-        let warnings = out.structured_content.unwrap()["warnings"].clone();
-        let joined = warnings.to_string();
+        assert_eq!(out.is_error, Some(false), "{out:?}");
+        let warnings = out.structured_content.clone().unwrap()["warnings"].to_string();
         assert!(
-            joined.contains("agent-b") && joined.contains("agent-a"),
-            "a foreign agent_id must be reported, got {joined}"
+            !warnings.contains("attribution"),
+            "the attribution warning must be gone, got {warnings}"
+        );
+        assert!(
+            !text_of(&out).contains("run one serve process per agent"),
+            "the one-serve-per-agent advice must be gone: {}",
+            text_of(&out)
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **J1 acceptance.** A write from a foreign `agent_id` is recorded under
+    /// **that** id, asserted on the graph rather than on the response: the
+    /// interaction the derive opened must carry `agent-b`, not the process
+    /// agent, and the process agent must not appear on it at all.
+    #[tokio::test]
+    async fn a_foreign_agent_ids_write_is_recorded_under_the_callers_id() {
+        let s = server("mcp-foreign-write").await;
+        assert_eq!(s.mem.agent().0, "agent-a", "the process agent");
+        let out = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-b",
+                "concepts": [{"content": "who wrote this", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{out:?}");
+
+        // Read the authors off the TEMPORAL CHAIN, which is ordered — the
+        // `interactions()` iterator is map order and would make this test a
+        // coin flip on any run with more than one interaction.
+        let authors = interaction_authors(&s);
+        assert_eq!(
+            authors,
+            vec!["agent-b".to_string()],
+            "the interaction must be stamped with the caller's id, not the handle's"
+        );
+
+        // And `record_action` too — it takes the same id through
+        // `spawn_blocking`, which is where an id is easiest to drop.
+        let out = call(
+            &s,
+            "lambo_record_action",
+            serde_json::json!({"agent_id": "agent-c", "action": "ship J1"}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{out:?}");
+        let authors = interaction_authors(&s);
+        assert_eq!(authors, vec!["agent-b".to_string(), "agent-c".to_string()]);
+        s.mem.close().await.expect("close");
+    }
+
+    /// **J1.** The handle's own default is untouched: a `Memory`-level write
+    /// (the CLI's and the demo's path) still stamps the handle's agent, so the
+    /// `_as` twins added a surface rather than moving one.
+    #[tokio::test]
+    async fn the_memory_default_agent_path_is_unchanged() {
+        let s = server("mcp-default-agent").await;
+        s.mem
+            .derive(&[("default path", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .expect("derive");
+        s.mem
+            .record_action(&Action {
+                action: "default action",
+                produces: &[],
+                modifies: &[],
+                depends_on: &[],
+            })
+            .expect("record_action");
+        let authors = interaction_authors(&s);
+        assert_eq!(
+            authors,
+            vec!["agent-a".to_string(), "agent-a".to_string()],
+            "Memory::derive / ::record_action still stamp the handle's own agent"
         );
         s.mem.close().await.expect("close");
     }
@@ -2489,11 +2576,18 @@ mod tests {
             .join("\n")
     }
 
-    /// **R1/T82-3 pinned.** The reviewer's three-agent reproduction: `agent-b`
-    /// must not be able to reserve a node `agent-a` holds, and `agent-c` must
-    /// not be able to release it — and neither may be told it worked.
+    /// **J1 acceptance, replacing R1/T82-3's blanket refusal.** The same
+    /// three-agent reproduction, now with real mutual exclusion instead of a
+    /// refusal: `agent-b` must not be able to reserve a node `agent-a` holds
+    /// (a *conflict*, not a refusal-to-try), `agent-c` must not be able to
+    /// release it, and `agent-a` must still be able to.
+    ///
+    /// R1/T82-3's reasoning stands — mutual exclusion that reports success
+    /// without providing exclusion is worse than none — but the exclusion is
+    /// now genuine, so refusing is no longer how it is honoured. What must NOT
+    /// regress is the second half: a non-holder still cannot release.
     #[tokio::test]
-    async fn reserve_and_release_fail_closed_on_a_foreign_agent_id() {
+    async fn two_agents_through_one_server_hold_distinct_locks() {
         let s = server("mcp-reserve-foreign").await;
         let derived = call(
             &s,
@@ -2515,12 +2609,16 @@ mod tests {
             serde_json::json!({"agent_id": "agent-a", "node_id": node, "ttl_seconds": 60}),
         )
         .await;
+        assert_eq!(a.is_error, Some(false), "{a:?}");
         assert_eq!(
-            a.is_error,
-            Some(false),
-            "the session's own agent may reserve"
+            a.structured_content.unwrap()["agent_id"],
+            serde_json::json!("agent-a"),
+            "the lock is held under the caller's id"
         );
 
+        // Contention, not refusal: `agent-b` loses the race for a node
+        // `agent-a` holds — the §11 conflict that could never fire before J1
+        // because there was only ever one agent.
         let b = call(
             &s,
             "lambo_reserve",
@@ -2530,35 +2628,73 @@ mod tests {
         assert_eq!(
             b.is_error,
             Some(true),
-            "a foreign agent_id must NOT be told it took a lock it does not hold: {b:?}"
+            "a second agent must not be told it took a lock the first holds: {b:?}"
         );
         assert!(
-            text_of(&b).contains("NOTHING WAS RESERVED"),
-            "the refusal must say plainly that no lock was taken: {}",
+            text_of(&b).contains("conflict"),
+            "the loss must read as a conflict, not as a refusal to try: {}",
             text_of(&b)
         );
 
-        let c = call(
-            &s,
-            "lambo_reserve",
-            serde_json::json!({"agent_id": "agent-c", "node_id": node, "release": true}),
-        )
-        .await;
-        assert_eq!(
-            c.is_error,
-            Some(true),
-            "a foreign agent_id must NOT be able to release someone else's lock: {c:?}"
-        );
-
-        // And the original lock is still there to be released by its owner.
+        // A non-holder still cannot release — the half of R1/T82-3 that must
+        // never regress, now enforced by the graph rather than by a guard in
+        // this file.
+        for other in ["agent-b", "agent-c"] {
+            let r = call(
+                &s,
+                "lambo_reserve",
+                serde_json::json!({"agent_id": other, "node_id": node, "release": true}),
+            )
+            .await;
+            assert_eq!(
+                r.is_error,
+                Some(true),
+                "{other} must not be able to release agent-a's lock: {r:?}"
+            );
+        }
         assert!(
             s.mem
                 .graph()
                 .read()
                 .reservation(NodeId(node.parse().unwrap()))
                 .is_some(),
-            "agent-a's reservation must have survived both refusals"
+            "agent-a's reservation must have survived every foreign attempt"
         );
+
+        // Distinct locks: `agent-b` holds its own on a different node while
+        // `agent-a` holds this one. Two clients, one serve, two locks.
+        let other_node = call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-b",
+                "concepts": [{"content": "b's own node", "concept_type": "entity"}]
+            }),
+        )
+        .await
+        .structured_content
+        .unwrap()["created"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let b_own = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-b", "node_id": other_node, "ttl_seconds": 60}),
+        )
+        .await;
+        assert_eq!(
+            b_own.is_error,
+            Some(false),
+            "a foreign agent_id must be able to take a lock of its own — the \
+             pre-J1 blanket refusal is gone: {b_own:?}"
+        );
+        assert_eq!(
+            b_own.structured_content.unwrap()["agent_id"],
+            serde_json::json!("agent-b")
+        );
+
+        // And the holder can still let go.
         let freed = call(
             &s,
             "lambo_reserve",
@@ -2571,22 +2707,16 @@ mod tests {
 
     /// **R1/T82-9 pinned.** `structuredContent` is optional and commonly not
     /// surfaced; a warning only ever written there is a warning nobody reads.
+    ///
+    /// J1 retargeted the vehicle, not the pin. The attribution warning used to
+    /// be the always-present warning this test rode on; J1 deleted it, so the
+    /// carrier is now `lambo_reserve`'s advisory-and-RAM-local warning, which
+    /// every grant emits. The property under test is unchanged: a warning must
+    /// reach `content`, and recall's `content[0]` must stay the context block.
     #[tokio::test]
     async fn warnings_reach_the_text_content_not_only_structured_content() {
         let s = server("mcp-warn-text").await;
-        for tool in ["lambo_stats", "lambo_saints"] {
-            let out = call(&s, tool, serde_json::json!({"agent_id": "agent-b"})).await;
-            assert_eq!(out.is_error, Some(false));
-            assert!(
-                text_of(&out).contains("attribution:"),
-                "{tool}: the attribution warning must be in the text content, got: {}",
-                text_of(&out)
-            );
-        }
-
-        // Recall keeps `content[0]` as the verbatim context block, with the
-        // warnings in a block after it.
-        call(
+        let node = call(
             &s,
             "lambo_derive",
             serde_json::json!({
@@ -2594,7 +2724,35 @@ mod tests {
                 "concepts": [{"content": "cache layer", "concept_type": "entity"}]
             }),
         )
+        .await
+        .structured_content
+        .unwrap()["created"][0]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let out = call(
+            &s,
+            "lambo_reserve",
+            serde_json::json!({"agent_id": "agent-b", "node_id": node}),
+        )
         .await;
+        assert_eq!(out.is_error, Some(false), "{out:?}");
+        let structured = out.structured_content.clone().unwrap();
+        assert!(
+            structured["warnings"]
+                .to_string()
+                .contains("lost on server restart"),
+            "the advisory warning must be in structuredContent: {structured}"
+        );
+        assert!(
+            text_of(&out).contains("lost on server restart"),
+            "and in the text content, which is the part models read: {}",
+            text_of(&out)
+        );
+
+        // Recall keeps `content[0]` as the verbatim context block, with any
+        // warnings in a block after it.
         let out = call(
             &s,
             "lambo_recall",
@@ -2609,9 +2767,12 @@ mod tests {
             ),
             other => panic!("expected text, got {other:?}"),
         }
+        // The context block itself carries agent-b's lock, named — this is how
+        // one agent learns another is holding a node (recall's reservation line
+        // is graph-wide, never filtered to the caller).
         assert!(
-            text_of(&out).contains("attribution:"),
-            "the warning must still reach the text: {}",
+            text_of(&out).contains("Reserved by agent-b"),
+            "recall must surface another agent's lock, holder named: {}",
             text_of(&out)
         );
         s.mem.close().await.expect("close");
@@ -3542,19 +3703,32 @@ mod tests {
             json!({"agent_id": "agent-a", "node_id": node_id}),
         )
         .await;
-        // Refused: a foreign agent cannot hold a lock this process cannot tell
-        // apart from its own (R1/T82-3).
+        // Granted to a DIFFERENT agent on a different node (J1): a foreign id
+        // now succeeds, and the grant must be booked as a grant under that id.
+        let other_node = {
+            let g = s.mem.graph().read();
+            let mut ids = g.concepts().map(|c| c.id);
+            let first = ids.next().expect("a concept");
+            ids.find(|id| *id != first).unwrap_or(first).0.to_string()
+        };
         call(
             &s,
             "lambo_reserve",
-            json!({
-                "agent_id": "someone-else",
-                "node_id": uuid::Uuid::new_v4().to_string(),
-            }),
+            json!({"agent_id": "someone-else", "node_id": other_node}),
+        )
+        .await;
+        // Refused: `someone-else` loses a race for the node `agent-a` holds.
+        // Post-J1 the only reserve refusal is a real §11 conflict, so this is
+        // the line that pins `granted: false` against a path that could report
+        // a grant.
+        call(
+            &s,
+            "lambo_reserve",
+            json!({"agent_id": "someone-else", "node_id": node_id}),
         )
         .await;
 
-        let lines = read_ledger(&ledger, 3);
+        let lines = read_ledger(&ledger, 4);
         let action = &lines[0];
         assert_eq!(action["tool"], json!("lambo_record_action"));
         assert!(
@@ -3568,7 +3742,21 @@ mod tests {
         assert_eq!(granted["granted"], json!(true), "{granted}");
         assert_eq!(granted["outcome"], json!("ok"), "{granted}");
 
-        let refused = &lines[2];
+        let foreign_grant = &lines[2];
+        assert_eq!(foreign_grant["op"], json!("reserve"), "{foreign_grant}");
+        assert_eq!(
+            foreign_grant["granted"],
+            json!(true),
+            "a foreign id's successful reserve is a grant: {foreign_grant}"
+        );
+        assert_eq!(foreign_grant["outcome"], json!("ok"), "{foreign_grant}");
+        assert_eq!(
+            foreign_grant["agent_id"],
+            json!("someone-else"),
+            "the line attributes to the CALLER, not the process agent: {foreign_grant}"
+        );
+
+        let refused = &lines[3];
         assert_eq!(refused["op"], json!("reserve"), "{refused}");
         assert_eq!(
             refused["granted"],
@@ -3578,9 +3766,10 @@ mod tests {
         assert_eq!(refused["outcome"], json!("error"), "{refused}");
         assert_eq!(
             refused["error_kind"],
-            json!("refused: foreign agent"),
-            "the refusal is classified, not just flagged: {refused}"
+            json!("conflict"),
+            "post-J1 the reserve refusal is a real §11 conflict: {refused}"
         );
+        assert_eq!(refused["agent_id"], json!("someone-else"), "{refused}");
 
         ledger.shutdown();
         s.mem.close().await.expect("close");

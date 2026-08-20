@@ -997,7 +997,22 @@ impl Memory {
         &self.session
     }
 
-    /// The agent id stamped on this handle's writes.
+    /// This handle's **default** agent id: the one stamped on writes made
+    /// through the plain write methods ([`Memory::derive`],
+    /// [`Memory::record_action`], [`Memory::reserve`], [`Memory::release`],
+    /// [`Memory::demote`]), and the id this handle registered in
+    /// `ACTIVE_SESSIONS` and holds the single-writer lease under.
+    ///
+    /// It is **not** "the only agent this handle can write as". Since J1 every
+    /// write method has an `_as` twin taking the acting agent per call
+    /// ([`Memory::derive_as`] and friends), so one handle serves many agents —
+    /// which is what lets one `lambo serve` process host several MCP clients
+    /// without falsifying any of their identities. Callers wanting "who wrote
+    /// this" must read the interaction's `agent_id`, not this accessor.
+    ///
+    /// Process-level identity (lease holder, `ACTIVE_SESSIONS` key, heartbeat
+    /// lines) is still exactly this one id: per-call ids name *writers*, never
+    /// lease holders.
     pub fn agent(&self) -> &AgentId {
         &self.agent
     }
@@ -1092,6 +1107,27 @@ impl Memory {
         concepts: &[(&str, ConceptType)],
         parent_of: &ParentOf<'_>,
     ) -> Result<DeriveOutcome, LamboError> {
+        self.derive_as(&self.agent, concepts, parent_of).await
+    }
+
+    /// [`Memory::derive`] on behalf of `agent` (J1).
+    ///
+    /// The acting agent lands on the interaction this call opens and on every
+    /// `Provenance` edge below it, so "who derived this" survives into the
+    /// graph rather than being flattened to the handle's own id. Everything
+    /// else — validation, canonicalization, the write-behind log, the
+    /// single-writer lease and its fencing token — is unchanged and still
+    /// process-wide: this parameter names the *writer*, not a second session.
+    ///
+    /// Identity is whatever the caller passed. Over MCP that is caller-asserted
+    /// and unauthenticated (see `lambo_reserve`'s tool doc), which is exactly
+    /// the trust level lambo's soft locks already assume.
+    pub async fn derive_as(
+        &self,
+        agent: &AgentId,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+    ) -> Result<DeriveOutcome, LamboError> {
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
@@ -1100,7 +1136,7 @@ impl Memory {
             .map(|(content, _)| *content)
             .collect::<Vec<_>>()
             .join("; ");
-        let interaction = self.begin_interaction(Some(prompt))?;
+        let interaction = self.begin_interaction_as(agent, Some(prompt))?;
 
         let outcome = match self.config.match_strategy {
             MatchStrategy::Hybrid => {
@@ -1110,7 +1146,7 @@ impl Memory {
                     self.embedder.as_ref(),
                     &self.embedding,
                     interaction,
-                    &self.agent,
+                    agent,
                     concepts,
                     parent_of,
                     self.config.max_cooccurrence_per_derive,
@@ -1125,7 +1161,7 @@ impl Memory {
                 graph_derive(
                     &mut g,
                     interaction,
-                    &self.agent,
+                    agent,
                     concepts,
                     parent_of,
                     self.config.max_cooccurrence_per_derive,
@@ -1145,11 +1181,21 @@ impl Memory {
     ///
     /// Synchronous — unlike `derive` there is no hybrid twin and no I/O.
     pub fn record_action(&self, action: &Action<'_>) -> Result<ActionOutcome, LamboError> {
+        self.record_action_as(&self.agent, action)
+    }
+
+    /// [`Memory::record_action`] on behalf of `agent` (J1). See
+    /// [`Memory::derive_as`] for what the per-call id does and does not change.
+    pub fn record_action_as(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+    ) -> Result<ActionOutcome, LamboError> {
         let _writing = self.begin_write_sync()?;
-        let interaction = self.begin_interaction(Some(action.action.to_string()))?;
+        let interaction = self.begin_interaction_as(agent, Some(action.action.to_string()))?;
         let outcome = {
             let mut g = self.graph.write();
-            graph_record_action(&mut g, interaction, &self.agent, action)?
+            graph_record_action(&mut g, interaction, agent, action)?
         };
 
         // The action node may be pre-existing (already indexed) — mirroring it
@@ -1338,17 +1384,42 @@ impl Memory {
     /// still holds, and must not read "no reservation" after a restart as
     /// "nobody else was working on this".
     pub fn reserve(&self, node: NodeId, ttl: Duration) -> Result<Reservation, LamboError> {
+        self.reserve_as(&self.agent, node, ttl)
+    }
+
+    /// [`Memory::reserve`] on behalf of `agent` (J1) — the call that makes soft
+    /// locks work for more than one client of one process.
+    ///
+    /// Contention is now genuine: two distinct ids reserving one node produce a
+    /// [`LamboError::Conflict`] for the second, and [`Memory::release_as`]
+    /// refuses an id that does not hold the lock. Two callers passing the *same*
+    /// id share one lock and can release each other's — cooperative by design,
+    /// and the MCP layer says so in the tool description. Nothing here
+    /// authenticates `agent`; a soft lock never did.
+    pub fn reserve_as(
+        &self,
+        agent: &AgentId,
+        node: NodeId,
+        ttl: Duration,
+    ) -> Result<Reservation, LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
-        graph_reserve(&mut g, node, &self.agent, ttl, Utc::now())
+        graph_reserve(&mut g, node, agent, ttl, Utc::now())
     }
 
     /// Release this agent's soft lock on `node` — the pair of
     /// [`Memory::reserve`]. A non-owner gets [`LamboError::Conflict`].
     pub fn release(&self, node: NodeId) -> Result<(), LamboError> {
+        self.release_as(&self.agent, node)
+    }
+
+    /// [`Memory::release`] on behalf of `agent` (J1). A caller that does not
+    /// hold the lock under this id gets [`LamboError::Conflict`] and the lock
+    /// stands — which is what stops one client dropping another's lock.
+    pub fn release_as(&self, agent: &AgentId, node: NodeId) -> Result<(), LamboError> {
         let _writing = self.begin_write_sync()?;
         let mut g = self.graph.write();
-        graph_release(&mut g, node, &self.agent)
+        graph_release(&mut g, node, agent)
     }
 
     // -----------------------------------------------------------------------
@@ -1867,6 +1938,22 @@ impl Memory {
     /// Reading the chain tail and inserting happen under one write lock, so two
     /// concurrent writers cannot both claim the same predecessor.
     fn begin_interaction(&self, prompt: Option<String>) -> Result<NodeId, LamboError> {
+        self.begin_interaction_as(&self.agent, prompt)
+    }
+
+    /// [`Memory::begin_interaction`] stamping `agent` as the interaction's
+    /// author (J1).
+    ///
+    /// `session_id` stays this handle's — a per-call agent is a writer inside
+    /// one session, not a session of its own — and `created_at` still comes
+    /// from the process clock, never from a caller. The temporal chain is
+    /// session-wide and unchanged: interleaved agents chain in arrival order,
+    /// which is what a shared session means.
+    fn begin_interaction_as(
+        &self,
+        agent: &AgentId,
+        prompt: Option<String>,
+    ) -> Result<NodeId, LamboError> {
         let id = NodeId::new();
         let created_at = (self.clock)();
         let mut g = self.graph.write();
@@ -1874,7 +1961,7 @@ impl Memory {
         g.insert_interaction(Interaction {
             id,
             session_id: self.session.clone(),
-            agent_id: self.agent.clone(),
+            agent_id: agent.clone(),
             prompt_text: prompt,
             previous_id,
             created_at,

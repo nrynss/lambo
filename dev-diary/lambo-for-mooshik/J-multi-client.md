@@ -24,7 +24,7 @@ caller's identity, and `lambo_reserve` is already broken without it. Renumbered.
 | # | Task | Depends on |
 | --- | --- | --- |
 | J0 | Carryover from workstream I, round 3 (CLEAN) — **DONE `0c81419`** | nothing |
-| J1 | Per-call agent identity | nothing |
+| J1 | Per-call agent identity — **DONE** | nothing |
 | J2 | A losing serve proxies instead of exiting | J1 |
 | J3 | Writes acknowledged before the embedder | J1 (receipt scoping) |
 | J4 | Lease conflicts leave an artifact | I1 |
@@ -109,6 +109,8 @@ watching it go red.
 
 ## J1 — Per-call agent identity
 
+**Status: done.** Landed as one commit on `wt/j1`; see the J1 Status note at the end of this section for what shipped and what it decided.
+
 The serve applies its own `--agent` to every connected client, so per-call `agent_id` is
 accepted, warned about, and ignored. Under a shared writer there is no correct value for
 `--agent`: any id naming one client falsifies the others.
@@ -145,6 +147,112 @@ transport connection; require distinct declared identities at attach; accept
 caller-asserted identity as cooperative-only and say so in the tool description), so
 **J1 does not start until the operator has picked one** — the choice is recorded here
 when made.
+
+### J1 Status — landed
+
+**What shipped.**
+
+* **`Memory` grew `_as` twins**, not a changed signature: `derive_as`, `record_action_as`,
+  `reserve_as`, `release_as`, and the private `begin_interaction_as`, each taking
+  `&AgentId` first. The plain methods delegate (`self.derive_as(&self.agent, …)`), so every
+  CLI, demo and test call site is untouched. Rejected: (a) making the existing methods take
+  an agent — churn across every caller for no gain; (b) an `as_agent(&id) -> handle` clone —
+  a second handle shape invites someone to give it its own `ACTIVE_SESSIONS` slot or lease,
+  which is precisely the confusion J1 must not create. One handle, one lease, one registry
+  slot; the per-call id names a **writer**, never a session.
+* **`Memory::agent()` changed meaning, and says so.** It is now the handle's *default*
+  writer id plus its process identity (lease holder, `ACTIVE_SESSIONS` key, heartbeat and
+  `lambo_stats` owner field). It is no longer "the only id this handle writes as". Consumers
+  asking "who wrote this" must read the interaction's `agent_id`. `ACTIVE_SESSIONS` is
+  untouched by per-call ids because no new handle is created, so `SecondSessionWriter`
+  detection is neither weakened nor spuriously tripped by a foreign per-call id.
+* **`LamboServer::attribution` is gone**, replaced by `check_agent_id` (shape only:
+  non-empty, size cap) and `caller_agent` (→ `AgentId` for the write path). The mismatch
+  warning was **deleted rather than reworded**: after J1 the caller's id is what gets
+  recorded, so a warning saying otherwise is simply false. The id is taken **verbatim and
+  untrimmed** — normalising would silently merge two callers' locks, the one failure mode
+  this design exists to avoid.
+* **`require_session_agent` is deleted** with its call site. The refusal's own reasoning
+  ("mutual exclusion that reports success without providing exclusion is worse than no
+  mutual exclusion") is honoured by *providing* the exclusion instead of refusing to try:
+  `reserve_as`/`release_as` contend on the caller's id, so two clients through one serve
+  hold distinct locks and a non-holder still cannot release.
+* **The declaration** (the operator's compensating control) is in three places: all seven
+  `agent_id` param descriptions, `lambo_reserve`'s tool description, and the server
+  instructions string — caller-asserted and unverified, one stable id per agent, distinct
+  ids get distinct locks, a shared id shares locks. Mirrored in `docs/reference/mcp.mdx`
+  and `site/src/content/docs/mcp.mdx` ("How `agent_id` is used", the `lambo_reserve`
+  argument row, the quoted instructions block).
+* **Ledger:** unchanged and already correct — `ledger_agent` copies the caller's `agent_id`
+  onto the line. Verified for the case that did not exist before: a *foreign-id reserve
+  that now succeeds* books `op=reserve, granted=true, outcome=ok, agent_id=<caller>`, and
+  the only remaining reserve refusal is a real §11 conflict (`error_kind="conflict"`).
+* **Read side needed nothing.** `recall`'s reservation line comes from
+  `active_reservation(graph, id, now)` unfiltered by caller and renders
+  `"Reserved by <holder> until <ts>"`, so it already surfaces *other* agents' locks with
+  the holder named; phase-2 traversal is agent-agnostic. Pinned by a test rather than
+  assumed.
+
+**Not done, deliberately:** `Memory::demote` has no `_as` twin — it is not on the MCP
+surface, so J1 added no caller for one. Nothing about authentication: no tokens, no
+connection binding, no attach handshake. The lease and its fencing token are untouched.
+
+**Sweep (claim-family rule).** Corrected: the seven param docs, the `lambo_reserve` tool
+doc, the server instructions, the two `mcp.mdx` mirrors, and
+`scripts/observability/make_sample.py`'s reserve-error line — whose `error_kind` was
+`"refused: foreign agent"`, a class no code can emit any more; reclassified to `"conflict"`
+(the only refusal that now exists) and the committed sample regenerated so the `verify.sh`
+drift gate stayed green. Left, as accurate history: `adve-review-t8.2-mcp.md` and
+`-r2.md` (past-tense review findings, including the ones that *proposed* `reserve_as`),
+this section's own quoted refusal text above (it is the defect J1 fixes, not a claim about
+today), and `skills/lambo-cloudops/SKILL.md`'s "every MCP tool takes your `agent_id`" plus
+its "do not run two writer processes against one session" — both still true, the second
+because the lease is untouched. `PHASE-8-surface.md`'s T8.2 finding, which promised exactly
+this change, gained a one-line closure pointer rather than an edit to its narrative.
+
+**The four kit scripts, read against a two-agent ledger** (synthetic, interleaved
+`agent-a`/`agent-b` traffic with one restart mid-file). Nothing is wrong; all four were
+already agent-partitioned or agent-agnostic in the right places, so nothing was changed:
+
+* `recall_first.py` filters `calls` by `agent_id` **before** cutting work sessions, so
+  interleaved traffic does not merge two agents' sessions — verified: the two agents get
+  separate session rows and separate compliance figures. The process restart splits *both*
+  agents' sessions, which is correct: one process, one in-RAM graph, so a restart really is
+  every agent's boundary.
+* `_ledger.py`'s `agents()` is a sorted distinct-id set — degenerate before J1, genuinely
+  multi-valued now, correct either way. `restart_times()` reads heartbeat `uptime_secs`,
+  and heartbeats are per-*process*: J1 adds agents, not processes, so there is still exactly
+  one restart stream. No per-agent notion of restart is needed or implied.
+* `dedup_rate.py`'s time buckets aggregate every agent, and its `per_agent` block breaks
+  the same traffic down. That is the right pair: dedup is a property of the shared graph and
+  cross-agent matching is the *point*, so a bucket mixing agents is the interesting number.
+  Worth knowing when reading the report: a single agent's rate is the "Per agent" block,
+  not the bucket table.
+* `warnings.py`'s "By agent (who was warned)" attributes to the caller and becomes
+  meaningful for the first time.
+
+The heartbeat's `stats.agent` stays the process agent, and no script reads it — so nothing
+in the kit infers "who does the work here" from process identity.
+
+**Done-when.** The first box is ticked: two clients through one serve process hold distinct
+locks, a foreign id takes and releases its own lock, and a non-holder cannot release —
+pinned by `two_agents_through_one_server_hold_distinct_locks`. "One hub" in the box's
+wording arrives in its proxy sense with J2; J1 pins the shared-process sense.
+
+**Tests** (all in `mcp::server::tests` unless noted):
+`two_agents_through_one_server_hold_distinct_locks` (contention, non-holder release refused,
+foreign lock granted, holder can release);
+`a_foreign_agent_ids_write_is_recorded_under_the_callers_id` (asserts on the graph's
+interaction `agent_id`, for both `derive` and the `spawn_blocking` `record_action` path);
+`a_foreign_agent_id_is_honoured_without_an_attribution_warning` (the warning and the
+one-serve-per-agent advice are gone);
+`the_memory_default_agent_path_is_unchanged` (the plain `Memory` methods still stamp the
+handle's agent);
+`i1_record_action_reports_edges_and_reserve_reports_grant_or_refusal` (extended: the
+foreign-id grant line, and `error_kind="conflict"` for the refusal);
+`warnings_reach_the_text_content_not_only_structured_content` (retargeted onto
+`lambo_reserve`'s advisory warning, since the attribution warning it used to ride on is
+gone, and extended to assert recall names another agent's lock holder).
 
 **Uncosted consumer dependency (J0 round 1):** the observability kit becomes genuinely
 multi-agent the moment J1 lands. `recall_first.py` groups compliance by agent,
@@ -326,8 +434,9 @@ Every figure is one rig, not a property of lambo.
 
 ## Done when
 
-- [ ] A client whose `agent_id` differs from the serve's can take and release a soft lock,
-      and two clients through one hub hold distinct locks (J1)
+- [x] A client whose `agent_id` differs from the serve's can take and release a soft lock,
+      and two clients through one hub hold distinct locks (J1) — through one serve process;
+      the proxy sense of "hub" is J2's
 - [ ] `lambo serve` against a held session starts as a proxy instead of exiting 1, and every
       tool call including writes succeeds through it (J2)
 - [ ] A write through a proxy is durable in the holder and visible to that client's next

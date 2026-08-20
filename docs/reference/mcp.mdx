@@ -48,13 +48,13 @@ Lambo keeps the allowed invisible characters in the content it stores, and ignor
 
 ### How agent_id is used
 
-One `lambo serve` process owns its session as one agent, which you set with `--agent`. That identity is what Lambo writes into the graph.
+Send the id of the agent making the call. Lambo honours it: your work is recorded in the graph under exactly that id, and your soft locks are held under it. One `lambo serve` process serves any number of agents, so several clients can share one server without any of them losing its identity. The process's own `--agent` is what it holds the session lease and writes its heartbeats under; it is not applied to your calls.
 
-- If your `agent_id` matches the process's agent, the call proceeds normally.
-- If it differs, the read and write tools still do the work, record it under the process's agent, and return a warning saying so. Your identity is not silently discarded, but it is also not what lands in the graph.
-- `lambo_reserve` refuses a mismatch outright, because a soft lock recorded under a different name would be a lock you do not actually hold. Nothing is reserved or released.
+The id is **caller-asserted and unverified**. Nothing authenticates it: over stdio the client owns the process, and over HTTP one bearer token authenticates the server rather than each agent. So identity here is a cooperative declaration, which is the same trust level Lambo's soft locks already have — they are advisory and live in RAM. In practice:
 
-To attribute work per agent today, run one `serve` process per agent.
+- Use one stable id per agent, such as `claude-orchestrator` or `codex-agent`.
+- Distinct ids get distinct locks and contend honestly: one agent reserving a node another holds gets a conflict.
+- Two callers sending the **same** id share one lock and can release each other's. That is by design, and worth knowing before you let two clients default to the same name.
 
 ### Errors
 
@@ -167,7 +167,7 @@ Take a soft lock on a memory node before you edit it, so two agents do not edit 
 
 | Argument | Type | Required | Notes |
 |---|---|---|---|
-| `agent_id` | string | Yes | Must be the agent this server runs as. A different `agent_id` is refused. |
+| `agent_id` | string | Yes | The identity the lock is held under. Caller-asserted and unverified: a distinct id gets a distinct lock, and callers sharing an id share the lock. |
 | `node_id` | string (UUID) | Yes | From `lambo_recall` or `lambo_inspect`. |
 | `ttl_seconds` | integer | No | `1` to `3600`. Defaults to `30`. |
 | `release` | boolean | No | Release instead of reserve. |
@@ -217,8 +217,10 @@ When your client connects, the server names the session and tells the model how 
 Lambo agentic graph memory for session 'demo'. Call lambo_recall before acting on a
 task to load relevant prior memory, lambo_derive and lambo_record_action to write what
 you learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
-lambo_saints / lambo_stats to look around. Every tool takes your agent_id. Never send a
-timestamp: the server stamps them. Ordering is yours to manage: a read sees a write only
+lambo_saints / lambo_stats to look around. Every tool takes your agent_id: it is
+caller-asserted and unverified, so send one stable id of your own — work is recorded under
+it, soft locks are held under it, distinct ids get distinct locks, and callers sharing an
+id share locks. Never send a timestamp: the server stamps them. Ordering is yours to manage: a read sees a write only
 after that write's own tool call has returned, so sequence a
 lambo_derive/lambo_record_action before the lambo_recall/lambo_inspect meant to see it.
 ```
