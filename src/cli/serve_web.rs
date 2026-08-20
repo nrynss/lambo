@@ -274,7 +274,10 @@ fn resolve_auth_token(flag: Option<AuthToken>) -> Result<Option<AuthToken>, CliE
 
 /// Fail closed when a non-loopback bind has no token.
 ///
-/// Mirrors `mcp::serve::authorize_bind`. serve-web is a *reader* — it never
+/// Mirrors `mcp::serve::authorize_bind` — the rule, not its J2 section: a
+/// reader takes no lease and binds no session endpoint, so the pre-lease
+/// ordering argument that section restates has no counterpart here.
+/// serve-web is a *reader* — it never
 /// takes the writer lease, so exposure is read-only — but the whole session
 /// is still readable, so a token-less bind to the world is not a configuration
 /// worth starting.

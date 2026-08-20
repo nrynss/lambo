@@ -9,9 +9,11 @@
 //! not CockroachDB's managed MCP server, which is separate, read-only, and used
 //! to inspect the store underneath (spec §12.1).
 
+pub mod endpoint;
 pub mod serve;
 pub mod server;
 
+pub use endpoint::SessionEndpoint;
 pub use serve::{
     build_memory, resolve_auth_token, resolve_serve_backends, serve, SecretToken, ServeOptions,
     Transport, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,

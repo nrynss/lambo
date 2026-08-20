@@ -1038,6 +1038,14 @@ ruling predicted.
 - **`src/mcp/serve.rs`** — `ServeOptions`, `Transport`, `build_memory`, `serve`. Both
   transports (stdio, streamable HTTP on `/mcp` via the axum already in the tree). `close()`
   runs on **every** exit path and its error is surfaced.
+  **Since J2 a holder also binds a THIRD listener, the session endpoint** — a unix socket,
+  bound under either transport, serving the same `LamboServer` so a `serve` refused by the
+  single-writer lease can proxy to it instead of exiting 1. It is not a user-facing
+  transport: no client configures it, and `--transport` still names the two above. See
+  `src/mcp/endpoint.rs` and `J-multi-client.md` §J2.
+- **`src/mcp/endpoint.rs`** (new with J2) — `SessionEndpoint`: the derived socket address
+  (a pure function of session and store identity, so it can be refused before any lease is
+  taken), the 0700-checked bind, and the stale-socket cleanup the lease licenses.
 - **`src/mcp/mod.rs`** — `init_tracing()`, which pins diagnostics to **stderr**. Under stdio
   this is not cosmetic: stdout is the JSON-RPC channel and one stray log line breaks framing.
 - **`src/main.rs`** — the real `serve` dispatch arm, plus new `--agent` and `--bind` flags;
@@ -1057,7 +1065,9 @@ ruling predicted.
 `main.rs` performs the **one** `resolve_from_config_path` (in the pre-existing
 `resolve_for_command`) and hands the single `ResolvedBackends` into `mcp::serve`.
 `mcp::serve::build_memory` **takes `ResolvedBackends`, not a config path**, deliberately: a
-second resolve is not expressible through the API. Fail-closed verified four ways (unknown
+second resolve is not expressible through the API. (J2 added a second parameter, the
+resolved `Option<&SessionEndpoint>`; it is derived *from* those same backends by the caller,
+so the one-resolve property is unchanged.) Fail-closed verified four ways (unknown
 TOML key, uncompiled store kind, bad transport, missing `--session`) — all exit before any
 session is attached. Captured in `evidence/mcp-client-stdio/README.md`.
 

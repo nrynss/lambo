@@ -18,6 +18,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::ServiceExt;
 
 use crate::ledger::Ledger;
+use crate::mcp::endpoint::SessionEndpoint;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::{resolve_from_config_path, ResolvedBackends};
@@ -331,6 +332,25 @@ fn resolve_auth_token_from(
 ///   unauthenticated write surface; binding it to the world without a
 ///   credential is not a configuration worth starting, so `serve` refuses
 ///   rather than coming up and hoping a proxy is in front of it.
+///
+/// ## What J2 changed, and what it deliberately did not
+///
+/// J2 made every holder bind a **second** listener — the session endpoint, a
+/// unix socket, bound even under `--transport stdio` so a refused serve can
+/// proxy to it. That threatened this function's ordering argument, which is that
+/// running before `build_memory` means *"refusing here means no lease is
+/// taken"*, so a misconfigured start leaves nothing behind and the operator's
+/// retry is not blocked by a lease their own refused start is holding.
+///
+/// **That sentence is still literally true, by construction rather than by
+/// luck.** The endpoint's *address* is derived (a pure function of session and
+/// store — see [`crate::mcp::endpoint::SessionEndpoint`]) so it can be published
+/// into the lease row by the very acquire that takes the lease, while the
+/// *socket* is bound only afterwards, only by the winner. A serve that loses the
+/// lease therefore binds nothing, creates nothing and unlinks nothing — exactly
+/// the property this ordering exists to give. The one new pre-lease refusal, the
+/// endpoint's `sun_path` length check, joins this group for the same reason:
+/// [`crate::mcp::endpoint::SessionEndpoint::resolve`] does no I/O.
 fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -672,15 +692,25 @@ async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duratio
 pub async fn build_memory(
     opts: &ServeOptions,
     backends: ResolvedBackends,
+    endpoint: Option<&SessionEndpoint>,
 ) -> Result<Memory, LamboError> {
     // Cadence overrides from `[daemon]` reach the writer here. Without this the
     // daemon always runs at Config::default() and `gc_interval` in lambo.toml
     // would parse, validate, and then do nothing at all.
     let config = backends.config.clone();
-    Memory::builder()
+    let mut builder = Memory::builder()
         .session(opts.session.clone())
         .agent(opts.agent.clone())
-        .config(config)
+        .config(config);
+    // J2: published by the acquire that takes the lease, so a live row always
+    // names the current holder's address. The socket itself is bound by the
+    // caller AFTER this returns — see `authorize_bind`. `None` (a store no
+    // second process can see) publishes nothing, which is the honest row for a
+    // holder nothing can reach.
+    if let Some(endpoint) = endpoint {
+        builder = builder.endpoint(endpoint.published());
+    }
+    builder
         .backends(backends)
         .build()
         .await
@@ -760,14 +790,22 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     authorize_bind(opts.transport, opts.bind, opts.auth_token.as_ref())?;
     // Same argument as the bind check: refuse before any lease is taken.
     authorize_ledger(&opts)?;
+    // J2, and it belongs in this pre-lease group for the same reason the two
+    // above do: `resolve` performs no I/O — it derives an address and checks it
+    // fits a `sun_path` — so an unusable endpoint costs nothing and leaves no
+    // lease behind. Nothing is created or bound here. See `authorize_bind`'s
+    // "What J2 changed" section, which restates that claim rather than letting
+    // unconditional binding quietly falsify it.
+    let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg)?;
 
-    let mem = Arc::new(build_memory(&opts, backends).await?);
+    let mem = Arc::new(build_memory(&opts, backends, endpoint.as_ref()).await?);
 
     // One signal registration for the whole life of the transport, armed HERE —
     // the first statement after the lease-taking `build_memory` returns, and
     // before ANY of the startup work below it (`Ledger::open`, `LamboServer::new`
-    // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the event
-    // pump, and the serve-level attach log). Registration is eager (see
+    // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the J2
+    // session-endpoint bind and its accept loop, the event pump, and the
+    // serve-level attach log). Registration is eager (see
     // `shutdown_signal`), so every one of those runs guarded (R2-a): a SIGTERM
     // arriving during them is taken by this future, `Memory::close` runs, the
     // tail reaches the store, and the single-writer lease is released.
@@ -830,6 +868,50 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         _ => None,
     };
 
+    // J2 — the session endpoint, bound HERE: below the arming (so a signal
+    // during it still reaches `Memory::close`) and below `LamboServer`, which it
+    // needs. This is also the first moment the unlink inside `bind` is licensed:
+    // we hold the lease, so a socket file already at this path cannot belong to
+    // a live holder.
+    //
+    // **A bind failure does not stop this process serving memory** — the same
+    // posture `Ledger::open` takes, for the same reason: reachability is a
+    // service to *other* processes, and losing it must not cost this client its
+    // memory. The consequence is stated at ERROR rather than swallowed, because
+    // the lease row now advertises an address nothing is listening on: a proxy
+    // that dials it fails honestly per call (the holder-unreachable path), which
+    // is loud but is a real degradation, so the log line names it.
+    // No endpoint: a store no second process can see, so there is no hub to be.
+    // See `SessionEndpoint::for_store`.
+    let hub = match endpoint
+        .as_ref()
+        .map(|ep| (ep.path().display().to_string(), ep.bind()))
+    {
+        None => None,
+        Some((path, Ok(listener))) => {
+            tracing::info!(
+                endpoint = %path,
+                "lambo serve: session endpoint bound — other clients on this machine can attach \
+                 to this session through it"
+            );
+            Some(tokio::spawn(serve_endpoint(
+                listener,
+                server.clone(),
+                opts.max_sessions,
+            )))
+        }
+        Some((path, Err(e))) => {
+            tracing::error!(
+                error = %e,
+                endpoint = %path,
+                "lambo serve: the session endpoint could not be bound — this process still serves \
+                 its own client normally, but other clients on this machine CANNOT attach to this \
+                 session and their calls will fail honestly rather than reaching memory"
+            );
+            None
+        }
+    };
+
     // Exactly once, at startup: `events()` is stateful on its first call — it
     // hands out the receiver subscribed *before* the daemon spawned, so the
     // spec §2.5 warm-up condition set (on a resumed session, the whole restored
@@ -861,6 +943,16 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // filesystem is abandoned, never allowed to hold process exit.
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
+    }
+    // J2. Aborted AFTER `close()` (that is where `run_and_close` returned from),
+    // deliberately: a proxy's in-flight call must not be cut off before the tail
+    // it may have just written is durable. Then the socket file goes, so the
+    // next start does not log a stale-socket warning it did not earn.
+    if let Some(hub) = hub {
+        hub.abort();
+    }
+    if let Some(endpoint) = &endpoint {
+        endpoint.unlink();
     }
     if let Some(ledger) = ledger {
         ledger.shutdown();
@@ -1095,6 +1187,68 @@ async fn run_until_shutdown<T>(
     match tokio::time::timeout(grace, &mut running).await {
         Ok(v) => Exit::Finished(v),
         Err(_) => Exit::Forced,
+    }
+}
+
+/// Serve the session endpoint (J2) — the hub half of multi-client survivability.
+///
+/// One MCP session per accepted connection, all against the **one** [`Memory`]
+/// this process owns: `server` is cloned exactly as `serve_http`'s factory
+/// clones it, so every connection shares the same graph, the same write-behind
+/// log, the same single-writer lease and the same call ledger. Nothing here
+/// builds a second `Memory`.
+///
+/// `UnixStream` is an rmcp transport without any new dependency: the
+/// `transport-io` feature already in use pulls `transport-async-rw`, whose
+/// `IntoTransport` covers any `AsyncRead + AsyncWrite`. The wire is the same
+/// newline-delimited JSON-RPC the stdio transport speaks — which is what lets a
+/// proxy be a byte pipe rather than a re-implementation of the tool surface.
+///
+/// Runs until aborted. The caller aborts it alongside the heartbeat, *after*
+/// [`Memory::close`], so a proxy's in-flight call is not cut off before the tail
+/// it may have just written is durable.
+async fn serve_endpoint(
+    listener: tokio::net::UnixListener,
+    server: LamboServer,
+    max_sessions: usize,
+) {
+    // The same ceiling `--max-sessions` puts on the HTTP transport, for the same
+    // reason: concurrently live MCP sessions are the resource, and the endpoint
+    // is another door onto it. A refused connection is closed immediately, which
+    // a proxy reports to its caller as an honest failure rather than a hang.
+    let permits = Arc::new(tokio::sync::Semaphore::new(max_sessions.max(1)));
+    loop {
+        let (stream, _addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                // A per-connection accept error must never take down the
+                // session: this process is still serving its own client.
+                tracing::warn!(error = %e, "lambo serve: session endpoint accept failed");
+                continue;
+            }
+        };
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            tracing::warn!(
+                max_sessions,
+                "lambo serve: session endpoint at the concurrent-session ceiling — refusing a                  connection (raise --max-sessions if this is a real workload)"
+            );
+            drop(stream);
+            continue;
+        };
+        let server = server.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            match server.serve(stream).await {
+                Ok(service) => {
+                    if let Err(e) = service.waiting().await {
+                        tracing::warn!(error = %e, "lambo serve: endpoint session ended in error");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "lambo serve: endpoint handshake failed");
+                }
+            }
+        });
     }
 }
 
