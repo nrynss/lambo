@@ -190,8 +190,11 @@ def render(data: dict[str, Any]) -> list[str]:
         out.append(
             f"   {data['derive_calls_without_facts']} SUCCESSFUL derive call(s) carried NO "
             "created/matched facts at all — not the same as creating and matching "
-            "nothing. Either the lines predate the facts, or a field was renamed; "
-            "the rates above are computed over the remaining calls only."
+            "nothing. Most likely the writes were acknowledged asynchronously (J3) and "
+            "the facts are on the receipt, not the line: fetch them with "
+            "lambo_stats(receipt=...), and see the observability README's metric-2 note. "
+            "Otherwise the lines predate the facts, or a field was renamed. "
+            "The rates above are computed over the remaining calls only."
         )
 
     out += ["", "Per agent:"]

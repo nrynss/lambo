@@ -128,6 +128,52 @@ else
   fail=1
 fi
 
+step "a J3-shaped derive line (async ack) reports n/a rather than a false zero"
+# **J3-R1-12, answered here rather than in the committed sample, deliberately.**
+# Since J3 an MCP-driven `lambo_derive` is acked before the write happens, so its
+# call line carries `concepts_requested` / `admitted` / `receipt` and NO
+# created/matched facts — those moved to the receipt (see the README's metric-2
+# note). Without a fixture, all the checks above could pass without one of them
+# ever seeing the shape the README now documents.
+#
+# It is planted here and not in `sample/calls.jsonl` for the reason stated above
+# the mixed-version fixture: the committed sample is deliberately clean-v1, and
+# fact-less lines in it would move the very numbers the metric-1 and metric-2
+# checks read (the 66.7% compliance figure, the "rising" convergence, the
+# per-day rates). A fixture that perturbs the plants it shares a file with
+# defends one schema by weakening five checks. This defends the schema and
+# leaves them alone.
+cat >"$work/j3-async.jsonl" <<'J3ASYNC'
+{"v":1,"ts":"2026-08-20T09:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":900,"query":"what did we decide","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-20T09:00:01+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":48,"concepts_requested":3,"admitted":true,"receipt":"lwr1.5b7d1c9e2f0a4413.1a06d6c1a00.1"}
+{"v":1,"ts":"2026-08-20T09:00:02+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":51,"concepts_requested":2,"admitted":true,"receipt":"lwr1.5b7d1c9e2f0a4413.1a06d6c1a3c.2"}
+{"v":1,"ts":"2026-08-20T09:00:03+00:00","kind":"call","tool":"lambo_record_action","agent_id":"agent-alpha","outcome":"ok","duration_us":44,"admitted":true,"receipt":"lwr1.5b7d1c9e2f0a4413.1a06d6c1a78.3"}
+{"v":1,"ts":"2026-08-20T09:00:04+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":4,"admitted":false,"receipt":"lwr1.5b7d1c9e2f0a4413.1a06d6c1ab4.4"}
+J3ASYNC
+out="$("$py" "$here/dedup_rate.py" --bucket all "$work/j3-async.jsonl")"
+echo "$out"
+check "reports no rate at all rather than 0.000" "$out" "n/a"
+check "counts every async derive as fact-less" "$out" \
+  "3 SUCCESSFUL derive call(s) carried NO created/matched facts"
+check "names the async ack as the likely cause" "$out" "acknowledged asynchronously"
+check "points at the receipt, not at a renamed field" "$out" "lambo_stats(receipt=...)"
+if "$py" "$here/dedup_rate.py" --json "$work/j3-async.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["derive_calls_without_facts"] == 3, d["derive_calls_without_facts"]
+t = d["totals"]
+assert t["created"] == 0 and t["matched"] == 0, t
+assert d["totals"]["dedup_rate"] is None, d["totals"]["dedup_rate"]'; then
+  printf '    ok   --json reports a null rate, never a zero\n'
+else
+  printf '    FAIL --json turned "no facts" into a zero rate\n'
+  fail=1
+fi
+# And metric 1 is unaffected by the shape: recall-then-write is still legible
+# when the write facts live on a receipt.
+out="$("$py" "$here/recall_first.py" "$work/j3-async.jsonl")"
+check "metric 1 still scores an async-acked run" "$out" "100.0%"
+
 step "chrono's nine-digit fractional seconds parse (no Python floor)"
 cat >"$work/nanos.jsonl" <<'NANOS'
 {"v":1,"ts":"2026-08-18T09:00:00.123456789+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":0,"hits":[]}

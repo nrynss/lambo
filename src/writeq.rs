@@ -52,14 +52,36 @@
 //! submission order; lanes run concurrently, because interleaving *across*
 //! agents is fine.
 //!
+//! **The scope of that promise is one agent's *sequential* submissions**
+//! (J3-R1-10). The chain position is pinned by `begin_interaction_as` and the
+//! lane position by the `lanes.lock()` inside [`WritePipeline::admit`], and
+//! those are two critical sections with no ordering between them across
+//! threads. So for two `lambo_derive` calls one agent has in flight *at the
+//! same time*, the chain order and the drain order can disagree — task A can
+//! open its interaction first and enqueue second. The consequence is confined
+//! to created/matched attribution between those two calls, and a caller that
+//! fires two writes concurrently has asserted no order for them to keep;
+//! closing the window would mean opening the interaction under the lane lock,
+//! which nests the graph write lock inside it. What must not happen is claiming
+//! more than that, which the first version of this section did.
+//!
 //! # Backpressure
 //!
-//! Asynchrony adds no capacity. The queue bound is therefore derived from a
+//! Asynchrony adds no capacity. The queue bounds are therefore derived from a
 //! ceiling **measured on the deployment's own embedder** ([`Calibration`]),
 //! never from a constant: a hosted or GPU embedder may be slower per call while
 //! parallelising far better, at which point this rig's "batching does not pay"
-//! result inverts. The drop policy is fixed regardless — bound, drop, log once,
-//! count in `lambo_stats`.
+//! result inverts.
+//!
+//! **A measurement has a width, and so does the drain** (J3-R1-1). A lane has
+//! one consumer, so admission is bounded per lane by the *serial* rate and in
+//! aggregate by the concurrent one, and both projections take
+//! [`DRAIN_PROJECTION_SHARE`] of [`WRITE_QUEUE_DRAIN_BUDGET`]. The probe's
+//! reading is an opening estimate rather than the last word: real write service
+//! times replace its serial figure ([`OBSERVED_MIN_SAMPLES`]), because the
+//! probe fires at the coldest moment in the process's life and measured a 7×
+//! spread across repeats on one host. The drop policy is fixed regardless —
+//! bound, drop, log once, count in `lambo_stats`.
 //!
 //! # Accounting (the `ledger_queued_lines` lesson, re-derived)
 //!

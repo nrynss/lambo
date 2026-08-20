@@ -2146,7 +2146,8 @@ impl ServerHandler for LamboServer {
                  and their ack carries a receipt id. Their outcome arrives on your next \
                  tool response. If you need a write visible to the very next read, call \
                  lambo_stats with that receipt and a wait_ms first; otherwise carry on \
-                 — your writes are applied in the order you sent them.",
+                 — writes you send one after another are applied in that order (two you \
+                 fire at once have no order to keep).",
             self.mem.session().0
         ));
         info
@@ -4863,6 +4864,20 @@ mod tests {
         assert!(
             !instructions.contains("a read sees a write only after that write's own tool call"),
             "the pre-J3 ordering sentence is now false and must not survive: {instructions}"
+        );
+        // J3-R1-10: the ordering promise is scoped to SEQUENTIAL submissions,
+        // which is what an agent can actually assert. Two concurrent calls from
+        // one agent pin their chain positions and their lane positions in two
+        // different critical sections, so the two orders can disagree — and for
+        // genuinely concurrent calls the caller has no order to preserve
+        // anyway.
+        assert!(
+            instructions.contains("one after another are applied in that order"),
+            "the ordering promise must state its scope: {instructions}"
+        );
+        assert!(
+            !instructions.contains("your writes are applied in the order you sent them"),
+            "the unscoped ordering promise is stronger than what holds: {instructions}"
         );
         s.mem.close().await.expect("close");
     }

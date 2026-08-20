@@ -1394,7 +1394,10 @@ impl Memory {
     ///   the comment correcting it — J3-R1-4.)
     /// * The **interaction**, which pins this write's place in the `Temporal`
     ///   chain at submission time. That is why the chain cannot be corrupted by
-    ///   an out-of-order drain: the drain no longer decides the order.
+    ///   an out-of-order drain: the drain no longer decides the order. Scoped to
+    ///   *sequential* calls from one agent — for two this agent has in flight at
+    ///   once, this line and the queue's own enqueue are separate critical
+    ///   sections and can disagree (J3-R1-10, and see `writeq`'s §Ordering).
     ///
     /// What moves off the call path is the embedder wait — 22 to 25 ms of a
     /// warm 27 ms `derive` — not the 0.4 ms round trip, which is not worth
