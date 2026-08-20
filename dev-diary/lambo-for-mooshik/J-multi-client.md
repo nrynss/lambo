@@ -40,9 +40,16 @@ the write-path change.
 **Status: done, `0c81419`.** Reviewed CLEAN with six P3 advisories at `77f119f`
 ([adve-review-mooshik-J0-round1.md](../adversarial-review/adve-review-mooshik-J0-round1.md)),
 all six remediated in the round-1 remediation commit that follows it rather than carried
-again — the three numbered items below stay as the spec they were, not as open work. The closure narrative lives in
-[I-observability.md](I-observability.md)'s Handoff Log, which is the right home for I's
-remediation history; this is the pointer from J's board.
+again — the three numbered items below stay as the spec they were, not as open work. The
+closure narrative lives in [I-observability.md](I-observability.md)'s Handoff Log, which is
+the right home for I's remediation history; this is the pointer from J's board.
+
+That remediation was itself reviewed CLEAN — one P2, five P3
+([adve-review-mooshik-J0-round2.md](../adversarial-review/adve-review-mooshik-J0-round2.md))
+— and all six are closed in the round-2 remediation commit. The P2 was a gate hole, not a
+prose defect: the new `verify.sh` queue-depth fixture wrote its heartbeats in stamp order,
+so deleting `queued_lines()`'s `ts` sort outright still passed. Still doc-precision plus
+that one fixture reorder; still no behaviour change.
 
 Remediating the six rather than carrying them is a deliberate reversal of the decision that
 created J0. The reasoning does not transfer twice: carrying I's advisories was defensible
@@ -78,6 +85,18 @@ Guidance handed forward with them: serve-startup ordering claims live in more pr
 than any one of them signals — the cheap defence when touching that ordering is an `rg`
 sweep for the claim, not a read of the neighbourhood. J2 moves this ordering again;
 apply the sweep then.
+
+Sweep once per **claim-family**, not once per change. Round 1's own conclusion was that
+"sweep for the ordering claim" is too narrow: the ordering sweep came back clean, while
+widening by one term — the `ledger_*` key set — found a stale count immediately (J0-R1-5),
+and round 2 then found the same class again in the very file the fix touched (J0-R2-2). So
+J2 gets **two** sweeps, because it moves two families: the startup ordering, **and** the
+lease/endpoint schema. The second one is not hypothetical — adding `endpoint` to
+`session_leases` falsifies a column list quoted verbatim at J2's own bullet below, both
+`001_init.sql` files, and the two `INSERT INTO session_leases (…)` column lists in
+`store/sqlite.rs` and `store/cockroach.rs`. Before finishing a change, sweep for whatever
+the change is a claim *about*, and count what you find — the recurring defect across three
+review rounds was never the ordering claim, it was the register not keeping up.
 
 **Depends on:** nothing.
 

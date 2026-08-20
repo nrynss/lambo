@@ -101,7 +101,7 @@ check "finds the should-have-merged pair" "$out" "AT OR ABOVE the merge threshol
 check "finds the in-band pair" "$out" "IN THE BAND [0.65, 0.85): 1 pair"
 check "warns about the unembedded concept" "$out" "CANNOT be scanned"
 
-# The committed sample is deliberately clean-v1: these two cases are generated
+# The committed sample is deliberately clean-v1: these three cases are generated
 # here instead, so they cannot perturb the planted facts every check above reads.
 step "an unknown schema version warns loudly and is still read"
 cat >"$work/mixed.jsonl" <<'MIXED'
@@ -147,10 +147,13 @@ step "a non-zero queue depth is read from the NEWEST heartbeat, not the largest"
 # older heartbeat carries the LARGER depth deliberately: queue depth is a gauge,
 # so the answer must be 3 (newest) and never 9 (maximum or oldest), which pins
 # `queued_lines()`'s sort direction and its newest-not-maximum semantics at once.
+# File order and stamp order are deliberately OPPOSED — the newer beat is written
+# first — so that deleting the `ts` sort and reading file order instead (the
+# natural simplification, since `load()` reads lines in order) also goes red.
 cat >"$work/queued.jsonl" <<'QUEUED'
 {"v":1,"ts":"2026-08-18T09:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":1,"hits":[]}
-{"v":1,"ts":"2026-08-18T09:00:10+00:00","kind":"stats","uptime_secs":10,"version":"0.2.2","git_sha":"aaaa111","stats":{"node_count":4,"ledger_written_lines":1,"ledger_dropped_lines":0,"ledger_dropped_channel_full":0,"ledger_dropped_write_failed":0,"ledger_queued_lines":9}}
 {"v":1,"ts":"2026-08-18T09:00:20+00:00","kind":"stats","uptime_secs":20,"version":"0.2.2","git_sha":"aaaa111","stats":{"node_count":4,"ledger_written_lines":7,"ledger_dropped_lines":0,"ledger_dropped_channel_full":0,"ledger_dropped_write_failed":0,"ledger_queued_lines":3}}
+{"v":1,"ts":"2026-08-18T09:00:10+00:00","kind":"stats","uptime_secs":10,"version":"0.2.2","git_sha":"aaaa111","stats":{"node_count":4,"ledger_written_lines":1,"ledger_dropped_lines":0,"ledger_dropped_channel_full":0,"ledger_dropped_write_failed":0,"ledger_queued_lines":9}}
 QUEUED
 out="$("$py" "$here/recall_first.py" "$work/queued.jsonl")"
 echo "$out"

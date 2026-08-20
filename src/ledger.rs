@@ -258,10 +258,12 @@ impl Ledger {
     /// transport, holding the session in a process that never serves, and it
     /// could not be shut down either — the pinned shutdown future is never
     /// polled while the main task sits in the blocking syscall, so
-    /// `Memory::close` never runs. Before I-R2-1 the same block lost the tail
-    /// instead, the signal hitting its default disposition and killing the
-    /// process outright. Either way it is observability taking down memory
-    /// through the flag that turns observability on.
+    /// `Memory::close` never runs. Before I-R1-3 the block was real, and — the
+    /// handler then being armed only below this call — it lost the tail instead,
+    /// the signal hitting its default disposition and killing the process
+    /// outright (`I-observability.md` narrates it). Either way it is
+    /// observability taking down memory through the flag that turns
+    /// observability on.
     ///
     /// The operator still learns about a typo at startup rather than from an
     /// empty file a day later — the writer thread probes as its first act, with

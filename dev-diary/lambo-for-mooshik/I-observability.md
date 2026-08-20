@@ -383,8 +383,11 @@ Round 3 was CLEAN with three P3 doc-precision advisories, carried into workstrea
   **last** heartbeat rather than the maximum, and it rides `--json` under
   `ledger_schema.queued_lines` so a duckdb consumer sees it too. Every heartbeat in the
   committed sample carries `ledger_queued_lines: 0`, so sample reports are byte-identical
-  and `verify.sh` needed no change at `0c81419` — which is exactly why round 1 asked for one
-  (J0-R1-3): with every committed heartbeat at `0`, both new branches were dead code under
-  the gate. The remediation adds a generated two-heartbeat fixture whose *older* beat
+  and `verify.sh` was left unchanged at `0c81419` — which is exactly why round 1 asked for a
+  change (J0-R1-3): with every committed heartbeat at `0`, both new branches were dead code
+  under the gate. The remediation adds a generated two-heartbeat fixture whose *older* beat
   carries the larger depth, so `9` instead of `3` in the header fails the gate and the
-  newest-not-maximum semantics are pinned.
+  newest-not-maximum semantics are pinned. Round 2 then found that fixture blind to the
+  `ts`-sort dependency the same commit documented — it wrote the newer beat *last*, so file
+  order and stamp order agreed and deleting the sort outright still passed 40/40. The two
+  heredoc lines are now deliberately opposed (J0-R2-1), which puts that mutation red too.
