@@ -1674,6 +1674,44 @@ three remediation commits the repo-wide totals are:
 | `cargo test --no-default-features --features store-cockroach` | **560 / 0 / 0** |
 | `scripts/observability/verify.sh` | **46 ok** |
 
+**The P1, measured at the release binary against the live BGE-M3** — not just
+in `cargo test`. Two release builds (`--features store-sqlite,embed-bge`), the
+review head `355e85e` and the remediated head, driven over raw stdio JSON-RPC
+against the rig's llama.cpp BGE-M3 q8_0 on CPU (`127.0.0.1:8080`). One agent,
+200 `lambo_derive` calls back to back, then the pipe is closed so `serve` runs
+its **clean** shutdown path, then a fresh `serve` on the same SQLite store counts
+what actually landed:
+
+| Run | bound(s) | acked | clean close | concepts in the store after restart | acked writes lost |
+| --- | --- | --- | --- | --- | --- |
+| `355e85e` #1 | 178 | 178 | 2041 ms (whole budget) | 116 | **62** |
+| `355e85e` #2 | 196 | 196 | 2030 ms (whole budget) | 109 | **87** |
+| remediated #1 | lane 69 / all 108 | 69 | 1174 ms | 69 | **0** |
+| remediated #2 | lane 39 / all 228 | 39 | 616 ms | 39 | **0** |
+
+The review projected "~200 abandoned at every clean close under load" from the
+published rates; measured on this rig it is 62 and 87 — the same defect, sized by
+how warm the embedder was when the probe ran. The remediated runs show the other
+half of the point: the *capacity* still moves with embedder warmth (lane bound 69
+one run, 39 the next), and durability no longer does. Everything acked applied,
+both times, with the close finishing in a third to two-thirds of its budget.
+
+The ack itself is unchanged where it matters: 20 sequential derives against the
+same live embedder ack at a **median 0.074 ms** (min 0.064, max 0.511), all 20
+applied, `concept_count: 20`, and a wait on the last receipt returns `applied` —
+so read-your-writes on demand still works end to end. `write_queue_bound_source`
+read `observed` by the end of that run, which is the round-1 mechanism doing its
+job: four real writes in, and the bound stopped resting on the startup probe.
+
+**The one cost, named.** The first ack of a session now waits for a six-embed
+probe in three sequenced waves rather than a four-embed concurrent one:
+**221 ms** at the binary for the first call, against a 0.074 ms median for every
+call after it. It is bounded by `PROBE_BUDGET` (5 s), it is once per process, and
+it buys a bound that cannot abandon acked writes — but it *is* a regression in
+first-call latency and it belongs in the record rather than in a footnote.
+Admission still refuses to fall back to a constant, which is what would otherwise
+remove the wait.
+
 **Register sweep (per file, including the nulls).** The claim families this
 remediation moved are: the queue bound's width, the probe's provenance, receipt
 expiry, the stats key list, and the ordering promise.
