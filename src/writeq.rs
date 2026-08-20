@@ -309,6 +309,14 @@ pub const PROBE_CLAMP_RPS: u64 =
 /// the release binary over stdio (2026-08-20; the run reported 110, 131 and 141
 /// across repeats). Recorded as a constant so the guard below can be a build
 /// invariant rather than a sentence.
+///
+/// **Those repeats were taken at the 35-byte [`PROBE_TEXT`], and that is
+/// deliberately what this constant keeps** (J3-R2-1). Probing at
+/// [`PROBE_TEXT_BYTES`] the same rig reads ~19 to 22 items/s 4-wide — five times
+/// lower — but the guard below wants the *largest* rate a real local embedder
+/// can produce, since its job is to keep [`PROBE_CLAMP_RPS`] clear of one.
+/// Replacing 141 with the smaller figure would loosen the guard while looking
+/// like an update.
 pub const MEASURED_LOCAL_EMBEDDER_RPS: u64 = 141;
 
 /// Build-time invariant: the clamp must sit well clear of a real embedder.

@@ -1360,12 +1360,16 @@ when matching happens.
 
 ### J3 Status — landed
 
-**Status: implemented on `wt/j3`, round-1 review remediated.** Four staged
-commits (`427fabf` pipeline, `dcf29de` MCP surface, `f9abfbb` tests, `3e1bea4`
-two defects found by measuring the binary), plus this note — and three more for
-the round-1 review's thirteen findings (see
+**Status: implemented on `wt/j3`, rounds 1 and 2 of the review remediated.**
+Four staged commits (`427fabf` pipeline, `dcf29de` MCP surface, `f9abfbb` tests,
+`3e1bea4` two defects found by measuring the binary), plus this note — three more
+for the round-1 review's thirteen findings (see
 [§Round-1 remediation](#round-1-remediation-1-p1-4-p2-8-p3--all-closed)), whose
-P1 changed how the queue bound is derived.
+P1 changed how the queue bound is derived, and three more for round 2's nine (see
+[§Round-2 remediation](#round-2-remediation-1-p1-3-p2-5-p3--all-closed)), whose
+P1 changed what the bound is allowed to rest on. Both P1s were the same hazard —
+an acked write abandoned at a clean `close()` — and both were found by measuring
+the release binary rather than by reading the code.
 
 #### The latency claim, measured
 
@@ -1454,7 +1458,7 @@ Probe output from the same runs, which is where the queue bound comes from:
   reason rather than left `pending` forever in an exiting process.
 * **The daemon's wake is unchanged**: a background write pokes it through the
   same `Notify` the synchronous path uses, via a new `Daemon::waker`.
-* **`lambo_stats` gains fourteen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`). The difference from the
+* **`lambo_stats` gains fifteen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`; round 2 added `write_queue_probe_serial_items_per_sec`). The five keys added since first landing are the ones that need explaining, and J3-R2-8 was right that the bullet did not explain them: **`write_queue_lane_bound`** is the bound that actually refuses one agent's burst, reported beside the aggregate `write_queue_bound` because the two come from measurements at different widths and a single busy agent meets the lane one first; **`write_queue_bound_source`** says which evidence the bounds rest on (`probe`, `observed`, `unmeasured`), because "measured" alone cannot distinguish a startup estimate from this deployment's own timed writes and the two differ by 4× on ordinary content; **`write_queue_serial_items_per_sec`** is the 1-wide rate the lane bound is projected from, which is the load-bearing number for durability; **`write_queue_probe_serial_items_per_sec`** keeps the probe's figure beside whichever rate is in force, because the *gap* between them is the diagnosis (J3-R2-4); and **`write_queue_dropped_closed`** separates a refused shutdown tail from real backpressure. The difference from the
   `ledger_*` keys' gating is not an inconsistency: the ledger is an optional
   subsystem, so "off means byte-identical" is a promise that can be kept for it;
   the write queue has no off switch, so there is no baseline payload left to
@@ -1567,18 +1571,21 @@ alive across the left-hand acquire and self-deadlocks.
 | Constant | Value | Derived from |
 | --- | --- | --- |
 | `WRITE_QUEUE_DRAIN_BUDGET` | 2 s | A quarter of `CLOSE_FLUSH_GRACE` (8 s), *carved out of* it rather than added, so the quiesce cannot be why a `close` misses the window `serve` gives it. One constant serves both admission projection and quiesce — **half the property; the other half is that the rate must be the drain's own, which is what J3-R1-1 was.** Build-guarded, and now also guarded above zero seconds (`PROBE_CLAMP_RPS` divides by `as_secs()`). |
-| `DRAIN_PROJECTION_SHARE` | 2 | **New at round 1.** The share of the drain budget a bound may project against: half, because a lane filled to exactly `rate × budget` leaves no slack for the part of a job the rate does not cover. The probe times the embedder only, and §Measurements puts the rest of a warm derive at ~1/5 of the embed. One share for both sources, so there is one rule: *a lane may hold what the drain retires in half the budget.* |
+| `DRAIN_PROJECTION_SHARE` | 2 | **New at round 1.** The share of the drain budget a bound may project against: half, because a lane filled to exactly `rate × budget` leaves no slack for the part of a job the rate does not cover. The probe times the embedder only, and §Measurements puts the embed at **22 to 27 ms** of a 27 ms warm derive — 0 to 5 ms of remainder on that rig. **Round 2 measured the general case and it is much less generous** (J3-R2-8): at the release binary with 512-byte concepts the embed is 36.3 ms and the whole of `run` is ~64 ms, so the remainder is ~78% of the embed, not ~20%. Half the budget still covers it, with far less margin than the old "~1/5" implied — and the docstring's "22-25 ms" was a misquote of §Measurements inside a load-bearing derivation, now corrected. One share for both sources, so there is one rule: *a lane may hold what the drain retires in half the budget.* |
 | `WRITE_QUEUE_MIN` | 4 | `PROBE_CONCURRENCY`, and defined from it: the **aggregate** floor must not drop work a 4-wide measurement has shown the deployment absorbs. |
-| `WRITE_QUEUE_LANE_MIN` | 1 | **New at round 1.** Floor on the *per-lane* bound. Not `WRITE_QUEUE_MIN`, because nothing has been demonstrated about one lane's depth; one, because a lane bound of zero is an outage rather than backpressure. This is the one declared hole in the close-drain invariant: a single write slower than the whole drain budget cannot be made to finish inside it, so it is abandoned with an honest receipt rather than refused. |
-| `WRITE_QUEUE_MAX` | 1024 | `MAX_RETAINED_RECEIPTS / 4` — see defect 2. Build-guarded, and the guard **replaced** at round 1: `WRITE_QUEUE_MAX * 4 <= MAX_RETAINED_RECEIPTS` is algebraically vacuous under integer division (J3-R1-7), so it now asserts `WRITE_QUEUE_MAX >= WRITE_QUEUE_MIN && WRITE_QUEUE_LANE_MIN <= WRITE_QUEUE_MAX`, which can fail. |
+| `WRITE_QUEUE_LANE_MIN` | 1 | **New at round 1.** Floor on the *per-lane* bound. Not `WRITE_QUEUE_MIN`, because nothing has been demonstrated about one lane's depth; one, because a lane bound of zero is an outage rather than backpressure. This is the floor of the one declared hole in the close-drain invariant: a single write slower than the whole drain budget cannot be made to finish inside it, so it is abandoned with an honest receipt rather than refused. **At round 2 the hole's width became `PROBE_LANE_CEILING` rather than this** — see limit (3) of the Done-when box. |
+| `WRITE_QUEUE_MAX` | 1024 | `MAX_RETAINED_RECEIPTS / 4` — see defect 2. Build-guarded, and the guard **replaced** at round 1: `WRITE_QUEUE_MAX * 4 <= MAX_RETAINED_RECEIPTS` is algebraically vacuous under integer division (J3-R1-7), so it now asserts `WRITE_QUEUE_MAX >= WRITE_QUEUE_MIN && WRITE_QUEUE_LANE_MIN <= WRITE_QUEUE_MAX`, which can fail. **Round 2 narrowed who may reach it** (J3-R2-1): only an `observed` calibration, the one source that sampled the workload. |
 | `PROBE_CLAMP_RPS` | 1024 | Derived: `WRITE_QUEUE_MAX × DRAIN_PROJECTION_SHARE / WRITE_QUEUE_DRAIN_BUDGET`. Was 512 before the projection share existed. Build-guarded above 3× the measured local embedder, now with more room. |
 | `WRITE_QUEUE_MAX_BYTES` | 16 MiB | `MAX_CONTENT_BYTES × 1024` — a thousand maximal strings. A count is the wrong unit for memory: at the door's caps one maximal `derive` retains ≈ 9 MiB, so this admits one whole and refuses a second. |
 | `PROBE_CONCURRENCY` | 4 | §Measurements' parallelism figure is a 4-wide one; the probe re-measures the rate per deployment, this fixes only the width of its **concurrent** leg. It sizes the aggregate bound only — the per-lane bound comes from the serial leg. |
 | `PROBE_WARMUP_EMBEDS` | 1 | **New at round 1 (J3-R1-2).** Embeds thrown away before the probe starts timing, so the model-load cost is paid out of the probe's budget rather than out of the measurement. |
-| `PROBE_EMBEDS` | 6 | Derived: `PROBE_WARMUP_EMBEDS + 1 + PROBE_CONCURRENCY` — the warm-up, the serial leg, the concurrent leg. |
+| `PROBE_EMBEDS` | 7 | Derived: `PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY` — the warm-up, **two** serial legs (J3-R2-1: one at `PROBE_TEXT`, one at `PROBE_TEXT_BYTES`), the concurrent leg. The seventh is best-effort, so this is a budget input rather than a requirement. |
+| `PROBE_TEXT_BYTES` | 1024 | **New at round 2 (J3-R2-1).** Size of the probe's representative serial leg. Bounded from below by the workload — lambo's own dogfood concepts run 700 to 1500 bytes — and from above by the embedder: this rig's llama-server answers 1280 B in 75.8 ms and returns **HTTP 500 on 8 of 8 calls at 1536 B**, so a representative leg takes the largest power of two under the smallest refusal measured here. The text is `PROBE_TEXT` repeated to that length, so the pair of legs differs in length and nothing else. |
+| `PROBE_LANE_CEILING` | 4 | **New at round 2, and the actual fix for J3-R2-1.** Ceiling on the per-lane bound while the rate is the probe's. `OBSERVED_MIN_SAMPLES`, and defined from it: *admit no more on the probe's word than it takes to replace the probe's word.* The population exposed to a startup estimate is exactly the population that retires it. |
+| `PROBE_AGGREGATE_CEILING` | 16 | **New at round 2 (J3-R2-1).** `PROBE_CONCURRENCY × PROBE_LANE_CEILING` — the widest the concurrent leg measured, each lane holding the exposure window the lane ceiling authorises. The aggregate leg has the same defect the serial one did, so it gets the same treatment rather than an argument about why it is different. |
 | `OBSERVED_MIN_SAMPLES` | 4 | **New at round 1 (J3-R1-2).** `PROBE_CONCURRENCY`, so the observed rate never rests on fewer embeds than the probe's own leg did. Past it, real write service times replace the probe's serial figure. |
 | `OBSERVED_EWMA_WEIGHT` | 4 | `PROBE_CONCURRENCY` again, as a divisor: a new sample gets 1/4 weight, so the average moves most of the way in about one probe's width of samples. A weight of 1 would track a single slow write; a much larger one would keep a warm figure after the embedder degraded. |
-| `PROBE_BUDGET` | 5 s | The worst an admission can wait, since admission blocks on the probe rather than falling back to a constant. **Unchanged even though the probe now takes six embeds rather than four**, deliberately: raising it raises the worst ack latency, and a deployment too cold to answer six embeds in 5 s is better served starting on the floor and being corrected by observation than believing a number taken while its model was loading. |
+| `PROBE_BUDGET` | 5 s | The worst an admission can wait, since admission blocks on the probe rather than falling back to a constant. **Unchanged even though the probe now takes seven embeds rather than four, one of them at `PROBE_TEXT_BYTES`**, deliberately: raising it raises the worst ack latency, and a deployment too cold to answer seven embeds in 5 s is better served starting on the floor and being corrected by observation than believing a number taken while its model was loading. Round 2 makes the trade *cheaper*, not dearer — with `PROBE_LANE_CEILING` in force, `unmeasured` and `probe` differ by a lane bound of one against four. Measured warm at the binary, all seven embeds land in ~180 ms of the 5 s; and the optional representative leg is separately bounded by half the remaining budget, so a *hang* there cannot starve the required concurrent leg. |
 | `RECEIPT_RETENTION` | 300 s | Above `MEASURED_WORST_FLUSH_LAG_SECS` — the applied-but-not-durable window a receipt has to outlive, or the widened crash window is unauditable from the surface that describes it. **Measured from the settle, not the issue** (J3-R1-3), which is what makes that the right comparison: the durability lag starts when the write applies. An unsettled receipt never expires and is never evicted. |
 | `MEASURED_WORST_FLUSH_LAG_SECS` | 227 | **New at round 1.** The worst `flush_lag` in §Measurements, as a constant so the retention relation can be a build guard — the same idiom as `MEASURED_LOCAL_EMBEDDER_RPS`. It **replaces a false guard**: `RETENTION > HYBRID_IO_TIMEOUT + DRAIN_BUDGET` stated the conclusion "so `expired` is unreachable for a running job" and did not prove it, because expiry keyed on issue time and the drain budget is a projection of queue residency, not a bound on it. |
 | `MAX_RETAINED_RECEIPTS` | 4096 | The **corrected** worst case is ≈31 MiB, not ~10 MiB (J3-R1-6): the old figure counted one of `AppliedSummary`'s two id lists, and `2 × MAX_RECEIPT_IDS` = 128 ids at 60 bytes apiece (36 text + a 24-byte `String` header) is ≈8 KiB per receipt. A plain `derive` cannot reach it (`created` + `matched` ≤ `MAX_CONCEPTS_PER_DERIVE`, so ≈16 MiB), but `record_action`'s three resource lists and `derive`'s `parent_of` fan-out can each push `created` past 64. The constant does not move, and the reason is worth stating: 4096 is driven by `PROBE_CLAMP_RPS > 3 × MEASURED_LOCAL_EMBEDDER_RPS` (which needs `WRITE_QUEUE_MAX ≥ 424`, so `MAX_RETAINED_RECEIPTS ≥ 1696`), and the memory figure is that choice's sanity check rather than its source. The time bound alone cannot do this job either — 300 s against `DEFAULT_RATE_LIMIT_RPS` (50/s) is 15 000 receipts. |
@@ -1699,18 +1706,73 @@ both times, with the close finishing in a third to two-thirds of its budget.
 The ack itself is unchanged where it matters: 20 sequential derives against the
 same live embedder ack at a **median 0.074 ms** (min 0.064, max 0.511), all 20
 applied, `concept_count: 20`, and a wait on the last receipt returns `applied` —
-so read-your-writes on demand still works end to end. `write_queue_bound_source`
-read `observed` by the end of that run, which is the round-1 mechanism doing its
-job: four real writes in, and the bound stopped resting on the startup probe.
+so read-your-writes on demand still works end to end.
 
-**The one cost, named.** The first ack of a session now waits for a six-embed
-probe in three sequenced waves rather than a four-embed concurrent one:
-**221 ms** at the binary for the first call, against a 0.074 ms median for every
-call after it. It is bounded by `PROBE_BUDGET` (5 s), it is once per process, and
-it buys a bound that cannot abandon acked writes — but it *is* a regression in
-first-call latency and it belongs in the record rather than in a footnote.
-Admission still refuses to fall back to a constant, which is what would otherwise
-remove the wait.
+**What flips `write_queue_bound_source`, stated correctly** (J3-R2-5). This note
+said the source "read `observed` by the end of that run", and it does not: what
+retires the probe's figure is `OBSERVED_MIN_SAMPLES` **completed writes**, not
+four *calls*. Twenty acks complete in ~1.2 ms while four writes take ~250 ms, so
+a tight 20-call run read immediately after its last ack still reads `probe` —
+the reviewer measured exactly that, four times. It does flip, reliably and
+one-way, given the writes time to finish; a run that waits on its receipts (the
+`lambo_stats(receipt=…, wait_ms=…)` surface) sees `observed` deterministically,
+which is how the round-2 measurements below establish it. The sentence mattered
+because it was the evidence a reader would use to conclude the probe-era
+exposure window is short — and J3-R2-1 is precisely what lives in that window.
+
+**The one cost, named — and re-measured at round 2** (J3-R2-5). The first ack of
+a session waits for the whole probe, which is now seven embeds in four sequenced
+waves, two of them at `PROBE_TEXT_BYTES`. Measured across **four fresh sessions**
+at the release binary against the live BGE-M3, fresh SQLite each:
+
+| | first ack | probe `serial_items_per_sec` |
+| --- | --- | --- |
+| round 1 (35-byte probe), reviewer's four runs | 63.0 / 67.5 / 69.6 / 80.2 ms | 54.7 to 75.5 (1.4× spread) |
+| round 2 (adds a 1024-byte leg), four runs | **273.5 / 299.3 / 300.4 / 301.1 ms** | 17.95 to 20.54 (**1.14× spread**) |
+
+So **273.5 to 301.1 ms**, and the single "221 ms" this note used to quote was
+both wrong and quoted without a warmth caveat for a quantity this workstream
+proved is warmth-dependent. The number is ~4× round 1's, and it is worth paying:
+it is once per process, bounded by `PROBE_BUDGET` (5 s), roughly **1% of the ~30 s
+an MCP client allows for server spawn**, and it buys a rate measured on input the
+size the product's own concepts carry. The second column is the unadvertised
+gain: embedding a longer text costs more but *varies less*, so the load-bearing
+figure's spread across cold repeats fell from 1.4× to 1.14×. Every call after
+the first is still 0.074 ms. Admission still refuses to fall back to a constant,
+which is what would otherwise remove the wait.
+
+**J3-R2-1's two sides, at the release binary.** Same rig, same live BGE-M3, 200
+`lambo_derive` calls back to back and then the pipe closed so `serve` runs its
+clean shutdown, then a fresh `serve` on the same SQLite store counts what landed:
+
+| content | commit | acked | close | abandoned | in store after restart |
+| --- | --- | --- | --- | --- | --- |
+| 512 B | `869b898` (parent) | 68 | 2047 ms (whole budget) | **37** | 31 |
+| 512 B | this branch | 4 | 306 ms | **0** | 4 |
+| 32 B (round 1's control) | `869b898` | 61 | 1040 ms | 0 | 61 |
+| 32 B (round 1's control) | this branch | 4 | 81 ms | **0** | 4 |
+
+The parent's probe read 67.70 items/s on the 512-byte run against a real ~64 ms
+service time — the 4× over-estimate the review measured, against a 2× slack —
+and 37 of 68 acked writes were abandoned at a **clean** close with no adversary.
+
+**And the throughput this costs, measured rather than waved at.** Four acked out
+of 200 is what "the probe sizes nothing load-bearing" means for an *instantaneous
+cold* burst, and it is a real cost: on the 32-byte control the parent admitted 61
+and applied all 61, where this branch admits 4. It is bounded in time rather than
+in kind, which is the reason it is acceptable — the same session, given its first
+four writes (~250 ms at this rig), admits the measured depth:
+
+| | lane bound | source | burst acked | close | abandoned | in store |
+| --- | --- | --- | --- | --- | --- | --- |
+| cold, 512 B | 4 | `probe` | 4 of 200 | 306 ms | 0 | 4 |
+| after 4 completed writes, 512 B | **17** | `observed` | **17 of 200** | 1107 ms | **0** | 21 |
+
+`probe_optimism` on that run is **1.14×** — the probe's 18.65 items/s against the
+observed 16.33 — where the parent's 35-byte leg was 4.0× out. That is fix (a)
+doing its job: the representative leg makes the published rate nearly right for
+this workload, and the ceiling is what makes the guarantee independent of whether
+it is.
 
 **Register sweep (per file, including the nulls).** The claim families this
 remediation moved are: the queue bound's width, the probe's provenance, receipt
@@ -1730,6 +1792,85 @@ expiry, the stats key list, and the ordering promise.
 | `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | the write-queue key paragraph and the ordering sentence, in both mirrors | 2 passages rewritten in each, verified passage-identical between the mirrors after the edit |
 | `README.md`, `AGENTS.md`, `docs/**` beyond `mcp.mdx` | `rg` for `write_queue`, `items_per_sec`, `PROBE_CLAMP`, `WRITE_QUEUE`, `order you sent`, `receipt` | **nothing** — the queue's surface is mirrored only in the two `mcp.mdx` files and this phase doc |
 | `scripts/observability/README.md` | the metric-2 note the new `dedup_rate.py` message points at | **checked, unchanged** — it already states the regression twice and says the facts are on the receipt |
+
+### Round-2 remediation (1 P1, 3 P2, 5 P3 — all closed)
+
+`adve-review-mooshik-J3-round2.md` returned REQUEST_CHANGES with all thirteen
+round-1 findings verified closed at the artifact and **one new P1**, reached
+through the one door the rebuilt admission still left open: the probe's fixed
+35-byte `PROBE_TEXT` is not the workload. Measured at the release binary against
+the live BGE-M3 with 512-byte concepts, `close()` burned its whole budget and 35
+of 77 acked writes were abandoned (I reproduced 37 of 68 on the same rig). The
+bound was right about the drain's *width* after round 1; it was still wrong about
+its *rate* whenever a concept is longer than a short sentence — and lambo's own
+dogfood concepts are, at 700 to 1500 bytes.
+
+**The lesson is the projection lesson's second face: a measurement is only a
+bound for the workload it sampled.** Round 1's was "a projection is not a bound";
+this one is the same shape one level down. The probe measured a real thing about
+a real embedder on real input — just not the input a lane runs.
+
+**The shape chosen, and why it is both of the review's options rather than
+either.** The review named two: make the probe's input representative, or floor
+the lane bound until observation lands. A measurement decides between them: this
+rig's llama-server answers 1280 B in 75.8 ms and returns **HTTP 500 on 8 of 8
+calls at 1536 B**. So a probe text sized at the workload band couples the probe's
+survival to a deployment's batch configuration, and a probe that fails is
+`unmeasured` — a *worse* answer than an optimistic one. A representative probe
+therefore cannot carry the guarantee. It can carry the diagnosis, and it does:
+
+| | mechanism | what it buys |
+| --- | --- | --- |
+| **(b), load-bearing** | `PROBE_LANE_CEILING` / `PROBE_AGGREGATE_CEILING`: while the source is `probe` or `unmeasured`, the bounds are capped at `OBSERVED_MIN_SAMPLES` per lane and `PROBE_CONCURRENCY ×` that in aggregate | the durability property stops depending on the probe's input at all — *admit no more on the probe's word than it takes to replace the probe's word* |
+| **(a), additive** | a second timed serial leg at `PROBE_TEXT_BYTES` = 1024, best effort, publishing the slower of the two | the published rate is honest for the product's own workload band (measured `probe_optimism` fell from 4.0× to 1.14×), which is what makes the probe-vs-observed comparison a diagnosis |
+
+Option (c) — scaling the projection by the job's own payload bytes — was
+considered and declined: it makes the bound per-job rather than per-lane, so a
+refusal message can no longer name a number the caller can reason about, and it
+still rests on the probe's rate for the size it did measure.
+
+| # | Finding | Closed by |
+| --- | --- | --- |
+| **J3-R2-1** (P1) | The probe's text is not the workload; 37 of 68 acked writes abandoned at a clean close, at the binary | `PROBE_LANE_CEILING` / `PROBE_AGGREGATE_CEILING` (the guarantee) plus a representative serial leg (the diagnosis); `PROBE_TEXT`'s false stated reason removed and replaced by the measured length table; `a_burst_of_concepts_larger_than_the_probes_text_still_drains_at_a_clean_close` at 512 B **and** 8192 B |
+| **J3-R2-2** (P2) | A fast-failing embedder biases the observed rate upward | `spawn_worker` samples only `Ok` outcomes — the fenced exclusion's own argument, one step further; `a_failed_write_is_never_sampled_into_the_observed_rate` |
+| **J3-R2-3** (P2) | The `[~]` box presented three limits as complete | Rewritten above: four limits, with (3) restated at its real magnitude (a lane's worth, not one write) and (4) new — the observed rate is a mean, so mixed concept sizes can still over-admit for the largest |
+| **J3-R2-4** (P2) | The two rates that disagree were both published and never compared | `Calibration::probe_serial_items_per_sec` survives the takeover, `probe_optimism()` names the ratio, `write_queue_probe_serial_items_per_sec` publishes it, and one INFO line at the flip carries both numbers; `the_probes_serial_figure_survives_the_observed_rate_that_replaces_it` |
+| **J3-R2-5** (P3) | 221 ms did not reproduce; the `observed`-by-the-end claim did not hold | Both corrected above with four fresh-session measurements (273.5 to 301.1 ms) and the real flip condition (four *completed* writes, not four calls) |
+| **J3-R2-6** (P3) | Three developer-facing restatements of the ordering promise were unscoped | All three scoped where they stand — `writeq`'s FIFO test, `server.rs`'s chain test, and the Done-when line ~470 lines from the bullet that scopes it; `writeq`'s §Ordering now leads with the scope instead of retracting nine lines later |
+| **J3-R2-7** (P3) | `probe_embedder` had no test | Four: the budget covering all `PROBE_EMBEDS` together (asserted at each required leg in turn), the slower-of-two-sizes rule, a refused representative leg, and a hanging one |
+| **J3-R2-8** (P3) | Four stated-reason blemishes in the constants block | All four: the "22-25 ms" misquote corrected **and** re-derived against round 2's own live figures; both `lambo_receipt` references replaced with the `lambo_stats(receipt=…)` surface that shipped; the six-space collapse in the `PROBE_CLAMP_RPS` guard message unwrapped; the keys bullet now explains every key added since first landing |
+| **J3-R2-9** (P3) | The piggyback test did not prove removal rather than suppression | One assertion on the *later* fetch's piggyback, mutation-checked against a `mark_delivered` that re-pushes what it retained out |
+
+**What round 2 did not change.** `WRITE_QUEUE_MAX`, `MAX_RETAINED_RECEIPTS`,
+`PROBE_CLAMP_RPS`, `DRAIN_PROJECTION_SHARE`, `WRITE_QUEUE_DRAIN_BUDGET`,
+`RECEIPT_RETENTION` and every receipt constant keep their values and their
+derivations; `MEASURED_LOCAL_EMBEDDER_RPS` stays at 141 deliberately, because its
+build guard wants the **largest** real rate a local embedder produces and 141 is
+that (the representative leg reads lower, ~20 items/s serial, which only widens
+the guard's margin). No proxy change. The aggregate bound is still projected from
+the probe's concurrent leg after observation takes over — a parallelism *ratio*
+applied to the observed serial rate would remove the last of the length bias, and
+it was declined this round as a redesign no finding asked for, with limit (2)
+already declaring the assumption it rests on.
+
+**Register sweep, round 2 (per file, including the nulls).** The claim families
+this round moved are: what the probe's rate is a rate *for*, the two-rate
+comparison, the stats key list and its rationale, the ordering promise's scope,
+and the Done-when box's completeness.
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/writeq.rs` | every stated reason that mentions the probe, its text, its budget or its rate, plus every numeric claim in the constants block | 6 corrected: `PROBE_TEXT`'s "not its own input" (the false stated reason under the P1, replaced by the measured length table including the HTTP-500 row); `PROBE_EMBEDS` (6 → 7); `PROBE_BUDGET`'s six-embeds wording and its trade; `DRAIN_PROJECTION_SHARE`'s misquote **and** its now-measured remainder; `MAX_CONCURRENT_RECEIPT_WAITS`' two `lambo_receipt` references; the `PROBE_CLAMP_RPS` guard message's collapsed whitespace. 4 constants added, each with its own build guard |
+| `src/writeq.rs` | the module docs' §Ordering and §Backpressure, re-read against round 2 | both edited: §Ordering leads with the scope (J3-R2-6's structural nit); §Backpressure gains "a measurement is only a bound for the workload it sampled" and no longer calls the probe an *opening* estimate, which understated it |
+| `src/writeq.rs` | `Calibration`'s doc table and `with_observed_serial`'s "wins outright" reason | both rewritten: the table now has a row per source, because the source decides the ceiling as well as the rate; "wins outright" is qualified — winning is not erasing |
+| `src/mcp/server.rs` | the stats-key block, its "ten keys" neighbourhood, and every test asserting a bound value | 1 key added with its reason; `the_stats_payload_reports_the_measured_bound_and_the_drop_count`'s two bound assertions re-derived (they asserted `WRITE_QUEUE_MAX` on a fixture embedder, which is exactly what a probe may no longer authorise); `i1_a_days_worth_of_concurrent_lines_all_parse` given a warm-up that retires the estimate, with the reason stated at the code |
+| `src/memory.rs` | `derive_async_as`'s bullets and `close`'s quiesce paragraph, re-read against the new ceilings | **nothing** — the pre-pass claim, the ordering scope and the quiesce budget are all unchanged by round 2, and the quiesce paragraph's numbers are the drain budget's, not the bound's |
+| `src/mcp/proxy.rs` | any receipt or queue claim | **nothing**, again — round 2 touches neither the proxy nor `INFLIGHT_DEPTH_WARN`'s guard |
+| `tests/serve_proxy_multi_client.rs` | the take-once property's coverage | 1 assertion added (J3-R2-9), mutation-checked |
+| `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | the write-queue key paragraph and the "bounds are not constants" paragraph, in both mirrors | 3 passages edited in each, verified passage-identical between the mirrors after the edit; the new paragraph says in operator language why a fresh session's first burst may be refused where a later one is not |
+| `scripts/observability/*` | whether any script or its message names a bound, a rate or a probe | **nothing** — `dedup_rate.py`'s J3-R1-11 message names the async ack and the receipt surface, neither of which moved; `verify.sh` stays at 46 ok with `sample/calls.jsonl` still byte-identical |
+| `README.md`, `AGENTS.md`, `docs/**` beyond `mcp.mdx` | `rg` for `write_queue`, `items_per_sec`, `PROBE_`, `WRITE_QUEUE`, `lane_bound` | **nothing** — the queue's surface is still mirrored only in the two `mcp.mdx` files and this phase doc |
+| `dev-diary/lambo-for-mooshik/J-multi-client.md` | the `[~]` box, the constants table, the probe-cost paragraph, the `observed` claim, and the ordering Done-when line | 5 passages rewritten; the box's limit count went 3 → 4 and the completeness claim is now true |
 
 ## J4 — Lease conflicts leave an artifact
 
@@ -1849,30 +1990,53 @@ Every figure is one rig, not a property of lambo.
 - [~] The queue bound comes from a ceiling measured on the deployment's own embedder, drops
       are counted in `lambo_stats`, and a burst degrades visibly (J3) — **rebuilt at round 1
       (J3-R1-1/2), because the first version admitted at a 4-wide rate while one agent's
-      lane drains 1-wide, and a clean `close()` then abandoned 61 of 80 acked writes.** Now
-      the probe takes three legs — a discarded warm-up, one embed timed alone, then
-      `PROBE_CONCURRENCY` together — and admission bounds each lane by the serial rate and
-      all lanes by the concurrent one, both projected against half the drain budget.
-      Admission still *awaits* the probe rather than falling back to a constant, so there is
-      no constant-bounded window; and the probe's figure is only the opening estimate, since
-      the lane workers' own service times replace its serial leg after
-      `OBSERVED_MIN_SAMPLES` real writes. Drops are `write_queue_dropped` beside thirteen
-      other keys, with `write_queue_dropped_closed` separating a refused shutdown tail from
-      real backpressure, and each drop says on its own receipt **which** bound refused it.
-      **Tilde, and here are the honest limits.** (1) An embedder above `PROBE_CLAMP_RPS`
-      (now 1024 items/s) is clamped by receipt retention rather than by its own throughput;
-      that is by design, and the two raw rates are still reported, but on such a deployment
-      the bound is not the embedder's ceiling. (2) Nothing measures throughput at more than
-      `PROBE_CONCURRENCY` active lanes, so the aggregate bound assumes throughput does not
-      *fall* as lanes grow past four. (3) A single write slower than the whole drain budget
-      cannot be made to finish inside it, so at a clean close it is abandoned — with a
-      receipt that says so, and `WRITE_QUEUE_LANE_MIN = 1` names the case at the constant.
-      The two limits this box used to carry are **gone**: a probe failure or a cold-probe
-      reading (measured at a 7× spread on one host, 21.2 to 150.2 items/s, every one of them
+      lane drains 1-wide and a clean `close()` abandoned 61 of 80 acked writes; and rebuilt
+      again at round 2 (J3-R2-1), because a rate measured on the probe's own 35-byte text is
+      not a rate for the caller's 512-byte concept, and a clean `close()` abandoned 37 of 68
+      acked writes at the release binary on content the product itself writes.** The probe
+      now takes four legs — a discarded warm-up, one embed timed alone at `PROBE_TEXT`, one
+      timed alone at `PROBE_TEXT_BYTES` (best effort, since an embedder may refuse the
+      larger input, and this rig's does above ~1280 B), then `PROBE_CONCURRENCY` together —
+      and publishes the **slower** of the two serial legs. Admission bounds each lane by the
+      serial rate and all lanes by the concurrent one, both projected against half the drain
+      budget, and while the rate is the probe's **neither bound may exceed
+      `PROBE_LANE_CEILING` / `PROBE_AGGREGATE_CEILING`**: the probe sizes nothing
+      load-bearing, because it measured a workload nobody sent. Admission still *awaits* the
+      probe rather than falling back to a constant, so there is no constant-bounded window;
+      and the probe's figure is retired outright by the lane workers' own service times after
+      `OBSERVED_MIN_SAMPLES` **completed** writes, while staying visible beside them
+      (`write_queue_probe_serial_items_per_sec`, and one INFO line at the flip carrying both
+      numbers and their ratio). Drops are `write_queue_dropped` beside fourteen other keys,
+      with `write_queue_dropped_closed` separating a refused shutdown tail from real
+      backpressure, and each drop says on its own receipt **which** bound refused it.
+      **Tilde, and here are the honest limits — four, and this enumeration is complete as of
+      round 2.** (1) An embedder above `PROBE_CLAMP_RPS` (1024 items/s) is clamped by receipt
+      retention rather than by its own throughput; that is by design, and the two raw rates
+      are still reported, but on such a deployment the bound is not the embedder's ceiling.
+      (2) Nothing measures throughput at more than `PROBE_CONCURRENCY` active lanes, so the
+      aggregate bound assumes throughput does not *fall* as lanes grow past four. (3) **Up
+      to `PROBE_LANE_CEILING` = 4 writes per lane, each slower than a quarter of the drain
+      budget, are abandoned at a clean close** — with receipts that say so. This is round 1's
+      limit (3) widened by a factor of four and stated at its real magnitude: the old wording
+      named *one* write and pointed at `WRITE_QUEUE_LANE_MIN = 1`, and J3-R2-1 was the same
+      character at 35× that, which is exactly the failure mode of an enumeration that
+      presents itself as complete. The residual is now bounded by construction rather than by
+      a rate: four jobs, retired by the four writes that also retire the estimate. (4) **The
+      observed rate is a mean, so a session whose concept sizes vary by more than
+      `DRAIN_PROJECTION_SHARE` can still over-admit for its largest.** `OBSERVED_EWMA_WEIGHT`
+      moves the average most of the way in about four samples, so a session that writes 200-
+      byte concepts and then a 16 KiB one admits the big one against the small ones' rate.
+      Bounded the same way: at most a lane's worth before the average follows.
+      The two limits this box used to carry are still **gone**: a probe failure or a
+      cold-probe reading (a 7× spread on one host, 21.2 to 150.2 items/s, every one of them
       reported `measured: true`) is no longer a sentence for the session's life, because
-      observation replaces it and `write_queue_bound_source` says which is in force. None of
-      the three remaining limits is a burst that degrades invisibly, which is what the box is
-      for; all three are reasons not to tick it flat
+      observation replaces it and `write_queue_bound_source` says which is in force. **The
+      cost of round 2's fix is throughput, and only where the estimate is all there is**: an
+      instantaneous cold burst is admitted 4-deep per lane instead of at the probe's figure
+      (measured: 4 acked of 200 where the parent acked 68 and lost 37 of them), and the same
+      session admits 17 after its first four writes complete — ~250 ms at this rig. None of
+      the four limits is a burst that degrades invisibly, which is what the box is for; all
+      four are reasons not to tick it flat
 - [x] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
       with two agents interleaving through one process, the §13 conflict sentence's `writer`
       is **measured** rather than assumed: J1 made the same-instant collision path
