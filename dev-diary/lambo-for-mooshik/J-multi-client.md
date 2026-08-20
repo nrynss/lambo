@@ -109,9 +109,14 @@ watching it go red.
 
 ## J1 — Per-call agent identity
 
-**Status: done.** Landed on `wt/j1` as one implementation commit plus one round-1 review
-  remediation commit; see the J1 Status note and the round-1 remediation note at the end of this
-  section for what shipped, what it decided, and what the review changed.
+**Status: done, integrated 2026-08-20.** Three review rounds: round 1 REQUEST_CHANGES
+(blocking J1-R1-1, context-block injection through a caller-asserted id), round 2
+REQUEST_CHANGES (two P2 defects in the remediation itself — the U+2028/29 guard bypass and
+the lease-lost `OPERATOR_OVERRIDE` disclosure), round 3 CLEAN with three P3 advisories
+closed at integration rather than carried. The operator's identity ruling (cooperative,
+loudly declared) plus a second ruling capping `agent_id` at 256 chars survived all three
+rounds untouched. The notes at the end of this section record what shipped, what each
+round changed, and the residuals handed to §J2.
 
 The serve applies its own `--agent` to every connected client, so per-call `agent_id` is
 accepted, warned about, and ignored. Under a shared writer there is no correct value for
