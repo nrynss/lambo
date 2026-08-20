@@ -1625,7 +1625,7 @@ impl LamboServer {
         );
         // One payload builder shared with the I2 heartbeat, so a heartbeat can
         // never report different numbers than the tool. With `--ledger` off
-        // this is exactly the payload it always was; with it on, the three
+        // this is exactly the payload it always was; with it on, the six
         // `ledger_*` keys are appended (I1: the dropped-line counter has to be
         // reachable from `lambo_stats`, or silence is invisible).
         let mut payload = self.stats_json();

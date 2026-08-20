@@ -39,10 +39,17 @@ Two quiet dependencies on the SHAPE of `ts`, written down here because both are
 invisible at their use site and both break silently:
 
   1. **String sort is timestamp sort** (`Ledger.sorted_calls`, `restart_times`,
-     `binaries`). True only while every stamp is the same fixed-offset RFC3339
-     form chrono's `to_rfc3339()` emits — same field widths, same `+00:00`
-     suffix. A producer that switched to `Z`, to local offsets, or to a variable
-     number of fractional digits would reorder lines lexically without erroring.
+     `binaries`, `queued_lines`). True only while every stamp is the same
+     fixed-offset RFC3339 form chrono's `to_rfc3339()` emits — same field
+     widths, same `+00:00` suffix. A producer that switched to `Z`, to local
+     offsets, or to a variable number of fractional digits would reorder lines
+     lexically without erroring. `queued_lines` is the strongest of the four,
+     and the reason to keep this list current: its sibling `dropped_lines` takes
+     a `max()` over VALUES and so never cared which stamp sorts last, whereas
+     `queued_lines` is the kit's first COMPLETENESS verdict decided by lexical
+     stamp order — a wrong "newest" heartbeat has `header()` call a ledger with
+     a known backlog complete, silently and without erroring. `load()` accepts
+     several paths, so a mixed-offset multi-file read is the realistic trigger.
   2. **Prefix slicing is bucketing** (`BUCKETS` in `dedup_rate.py`: `ts[:13]` is
      the hour, `ts[:10]` the day). True only for the same fixed-width form, and
      only while the stamp is UTC — a local-offset stamp would bucket by local

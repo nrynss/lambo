@@ -173,11 +173,13 @@ scripts/observability/verify.sh
 ```
 
 runs all five, asserts each still finds its planted facts, checks the committed
-sample still matches its generator, and checks `--json` parses everywhere. Two
+sample still matches its generator, and checks `--json` parses everywhere. Three
 cases are generated inside the run rather than committed, so they cannot perturb
 the planted facts: a **mixed-version** ledger (a `v:2` line and a line with no `v`,
-which must warn loudly and still be read) and a ledger of **nanosecond** timestamps
-(chrono's nine-digit fractional seconds, which must parse). CI
+which must warn loudly and still be read), a ledger of **nanosecond** timestamps
+(chrono's nine-digit fractional seconds, which must parse), and a **queued**
+ledger whose older heartbeat reports the larger depth (queue depth is a gauge, so
+the header must print the newest reading and never the maximum). CI
 does not execute `scripts/**` (see the path filter in `.github/workflows/ci.yml`),
 so **this is a manual gate**: run it after touching anything here, and before
 quoting a report in `evidence/`.
@@ -241,8 +243,11 @@ duckdb -c "SELECT ts, query, h.content, h.score,
            FROM read_json_auto('calls.jsonl'), UNNEST(hits) AS t(h)
            WHERE tool = 'lambo_recall'"
 
-# Every dropped-line reading, as a sanity check before quoting any count.
-jq -r 'select(.kind=="stats") | [.ts, .git_sha, .stats.ledger_dropped_lines] | @tsv' calls.jsonl
+# Every dropped-line and queue-depth reading, as a sanity check before quoting
+# any count: a non-zero drop makes the file an undercount, and so does a queue
+# depth the newest row still reports — those lines were accepted but had not
+# reached the disk when the heartbeat was taken (I-R3-2).
+jq -r 'select(.kind=="stats") | [.ts, .git_sha, .stats.ledger_dropped_lines, .stats.ledger_queued_lines] | @tsv' calls.jsonl
 
 # Did any tool call ever fail, and how?
 jq -r 'select(.kind=="call" and .outcome!="ok") | [.ts, .tool, .outcome, .error_kind] | @tsv' calls.jsonl

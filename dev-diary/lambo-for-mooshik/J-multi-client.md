@@ -23,7 +23,7 @@ caller's identity, and `lambo_reserve` is already broken without it. Renumbered.
 
 | # | Task | Depends on |
 | --- | --- | --- |
-| J0 | Carryover from workstream I, round 3 (CLEAN) | nothing |
+| J0 | Carryover from workstream I, round 3 (CLEAN) — **DONE `0c81419`** | nothing |
 | J1 | Per-call agent identity | nothing |
 | J2 | A losing serve proxies instead of exiting | J1 |
 | J3 | Writes acknowledged before the embedder | J1 (receipt scoping) |
@@ -36,6 +36,21 @@ the write-path change.
 ---
 
 ## J0 — Carryover from workstream I (round 3, CLEAN — decision 2026-08-20)
+
+**Status: done, `0c81419`.** Reviewed CLEAN with six P3 advisories at `77f119f`
+([adve-review-mooshik-J0-round1.md](../adversarial-review/adve-review-mooshik-J0-round1.md)),
+all six remediated in the round-1 remediation commit that follows it rather than carried
+again — the three numbered items below stay as the spec they were, not as open work. The closure narrative lives in
+[I-observability.md](I-observability.md)'s Handoff Log, which is the right home for I's
+remediation history; this is the pointer from J's board.
+
+Remediating the six rather than carrying them is a deliberate reversal of the decision that
+created J0. The reasoning does not transfer twice: carrying I's advisories was defensible
+because J1/J2/J4 rebuild the surface they sit on, so a fourth round would have re-touched
+prose about to be rewritten anyway. These six are two-word register fixes, one `jq` field,
+one grammatical mood, and one `verify.sh` fixture — cheap, entirely inside J0's own scope,
+and none of them on ground J1–J5 rebuild. Carrying advisories twice in a row would also
+stop being an exception and start being how this workstream handles P3s.
 
 Workstream I closed CLEAN with three P3 advisories
 ([adve-review-mooshik-I-round3.md](../adversarial-review/adve-review-mooshik-I-round3.md)).

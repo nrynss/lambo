@@ -140,6 +140,34 @@ echo "$out"
 check "parses 0/3/9-digit stamps without erroring" "$out" "metric 1"
 check "and scores the run it found" "$out" "100.0%"
 
+step "a non-zero queue depth is read from the NEWEST heartbeat, not the largest"
+# The committed sample is queued=0 throughout (a healthy writer keeps nothing
+# queued), so `header()`'s `queued:` line and its `elif queued:` completeness
+# branch are unreachable there. This fixture is the only place they run. The
+# older heartbeat carries the LARGER depth deliberately: queue depth is a gauge,
+# so the answer must be 3 (newest) and never 9 (maximum or oldest), which pins
+# `queued_lines()`'s sort direction and its newest-not-maximum semantics at once.
+cat >"$work/queued.jsonl" <<'QUEUED'
+{"v":1,"ts":"2026-08-18T09:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":1,"hits":[]}
+{"v":1,"ts":"2026-08-18T09:00:10+00:00","kind":"stats","uptime_secs":10,"version":"0.2.2","git_sha":"aaaa111","stats":{"node_count":4,"ledger_written_lines":1,"ledger_dropped_lines":0,"ledger_dropped_channel_full":0,"ledger_dropped_write_failed":0,"ledger_queued_lines":9}}
+{"v":1,"ts":"2026-08-18T09:00:20+00:00","kind":"stats","uptime_secs":20,"version":"0.2.2","git_sha":"aaaa111","stats":{"node_count":4,"ledger_written_lines":7,"ledger_dropped_lines":0,"ledger_dropped_channel_full":0,"ledger_dropped_write_failed":0,"ledger_queued_lines":3}}
+QUEUED
+out="$("$py" "$here/recall_first.py" "$work/queued.jsonl")"
+echo "$out"
+check "reports the newest queue depth, not the largest" "$out" "queued:   3 LINE(S) STILL QUEUED"
+check "does not call a backlogged ledger complete" "$out" \
+  "dropped:  0 — but the ledger is not complete; see \`queued\`"
+if "$py" "$here/recall_first.py" --json "$work/queued.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+q = d["ledger_schema"]["queued_lines"]
+assert q == 3, q'; then
+  printf '    ok   --json carries the newest queue depth\n'
+else
+  printf '    FAIL --json did not carry the newest queue depth\n'
+  fail=1
+fi
+
 step "every report also emits JSON"
 for script in recall_first dedup_rate score_bands warnings; do
   if "$py" "$here/$script.py" --json "$ledger" | "$py" -c 'import json,sys; json.load(sys.stdin)'; then

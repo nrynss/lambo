@@ -251,8 +251,9 @@ impl Ledger {
     /// probe is not here: `serve` calls this **after** the single-writer lease
     /// is taken and — since I-R2-1 — **after** the SIGTERM handler is armed
     /// (`shutdown_signal()` is the first statement once `build_memory` returns;
-    /// this call is the next one). What that ordering leaves is an
-    /// **availability** hazard rather than the durability one it used to be: a
+    /// this call is the next one). What that ordering would change, were the
+    /// probe ever moved back here, is the hazard *class*: it would be an
+    /// **availability** hazard rather than the durability one it used to be. A
     /// blocking `open` here would wedge `serve` between the lease and the
     /// transport, holding the session in a process that never serves, and it
     /// could not be shut down either — the pinned shutdown future is never
