@@ -98,6 +98,13 @@ lease/endpoint schema. The second one is not hypothetical — adding `endpoint` 
 the change is a claim *about*, and count what you find — the recurring defect across three
 review rounds was never the ordering claim, it was the register not keeping up.
 
+One more, from round 2's P2: **a fixture for an ordering claim must oppose file order and
+claimed order**, or it cannot see the ordering at all. J0's `queued` fixture first wrote
+its heartbeats in stamp order, so deleting the `ts` sort outright still passed the gate
+40/40 — while the same commit hardened the prose calling that sort load-bearing. Write the
+newer record first; prove the fixture by making the mutation it exists to catch and
+watching it go red.
+
 **Depends on:** nothing.
 
 ## J1 — Per-call agent identity
@@ -121,7 +128,31 @@ broken.
 
 **The work:** accept `agent_id` as an override at the Memory level rather than only at
 session attach, and record it on the interaction. Small, and it gates J2, J3, and the
-ledger's usefulness.
+ledger's usefulness. Mechanically smaller than this section implies: `graph::derive`,
+`record_action`, `reserve` and `release` all already take `&AgentId` as an explicit
+parameter — only `Memory` hardcodes `&self.agent` at its call sites, and the ledger
+already attributes lines to the *caller's* id, not the process agent.
+
+**The catch (found reviewing J0, decided by the operator, not the implementor):**
+`agent_id` arrives on the wire **unauthenticated**. Over stdio the client owns the
+process; over HTTP there is one bearer token for the server, not one per agent. Honouring
+the field naively restores the exact defect `require_session_agent`'s docstring names —
+*"mutual exclusion that reports success without providing exclusion is worse than no
+mutual exclusion"*: two clients that both default to the same id (`"claude"`) share every
+lock while each is told it holds one, and any client can release a lock it does not hold
+by naming the holder. The candidate designs differ materially (bind identity to the
+transport connection; require distinct declared identities at attach; accept
+caller-asserted identity as cooperative-only and say so in the tool description), so
+**J1 does not start until the operator has picked one** — the choice is recorded here
+when made.
+
+**Uncosted consumer dependency (J0 round 1):** the observability kit becomes genuinely
+multi-agent the moment J1 lands. `recall_first.py` groups compliance by agent,
+`_ledger.py`'s `agents()` enumerates ids, and `dedup_rate.py`'s bucketing plus
+`restart_times()`'s work-session boundaries were all written under the
+one-agent-per-file assumption that one serve stamping one `--agent` makes degenerate
+today — none of them declares it. J1's Done-when includes re-reading those four against
+a two-agent ledger, not just the server side.
 
 ## J2 — A losing serve proxies instead of exiting
 
@@ -141,6 +172,28 @@ N clients cost one graph instead of N.
 
 Costs are operational rather than semantic: a socket to bind and clean up, a stale endpoint
 after unclean holder death (bounded by the 45s TTL), a busier startup path.
+
+**Two catches found before J2 was written (J0 round 1, verified at the source):**
+
+* **The proxy branch reopens I-R2-1's hole through a new door.** A *refused* serve never
+  reaches `build_memory`'s success path, so everything the proxy does — bind, read the
+  lost lease's endpoint, connect — runs **above** the shutdown-arming point at
+  `serve.rs:795`, unguarded, holding a socket. And the existing regression test cannot
+  see it: `serve_pre_handshake_durability`'s deliberately loose matcher fires on
+  "session attached", which a proxy never logs. J2 must place the arming relative to the
+  refusal branch *first*, as a design decision rather than a consequence, and extend that
+  test with a proxy-path case whose matcher fires on whatever line the proxy does emit.
+* **Unconditional binding collides with `authorize_bind`.** `authorize_bind` runs before
+  `build_memory` *specifically* so a misconfigured bind costs nothing and leaves no lease
+  behind — its docstring at `serve.rs:754-759` states the reason out loud, and "refusing
+  here means no lease is taken" stops being true the moment every serve binds a socket.
+  That sentence and the ordering it justifies must be restated deliberately, not
+  falsified in passing.
+
+Per the claim-family rule above: J2 runs **two sweeps** before it lands — startup-ordering
+claims, and the lease/endpoint schema (this section's own column list, both
+`001_init.sql` files, and the `INSERT INTO session_leases (…)` lists in
+`store/sqlite.rs` and `store/cockroach.rs` all quote the current five columns).
 
 **Considered and rejected: a durable write-intent queue.** The loser appends intents, the
 holder drains them. Rejected because **validation needs the graph** — resolving concepts
@@ -198,6 +251,17 @@ when matching happens.
   Per-agent scoping is why this depends on J1.
 * **The crash window widens but is not new** — the write-behind tail already dies with a
   crashed holder today.
+* **The `ledger_queued_lines` arithmetic must be re-derived, not assumed.** Its gauge is
+  `accepted − written − write_failed`, and that formula is correct *only because*
+  `try_send`'s `Err(Full)` arm never touches `accepted` — the whole exclusivity argument
+  is pinned by a test the alternative formula fails (see I-observability.md's Handoff
+  Log). A receipt queue is a second bounded channel with its own accept/reject
+  accounting; if receipts ride the ledger's counters, or the background path adds a
+  third drop class, the shared subtraction in `Ledger::shutdown` and `queued()` —
+  deliberately one expression so the live gauge and the exit count cannot drift — stops
+  being obviously right. Re-derive it against the new counter sites;
+  `adve-review-mooshik-I-round3.md`'s flip D is the map for the never-`accepted`
+  classes.
 
 ## J4 — Lease conflicts leave an artifact
 
@@ -224,6 +288,13 @@ J2 makes it cheaper, since a proxying serve is alive and can write its own lines
 
 Lowest priority: once J2 lands, transport stops being the user's problem to get right.
 Worth keeping as hygiene.
+
+**Catch:** the `--ledger`/transport prose lives in four hand-maintained mirrors —
+`docs/reference/{cli,mcp}.mdx` and `site/src/content/docs/{cli,mcp}.mdx` — kept as
+byte-identical pairs with **no drift gate** (`verify.sh` drift-checks only the
+observability sample). J5 edits all four; add the one-line `diff` of each pair to CI
+*before* editing them, so the edit lands against a gate instead of installing the first
+drift.
 
 ---
 
