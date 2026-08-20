@@ -283,11 +283,80 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         text_of(&derived)
     );
 
+    // **J3 through the proxy.** The ack now precedes the write, so it carries a
+    // receipt id — and the receipt has to survive the hop. Nothing in
+    // `src/mcp/proxy.rs` knows what a receipt is: the byte pipe forwards the
+    // response line untouched, which is exactly why J3 needed no transport
+    // change. This is the assertion that says so.
+    let receipt = derived["result"]["structuredContent"]["receipt"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "the proxied ack must carry a receipt: {}",
+                text_of(&derived)
+            )
+        })
+        .to_string();
+    assert!(
+        receipt.starts_with("lwr1."),
+        "the receipt must cross the hop verbatim, not re-rendered: {receipt}"
+    );
+
+    // Waiting on it through the proxy is the opt-in synchrony, and it is what
+    // makes the read below deterministic instead of a race against the
+    // holder's background worker.
+    let waited = b.call(
+        30,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-b", "receipt": receipt, "wait_ms": 4000}),
+    );
+    assert_eq!(
+        waited["result"]["structuredContent"]["receipt"]["state"]
+            .as_str()
+            .unwrap_or("<none>"),
+        "applied",
+        "a receipt waited on through the proxy must resolve: {}",
+        text_of(&waited)
+    );
+    // The piggyback reached the right caller through the shared hub, over the
+    // byte pipe, in a `content` block the model reads. Per-agent scoping is
+    // what makes that true of one hub serving two clients; the proxy neither
+    // knows nor needs to.
+    assert!(
+        text_of(&waited).contains("write receipts"),
+        "B's response must carry the tagged piggyback: {}",
+        text_of(&waited)
+    );
+    assert!(
+        text_of(&waited).contains(&receipt),
+        "the piggyback must name B's own receipt: {}",
+        text_of(&waited)
+    );
+    // The receipt carries what the ack could not — including the node id the
+    // reserve below needs.
+    let receipt_node = waited["result"]["structuredContent"]["receipt"]["created"][0]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "an applied receipt lists what it created: {}",
+                text_of(&waited)
+            )
+        })
+        .to_string();
+
     // Read-your-writes across the hop, for the client that wrote it.
     let recalled = b.call(
         3,
         "lambo_recall",
         serde_json::json!({"agent_id": "agent-b", "query": "crossed the proxy hop"}),
+    );
+    // Take-once: the piggyback already rode the `lambo_stats` response above
+    // (the wait settled the receipt inside that call, and the piggyback is
+    // attached after the body runs), so it must NOT be repeated here.
+    assert!(
+        !text_of(&recalled).contains(&receipt),
+        "a delivered receipt must not be re-announced on every later response: {}",
+        text_of(&recalled)
     );
     assert!(
         text_of(&recalled).contains("crossed the proxy hop"),
@@ -315,6 +384,10 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         .as_str()
         .unwrap_or_else(|| panic!("recall must return a node id: {}", text_of(&recalled)))
         .to_string();
+    assert_eq!(
+        node_id, receipt_node,
+        "the node id on the receipt and the node id recall returns must be the same node"
+    );
 
     // Two agents, two locks, through the hop. B takes the lock as `agent-b `...
     //

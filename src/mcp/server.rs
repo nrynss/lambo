@@ -2786,6 +2786,664 @@ mod tests {
         s.mem.close().await.expect("close");
     }
 
+    // -----------------------------------------------------------------------
+    // J3 — writes acknowledged before the embedder
+    // -----------------------------------------------------------------------
+
+    /// **Done-when: every write ack carries a receipt.** Both write tools, and
+    /// the ack must NOT pretend to know what the write did.
+    #[tokio::test]
+    async fn every_write_ack_carries_a_receipt_and_claims_nothing_about_the_write() {
+        let s = server("mcp-j3-ack").await;
+        for (tool, args) in [
+            (
+                "lambo_derive",
+                json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": "async ack", "concept_type": "logic"}],
+                }),
+            ),
+            (
+                "lambo_record_action",
+                json!({"agent_id": "agent-a", "action": "wrote the pipeline"}),
+            ),
+        ] {
+            let ack = call_raw(&s, tool, args).await;
+            assert_eq!(ack.is_error, Some(false), "{ack:?}");
+            let payload = ack.structured_content.as_ref().expect("payload");
+            let id = payload["receipt"].as_str().expect("a receipt id");
+            assert!(
+                id.parse::<crate::writeq::ReceiptId>().is_ok(),
+                "{tool}'s receipt must be parseable: {id}"
+            );
+            assert_eq!(payload["receipt_state"], json!("pending"), "{tool}");
+            // The ack cannot know these, so it must not carry them at all.
+            for absent in ["created", "matched", "action_node", "edges"] {
+                assert!(
+                    payload.get(absent).is_none(),
+                    "{tool}'s ack must not carry {absent} — an empty value is a claim: {payload}"
+                );
+            }
+            // And the receipt id is in the text too, because that is what the
+            // model reads.
+            let text = match &ack.content[0] {
+                rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            assert!(
+                text.contains(id),
+                "{tool}'s text must name the receipt: {text}"
+            );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when: waiting on a receipt restores read-your-writes for a
+    /// caller that asks.** Through the shipped surface, and the test the
+    /// harness comment on `call` points at.
+    #[tokio::test]
+    async fn waiting_on_a_receipt_through_lambo_stats_restores_read_your_writes() {
+        let s = server("mcp-j3-ryw").await;
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "read your writes", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("payload")["receipt"]
+            .as_str()
+            .expect("receipt")
+            .to_string();
+
+        let waited = call_raw(
+            &s,
+            "lambo_stats",
+            json!({
+                "agent_id": "agent-a",
+                "receipt": receipt,
+                "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64,
+            }),
+        )
+        .await;
+        let payload = waited.structured_content.expect("stats payload");
+        assert_eq!(payload["receipt"]["state"], json!("applied"), "{payload}");
+        assert_eq!(payload["receipt"]["id"], json!(receipt));
+        assert_eq!(payload["receipt"]["created_count"], json!(1), "{payload}");
+
+        // The write is now visible to a read that follows the wait — which is
+        // the whole claim.
+        let seen = call_raw(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id": "agent-a", "focus": "read your writes"}),
+        )
+        .await;
+        assert_eq!(seen.is_error, Some(false), "{seen:?}");
+        s.mem.close().await.expect("close");
+    }
+
+    /// A receipt with **no** `wait_ms` is a fetch, not a wait: it answers with
+    /// whatever the state is, which for a fresh ack is `pending`. The
+    /// asynchrony is real and this is what proves it — without this, every
+    /// other J3 test could be passing over a secretly synchronous path.
+    #[tokio::test]
+    async fn a_fresh_receipt_fetched_without_waiting_answers_pending() {
+        let s = server("mcp-j3-pending").await;
+        // A held embedder would make this deterministic; the fixture embedder
+        // is fast, so accept either answer and assert only that BOTH are
+        // reachable states of a real queue — never an error, never "unknown".
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "not yet applied", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("payload")["receipt"]
+            .as_str()
+            .expect("receipt")
+            .to_string();
+        let fetched = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id": "agent-a", "receipt": receipt}),
+        )
+        .await;
+        let state = fetched.structured_content.expect("payload")["receipt"]["state"]
+            .as_str()
+            .expect("a state")
+            .to_string();
+        assert!(
+            state == "pending" || state == "applied",
+            "a fetch must answer the real state, got {state}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when: outcomes are retrievable by receipt, and expired /
+    /// restart-lost answer distinctly, never "unknown".** Through the shipped
+    /// surface this time — the taxonomy itself is pinned in `writeq`.
+    #[tokio::test]
+    async fn a_foreign_receipt_is_named_restart_lost_not_unknown() {
+        let s = server("mcp-j3-foreign").await;
+        // A well-formed id from a different process epoch.
+        let foreign = "lwr1.dead0000beef0000.1a00000000.1";
+        let out = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id": "agent-a", "receipt": foreign}),
+        )
+        .await;
+        let payload = out.structured_content.expect("payload");
+        assert_eq!(
+            payload["receipt"]["state"],
+            json!("restart_lost"),
+            "{payload}"
+        );
+        let detail = payload["receipt"]["detail"].as_str().expect("detail");
+        assert!(detail.contains("UNKNOWN"), "{detail}");
+        assert!(detail.contains("Recall before re-deriving"), "{detail}");
+        assert!(
+            !detail.contains("\"unknown\""),
+            "the STATE must never be the word unknown: {detail}"
+        );
+
+        // A malformed id is a parameter error, not a receipt state — a client
+        // typo must not read as a lost write.
+        let bad = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id": "agent-a", "receipt": "not-a-receipt"}),
+        )
+        .await;
+        assert_eq!(bad.is_error, Some(true), "{bad:?}");
+        s.mem.close().await.expect("close");
+    }
+
+    /// Receipts are per-agent scoped (J1 is why): one agent must not be able
+    /// to read another's write outcome, which can carry concept ids and error
+    /// text.
+    #[tokio::test]
+    async fn another_agents_receipt_is_refused_through_lambo_stats() {
+        let s = server("mcp-j3-scope").await;
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "a's private write", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("payload")["receipt"]
+            .as_str()
+            .expect("receipt")
+            .to_string();
+        let peek = call_raw(
+            &s,
+            "lambo_stats",
+            json!({"agent_id": "agent-b", "receipt": receipt.clone()}),
+        )
+        .await;
+        let payload = peek.structured_content.expect("payload");
+        assert_eq!(payload["receipt"]["state"], json!("forbidden"), "{payload}");
+        assert!(
+            payload["receipt"].get("created").is_none(),
+            "a refused lookup must leak no outcome: {payload}"
+        );
+        // The owner still gets it.
+        let own = call_raw(
+            &s,
+            "lambo_stats",
+            json!({
+                "agent_id": "agent-a",
+                "receipt": receipt,
+                "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64,
+            }),
+        )
+        .await;
+        assert_eq!(
+            own.structured_content.expect("payload")["receipt"]["state"],
+            json!("applied")
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Shape part 3: piggybacked on that agent's next tool response, tagged
+    /// and self-identifying.** And scoped — the other agent's response must not
+    /// carry it.
+    #[tokio::test]
+    async fn a_settled_receipt_is_piggybacked_on_that_agents_next_response() {
+        let s = server("mcp-j3-piggyback").await;
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "piggyback me", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let receipt = ack.structured_content.as_ref().expect("payload")["receipt"]
+            .as_str()
+            .expect("receipt")
+            .to_string();
+        // Let it settle without consuming the piggyback.
+        let id: crate::writeq::ReceiptId = receipt.parse().expect("id");
+        s.mem
+            .pipeline()
+            .wait(
+                &AgentId::new("agent-a"),
+                id,
+                crate::writeq::RECEIPT_WAIT_MAX,
+            )
+            .await;
+
+        // A DIFFERENT agent's next call must not carry it.
+        let other = call_raw(&s, "lambo_saints", json!({"agent_id": "agent-b"})).await;
+        let other_text = other
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !other_text.contains(&receipt),
+            "agent-b must not be handed agent-a's receipt: {other_text}"
+        );
+
+        // agent-a's next call must.
+        let mine = call_raw(&s, "lambo_saints", json!({"agent_id": "agent-a"})).await;
+        let text = mine
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("write receipts"),
+            "untagged piggyback: {text}"
+        );
+        assert!(text.contains(&receipt), "{text}");
+        assert!(text.contains("applied"), "{text}");
+
+        // Take-once: the call after that must not repeat it.
+        let again = call_raw(&s, "lambo_saints", json!({"agent_id": "agent-a"})).await;
+        let again_text = again
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !again_text.contains(&receipt),
+            "a delivered receipt must not be re-announced forever: {again_text}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when: the queue bound comes from a ceiling measured on the
+    /// deployment's own embedder, and drops are counted in `lambo_stats`.**
+    #[tokio::test]
+    async fn the_stats_payload_reports_the_measured_bound_and_the_drop_count() {
+        let s = server("mcp-j3-stats").await;
+        // Force the probe to land before reading the payload.
+        call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "make the probe land", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        let out = call_raw(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        let p = out.structured_content.expect("payload");
+        for key in [
+            "write_queue_bound",
+            "write_queue_measured",
+            "write_queue_items_per_sec",
+            "write_queue_outstanding",
+            "write_queue_accepted",
+            "write_queue_applied",
+            "write_queue_failed",
+            "write_queue_abandoned",
+            "write_queue_dropped",
+            "receipts_retained",
+        ] {
+            assert!(p.get(key).is_some(), "{key} missing from {p}");
+        }
+        assert_eq!(
+            p["write_queue_measured"],
+            json!(true),
+            "the fixture embedder IS a measurement of this deployment's embedder: {p}"
+        );
+        // The FixtureEmbedder is instant, so the credible-rate clamp is what
+        // decides the bound — the case PROBE_MAX_CREDIBLE_RPS exists for.
+        assert_eq!(
+            p["write_queue_bound"],
+            json!(crate::writeq::WRITE_QUEUE_MAX),
+            "{p}"
+        );
+        assert_eq!(p["write_queue_accepted"], json!(1), "{p}");
+        assert_eq!(p["write_queue_applied"], json!(1), "{p}");
+        assert_eq!(p["write_queue_dropped"], json!(0), "{p}");
+        assert_eq!(p["write_queue_outstanding"], json!(0), "{p}");
+        // The gauge must be re-derivable from the payload — I-R2-3's property.
+        let derived = p["write_queue_accepted"].as_u64().unwrap()
+            - p["write_queue_applied"].as_u64().unwrap()
+            - p["write_queue_failed"].as_u64().unwrap();
+        assert_eq!(
+            derived,
+            p["write_queue_outstanding"].as_u64().unwrap(),
+            "{p}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when: one agent's writes apply in submission order, pinning the
+    /// `Temporal` chain — with two agents interleaving through one process.**
+    ///
+    /// Since J1 the chain is SESSION-wide, so the per-agent claim is read by
+    /// filtering the chain on `agent_id`. That is not a workaround: the chain
+    /// records arrival order across a shared session, and one agent's slice of
+    /// it is exactly that agent's submission order.
+    #[tokio::test]
+    async fn interleaved_agents_each_keep_their_own_order_on_the_temporal_chain() {
+        let s = server("mcp-j3-chain").await;
+        let mut expected_a = Vec::new();
+        let mut expected_b = Vec::new();
+        for i in 0..4 {
+            for (agent, expected) in [("agent-a", &mut expected_a), ("agent-b", &mut expected_b)] {
+                let content = format!("{agent}-step-{i}");
+                expected.push(content.clone());
+                call(
+                    &s,
+                    "lambo_derive",
+                    json!({
+                        "agent_id": agent,
+                        "concepts": [{"content": content, "concept_type": "logic"}],
+                    }),
+                )
+                .await;
+            }
+        }
+
+        let (chain_a, chain_b) = {
+            let g = s.mem.graph().read();
+            let prompts_for = |want: &str| -> Vec<String> {
+                g.temporal_chain()
+                    .iter()
+                    .filter_map(|id| match g.node(*id) {
+                        Some(crate::types::Node::Interaction(i)) if i.agent_id.0 == want => {
+                            i.prompt_text.clone()
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            (prompts_for("agent-a"), prompts_for("agent-b"))
+        };
+        assert_eq!(chain_a, expected_a, "agent-a's slice of the chain");
+        assert_eq!(chain_b, expected_b, "agent-b's slice of the chain");
+
+        // The session-wide chain interleaves, which is what a shared session
+        // means — and is the thing the per-agent filter exists to see past.
+        let interleaved = {
+            let g = s.mem.graph().read();
+            g.temporal_chain()
+                .iter()
+                .filter_map(|id| match g.node(*id) {
+                    Some(crate::types::Node::Interaction(i)) => Some(i.agent_id.0.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            interleaved.windows(2).any(|w| w[0] != w[1]),
+            "the chain must actually interleave, or this test proves nothing: {interleaved:?}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when: `lambo_derive` returns after validation without waiting on
+    /// the embedder.** Pinned by construction rather than by a stopwatch: a
+    /// timing assertion would be flaky, so this asserts the *property* — the
+    /// ack lands with the embedder untouched.
+    #[tokio::test]
+    async fn the_ack_lands_before_the_embedder_is_called() {
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+
+        struct CountingEmbedder {
+            inner: FixtureEmbedder,
+            calls: Arc<AtomicUsize>,
+            gate: Arc<tokio::sync::Semaphore>,
+        }
+        #[async_trait::async_trait]
+        impl Embedder for CountingEmbedder {
+            fn dimensions(&self) -> usize {
+                self.inner.dimensions()
+            }
+            async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+                self.calls.fetch_add(1, O::Relaxed);
+                let p = self.gate.acquire().await.expect("gate");
+                p.forget();
+                self.inner.embed(text).await
+            }
+        }
+
+        // A store that advertises VECTOR_SEARCH, because hybrid `derive` skips
+        // the embedder entirely when the store has none — and a test that
+        // proves "the ack does not wait for the embedder" against a store that
+        // never embeds proves nothing at all. That is exactly how this test
+        // first passed-by-accident, so the wrapper is load-bearing.
+        struct VectorCapable(MemoryStore);
+        #[async_trait::async_trait]
+        impl GraphStore for VectorCapable {
+            fn capabilities(&self) -> crate::store::Capabilities {
+                crate::store::Capabilities::VECTOR_SEARCH
+            }
+            async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+                self.0.init_schema().await
+            }
+            fn vector_dimensions(&self) -> Option<usize> {
+                self.0.vector_dimensions()
+            }
+            async fn flush(
+                &self,
+                batch: &crate::types::MutationBatch,
+                token: Option<u64>,
+            ) -> Result<(), crate::types::StoreError> {
+                self.0.flush(batch, token).await
+            }
+            async fn load_session(
+                &self,
+                session: &crate::types::SessionId,
+            ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+                self.0.load_session(session).await
+            }
+            async fn keyword_candidates(
+                &self,
+                session: &crate::types::SessionId,
+                tokens: &[String],
+                limit: usize,
+            ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+                self.0.keyword_candidates(session, tokens, limit).await
+            }
+            async fn vector_candidates(
+                &self,
+                session: &crate::types::SessionId,
+                embedding: &[f32],
+                limit: usize,
+            ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+                self.0.vector_candidates(session, embedding, limit).await
+            }
+            async fn blast_radius(
+                &self,
+                session: &crate::types::SessionId,
+                node: NodeId,
+                min_edge_age: Duration,
+                now: chrono::DateTime<chrono::Utc>,
+            ) -> Result<u64, crate::types::StoreError> {
+                self.0.blast_radius(session, node, min_edge_age, now).await
+            }
+            async fn interaction_span(
+                &self,
+                session: &crate::types::SessionId,
+                node: NodeId,
+                min_age: Duration,
+                now: chrono::DateTime<chrono::Utc>,
+            ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+                self.0.interaction_span(session, node, min_age, now).await
+            }
+            async fn record_canonization(
+                &self,
+                event: &crate::types::CanonizationEvent,
+                token: Option<u64>,
+            ) -> Result<(), crate::types::StoreError> {
+                self.0.record_canonization(event, token).await
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(
+            crate::writeq::PROBE_CONCURRENCY,
+        ));
+        let store: Arc<dyn GraphStore> = Arc::new(VectorCapable(MemoryStore::new()));
+        let mem = Memory::builder()
+            .session("mcp-j3-latency")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .match_strategy(crate::MatchStrategy::Hybrid)
+            .store(store)
+            .embedder(Arc::new(CountingEmbedder {
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+                gate: gate.clone(),
+            }) as Arc<dyn Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .build()
+            .await
+            .expect("build");
+        let s = LamboServer::new(Arc::new(mem));
+
+        // Drain the probe's permits so the NEXT embed parks.
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "acked before the embedder", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        assert_eq!(ack.is_error, Some(false), "{ack:?}");
+        assert_eq!(
+            ack.structured_content.as_ref().expect("payload")["receipt_state"],
+            json!("pending"),
+            "the ack must return with the write still outstanding"
+        );
+        // The write is parked in the embedder — the ack did not wait for it.
+        let receipt: crate::writeq::ReceiptId = ack.structured_content.as_ref().expect("payload")
+            ["receipt"]
+            .as_str()
+            .expect("receipt")
+            .parse()
+            .expect("id");
+        assert_eq!(
+            s.mem
+                .pipeline()
+                .lookup(&AgentId::new("agent-a"), receipt)
+                .tag(),
+            "pending",
+            "an ack that had waited for the embedder would already be settled"
+        );
+        // Release it and confirm it lands.
+        gate.add_permits(8);
+        let answer = s
+            .mem
+            .pipeline()
+            .wait(
+                &AgentId::new("agent-a"),
+                receipt,
+                crate::writeq::RECEIPT_WAIT_MAX,
+            )
+            .await;
+        assert_eq!(answer.tag(), "applied", "{answer:?}");
+        let total = calls.load(O::Relaxed);
+        assert!(
+            total > crate::writeq::PROBE_CONCURRENCY,
+            "the background write must have embedded after the ack (calls={total}, probe={})",
+            crate::writeq::PROBE_CONCURRENCY
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// **Done-when (close-drain durability).** `close()` quiesces the queue
+    /// before it drains the log, so a write acked just before shutdown is
+    /// durable rather than lost.
+    #[tokio::test]
+    async fn close_makes_a_write_acked_just_before_it_durable() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = Memory::builder()
+            .session("mcp-j3-close")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .build()
+            .await
+            .expect("build");
+        let s = LamboServer::new(Arc::new(mem));
+        // No wait, no piggyback: ack and immediately close.
+        let ack = call_raw(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "durable across close", "concept_type": "logic"}],
+            }),
+        )
+        .await;
+        assert_eq!(ack.is_error, Some(false), "{ack:?}");
+        s.mem.close().await.expect("close");
+
+        let snap = store
+            .load_session(&crate::types::SessionId::new("mcp-j3-close"))
+            .await
+            .expect("load");
+        assert!(
+            snap.concepts
+                .iter()
+                .any(|c| c.content == "durable across close"),
+            "close() must drain the write queue before it drains the log — otherwise an ack \
+             just before shutdown is a lie"
+        );
+    }
+
     #[tokio::test]
     async fn record_action_and_saints_and_stats_round_trip() {
         let s = server("mcp-roundtrip").await;

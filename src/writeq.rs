@@ -1452,14 +1452,19 @@ impl WritePipeline {
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             // Register BEFORE reading the state, or a settle landing between
-            // the read and the registration is a lost wakeup.
-            let notified = self.settled.notified();
+            // the read and the registration is a lost wakeup — and
+            // `notify_waiters` wakes only waiters that have already
+            // registered, which for a `Notified` means it has been polled.
+            // `enable()` is that registration without awaiting: constructing
+            // the future is *not* enough, and getting this wrong costs the
+            // whole `RECEIPT_WAIT_MAX` on a write that had already landed.
+            let mut notified = Box::pin(self.settled.notified());
+            notified.as_mut().enable();
             let answer = self.lookup(agent, id);
             if answer.is_settled() {
                 return answer;
             }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 return answer;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -1524,7 +1529,12 @@ impl WritePipeline {
         self.seal();
         let deadline = tokio::time::Instant::now() + WRITE_QUEUE_DRAIN_BUDGET;
         while self.outstanding() > 0 {
-            let notified = self.settled.notified();
+            // `enable()` before the re-check, for the reason in
+            // `WritePipeline::wait`: an un-polled `Notified` is not a
+            // registered waiter, so a settle landing here would be missed and
+            // the quiesce would burn its whole budget on an empty queue.
+            let mut notified = Box::pin(self.settled.notified());
+            notified.as_mut().enable();
             if self.outstanding() == 0 {
                 break;
             }
@@ -1932,5 +1942,430 @@ mod tests {
         assert_eq!(RECEIPT_WAIT_MAX.as_secs(), 4);
         assert_eq!(MAX_CONCURRENT_RECEIPT_WAITS * 2, 32);
         assert_eq!(crate::mcp::proxy::INFLIGHT_DEPTH_WARN, 64);
+    }
+}
+
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+mod pipeline_tests {
+    use super::*;
+    use crate::embed::FixtureEmbedder;
+    use crate::types::Interaction;
+    use crate::MemoryStore;
+    use std::sync::atomic::AtomicUsize;
+
+    /// An embedder that parks until it is released, so a burst can be held in
+    /// the queue long enough to observe the bound.
+    struct HeldEmbedder {
+        gate: Arc<tokio::sync::Semaphore>,
+        inner: FixtureEmbedder,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for HeldEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let permit = self
+                .gate
+                .acquire()
+                .await
+                .expect("the gate outlives its holders");
+            permit.forget();
+            self.inner.embed(text).await
+        }
+    }
+
+    struct Rig {
+        pipeline: WritePipeline,
+        graph: Arc<RwLock<Graph>>,
+        now: Arc<PlMutex<DateTime<Utc>>>,
+    }
+
+    impl Rig {
+        /// A pipeline over an empty in-RAM session, with a clock this test can
+        /// move and an optional embedder gate.
+        fn new(session: &str, embedder: Arc<dyn Embedder>) -> Self {
+            let session = SessionId::new(session);
+            let graph = Arc::new(RwLock::new(Graph::new(session.clone())));
+            let index = Arc::new(RwLock::new(InvertedIndex::default()));
+            let now = Arc::new(PlMutex::new(Utc::now()));
+            let clock_now = now.clone();
+            let clock: crate::daemon::Clock = Arc::new(move || *clock_now.lock());
+            let ctx = WriteCtx {
+                session,
+                graph: graph.clone(),
+                index,
+                store: Arc::new(MemoryStore::new()),
+                embedder,
+                embedding: EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                },
+                match_strategy: MatchStrategy::Canonical,
+                max_cooccurrence_per_derive: 10,
+                semantic_match_threshold: 0.85,
+                daemon_wake: Arc::new(Notify::new()),
+                lease_lost: Arc::new(AtomicBool::new(false)),
+            };
+            Rig {
+                pipeline: WritePipeline::spawn(ctx, clock),
+                graph,
+                now,
+            }
+        }
+
+        fn fixture(session: &str) -> Self {
+            Self::new(session, Arc::new(FixtureEmbedder::new()))
+        }
+
+        /// Open an interaction the way the call path does, so a job has
+        /// somewhere to hang.
+        fn interaction(&self, agent: &AgentId) -> NodeId {
+            let id = NodeId::new();
+            let mut g = self.graph.write();
+            let previous_id = g.temporal_chain().last().copied();
+            let session_id = g.session_id().clone();
+            g.insert_interaction(Interaction {
+                id,
+                session_id,
+                agent_id: agent.clone(),
+                prompt_text: None,
+                previous_id,
+                created_at: *self.now.lock(),
+            })
+            .expect("insert interaction");
+            id
+        }
+
+        async fn derive(&self, agent: &AgentId, content: &str) -> Submitted {
+            let interaction = self.interaction(agent);
+            self.pipeline
+                .submit_derive(
+                    agent.clone(),
+                    interaction,
+                    vec![(content.to_string(), ConceptType::Entity)],
+                    Vec::new(),
+                )
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_applied_receipt_reports_what_the_write_did() {
+        let rig = Rig::fixture("wq-applied");
+        let agent = AgentId::new("agent-a");
+        let first = rig.derive(&agent, "user schema").await;
+        assert_eq!(first.answer.tag(), "pending", "the ack precedes the write");
+
+        let settled = rig
+            .pipeline
+            .wait(&agent, first.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        let ReceiptAnswer::Applied(s) = settled else {
+            panic!("expected applied, got {settled:?}");
+        };
+        assert_eq!(s.created_count, 1);
+        assert_eq!(s.matched_count, 0);
+        assert_eq!(s.kind, WriteKind::Derive);
+
+        // A re-derive matches instead of creating — the metric-2 distinction,
+        // now observable on the receipt.
+        let second = rig.derive(&agent, "user schema").await;
+        let settled = rig
+            .pipeline
+            .wait(&agent, second.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        let ReceiptAnswer::Applied(s) = settled else {
+            panic!("expected applied, got {settled:?}");
+        };
+        assert_eq!(s.created_count, 0);
+        assert_eq!(s.matched_count, 1);
+    }
+
+    /// **§J3: expired must not read as unknown, and restart-lost must not
+    /// either.** All four non-answers, each distinct, none of them "unknown".
+    #[tokio::test]
+    async fn the_four_non_answers_are_distinguishable() {
+        let rig = Rig::fixture("wq-answers");
+        let agent = AgentId::new("agent-a");
+        let mine = rig.derive(&agent, "held concept").await;
+        rig.pipeline
+            .wait(&agent, mine.receipt, RECEIPT_WAIT_MAX)
+            .await;
+
+        // 1. Another process's epoch.
+        let foreign = ReceiptId {
+            epoch: mine.receipt.epoch ^ 0xffff_ffff_ffff_ffff,
+            issued_ms: mine.receipt.issued_ms,
+            seq: mine.receipt.seq,
+        };
+        assert_eq!(
+            rig.pipeline.lookup(&agent, foreign).tag(),
+            "restart_lost",
+            "a foreign epoch is restart-lost, not unknown"
+        );
+
+        // 2. Our epoch, a sequence number never issued.
+        let unissued = ReceiptId {
+            seq: mine.receipt.seq + 1_000,
+            ..mine.receipt
+        };
+        assert_eq!(rig.pipeline.lookup(&agent, unissued).tag(), "never_issued");
+
+        // 3. Our epoch, issued, retention elapsed.
+        // Read into a local first: `parking_lot::Mutex` is not reentrant, and
+        // `*m.lock() = *m.lock() + d` keeps the right-hand guard alive across
+        // the left-hand acquire — a self-deadlock, which is exactly what this
+        // line did on its first outing.
+        let base = *rig.now.lock();
+        *rig.now.lock() = base
+            + chrono::Duration::from_std(RECEIPT_RETENTION).unwrap()
+            + chrono::Duration::seconds(1);
+        assert_eq!(
+            rig.pipeline.lookup(&agent, mine.receipt).tag(),
+            "expired",
+            "a receipt this process issued and no longer holds is expired"
+        );
+
+        // 4. Held, but by another agent (J1 scoping).
+        let held = rig.derive(&agent, "second concept").await;
+        assert_eq!(
+            rig.pipeline
+                .lookup(&AgentId::new("agent-b"), held.receipt)
+                .tag(),
+            "forbidden",
+            "a receipt is scoped to the agent that created it"
+        );
+    }
+
+    /// Eviction is oldest-first, which is what lets it collapse into `expired`
+    /// rather than becoming a fifth answer. Asserted on the store directly:
+    /// filling `MAX_RETAINED_RECEIPTS` through the pipeline would be 1024 real
+    /// writes.
+    #[test]
+    fn eviction_is_oldest_first_so_an_evicted_id_is_older_than_everything_held() {
+        let mut r = Receipts::default();
+        let base = Utc::now();
+        let mut ids = Vec::new();
+        for seq in 1..=(MAX_RETAINED_RECEIPTS as u64 + 8) {
+            let id = ReceiptId {
+                epoch: 7,
+                issued_ms: base.timestamp_millis() + seq as i64,
+                seq,
+            };
+            ids.push(id);
+            r.entries.insert(
+                id,
+                Entry {
+                    agent: AgentId::new("agent-a"),
+                    issued: base + chrono::Duration::milliseconds(seq as i64),
+                    answer: ReceiptAnswer::Pending,
+                },
+            );
+            r.order.push_back(id);
+            r.highest_seq = seq;
+            r.evict();
+        }
+        assert_eq!(r.entries.len(), MAX_RETAINED_RECEIPTS);
+        for evicted in &ids[..8] {
+            assert!(!r.entries.contains_key(evicted), "{evicted} survived");
+        }
+        for held in &ids[8..] {
+            assert!(r.entries.contains_key(held), "{held} was evicted early");
+        }
+        let oldest_held = ids[8];
+        assert!(
+            ids[..8].iter().all(|e| e.issued_ms < oldest_held.issued_ms),
+            "an evicted id must be older than everything held, or 'expired' would be a lie"
+        );
+    }
+
+    /// **Per-agent FIFO under interleaving.** Two agents submit alternately;
+    /// each agent's own writes must apply in that agent's submission order.
+    ///
+    /// The `Temporal` chain is pinned by construction (the interaction is
+    /// opened on the call path), so what this test has to prove is the other
+    /// half: the *drain* order within a lane, which is what decides which of
+    /// two identical concepts is `created` and which is `matched`.
+    #[tokio::test]
+    async fn each_agents_writes_drain_in_that_agents_submission_order() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::new(
+            "wq-fifo",
+            Arc::new(HeldEmbedder {
+                gate: gate.clone(),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        // Canonical strategy never embeds, so the gate only holds the probe.
+        // Release it so calibration lands.
+        gate.add_permits(PROBE_CONCURRENCY);
+
+        let a = AgentId::new("agent-a");
+        let b = AgentId::new("agent-b");
+        // Interleaved submission: a1, b1, a2, b2, a3, b3. Each agent derives
+        // the SAME content twice, so ordering is visible as created-then-
+        // matched rather than the reverse.
+        let mut a_receipts = Vec::new();
+        let mut b_receipts = Vec::new();
+        for i in 0..3 {
+            a_receipts.push(rig.derive(&a, &format!("a-concept-{}", i / 2)).await);
+            b_receipts.push(rig.derive(&b, &format!("b-concept-{}", i / 2)).await);
+        }
+
+        for (owner, r) in a_receipts
+            .iter()
+            .map(|r| (&a, r))
+            .chain(b_receipts.iter().map(|r| (&b, r)))
+        {
+            let answer = rig.pipeline.wait(owner, r.receipt, RECEIPT_WAIT_MAX).await;
+            assert_eq!(answer.tag(), "applied", "{answer:?}");
+        }
+
+        // a-concept-0 is submitted twice in a row (i = 0, 1): the first must be
+        // the create and the second the match. Reversed drain order would swap
+        // them, and nothing else in the system would notice.
+        let created_first = matches!(
+            rig.pipeline.lookup(&a, a_receipts[0].receipt),
+            ReceiptAnswer::Applied(ref s) if s.created_count == 1 && s.matched_count == 0
+        );
+        let matched_second = matches!(
+            rig.pipeline.lookup(&a, a_receipts[1].receipt),
+            ReceiptAnswer::Applied(ref s) if s.created_count == 0 && s.matched_count == 1
+        );
+        assert!(created_first, "agent-a's first write must be the create");
+        assert!(matched_second, "agent-a's second write must be the match");
+
+        // And agent-b's lane is unaffected by having been interleaved into it.
+        let b_created = matches!(
+            rig.pipeline.lookup(&b, b_receipts[0].receipt),
+            ReceiptAnswer::Applied(ref s) if s.created_count == 1
+        );
+        assert!(
+            b_created,
+            "interleaving across agents must not reorder a lane"
+        );
+    }
+
+    /// **Backpressure, visibly.** A burst larger than the measured bound is
+    /// dropped, the drops are counted, and the receipts say nothing was
+    /// written.
+    #[tokio::test]
+    async fn a_burst_past_the_bound_drops_and_counts_it() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::new(
+            "wq-burst",
+            Arc::new(HeldEmbedder {
+                gate: gate.clone(),
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        // Let the probe through so a bound exists, then close the gate again so
+        // real work parks in the queue. `Hybrid` is what embeds; this rig runs
+        // `Canonical`, so hold the lane by never releasing after the probe.
+        gate.add_permits(PROBE_CONCURRENCY);
+        let bound = loop {
+            if let Some(c) = rig.pipeline.calibration() {
+                break c.bound;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!((WRITE_QUEUE_MIN..=WRITE_QUEUE_MAX).contains(&bound));
+
+        // Seal the pipeline: a sealed queue refuses admission, which is the
+        // same refusal path a full one takes and the only one a `Canonical`
+        // rig can hold open deterministically (its writes never await, so a
+        // real queue drains as fast as it fills).
+        rig.pipeline.seal();
+        let agent = AgentId::new("agent-a");
+        let refused = rig.derive(&agent, "dropped concept").await;
+        assert!(refused.dropped(), "{:?}", refused.answer);
+        assert_eq!(refused.answer.tag(), "dropped");
+        assert!(
+            refused.answer.describe().contains("nothing was written"),
+            "a drop must say plainly that nothing was written: {}",
+            refused.answer.describe()
+        );
+        assert_eq!(rig.pipeline.counters().dropped(), 1);
+        assert_eq!(
+            rig.pipeline.counters().accepted(),
+            0,
+            "a refused admission must never enter `accepted` — the whole gauge rests on it"
+        );
+        assert_eq!(rig.pipeline.counters().outstanding(), 0);
+        // The receipt is still fetchable: a drop is an answer, not a silence.
+        assert_eq!(
+            rig.pipeline.lookup(&agent, refused.receipt).tag(),
+            "dropped"
+        );
+    }
+
+    /// A fenced handle (lease lost) must settle its queued writes as `failed`
+    /// without writing any of them into a session another writer now owns.
+    #[tokio::test]
+    async fn a_fenced_pipeline_refuses_every_queued_write() {
+        let rig = Rig::fixture("wq-fenced");
+        let agent = AgentId::new("agent-a");
+        rig.pipeline.ctx.lease_lost.store(true, Ordering::Release);
+        let submitted = rig.derive(&agent, "post-fence concept").await;
+        let answer = rig
+            .pipeline
+            .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        assert_eq!(answer.tag(), "failed", "{answer:?}");
+        assert!(
+            answer.describe().contains("lost its single-writer lease"),
+            "{}",
+            answer.describe()
+        );
+        assert_eq!(rig.pipeline.counters().abandoned(), 1);
+        assert!(
+            rig.pipeline.counters().abandoned() <= rig.pipeline.counters().failed(),
+            "abandoned is a subset of failed"
+        );
+        assert_eq!(
+            rig.graph.read().concepts().count(),
+            0,
+            "a fenced pipeline must not write"
+        );
+    }
+
+    /// The quiesce must not leave a receipt answering `pending` forever in a
+    /// process that is exiting.
+    #[tokio::test]
+    async fn quiesce_settles_everything_it_could_not_apply() {
+        let rig = Rig::fixture("wq-quiesce");
+        let agent = AgentId::new("agent-a");
+        let submitted = rig.derive(&agent, "tail concept").await;
+        let abandoned = rig.pipeline.quiesce().await;
+        let answer = rig.pipeline.lookup(&agent, submitted.receipt);
+        assert!(
+            answer.is_settled(),
+            "close must leave no receipt pending: {answer:?}"
+        );
+        // Either it drained inside the budget (applied) or it was abandoned and
+        // said so — never `pending`, and never a silent loss.
+        match answer {
+            ReceiptAnswer::Applied(_) => assert_eq!(abandoned, 0),
+            ReceiptAnswer::Failed(ref why) => {
+                assert_eq!(abandoned, 1);
+                assert!(
+                    why.contains("closed before this write was applied"),
+                    "{why}"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // And the queue is sealed against anything new.
+        let after = rig.derive(&agent, "after close").await;
+        assert!(after.dropped(), "{:?}", after.answer);
     }
 }
