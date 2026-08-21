@@ -129,7 +129,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -176,6 +176,42 @@ use crate::types::{
 /// used. A quarter of the window is the largest slice that leaves the flush,
 /// which is the step that actually delivers durability, the majority of it.
 pub const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
+
+/// How many **consecutive transient** embed failures within one attach end the
+/// durable-intent replay loop, leaving the rest of the backlog durable
+/// (J3-R2R-1 property 3 — the sequential decision rule, in the shape the design
+/// doc's "termination measure" asks for).
+///
+/// Each replayed intent's status-classifier outcome is a Bernoulli draw
+/// (`Transient` vs `Content`). A **content** rejection is absorbing — it is
+/// permanent for *that input*, is consumed as `failed` immediately, and never
+/// counts toward the embedder-sickness evidence. A **transient** draw is
+/// evidence that the embedder is sick; it is left durable (never consumed) and
+/// increments a running streak. The streak resets to zero on any applied
+/// success or any content refusal (each proves the embedder just answered —
+/// observed health), so only a run of `EMBEDDER_SICK_THRESHOLD` transients with
+/// *nothing* answered in between concludes that the embedder is sick and stops
+/// the loop.
+///
+/// **The two controls this threshold sets, stated (Wald's SPRT, deferred by the
+/// design doc until the rule table existed; it now exists, so this is no longer
+/// deferred):**
+///
+/// * **Burn bound** — intents at risk before the decision. At most this many
+///   intents are spent as transient probe-embeds per attach; none is consumed
+///   (all stay durable) so the cost is time, bounded by this ×
+///   [`crate::graph::hybrid::HYBRID_IO_TIMEOUT`] worst case, never durability.
+/// * **False-alarm tolerance** — wrongly labeling a healthy embedder sick. We
+///   stop only after this many *consecutive* transients with no applied success
+///   or content refusal between them, so an embedder that answers — even if it
+///   occasionally blips — is never stopped.
+///
+/// Value: **3**, matching round-2's measured `k=3` and the design doc's
+/// reading — enough that two independent one-off transients do not stop a
+/// healthy replay, small enough that a hung-but-alive embedder costs three
+/// bounded embeds per attach, not the whole backlog. Recorded in the design
+/// doc's as-built disposition (J3-R2R-1).
+pub const EMBEDDER_SICK_THRESHOLD: usize = 3;
 
 /// Build-time invariant: the quiesce cannot become the reason a `close()` blows
 /// the deadline `serve` gives it.
@@ -445,24 +481,27 @@ pub const PROBE_BUDGET: Duration = Duration::from_secs(5);
 /// The sentence this used to carry, "it is measuring the deployment's embedder,
 /// not its own input", was **false and load-bearing** (J3-R2-1). Input length is
 /// a first-order determinant of a transformer's latency, so a rate measured on
-/// 35 bytes is a rate for 35-byte writes and nothing else. Measured on this
-/// rig's llama.cpp BGE-M3 q8_0 (median of 8 `/v1/embeddings` calls each):
+/// 35 bytes is a rate for 35-byte writes and nothing else.
 ///
-/// | input | median | × this text |
-/// | --- | --- | --- |
-/// | this text (35 B) | 13.6 ms | 1.00 |
-/// | 256 B | 22.2 ms | 1.63 |
-/// | 512 B | 36.3 ms | 2.67 |
-/// | 1024 B ([`PROBE_TEXT_BYTES`]) | 60.0 ms | 4.41 |
-/// | 1280 B | 75.8 ms | 5.57 |
-/// | 1536 B and up | **HTTP 500, 8 of 8** | — |
+/// **No per-deployment measured table is stamped here (J3-R2R-6).** The table
+/// this docstring once published — "1536 B and up — HTTP 500, 8 of 8" — did not
+/// reproduce on the rig it named: re-measured, the refusal actually sat between
+/// **2048 B and 3072 B**, and the latencies swung by up to 1.6×. A measured
+/// table needs its conditions (the server's batch flags and a date), which is
+/// exactly what a code docstring cannot stay in sync with. The *shape* of the
+/// argument survives and is the part that is load-bearing:
 ///
-/// That last row is why this text survives rather than simply growing: an
-/// embedder has an input ceiling of its own (this llama-server refuses above
-/// ~1280 B on its configured batch), and a probe text large enough to trip it
-/// turns every probe into [`Calibration::unmeasured`] — a worse outcome than an
-/// optimistic number. So the short leg stays, always answerable, and
-/// [`PROBE_TEXT_BYTES`] is measured **beside** it rather than instead of it.
+/// * input length is first-order for a transformer's latency, so the short leg
+///   measures the embedder on its shortest possible work, and
+/// * an embedder has an input ceiling of **its own** (this llama-server refuses
+///   somewhere above ~2 KiB on its configured batch), so a probe text large
+///   enough to trip it would turn every probe into
+///   [`Calibration::unmeasured`] — a worse outcome than an optimistic number.
+///
+/// So the short leg stays, always answerable, and [`PROBE_TEXT_BYTES`] is
+/// measured **beside** it rather than instead of it. The honest reading of the
+/// round-2 re-measurement (largest power of two under the smallest refusal) puts
+/// the representative leg at 1024 B.
 pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 
 /// Size of the probe's **representative** leg, in bytes: 1024.
@@ -473,10 +512,13 @@ pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 ///   `Constraint` entries `lambo_recall` returns — run **700 to 1500 bytes**, so
 ///   a leg inside that band measures the embedder on the shape the product
 ///   actually writes.
-/// * From above, the embedder: this rig's llama-server answers 1280 B and
-///   refuses 1536 B outright (see [`PROBE_TEXT`]'s table). A representative leg
-///   must stay clear of a limit it cannot know, so it takes the largest power of
-///   two under the smallest refusal measured here.
+/// * From above, the embedder: an embedder has an input ceiling of its own —
+///   re-measured on this rig's llama-server, the refusal sits between **2048 B
+///   and 3072 B** (see [`PROBE_TEXT`]; it moved off the old 1536 B claim, which
+///   is why no code docstring stamps a verdict here). A representative leg must
+///   stay clear of a limit it cannot know, so it takes the largest power of two
+///   under the smallest refusal measured — 2048 would sit too close to a limit
+///   that moved, so 1024 keeps a full power-of-two of headroom.
 ///
 /// The leg is **best effort** on top of that: if this size is refused anyway,
 /// [`probe_embedder`] keeps the short figure and says nothing it did not
@@ -625,19 +667,21 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
 /// Longest a caller may block waiting for its own write to apply.
 ///
-/// Two drain budgets: a job admitted at the instant the queue was full is
-/// projected to *start* at ≈ one budget, so the second budget is its own
-/// service time plus slack. A wait that runs out answers `pending` — which is
-/// one of the honest answers, not a failure.
+/// Two drain budgets, resting on the one surviving reason (J3-R2R-5 — the
+/// redesign retired admission "projections"): a close's quiesce drains for one
+/// whole budget, so a wait of one budget would expire on jobs that quiesce is
+/// still retiring. The second budget is that quiesce plus slack for the
+/// caller's own job's service time. A wait that runs out answers `pending` —
+/// which is one of the honest answers, not a failure.
 pub const RECEIPT_WAIT_MAX: Duration = Duration::from_secs(4);
 
 /// Build-time invariant: a wait shorter than the queue's own admission promise
 /// would make the opt-in-synchrony surface useless by construction.
 const _: () = assert!(
     RECEIPT_WAIT_MAX.as_secs() >= 2 * WRITE_QUEUE_DRAIN_BUDGET.as_secs(),
-    "RECEIPT_WAIT_MAX must be at least twice WRITE_QUEUE_DRAIN_BUDGET — the queue admits work \
-     it projects to drain within one budget, so a wait of one budget would time out on the very \
-     jobs the wait exists for",
+    "RECEIPT_WAIT_MAX must be at least twice WRITE_QUEUE_DRAIN_BUDGET — a close's quiesce drains \
+     for one whole budget, so a wait of one budget would expire on jobs the quiesce is still \
+     retiring",
 );
 
 /// Concurrent receipt waits this process will hold at once.
@@ -859,7 +903,9 @@ pub struct AppliedSummary {
 /// [`ReceiptAnswer::Dropped`] and [`ReceiptAnswer::Forbidden`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptAnswer {
-    /// Admitted, not yet decided. Also what a timed-out wait answers.
+    /// Admitted, not yet decided. Also what a timed-out wait answers *for a
+    /// receipt this process holds* — a replay-owed id answers
+    /// [`ReceiptAnswer::PendingReplay`] instead (J3-R2R-5).
     Pending,
     /// Admitted by a **previous** process, recorded as a durable intent, and
     /// still owed a replay (J3 round-1 N8).
@@ -951,6 +997,26 @@ impl ReceiptAnswer {
     /// `true` once the answer can no longer change.
     pub fn is_settled(&self) -> bool {
         !matches!(self, ReceiptAnswer::Pending | ReceiptAnswer::PendingReplay)
+    }
+
+    /// A unique index per variant, with **no `_` arm** — the mechanical
+    /// exhaustiveness that makes the "Eleven variants" docstring true by
+    /// construction (J3-R2R-4): a twelfth variant is a compile error here
+    /// before it can drift out of the taxonomy tests.
+    pub fn ordinal(&self) -> usize {
+        match self {
+            ReceiptAnswer::Pending => 0,
+            ReceiptAnswer::PendingReplay => 1,
+            ReceiptAnswer::Applied(_) => 2,
+            ReceiptAnswer::Failed(_) => 3,
+            ReceiptAnswer::AppliedAfterRestart(_) => 4,
+            ReceiptAnswer::IntentRecorded => 5,
+            ReceiptAnswer::Dropped(_) => 6,
+            ReceiptAnswer::Expired => 7,
+            ReceiptAnswer::RestartLost => 8,
+            ReceiptAnswer::NeverIssued => 9,
+            ReceiptAnswer::Forbidden => 10,
+        }
     }
 
     /// One line, addressed to the model that will read it.
@@ -1238,6 +1304,26 @@ fn rate_of(n: usize, wall: Duration) -> f64 {
     }
 }
 
+/// Why the durable-intent replay last stopped without draining (J3-R2R-8).
+///
+/// `replay_owed` is a *level* — an operator cannot tell "draining" from
+/// "wedged" from it alone. This names the class of the error that ended the
+/// last replay, so a single poll answers the question two polls-and-a-memory
+/// used to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplayBlockReason {
+    /// The replay drained, was never owed, or has not been attempted this attach.
+    #[default]
+    None,
+    /// The embedder answered transiently (or not at all) past
+    /// [`EMBEDDER_SICK_THRESHOLD`] — it is presumed sick. This is "wedged",
+    /// not "draining".
+    Embedder,
+    /// A non-embedder, session-wide fault (a store error, a lost lease, a
+    /// config error) ended the loop.
+    Other,
+}
+
 // ---------------------------------------------------------------------------
 // Counters
 // ---------------------------------------------------------------------------
@@ -1292,6 +1378,11 @@ pub struct WriteQueueCounters {
     /// therefore not a term in `outstanding` (those intents were never accepted
     /// by this process).
     replay_owed: AtomicU64,
+    /// The reason the last replay stopped without draining (J3-R2R-8), or
+    /// [`ReplayBlockReason::None`] when it drained / was never owed. Renders as
+    /// the `write_queue_replay_blocked` stat: `null` = draining or idle,
+    /// `"embedder"` = sick/wedged, `"other"` = store/lease/config.
+    replay_blocked: AtomicU8,
 }
 
 impl WriteQueueCounters {
@@ -1324,6 +1415,21 @@ impl WriteQueueCounters {
     }
     pub fn replay_owed(&self) -> u64 {
         self.replay_owed.load(Ordering::Relaxed)
+    }
+    pub fn replay_blocked(&self) -> ReplayBlockReason {
+        match self.replay_blocked.load(Ordering::Relaxed) {
+            0 => ReplayBlockReason::None,
+            1 => ReplayBlockReason::Embedder,
+            _ => ReplayBlockReason::Other,
+        }
+    }
+    pub(crate) fn set_replay_blocked(&self, reason: ReplayBlockReason) {
+        let disc = match reason {
+            ReplayBlockReason::None => 0,
+            ReplayBlockReason::Embedder => 1,
+            ReplayBlockReason::Other => 2,
+        };
+        self.replay_blocked.store(disc, Ordering::Relaxed);
     }
 
     /// Every refused admission, whatever the bound that refused it. The three
@@ -2469,33 +2575,40 @@ impl WritePipeline {
                         tag: "applied",
                         at: (clock)(),
                     };
-                    let outcome = ctx.run(&job, Some(stamp)).await.map_err(|e| e.to_string());
-                    if outcome.is_ok() {
+                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
+                    if raw_outcome.is_ok() {
                         observed.lock().sample(started.elapsed().as_secs_f64());
                     } else {
-                        // A failed job's intent must ALSO be consumed — with
-                        // the failure — or the next serve would replay a write
-                        // whose receipt said "FAILED, nothing was written".
-                        // `run` consumes only at a commit, and a failure has
-                        // no commit to ride, so this is its own lock hold: a
-                        // consume-without-apply is a single mutation and needs
-                        // no transactional partner. (Crash window: if this
-                        // consume never flushes, the next serve re-attempts a
-                        // write this process reported failed — replaying an
-                        // acked, validated write is never a loss, and the
-                        // durable record then says what actually happened.)
-                        if let Err(why) = &outcome {
-                            ctx.graph.write().consume_write_intent(
-                                job.receipt.to_string(),
-                                WriteIntentOutcome {
-                                    tag: "failed".into(),
-                                    summary: why.clone(),
-                                    consumed_at: (clock)(),
-                                },
-                            );
+                        // J3-R2R-2 (in-session symmetry). A failed job's intent
+                        // must be settled — `run` consumes only at a commit, and
+                        // a failure has no commit to ride — but WHICH failures
+                        // consume it is the question this arm answers to match
+                        // the replay arm. A content refusal
+                        // (`LamboError::Embed`) is settled `failed` and consumed,
+                        // exactly as the replay arm does. An embedder **outage**
+                        // (`LamboError::EmbedUnavailable`) is NOT: it says
+                        // nothing was learned about this *input*, so destroying
+                        // the durable intent over it would recreate N1's loss on
+                        // the path that handles almost every write. Instead the
+                        // intent is left unconsumed, and the next serve of the
+                        // session re-attempts it. The receipt still says `failed`
+                        // (nothing was written by this process), and the deferred
+                        // J4 seam is to re-queue with backoff or keep leaving it
+                        // unconsumed for replay.
+                        if let Err(e) = &raw_outcome {
+                            if !matches!(e, LamboError::EmbedUnavailable(_)) {
+                                ctx.graph.write().consume_write_intent(
+                                    job.receipt.to_string(),
+                                    WriteIntentOutcome {
+                                        tag: "failed".into(),
+                                        summary: e.to_string(),
+                                        consumed_at: (clock)(),
+                                    },
+                                );
+                            }
                         }
                     }
-                    outcome
+                    raw_outcome.map_err(|e| e.to_string())
                 };
 
                 // No `.await` from here to the end of the iteration: an
@@ -2546,8 +2659,8 @@ impl WritePipeline {
         }
         drop(r);
         // J3: a receipt from a previous process whose fate the durable intent
-        // record carries answers its truth — `pending` while its replay is
-        // owed, `applied_after_restart`/`failed` once decided — instead of
+        // record carries answers its truth — `pending_replay` while its replay
+        // is owed, `applied_after_restart`/`failed` once decided — instead of
         // falling through to `restart_lost`.
         if let Some((owner, answer)) = self.restart.lock().get(&id) {
             if owner != agent {
@@ -2570,8 +2683,9 @@ impl WritePipeline {
     /// `budget` is clamped to [`RECEIPT_WAIT_MAX`], and concurrent waits are
     /// capped ([`MAX_CONCURRENT_RECEIPT_WAITS`]); both bounds exist because a
     /// waiting call occupies a proxy in-flight slot for its whole duration.
-    /// A wait that runs out returns [`ReceiptAnswer::Pending`] — honest, and
-    /// not a failure.
+    /// A wait that runs out returns [`ReceiptAnswer::Pending`] for a receipt
+    /// this process holds, or [`ReceiptAnswer::PendingReplay`] for a replay-owed
+    /// id — either is honest, and neither is a failure.
     pub async fn wait(&self, agent: &AgentId, id: ReceiptId, budget: Duration) -> ReceiptAnswer {
         let budget = budget.min(RECEIPT_WAIT_MAX);
         let _slot = match self.wait_slots.clone().try_acquire_owned() {
@@ -2922,9 +3036,15 @@ impl WritePipeline {
             // That is the bound on "retry forever without visibility": the retry
             // is one embed per session start, and the debt is on the stats
             // surface until it is paid.
+            // J3-R2R-1 property 3 — the sequential decision rule that BOUNDS the
+            // loop. A fresh attach starts with a cleared block reason so a drain
+            // that never faults reports `null` (J3-R2R-8).
+            this.counters.set_replay_blocked(ReplayBlockReason::None);
             let live =
                 tokio::time::timeout(PROBE_BUDGET, this.ctx.embedder.embed(PROBE_TEXT)).await;
             if !matches!(live, Ok(Ok(_))) {
+                this.counters
+                    .set_replay_blocked(ReplayBlockReason::Embedder);
                 let why: String = match &live {
                     Err(_) => format!("no answer within {PROBE_BUDGET:?}"),
                     Ok(Err(e)) => e.to_string(),
@@ -2943,6 +3063,9 @@ impl WritePipeline {
             }
             let mut applied = 0usize;
             let mut failed = 0usize;
+            // Consecutive-transient embedder-sickness evidence; threshold and
+            // rationale at [`EMBEDDER_SICK_THRESHOLD`].
+            let mut transient_streak: usize = 0;
             for intent in pending {
                 if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
                     break;
@@ -2963,37 +3086,57 @@ impl WritePipeline {
                 };
                 let answer = match this.ctx.run(&job, Some(stamp)).await {
                     Ok(summary) => {
+                        // Observed health: the embedder just worked. Resets the
+                        // consecutive-transient streak.
+                        transient_streak = 0;
                         applied += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         this.counters.replayed.fetch_add(1, Ordering::Relaxed);
                         ReceiptAnswer::AppliedAfterRestart(summary.summary)
                     }
-                    // J3 round-1 N1, step 2 — consume only what a later process
-                    // cannot do better with. `LamboError::Embed` means the
-                    // embedder answered and the answer was unusable FOR THIS
-                    // CONTENT, so the next attach gets the same answer: that is
-                    // the poison record the design meant, and it settles
-                    // `failed` exactly as the in-session worker would. Every
-                    // other class says nothing about the intent — the embedder
-                    // unreachable or timed out (`EmbedUnavailable`), the store
-                    // failing, the lease moved — so the intent stays durable and
-                    // the loop ENDS: those conditions are session-wide, the next
-                    // job would hit them too, and burning the backlog against
-                    // them is the P1 this closes.
-                    Err(e) if !matches!(e, LamboError::Embed(_)) => {
+                    // Transient — the status-classifier draw is "embedder
+                    // momentarily unwilling / unreachable": evidence of sickness,
+                    // NOT a statement about this intent. Leave THIS intent durable
+                    // (unconsumed) and accumulate; concluding sickness at the
+                    // threshold keeps the rest of the backlog durable too.
+                    Err(LamboError::EmbedUnavailable(e)) => {
+                        transient_streak += 1;
+                        if transient_streak >= EMBEDDER_SICK_THRESHOLD {
+                            this.counters
+                                .set_replay_blocked(ReplayBlockReason::Embedder);
+                            tracing::warn!(
+                                session = %this.ctx.session,
+                                receipt = %intent.receipt,
+                                error = %e,
+                                applied,
+                                failed,
+                                remaining = backlog - applied - failed,
+                                "write queue: the embedder answered transiently for \
+                                 {EMBEDDER_SICK_THRESHOLD} intents in a row (the sequential \
+                                 decision rule's threshold); treating it as SICK. THIS intent and \
+                                 the rest of the backlog stay DURABLE and unconsumed for the next \
+                                 serve"
+                            );
+                            break;
+                        }
                         tracing::warn!(
                             session = %this.ctx.session,
                             receipt = %intent.receipt,
                             error = %e,
-                            applied,
-                            remaining = backlog - applied - failed,
-                            "write queue: a durable intent's replay failed for a reason that says \
-                             nothing about the write itself; it stays DURABLE and unconsumed, and \
-                             the replay stops here so the rest of the backlog survives too"
+                            streak = transient_streak,
+                            "write queue: a durable intent's replay got a transient embedder \
+                             answer; it stays DURABLE and unconsumed while the sequential \
+                             decision rule keeps sampling for the embedder's health"
                         );
-                        break;
+                        continue;
                     }
-                    Err(e) => {
+                    // Content — absorbing: permanent FOR THIS INPUT. Consume it
+                    // as `failed` immediately, exactly as the in-session worker
+                    // would. It never counts toward embedder-sickness evidence,
+                    // and the refusal proves the embedder just answered (resets
+                    // the streak — observed aliveness).
+                    Err(LamboError::Embed(e)) => {
+                        transient_streak = 0;
                         failed += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         let why =
@@ -3015,6 +3158,24 @@ impl WritePipeline {
                             "write queue: a durable intent's replay was refused; its record says so"
                         );
                         ReceiptAnswer::Failed(why)
+                    }
+                    // Anything else (store/lease/config) — session-wide and
+                    // non-embedder; the next job would hit it too. Stop, leave
+                    // everything durable, and name the block reason.
+                    Err(e) => {
+                        this.counters.set_replay_blocked(ReplayBlockReason::Other);
+                        tracing::warn!(
+                            session = %this.ctx.session,
+                            receipt = %intent.receipt,
+                            error = %e,
+                            applied,
+                            remaining = backlog - applied - failed,
+                            "write queue: a durable intent's replay failed for a non-embedder \
+                             session-wide reason (store/lease/config); it stays DURABLE and \
+                             unconsumed, and the replay stops here so the rest of the backlog \
+                             survives too"
+                        );
+                        break;
                     }
                 };
                 this.restart
@@ -3461,9 +3622,25 @@ mod tests {
     }
 
     #[test]
+    fn replay_blocked_names_the_reason_or_is_none() {
+        // J3-R2R-8: the level `replay_owed` cannot tell draining from wedged;
+        // `replay_blocked` defaults to `None` and records the class that ended
+        // the last replay.
+        let c = WriteQueueCounters::default();
+        assert_eq!(c.replay_blocked(), ReplayBlockReason::None);
+        c.set_replay_blocked(ReplayBlockReason::Embedder);
+        assert_eq!(c.replay_blocked(), ReplayBlockReason::Embedder);
+        c.set_replay_blocked(ReplayBlockReason::Other);
+        assert_eq!(c.replay_blocked(), ReplayBlockReason::Other);
+        c.set_replay_blocked(ReplayBlockReason::None);
+        assert_eq!(c.replay_blocked(), ReplayBlockReason::None);
+    }
+
+    #[test]
     fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         let answers = [
             ReceiptAnswer::Pending,
+            ReceiptAnswer::PendingReplay,
             ReceiptAnswer::Applied(AppliedSummary {
                 kind: WriteKind::Derive,
                 summary: "x".into(),
@@ -3485,6 +3662,21 @@ mod tests {
             ReceiptAnswer::NeverIssued,
             ReceiptAnswer::Forbidden,
         ];
+        // J3-R2R-4: `ordinal` has no `_` arm, so it is exhaustive by
+        // construction — if a twelfth variant is ever added, this compiles
+        // only when it is named. Asserting eleven distinct ordinals (and
+        // eleven distinct tags) turns that mechanical exhaustiveness into the
+        // proof that `ReceiptAnswer`'s count stays real.
+        let ords: Vec<usize> = answers.iter().map(ReceiptAnswer::ordinal).collect();
+        let mut ords_sorted = ords.clone();
+        ords_sorted.sort_unstable();
+        ords_sorted.dedup();
+        assert_eq!(
+            ords_sorted.len(),
+            11,
+            "ordinals must be eleven and distinct: {ords:?}"
+        );
+        assert_eq!(answers.len(), 11, "the taxonomy holds eleven answers");
         let mut tags: Vec<&str> = answers.iter().map(ReceiptAnswer::tag).collect();
         tags.sort_unstable();
         let mut deduped = tags.clone();
@@ -3509,8 +3701,12 @@ mod tests {
     }
 
     #[test]
-    fn only_pending_is_unsettled() {
+    fn only_the_two_pendings_are_unsettled() {
         assert!(!ReceiptAnswer::Pending.is_settled());
+        assert!(
+            !ReceiptAnswer::PendingReplay.is_settled(),
+            "PendingReplay is owed a replay and must stay unsettled"
+        );
         for a in [
             ReceiptAnswer::Failed("x".into()),
             ReceiptAnswer::AppliedAfterRestart("x".into()),

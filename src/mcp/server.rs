@@ -1129,6 +1129,18 @@ impl LamboServer {
             // `replayed` not advancing is the visible form of "the embedder was
             // not answering at attach, so nothing was consumed".
             obj.insert("write_queue_replay_owed".into(), json!(c.replay_owed()));
+            // J3 round-2 R-8: a *level* (`replay_owed`) cannot tell "draining"
+            // from "wedged"; this names the class of the error that ended the
+            // last replay. `null` = draining/idle, "embedder" = sick/wedged,
+            // "other" = store/lease/config.
+            obj.insert(
+                "write_queue_replay_blocked".into(),
+                match c.replay_blocked() {
+                    crate::writeq::ReplayBlockReason::None => json!(null),
+                    crate::writeq::ReplayBlockReason::Embedder => json!("embedder"),
+                    crate::writeq::ReplayBlockReason::Other => json!("other"),
+                },
+            );
             obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));
         }
         payload
