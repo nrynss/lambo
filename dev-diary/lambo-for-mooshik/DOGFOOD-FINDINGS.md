@@ -241,4 +241,37 @@ probe.
 
 ---
 
+## 2026-08-21 — what the G3 spike found about the graph itself
+
+The G3 Laplacian spike (`spikes/g3-laplacian/`, outcome in G-recall-calibration.md §G3)
+shelved its diffusion hypothesis with numbers and upheld its resistance hypothesis pending
+operator judgement — but its side-findings are the dogfood entries:
+
+* **Derived decisions arrive edge-less, and the provenance spine does not rescue them.**
+  386 concepts, 41 components; the giant component holds 92% of Resources and 85% of
+  Entities but only **37% of Logic and 30% of Observation**. Mechanism, read at the API:
+  `record_action` writes `Causal`/`Dependency` edges to shared file/commit hubs, so
+  artifacts connect; `lambo_derive` writes only intra-call `CoOccurrence` cliques plus the
+  rarely-used `parent_of` — so *reasoning strands*. Adding the `Derives` co-parent
+  projection collapses 41 islands to only 40. No expansion algorithm can reach what has no
+  edges — which is also *why* diffusion could not beat fixed-depth here. The islands
+  problem is a **`lambo_derive` API-ergonomics question, not a graph-algorithm question**.
+* **Canonization has never completed on this store**: 0 of 386 concepts carry a stored
+  blast_radius after thousands of daemon cycles. The pillar warning has never actually
+  fired for a structural reason upstream of the promotion policy — this sharpens the
+  2026-08-27 fair test again (check Stage-3 completion, not just promotion counts).
+* **The exclusivity filter hides pillars** (H2's upheld half, awaiting operator judgement
+  on the table in `spikes/g3-laplacian/README.md`): a dependent with path multiplicity has
+  another inbound structural source and is excluded *by construction*, so 156/159 counted
+  pairs sit at identical resistance while the discriminating structure lives outside the
+  counted set. Concrete case: the J3-implementation concept has 13 dependents and the
+  graph's three deepest-supported pairs, yet blast_radius 4 — below the warning bar —
+  while a pendant-6 concept warns today.
+* **The cheap actionable H1 surfaced**: recall phase-2 expansion is out-edge only;
+  248/386 single seeds expand to nothing, and symmetrizing the same BFS multiplies
+  expansion 2–4× for one function call. "Should phase 2 follow in-edges" is now a
+  measured, one-line question for whichever workstream next touches recall.
+
+---
+
 *(next entry appends here)*
