@@ -1,0 +1,44 @@
+J3 durable intents — proof obligation 1 at the release binary, live BGE-M3
+==========================================================================
+Date: 2026-08-21. Rig: llama.cpp BGE-M3 q8_0 on CPU at 127.0.0.1:8080
+({"status":"ok"} before the run). Binary: target/release/lambo built from
+wt/j3 with --features store-sqlite (embed-bge default), driven over raw
+stdio JSON-RPC by j3_live_demo.py (this directory). Store counts read back
+with sqlite3, never taken from the payload. Every durability figure reads
+the store's EMBEDDING column (J3-R3-1), never applied counts.
+
+RED (the baseline this replaces — measured at ed22476 by the round-3
+reviewer, same rig, same binary lineage, adve-review-mooshik-J3-round3.md):
+  J3-R3-1: 326 of 365 and 361 of 400 acked writes ABANDONED at a clean
+           close (silent embedder refusals sampled as fast writes).
+  J3-R3-2: 13 of 16 acked writes ABANDONED from eight concurrent agents up
+           (aggregate ceiling derived per-lane, applied across lanes).
+
+GREEN (this run — 16 agents x 4 derives of 1024-byte concepts, the
+multi-agent + in-band-size regime both P1s lived in, closed IMMEDIATELY):
+
+  refusal probe: state=failed detail='FAILED, nothing was written — embed:
+    the embedder refused this content (backend: llama.cpp returned ...'
+  session 1: acked=64 in 0.00s; close=2.04s
+    store: embedded=1 embedding_NULL_rows=0 unconsumed_intents=63
+           consumed_applied=1
+    INVARIANT acked == applied-with-embedding + durable-intent:
+           64 == 1 + 63 -> True
+  session 2: replayed=63; sampled cross-restart receipt
+           state=applied_after_restart; close=0.02s
+    store after replay: embedded=64 embedding_NULL_rows=0 unconsumed=0
+           applied_after_restart=63 failed=1
+  OVERALL: PASS
+
+Readings:
+- The refusal probe (3000-byte content, above this llama's ~1536 B input
+  ceiling) settles FAILED with "nothing was written" — the applied-with-
+  NULL-embedding dishonesty is gone at the live binary; embedding_NULL_rows
+  is 0 at every readback.
+- A clean close 2.04s after a 64-write burst applies what the budget covers
+  (1, on this cold rig) and persists the other 63 as durable intents:
+  acked == applied + intents EXACTLY, by construction, not by estimate.
+- The next serve replays all 63 (write_queue_replayed=63), the original
+  receipt ids answer applied_after_restart, and the final store holds all
+  64 concepts WITH their vectors, 0 unconsumed intents. The 1 "failed"
+  intent row is the refusal probe's, consumed with its honest outcome.
