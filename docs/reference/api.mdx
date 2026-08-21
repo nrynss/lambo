@@ -71,7 +71,7 @@ let mem = Memory::builder()
 | `default_top_k` | `5` | Hits a recall returns when the caller omits `top_k`. |
 | `default_max_tokens` | `500` | Token budget for the rendered context block. |
 | `default_traversal_depth` | `2` | Graph expansion depth during recall. |
-| `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` concept matching. |
+| `match_strategy` | `Hybrid` | `Canonical` or `Hybrid` — selects the recall matching scope, whether a derive embeds, **and** the call-time validation rule set (see `MatchStrategy` in the source authority). J3-R2R-7: `Canonical` adds `reject_repeated_observation` and the single-`Hierarchical`-parent rule. |
 | `semantic_match_threshold` | `0.85` | Similarity above which two concepts match. Must be between `0` and `1`. |
 | `backend_flush_interval` | 1 second | How often pending writes flush, which sets how far behind durable storage a session can be. |
 | `backend_flush_max_batch` | `500` | Mutations per flush batch. |

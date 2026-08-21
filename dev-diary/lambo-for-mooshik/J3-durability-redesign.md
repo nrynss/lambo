@@ -484,3 +484,94 @@ lost.
 **Then, and only then:** J4 → J5 → the phase close (the rig re-pin and the DOGFOOD-SETUP
 runbook rewrite in one commit, per §"Rig re-pin rides with J's landing") → the E2E adversarial
 cycle → K1 → K2 if it clears → D.
+
+---
+
+## As built (round 3) — the R-2 remediation, all nine findings closed
+
+Implemented on `wt/j3` after round 2's REQUEST_CHANGES (1 P1 / 3 P2 / 5 P3). Every finding
+is closed at source; the dispositions below record what this doc prescribed and how the
+implementation honoured or deviated from it.
+
+| # | Grade | Verdict | What closed it |
+|---|---|---|---|
+| J3-R2R-1 | P1 | **CLOSED** | `src/embed/bge_m3.rs`: an exhaustive, priority-ordered status-class rule table (`EmbedStatusClass` + `classify_status`) with **no wildcard producing `Backend`**; `unclassified` is conservative (mapped to `Unavailable`, logged). The sequential decision rule (`src/writeq.rs` `EMBEDDER_SICK_THRESHOLD`) bounds the replay loop; the self-bounding sentence restated at its real magnitude. |
+| J3-R2R-2 | P2 | **CLOSED** | In-session worker leaves `EmbedUnavailable` intents unconsumed (the write is not destroyed); all three user surfaces (both `mcp.mdx` mirrors + Done-when (6)) corrected to the honest asymmetry; the asymmetry is declared as a deviation below with the J4 seam named. |
+| J3-R2R-3 | P2 | **CLOSED** | `columns_in_ddl` + `unprovisioned_column_err` extend `preflight_schema` to columns from the same DDL source, in **both** adapters; verified against the **live Cockroach cluster** (the operator confirmed it reachable on this machine) — see below. |
+| J3-R2R-4 | P2 | **CLOSED** | `PendingReplay` added to both taxonomy tests; `only_the_two_pendings_are_unsettled`; `ReceiptAnswer::ordinal` with no `_` arm asserted to yield eleven distinct values (a twelfth variant is a compile error). |
+| J3-R2R-5 | P3 | **CLOSED** | Register sweep: `RECEIPT_WAIT_MAX` + const-assert restated on the surviving reason; three `PendingReplay`-falsified sentences fixed; `consumed_at` purge restated as lazy; `memory.rs` `match_strategy` setter fixed. |
+| J3-R2R-6 | P3 | **CLOSED** | `PROBE_TEXT`/`PROBE_TEXT_BYTES` measured numbers dropped (the live BGE-M3 embedder was not running on the implementer's machine to re-measure) and the argument kept in shape, grounded in round 2's re-measurement (refusal between 2048–3072 B, not at 1536 B). |
+| J3-R2R-7 | P3 | **CLOSED** | Third consequence (call-time validation rule set) added to `MatchStrategy`'s authority; "all three" in `config.rs`; both `api.mdx` mirrors updated. |
+| J3-R2R-8 | P3 | **CLOSED** | `write_queue_replay_blocked` stat (`ReplayBlockReason`, `null`/`"embedder"`/`"other"`), set in the liveness-gate return and both breaking arms. |
+| J3-R2R-9 | P3 | **CLOSED** | `j3_n1_outage_demo.py` changed from `next(iter(receipts))` to asserting over **every** receipt partitioned by state (deterministic). |
+
+### R-1 — the rule table and the sequential decision rule (threshold, stated)
+
+The rule table (`EmbedStatusClass`) decides the class at the adapter (the site that knows
+the status) and collapses to the two `EmbedError` variants, so `is_transient` needed no
+change. Transient / unclassified → `Unavailable`; content / permanent-config → `Backend`
+permanent-for-this-input (consumed). 401/403/404 are permanent-config: the write is failed
+AND the adapter warns loudly; content (400/413/415/422) consumes silently.
+
+The replay-loop termination is **not** a throwaway `break-after-k=3`. It is the
+sequential decision rule this doc's §Prescribed design defers until the rule table exists
+(Wald's SPRT, p. 410-416). Each replayed intent's status-classifier outcome is a Bernoulli
+draw (transient vs content); a **content** rejection is absorbing — consumed as `failed`
+immediately, permanent for that input, never counted toward embedder-sickness — and a
+success resets the streak (observed health). The sickness evidence is a run of
+`EMBEDDER_SICK_THRESHOLD = 3` *consecutive transients with nothing answered in between*.
+Stated posture (the two controls):
+
+* **False-alarm tolerance** — we stop only after three consecutive transients with no
+  applied success or content refusal between them, so a healthy embedder that blips once or
+  twice (or that a content refusal proves is alive) is never wrongly labeled sick.
+* **Burn bound** — at most three intents per attach are spent as transient probe-embeds
+  before concluding the embedder is sick; none is consumed (all stay durable), so the cost
+  is time (≤ 3 × `HYBRID_IO_TIMEOUT`), never durability. When the threshold trips, the
+  loop stops and leaves the rest of the backlog durable, and `write_queue_replay_blocked`
+  is set to `"embedder"` so an operator sees **wedged**, not draining.
+
+### R-2 — the asymmetry, declared
+
+The replay arm keeps `EmbedUnavailable` intents durable (they have no caller to answer),
+as N1 built it. The in-session arm — **decision: leave the intent unconsumed, settle the
+receipt `failed`** — was made symmetric with it so an acked write reached during an outage
+is not *destroyed*: the caller's receipt honestly says `failed` (nothing was written by
+this process), while the durable intent stays unconsumed and the next serve re-attempts it.
+The declared asymmetry that remains is *who learns immediately* — the in-session caller has
+a receipt to read; the replay has no caller — which is why the receipt is settled here but
+the intent is left for a later process. The **J4 seam** for true symmetry: on
+`EmbedUnavailable`, re-queue with backoff in-session instead of settling `failed`, or
+continue leaving the intent unconsumed for the next serve to replay.
+
+### R-3 — column preflight, verified against live Cockroach
+
+The preferred option (real column preflight, not a stated magnitude) was implemented:
+`columns_in_ddl` parses each `CREATE TABLE … ( … )` block plus `ALTER TABLE … ADD COLUMN
+` lines (skipping `--`, `CONSTRAINT`, `PRIMARY`, `UNIQUE`, `FOREIGN`, `CHECK`, `INDEX` and
+the Cockroach `VECTOR`/`CREATE VECTOR INDEX`/`::STRING` non-table statements), and the
+preflight diffs those against `PRAGMA table_info` (SQLite) / `information_schema.columns`
+(Cockroach), reusing the table-preflight's refusal shape
+(`unprovisioned_column_err`). **Verified against the real Cockroach cluster** (the operator
+confirmed `LAMBO_COCKROACH_DSN` is reachable on this machine; the DSN was sourced from
+`.env` for the run and never printed or committed): `init_schema`, a passing preflight, a
+required column renamed away → preflight refused by table + column name, then renamed back.
+The one named follow-up that remains is **F4** — close-time latency against the live
+cluster (three extra statements + two bucket drains per write) — which the design doc
+already records as a *measurement to schedule*, not a blocker.
+
+### R-6 — PROBE_TEXT, numbers dropped rather than restated
+
+The live BGE-M3 embedder at `127.0.0.1:8080` was not running on this machine during round 3
+(only a chat llama-server on :8082), so the "re-measure and stamp" option was not possible
+without fabricating numbers — which this branch has been burned by. The measured table was
+dropped and the argument kept in shape, grounded in round 2's re-measurement (the refusal
+sits between 2048 B and 3072 B, not at 1536 B, and the latencies swung by up to 1.6×). A
+future machine with the embedder up may re-measure and stamp the table per R-6's first
+option.
+
+### Uncertainties / named follow-ups
+
+* **F4** — close-time latency against live Cockroach: a measurement to schedule, not a
+  blocker (R-3 row above).
+

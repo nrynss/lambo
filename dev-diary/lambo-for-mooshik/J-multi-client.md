@@ -2326,9 +2326,10 @@ answered:
   embedder**.
 * **The declaration**, where a user reads it: a new paragraph in both `mcp.mdx` mirrors under
   `lambo_derive` and limit (6) of the Done-when box, both naming the consequence (a server
-  whose embedder is down accepts reads and refuses writes), what is *not* at risk (nothing
-  acked — an acked write is a durable intent that waits for an embedder rather than dying
-  with one, which is exactly what N1's fix restored), and the opt-out
+  acked — a write not yet attempted when the session closes waits for an embedder as a
+  durable intent, while a write the worker reaches during the outage fails and its receipt
+  says so (the honest asymmetry, J3-R2R-2), which is exactly what N1's fix changed the
+  replay path to preserve), and the opt-out
   (`match_strategy = "canonical"`).
 * **The behaviour: argued and kept.** The review's second half asked whether a
   connection-level failure deserves the same "declared, session-uniform" treatment the
@@ -2707,8 +2708,10 @@ Every figure is one rig, not a property of lambo.
       config default, so **no arm degrades on a missing or dead embedder** and an
       unreachable llama.cpp fails every `lambo_derive` while it is unreachable. That is the
       intended trade — the alternative is the silent `embedding: NULL` write it replaced,
-      and nothing acked is lost, since an acked write is a durable intent that waits for an
-      embedder rather than dying with one — but it is an *availability* consequence and it
+      and no acked write dies with the outage *unattempted*: a write not yet attempted
+      when the session closes waits for an embedder as a durable intent, while a write the
+      worker reaches during the outage fails, and its receipt says so — the honest
+      asymmetry (J3-R2R-2) — but it is an *availability* consequence and it
       was stated nowhere a user reads. It is now in both `mcp.mdx` mirrors together with
       the way to opt out, which is to **declare** the degraded mode
       (`match_strategy = "canonical"`, keyword-only, session-wide) rather than receive it
