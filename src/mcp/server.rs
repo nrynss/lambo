@@ -1035,13 +1035,15 @@ impl LamboServer {
         // baseline payload left to preserve, and hiding the keys behind a
         // condition that is always true would only make them look optional.
         //
-        // `write_queue_bound` is the measured bound and `write_queue_measured`
-        // says whether anything measured it; reporting the first without the
-        // second would present the unmeasured floor as a measurement.
-        // `write_queue_accepted` is here so the gauge is re-derivable from the
-        // payload — `outstanding = accepted − applied − failed` — which is the
-        // property I-R2-3 asked `ledger_queued_lines` for and the reason
-        // `dropped` sits beside them rather than inside them.
+        // `write_queue_bound` / `write_queue_lane_bound` are the static
+        // fairness/memory caps in force (the J3 redesign — no rate sizes a
+        // bound any more); `write_queue_measured` and the rate keys are the
+        // embedder telemetry that used to size them and now only describes
+        // them. `write_queue_accepted` is here so the gauge is re-derivable
+        // from the payload — `outstanding = accepted − applied − failed −
+        // deferred` — which is the property I-R2-3 asked `ledger_queued_lines`
+        // for and the reason `dropped` sits beside them rather than inside
+        // them.
         {
             let queue = self.mem.pipeline();
             let c = queue.counters();
@@ -1052,10 +1054,10 @@ impl LamboServer {
                 json!(calibration.map_or(crate::writeq::WRITE_QUEUE_MAX, |c| c.bound)),
             );
             // The bound that actually refuses one agent's burst, reported
-            // beside the aggregate one because they come from different
-            // measurements at different widths (J3-R1-1): a lane drains 1-wide
-            // however wide the deployment's embedder is, so this is the number
-            // that explains a drop a single-agent session sees.
+            // beside the aggregate one (J3-R1-1): a lane drains 1-wide however
+            // wide the deployment's embedder is, so this is the number that
+            // explains a drop a single-agent session sees. Since the J3
+            // redesign it is the per-agent fair share, not a measurement.
             obj.insert(
                 "write_queue_lane_bound".into(),
                 json!(calibration.map_or(crate::writeq::WRITE_QUEUE_LANE_MAX, |c| c.lane_bound)),
@@ -1084,12 +1086,13 @@ impl LamboServer {
             // The probe's own serial figure, kept beside whichever rate is in
             // force (J3-R2-4). Replacing a number is not a reason to destroy
             // it: `serial_items_per_sec` alone tells an operator what the
-            // deployment retires at now, while the pair tells them what the
-            // session's first burst was ADMITTED at — and the gap between the
-            // two is the whole diagnosis of J3-R2-1, which a review had to
-            // measure at a release binary because nothing published it. Equal
-            // to `write_queue_serial_items_per_sec` while `bound_source` is
-            // `probe`, and frozen at the probe's reading after that.
+            // deployment retires at now, and the GAP between the pair is the
+            // self-diagnosing comparison — how far the startup estimate sat
+            // from the work the agents actually send, the fact two review
+            // rounds had to measure at a release binary because nothing
+            // published it. Equal to `write_queue_serial_items_per_sec` while
+            // `bound_source` is `probe`, and frozen at the probe's reading
+            // after that.
             obj.insert(
                 "write_queue_probe_serial_items_per_sec".into(),
                 json!(calibration.and_then(|c| c.probe_serial_items_per_sec)),

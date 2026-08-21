@@ -1298,14 +1298,17 @@ existing test, which is why J2-R2-6 shows no count change.
 
 ## J3 — Writes acknowledged before the embedder
 
-**Status: implemented, round-1 review remediated — see
-[§J3 Status](#j3-status--landed) below** for what shipped, the measured latency,
-the deviations argued (fetch-by-id on `lambo_stats` rather than an eighth tool;
-the declared metric-2 regression; the J3-R1-12 fixture placement), every
-constant's derivation, and the round-1 findings. The spec below is the spec it
-was built against.
+**Status: implemented; three review rounds remediated; REDESIGNED at round 3
+(durable intents) — see [§J3 Status](#j3-status--landed) below** for what
+shipped, the measured latency, the deviations argued, every constant's
+derivation, and the per-round findings, ending with
+[§Round-3 and the durable-intent redesign](#round-3-and-the-durable-intent-redesign-adopted--2-p1-1-p2-3-p3-all-closed),
+which is where the current design lives. The spec below is the spec the first
+implementation was built against; the redesign's design of record is
+`J3-durability-redesign.md` beside this file.
 
-A warm `lambo_derive` is 27ms, of which 22 to 25ms is the embedding call. Durability is
+A warm `lambo_derive` is 27ms, of which 22 to 27ms is the embedding call (this
+line's earlier "22 to 25ms" was a misquote of §Measurements — J3-R3-5). Durability is
 *already* async: write-behind returns long before anything reaches disk. The wait buys the
 agent nothing it is waiting for.
 
@@ -1360,16 +1363,23 @@ when matching happens.
 
 ### J3 Status — landed
 
-**Status: implemented on `wt/j3`, rounds 1 and 2 of the review remediated.**
+**Status: implemented on `wt/j3`; rounds 1–3 of the review remediated; the
+round-3 remediation is a REDESIGN (durable post-validation intents), adopted.**
 Four staged commits (`427fabf` pipeline, `dcf29de` MCP surface, `f9abfbb` tests,
 `3e1bea4` two defects found by measuring the binary), plus this note — three more
 for the round-1 review's thirteen findings (see
 [§Round-1 remediation](#round-1-remediation-1-p1-4-p2-8-p3--all-closed)), whose
-P1 changed how the queue bound is derived, and three more for round 2's nine (see
+P1 changed how the queue bound is derived, three more for round 2's nine (see
 [§Round-2 remediation](#round-2-remediation-1-p1-3-p2-5-p3--all-closed)), whose
-P1 changed what the bound is allowed to rest on. Both P1s were the same hazard —
-an acked write abandoned at a clean `close()` — and both were found by measuring
-the release binary rather than by reading the code.
+P1 changed what the bound is allowed to rest on, and five more for round 3's six
+(see [§Round-3 and the durable-intent redesign](#round-3-and-the-durable-intent-redesign-adopted--2-p1-1-p2-3-p3-all-closed)),
+whose two P1s ended the estimator's career entirely. Every round's P1 was the
+same hazard — an acked write abandoned at a clean `close()` — and every one was
+found by measuring the release binary rather than by reading the code. **The
+subsections between here and the round-3 one are the history of the estimator
+design and are kept as history**: where a sentence below describes admission
+bounds derived from measured rates, probe-era ceilings, or a close that
+abandons what it cannot drain, the round-3 section is the current truth.
 
 #### The latency claim, measured
 
@@ -1453,12 +1463,15 @@ Probe output from the same runs, which is where the queue bound comes from:
   of `close`, so a worker passing through the gate could never finish and a
   `close` waiting for it would deadlock. Workers therefore never touch the gate;
   latching `closed` stops new jobs and the quiesce stops the workers. Anything
-  past the budget is abandoned — aborted **and joined**, because aborting alone
-  proves nothing (the R3-1 lesson) — and settled `failed` with a session-closed
-  reason rather than left `pending` forever in an exiting process.
+  past the budget is aborted **and joined**, because aborting alone proves
+  nothing (the R3-1 lesson). *What happens to the remainder changed at round 3*:
+  it used to be settled `failed` with a session-closed reason; under the
+  durable-intent redesign it settles `intent_durable` — the write survives as a
+  durable intent the next serve applies — and is counted in
+  `write_queue_deferred`, never in `abandoned`.
 * **The daemon's wake is unchanged**: a background write pokes it through the
   same `Notify` the synchronous path uses, via a new `Daemon::waker`.
-* **`lambo_stats` gains fifteen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`; round 2 added `write_queue_probe_serial_items_per_sec`). The five keys added since first landing are the ones that need explaining, and J3-R2-8 was right that the bullet did not explain them: **`write_queue_lane_bound`** is the bound that actually refuses one agent's burst, reported beside the aggregate `write_queue_bound` because the two come from measurements at different widths and a single busy agent meets the lane one first; **`write_queue_bound_source`** says which evidence the bounds rest on (`probe`, `observed`, `unmeasured`), because "measured" alone cannot distinguish a startup estimate from this deployment's own timed writes and the two differ by 4× on ordinary content; **`write_queue_serial_items_per_sec`** is the 1-wide rate the lane bound is projected from, which is the load-bearing number for durability; **`write_queue_probe_serial_items_per_sec`** keeps the probe's figure beside whichever rate is in force, because the *gap* between them is the diagnosis (J3-R2-4); and **`write_queue_dropped_closed`** separates a refused shutdown tail from real backpressure. The difference from the
+* **`lambo_stats` gains seventeen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`; round 2 added `write_queue_probe_serial_items_per_sec`; round 3 added `write_queue_deferred` and `write_queue_replayed`). The keys added since first landing are the ones that need explaining, and J3-R2-8 was right that the bullet did not explain them: **`write_queue_lane_bound`** is the bound that actually refuses one agent's burst, reported beside the aggregate `write_queue_bound` — since round 3 both are static caps (the per-agent fair share and the memory ceiling), not measurements; **`write_queue_bound_source`** says which evidence the *rate telemetry* rests on (`probe`, `observed`, `unmeasured`), because "measured" alone cannot distinguish a startup estimate from this deployment's own timed writes and the two differ by 4× on ordinary content; **`write_queue_serial_items_per_sec`** is the 1-wide rate the lane drains at — telemetry since round 3, never a bound input; **`write_queue_probe_serial_items_per_sec`** keeps the probe's figure beside whichever rate is in force, because the *gap* between them is the diagnosis (J3-R2-4); **`write_queue_dropped_closed`** separates a refused shutdown tail from real backpressure; **`write_queue_deferred`** counts acked writes a clean close handed to the next serve as durable intents (a fourth settle class — neither applied, failed, nor lost); and **`write_queue_replayed`** counts a previous process's intents this session applied at attach, deliberately not summed into `applied` so `outstanding = accepted − applied − failed − deferred` stays exact. The difference from the
   `ledger_*` keys' gating is not an inconsistency: the ledger is an optional
   subsystem, so "off means byte-identical" is a promise that can be kept for it;
   the write queue has no off switch, so there is no baseline payload left to
@@ -1567,6 +1580,17 @@ And one in the new test rig itself, recorded because it cost a 120 s watchdog:
 alive across the left-hand acquire and self-deadlocks.
 
 #### Constants, and where each number comes from
+
+**This table is the round-2 record, kept as history.** The round-3 redesign
+deleted `DRAIN_PROJECTION_SHARE`, `WRITE_QUEUE_MIN`, `WRITE_QUEUE_LANE_MIN`,
+`PROBE_LANE_CEILING` and `PROBE_AGGREGATE_CEILING` (with the argument recorded
+at the site in `src/writeq.rs` that held them), re-derived `PROBE_CLAMP_RPS` as
+a pure telemetry clamp (numerically unchanged), retired `PROBE_BUDGET`'s
+"admission blocks on the probe" role (admission is instant; nothing awaits the
+probe), and added `WRITE_QUEUE_LANE_MAX = WRITE_QUEUE_MAX /
+MAX_CONCURRENT_RECEIPT_WAITS = 64` — the per-agent fair share, a division of
+two structural constants rather than a projection of any rate. See the round-3
+section's constants table for the current derivations.
 
 | Constant | Value | Derived from |
 | --- | --- | --- |
@@ -1768,11 +1792,17 @@ four writes (~250 ms at this rig), admits the measured depth:
 | cold, 512 B | 4 | `probe` | 4 of 200 | 306 ms | 0 | 4 |
 | after 4 completed writes, 512 B | **17** | `observed` | **17 of 200** | 1107 ms | **0** | 21 |
 
-`probe_optimism` on that run is **1.14×** — the probe's 18.65 items/s against the
-observed 16.33 — where the parent's 35-byte leg was 4.0× out. That is fix (a)
-doing its job: the representative leg makes the published rate nearly right for
-this workload, and the ceiling is what makes the guarantee independent of whether
-it is.
+`probe_optimism` on that run read **1.14×** — the probe's 18.65 items/s against
+the observed 16.33 — where the parent's 35-byte leg was 4.0× out.
+**Corrected at round 3 (J3-R3-3): 1.14× did not reproduce.** The round-3
+reviewer read the flip line twice at 512 B and got **1.4308 and 1.4312**, and
+the arithmetic agrees (a 1024 B embed at 60.2 ms against a 512 B whole-`run` at
+~70 ms is 1.43); extrapolated to the top of the declared 700–1500 B band the
+ratio runs **1.9× to 2.7×**, because `PROBE_TEXT_BYTES = 1024` sits in the
+lower half of that band, not its middle. Under the round-2 design that margin
+was load-bearing against the half-budget share; under the round-3 redesign the
+ratio is telemetry — quoted now as a range with its content size, and gating
+nothing.
 
 **Register sweep (per file, including the nulls).** The claim families this
 remediation moved are: the queue bound's width, the probe's provenance, receipt
@@ -1871,6 +1901,216 @@ and the Done-when box's completeness.
 | `scripts/observability/*` | whether any script or its message names a bound, a rate or a probe | **nothing** — `dedup_rate.py`'s J3-R1-11 message names the async ack and the receipt surface, neither of which moved; `verify.sh` stays at 46 ok with `sample/calls.jsonl` still byte-identical |
 | `README.md`, `AGENTS.md`, `docs/**` beyond `mcp.mdx` | `rg` for `write_queue`, `items_per_sec`, `PROBE_`, `WRITE_QUEUE`, `lane_bound` | **nothing** — the queue's surface is still mirrored only in the two `mcp.mdx` files and this phase doc |
 | `dev-diary/lambo-for-mooshik/J-multi-client.md` | the `[~]` box, the constants table, the probe-cost paragraph, the `observed` claim, and the ordering Done-when line | 5 passages rewritten; the box's limit count went 3 → 4 and the completeness claim is now true |
+
+### Round-3 and the durable-intent redesign (adopted) — 2 P1, 1 P2, 3 P3, all closed
+
+`adve-review-mooshik-J3-round3.md` returned REQUEST_CHANGES with all ten round-2
+findings closed at the artifact and **two new P1s the round-2 fix's own shape
+opened**, both measured at the release binary against the live BGE-M3: J3-R3-1
+(an embedder refusal on the hybrid path returned `Ok` with `embedding = NULL`,
+so the observed rate sampled 3 ms non-writes as fast writes — rate inflated
+20–45×, **326 and 361 acked writes abandoned** at a clean close) and J3-R3-2
+(`PROBE_AGGREGATE_CEILING = 16` was derived per-lane and applied across lanes —
+**13 of 16 abandoned from eight concurrent agents up**).
+
+**The remediation is a redesign, commissioned by the operator and specified in
+`J3-durability-redesign.md`.** The diagnosis: every round's P1 was one defect
+through a different door — the durability invariant was **coupled to an
+estimator's correctness**, and the estimator was falsified on a new workload
+axis each round (width, warmth, length, failure shape, concurrency scaling —
+five axes in three rounds; the series does not converge, because an estimator
+is wrong in as many ways as the workload has covariates). The cut:
+**durable post-validation intents.** Five staged commits on `wt/j3`:
+
+1. **`8605f46` — the honesty fix (J3-R3-1's root), standalone because it is
+   correct under either design.** An embedder failure or timeout on the hybrid
+   derive path is now a hard `Err` before anything is written — never
+   applied-with-`NULL`-embedding — closing the located mechanism behind the
+   dogfood store's 92/100 unembedded concepts (the `lambo re-embed` backfill
+   verb remains required for the existing damage; workstream A's migration
+   path). The capability-absent arm stays a degrade (a declared, deterministic,
+   session-uniform configuration, not a per-input surprise) — this reverses the
+   L82-4-era pin "a dead embedder degrades the write, it does not fail it", and
+   the rewritten test records the argument. *Applied ≠ embedded* is first-class:
+   `DeriveOutcome.embedded`, `AppliedSummary.embedded` (`Some` only for hybrid
+   derive, the one kind that can embed), the receipt sentence reads
+   "N created (E embedded)", and the receipt block carries the field. With
+   refusals now `Err`, `spawn_worker`'s `is_ok()` sampling filter finally sees
+   what it always assumed; pinned through the whole shipping path by
+   `an_embedder_refusal_fails_the_write_and_is_never_sampled`, red at the
+   pre-fix hybrid (it settled `Applied("1 created (0 embedded)")` — the exact
+   dishonesty).
+2. **`e7ff6f2` — durable post-validation intents.** On ack, `admit` records the
+   validated job (concepts, interaction id, receipt id, lane seq) as
+   `Mutation::PutWriteIntent` through the ordinary write-behind log, under a
+   graph⊃lanes lock nesting that puts the intent in the log before a worker can
+   see the job. The C-series "session closed, tail durable" final flush carries
+   it unchanged, so **acked ⇒ (applied ∨ durable intent) at a clean close, by
+   construction**. Applying a job consumes its intent **in the same write-lock
+   critical section as the commit** (hybrid: a `CommitHook` at the
+   epoch-checked commit; canonical/action: inline under the same guard) — the
+   flush drain takes that same lock, so apply + consume always travel in one
+   batch, i.e. one store transaction, and a crash can never leave a write
+   durable beside its unconsumed intent: replay is idempotent per receipt id by
+   construction. A clean close defers what it cannot drain (`intent_durable`
+   receipts, `write_queue_deferred`) instead of abandoning it; the next attach
+   replays unconsumed intents strictly sequentially in (`issued_ms`,
+   `lane_seq`) order; consumed rows are retained for `RECEIPT_RETENTION`
+   (const-asserted equal to `types::WRITE_INTENT_RETENTION`) so the original
+   receipt id answers `applied_after_restart`, agent-scoped, in the new
+   process. The crash window is unchanged: a `kill -9` loses unflushed intents
+   exactly as it loses the rest of the tail, and receipts stay honest.
+3. **`9e48dca` — the estimator demoted.** Admission bounds are static and
+   structural: `WRITE_QUEUE_MAX` (1024, the receipt-store memory cap, unchanged)
+   and the new `WRITE_QUEUE_LANE_MAX = WRITE_QUEUE_MAX /
+   MAX_CONCURRENT_RECEIPT_WAITS = 64`, one agent's fair share — a division of
+   two existing structural constants, not a projection of any rate. Deleted
+   with the argument recorded at the site: `DRAIN_PROJECTION_SHARE`,
+   `WRITE_QUEUE_MIN`, `WRITE_QUEUE_LANE_MIN`, `PROBE_LANE_CEILING`,
+   `PROBE_AGGREGATE_CEILING`, `project()`, and `await_calibration` (admission
+   is instant; the first ack no longer waits on the probe). The probe/observed
+   apparatus survives as telemetry only — both rates, the slower-of-two
+   publication, the observed takeover, `probe_optimism`, the flip line — none
+   of it sizing anything.
+4. **`2bba0e9` — the proof obligations at the shipped binary** (below).
+5. **This note.**
+
+**The invariant, demonstrated at the release binary against the live BGE-M3**
+(`evidence/mooshik-j3-durable-intents/`, script committed beside the transcript;
+store counts read back with sqlite3; every durability figure reads the
+**embedding column**, never `applied` counts). Sixteen agents × four derives of
+1024-byte concepts — the multi-agent, in-band-size regime both round-3 P1s
+lived in — closed immediately:
+
+| | acked | clean close | applied w/ embedding | durable intents | lost |
+| --- | --- | --- | --- | --- | --- |
+| **red** (round 3, `ed22476`, same rig) | 365 / 400 / 16 | whole budget | — | — | **326 / 361 / 13 of 16** |
+| **green** (this branch) | 64 | 2.04 s | 1 | 63 | **0** — 64 == 1 + 63, exactly |
+
+The next serve replayed all 63 (`write_queue_replayed: 63`), the original
+receipt ids answered `applied_after_restart`, and the final store held all 64
+concepts **with their vectors** (0 `embedding IS NULL` rows at every readback,
+0 unconsumed intents). The J3-R3-1 refusal probe (a 3000-byte content this
+llama refuses) settled `failed` — "nothing was written" — with no row written.
+
+**The proof obligations, disposed one by one** (`J3-durability-redesign.md`):
+
+1. *Acked ⇒ (applied ∨ durable intent) at a clean close, realistic sizes,
+   multi-agent* — the live run above; at `Memory` level
+   (`an_acked_write_survives_a_clean_close_as_a_durable_intent_and_replays`);
+   at the pipeline in regimes that deliberately outrun the budget
+   (`a_close_that_cannot_drain_defers_acked_writes_as_durable_intents`,
+   `one_agents_burst_never_loses_an_acked_write_at_a_clean_close`,
+   `a_burst_of_concepts_larger_than_the_probes_text_loses_nothing_at_a_clean_close`
+   at 512 B and 8 KiB).
+2. *Replay: kill −9 idempotent, per-lane order, contract enforced, the truth
+   table* — `tests/serve_intent_durability.rs` at the shipped binary:
+   `a_kill_nine_mid_replay_re_replays_idempotently` (exactly-once judged at the
+   embedding column and at Derives reinforcements, for every crash/flush
+   interleaving) and
+   `seeded_intents_replay_in_lane_order_and_answer_applied_after_restart`
+   (order pinned by a create-then-match pair whose receipts would flip under
+   inversion; `forbidden` across agents; replay rides no admission). The
+   embedding contract at replay is enforced by construction — replay runs
+   `hybrid::derive`, whose `ensure_compatible` gate precedes every embed.
+3. *Applied ≠ embedded* — commit 1, and every durability assertion in the new
+   tests reads the store's embedding column.
+4. *The e-process breaker* — **deferred with its seam**, and the argument is
+   recorded at commit 3: the Part-2 math (ACI conformal bounds, the e-process)
+   was specified for an admission that still estimates, and the static bounds
+   dissolved that premise. The seam left ready is the retained probe/observed
+   telemetry pair plus `probe_optimism` — exactly the divergence statistic an
+   e-process would consume — and nothing acts on it today because nothing needs
+   to: no estimate gates durability.
+5. *Intents ride the ledger* — deferred to J4, whose completion-line schema is
+   the vehicle the design names (the same disposition as the declared metric-2
+   regression above); the `write_intents` table itself is queryable meanwhile.
+
+**Open questions from the design doc, decided at the decision sites:**
+
+* **Intent placement**: a new mutation kind in the write-behind log, not a
+  sibling path — it reuses the drain, the final flush, the fencing token and
+  the batch transaction wholesale, and the schema isolation is a table either
+  way (`write_intents` in both SQL adapters; snapshot rows in `MemoryStore`;
+  expired consumed rows are purged inside the consume step, clocked by the
+  mutation's own `consumed_at`, so no adapter grows a clock).
+* **Replay throttling**: sequential background replay, at most one write in
+  flight, deliberately **not** through admission — admission-routed replay
+  would answer `lane_full` to the very calls the restart interrupted, the
+  starvation the design forbids; a replayed intent already paid for admission
+  in the session that acked it. The accepted cost, documented at the site: a
+  fresh write can land before a replayed intent from the same agent —
+  cross-restart interleaving is unordered, the same scope §Ordering already
+  declares for concurrent submissions.
+* **Receipt-store ownership across restart**: the intent record *is* the
+  durable half of the receipt store — unconsumed rows answer `pending`,
+  consumed ones `applied_after_restart`/`failed` for one retention window,
+  and nothing else survives: `restart_lost` remains the honest answer for
+  receipts with no durable record.
+* **Does the proxy need to know?** No — verified, not just believed: intents
+  are holder-internal (the proxy forwards tool responses byte-for-byte, and
+  `src/mcp/proxy.rs` has no J3-round-3 change), and the -32002 wording's
+  "outcome UNKNOWN — recall before re-deriving" remains correct for the case
+  it covers, while receipts whose intent record survived now do better.
+* **Lease interplay** (not in the doc's list, decided in passing): a fenced
+  holder never consumes — its flushes are refused at the token — so a
+  pre-fence durable intent is applied exactly once, by the current holder's
+  replay; the fenced worker's receipt message says so.
+
+**The round-3 findings, one by one:**
+
+| # | Finding | Closed by |
+| --- | --- | --- |
+| **J3-R3-1** (P1) | The observed rate sampled writes that never embedded; 326/361 abandoned | Commit 1 (refusal is an `Err` at the source, so the sampling filter's premise is finally true) + commit 2 (abandonment itself is gone); the estimator half is moot under commit 3 — no rate sizes a bound |
+| **J3-R3-2** (P1) | The aggregate ceiling derived per-lane, applied across lanes; 13/16 abandoned from 8 agents up | **Closed by deletion, with the argument recorded where the ceiling lived**: fairness needs a share, not a projection — `WRITE_QUEUE_LANE_MAX` is per-lane by construction and `WRITE_QUEUE_MAX` is a memory cap, and neither can abandon anything (commit 2) |
+| **J3-R3-3** (P2) | The `probe_optimism` "fell to 1.14×" claim did not reproduce (1.43× measured); 1024 B is the band's lower half, not its middle | Corrected above at the claim, with the reviewer's figures, the agreeing arithmetic, and the 1.9–2.7× band-top extrapolation; the ratio is telemetry now and gates nothing |
+| **J3-R3-4** (P3) | The refusal message attributed the bound to a measured rate in the era a ceiling decided | `DropReason::describe` rewritten: the lane refusal names the per-agent fair share (1/16 of the queue) and the queue refusal names the memory cap — no refusal claims to be "measured on this deployment's embedder" in any era |
+| **J3-R3-5** (P3) | The 22–25 ms misquote fixed at the cited line, surviving at three siblings | All three: the `writeq` module header and `PROBE_CLAMP_RPS` (commit 3, which also updated the clamp's operator-reference figures to the slower-of-two ~18–21 items/s reading), and this file's §J3 opening line (this commit) |
+| **J3-R3-6** (P3) | Limit (4) of the `[~]` box inherited limit (3)'s magnitude, understating its own by up to 256× | The box is rewritten wholesale below — the limits it enumerated were properties of the estimator design, and the rewritten box states the redesign's own limits at their own magnitudes |
+
+**Constants after the redesign** (current; the earlier table is the round-2
+record):
+
+| Constant | Value | Derived from |
+| --- | --- | --- |
+| `WRITE_QUEUE_DRAIN_BUDGET` | 2 s | Unchanged value, demoted role: how long a clean close drains before **deferring** the remainder — a latency price, not a durability deadline. Still carved out of `CLOSE_FLUSH_GRACE` (8 s), still build-guarded |
+| `WRITE_QUEUE_MAX` | 1024 | Unchanged: `MAX_RETAINED_RECEIPTS / 4`, the receipt-store memory cap — the whole-queue bound for every source |
+| `WRITE_QUEUE_LANE_MAX` | 64 | **New**: `WRITE_QUEUE_MAX / MAX_CONCURRENT_RECEIPT_WAITS` — one agent's fair share of the queue, 1/16 by the constant that already declares the multi-caller design point. A fairness rule from two structural constants; being wrong costs a refusal or a deferral, never a loss |
+| `WRITE_QUEUE_MAX_BYTES` | 16 MiB | Unchanged: the byte cap, a count being the wrong unit for memory |
+| `PROBE_CLAMP_RPS` | 1024 | Re-derived as `WRITE_QUEUE_MAX` per second — a telemetry sanitization clamp for fixture-fast readings, numerically unchanged; its guard above `3 × MEASURED_LOCAL_EMBEDDER_RPS` stays |
+| `WRITE_INTENT_RETENTION` | 300 s | **New** (`types::`): how long a consumed intent row survives — the cross-restart receipt window, const-asserted equal to `RECEIPT_RETENTION` because a receipt's answer must not depend on whether a restart intervened |
+| probe/observation constants | unchanged | `PROBE_TEXT`, `PROBE_TEXT_BYTES`, `PROBE_CONCURRENCY`, `PROBE_WARMUP_EMBEDS`, `PROBE_EMBEDS`, `PROBE_BUDGET`, `OBSERVED_MIN_SAMPLES`, `OBSERVED_EWMA_WEIGHT`, `MEASURED_LOCAL_EMBEDDER_RPS` — all telemetry now; nothing awaits the probe and nothing projects its rates |
+| receipt constants | unchanged | `RECEIPT_RETENTION`, `MAX_RETAINED_RECEIPTS`, `MAX_RECEIPT_IDS`, `RECEIPT_WAIT_MAX`, `MAX_CONCURRENT_RECEIPT_WAITS`, `MAX_PIGGYBACK_RECEIPTS` |
+
+**Register sweep, round 3 (per file, including the nulls).** The claim families
+this round moved: what bounds rest on, what a close does with the remainder,
+the receipt truth table, the applied/embedded distinction, and the stats key
+list.
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/writeq.rs` | every stated reason naming a projection, a ceiling, a share, or the close's abandonment; the module doc's §Backpressure; the `Calibration` table | rewritten to the fairness/memory role with the estimator history recorded in place; the deleted constants' arguments recorded at the site that held them; the two J3-R3-5 sibling misquotes corrected |
+| `src/graph/hybrid.rs` | the degrade taxonomy | module doc, `Resolution` doc and `derive`'s doc rewritten: embed failure fails the call; capability absence still degrades; the L82-4 test pin reversed with the argument |
+| `src/mcp/server.rs` | the stats-key comments and the key-list test | bound keys re-annotated as static caps; two keys added; the fifteen-key enumerations grown to seventeen |
+| `src/memory.rs` | `close()`'s quiesce paragraph and the build path | quiesce comment now states the defer semantics; replay spawn and stop documented at their sites |
+| `src/mcp/proxy.rs` | any intent, replay or receipt-state claim | **nothing** — no round-3 change; the -32002 wording remains correct for the record-less case |
+| `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | the receipt-state table, the write-queue key list, the bounds paragraph, the rates paragraph, the dropped paragraph | 5 passages rewritten in each, byte-identical between the mirrors (verified by diffing the two change bodies) |
+| `migrations/sqlite/001_init.sql`, `migrations/cockroach/001_init.sql` | the new table | `write_intents` DDL added to both, with the lifecycle documented at the DDL |
+| `scripts/observability/*` | any bound, rate or receipt-state claim | **nothing** — `verify.sh` stays at 46 ok, `sample/calls.jsonl` byte-identical; the ledger completion-line repair remains handed to J4 |
+| this file | the §J3 opening line, the status header, the close bullet, the keys bullet, the constants table, the round-2 `probe_optimism` claim, the `[~]` Done-when box | all rewritten or annotated; history kept as history with the current truth stated beside it |
+
+**Gates after the five commits (repo-wide, house convention):**
+
+| Gate | Result |
+| --- | --- |
+| `cargo test --all --features fixtures` | **901 / 0 / 3** |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | **991 / 0 / 3** |
+| `cargo test --no-default-features --features store-cockroach` | **563 / 0 / 0** |
+| `scripts/observability/verify.sh` | **46 ok** |
+
+(Baselines at `ed22476`: 898 / 986 / 564 / 46. The −1 in the cockroach and
+lib-side counts is two calibration-bound tests merged into
+`no_rate_can_move_the_bounds`; everything else is additions.)
 
 ## J4 — Lease conflicts leave an artifact
 
@@ -1987,56 +2227,44 @@ Every figure is one rig, not a property of lambo.
       `lambo_stats(receipt=…, wait_ms=…)`, clamped to `RECEIPT_WAIT_MAX` rather than
       refused, and exercised end to end through a **proxy** as well as in-process. A
       timed-out wait answers `pending`, which is honest rather than a failure
-- [~] The queue bound comes from a ceiling measured on the deployment's own embedder, drops
-      are counted in `lambo_stats`, and a burst degrades visibly (J3) — **rebuilt at round 1
-      (J3-R1-1/2), because the first version admitted at a 4-wide rate while one agent's
-      lane drains 1-wide and a clean `close()` abandoned 61 of 80 acked writes; and rebuilt
-      again at round 2 (J3-R2-1), because a rate measured on the probe's own 35-byte text is
-      not a rate for the caller's 512-byte concept, and a clean `close()` abandoned 37 of 68
-      acked writes at the release binary on content the product itself writes.** The probe
-      now takes four legs — a discarded warm-up, one embed timed alone at `PROBE_TEXT`, one
-      timed alone at `PROBE_TEXT_BYTES` (best effort, since an embedder may refuse the
-      larger input, and this rig's does above ~1280 B), then `PROBE_CONCURRENCY` together —
-      and publishes the **slower** of the two serial legs. Admission bounds each lane by the
-      serial rate and all lanes by the concurrent one, both projected against half the drain
-      budget, and while the rate is the probe's **neither bound may exceed
-      `PROBE_LANE_CEILING` / `PROBE_AGGREGATE_CEILING`**: the probe sizes nothing
-      load-bearing, because it measured a workload nobody sent. Admission still *awaits* the
-      probe rather than falling back to a constant, so there is no constant-bounded window;
-      and the probe's figure is retired outright by the lane workers' own service times after
-      `OBSERVED_MIN_SAMPLES` **completed** writes, while staying visible beside them
-      (`write_queue_probe_serial_items_per_sec`, and one INFO line at the flip carrying both
-      numbers and their ratio). Drops are `write_queue_dropped` beside fourteen other keys,
-      with `write_queue_dropped_closed` separating a refused shutdown tail from real
-      backpressure, and each drop says on its own receipt **which** bound refused it.
-      **Tilde, and here are the honest limits — four, and this enumeration is complete as of
-      round 2.** (1) An embedder above `PROBE_CLAMP_RPS` (1024 items/s) is clamped by receipt
-      retention rather than by its own throughput; that is by design, and the two raw rates
-      are still reported, but on such a deployment the bound is not the embedder's ceiling.
-      (2) Nothing measures throughput at more than `PROBE_CONCURRENCY` active lanes, so the
-      aggregate bound assumes throughput does not *fall* as lanes grow past four. (3) **Up
-      to `PROBE_LANE_CEILING` = 4 writes per lane, each slower than a quarter of the drain
-      budget, are abandoned at a clean close** — with receipts that say so. This is round 1's
-      limit (3) widened by a factor of four and stated at its real magnitude: the old wording
-      named *one* write and pointed at `WRITE_QUEUE_LANE_MIN = 1`, and J3-R2-1 was the same
-      character at 35× that, which is exactly the failure mode of an enumeration that
-      presents itself as complete. The residual is now bounded by construction rather than by
-      a rate: four jobs, retired by the four writes that also retire the estimate. (4) **The
-      observed rate is a mean, so a session whose concept sizes vary by more than
-      `DRAIN_PROJECTION_SHARE` can still over-admit for its largest.** `OBSERVED_EWMA_WEIGHT`
-      moves the average most of the way in about four samples, so a session that writes 200-
-      byte concepts and then a 16 KiB one admits the big one against the small ones' rate.
-      Bounded the same way: at most a lane's worth before the average follows.
-      The two limits this box used to carry are still **gone**: a probe failure or a
-      cold-probe reading (a 7× spread on one host, 21.2 to 150.2 items/s, every one of them
-      reported `measured: true`) is no longer a sentence for the session's life, because
-      observation replaces it and `write_queue_bound_source` says which is in force. **The
-      cost of round 2's fix is throughput, and only where the estimate is all there is**: an
-      instantaneous cold burst is admitted 4-deep per lane instead of at the probe's figure
-      (measured: 4 acked of 200 where the parent acked 68 and lost 37 of them), and the same
-      session admits 17 after its first four writes complete — ~250 ms at this rig. None of
-      the four limits is a burst that degrades invisibly, which is what the box is for; all
-      four are reasons not to tick it flat
+- [~] ~~The queue bound comes from a ceiling measured on the deployment's own embedder~~ —
+      **this line's premise was retired at round 3, and the box is re-verified against the
+      redesign's own truth.** Three successive estimator designs each abandoned acked writes
+      at a clean close on a workload axis the estimate had not sampled (61/80 at round 1;
+      37/68 at round 2; 326/361 and 13/16 at round 3, all at the release binary), so the
+      durability invariant no longer rests on any measurement: **acked ⇒ (applied ∨ durable
+      intent) at a clean close, by construction** — an accepted write is a durable intent
+      from admission, a close defers what it cannot drain, and the next serve applies the
+      remainder in order, idempotently per receipt id. Demonstrated at the release binary
+      against the live BGE-M3 (16 agents × 4 × 1024 B: 64 acked == 1 applied-with-embedding
+      + 63 durable intents, exactly; all 63 replayed; final store 64 embedded / 0 NULL / 0
+      unconsumed — `evidence/mooshik-j3-durable-intents/`). Admission survives for fairness
+      and memory only — `WRITE_QUEUE_LANE_MAX` (64, one agent's 1/16 share) and
+      `WRITE_QUEUE_MAX` (1024, the receipt-store cap) — and being wrong there costs a
+      refusal or a deferral, never a loss. Drops are `write_queue_dropped` beside sixteen
+      other keys, with `write_queue_dropped_closed` separating a refused shutdown tail from
+      real backpressure, `write_queue_deferred` counting close-deferred intents and
+      `write_queue_replayed` counting a predecessor's intents applied at attach; each drop
+      says on its own receipt which cap refused it, as what it is (J3-R3-4). The embedder
+      telemetry (probe + observed rates, `probe_optimism`, the flip line) is kept and gates
+      nothing. **Tilde, and here are the honest limits of the redesign — its own, not the
+      estimator's** (J3-R3-6's lesson: state each limit at its own magnitude): (1) **the
+      crash window is unchanged** — a `kill -9` loses unflushed intents exactly as it loses
+      the write-behind tail, up to one flush interval plus the in-flight batch; receipts
+      answer `restart_lost`, honestly, when no durable record survived. (2) **Deferral is
+      not application**: a deferred write lands only when a next serve of that session runs
+      — a session nobody reopens holds its intents indefinitely (they are small and bounded
+      by the queue cap, but "durable" is not "applied"), and its receipt store dies with the
+      process, so the `intent_durable` answer outlives only the retention window of the
+      NEXT process once it consumes. (3) **Cross-restart ordering is per-lane among
+      replayed intents only**: a fresh write submitted after reattach can land before a
+      replayed intent from the same agent (replay deliberately bypasses admission so a
+      backlog cannot starve the fresh session — the same concurrent-submission scope
+      §Ordering declares). (4) **A replay failure consumes the intent as `failed`** rather
+      than retrying on every restart forever — an embedder still refusing that content at
+      replay time settles it, mirroring the in-session worker; the receipt says so, for one
+      retention window. None of the four is a loss on the clean path, which is what this
+      box exists to exclude; all four are reasons not to tick it flat
 - [x] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
       with two agents interleaving through one process, the §13 conflict sentence's `writer`
       is **measured** rather than assumed: J1 made the same-instant collision path

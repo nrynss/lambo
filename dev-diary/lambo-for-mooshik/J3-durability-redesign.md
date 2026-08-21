@@ -1,11 +1,12 @@
 # J3 durability redesign — durable intents, and estimates that carry theorems
 
-**Status: PROPOSAL, not adopted.** Written 2026-08-21 while the workstream is paused at
-J3 round 3 (`wt/j3` @ `ed22476`, REQUEST_CHANGES, 2 P1). Commissioned by the operator
-("we should think of something more durable — maybe apply some new math"). Nothing below
-is built; the design itself is the next artifact to adversarially review when work
-resumes. Where this doc and the eventual implementation disagree, the implementation's
-review decides.
+**Status: ADOPTED AND BUILT** — Part 1 in full, Part 2 deferred with its seam; see
+[§As built](#as-built-2026-08-21--part-1-shipped-part-2-deferred-with-its-seam) at the
+end for the implementation record, the open-question decisions, and the deviations.
+Originally written 2026-08-21 as a proposal while the workstream was paused at J3 round 3
+(`wt/j3` @ `ed22476`, REQUEST_CHANGES, 2 P1), commissioned by the operator ("we should
+think of something more durable — maybe apply some new math"). Where this doc and the
+implementation disagree, the implementation's review decides.
 
 ---
 
@@ -153,3 +154,79 @@ The eventual round-1 reviewer should attack these, not re-attack estimation:
   write applied. Decide which store owns receipts.
 * Does the proxy need to know? (Believed no: intents are holder-internal; the proxy's
   -32002 wording already says "outcome UNKNOWN — recall before re-deriving".)
+
+---
+
+## As built (2026-08-21) — Part 1 shipped, Part 2 deferred with its seam
+
+Implemented on `wt/j3` in five staged commits (`8605f46` the honesty fix, `e7ff6f2`
+durable intents, `9e48dca` the estimator demotion, `2bba0e9` the proof obligations at the
+binary, plus the docs commit carrying this section). The narrative of record — findings
+closed, live-binary numbers, register sweep, gates — is §J3's round-3 section in
+`J-multi-client.md`; this section records only what belongs to the design: the
+open-question decisions, the deviations, and what of Part 2 shipped.
+
+### The open questions, decided
+
+* **Intent placement → a new mutation kind in the write-behind log**
+  (`Mutation::PutWriteIntent` / `Mutation::ConsumeWriteIntent`), not a sibling path. The
+  former reuses the drain, the close-time final flush, the fencing token, and the
+  batch-is-one-transaction property wholesale — and that last one turned out to be the
+  load-bearing half: consumption is appended **inside the same graph-lock critical section
+  as the commit** (a `CommitHook` at hybrid's epoch-checked commit; inline under the guard
+  for canonical/action), and since the flush drain takes that same lock, apply + consume
+  always travel in one store transaction. That is the whole idempotency argument: a crash
+  can never leave a write durable beside its unconsumed intent. Schema isolation was had
+  anyway — a `write_intents` table in both SQL adapters, snapshot rows in `MemoryStore`.
+* **Replay throttling → sequential background replay, at most one write in flight, not
+  through admission.** The doc's "same admission math, applied to replay" was considered
+  and rejected at the site: admission-routed replay pre-fills lanes and answers
+  `lane_full` to the very calls the restart interrupted — precisely the starvation the
+  question worries about. A replayed intent already paid for admission in the session that
+  acked it. Cost accepted and documented: a fresh write can land before a replayed intent
+  from the same agent; cross-restart interleaving is unordered (the concurrent-submission
+  scope §Ordering already declares), while order among replayed intents is exact
+  (`issued_ms`, `lane_seq`).
+* **Receipt-store ownership across restart → the intent record is the receipt store's
+  durable half.** Consumed rows are retained for `types::WRITE_INTENT_RETENTION`
+  (const-asserted equal to `RECEIPT_RETENTION` — one window, or a receipt's answer would
+  depend on whether a restart intervened) and answer `applied_after_restart` / `failed`
+  on the original receipt id, agent-scoped; unconsumed rows answer `pending`. Nothing
+  else survives: `restart_lost` remains the honest answer for receipts with no record.
+* **Does the proxy need to know? → No, verified**: intents are holder-internal,
+  `src/mcp/proxy.rs` has no round-3 change, and -32002's wording stays correct for the
+  record-less case.
+
+### Deviations from this doc, argued
+
+* **The timeout arm fails the write too.** The doc's honesty clause named the embedder
+  *refusal*; the implementation also makes an embed **timeout** an `Err`. Same argument,
+  same mechanism: a per-input surprise that used to become applied-with-`NULL` silently.
+  The capability-absent arm stays a degrade — a declared, session-uniform configuration.
+* **Part 2 is deferred entirely, with its seam** — not for budget but because stage 3
+  dissolved its premise: ACI conformal admission and the e-process breaker were specified
+  for an admission that still estimates, and after the demotion no estimate gates
+  anything. Shipping a theorem to guard a telemetry key would be math for its own sake.
+  The seam left ready: the probe/observed rate pair survives, `probe_optimism` is exactly
+  the divergence statistic an e-process would consume, and the flip line publishes it. If
+  a future workstream re-couples admission to a measurement, Part 2 is the pre-approved
+  math and this seam is where it plugs in. ("Know" items likewise: Kaplan–Meier's
+  censoring lesson is already structural — unsettled receipts never expire — and Freedman
+  / t-digest have no consumer.)
+* **Proof obligation 4 (the e-process firing on a constructed lie)** falls with Part 2,
+  by the same argument.
+* **Proof obligation 5 (intents ride the ledger)** is deferred to J4, whose
+  completion-line schema is the vehicle this doc itself names — the same disposition as
+  §J3's declared metric-2 regression, and for the same one-append-path reason. The
+  `write_intents` table is queryable in the meantime.
+* **One prediction of this doc corrected**: "receipts gain one honest state" — they
+  gained two. `applied_after_restart` as designed, and `intent_durable`, because the
+  closing process itself must answer honestly about a write it is deferring; settling it
+  `failed` (the old behaviour) became the lie once the write stopped being lost.
+
+### The invariant at the binary, in one line
+
+Live BGE-M3, release binary, 16 agents × 4 × 1024 B, immediate close: **64 acked == 1
+applied-with-embedding + 63 durable intents; replay applies all 63; final store 64
+embedded / 0 NULL / 0 unconsumed** (`evidence/mooshik-j3-durable-intents/`). The red
+baseline it replaces: 326/361 and 13/16 acked writes abandoned (round 3, `ed22476`).
