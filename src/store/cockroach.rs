@@ -113,8 +113,9 @@ use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, tables_in_ddl, unprovisioned_store_err, validate_vector_candidate_limit,
-    Capabilities, GraphStore, SessionFlushStats, StoreConfig,
+    columns_in_ddl, map_write_err, tables_in_ddl, unprovisioned_column_err,
+    unprovisioned_store_err, validate_vector_candidate_limit, Capabilities, GraphStore,
+    SessionFlushStats, StoreConfig,
 };
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
@@ -1969,11 +1970,15 @@ impl GraphStore for CockroachStore {
         Ok(())
     }
 
-    /// J3 F5. One `information_schema.tables` read in the connection's current
-    /// schema, diffed against the table names in the DDL this build ships.
-    /// Cockroach is provisioned by `scripts/provision.sh`, not by `init_schema`
-    /// on the attach path, so the same upgrade-without-reprovision hazard
-    /// applies — and here every failed statement is also a round trip.
+    /// J3 F5 + J3-R2R-3. An `information_schema.tables` read in the
+    /// connection's current schema, diffed against the table names in the DDL
+    /// this build ships, then an `information_schema.columns` read per required
+    /// table, diffed against the column set the same DDL declares. Cockroach is
+    /// provisioned by `scripts/provision.sh`, not by `init_schema` on the attach
+    /// path, so the same upgrade-without-reprovision hazard applies — and here
+    /// every failed statement is also a round trip. The column half is the
+    /// Cockroach-dialect side of J3-R2R-3 (source-correct here; live-cluster
+    /// verification is the named follow-up the brief records).
     async fn preflight_schema(&self) -> Result<(), StoreError> {
         let pool = self.pool().await?;
         let present: Vec<String> = sqlx::query_scalar(
@@ -1984,15 +1989,36 @@ impl GraphStore for CockroachStore {
         .await
         .map_err(backend)?;
         let required = tables_in_ddl(INIT_SQL);
-        let missing: Vec<&str> = required
+        let missing_tables: Vec<&str> = required
             .into_iter()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(unprovisioned_store_err("cockroach", &missing))
+        if !missing_tables.is_empty() {
+            return Err(unprovisioned_store_err("cockroach", &missing_tables));
         }
+        let mut by_table: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for (table, col) in columns_in_ddl(INIT_SQL) {
+            by_table.entry(table).or_default().push(col);
+        }
+        for (table, cols) in by_table {
+            let present_cols: Vec<String> = sqlx::query_scalar(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = current_schema() AND table_name = $1",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .map_err(backend)?;
+            let missing: Vec<&str> = cols
+                .iter()
+                .copied()
+                .filter(|c| !present_cols.iter().any(|p| p == c))
+                .collect();
+            if !missing.is_empty() {
+                return Err(unprovisioned_column_err("cockroach", table, &missing));
+            }
+        }
+        Ok(())
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -3712,6 +3738,49 @@ mod conformance {
             "adding the beam-size option dropped the STORE-2 statement_timeout \
              — options() must append, not replace"
         );
+    }
+
+    /// **J3-R2R-3, live.** The Cockroach dialect half of the column preflight:
+    /// on a real cluster, `init_schema`, a passing preflight, then a required
+    /// column temporarily renamed away (the older-build shape) refusing by
+    /// table and column name through the `information_schema.columns` path, and
+    /// the rename reverted so the shared cluster is left exactly as found.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn column_preflight_refuses_a_missing_column_live() {
+        let Some(dsn) = dsn_or_skip("column_preflight_refuses_a_missing_column_live") else {
+            return;
+        };
+        let store = new_store(&dsn);
+        store
+            .init_schema()
+            .await
+            .expect("init_schema on live cluster");
+        store
+            .preflight_schema()
+            .await
+            .expect("a provisioned live cluster must pass the column preflight");
+        let pool = store.pool().await.expect("pool");
+        sqlx::query("ALTER TABLE concepts RENAME COLUMN chunk_group_id TO chunk_group_id_x")
+            .execute(pool)
+            .await
+            .expect("rename a required column away (older-build shape)");
+        let err = store
+            .preflight_schema()
+            .await
+            .expect_err("a live cluster missing a required column must not pass")
+            .to_string();
+        assert!(err.contains("concepts"), "names the table: {err}");
+        assert!(err.contains("chunk_group_id"), "names the column: {err}");
+        assert!(err.contains("lambo provision"), "actionable: {err}");
+        sqlx::query("ALTER TABLE concepts RENAME COLUMN chunk_group_id_x TO chunk_group_id")
+            .execute(pool)
+            .await
+            .expect("rename the column back — the shared cluster is left as found");
+        store
+            .preflight_schema()
+            .await
+            .expect("passes again after the rename is reverted");
     }
 
     fn embed(seed: f32) -> Vec<f32> {

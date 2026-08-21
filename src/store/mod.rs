@@ -112,6 +112,104 @@ pub fn tables_in_ddl(ddl: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Every `(table, column)` pair the embedded DDL requires, in DDL order.
+///
+/// Like [`tables_in_ddl`], derived from the migration text an adapter already
+/// `include_str!`s, so the *column* preflight (J3-R2R-3 — the half of F5 the
+/// table check cannot see) cannot drift behind a future schema change either.
+/// Preflight that guesses is worse than one whose coverage is stated, so the
+/// parser matches the project's two DDL idioms only:
+///
+/// * a `CREATE TABLE IF NOT EXISTS <name> ( … )` block — a non-column line
+///   inside it (a table-level `PRIMARY KEY`/`UNIQUE`/`CONSTRAINT`/`FOREIGN`/
+///   `CHECK`/`INDEX` clause, or a `--` comment) is skipped by its first token;
+/// * an `ALTER TABLE <t> ADD COLUMN [IF NOT EXISTS] <col> <type>` statement —
+///   Cockroach's post-provision convergence path, which the
+///   `ensure_column`/`ADD COLUMN` idiom feeds.
+///
+/// A statement written any other way — a `CREATE VECTOR INDEX`, a
+/// `::STRING` cast, a `DROP CONSTRAINT` — is deliberately not matched. This is
+/// the same stated-coverage limit as [`tables_in_ddl`].
+pub fn columns_in_ddl(ddl: &str) -> Vec<(&str, &str)> {
+    const TABLE_NEEDLE: &str = "CREATE TABLE IF NOT EXISTS ";
+    const ADD_COLUMN_NEEDLE: &str = "ADD COLUMN";
+    // First token that marks a *table-level* clause, not a column. `--` is a
+    // comment; `INDEX` is Cockroach's inline table-level index clause.
+    const SKIP_FIRST: [&str; 7] = [
+        "--",
+        "CONSTRAINT",
+        "PRIMARY",
+        "UNIQUE",
+        "FOREIGN",
+        "CHECK",
+        "INDEX",
+    ];
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    let mut in_table: Option<&str> = None;
+    for line in ddl.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(TABLE_NEEDLE) {
+            let table = rest
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("");
+            in_table = Some(table);
+            continue;
+        }
+        if let Some(table) = in_table {
+            if trimmed.starts_with(')') || trimmed == ");" {
+                in_table = None;
+                continue;
+            }
+            let first = trimmed.split_whitespace().next().unwrap_or("");
+            if !SKIP_FIRST.contains(&first) {
+                out.push((table, first));
+            }
+            continue;
+        }
+        if let Some(idx) = trimmed.find(ADD_COLUMN_NEEDLE) {
+            let after = trimmed[idx + ADD_COLUMN_NEEDLE.len()..].trim();
+            let after = after.strip_prefix("IF NOT EXISTS").unwrap_or(after).trim();
+            let col = after
+                .split(|c: char| c.is_whitespace() || c == ';')
+                .next()
+                .unwrap_or("");
+            if !col.is_empty() {
+                if let Some(table) = trimmed
+                    .strip_prefix("ALTER TABLE ")
+                    .and_then(|t| t.split_whitespace().next())
+                {
+                    out.push((table, col));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The column-shaped sibling of [`unprovisioned_store_err`] (J3-R2R-3): a store
+/// whose **table** is present but a **column** is missing. Same refusal channel,
+/// same actionable `lambo provision` sentence — a missing column converges on
+/// the provision path (`ensure_column` / `ADD COLUMN IF NOT EXISTS`).
+pub fn unprovisioned_column_err(kind: &str, table: &str, missing: &[&str]) -> StoreError {
+    StoreError::Capability(format!(
+        "{kind} store's table {table} is missing {} the current build requires ({}) — its \
+         schema was provisioned by an older lambo and never migrated. Nothing would become \
+         durable: a write's mutations and its durable intent share one flush transaction, so \
+         one missing column rolls every batch back whole and the failure surfaces only at \
+         close. Run `lambo provision` (idempotent) against this store, then retry",
+        if missing.len() == 1 {
+            "a column"
+        } else {
+            "columns"
+        },
+        missing.join(", "),
+    ))
+}
+
 /// The refusal [`GraphStore::preflight_schema`] returns, shared by both SQL
 /// adapters so the operator reads one sentence whichever store they run.
 pub fn unprovisioned_store_err(kind: &str, missing: &[&str]) -> StoreError {

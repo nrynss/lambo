@@ -245,8 +245,9 @@ use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, tables_in_ddl, unprovisioned_store_err, validate_vector_candidate_limit,
-    Capabilities, GraphStore, SessionFlushStats,
+    columns_in_ddl, map_write_err, tables_in_ddl, unprovisioned_column_err,
+    unprovisioned_store_err, validate_vector_candidate_limit, Capabilities, GraphStore,
+    SessionFlushStats,
 };
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
@@ -700,9 +701,14 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
-    /// J3 F5. One `sqlite_master` read, diffed against the table names in the
-    /// DDL this build ships. Cheap (one statement, no DDL, no write) and run
-    /// before the lease is taken, so a refusal leaves no lease to release.
+    /// J3 F5 + J3-R2R-3. A `sqlite_master` read, diffed against the **table**
+    /// names in the DDL this build ships, then a `pragma_table_info` read per
+    /// required table, diffed against the **column** set the same DDL declares.
+    /// Cheap (no DDL, no write) and run before the lease is taken, so a refusal
+    /// leaves no lease to release. The column half matters because a missing
+    /// *column* is F5's exact consequence — attaches, acks, and loses
+    /// everything, loud only at close — and the table check cannot see it
+    /// (J3-R2R-3 measured it at the same magnitude as a missing table).
     async fn preflight_schema(&self) -> Result<(), StoreError> {
         let present: Vec<String> =
             sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -710,15 +716,36 @@ impl GraphStore for SqliteStore {
                 .await
                 .map_err(|e| db_err("preflight_schema: list tables", e))?;
         let required = tables_in_ddl(INIT_SQL);
-        let missing: Vec<&str> = required
+        let missing_tables: Vec<&str> = required
             .into_iter()
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
-        if missing.is_empty() {
-            Ok(())
-        } else {
-            Err(unprovisioned_store_err("sqlite", &missing))
+        if !missing_tables.is_empty() {
+            return Err(unprovisioned_store_err("sqlite", &missing_tables));
         }
+        // Column preflight (J3-R2R-3): every required (table, column) from the
+        // same DDL source, diffed per table against `pragma_table_info`.
+        let mut by_table: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for (table, col) in columns_in_ddl(INIT_SQL) {
+            by_table.entry(table).or_default().push(col);
+        }
+        for (table, cols) in by_table {
+            let present_cols: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                    .bind(table)
+                    .fetch_all(self.pool())
+                    .await
+                    .map_err(|e| db_err("preflight_schema: list columns", e))?;
+            let missing: Vec<&str> = cols
+                .iter()
+                .copied()
+                .filter(|c| !present_cols.iter().any(|p| p == c))
+                .collect();
+            if !missing.is_empty() {
+                return Err(unprovisioned_column_err("sqlite", table, &missing));
+            }
+        }
+        Ok(())
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -2793,6 +2820,56 @@ mod tests {
             .to_string();
         assert!(err.contains("write_intents"), "{err}");
         assert!(err.contains("lambo provision"), "{err}");
+    }
+
+    /// J3-R2R-3, at the adapter: F5's uncovered half. A store whose *tables*
+    /// are all present but one *column* is missing — the exact shape round 2
+    /// measured attaching, acking and losing everything, loud only at close —
+    /// must now be refused by the preflight, by table and column name.
+    #[tokio::test]
+    async fn preflight_schema_refuses_a_missing_column() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        store
+            .preflight_schema()
+            .await
+            .expect("a provisioned store must pass the column preflight");
+        // Render `concepts.chunk_group_id` absent under the required name the
+        // way an older build's store would have it. RENAME is the clean
+        // analogue of round-2's measured "one column missing" — all ten tables
+        // present, one column gone under the name the DDL requires.
+        sqlx::query("ALTER TABLE concepts RENAME COLUMN chunk_group_id TO chunk_group_id_old")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let err = store
+            .preflight_schema()
+            .await
+            .expect_err("a store missing a column the build requires must not pass")
+            .to_string();
+        assert!(err.contains("concepts"), "names the table: {err}");
+        assert!(err.contains("chunk_group_id"), "names the column: {err}");
+        assert!(err.contains("lambo provision"), "actionable: {err}");
+    }
+
+    #[test]
+    fn columns_in_ddl_parses_the_shipped_migration() {
+        // The parser and the shipped DDL must agree, or the column preflight
+        // silently checks nothing. Assert a column from each idiom: an inline
+        // post-T3.1 column, a plain column, and that table-level constraints
+        // (PRIMARY KEY / UNIQUE) are never read as columns.
+        let cols = super::columns_in_ddl(INIT_SQL);
+        assert!(
+            cols.contains(&("concepts", "chunk_group_id")),
+            "the J3-R2R-3 missing-column case must be in the parsed set"
+        );
+        assert!(cols.contains(&("concepts", "embedding")));
+        assert!(cols.contains(&("sessions", "embedding_kind")));
+        assert!(cols.contains(&("write_intents", "outcome_summary")));
+        // The parse must not manufacture a column out of a table-level clause.
+        assert!(!cols.contains(&("edges", "UNIQUE")));
+        assert!(!cols.contains(&("synonyms", "PRIMARY")));
+        assert!(!cols.contains(&("write_intents", "PRIMARY")));
     }
 
     #[tokio::test]
