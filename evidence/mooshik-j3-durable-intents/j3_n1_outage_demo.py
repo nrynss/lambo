@@ -13,8 +13,11 @@ Three sessions, one store:
    at a closed port (127.0.0.1:9, `discard`), which is what a down or restarting
    llama-server looks like to the client: a connection refusal, i.e.
    `EmbedError::Unavailable`. The backlog must be **untouched** — every intent
-   still unconsumed, `write_queue_replayed` 0, `write_queue_replay_owed` equal to
-   the backlog, and every affected receipt `pending_replay`, never `failed`.
+   still unconsumed, `write_queue_replayed` 0, `write_queue_replay_owed` equal
+   to the backlog, and every acked receipt, queried as a whole (not one
+   sampled id — J3-R2R-9), partitions exactly into `pending_replay` (the
+   deferred backlog) and `applied_after_restart` (the ones session 1 drained
+   in-session), with `failed` never present.
    Before the fix this session settled all of them `failed` with nothing written.
 3. **Attach healthy.** The embedder is back. Every intent the outage would have
    destroyed is applied, **with its embedding** (durability is judged at the
@@ -160,24 +163,37 @@ s = Serve(cfg_dead)
 # ~2 ms per intent to burn the whole backlog.
 time.sleep(5)
 st = s.call("lambo_stats", {"agent_id": "agent-0"})["structuredContent"]
-sample_agent, sample_i = next(iter(receipts))
-sample = s.call("lambo_stats", {"agent_id": sample_agent,
-                                "receipt": receipts[(sample_agent, sample_i)]})
-sample_state = sample["structuredContent"]["receipt"]["state"]
-s.sigterm_wait()
-c2 = counts()
-print(f"session 2 (embedder at {DEAD}): replayed={st.get('write_queue_replayed')} "
-      f"replay_owed={st.get('write_queue_replay_owed')} "
-      f"sampled_receipt={sample_state}")
-print(f"  store: unconsumed={c2['unconsumed']} failed_rows={c2['failed']} "
-      f"embedded={c2['embedded']}")
+# J3-R2R-9: the old driver sampled `next(iter(receipts))` — the FIRST write of
+# session 1, the one likeliest to have drained in-session, which a later
+# process answers `applied_after_restart` rather than `pending_replay`. That
+# made the check order-dependent (it failed or passed on a timing accident).
+# Assert over EVERY receipt, partitioned by the obtained state, which is
+# deterministic: the acked set must partition exactly into `pending_replay`
+# (the deferred backlog, still owed — count == store `unconsumed`) and
+# `applied_after_restart` (the ones session 1 drained in-session), with
+# `failed` never present.
+states = {}
+for (agent, i), receipt in receipts.items():
+    sample = s.call("lambo_stats", {"agent_id": agent, "receipt": receipt})
+    state = sample["structuredContent"]["receipt"]["state"]
+    states[state] = states.get(state, 0) + 1
+drained_in_session = acked - backlog
 outage_ok = (
     c2["unconsumed"] == backlog
     and c2["failed"] == 0
     and st.get("write_queue_replayed") == 0
     and st.get("write_queue_replay_owed") == backlog
-    and sample_state == "pending_replay"
+    and states.get("pending_replay", 0) == backlog
+    and states.get("applied_after_restart", 0) == drained_in_session
+    and states.get("failed", 0) == 0
 )
+print(f"session 2 (embedder at {DEAD}): replayed={st.get('write_queue_replayed')} "
+      f"replay_owed={st.get('write_queue_replay_owed')} "
+      f"receipts={{pending_replay={states.get('pending_replay', 0)}, "
+      f"applied_after_restart={states.get('applied_after_restart', 0)}, "
+      f"failed={states.get('failed', 0)}}}")
+print(f"  store: unconsumed={c2['unconsumed']} failed_rows={c2['failed']} "
+      f"embedded={c2['embedded']}")
 print(f"  N1: the outage consumed NOTHING and the debt is visible -> {outage_ok}")
 
 # ---- Session 3: the embedder is back ------------------------------------
@@ -189,14 +205,20 @@ while True:
         break
     assert time.time() < deadline, f"replay wedged after the outage: {st3}"
     time.sleep(0.5)
-sample3 = s.call("lambo_stats", {"agent_id": sample_agent,
-                                 "receipt": receipts[(sample_agent, sample_i)]})
-sample3_state = sample3["structuredContent"]["receipt"]["state"]
+# J3-R2R-9 (same order-independence as session 2): after the replay, every
+# acked receipt must answer `applied_after_restart` — the drained-in-session
+# ones and the replayed-backlog ones alike.
+states3 = {}
+for (agent, i), receipt in receipts.items():
+    sample3 = s.call("lambo_stats", {"agent_id": agent, "receipt": receipt})
+    state3 = sample3["structuredContent"]["receipt"]["state"]
+    states3[state3] = states3.get(state3, 0) + 1
 s.sigterm_wait()
 c3 = counts()
 print(f"session 3 (live embedder again): replayed={st3['write_queue_replayed']} "
       f"replay_owed={st3.get('write_queue_replay_owed')} "
-      f"sampled_receipt={sample3_state}")
+      f"receipts={{applied_after_restart={states3.get('applied_after_restart', 0)}, "
+      f"other={dict((k, v) for k, v in states3.items() if k != 'applied_after_restart')}}}")
 print(f"  store: embedded={c3['embedded']} NULL_rows={c3['null_rows']} "
       f"unconsumed={c3['unconsumed']} applied_after_restart={c3['after_restart']}")
 recovered_ok = (
@@ -204,7 +226,7 @@ recovered_ok = (
     and c3["unconsumed"] == 0
     and c3["null_rows"] == 0
     and c3["after_restart"] == backlog
-    and sample3_state == "applied_after_restart"
+    and states3.get("applied_after_restart", 0) == acked
 )
 print(f"  every write the outage would have destroyed is applied WITH its "
       f"embedding -> {recovered_ok}")
