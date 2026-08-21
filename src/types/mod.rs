@@ -539,9 +539,27 @@ pub struct WriteIntent {
 /// purge it — the cross-restart receipt window: a consumed intent is the only
 /// durable carrier of "your write applied after a restart", so it lives as
 /// long as an in-RAM receipt would ([`crate::writeq::RECEIPT_RETENTION`] is
-/// const-asserted equal to this). Purging happens inside the adapters' consume
-/// step, clocked by the mutation's own `consumed_at`, and expired rows are
-/// skipped at load.
+/// const-asserted equal to this).
+///
+/// **Two mechanisms, stated precisely (J3 round-1 F2 corrected the second).**
+///
+/// * *Purging the row* is **lazy**: it happens inside the adapters' consume
+///   step, clocked by that mutation's own `consumed_at`, so no adapter needs a
+///   clock. A session that goes quiet after a burst therefore **keeps** its
+///   consumed rows — there is no sweeper — until its next consume. They are
+///   small and bounded by the queue cap; nothing reads them.
+/// * *Answering from the row* is bounded: the replay's seeding step skips a
+///   consumed row older than this window, so it answers `restart_lost` rather
+///   than `applied_after_restart`. Without that skip a stale row answered
+///   **better** for having survived a restart than the same id would have in a
+///   process that never restarted (`expired`) — the exact asymmetry the equality
+///   assert above exists to forbid, pointing the other way.
+///
+/// This docstring used to end "and expired rows are skipped at load". No such
+/// filter existed in either adapter: both load with an unfiltered
+/// `SELECT … WHERE session_id = ? ORDER BY issued_ms, lane_seq`, and nothing
+/// between there and the replay filtered by age. The skip is real now, and it is
+/// at the replay, not at the load.
 pub const WRITE_INTENT_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// What became of a consumed [`WriteIntent`].

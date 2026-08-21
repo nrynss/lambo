@@ -114,11 +114,17 @@
 //! no new class enters the ledger's `accepted`. The queue mirrors that
 //! discipline deliberately — a queue-full or byte-cap reject never enters
 //! [`WriteQueueCounters::accepted`], so
-//! `outstanding = accepted − applied − failed` is one expression serving both
-//! the live gauge and the shutdown count, and cannot drift between them.
-//! `abandoned` is a **label on a subset of `failed`**, not a fourth term: an
-//! abandoned job is settled `failed`, and counting it twice is exactly the
-//! mistake `adve-review-mooshik-I-round3.md`'s flip D maps.
+//! `outstanding = accepted − applied − failed − deferred` is one expression
+//! serving both the live gauge and the shutdown count, and cannot drift between
+//! them. `abandoned` is a **label on a subset of `failed`**, not a fourth term:
+//! an abandoned job is settled `failed`, and counting it twice is exactly the
+//! mistake `adve-review-mooshik-I-round3.md`'s flip D maps. `deferred` **is** a
+//! term — a close-deferred job settled `intent_durable` left this process's
+//! custody without being applied or failed — and this line omitted it (J3
+//! round-1 N5). The drift was inside the section whose whole thesis is that
+//! there must be **one** expression, which is the reminder that a thesis does
+//! not enforce itself: [`WriteQueueCounters::outstanding`] is the authority and
+//! this sentence is a copy of it.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -229,8 +235,12 @@ const _: () = assert!(
      share rounds to zero, which is an outage, not fairness",
 );
 
-/// Upper clamp on the measured bound — and **derived from receipt retention,
+/// The queue's aggregate admission bound — **derived from receipt retention,
 /// not from throughput.**
+///
+/// (J3 round-1 N3: this headline read "Upper clamp on the measured bound" for a
+/// bound that stopped being measured and started *being* the bound at the
+/// estimator demotion. There is nothing left for it to clamp.)
 ///
 /// Every outstanding job holds a `Pending` receipt, and receipt eviction is
 /// oldest-first, so a queue deeper than [`MAX_RETAINED_RECEIPTS`] could evict
@@ -284,7 +294,17 @@ const _: () = assert!(
 /// round 2 that key publishes the **slower of two probe sizes** (35 B and
 /// 1 KiB), so ~18 to 21 items/s is the ordinary reading on this rig, not the
 /// 40–45 the short text alone used to show.
-pub const PROBE_CLAMP_RPS: u64 = WRITE_QUEUE_MAX as u64;
+/// **Stated on its own terms since J3 round-1 N4.** This used to read
+/// `WRITE_QUEUE_MAX as u64`, which tied a telemetry ceiling to an admission cap
+/// for no reason — and, through the build assert below, made the admission cap
+/// answerable to a *measured embedder rate*: `PROBE_CLAMP_RPS > 3 ×
+/// MEASURED_LOCAL_EMBEDDER_RPS` implied `WRITE_QUEUE_MAX ≥ 424` and therefore
+/// `MAX_RETAINED_RECEIPTS ≥ 1696`, so both surviving bounds were structural in
+/// kind and measured in magnitude, at build time, by the estimator this branch
+/// deleted. The value is unchanged (1024, so no reading moves); what changed is
+/// that nothing about admission now depends on a number this rig's llama.cpp
+/// produced, and the assert below guards telemetry alone.
+pub const PROBE_CLAMP_RPS: u64 = 1_024;
 
 /// The fastest embedder throughput measured on this rig, in items/second, at
 /// [`PROBE_CONCURRENCY`]: a live llama.cpp BGE-M3 q8_0 on CPU, probed through
@@ -304,16 +324,24 @@ pub const MEASURED_LOCAL_EMBEDDER_RPS: u64 = 141;
 /// Build-time invariant: the clamp must sit well clear of a real embedder.
 ///
 /// This is the guard the first version of these constants failed. A clamp
-/// derived at 128 items/s sat *below* the 141 measured here, which would have
-/// made "a ceiling measured on the deployment's own embedder" decorative on an
-/// ordinary local setup — the bound would have come from the clamp every time.
-/// Three times the measured rate is the margin; if a future edit shrinks
-/// `MAX_RETAINED_RECEIPTS` far enough to violate it, the build says so instead
-/// of the property quietly disappearing.
+/// derived at 128 items/s sat *below* the 141 measured here, so it would have
+/// clipped an ordinary local embedder's own reading. Three times the measured
+/// rate is the margin.
+///
+/// **What this guard is about, restated (J3 round-1 N4).** It used to say that
+/// violating it would make "the queue bound stop being a per-deployment
+/// measurement and become a constant" — which is now the *intended* state, and
+/// which is how a live build assertion came to be the thing sizing both
+/// surviving bounds. Since [`PROBE_CLAMP_RPS`] no longer derives from
+/// [`WRITE_QUEUE_MAX`], this constrains nothing but telemetry hygiene: it keeps
+/// the sanitizer clear of any rate a real embedder can produce, so a clamped
+/// reading always means "this measurement is not real" and never "this embedder
+/// is fast".
 const _: () = assert!(
     PROBE_CLAMP_RPS > 3 * MEASURED_LOCAL_EMBEDDER_RPS,
     "PROBE_CLAMP_RPS must stay well above the throughput a real local embedder measures, or the \
-     queue bound stops being a per-deployment measurement and becomes a constant",
+     sanitizer would clip a genuine reading and the rate telemetry would report a number no \
+     deployment produced. It bounds no admission decision: the bounds are static",
 );
 
 /// Second admission condition: total queued payload bytes.
@@ -332,9 +360,12 @@ pub const WRITE_QUEUE_MAX_BYTES: usize = MAX_CONTENT_BYTES * 1024;
 ///
 /// Four, because the phase doc's parallelism figure is a 4-wide one (4 recalls:
 /// 380 ms sequential against 64 ms concurrent). The probe re-measures the rate
-/// per deployment; the 4 fixes only how wide that leg is taken. It sizes the
-/// *aggregate* bound only — the per-lane bound comes from the serial leg, since
-/// a lane has one consumer (J3-R1-1).
+/// per deployment; the 4 fixes only how wide that leg is taken. It sizes
+/// **nothing** — it is the width of a telemetry reading, and the pairing that
+/// matters is that the concurrent leg is reported beside the serial one so the
+/// two widths are comparable (J3 round-1 N3: this said "It sizes the *aggregate*
+/// bound only — the per-lane bound comes from the serial leg", which was true of
+/// the deleted estimator and is true of nothing now).
 pub const PROBE_CONCURRENCY: usize = 4;
 
 /// Embeds the probe throws away before it starts timing.
@@ -368,16 +399,22 @@ pub const PROBE_EMBEDS: usize = PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY;
 /// serial service time, and it covers the whole of [`WriteCtx::run`] rather
 /// than the embed alone. Once it takes over, a cold probe stops being a
 /// sentence the whole session has to live with — including a probe that failed
-/// outright and floored the bound.
+/// outright and left the session with no rate telemetry at all (J3 round-1 N3:
+/// "and floored the bound" named `WRITE_QUEUE_MIN`, which this branch deleted;
+/// a failed probe now costs `write_queue_measured: false` and nothing else).
 pub const OBSERVED_MIN_SAMPLES: u64 = PROBE_CONCURRENCY as u64;
 
 /// EWMA weight for observed service time, as a divisor: the new sample gets
 /// `1 / OBSERVED_EWMA_WEIGHT`.
 ///
 /// [`PROBE_CONCURRENCY`] again, so the average moves most of the way in about
-/// one probe's width of samples. A weight of 1 would make the bound track a
-/// single slow write and oscillate; a much larger one would keep a warm figure
-/// long after the embedder degraded, which is the J3-R1-3 scenario.
+/// one probe's width of samples. A weight of 1 would make the published **rate**
+/// track a single slow write and oscillate; a much larger one would keep a warm
+/// figure long after the embedder degraded, which is the J3-R1-3 scenario. Both
+/// are now telemetry faults rather than admission faults (J3 round-1 N3: this
+/// said "would make the bound track a single slow write"), and the reason to
+/// smooth is unchanged: an operator diagnosing a slow embedder needs a number
+/// that means something, and a 1-weight rate means only "the last write".
 pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 
 /// Bound on the calibration probe — **all [`PROBE_EMBEDS`] of its embeds
@@ -556,21 +593,34 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 /// `record_action`'s three resource lists and `derive`'s `parent_of` fan-out
 /// can both push `created` past 64 on their own.
 ///
-/// The corrected figure does **not** move the constant, and that is worth
-/// stating rather than hiding: 4096 is driven by
-/// `PROBE_CLAMP_RPS > 3 × MEASURED_LOCAL_EMBEDDER_RPS`, which needs
-/// `WRITE_QUEUE_MAX ≥ 424` and therefore `MAX_RETAINED_RECEIPTS ≥ 1696`. The
-/// memory budget is the sanity check on that, not its source, and 31 MiB of
-/// worst-case receipts against a process that holds an entire session graph in
-/// RAM is a cost worth naming and paying. The time bound alone could not do
-/// this job either — [`RECEIPT_RETENTION`] against `serve`'s own sustained abuse
-/// bound ([`crate::mcp::DEFAULT_RATE_LIMIT_RPS`], 50/s) is 15 000 receipts.
+/// The corrected figure does **not** move the constant, and **the memory budget
+/// is now the reason, not the sanity check** (J3 round-1 N4). What this
+/// paragraph used to say was: "4096 is driven by `PROBE_CLAMP_RPS > 3 ×
+/// MEASURED_LOCAL_EMBEDDER_RPS`, which needs `WRITE_QUEUE_MAX ≥ 424` and
+/// therefore `MAX_RETAINED_RECEIPTS ≥ 1696`. The memory budget is the sanity
+/// check on that, not its source." That inequality was a **live build
+/// assertion** against a measured llama.cpp rate, so the estimator this branch
+/// deleted was still sizing both surviving bounds at compile time — structural
+/// in kind, measured in magnitude — and a future edit shrinking the receipt cap
+/// for memory reasons would have failed the build citing a rationale the branch
+/// declares retired. [`PROBE_CLAMP_RPS`] no longer derives from
+/// [`WRITE_QUEUE_MAX`], so that chain is cut and the derivation stands on its
+/// own two feet:
 ///
-/// **[`WRITE_QUEUE_MAX`] is defined from this**, so raising or lowering it
-/// moves the queue's clamp with it. 4096 rather than the 1024 this started at,
-/// because at 1024 the derived clamp bound sat *below* the throughput measured
-/// on an ordinary local embedder, which made the per-deployment measurement
-/// decorative on exactly the deployments it was written for.
+/// * **4096 is what the memory budget allows** — ≈ 31 MiB of worst-case
+///   receipts, computed above, against a process that already holds an entire
+///   session graph in RAM. A cost worth naming and paying.
+/// * **[`WRITE_QUEUE_MAX`] is a quarter of it**, for the eviction-safety reason
+///   at the top of that constant: 3× headroom so settled receipts accumulating
+///   behind the outstanding ones can never evict a running job's receipt.
+///
+/// The time bound alone could not do this job — [`RECEIPT_RETENTION`] against
+/// `serve`'s own sustained abuse bound ([`crate::mcp::DEFAULT_RATE_LIMIT_RPS`],
+/// 50/s) is 15 000 receipts. Historical note kept because the number is
+/// unchanged and someone will wonder: 4096 rather than the 1024 this started at,
+/// because at 1024 the *then* rate-derived clamp sat below an ordinary local
+/// embedder's throughput. That reason is retired; the figure survives on the
+/// memory argument, which is why no constant moved when the reason changed.
 pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
 /// Longest a caller may block waiting for its own write to apply.
@@ -835,10 +885,32 @@ pub enum ReceiptAnswer {
     AppliedAfterRestart(String),
     /// Not applied before this session closed, and **not lost**: the validated
     /// job is recorded as a durable intent that the close's final flush
-    /// persists, and the next serve of this session applies it — idempotently,
-    /// in submission order (J3 durable intents). Terminal *for this process*;
-    /// the next process's answer for this id is `applied_after_restart` (or
-    /// `failed`, if the replay is refused).
+    /// persists, and the next serve of this session re-attempts it —
+    /// idempotently, in submission order (J3 durable intents). Terminal *for
+    /// this process*; the next process's answer for this id is
+    /// `applied_after_restart` (or `failed`, if the replay is refused for the
+    /// content, or `pending_replay` while it is still owed).
+    ///
+    /// **Read the tense: this is durable as of the mutation log, pending the
+    /// close's final flush** (J3 round-1 N7). It is the one answer in the
+    /// taxonomy that asserts a future rather than records a past, and it is
+    /// forced: `abort_workers` settles every unsettled receipt during the
+    /// quiesce, and `close()`'s final flush necessarily runs **after** that
+    /// quiesce (`crate::Memory::close`), so the assertion is made before the
+    /// write it describes reaches the store. If that flush fails, the process
+    /// has told a caller "recorded as a durable intent" about a record that
+    /// never landed.
+    ///
+    /// Why it is left as a prediction rather than deferred until the flush
+    /// reports success: the alternative settles receipts *after* the store I/O
+    /// that may hang or fail, which means a close that cannot reach its store
+    /// leaves callers holding `pending` — an answer that is unsettled, so
+    /// waiters keep waiting — where they currently get a specific one. And the
+    /// contradiction is transient and **self-correcting in both directions**:
+    /// after a restart an id with no durable record answers `restart_lost`
+    /// (honest), and an id whose apply *did* land answers
+    /// `applied_after_restart` from the consumed row. The only observation
+    /// window is a `lambo_stats(receipt=…)` racing the close.
     IntentRecorded,
     /// Never attempted: the queue was full when the ack was issued.
     Dropped(String),
@@ -1876,9 +1948,13 @@ impl Lanes {
     }
 
     /// Outstanding jobs **on one lane** — queued plus the one being run by that
-    /// lane's own consumer. This is the population
-    /// [`Calibration::lane_bound`] bounds, and the reason a global gauge could
-    /// not do the job: the drain is per-lane and serial (J3-R1-1).
+    /// lane's own consumer. This is the population [`WRITE_QUEUE_LANE_MAX`]
+    /// bounds, and the reason a global gauge could not do the job: the drain is
+    /// per-lane and serial (J3-R1-1), which is also why the round-3 defect —
+    /// a ceiling derived per-lane and enforced across lanes — was possible at
+    /// all. (J3 round-1 N3: this named `Calibration::lane_bound`, which since the
+    /// estimator demotion is a field that copies the static constant rather than
+    /// a bound of its own.)
     fn lane_outstanding(&self, agent: &AgentId) -> usize {
         self.queues.get(agent).map_or(0, VecDeque::len)
             + self.running_per_lane.get(agent).copied().unwrap_or(0)
@@ -1954,10 +2030,15 @@ impl WritePipeline {
     ///
     /// Spawned rather than awaited: the probe measures the deployment's
     /// embedder, and making session build wait for it would put embedder
-    /// latency on a startup path J2 has already made latency-sensitive. It is
-    /// nonetheless the only source of the bound — admission awaits its result
-    /// rather than falling back to a constant — so it is bounded by
-    /// [`PROBE_BUDGET`] and always publishes something.
+    /// latency on a startup path J2 has already made latency-sensitive. It
+    /// sources **nothing** — the bounds are the static
+    /// [`WRITE_QUEUE_LANE_MAX`] / [`WRITE_QUEUE_MAX`] whatever it reads, and
+    /// `admit` never consults it (J3 round-1 N3: this docstring used to say the
+    /// probe "is nonetheless the only source of the bound — admission awaits its
+    /// result rather than falling back to a constant", both halves of which the
+    /// estimator demotion made false). It is still bounded by [`PROBE_BUDGET`]
+    /// and still always publishes something, for the same reason it survives at
+    /// all: the probe/observed pair is the divergence telemetry.
     pub(crate) fn spawn(ctx: WriteCtx, clock: crate::daemon::Clock) -> Self {
         let (tx, rx) = watch::channel(None);
         let embedder = ctx.embedder.clone();
@@ -1965,6 +2046,13 @@ impl WritePipeline {
         let probe = tokio::spawn(async move {
             let calibration = probe_embedder(embedder.as_ref()).await;
             match calibration.items_per_sec {
+                // J3 round-1 N3. These two lines are what an operator reads
+                // about their own deployment, and both said the bounds came
+                // from the probe. They never did after the estimator demotion —
+                // the bounds are static and the second line even named
+                // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
+                // deleted. Provenance first now, rates second, and neither line
+                // claims a bound was measured.
                 Some(rate) => tracing::info!(
                     session = %session,
                     items_per_sec = rate,
@@ -1972,15 +2060,25 @@ impl WritePipeline {
                     bound = calibration.bound,
                     lane_bound = calibration.lane_bound,
                     concurrency = PROBE_CONCURRENCY,
-                    "write queue: bounds measured on this deployment's embedder — the lane bound \
-                     from the serial leg, the aggregate from the concurrent one"
+                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
+                     the rates below are telemetry measured on this deployment's embedder — the \
+                     serial leg 1-wide, the aggregate {}-wide",
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX,
+                    PROBE_CONCURRENCY
                 ),
                 None => tracing::warn!(
                     session = %session,
                     bound = calibration.bound,
-                    "write queue: the embedder could not be probed within {:?}; the bound is the \
-                     unmeasured floor and lambo_stats reports write_queue_measured=false",
-                    PROBE_BUDGET
+                    "write queue: the embedder could not be probed within {:?}, so there is no \
+                     rate telemetry this session and lambo_stats reports \
+                     write_queue_measured=false. The bounds are unaffected — they are static \
+                     (lane {}, queue {}) and never came from the probe. Note what a failed probe \
+                     DOES suggest: with match_strategy=hybrid (the default) an embedder that \
+                     cannot answer will also fail every derive it cannot answer",
+                    PROBE_BUDGET,
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX
                 ),
             }
             // A closed receiver means the session went away first; there is
@@ -2343,8 +2441,13 @@ impl WritePipeline {
                     ))
                 } else {
                     // Timed, because this lane is single-consumer: the wall
-                    // clock around one `run` *is* the serial service time the
-                    // admission bound needs, embedder warmth and all (J3-R1-2).
+                    // clock around one `run` *is* this deployment's serial
+                    // service time, embedder warmth and all (J3-R1-2) — the
+                    // figure `write_queue_serial_items_per_sec` publishes. It
+                    // feeds no admission decision (J3 round-1 N3: this said "the
+                    // serial service time the admission bound needs"); what it
+                    // is *for* is that an operator watching a slowing embedder
+                    // sees the deployment's own writes, not a startup estimate.
                     // A fenced refusal above is deliberately not sampled — it
                     // never entered `run`, and calling it a fast write would
                     // bias the rate upward, which is the dangerous direction.
@@ -2737,10 +2840,34 @@ impl WritePipeline {
             return;
         }
         // Seed the cross-restart answers before the task starts, so a lookup
-        // racing the replay sees `pending` rather than `restart_lost`.
+        // racing the replay sees `pending_replay` rather than `restart_lost`.
+        //
+        // J3 round-1 F2. A **consumed** row older than the retention window is
+        // deliberately NOT seeded. `types::WRITE_INTENT_RETENTION` claimed
+        // "expired rows are skipped at load" and no such filter existed in
+        // either adapter, so a consumed row that outlived the window still
+        // answered `applied_after_restart` — while the same receipt id in a
+        // process that had NOT restarted would have been swept to `expired`.
+        // That is the exact asymmetry the `RECEIPT_RETENTION ==
+        // WRITE_INTENT_RETENTION` assert above exists to forbid ("a receipt's
+        // answer must not depend on whether a restart intervened"), pointing
+        // the other way. Skipping the row here makes it answer `restart_lost` —
+        // a foreign epoch with no record — which is the honest analogue of
+        // `expired` for another process's id, and it costs one clock read in one
+        // place instead of a cutoff parameter threaded through three adapters'
+        // load paths. **Unconsumed rows are seeded and replayed whatever their
+        // age**: those are owed, and a debt does not expire.
+        let stale_before = (self.clock)()
+            - chrono::Duration::from_std(RECEIPT_RETENTION)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300));
         {
             let mut map = self.restart.lock();
             for intent in &intents {
+                if let Some(o) = &intent.outcome {
+                    if o.consumed_at < stale_before {
+                        continue;
+                    }
+                }
                 let Ok(id) = ReceiptId::from_str(&intent.receipt) else {
                     tracing::warn!(
                         session = %self.ctx.session,
@@ -2996,7 +3123,10 @@ impl Submitted {
 ///    reported as a measurement (J3-R1-2).
 /// 2. **Serial, short** — one embed of [`PROBE_TEXT`] **alone**, wall-clocked.
 ///    This is the width a lane drains at, so it is what
-///    [`Calibration::lane_bound`] is projected from (J3-R1-1).
+///    `write_queue_serial_items_per_sec` reports (J3-R1-1). It is projected into
+///    nothing: `project()` was deleted with the estimator, and
+///    [`Calibration::lane_bound`] copies [`WRITE_QUEUE_LANE_MAX`] for every
+///    source including `Unmeasured` (J3 round-1 N3).
 /// 3. **Serial, representative** — one embed of [`PROBE_TEXT_BYTES`] bytes
 ///    alone, wall-clocked, and **best effort** (J3-R2-1). Input length is a
 ///    first-order determinant of a transformer's latency, so leg 2 alone
@@ -3007,7 +3137,8 @@ impl Submitted {
 ///    at 1536 B — and losing the whole probe to a refused *optional* leg would
 ///    trade an optimistic number for no number at all.
 /// 4. **Concurrent** — [`PROBE_CONCURRENCY`] embeds together, wall-clocked, for
-///    the aggregate bound and for the parallelism figure an operator reads. At
+///    the aggregate rate and the parallelism figure an operator reads — for no
+///    bound (J3 round-1 N3: "for the aggregate bound"). At
 ///    the representative size when leg 3 proved the embedder accepts it, at the
 ///    short one otherwise: the aggregate leg gets the same conservative input as
 ///    the serial one wherever that is known to be answerable.
@@ -3416,8 +3547,15 @@ mod tests {
         // The telemetry sanitization clamp: one full queue per second,
         // comfortably above the fastest real embedder measured (141 items/s
         // 4-wide) while still finite for a fixture that does no work.
-        assert_eq!(PROBE_CLAMP_RPS, WRITE_QUEUE_MAX as u64);
+        // J3 round-1 N4: the clamp is its own number now. It happens to equal
+        // WRITE_QUEUE_MAX and must NOT be *defined* from it — that coupling put
+        // a measured embedder rate (via the const_assert beside the constant,
+        // which still guards telemetry hygiene) in the chain that sized both
+        // bounds. Asserted as a literal on purpose: writing
+        // `WRITE_QUEUE_MAX as u64` here would re-create the coupling in the test
+        // that exists to forbid it.
         assert_eq!(PROBE_CLAMP_RPS, 1024);
+        assert_eq!(MEASURED_LOCAL_EMBEDDER_RPS, 141);
         assert_eq!(PROBE_EMBEDS, 7);
         assert_eq!(PROBE_EMBEDS, PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY);
         // The representative leg is bigger than the short one, and the helper

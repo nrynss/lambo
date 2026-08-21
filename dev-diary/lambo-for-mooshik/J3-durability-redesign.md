@@ -189,7 +189,25 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   acked it. Cost accepted and documented: a fresh write can land before a replayed intent
   from the same agent; cross-restart interleaving is unordered (the concurrent-submission
   scope §Ordering already declares), while order among replayed intents is exact
-  (`issued_ms`, `lane_seq`).
+  **for one agent's sequential submissions** — the same scope every neighbouring claim
+  carries, and the scope this sentence was missing (round-1 N6). Replay sorts on
+  (`issued_ms`, `lane_seq`), which `next_receipt` mints; the drain position is decided by
+  the `lanes.lock()` **push_back** in a later critical section. For two writes one agent has
+  in flight *simultaneously* those are two different keys, so the replay sort can invert the
+  order the in-session drain would have used — flipping which of two identical concepts is
+  `created` and which is `matched`. Already excluded twice for the same reason
+  (`writeq.rs` §Ordering and the Done-when box), so this is a missing scope, not an
+  uncovered defect.
+
+  **The review's suggested three-line closure was checked and does not close it**, which is
+  why the sentence was scoped instead: moving the clock read and the `fetch_add` inside the
+  `receipts.lock()` that `next_receipt` already takes makes `(issued_ms, seq)` mutually
+  monotone, but the window is not inside `next_receipt` — it is between minting a receipt
+  and reaching the lanes lock, so a thread with the lower `seq` can still be preempted and
+  enqueued second. Genuinely closing it means minting the receipt *inside* the
+  `graph.write() → lanes.lock()` critical section, i.e. adding `receipts` to that nesting on
+  the admission hot path, and buying a documented ordering scope with a new lock-order risk
+  is the wrong trade.
 * **Receipt-store ownership across restart → the intent record is the receipt store's
   durable half.** Consumed rows are retained for `types::WRITE_INTENT_RETENTION`
   (const-asserted equal to `RECEIPT_RETENTION` — one window, or a receipt's answer would
@@ -265,6 +283,41 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   the backlog. A fourth reason is specific to this branch: a new column is exactly the
   schema change the F5 preflight **cannot** see (it checks tables), so adding one now would
   open a fresh un-migrated-store hazard in the one dimension left unguarded.
+* **The Cockroach cost this section named is understated, and the real figure is stated
+  here rather than corrected away** (round-1 F4). "Two extra `Single` mutations per write" is
+  right about mutations and wrong about cost, twice over. First, `consume_write_intent`
+  issues **two** statements, not one — the `UPDATE`, then the retention
+  `DELETE … WHERE session_id = $1 AND consumed_at IS NOT NULL AND consumed_at < $2` — so the
+  per-write cost is **three extra statements**, and on Cockroach every statement is a round
+  trip inside the flush transaction. Second, and larger: both intent mutations fall into
+  `plan_flush`'s `barrier` arm, which calls `buckets.drain_into` before emitting the step, so
+  **each one flushes the open bulk buckets** — fragmenting exactly the multi-row batching
+  L82-1 introduced to survive a serverless cluster's per-round-trip latency. Two bucket
+  drains per write, in the transaction the close-time flush depends on.
+
+  *Why the purge stays on the per-write path.* Moving it off would remove one of the three
+  statements and none of the two drains — the drains are inherent, because a consume must
+  ride its apply's transaction in log order, which is the whole idempotency argument. And the
+  seams available are worse than the saving: `apply_step` is a free function with no store
+  state, so throttling the purge means either changing that signature on the flush hot path
+  in both adapters or adding a trait method for an attach-time sweep. Paying either for a
+  statement whose cost is a PK-prefix scan bounded by one session's retained rows
+  (`PRIMARY KEY (session_id, receipt)`) is the wrong trade; recording the real number is
+  not. If the risk below materialises, the barriers are what to attack, not the `DELETE`.
+
+  *The risk for B/Mooshik, unchanged by this remediation because it is a measurement nobody
+  has taken.* Three extra statements plus two bucket drains per write, inside the
+  close-time flush transaction, against a serverless cluster at ~40 ms RTT, is the shape of
+  problem that shows up as a blown `CLOSE_FLUSH_GRACE` and nothing else. Two things bound
+  it and one does not. Bounded: nothing is *lost* if that flush is slow or fails — the
+  intents that do not make it stay on the log and the receipts stay honest, which is
+  precisely what J3 bought; and `SetEmbedding` was already a barrier on the hybrid path, so
+  bulk batching was already fragmented one-per-write before this change. Unbounded: the
+  absolute close-time latency at scale, which is a number, and nobody has it. F4 does
+  **not** move my assessment of the risk — it sharpens the multiplier from 2 to 3 statements
+  plus names the drains — and the assessment is that this is the one item on the branch
+  whose cost is unmeasured against real Cockroach, which is a *measurement to schedule*
+  rather than a change to make blind.
 * **One prediction of this doc corrected**: "receipts gain one honest state" — they
   gained two. `applied_after_restart` as designed, and `intent_durable`, because the
   closing process itself must answer honestly about a write it is deferring; settling it

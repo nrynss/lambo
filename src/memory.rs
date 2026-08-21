@@ -4879,6 +4879,103 @@ mod tests {
         );
     }
 
+    /// **J3 round-1 F2**: a consumed intent row older than the retention window
+    /// must not answer better for having survived a restart than the same id
+    /// would in a process that never restarted.
+    ///
+    /// `WRITE_INTENT_RETENTION` claimed "expired rows are skipped at load" and
+    /// no such filter existed anywhere, so a stale consumed row answered
+    /// `applied_after_restart` where a live process would have swept the receipt
+    /// to `expired` — the exact asymmetry the
+    /// `RECEIPT_RETENTION == WRITE_INTENT_RETENTION` assert forbids, pointing the
+    /// other way. The skip lives at the replay's seeding step now, and this pins
+    /// both sides of the boundary in one attach.
+    // `MemoryStore::seed` is fixtures-only; this is the only test here that
+    // needs to fabricate a previous process's consumed row.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn a_consumed_intent_past_its_retention_window_is_not_answered_from() {
+        use crate::types::{WriteIntent, WriteIntentOutcome, WriteIntentPayload};
+        use std::str::FromStr;
+        let inner = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("intent-stale");
+        let agent = AgentId::new("agent-a");
+        let interaction = NodeId::new();
+        let now = Utc::now();
+        let stale_receipt = "lwr1.00000000deadbee1.18f00000000.1";
+        let fresh_receipt = "lwr1.00000000deadbee1.18f00000000.2";
+        let consumed = |receipt: &str, seq: u64, consumed_at| WriteIntent {
+            session_id: sid.clone(),
+            receipt: receipt.to_string(),
+            agent: agent.clone(),
+            interaction,
+            lane_seq: seq,
+            issued_ms: 1_755_000_000_000,
+            payload: WriteIntentPayload::Derive {
+                concepts: vec![("stale probe".to_string(), ConceptType::Entity)],
+                pairs: Vec::new(),
+            },
+            created_at: now,
+            outcome: Some(WriteIntentOutcome {
+                tag: "applied_after_restart".into(),
+                summary: "derived 1 concept(s)".into(),
+                consumed_at,
+            }),
+        };
+        inner
+            .seed(GraphSnapshot {
+                session_id: sid.clone(),
+                embedding: Some(contract("fixture", 1024)),
+                interactions: vec![Interaction {
+                    id: interaction,
+                    session_id: sid.clone(),
+                    agent_id: agent.clone(),
+                    prompt_text: None,
+                    previous_id: None,
+                    created_at: now,
+                }],
+                write_intents: vec![
+                    // One window plus a minute in the past: outside.
+                    consumed(
+                        stale_receipt,
+                        1,
+                        now - chrono::Duration::from_std(crate::writeq::RECEIPT_RETENTION).unwrap()
+                            - chrono::Duration::seconds(60),
+                    ),
+                    // Just now: inside.
+                    consumed(fresh_receipt, 2, now),
+                ],
+                ..GraphSnapshot::default()
+            })
+            .expect("seed");
+
+        let mem = Memory::builder()
+            .session("intent-stale")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build");
+        let stale = crate::writeq::ReceiptId::from_str(stale_receipt).unwrap();
+        let fresh = crate::writeq::ReceiptId::from_str(fresh_receipt).unwrap();
+        assert_eq!(
+            mem.pipeline().lookup(&agent, fresh).tag(),
+            "applied_after_restart",
+            "a row inside the window is still the durable carrier of the answer"
+        );
+        assert_eq!(
+            mem.pipeline().lookup(&agent, stale).tag(),
+            "restart_lost",
+            "a row past the window must not answer better than the same id would \
+             have in a process that never restarted"
+        );
+        mem.close().await.expect("clean close");
+    }
+
     /// **The other half of N1's classification**: a content-level refusal still
     /// consumes. Without this, "leave it for the next process" would become
     /// retry-forever for a record no embedder will ever accept — the objection

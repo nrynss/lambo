@@ -1503,9 +1503,15 @@ The queue keeps its **own** counters and never touches `LedgerCounters`, so
 `accepted − written − write_failed` keeps its exclusivity argument intact: no
 new class enters the ledger's `accepted`. The queue mirrors the discipline
 deliberately — a queue-full or byte-cap reject never enters the queue's
-`accepted`, `outstanding = accepted − applied − failed` is one expression
-serving both the live gauge and the shutdown count, and `abandoned` is a **label
-on a subset of `failed`**, not a fourth term. Pinned by
+`accepted`, `outstanding = accepted − applied − failed − deferred` is one
+expression serving both the live gauge and the shutdown count, and `abandoned` is
+a **label on a subset of `failed`**, not a fourth term — while `deferred` *is*
+one, because a close-deferred job settled `intent_durable` left this process's
+custody without being applied or failed. (Round 1's N5 caught both this sentence
+and its `writeq.rs` twin still writing the three-term form after round 3 added
+the fourth: a section whose thesis is "one expression, and it cannot drift
+between them" had drifted in the two prose copies while the code was right.
+Neither copy is the authority; `WriteQueueCounters::outstanding` is.) Pinned by
 `outstanding_excludes_refusals_because_they_never_reached_accepted`, which
 asserts both wrong formulas wrong — and the naive one *panics* on
 subtract-with-overflow in a debug build, which is why `outstanding()` is
@@ -2320,6 +2326,118 @@ answered:
 | `src/types/mod.rs`, `src/config.rs` | whether `match_strategy`'s own docs support the opt-out F3 now points users at | **a finding of its own, fixed.** `MatchStrategy`'s docstring read "Which concepts a **recall** is allowed to match" and its two variants described recall only — while the same setting decides whether a *derive* embeds, which is the half with the availability consequence and the half F3's remediation tells a user to change. Sending someone to a write-path setting documented as a read-path filter is the same false-stated-reason family this review round exists for. Both variants now document both axes, and one live trap is recorded beside them: the `Default` impl is `Canonical` while `Config::default()` is `Hybrid`, so the attribute and the product disagree and only the config answers "what does a deployment do". The `Config` field, which had **no** docstring, points at it |
 | `src/embed/mod.rs` | whether `build_embedder`'s "always an embedder or a startup error" is stated where the degrade claim is made | **nothing at the source** — it is true and unchanged; what was missing was the *consequence*, now recorded at `hybrid.rs` where the claim it falsifies lives |
 | this file | the Done-when limits | limit (6) added, at its own magnitude, with the behaviour argued rather than only described |
+
+**N3 (P2) — the twelve estimator-era stated reasons, including the two that operators read.**
+The round-3 register sweep named `writeq.rs` first and claimed it was swept for "every stated
+reason naming a projection, a ceiling, a share, or the close's abandonment". The module doc's
+§Backpressure genuinely was; the item-level docstrings were not, and two of the survivors
+were not prose at all. All twelve corrected, each with the false sentence quoted at the site
+so the correction is auditable rather than a silent overwrite:
+
+| Site | What it claimed | Now |
+| --- | --- | --- |
+| `WritePipeline::spawn`'s probe `info!` — **every session start** | "bounds measured on this deployment's embedder — the lane bound from the serial leg, the aggregate from the concurrent one" | provenance first: the bounds are static (lane 64 / queue 1024) and no rate moves them; the rates are telemetry, named with their widths |
+| the probe-failure `warn!` | "the bound is the **unmeasured floor**" — `WRITE_QUEUE_MIN`, which **this branch deleted** | says there is no rate telemetry this session, that the bounds are unaffected and never came from the probe, and — since a failed probe is a real signal about something else — that with `match_strategy=hybrid` an embedder that cannot answer will also fail every derive (F3's warning where it is actually useful) |
+| `WRITE_QUEUE_MAX`'s headline | "Upper clamp on **the measured bound**" | "The queue's aggregate admission bound" — there is nothing left for it to clamp |
+| the `PROBE_CLAMP_RPS` build-assert message | "or the queue bound stops being a per-deployment measurement and **becomes a constant**" — the intended state | rewritten as telemetry hygiene, and the guard now constrains only that (see N4) |
+| `PROBE_CONCURRENCY` | "It **sizes the aggregate bound only** — the per-lane bound comes from the serial leg" | it sizes nothing; it is the width of a telemetry reading, reported beside the serial one so the two are comparable |
+| `OBSERVED_MIN_SAMPLES` | "a probe that failed outright and **floored the bound**" | a probe that failed leaves the session with no rate telemetry; the floor it named is deleted |
+| `OBSERVED_EWMA_WEIGHT` | "A weight of 1 would make **the bound** track a single slow write" | the published *rate*; both failure modes are telemetry faults now, and the reason to smooth is stated (a 1-weight rate means only "the last write") |
+| `WritePipeline::spawn`'s docstring | "It is nonetheless **the only source of the bound** — admission awaits its result rather than falling back to a constant" — both halves false | it sources nothing and `admit` never consults it; still budgeted, for the reason it survives at all |
+| `lane_outstanding` | "the population `Calibration::lane_bound` **bounds**" | the population `WRITE_QUEUE_LANE_MAX` bounds — `Calibration::lane_bound` is a field that copies the constant — with the round-3 defect (derived per-lane, enforced across lanes) named as what the distinction is for |
+| the worker's timing comment | "*is* the serial service time **the admission bound needs**" | is this deployment's serial service time, the figure `write_queue_serial_items_per_sec` publishes, feeding no admission decision |
+| `probe_embedder` leg 2 | "what `Calibration::lane_bound` is **projected from**" — `project()` was deleted | what the key reports; projected into nothing, and `from_rates` hardcodes the static for every source including `Unmeasured` |
+| `probe_embedder` leg 4 | "for the **aggregate bound**" | for the aggregate rate and the parallelism figure an operator reads |
+
+**N4 (P3) — the deleted estimator no longer sizes the bounds at build time.** The chain was
+real and live: `PROBE_CLAMP_RPS = WRITE_QUEUE_MAX as u64`, a `const_assert` requiring
+`PROBE_CLAMP_RPS > 3 × MEASURED_LOCAL_EMBEDDER_RPS` (141 items/s, this rig's llama.cpp), and
+`MAX_RETAINED_RECEIPTS`'s own stated reason deriving 4096 *from that inequality* — so both
+surviving bounds were structural in kind and **measured in magnitude**, and an edit shrinking
+the receipt cap for memory reasons would have failed the build citing a rationale the branch
+declares retired. Cut at the coupling, not at the guard: `PROBE_CLAMP_RPS` is now its own
+literal `1_024` (the value is unchanged, so no reading moves), the assert survives as pure
+telemetry hygiene with no bound in its message, and `MAX_RETAINED_RECEIPTS` states the
+derivation it actually has — 4096 is what the ≈31 MiB worst-case memory budget allows, and
+`WRITE_QUEUE_MAX` is a quarter of it for the eviction-safety reason already at that constant.
+The retired derivation is quoted in place, because the number did not move when its reason
+changed and someone will want to know why.
+
+**N5 (P3) — the accounting expression, in both prose copies.**
+`outstanding = accepted − applied − failed` → `− deferred`, in `writeq.rs`'s §Accounting and
+in §J3's "`ledger_queued_lines` arithmetic, re-derived". The drift was inside the section
+whose thesis is that there must be **one** expression which "cannot drift between them", and
+the lesson is recorded beside the fix: a thesis does not enforce itself, the code
+(`WriteQueueCounters::outstanding`, which was right) is the authority, and both sentences are
+copies of it.
+
+**N6 (P3) — "exact" scoped, and the offered code fix checked and declined.** The design doc's
+"order among replayed intents is **exact** (`issued_ms`, `lane_seq`)" carried no scope where
+every neighbouring claim carries one; it now carries the same one (**one agent's sequential
+submissions**), with the mechanism written out. The review also offered a three-line closure —
+move the clock read and the `fetch_add` inside the `receipts.lock()` `next_receipt` already
+takes — and **it does not close the window**: that makes `(issued_ms, seq)` mutually monotone,
+but the gap is *between* minting a receipt and reaching the `lanes.lock()` whose `push_back`
+decides drain position, so a thread holding the lower `seq` can still be preempted and
+enqueued second. Genuinely closing it means minting the receipt inside the
+`graph.write() → lanes.lock()` nesting on the admission hot path; buying a documented ordering
+scope with a new lock-order risk is the wrong trade, and the analysis is recorded at the
+sentence so the next reader does not re-derive it.
+
+**N7 (P3) — the prediction is labelled as one, and the alternative is argued.**
+`IntentRecorded`'s docstring now opens with the tense ("durable as of the mutation log,
+pending the close's final flush"), states that it is the only answer in the taxonomy asserting
+a future rather than recording a past, and states why: `abort_workers` settles during the
+quiesce and the final flush necessarily runs after it. Left as a prediction, deliberately —
+settling only after the flush reports success means a close that cannot reach its store leaves
+callers on `pending`, an *unsettled* answer that keeps waiters waiting, where they currently
+get a specific one. The mitigation is recorded with it, including the elegant half: the
+contradiction self-corrects from **both** directions after a restart (`restart_lost` if
+nothing landed, `applied_after_restart` if the apply did), and the only observation window is a
+`lambo_stats(receipt=…)` racing the close.
+
+**F2 (P3) — the load-time skip that did not exist now exists, one layer up.**
+`WRITE_INTENT_RETENTION` ended "and expired rows are **skipped at load**"; both adapters load
+with an unfiltered `SELECT … WHERE session_id = ? ORDER BY issued_ms, lane_seq` and nothing
+between there and the replay filtered by age, so a consumed row outliving the window answered
+`applied_after_restart` where the same id in a process that had **not** restarted would have
+been swept to `expired`. That is the asymmetry the `RECEIPT_RETENTION ==
+WRITE_INTENT_RETENTION` assert exists to forbid, pointing the other way — so this was fixed
+rather than documented away. The skip is at the replay's **seeding step**, not at the load:
+one clock read in one place instead of a cutoff threaded through three adapters' load paths,
+and it makes the stale row answer `restart_lost` — the honest analogue of `expired` for
+another process's id. Unconsumed rows are seeded and replayed whatever their age: a debt does
+not expire. The docstring now separates the two mechanisms it had conflated — *purging the
+row* is lazy and clocked by the next consume (so a session that goes quiet keeps its rows, and
+that is now said out loud), while *answering from the row* is bounded by the window. Pinned by
+`a_consumed_intent_past_its_retention_window_is_not_answered_from`, which asserts both sides
+of the boundary in one attach.
+
+**F4 (P3) — the Cockroach cost stated at its real size, and the risk left standing.**
+Verified at source: `consume_write_intent` issues **two** statements on Cockroach (the
+`UPDATE`, then the retention `DELETE`), so a write costs **three** extra statements and not
+two; and both intent mutations land in `plan_flush`'s `barrier` arm, whose first act is
+`buckets.drain_into`, so each one **flushes the open bulk buckets** — two drains per write,
+fragmenting the L82-1 batching in the transaction the close-time flush depends on. The real
+figure is now in the design doc's as-built section, with the argument for leaving the purge on
+the per-write path (it would remove one statement and none of the drains, and the seams cost
+either an `apply_step` signature change on the flush hot path or a new trait method) and with
+the B/Mooshik risk assessment: F4 sharpens the multiplier and does **not** move the
+assessment, because the thing that matters is a number nobody has — absolute close-time
+latency against a real serverless cluster. Bounded either way: a slow or failed close-time
+flush loses nothing, which is what J3 bought.
+
+**Register sweep, N3–N7 + F2 + F4 (per file, including the nulls).**
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/writeq.rs` | every item-level stated reason naming a projection, a ceiling, a share, a bound or a floor — the sweep round 3's table claimed and did not finish | 12 sites corrected (2 production log lines, 10 docstrings/comments), each quoting what it used to say; plus the N4 decoupling, the N5 expression, the N7 tense and the F2 skip |
+| `src/types/mod.rs` | `WRITE_INTENT_RETENTION`'s two mechanisms | the false "skipped at load" clause replaced by the two real mechanisms, named separately, with the lazy-purge consequence said out loud |
+| `src/store/cockroach.rs`, `src/store/batch.rs` | the per-write statement count and the barrier behaviour | **nothing changed at the source** — both are correct as written; what was wrong was the *design doc's* count, now corrected there |
+| `src/store/sqlite.rs` | the same | **nothing** — the identical two-statement consume, free on a local file, correctly documented at the function |
+| `dev-diary/lambo-for-mooshik/J3-durability-redesign.md` | the "exact" ordering claim, the unconsumed-row answer, the Cockroach cost | scope added with the declined-closure analysis; `pending` → `pending_replay`; the three-statements-and-two-drains figure with the risk assessment |
+| this file | §J3's arithmetic paragraph | the fourth term added, with the drift's lesson recorded rather than quietly patched |
+| `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | whether any user-facing text repeats a bound-from-a-rate claim or the three-term accounting | **nothing** — the round-3 pass had already rewritten the bounds and rates paragraphs correctly, and the accounting expression appears in neither mirror. Checked rather than assumed: `write_queue_outstanding` is described as a count, not a formula |
 
 ## J4 — Lease conflicts leave an artifact
 
