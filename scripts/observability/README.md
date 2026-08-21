@@ -65,7 +65,7 @@ does.
 | `dedup_rate.py` | 2 — re-derivation savings | ledger (+ store) | Is the graph converging or accumulating? |
 | `duplicates.py` | 3 — duplicate-creation rate | **store** (+ ledger) | Is the 0.85 merge threshold right for a real embedder? |
 | `score_bands.py` | 4 — scores vs G1's bands | ledger | Do the calibrated constants still mean what G1 measured? |
-| `warnings.py` | 5 — blast-radius warnings fired | ledger (+ `git log`) | Did the warning change anything? |
+| `blast_radius.py` | 5 — blast-radius warnings fired | ledger (+ `git log`) | Did the warning change anything? |
 
 Metric 6 (friction) stays human notes, unchanged.
 
@@ -75,7 +75,7 @@ cd scripts/observability
 python3 recall_first.py ~/lambo-dogfood/calls.jsonl
 python3 dedup_rate.py   --bucket hour --store ~/lambo-dogfood/lambo.db  ~/lambo-dogfood/calls.jsonl
 python3 score_bands.py  ~/lambo-dogfood/calls.jsonl
-python3 warnings.py     --repo ~/src/lambo --window-minutes 120  ~/lambo-dogfood/calls.jsonl
+python3 blast_radius.py   --repo ~/src/lambo --window-minutes 120  ~/lambo-dogfood/calls.jsonl
 python3 duplicates.py   --store ~/lambo-dogfood/lambo.db --ledger ~/lambo-dogfood/calls.jsonl
 ```
 
@@ -113,7 +113,7 @@ overrule:
   merge adds a decaying `Semantic` edge and does not re-upsert the target or add
   a `Derives` edge, so counting it as re-derivation savings would overstate them
   with a weaker relationship. Reported in its own column.
-* **The git join proves nothing** (`warnings.py --repo`). A commit in the window
+* **The git join proves nothing** (`blast_radius.py --repo`). A commit in the window
   after a warning is not evidence the agent ignored it, and its absence is not
   evidence the agent heeded it. `overlap[...]` is an explicitly-labelled token
   heuristic between the concept text and the commit subject/paths — a starting
@@ -131,7 +131,7 @@ overrule:
   `conflict_line`, `hot_warning`, `reservation_warning`) are **budget-independent**:
   their lines go into the flat `warnings` vector for every returned hit whatever
   the budget did to the block, and arrive as a second text block, so those flags
-  are computed over every returned hit. `warnings.py` reports both halves — a
+  are computed over every returned hit. `blast_radius.py` reports both halves — a
   warning whose block was cut was still *delivered*; a cut Canonical hit's marker
   was not. For "was a Canonical concept returned at all", read per-hit
   `is_canonical`, never the set-level flag.

@@ -240,7 +240,7 @@ already agent-partitioned or agent-agnostic in the right places, so nothing was 
   cross-agent matching is the *point*, so a bucket mixing agents is the interesting number.
   Worth knowing when reading the report: a single agent's rate is the "Per agent" block,
   not the bucket table.
-* `warnings.py`'s "By agent (who was warned)" attributes to the caller and becomes
+* `blast_radius.py`'s "By agent (who was warned)" attributes to the caller and becomes
   meaningful for the first time.
 
 The heartbeat's `stats.agent` stays the process agent, and no script reads it — so nothing

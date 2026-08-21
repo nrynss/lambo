@@ -73,8 +73,8 @@ else
   printf '    ok   --floor is gone (the ledger states the floor)\n'
 fi
 
-step "warnings.py (metric 5)"
-out="$("$py" "$here/warnings.py" "$ledger")"
+step "blast_radius.py (metric 5)"
+out="$("$py" "$here/blast_radius.py" "$ledger")"
 echo "$out"
 check "counts both blast-radius warnings" "$out" "blast-radius (load_bearing) warnings fired: 2"
 check "flags the one the token budget cut" "$out" "BLOCK CUT BY TOKEN BUDGET"
@@ -88,8 +88,8 @@ check "separates canonical hits returned from markers rendered" "$out" \
 check "reports the canonical hit the budget cut" "$out" \
   "1 Canonical hit(s) were CUT BY THE TOKEN BUDGET"
 
-step "warnings.py --repo (the git join)"
-out="$("$py" "$here/warnings.py" --repo "$repo" --window-minutes 60 "$ledger")"
+step "blast_radius.py --repo (the git join)"
+out="$("$py" "$here/blast_radius.py" --repo "$repo" --window-minutes 60 "$ledger")"
 check "performs the join without erroring" "$out" "Git join"
 check "labels the join as correlation only" "$out" "CORRELATION ONLY"
 
@@ -218,7 +218,7 @@ else
 fi
 
 step "every report also emits JSON"
-for script in recall_first dedup_rate score_bands warnings; do
+for script in recall_first dedup_rate score_bands blast_radius; do
   if "$py" "$here/$script.py" --json "$ledger" | "$py" -c 'import json,sys; json.load(sys.stdin)'; then
     printf '    ok   %s --json parses\n' "$script"
   else

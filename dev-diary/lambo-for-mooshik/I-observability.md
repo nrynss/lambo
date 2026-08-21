@@ -76,7 +76,7 @@ question, each emitting a small report:
 * `dedup_rate.py` — derive created-vs-matched over time (metric 2), ledger + store.
 * `score_bands.py` — real recall score distribution against G1's measured bands and the
   0.35 floor (metric 4); flags any true-hit-below-floor recurrence.
-* `warnings.py` — every blast-radius warning fired: when, to whom, over which concept,
+* `blast_radius.py` — every blast-radius warning fired: when, to whom, over which concept,
   and (join with git log by time window) whether the touching commit happened anyway
   (metric 5 — the honest version of it).
 * `duplicates.py` — cosine scan for near-duplicate concepts above/below the merge
@@ -262,7 +262,7 @@ than prose, and are worth not re-deriving:
    A `max_tokens: 1` recall of a Canonical concept returned an empty context and a ledger
    line saying `canonical_marker: true`. It is now gated on `included_in_context`, the
    asymmetry is documented where the flags are computed and in the kit README's choices
-   list, `warnings.py` reports the cut-canonical case (and no longer says "the model never
+   list, `blast_radius.py` reports the cut-canonical case (and no longer says "the model never
    saw the block" of a warning that *was* delivered), and the reviewer's probe is a test.
 4. **Duplicate vector-leg entries max-merge again.** `candidates_with_legs` assigned
    rather than max-merged, so a duplicate `NodeId` from `vector_candidates` let the last

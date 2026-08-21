@@ -35,8 +35,8 @@ token with the warned concept. A human reads the candidate rows; the script
 never concludes "the agent ignored the warning".
 
 Usage:
-    python3 scripts/observability/warnings.py ~/lambo-dogfood/calls.jsonl
-    python3 scripts/observability/warnings.py --repo . --window-minutes 120 calls.jsonl
+    python3 scripts/observability/blast_radius.py ~/lambo-dogfood/calls.jsonl
+    python3 scripts/observability/blast_radius.py --repo . --window-minutes 120 calls.jsonl
 """
 
 from __future__ import annotations

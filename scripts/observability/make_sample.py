@@ -22,7 +22,7 @@ Deliberately planted, one per script, so no report is exercised on an empty set:
     warning line was delivered either way, while `[canonical]` rendered only for
     the hit that stayed in the context (`canonical_marker` is true on the first
     recall and FALSE on the second, over the very same Canonical concept)
-                                                     -> warnings.py
+                                                     -> blast_radius.py
   * a non-zero dropped-line count on the last heartbeat, so the "counts are a
     lower bound" path in the header is exercised
   * one failed call with an error_kind, and one torn final line
@@ -329,7 +329,7 @@ def lines() -> list[dict]:
                 # did not — and because the `[canonical]` marker lives inside that
                 # block, this line's `canonical_marker` is FALSE over the same
                 # Canonical concept the first recall reported TRUE for.
-                # warnings.py must distinguish all three of those.
+                # blast_radius.py must distinguish all three of those.
                 hit(
                     "pagination",
                     PAGINATION,

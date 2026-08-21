@@ -110,7 +110,7 @@ evidence pointers.
 > | 2. Re-derivation savings | `dedup_rate.py` (ledger `created`/`matched`, + store) |
 > | 3. Duplicate-creation rate | `duplicates.py` (cosine scan over the store) |
 > | 4. Real scores vs G1's bands | `score_bands.py` (ledger per-leg scores) |
-> | 5. Blast-radius warnings fired | `warnings.py` (+ optional `git log` join) |
+> | 5. Blast-radius warnings fired | `blast_radius.py` (+ optional `git log` join) |
 > | 6. Friction | human notes, unchanged |
 >
 > Run the rig's serve with `--ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300`;
