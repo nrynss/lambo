@@ -6,9 +6,23 @@
 //! `dev-diary/PHASE-7-embeddings.md`), queries [`GraphStore::vector_candidates_checked`],
 //! and — when a candidate sits at or above `semantic_match_threshold` — records
 //! the merge as a decaying [`EdgeType::Semantic`] edge to the matched concept.
-//! Below the threshold, or when the capability / embedder is unavailable, it
-//! degrades to the byte-identical `MatchStrategy::Canonical` outcome (a fresh,
+//! Below the threshold, or when the **store capability** is absent, it degrades
+//! to the byte-identical `MatchStrategy::Canonical` outcome (a fresh,
 //! keyword-only concept), logging the fallback once per session.
+//!
+//! **An embedder failure does not degrade — it fails the write** (J3-R3-1).
+//! A capability miss is a declared, deterministic configuration: every write of
+//! the session takes the same keyword-only arm and the session says so once. An
+//! embedder refusal or timeout is a *per-input* surprise: before this rule, the
+//! concept was applied with `embedding: NULL`, reported to the caller as an
+//! unqualified success, and became unfindable by semantic recall — the located
+//! mechanism behind the dogfood store's 92/100 unembedded concepts
+//! (DOGFOOD-FINDINGS 2026-08-20) and behind J3-R3-1's estimator poisoning (a
+//! 3 ms non-embed sampled as a fast write inflated the drain rate 20–45× and
+//! abandoned 326/361 acked writes). *Applied without its vector* is not a lesser
+//! success; it is a different outcome, and the caller decides what to do with
+//! it — retry, shorten, or accept keyword-only by configuring
+//! `MatchStrategy::Canonical`.
 //!
 //! # The seam (design decision of record)
 //!
@@ -27,8 +41,9 @@
 //!    kind/model/dim swap is refused without re-embedding. Release the lock.
 //! 2. **Gather (async, no lock).** For each `Unmatched` concept: build the
 //!    context, `embedder.embed`, `store.vector_candidates_checked`. The store call goes
-//!    through the [`GraphStore`] trait only. A capability-miss or embed failure
-//!    marks the concept for the canonical fallback (logged once per session); a
+//!    through the [`GraphStore`] trait only. A capability-miss marks the concept
+//!    for the canonical fallback (logged once per session); an embed failure or
+//!    timeout fails the whole call before anything is written (J3-R3-1); a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates.
 //! 3. **Commit (write lock, sync).** Re-acquire the write lock and compare the
 //!    current epoch with the planned epoch. A concurrent daemon/MCP mutation
@@ -54,10 +69,11 @@
 //! — kept separate from `matched` because a merge does not re-upsert the target
 //! nor `Derives`-reinforce it, and `matched` must stay faithful to the sync
 //! `derive` contract (PHASE-7 T7.2 remediation, MINOR-3). A concept for which no
-//! vector was ever produced (capability-absent, embed failure/timeout, a store
-//! that refuses `vector_candidates_checked` after advertising the capability, or an
+//! vector exists (capability-absent, a store that refuses
+//! `vector_candidates_checked` after advertising the capability, or an
 //! invalid non-Concept merge target — see the commit-time validation) is written
-//! with `embedding: None`; a failed embed likewise never stamps the session's
+//! with `embedding: None` — an embed *failure* no longer reaches a write at all
+//! (J3-R3-1, module doc above); a failed embed likewise never stamps the session's
 //! embedding contract (MINOR-2). See "Vector persistence for fresh concepts"
 //! below for the one arm that changed. At commit, each
 //! content is re-canonicalized against the graph as written this call so that
@@ -189,9 +205,9 @@ enum Resolution {
     /// Canonical key already matched an existing concept — reuse it (byte-identical
     /// to derive's `Matched` path).
     CanonicalMatch { node: NodeId },
-    /// `Unmatched` with no viable vector hit (capability absent, embed failure,
-    /// below threshold, or invalid candidate): create a fresh concept and no
-    /// `Semantic` edge.
+    /// `Unmatched` with no viable vector hit (capability absent, below
+    /// threshold, or invalid candidate — an embed failure fails the call
+    /// instead, J3-R3-1): create a fresh concept and no `Semantic` edge.
     ///
     /// `embedding` is `Some` exactly when a vector was actually computed for
     /// this concept and the store can serve vectors — the below-threshold arm
@@ -302,9 +318,13 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// Semantically identical to `derive` for everything the hybrid step does not
 /// touch (canonical matches, co-occurrence, `ParentOf` hierarchies); only the
 /// `Unmatched` branch is replaced by the embed→`vector_candidates` merge step.
-/// When the store lacks `Capabilities::VECTOR_SEARCH` or embedding fails, the
-/// outcome is byte-identical to `derive` (fresh keyword-only concepts, no
-/// store I/O beyond the capability probe).
+/// When the store lacks `Capabilities::VECTOR_SEARCH`, the outcome is
+/// byte-identical to `derive` (fresh keyword-only concepts, no store I/O beyond
+/// the capability probe). When the **embedder** fails or times out, the call
+/// fails with [`LamboError::Embed`] and nothing is written (J3-R3-1): applying
+/// the concept with `embedding: NULL` would report a success the semantic tier
+/// can never serve, and — on the async path — hand the write queue a 3 ms
+/// non-embed to sample as a fast write.
 ///
 /// `embedding` is the live, resolved [`EmbeddingContract`] for the process's
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
@@ -558,33 +578,35 @@ async fn derive_planned(
                 None => {
                     let context = context_text(content, origin_text.as_deref());
                     match tokio::time::timeout_at(io_deadline, embedder.embed(&context)).await {
+                        // An embed failure or timeout FAILS the write — it does
+                        // not degrade it (J3-R3-1). The old arms applied the
+                        // concept with `embedding: NULL` and returned `Ok`: an
+                        // unqualified success over a concept semantic recall can
+                        // never find (the mechanism behind the dogfood store's
+                        // 92/100 unembedded concepts), and on the async path a
+                        // ~3 ms non-embed handed to the write queue's observed
+                        // rate as evidence of a fast deployment (326/361 acked
+                        // writes abandoned at a clean close, round 3). Nothing
+                        // has been written at this point — the commit phase is
+                        // strictly later — so "nothing was written" is exact.
+                        // The capability-absent arm above is untouched: that is
+                        // a declared, session-uniform configuration, not a
+                        // per-input surprise.
                         Err(_) => {
-                            if note_fallback_logged(&session_id) {
-                                tracing::warn!(
-                                    target: "lambo::hybrid",
-                                    session = %session_id,
-                                    "hybrid embed timed out - degrading to MatchStrategy::Canonical"
-                                );
-                            }
-                            Resolution::Fresh {
-                                key: key.clone(),
-                                embedding: None,
-                            }
+                            return Err(LamboError::Embed(format!(
+                                "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was \
+                                 written — the write is refused rather than applied without its \
+                                 vector (a concept stored with no embedding is unfindable by \
+                                 semantic recall)"
+                            )))
                         }
                         Ok(Err(e)) => {
-                            if note_fallback_logged(&session_id) {
-                                tracing::warn!(
-                                    target: "lambo::hybrid",
-                                    session = %session_id,
-                                    error = %e,
-                                    "hybrid embed failed — degrading to MatchStrategy::Canonical \
-                                     (creating keyword-only concept)"
-                                );
-                            }
-                            Resolution::Fresh {
-                                key: key.clone(),
-                                embedding: None,
-                            }
+                            return Err(LamboError::Embed(format!(
+                                "the embedder refused this content ({e}); nothing was written — \
+                                 the write is refused rather than applied without its vector (a \
+                                 concept stored with no embedding is unfindable by semantic \
+                                 recall)"
+                            )))
                         }
                         Ok(Ok(emb)) => {
                             // An embed only counts as "attempted" for the contract
@@ -771,6 +793,12 @@ async fn derive_planned(
                     g.insert_concept(concept, interaction)?;
                     written.insert(id);
                     outcome.created.push(id);
+                    if embedding.is_some() {
+                        // The below-threshold arm (L82-4): the row carries its
+                        // vector. Counted so the receipt can say *embedded*,
+                        // not just *applied* (J3-R3-1).
+                        outcome.embedded += 1;
+                    }
                     this_node = id;
                 }
                 Resolution::HybridMerge {
@@ -810,6 +838,12 @@ async fn derive_planned(
                     g.insert_concept(concept, interaction)?;
                     written.insert(id);
                     outcome.created.push(id);
+                    if can_merge {
+                        // The merge arm persists its vector (`embedding` above
+                        // is `Some` exactly when `can_merge`); count it for the
+                        // receipt's applied-vs-embedded distinction (J3-R3-1).
+                        outcome.embedded += 1;
+                    }
                     if can_merge && *target != id {
                         // Decaying Semantic edge to the matched concept (deterministic
                         // direction: order endpoints by NodeId's inner UUID, since
@@ -2041,11 +2075,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embed_failure_degrades_to_fresh_concept() {
+    async fn embed_failure_fails_the_write_and_writes_nothing() {
+        // J3-R3-1 (reverses this test's previous pin, which asserted the L82-4
+        // era behaviour "a dead embedder degrades the write, it does not fail
+        // it"). The degrade arm was the located mechanism behind the dogfood
+        // store's 92/100 unembedded concepts and behind round 3's estimator
+        // poisoning: the concept was applied with `embedding: NULL`, the caller
+        // was told an unqualified success, and the write queue sampled a ~3 ms
+        // non-embed as a fast write. An embedder failure is now an `Err`, and
+        // nothing — no concept, no edge, no contract stamp — is written.
         let sess = "hybrid-embedfail";
         let (graph, i1) = graph_with_interaction(sess, 1, 0, "auth flow");
         let failing = FailingEmbedder::new();
-        let out = derive(
+        let err = derive(
             graph.clone(),
             &SpyStore::with_vector(vec![]),
             &failing,
@@ -2058,26 +2100,27 @@ mod tests {
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         )
         .await
-        .unwrap();
-        assert_eq!(failing.calls(), 1, "embed attempted once then degraded");
-        assert_eq!(out.created.len(), 1);
-        assert!(out.matched.is_empty());
+        .unwrap_err();
+        assert_eq!(failing.calls(), 1, "embed attempted once, then refused");
+        assert!(
+            matches!(err, LamboError::Embed(_)),
+            "an embedder refusal is an Embed error, not a degrade: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("nothing was written"),
+            "the refusal must say nothing was written: {err}"
+        );
         let g = graph.read();
-        let c = out.created[0];
-        assert!(g.edge_between(i1, c, EdgeType::Derives).is_some());
-        // Concept has no embedding (the embed itself failed). L82-4 explicitly
-        // does NOT touch this arm: persistence follows a vector that exists, and
-        // a vector is never invented. The derive still returns Ok — a dead
-        // embedder degrades the write, it does not fail it.
-        match g.node(c) {
-            Some(Node::Concept(con)) => assert!(con.embedding.is_none()),
-            _ => unreachable!(),
-        }
-        // MINOR-2: the session's embedding contract must NOT be stamped — no
-        // embed ever returned a vector, so this is not a "first embed".
+        assert_eq!(
+            g.node_count(),
+            1,
+            "interaction only — the refused write must not create a concept"
+        );
+        // MINOR-2 still holds: no embed ever returned a vector, so this is not
+        // a "first embed" and the contract must not be stamped.
         assert!(
             g.embedding().is_none(),
-            "a fully-failed embed must not bind the session to an embedding contract"
+            "a failed embed must not bind the session to an embedding contract"
         );
         g.assert_invariants().unwrap();
     }

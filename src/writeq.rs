@@ -833,6 +833,15 @@ pub struct AppliedSummary {
     /// reports [`AppliedSummary::reinforced`] instead; a zero here would claim
     /// a derive wrote no edges, which is not what it means.
     pub edges: Option<usize>,
+    /// Concepts persisted **with a vector** — *applied ≠ embedded* as a
+    /// first-class receipt fact (J3-R3-1). `Some` only for a hybrid-strategy
+    /// `derive`, the one write kind that can embed: a canonical-strategy derive
+    /// and a `record_action` never produce vectors by design, and an absent key
+    /// must never read as "zero of something that was attempted". When
+    /// `Some(e)` with `e < created_count`, some applied concepts carry no
+    /// embedding (capability-absent or a refused merge target) and are
+    /// unfindable by semantic recall until re-embedded.
+    pub embedded: Option<usize>,
 }
 
 /// The answer to "what happened to this receipt?".
@@ -1452,14 +1461,34 @@ impl WriteCtx {
                 self.daemon_wake.notify_one();
                 let created = truncate_ids(&outcome.created);
                 let matched = truncate_ids(&outcome.matched);
+                // Applied ≠ embedded (J3-R3-1): only the hybrid strategy can
+                // embed, so only it reports the count — and its receipt
+                // sentence carries the number so a write applied without its
+                // vector is never read as an unqualified success.
+                let (embedded, summary) = match self.match_strategy {
+                    MatchStrategy::Hybrid => (
+                        Some(outcome.embedded),
+                        format!(
+                            "derived {} concept(s): {} created ({} embedded), {} matched existing",
+                            borrowed.len(),
+                            outcome.created.len(),
+                            outcome.embedded,
+                            outcome.matched.len()
+                        ),
+                    ),
+                    MatchStrategy::Canonical => (
+                        None,
+                        format!(
+                            "derived {} concept(s): {} created, {} matched existing",
+                            borrowed.len(),
+                            outcome.created.len(),
+                            outcome.matched.len()
+                        ),
+                    ),
+                };
                 Ok(AppliedSummary {
                     kind: WriteKind::Derive,
-                    summary: format!(
-                        "derived {} concept(s): {} created, {} matched existing",
-                        borrowed.len(),
-                        outcome.created.len(),
-                        outcome.matched.len()
-                    ),
+                    summary,
                     created,
                     matched,
                     created_count: outcome.created.len(),
@@ -1467,6 +1496,7 @@ impl WriteCtx {
                     semantic_merged: Some(outcome.semantic_merged.len()),
                     reinforced: Some(outcome.reinforced),
                     edges: None,
+                    embedded,
                 })
             }
             JobPayload::Action {
@@ -1511,6 +1541,9 @@ impl WriteCtx {
                     semantic_merged: None,
                     reinforced: None,
                     edges: Some(outcome.edges),
+                    // `record_action` never embeds by design — absent, not
+                    // zero, for the reason on the field.
+                    embedded: None,
                 })
             }
         }
@@ -2956,6 +2989,7 @@ mod tests {
                 semantic_merged: Some(0),
                 reinforced: Some(0),
                 edges: None,
+                embedded: Some(0),
             }),
             ReceiptAnswer::Failed("x".into()),
             ReceiptAnswer::Dropped("x".into()),
@@ -4318,6 +4352,103 @@ mod pipeline_tests {
         assert!(
             rate < 1000.0 / 100.0 + 1.0,
             "the observed rate must reflect the 100 ms writes and nothing faster: {rate}"
+        );
+    }
+
+    /// An embedder that answers the calibration probe's own texts and refuses
+    /// everything else, fast — the shape J3-R3-1 measured at the rig: llama
+    /// returns HTTP 500 in ~2 ms for an input it refuses, 30× faster than a
+    /// write it accepts.
+    struct RefusingEmbedder {
+        inner: FixtureEmbedder,
+        refusals: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for RefusingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+            if text.contains(PROBE_TEXT) {
+                return self.inner.embed(text).await;
+            }
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            Err(crate::EmbedError::Backend("HTTP 500: input refused".into()))
+        }
+    }
+
+    /// **J3-R3-1, as a test — the door J3-R2-2's fix left open, now closed at
+    /// the source.** `spawn_worker`'s `if outcome.is_ok()` filter was correct
+    /// about what it excluded and wrong about what reached it: on the shipping
+    /// hybrid path an embedder refusal was not an `Err` — the concept was
+    /// applied with `embedding: NULL`, the caller was told an unqualified
+    /// success, and the ~ms non-embed was sampled as a fast write (rate
+    /// inflated 20–45×; 326/361 acked writes abandoned at a clean close, at the
+    /// release binary). The fix is upstream: `hybrid::derive` now fails the
+    /// write on an embed error, so the refusal arrives here as the `Err` the
+    /// filter always assumed.
+    ///
+    /// This test drives refusals through the **whole shipping path** — hybrid
+    /// strategy, vector-capable store, the embed itself refused — unlike its
+    /// J3-R2-2 sibling above, whose failures never reach an embed.
+    #[tokio::test]
+    async fn an_embedder_refusal_fails_the_write_and_is_never_sampled() {
+        let refusals = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-refusal-honesty",
+            Arc::new(RefusingEmbedder {
+                inner: FixtureEmbedder::new(),
+                refusals: refusals.clone(),
+            }),
+        );
+        let agent = AgentId::new("agent-a");
+
+        for i in 0..(OBSERVED_MIN_SAMPLES * 2) {
+            let submitted = rig.derive(&agent, &format!("real concept {i}")).await;
+            assert!(!submitted.dropped(), "submission {i} was refused, not run");
+            until(|| rig.pipeline.outstanding() == 0, "the refusal to settle").await;
+            let answer = rig.pipeline.lookup(&agent, submitted.receipt);
+            let ReceiptAnswer::Failed(why) = answer else {
+                panic!(
+                    "a refused embed must settle FAILED, not {answer:?} — an applied answer \
+                     here is the applied-with-NULL-embedding dishonesty"
+                );
+            };
+            assert!(
+                why.contains("nothing was written"),
+                "the receipt must say nothing was written: {why}"
+            );
+        }
+        assert!(
+            refusals.load(Ordering::Relaxed) >= (OBSERVED_MIN_SAMPLES * 2) as usize,
+            "every write must have reached the embedder and been refused there"
+        );
+        let counters = rig.pipeline.counters();
+        assert_eq!(
+            counters.applied(),
+            0,
+            "nothing may apply without its vector"
+        );
+        assert_eq!(counters.failed(), OBSERVED_MIN_SAMPLES * 2);
+
+        // Applied ≠ embedded, asserted at the graph rather than at the counters:
+        // no concept row exists at all, with or without a vector. (Before the
+        // fix this read OBSERVED_MIN_SAMPLES * 2 rows, every one with
+        // `embedding: None`.)
+        assert_eq!(
+            rig.graph.read().concepts().count(),
+            0,
+            "a refused embed must write no concept row"
+        );
+
+        // And the estimator half: the refusals never became an observed rate.
+        let calibration = rig.pipeline.calibration().expect("the probe has landed");
+        assert_eq!(
+            calibration.source,
+            CalibrationSource::Probe,
+            "{} fast refusals must not flip the source to observed: {calibration:?}",
+            counters.failed()
         );
     }
 

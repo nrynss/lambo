@@ -2115,6 +2115,11 @@ impl LamboServer {
                         ("semantic_merged", s.semantic_merged),
                         ("reinforced", s.reinforced),
                         ("edges", s.edges),
+                        // Applied ≠ embedded (J3-R3-1): present only for the
+                        // write kind that can embed (hybrid derive), so an
+                        // agent can see a write that applied without its
+                        // vector instead of reading `applied` as embedded.
+                        ("embedded", s.embedded),
                     ] {
                         if let Some(v) = value {
                             obj.insert(key.into(), json!(v));

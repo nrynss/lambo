@@ -165,6 +165,12 @@ pub struct DeriveOutcome {
     /// Number of duplicate natural-key writes in this call that bumped an
     /// existing edge (`Derives` / `CoOccurrence` / `Hierarchical`).
     pub reinforced: usize,
+    /// Concepts this call **persisted with a vector** — *applied ≠ embedded* as
+    /// a first-class fact (J3-R3-1). Counts entries of [`Self::created`] whose
+    /// row carries an embedding; sync (canonical) `derive` never embeds, so it
+    /// is always `0` here and only [`crate::graph::hybrid::derive`] can raise
+    /// it. `matched` entries are pre-existing rows and are not re-counted.
+    pub embedded: usize,
 }
 
 /// The primary write path (spec §7): derive `concepts` from `interaction`,
