@@ -1,0 +1,18 @@
+{
+ "k": 9,
+ "jaccard_blast_vs_countall": 0.6363636363636364,
+ "jaccard_blast_vs_cond": 0.2857142857142857,
+ "jaccard_countall_vs_cond": 0.5,
+ "tau_excl_all": 0.5682692307692307,
+ "tau_excl_cond": 0.4355769230769231,
+ "tau_all_cond": 0.8403846153846154,
+ "resistance_bins": {
+  "R<0.6 (deep support)": 41,
+  "0.6<=R<1.2": 67,
+  "1.2<=R<2.0": 52,
+  "R==2.0 (single edge)": 165
+ },
+ "n_big_moves": 5,
+ "exclusive_pairs_at_R2": 156,
+ "exclusive_pairs": 159
+}

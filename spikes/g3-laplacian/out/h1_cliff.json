@@ -1,0 +1,60 @@
+{
+ "inversions": {
+  "ppr_dir_a0.15": {
+   "queries_with_inversion": 7,
+   "total_inversions": 14,
+   "worst_query": 3
+  },
+  "ppr_dir_a0.3": {
+   "queries_with_inversion": 4,
+   "total_inversions": 8,
+   "worst_query": 3
+  },
+  "ppr_dir_a0.5": {
+   "queries_with_inversion": 2,
+   "total_inversions": 3,
+   "worst_query": 2
+  },
+  "heat_t1.0_und": {
+   "queries_with_inversion": 19,
+   "total_inversions": 627,
+   "worst_query": 129
+  },
+  "ppr_und_a0.3": {
+   "queries_with_inversion": 20,
+   "total_inversions": 538,
+   "worst_query": 84
+  }
+ },
+ "disagreements": [
+  {
+   "query": "J2 proxy wedge invariant handshake replay",
+   "added": [
+    "Two J3 defects were found by MEASURING THE SHIPPED BINARY while the whole test suite was green, which is the transferable lesson. (1) lambo_stats with a wait_ms...",
+    "J3 declared regression handed forward: I1's DOGFOOD metric-2 fact set (created, matched, semantic_merged, reinforced, edges) cannot ride a ledger call line writ..."
+   ],
+   "dropped": [
+    {
+     "level": 2,
+     "content": "J2 wire-protocol decision: the proxy is a BYTE-LEVEL newline-delimited JSON-RPC line pipe, not a tool-level forwarder. rmcp 3.1.2's transport-io feature already..."
+    },
+    {
+     "level": 2,
+     "content": "J1 gates everything multi-client: the serve applies its own --agent to every connected client, and lambo_reserve hard-refuses any caller whose agent_id differs ..."
+    }
+   ]
+  },
+  {
+   "query": "J3 probe representative ceilings observed",
+   "added": [
+    "J4 places a requirement on I1's ledger: a serve that loses the lease exits before it can open a ledger, so the most common multi-agent failure is structurally i..."
+   ],
+   "dropped": [
+    {
+     "level": 1,
+     "content": "scripts/observability/README.md"
+    }
+   ]
+  }
+ ]
+}

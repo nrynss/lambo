@@ -180,3 +180,184 @@ queries; each hypothesis is upheld or falsified with numbers; the recommendation
 (adopt / adapt / shelve) is recorded here with the evidence, and if "adopt", the product
 design questions (incremental maintenance, lock discipline, determinism) each have a
 measured answer rather than an assumption.
+
+## G3 spike outcome (2026-08-21)
+
+Spike: [`spikes/g3-laplacian/`](../../spikes/g3-laplacian/) — read-only, plain Python,
+not a workspace member. Snapshot of `~/lambo-dogfood/lambo-dev.db` opened `immutable=1`;
+the live store and the MCP session were never written or locked. All **22** real
+`lambo_recall` calls in the dogfood ledger were replayed. The graph had grown well past
+§G3's estimate: **386 concepts, 528 Concept↔Concept edges** (`Causal` 207,
+`CoOccurrence` 202, `Dependency` 94, `Hierarchical` 25, `Semantic` 0). The ported
+tokenizer passes `fixtures/canonicalization-cases.json` verbatim, so the replayed phase 1
+is faithful rather than approximate.
+
+Two semantics had to be pinned before any comparison was meaningful, and both reshape the
+hypotheses:
+
+* **`expand.rs` is a membership gate, not a ranking.** `assemble.rs` scores members
+  `daemon×w_daemon + relevance×w_query`, and `relevance` is the *phase-1* score — exactly
+  `0.0` for anything that arrived by expansion. Fixed-depth contributes no ordinal signal,
+  so the honest comparison is set-vs-set at equal budget.
+* **`blast_radius` is not a dependent count.** It counts *exclusive* dependents — those
+  with no aged inbound structural edge from any other source. It already encodes a crude
+  sole-support notion, which is what H2 had to be tested against.
+
+### H1 — expansion as diffusion: **FALSIFIED, shelved with numbers**
+
+| variant | mean Jaccard vs fixed-depth | set disagreements | same set, different order |
+| --- | --- | --- | --- |
+| `ppr_dir` α=0.5 (matched directedness) | **0.994** | **2 / 22 (9%)** | 18 |
+| `ppr_dir` α=0.3 | 0.985 | 4 / 22 (18%) | 16 |
+| `ppr_dir` α=0.15 | 0.970 | 7 / 22 (32%) | 13 |
+| heat kernel t=0.5 / 1.0 / 2.0 (undirected) | 0.642 / 0.590 / 0.520 | 19 / 22 (86%) | 0 |
+| `ppr_und` α=0.3 | 0.522 | 20 / 22 (91%) | 0 |
+| **CONTROL: fixed-depth BFS, symmetrized** | **0.468** | **20 / 22 (91%)** | — |
+
+The control carries the verdict. The undirected diffusions disagree on 19–20 of 22
+queries — but so does plain fixed-depth BFS run on the symmetrized graph, at a lower
+Jaccard still. **That disagreement is the symmetrization, not the diffusion.** Hold
+directedness constant and diffusion reproduces the depth-2 cliff at Jaccard 0.994. Both
+clauses of §G3's falsifier are met at once: 9% set disagreement (under ~1 in 10), and the
+remaining 18 queries are the *same set* differing only in an order `assemble.rs` discards.
+
+The cliff also sits where continuous decay would put it. Counting *inversions* — a node
+at directed distance ≥3 scored above an admitted distance-1-or-2 node — gives **3 across
+all 22 queries** at α=0.5 (8 at α=0.3, 14 at α=0.15), against 627 for the undirected heat
+kernel. Type-weighted variants (`Dependency`=`Causal` 1.0 > `Hierarchical` 0.7 >
+`CoOccurrence` 0.4, the only weighting available — every stored edge weight is 0.5 and
+every `reinforcements` is 1, so the fields carry no information) land within ±0.03 Jaccard
+and change no verdict.
+
+Worse, the few genuine disagreements favour fixed-depth. At α=0.15 one high-degree
+distance-3 hub is promoted on 6 of the 7 disagreeing queries, displacing precise level-1
+provenance: `src/memory.rs`, `docs/reference/mcp.mdx`, `J-multi-client.md`, commit
+`206f977`. That is PageRank popularity bias, and on a graph whose level-1 dependents *are*
+the provenance the agent asked for, it is a regression.
+
+### H2 — blast radius as effective resistance: **UPHELD, pending operator judgement**
+
+`R_eff = L†_uu + L†_vv − 2L†_uv` on the symmetrized structural graph, pseudoinverse taken
+**per connected component** (cross-component resistance is infinite, and a whole-graph
+pinv would silently return a finite wrong number).
+
+One structural fact nearly killed H2: of the 159 `(node, dependent)` pairs `blast_radius`
+counts, **156 (98.1%) sit at `R_eff = 1/w = 2.0` exactly** — no multiplicity. That is
+forced, not incidental: a dependent with multiple independent paths has another inbound
+structural source, which is precisely what the exclusivity filter excludes. Resistance is
+constant over the set the count looks at and cannot reorder it. Over all 325 structural
+pairs it discriminates well (118 distinct values; 41 pairs at `R < 0.6`, 165 at `R = 2.0`).
+
+The reordering therefore had to be attributed, since conductance sums over *all*
+dependents while `blast_radius` filters to exclusive ones. At k=9, the set clearing the
+Stage-3 bar `blast_radius > 5`:
+
+| comparison | overlap | Jaccard |
+| --- | --- | --- |
+| `blast > 5` vs `count_all` top-9 — CONTROL | 7 / 9 | 0.636 |
+| `blast > 5` vs `conductance` top-9 — H2 | 4 / 9 | 0.286 |
+| `count_all` top-9 vs `conductance` top-9 — **H2 net** | 6 / 9 | **0.500** |
+
+Kendall τ over the 65 concepts with a structural dependent: `count_exclusive`/`count_all`
++0.568, `count_exclusive`/`conductance` +0.436, `count_all`/`conductance` **+0.840**. H2
+survives its control: at τ 0.840 (not 1.0) and 5 of the top 14 moving ≥3 places, the
+resistance is neither redundant with the plain count nor a restatement of it. Three cases
+carry it:
+
+* **`Implemented J3 (writes acknowledged before the embedder)`** — `blast_radius` **4**,
+  *below* the Stage-3 bar, so it warns nobody today; yet 13 structural dependents and the
+  2nd-highest conductance, with `J-multi-client.md` (R=0.4222), `src/mcp/server.rs`
+  (R=0.4726) and `src/memory.rs` (R=0.4951) the three most deeply-supported pairs in the
+  graph. A load-bearing pillar the count structurally cannot see — every dependent is
+  *also* depended on elsewhere, which is exactly why it is load-bearing.
+* **`Stood up the dogfood rig`** — `blast_radius` **6**, warns today, conductance **3.00**,
+  all six dependents pendant at `R = 2.0`. §G3's "fragile linkage, cheap to verify by
+  hand", verbatim.
+* **`Committed J2 stage 1 as 7f51bb6`** — the graph's *highest* blast radius (10) and top
+  warning today, falls to conductance rank 11. Breadth of fan-out, not depth of support.
+
+The falsifier does not trip. The one thing the spike cannot supply is §G3's own criterion
+— "in a way a human judge endorses" — so the table in the spike README is the artefact to
+judge.
+
+### The side-finding worth more than either hypothesis
+
+The graph **connects artifacts and strands reasoning**, and the provenance spine does not
+fix it: adding the `Derives` co-parent projection collapses 41 traversable islands to only
+**40** (giant component 266 → 271). So the orchestrator's islands do *not* join through
+`record_action` provenance — they join through `Causal` (207 edges, largest single-type
+component 135), which is already traversable. The giant component holds **92%** of
+`Resource` and **85%** of `Entity` concepts but only 49% of `Constraint`, **37%** of
+`Logic` and **30%** of `Observation`.
+
+The mechanism is the two write APIs. `lambo_record_action` writes `Causal`/`Dependency`
+edges to shared file and commit resources, which become hubs — that web *is* the giant
+component. `lambo_derive` writes only **intra-call** `CoOccurrence` cliques, capped by
+`max_cooccurrence_per_derive` (hence `CoOccurrence`'s largest component being 11), plus
+`Hierarchical` edges from the rarely-used `parent_of` (25 in the whole graph). Derived
+decisions, lessons and constraints therefore arrive edge-less and strand. **No phase-2
+expansion algorithm can reach them from an artifact hit, because there is no path** — which
+is also why diffusion cannot beat fixed-depth here: there is nothing to diffuse to.
+
+Related sparsity numbers: density 0.00703, mean undirected degree 2.70, 179 of 386
+concepts at degree exactly 1, 22/386 with an embedding, **0/386** with a stored
+`blast_radius` (no canonization has ever completed on this store, so the pillar warning
+has never actually fired). A single-seed directed depth-2 ball has median size **1**, and
+**248 of 386** concepts expand to nothing at all — `expand.rs` follows out-edges only and
+the graph is directed hub→sink.
+
+### Recommendation: shelve H1, adapt H2, fix connectivity first
+
+1. **Shelve H1.** Do not replace fixed-depth traversal with diffusion. The
+   principled-looking win is a direction artefact; the honest version costs a solve per
+   query to reproduce a cliff already in the right place. Revisit only if mean degree
+   rises well above 2.70 — the cliff bites when the depth-2 ball is *large*, and its
+   median here is 1.
+2. **Take the cheaper question H1 surfaced.** Should phase 2 follow in-edges as well as
+   out-edges? Symmetrizing the same BFS multiplies expansion 2–4× on every real query
+   (20→67, 43→101, 1→19) for one function call and no new math. Whether that is *better*
+   needs a relevance judgement, not a Laplacian — a G-shaped task, unmeasured here.
+3. **Adapt H2, do not adopt it wholesale.** What generalizes is not "use effective
+   resistance" but **the exclusivity filter is hiding load-bearing pillars**: a concept
+   whose dependents each have other support is *more* load-bearing, and today it scores
+   lower. Cheapest first: report `count_all` beside the exclusive count (τ 0.568 against
+   it, no new math); or adopt conductance, which adds a separable signal on top (τ 0.840).
+   Either way `MIN_BLAST_RADIUS = 5` needs recalibrating — it is tuned to the exclusive
+   count's scale.
+4. **Fix connectivity before either.** 63% of `Logic` and 70% of `Observation` concepts
+   are unreachable from the artifact web. That is a `lambo_derive` API question — derived
+   concepts have no way to declare a non-hierarchical edge — not a graph-algorithm one,
+   and it outranks any traversal change.
+
+### Product design questions, measured (they bear on H2's option 2)
+
+* **Incremental maintenance — not needed at this scale.** One PPR seed-vector solve is
+  **0.51 ms** at n=386, so there is no precompute to invalidate. H2's per-component
+  pseudoinverses cost **3.02 ms for all 12 components together** (largest, n=221: 2.45 ms).
+  Whole-graph dense `pinv` is O(n³) and would be untenable past n≈3 000 (3.85 s at 3 000,
+  173 s at 10 000), but resistance is only ever wanted inside a component, and the
+  structural graph is fragmented 144 ways. **Unmeasured:** whether a component-local
+  pseudoinverse can be updated incrementally on edge insert rather than recomputed — moot
+  at 3 ms, live if one giant structural component ever forms.
+* **Lock discipline — satisfiable, no precomputed cache required.** Both operators are
+  pure functions of the `(source, target, edge_type)` triples: no content, no embeddings,
+  no scores. That is 528 triples (~21 KiB) here, so the graph lock is held for the copy
+  only and all algebra runs outside it. §6.4 is satisfied.
+* **Determinism — satisfied by construction.** Two independent runs of the PPR operator,
+  heat kernel and pseudoinverse hash bit-identically
+  (`e4aac064a469963e5f7ae315a21d91f04a7055505c05e5e9dbd143cf36289eb2`). Every solver is a
+  direct dense factorization (LAPACK `gesv`/`gesdd`, Padé `expm`) — no iteration cap, no
+  tolerance, no RNG, so issue #2's lesson has nothing to pin. A sparse iterative solver
+  would give this guarantee up, which is the real argument for the dense path while n
+  stays small.
+
+**Confidence.** H1's falsification **high** — the control isolates the cause, the effect
+size is large (0.994 vs 0.468), and it holds across three α, three temperatures and both
+weightings. H2's upholding **medium** — clean control and understood mechanism, but the
+warning set is n=9, no concept in the snapshot is canonical so the warning never fires
+today, and the human-judge clause is by construction outside the spike. The islands
+finding **high** — it is a census, not an inference.
+
+**Feeds C** (per §G3's own note): resistance *is* informative, so a concept's conductance
+profile is a live canonization/eviction-resistance signal — but C should read the
+exclusivity caveat above before using `blast_radius` as a proxy for load-bearing-ness.

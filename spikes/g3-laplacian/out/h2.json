@@ -1,0 +1,1038 @@
+{
+ "records": [
+  {
+   "node": "0235df4b-8618-49e4-a53b-2c851224bcf7",
+   "content": "Workstream J (multi-client survivability), found by the first live dogfood session 2026-08-19: two clients each spawning their own lambo serve per the...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.4999999999999991,
+   "min_r": 2.0000000000000036,
+   "max_r": 2.0000000000000036,
+   "mean_r": 2.0000000000000036,
+   "exclusive_r": [
+    2.0000000000000036
+   ]
+  },
+  {
+   "node": "03ff6c9a-cdbf-4d13-b91b-475ddef085ea",
+   "content": "Integrated J0 to lambo-for-mooshik and pushed (0bcb275..5e049f1). Cycle: implement 0c81419 \u2192 review r1 CLEAN 6 P3 (77f119f) \u2192 remediate all six 13c728...",
+   "count_exclusive": 1,
+   "count_all": 3,
+   "conductance": 1.833333333333332,
+   "min_r": 1.5000000000000009,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.666666666666668,
+   "exclusive_r": [
+    2.0000000000000027
+   ]
+  },
+  {
+   "node": "0e3d827c-e24c-479f-b89c-024c3858be20",
+   "content": "J3 round-3 BLOCKING defect J3-R3-1 (P1): the observed rate samples writes that NEVER EMBEDDED. spawn_worker's `if outcome.is_ok()` filter is the J3-R2...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "11184324-f2c1-46a8-9ba3-a15a14991925",
+   "content": "Integrated J1 to lambo-for-mooshik and pushed (f29340d..19f51d3, 9 commits rebased linear). Cycle: implement 25c9f41 \u2192 review r1 REQUEST_CHANGES (P1 c...",
+   "count_exclusive": 2,
+   "count_all": 5,
+   "conductance": 3.5207475661469365,
+   "min_r": 1.0847557205133391,
+   "max_r": 2.0000000000000013,
+   "mean_r": 1.5194604794663709,
+   "exclusive_r": [
+    2.0000000000000013,
+    2.0000000000000013
+   ]
+  },
+  {
+   "node": "113c02de-0e22-49b8-acc9-04cbfe188ff7",
+   "content": "Committed fdb3225 on wt/j2 \u2014 the remaining ten proxy.rs findings (J2-R1-4/6/8/11/12/14/15/16/17/18/21). One bounded resynchronising read_frame replace...",
+   "count_exclusive": 1,
+   "count_all": 4,
+   "conductance": 3.4818911150709564,
+   "min_r": 0.9110938576455289,
+   "max_r": 2.0,
+   "mean_r": 1.263902977399223,
+   "exclusive_r": [
+    2.0
+   ]
+  },
+  {
+   "node": "1b23b47e-903a-42ff-b08a-731f8f2f6ebc",
+   "content": "Wrote and pushed the J3 durability redesign proposal (dev-diary/lambo-for-mooshik/J3-durability-redesign.md, d730c85) while paused at J3 round 3: the ...",
+   "count_exclusive": 2,
+   "count_all": 2,
+   "conductance": 1.0,
+   "min_r": 1.9999999999999996,
+   "max_r": 2.0,
+   "mean_r": 1.9999999999999998,
+   "exclusive_r": [
+    1.9999999999999996,
+    2.0
+   ]
+  },
+  {
+   "node": "215ddce5-0650-493e-89d9-b4c2b6e5804e",
+   "content": "Committed a878859 on wt/j1 \u2014 the J1 round-3 adversarial review: CLEAN, all four round-2 findings closed at the mechanism, three P3 doc-precision advis...",
+   "count_exclusive": 1,
+   "count_all": 5,
+   "conductance": 4.207799623777052,
+   "min_r": 0.9171679413015774,
+   "max_r": 1.9999999999999991,
+   "mean_r": 1.2873775369198683,
+   "exclusive_r": [
+    1.9999999999999991
+   ]
+  },
+  {
+   "node": "22f7de05-f6fd-4cb7-aca7-ef73404328b7",
+   "content": "J3 round-1 P1 cluster, one root cause: A PROJECTION IS NOT A BOUND. The queue admitted at a 4-wide probe's throughput while one agent's FIFO lane drai...",
+   "count_exclusive": 0,
+   "count_all": 1,
+   "conductance": 0.5000000000000004,
+   "min_r": 1.9999999999999982,
+   "max_r": 1.9999999999999982,
+   "mean_r": 1.9999999999999982,
+   "exclusive_r": []
+  },
+  {
+   "node": "28d1c1dd-e76a-46d2-9040-9e27efaf9f54",
+   "content": "Re-pinned the dogfood rig to lambo-0f672f1 (the I-close, ledger-carrying binary), built with LAMBO_GIT_SHA per the runbook. Scratch-session smoke prov...",
+   "count_exclusive": 4,
+   "count_all": 4,
+   "conductance": 2.0000000000000004,
+   "min_r": 1.9999999999999996,
+   "max_r": 2.0,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996,
+    1.9999999999999996,
+    1.9999999999999996,
+    2.0
+   ]
+  },
+  {
+   "node": "2a0fd13d-fa5a-48bb-8841-8924956d5be7",
+   "content": "Committed 8daf389 on wt/j2 \u2014 J2-R1-2/3/5/9: store path canonicalized before hashing, per-uid endpoint directory restored with symlink+ownership checks...",
+   "count_exclusive": 2,
+   "count_all": 5,
+   "conductance": 3.8457508683855677,
+   "min_r": 0.9677036473880509,
+   "max_r": 2.0000000000000018,
+   "mean_r": 1.439558228879978,
+   "exclusive_r": [
+    1.9999999999999996,
+    2.0000000000000018
+   ]
+  },
+  {
+   "node": "2be3e0e9-6084-46e8-88d9-a1de7bc4bc5b",
+   "content": "J2 hazard found by the J0 round-1 review before J2 was written: a REFUSED serve never reaches build_memory's success path, so J2's proxy branch runs e...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "2d1bfc48-101c-46e6-bced-5727e2b917da",
+   "content": "Closed J2 round-1 adversarial review on wt/j2 (19f51d3..40791e2): REQUEST_CHANGES, 1 P1 / 7 P2 / 13 P3. Adjudicated the handshake-replay deviation as ...",
+   "count_exclusive": 0,
+   "count_all": 7,
+   "conductance": 10.28911135585097,
+   "min_r": 0.5606533583062776,
+   "max_r": 1.2334102199614656,
+   "mean_r": 0.7380987636145332,
+   "exclusive_r": []
+  },
+  {
+   "node": "2e8ebbd6-9749-45fd-945e-8a78dfd2cdf2",
+   "content": "Committed J2 stage 2 as 8e64fc8 on wt/j2 \u2014 src/mcp/endpoint.rs (SessionEndpoint: derived FNV-1a path over session+store, 0700-checked bind, lease-lice...",
+   "count_exclusive": 6,
+   "count_all": 10,
+   "conductance": 6.985726643188947,
+   "min_r": 0.8615292264836282,
+   "max_r": 2.0000000000000018,
+   "mean_r": 1.610077163993172,
+   "exclusive_r": [
+    1.9999999999999996,
+    1.999999999999998,
+    2.0000000000000018,
+    2.0,
+    1.999999999999999,
+    1.9999999999999987
+   ]
+  },
+  {
+   "node": "2fa6c47e-8352-488b-8d99-c510c8c9829d",
+   "content": "Stood up the dogfood rig: pinned binary lambo-3039b82 serving session lambo-dev over stdio MCP, SQLite store at ~/lambo-dogfood/lambo-dev.db, BGE-M3 e...",
+   "count_exclusive": 6,
+   "count_all": 6,
+   "conductance": 3.0,
+   "min_r": 1.9999999999999984,
+   "max_r": 2.0000000000000013,
+   "mean_r": 2.0,
+   "exclusive_r": [
+    2.0000000000000013,
+    1.9999999999999984,
+    1.9999999999999998,
+    1.9999999999999998,
+    1.9999999999999998,
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "330a20c7-a72b-477f-8ba3-f926778cb188",
+   "content": "Workstream B is extract-then-extend, not copy-then-edit: B0 extracts PgStore<D: Dialect> from the hardened Cockroach adapter (move-only commit first, ...",
+   "count_exclusive": 2,
+   "count_all": 2,
+   "conductance": 1.0,
+   "min_r": 1.9999999999999996,
+   "max_r": 2.0,
+   "mean_r": 1.9999999999999998,
+   "exclusive_r": [
+    1.9999999999999996,
+    2.0
+   ]
+  },
+  {
+   "node": "3e01bb4b-9550-43c5-b0c5-7a62af123741",
+   "content": "J2 WEDGE INVARIANT (operator/orchestrator ruling 2026-08-20, hard): a proxy that cannot serve its own client must NEVER acquire the lease \u2014 acquisitio...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5,
+   "min_r": 2.0,
+   "max_r": 2.0,
+   "mean_r": 2.0,
+   "exclusive_r": [
+    2.0
+   ]
+  },
+  {
+   "node": "3f6de603-9aa9-4044-a133-d6f7ffa3baf8",
+   "content": "J3-R2-1 design decision, taken against a NEW measurement that rules out the cheap fix: this rig's llama-server REFUSES input above ~1280 bytes (HTTP 5...",
+   "count_exclusive": 2,
+   "count_all": 3,
+   "conductance": 1.4999999999999984,
+   "min_r": 2.0,
+   "max_r": 2.0000000000000044,
+   "mean_r": 2.000000000000002,
+   "exclusive_r": [
+    2.0000000000000018,
+    2.0
+   ]
+  },
+  {
+   "node": "3fdc8e07-fb05-4058-b6c0-56d2f02fd7e5",
+   "content": "J2 round-1 adversarial review",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000003,
+   "min_r": 1.9999999999999987,
+   "max_r": 1.9999999999999987,
+   "mean_r": 1.9999999999999987,
+   "exclusive_r": [
+    1.9999999999999987
+   ]
+  },
+  {
+   "node": "43f6206e-6512-416f-b29f-31c6226134ac",
+   "content": "J2-R2-1 decision, made at the true number (2026-08-20): the reconnect hoist stays DECLINED, but for a reason independent of the bound. Round 1 decline...",
+   "count_exclusive": 2,
+   "count_all": 2,
+   "conductance": 0.9999999999999996,
+   "min_r": 2.0,
+   "max_r": 2.0000000000000018,
+   "mean_r": 2.000000000000001,
+   "exclusive_r": [
+    2.0000000000000018,
+    2.0
+   ]
+  },
+  {
+   "node": "445f8336-681a-4014-8cd5-713a266d570e",
+   "content": "Merged workstream I implementation (a9ec7f2): serve call ledger with per-leg recall provenance and warning-rendered flag, heartbeat lines with binary ...",
+   "count_exclusive": 4,
+   "count_all": 8,
+   "conductance": 5.766484094823623,
+   "min_r": 0.87387775333648,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.5607401536815968,
+   "exclusive_r": [
+    1.9999999999999951,
+    1.9999999999999982,
+    2.000000000000001,
+    2.0000000000000027
+   ]
+  },
+  {
+   "node": "46a7bbec-65b7-4a91-9284-57b147ac2668",
+   "content": "Closed the J2 round-2 adversarial review on wt/j2 as 920e096 \u2014 REQUEST_CHANGES, 2 P2 / 5 P3, with all 21 round-1 findings and both live-probe P2s veri...",
+   "count_exclusive": 7,
+   "count_all": 9,
+   "conductance": 4.882049273343387,
+   "min_r": 1.4471264075568684,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.877139201679305,
+   "exclusive_r": [
+    2.0,
+    2.0,
+    2.0000000000000027,
+    2.000000000000002,
+    2.0000000000000018,
+    2.0000000000000004,
+    2.0
+   ]
+  },
+  {
+   "node": "4c22c3aa-3e20-45dd-9f5e-599e5cfdd65c",
+   "content": "Committed the J1 round-2 remediation as f083a5a on wt/j1 \u2014 all 4 findings closed (2 P2, 2 P3): U+2028/U+2029 fixed as a shared character class, the le...",
+   "count_exclusive": 7,
+   "count_all": 15,
+   "conductance": 16.156105571235077,
+   "min_r": 0.4473946324252017,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.319035573925624,
+   "exclusive_r": [
+    1.9999999999999996,
+    2.0000000000000027,
+    2.0000000000000004,
+    2.0000000000000018,
+    1.9999999999999996,
+    2.0,
+    1.9999999999999998
+   ]
+  },
+  {
+   "node": "5073e657-93d7-443c-a09b-d42364f8ccce",
+   "content": "Committed 8797ab2 on wt/j3 \u2014 the P1 measured at the release binary on both sides of the fix (62 and 87 acked writes lost at a clean close before, 0 af...",
+   "count_exclusive": 0,
+   "count_all": 2,
+   "conductance": 1.2058919809299742,
+   "min_r": 1.6585233434072721,
+   "max_r": 1.6585233434072735,
+   "mean_r": 1.6585233434072728,
+   "exclusive_r": []
+  },
+  {
+   "node": "50d5a71d-4879-40ca-bdb4-5208c68787e6",
+   "content": "Canonization fair-test redesign (operator, 2026-08-20): the dogfood corpus is chaff-heavy \u2014 regular history and decisions that SHOULD NOT promote \u2014 so...",
+   "count_exclusive": 0,
+   "count_all": 1,
+   "conductance": 0.4999999999999998,
+   "min_r": 2.000000000000001,
+   "max_r": 2.000000000000001,
+   "mean_r": 2.000000000000001,
+   "exclusive_r": []
+  },
+  {
+   "node": "533a1063-e38a-4680-9891-f3f9207163f5",
+   "content": "Committed J2 stage 5 as 40791e2 on wt/j2 \u2014 the \u00a7J2 status note (design decisions with why, both J0 catches, the wedge invariant, the forced deviation)...",
+   "count_exclusive": 5,
+   "count_all": 8,
+   "conductance": 6.16264844285797,
+   "min_r": 0.8050714023219516,
+   "max_r": 2.000000000000003,
+   "mean_r": 1.5572008879353663,
+   "exclusive_r": [
+    2.000000000000003,
+    1.999999999999997,
+    2.0000000000000018,
+    2.000000000000001,
+    2.000000000000001
+   ]
+  },
+  {
+   "node": "54f3ab36-62d4-47c2-813b-8edd233ec254",
+   "content": "J2 deviation argued, not taken: the reconnect hoist",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000004,
+   "min_r": 1.9999999999999982,
+   "max_r": 1.9999999999999982,
+   "mean_r": 1.9999999999999982,
+   "exclusive_r": [
+    1.9999999999999982
+   ]
+  },
+  {
+   "node": "5da57fe5-2b5c-447c-86c6-958d3a43cec1",
+   "content": "J2 WEDGE INVARIANT",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000002,
+   "min_r": 1.9999999999999991,
+   "max_r": 1.9999999999999991,
+   "mean_r": 1.9999999999999991,
+   "exclusive_r": [
+    1.9999999999999991
+   ]
+  },
+  {
+   "node": "5dce3093-1fe0-42e8-977a-41c341e56eb8",
+   "content": "J2 proxy reconnect rule",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "63432152-a027-4b32-9dd6-f48605c3995d",
+   "content": "Committed cab9881 (J3-R1-4 pre-pass docstring per strategy; J3-R1-5 real drop-class tests for LaneFull/QueueFull/QueueBytes plus the seal-test rename)...",
+   "count_exclusive": 2,
+   "count_all": 8,
+   "conductance": 12.009378758153225,
+   "min_r": 0.4852520403338503,
+   "max_r": 2.0000000000000018,
+   "mean_r": 0.9104147147049992,
+   "exclusive_r": [
+    2.0000000000000018,
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "6ee7b879-78d3-44c0-a06d-c8573311c016",
+   "content": "J3 round-1 verdict: REQUEST_CHANGES \u2014 1 P1, 4 P2, 8 P3. The design is right and none of the findings question it: the ack is right, the receipt taxono...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "711b9239-3fe0-4a81-af88-6bc0b77707cb",
+   "content": "Committed J3 stage 1 on wt/j3 as 427fabf \u2014 src/writeq.rs (the background write pipeline, calibration probe, receipt store, counters), Memory::derive_a...",
+   "count_exclusive": 6,
+   "count_all": 10,
+   "conductance": 7.377996483321581,
+   "min_r": 0.782824643876672,
+   "max_r": 2.000000000000001,
+   "mean_r": 1.5857446602883207,
+   "exclusive_r": [
+    1.999999999999999,
+    2.000000000000001,
+    2.000000000000001,
+    2.0,
+    2.0000000000000004,
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "71eda463-4efc-44dc-b56e-5274d0baf457",
+   "content": "J2 scope cut, argued not assumed: NO in-process promotion of a proxy to holder, and the proxy path is stdio-only. (1) Promotion needs a store handle i...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "7488a853-e565-4cbb-82cb-d44da0fd26c7",
+   "content": "J3 round-2 adversarial review on wt/j3 (355e85e..8797ab2): verdict REQUEST_CHANGES. All 13 round-1 findings verified closed at the artifact \u2014 P1 red r...",
+   "count_exclusive": 4,
+   "count_all": 6,
+   "conductance": 3.7058919809299686,
+   "min_r": 1.0,
+   "max_r": 2.000000000000001,
+   "mean_r": 1.71950778113576,
+   "exclusive_r": [
+    2.000000000000001,
+    2.0,
+    2.000000000000001,
+    1.0
+   ]
+  },
+  {
+   "node": "83472872-bfd7-42c0-964a-08fc268c2dd0",
+   "content": "J2's 'serve always binds a local endpoint even under --transport stdio' collides with authorize_bind (serve.rs:760), which runs FIRST specifically so ...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "85581e25-972f-4765-9602-bc0f7c43c22b",
+   "content": "Merged I round-2 remediation (1f86792) and pushed with the round-2 review: shutdown_signal armed immediately after build_memory (before the I-inserted...",
+   "count_exclusive": 2,
+   "count_all": 5,
+   "conductance": 3.503165647790373,
+   "min_r": 1.0632565756423218,
+   "max_r": 1.9999999999999982,
+   "mean_r": 1.5250036610405613,
+   "exclusive_r": [
+    1.9999999999999978,
+    1.9999999999999982
+   ]
+  },
+  {
+   "node": "8baad4e0-a943-4d1f-87c2-f9eefeb89dcb",
+   "content": "J3 async-ack rule: a write may be acknowledged asynchronously only when its result does not gate the caller's next action. derive and record_action qu...",
+   "count_exclusive": 2,
+   "count_all": 2,
+   "conductance": 1.0000000000000004,
+   "min_r": 1.9999999999999982,
+   "max_r": 2.0,
+   "mean_r": 1.9999999999999991,
+   "exclusive_r": [
+    2.0,
+    1.9999999999999982
+   ]
+  },
+  {
+   "node": "9562063b-a3ab-4951-9b05-d4e5e06a2f1e",
+   "content": "Closed J0 round-1 adversarial review (77f119f): CLEAN, six P3 advisories, no blocking findings. Implementation 0c81419. Headline claim (a blocking Led...",
+   "count_exclusive": 1,
+   "count_all": 4,
+   "conductance": 2.6139618880116426,
+   "min_r": 1.5000000000000018,
+   "max_r": 1.5617330979336115,
+   "mean_r": 1.5308665489668059,
+   "exclusive_r": [
+    1.5617330979336037
+   ]
+  },
+  {
+   "node": "9c7521cd-38ec-4e25-9492-69b9158846bc",
+   "content": "Workstream I closed CLEAN at round 3 (0f672f1). Three P3 advisories carried as J0 by decision instead of a fourth round: the stale Ledger::open orderi...",
+   "count_exclusive": 2,
+   "count_all": 4,
+   "conductance": 1.9999999999999973,
+   "min_r": 2.0,
+   "max_r": 2.000000000000007,
+   "mean_r": 2.0000000000000027,
+   "exclusive_r": [
+    2.0000000000000018,
+    2.0
+   ]
+  },
+  {
+   "node": "a1c331aa-e73e-4590-b317-c799853eb513",
+   "content": "Committed the J2 round-2 review remediation on wt/j2 as 72050b7 + 6442d95 \u2014 all 7 findings closed (2 P2, 5 P3). J2-R2-1 taken as the operator ruled: a...",
+   "count_exclusive": 7,
+   "count_all": 18,
+   "conductance": 17.848650643393263,
+   "min_r": 0.5252865631336749,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.3305942617461903,
+   "exclusive_r": [
+    1.9999999999999993,
+    1.9999999999999991,
+    2.0000000000000018,
+    2.0000000000000027,
+    2.000000000000002,
+    2.0000000000000004,
+    1.9999999999999998
+   ]
+  },
+  {
+   "node": "a7fb225c-cd28-40e6-b490-f9b755c123c1",
+   "content": "Committed b107981 test(j3): J3-R2-6/9. J3-R2-9 closed with one assertion on the LATER fetch's piggyback, where a mark_delivered that suppressed rather...",
+   "count_exclusive": 0,
+   "count_all": 6,
+   "conductance": 8.182734140034794,
+   "min_r": 0.5671662649192892,
+   "max_r": 1.2750546177690696,
+   "mean_r": 0.8214117927473671,
+   "exclusive_r": []
+  },
+  {
+   "node": "ac22b489-c9d8-4421-8324-edd01e424888",
+   "content": "Committed a573e64 on wt/j2 \u2014 J2-L1 and J2-L2, the live two-client probe's two P2s: TMPDIR removed from the endpoint derivation and proxyable() switche...",
+   "count_exclusive": 3,
+   "count_all": 9,
+   "conductance": 11.323553655343336,
+   "min_r": 0.5154132658042568,
+   "max_r": 2.0000000000000018,
+   "mean_r": 1.078057165783611,
+   "exclusive_r": [
+    2.0000000000000013,
+    2.0,
+    2.0000000000000018
+   ]
+  },
+  {
+   "node": "ad552aca-2365-481c-b781-72e04d3f229e",
+   "content": "Committed the J1 round-1 remediation as 4a9c6a2 on wt/j1 \u2014 all 8 findings closed (1 P1, 1 P2, 6 P3), design untouched",
+   "count_exclusive": 7,
+   "count_all": 13,
+   "conductance": 12.470108494832044,
+   "min_r": 0.5310969014212423,
+   "max_r": 2.000000000000005,
+   "mean_r": 1.411086904417348,
+   "exclusive_r": [
+    1.9999999999999973,
+    2.000000000000005,
+    1.9999999999999978,
+    1.9999999999999991,
+    2.0,
+    1.999999999999999,
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "ae03d980-4581-4ce6-9d75-48d6af406e6b",
+   "content": "Completed the J3 round-3 independent adversarial review on wt/j3 (869b898..ea1e577) and committed adve-review-mooshik-J3-round3.md as ed22476. Verdict...",
+   "count_exclusive": 5,
+   "count_all": 7,
+   "conductance": 4.283784368275966,
+   "min_r": 1.1212117538248232,
+   "max_r": 2.0000000000000018,
+   "mean_r": 1.7489176439499494,
+   "exclusive_r": [
+    2.0000000000000004,
+    2.0000000000000018,
+    1.9999999999999991,
+    1.9999999999999987,
+    1.9999999999999982
+   ]
+  },
+  {
+   "node": "af7fef81-66ce-4fbb-9616-b6677d0d6b36",
+   "content": "Committed J1 round-1 adversarial review as 00cf4c9 on wt/j1 \u2014 REQUEST_CHANGES, 1 P1 / 1 P2 / 6 P3",
+   "count_exclusive": 1,
+   "count_all": 3,
+   "conductance": 2.7046548238367474,
+   "min_r": 0.961900241423636,
+   "max_r": 1.2404750603559107,
+   "mean_r": 1.1222169483275757,
+   "exclusive_r": [
+    0.961900241423636
+   ]
+  },
+  {
+   "node": "be22f58e-e7c7-40fb-aae2-d1e14a02fe52",
+   "content": "Committed the J2 round-3 adversarial review on wt/j2 as aefda87 \u2014 verdict CLEAN. All 7 round-2 findings (2 P2 / 5 P3) verified closed over 920e096..64...",
+   "count_exclusive": 5,
+   "count_all": 8,
+   "conductance": 4.749999999999999,
+   "min_r": 1.333333333333334,
+   "max_r": 2.0000000000000013,
+   "mean_r": 1.7500000000000004,
+   "exclusive_r": [
+    1.9999999999999987,
+    2.0,
+    2.0000000000000004,
+    2.0000000000000004,
+    2.0000000000000013
+   ]
+  },
+  {
+   "node": "c3a120e8-0d5d-4918-96c9-523ba84eb1a9",
+   "content": "Committed ea1e577 docs(j3): J3-R2-3/5/8. The [~] Done-when box rewritten against the post-fix truth: four limits, complete \u2014 (3) restated at its real ...",
+   "count_exclusive": 2,
+   "count_all": 7,
+   "conductance": 8.050114622535016,
+   "min_r": 0.5888807502013238,
+   "max_r": 2.0000000000000004,
+   "mean_r": 1.1121862651833772,
+   "exclusive_r": [
+    2.0000000000000004,
+    1.9999999999999998
+   ]
+  },
+  {
+   "node": "c620ce53-17e8-4a7e-9d15-841ecaba5eab",
+   "content": "Implemented J3 (writes acknowledged before the embedder) on wt/j3 in five commits 427fabf..528ade6: the Memory-level write pipeline with a measured-ce...",
+   "count_exclusive": 4,
+   "count_all": 13,
+   "conductance": 17.517872236512353,
+   "min_r": 0.42222736766034247,
+   "max_r": 2.0000000000000013,
+   "mean_r": 1.0896354463496547,
+   "exclusive_r": [
+    1.9999999999999991,
+    1.999999999999999,
+    1.9999999999999996,
+    2.0000000000000013
+   ]
+  },
+  {
+   "node": "cbf1a8c0-b289-4a0d-8978-34983ef32bfb",
+   "content": "Merged I round-1 remediation (49a9b09): all twelve findings fixed \u2014 canonical_marker now counts rendered hits only, drop counter split channel-full vs...",
+   "count_exclusive": 3,
+   "count_all": 5,
+   "conductance": 3.0182087774809165,
+   "min_r": 1.3173418766017773,
+   "max_r": 2.0000000000000004,
+   "mean_r": 1.7269367506407103,
+   "exclusive_r": [
+    2.0,
+    1.9999999999999978,
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "cc5edae8-a677-4bcc-8875-ab7c38c3b3ce",
+   "content": "J1 identity decision (operator, 2026-08-20)",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.4999999999999999,
+   "min_r": 2.0000000000000004,
+   "max_r": 2.0000000000000004,
+   "mean_r": 2.0000000000000004,
+   "exclusive_r": [
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "cd5565f0-1479-4b09-bc1e-5dcc477662f8",
+   "content": "CI green on 1f86792 (run 32283530988, 2m09s) \u2014 the pre-handshake SIGTERM regression is confirmed fixed on the environment that caught it. Two consecut...",
+   "count_exclusive": 0,
+   "count_all": 1,
+   "conductance": 0.49999999999999956,
+   "min_r": 2.0000000000000018,
+   "max_r": 2.0000000000000018,
+   "mean_r": 2.0000000000000018,
+   "exclusive_r": []
+  },
+  {
+   "node": "d5ac3d2c-35d2-4846-9f51-d1f0e4e8f18b",
+   "content": "Integrated J2 to lambo-for-mooshik and pushed (26baa0c..166a3c8, 15 commits rebased linear). Cycle: 4-stage implement \u2192 review r1 REQUEST_CHANGES (1 P...",
+   "count_exclusive": 2,
+   "count_all": 6,
+   "conductance": 5.0996596230596145,
+   "min_r": 0.8237655482551042,
+   "max_r": 2.000000000000004,
+   "mean_r": 1.3397866669847727,
+   "exclusive_r": [
+    2.000000000000004,
+    1.9999999999999958
+   ]
+  },
+  {
+   "node": "d72ece2f-dad6-4a20-8900-3b25c85b3aaf",
+   "content": "Landed J1 (per-call agent identity, cooperative and loudly declared) as 206f977 on wt/j1",
+   "count_exclusive": 6,
+   "count_all": 12,
+   "conductance": 11.486828939991302,
+   "min_r": 0.5827757894362497,
+   "max_r": 2.0000000000000027,
+   "mean_r": 1.388251344604842,
+   "exclusive_r": [
+    2.0000000000000027,
+    2.0,
+    2.0,
+    1.9999999999999993,
+    2.0000000000000004,
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "d9720074-0968-4034-a347-9cea9b45a033",
+   "content": "J3 round-3 P1s = axes four and five of the estimator disease, and the likely solution to the dogfood embedding mystery. J3-R3-1: llama refuses some in...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000001,
+   "min_r": 1.9999999999999996,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.9999999999999996,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "d9ddc695-1c3a-47d2-93c7-f3d91a97a0bd",
+   "content": "Committed 41b46d9 fix(writeq): J3-R2-1/2/4 \u2014 the probe sizes nothing load-bearing. PROBE_LANE_CEILING = OBSERVED_MIN_SAMPLES (4) and PROBE_AGGREGATE_C...",
+   "count_exclusive": 2,
+   "count_all": 6,
+   "conductance": 4.391972925811633,
+   "min_r": 0.9461245617087269,
+   "max_r": 2.000000000000002,
+   "mean_r": 1.5288134642052273,
+   "exclusive_r": [
+    2.000000000000001,
+    2.000000000000002
+   ]
+  },
+  {
+   "node": "de1fe9f1-7a19-4286-828d-f1e578e1733b",
+   "content": "Committed the J1 round-2 adversarial review on wt/j1 \u2014 REQUEST_CHANGES: all 8 round-1 findings verified closed (mutation-tested both ways), but 2 new ...",
+   "count_exclusive": 1,
+   "count_all": 8,
+   "conductance": 10.00065559693953,
+   "min_r": 0.5202025531922067,
+   "max_r": 2.0000000000000018,
+   "mean_r": 0.9587068771168221,
+   "exclusive_r": [
+    2.0000000000000018
+   ]
+  },
+  {
+   "node": "e9a429e9-9884-4ad4-8e2e-e1a0858cccce",
+   "content": "Closed I round-1 adversarial review (71a87c4): REQUEST_CHANGES, 5 P2 / 7 P3. Mechanism verified at the binary (never-block, shutdown ordering, H3 wire...",
+   "count_exclusive": 2,
+   "count_all": 3,
+   "conductance": 1.6403142773391584,
+   "min_r": 1.5617330979336042,
+   "max_r": 1.9999999999999991,
+   "mean_r": 1.8539110326445343,
+   "exclusive_r": [
+    1.9999999999999991,
+    1.9999999999999991
+   ]
+  },
+  {
+   "node": "ee4e9dc9-8ec1-49bb-80fb-d06116d7d975",
+   "content": "J3 round-2 P1 (J3-R2-1), the projection lesson's second face: A MEASUREMENT IS ONLY A BOUND FOR THE WORKLOAD IT SAMPLED. The 35-byte PROBE_TEXT measur...",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.4999999999999991,
+   "min_r": 2.0000000000000036,
+   "max_r": 2.0000000000000036,
+   "mean_r": 2.0000000000000036,
+   "exclusive_r": [
+    2.0000000000000036
+   ]
+  },
+  {
+   "node": "f281c28b-a6b4-4480-b8b6-e4c5cee3a403",
+   "content": "Committed J2 stages 3+4 as 275b418 on wt/j2 \u2014 MemoryBuilder::build_attach/Attach reporting a lease refusal as data without widening LamboError, src/mc...",
+   "count_exclusive": 5,
+   "count_all": 12,
+   "conductance": 11.729104344280767,
+   "min_r": 0.5972291040709691,
+   "max_r": 2.0000000000000018,
+   "mean_r": 1.3238984407139798,
+   "exclusive_r": [
+    2.0000000000000018,
+    2.0000000000000004,
+    2.0000000000000004,
+    1.9999999999999991,
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "f3e514f1-3642-4e6d-b8e7-f2ffd9f19df7",
+   "content": "Completed the J3 round-1 independent adversarial review on wt/j3 (166a3c8..528ade6) and committed adve-review-mooshik-J3-round1.md. Verdict REQUEST_CH...",
+   "count_exclusive": 1,
+   "count_all": 6,
+   "conductance": 3.8353066835070173,
+   "min_r": 1.3188062661713549,
+   "max_r": 2.000000000000004,
+   "mean_r": 1.6155167567140134,
+   "exclusive_r": [
+    2.000000000000004
+   ]
+  },
+  {
+   "node": "f4384464-cc2f-41ee-94dc-6a66bbb6a2f9",
+   "content": "Committed ee6f4a2 on wt/j3 \u2014 the J3 round-1 P1 cluster (J3-R1-1/2/3) plus J3-R1-6/7/8/9. Red reproduced first (58 of 77 acked writes abandoned at a cl...",
+   "count_exclusive": 1,
+   "count_all": 4,
+   "conductance": 3.9821996269195417,
+   "min_r": 0.8388860971033482,
+   "max_r": 2.0000000000000036,
+   "mean_r": 1.1464351058933504,
+   "exclusive_r": [
+    2.0000000000000036
+   ]
+  },
+  {
+   "node": "f762f11d-24ce-4812-b6df-ddb40a09b530",
+   "content": "Committed 58faeac on wt/j2 \u2014 J2-R1-1 (the P1) closed: the proxy pump tracks in-flight request ids per hub connection and answers every outstanding id ...",
+   "count_exclusive": 1,
+   "count_all": 3,
+   "conductance": 2.033092303475729,
+   "min_r": 1.3045528931726598,
+   "max_r": 1.9999999999999996,
+   "mean_r": 1.5363685954484403,
+   "exclusive_r": [
+    1.9999999999999996
+   ]
+  },
+  {
+   "node": "f76f8cb0-cc6d-4ccf-96dd-062ce9988970",
+   "content": "breaks_one_line predicate",
+   "count_exclusive": 1,
+   "count_all": 1,
+   "conductance": 0.5000000000000004,
+   "min_r": 1.9999999999999982,
+   "max_r": 1.9999999999999982,
+   "mean_r": 1.9999999999999982,
+   "exclusive_r": [
+    1.9999999999999982
+   ]
+  },
+  {
+   "node": "f95fa65d-c300-415e-8e49-bebde5058c73",
+   "content": "J2 socket-path scheme decision",
+   "count_exclusive": 2,
+   "count_all": 2,
+   "conductance": 0.9999999999999998,
+   "min_r": 1.9999999999999987,
+   "max_r": 2.000000000000002,
+   "mean_r": 2.0000000000000004,
+   "exclusive_r": [
+    2.000000000000002,
+    1.9999999999999987
+   ]
+  },
+  {
+   "node": "fee3b6fa-2635-4085-a42b-71b4e6ab3d78",
+   "content": "Committed J2 stage 1 as 7f51bb6 on wt/j2 \u2014 session_leases gains a nullable `endpoint` column across both 001_init.sql files, both SQL adapters (with i...",
+   "count_exclusive": 10,
+   "count_all": 15,
+   "conductance": 9.84468293751499,
+   "min_r": 0.8001522353338482,
+   "max_r": 2.0000000000000004,
+   "mean_r": 1.6867612912391263,
+   "exclusive_r": [
+    1.9999999999999993,
+    2.0000000000000004,
+    1.9999999999999996,
+    1.9999999999999991,
+    1.999999999999998,
+    2.0,
+    1.9999999999999982,
+    1.9999999999999984,
+    1.9999999999999987,
+    2.0000000000000004
+   ]
+  },
+  {
+   "node": "ffa87757-d7c1-4ba0-9912-1af8b1ab2502",
+   "content": "Closed J2 round-2 adversarial review (920e096 on wt/j2): REQUEST_CHANGES, 2 P2 / 5 P3; all 23 round-1 + live-probe findings verified closed at the art...",
+   "count_exclusive": 1,
+   "count_all": 2,
+   "conductance": 0.9999999999999986,
+   "min_r": 1.9999999999999996,
+   "max_r": 2.000000000000006,
+   "mean_r": 2.0000000000000027,
+   "exclusive_r": [
+    2.000000000000006
+   ]
+  }
+ ],
+ "tau_excl_cond": 0.4355769230769231,
+ "tau_all_cond": 0.8403846153846154,
+ "warn_now": [
+  "2e8ebbd6-9749-45fd-945e-8a78dfd2cdf2",
+  "2fa6c47e-8352-488b-8d99-c510c8c9829d",
+  "46a7bbec-65b7-4a91-9284-57b147ac2668",
+  "4c22c3aa-3e20-45dd-9f5e-599e5cfdd65c",
+  "711b9239-3fe0-4a81-af88-6bc0b77707cb",
+  "a1c331aa-e73e-4590-b317-c799853eb513",
+  "ad552aca-2365-481c-b781-72e04d3f229e",
+  "d72ece2f-dad6-4a20-8900-3b25c85b3aaf",
+  "fee3b6fa-2635-4085-a42b-71b4e6ab3d78"
+ ],
+ "top_cond": [
+  "a1c331aa-e73e-4590-b317-c799853eb513",
+  "c620ce53-17e8-4a7e-9d15-841ecaba5eab",
+  "4c22c3aa-3e20-45dd-9f5e-599e5cfdd65c",
+  "ad552aca-2365-481c-b781-72e04d3f229e",
+  "63432152-a027-4b32-9dd6-f48605c3995d",
+  "f281c28b-a6b4-4480-b8b6-e4c5cee3a403",
+  "d72ece2f-dad6-4a20-8900-3b25c85b3aaf",
+  "ac22b489-c9d8-4421-8324-edd01e424888",
+  "2d1bfc48-101c-46e6-bced-5727e2b917da"
+ ],
+ "disagreements": [
+  {
+   "kind": "promoted",
+   "content": "Implemented J3 (writes acknowledged before the embedder) on wt/j3 in five commits 427fabf..528ade6: the Memory-level write pipeline with a measured-ce...",
+   "count_exclusive": 4,
+   "count_all": 13,
+   "conductance": 17.517872236512353
+  },
+  {
+   "kind": "promoted",
+   "content": "Committed cab9881 (J3-R1-4 pre-pass docstring per strategy; J3-R1-5 real drop-class tests for LaneFull/QueueFull/QueueBytes plus the seal-test rename)...",
+   "count_exclusive": 2,
+   "count_all": 8,
+   "conductance": 12.009378758153225
+  },
+  {
+   "kind": "promoted",
+   "content": "Committed J2 stages 3+4 as 275b418 on wt/j2 \u2014 MemoryBuilder::build_attach/Attach reporting a lease refusal as data without widening LamboError, src/mc...",
+   "count_exclusive": 5,
+   "count_all": 12,
+   "conductance": 11.729104344280767
+  },
+  {
+   "kind": "promoted",
+   "content": "Committed a573e64 on wt/j2 \u2014 J2-L1 and J2-L2, the live two-client probe's two P2s: TMPDIR removed from the endpoint derivation and proxyable() switche...",
+   "count_exclusive": 3,
+   "count_all": 9,
+   "conductance": 11.323553655343336
+  },
+  {
+   "kind": "promoted",
+   "content": "Closed J2 round-1 adversarial review on wt/j2 (19f51d3..40791e2): REQUEST_CHANGES, 1 P1 / 7 P2 / 13 P3. Adjudicated the handshake-replay deviation as ...",
+   "count_exclusive": 0,
+   "count_all": 7,
+   "conductance": 10.28911135585097
+  },
+  {
+   "kind": "demoted",
+   "content": "Committed J2 stage 2 as 8e64fc8 on wt/j2 \u2014 src/mcp/endpoint.rs (SessionEndpoint: derived FNV-1a path over session+store, 0700-checked bind, lease-lice...",
+   "count_exclusive": 6,
+   "count_all": 10,
+   "conductance": 6.985726643188947
+  },
+  {
+   "kind": "demoted",
+   "content": "Stood up the dogfood rig: pinned binary lambo-3039b82 serving session lambo-dev over stdio MCP, SQLite store at ~/lambo-dogfood/lambo-dev.db, BGE-M3 e...",
+   "count_exclusive": 6,
+   "count_all": 6,
+   "conductance": 3.0
+  },
+  {
+   "kind": "demoted",
+   "content": "Closed the J2 round-2 adversarial review on wt/j2 as 920e096 \u2014 REQUEST_CHANGES, 2 P2 / 5 P3, with all 21 round-1 findings and both live-probe P2s veri...",
+   "count_exclusive": 7,
+   "count_all": 9,
+   "conductance": 4.882049273343387
+  },
+  {
+   "kind": "demoted",
+   "content": "Committed J3 stage 1 on wt/j3 as 427fabf \u2014 src/writeq.rs (the background write pipeline, calibration probe, receipt store, counters), Memory::derive_a...",
+   "count_exclusive": 6,
+   "count_all": 10,
+   "conductance": 7.377996483321581
+  },
+  {
+   "kind": "demoted",
+   "content": "Committed J2 stage 1 as 7f51bb6 on wt/j2 \u2014 session_leases gains a nullable `endpoint` column across both 001_init.sql files, both SQL adapters (with i...",
+   "count_exclusive": 10,
+   "count_all": 15,
+   "conductance": 9.84468293751499
+  }
+ ],
+ "exclusive_r_all_single": false,
+ "n_exclusive_pairs": 159,
+ "n_pairs_with_multiplicity": 160,
+ "n_pairs": 325,
+ "distinct_resistances": 118
+}

@@ -1,0 +1,195 @@
+{
+ "blast_hist": {
+  "1": 25,
+  "10": 1,
+  "2": 15,
+  "3": 2,
+  "4": 4,
+  "5": 4,
+  "6": 4,
+  "7": 4
+ },
+ "chunk_grouped": 0,
+ "component_sizes": [
+  266,
+  9,
+  8,
+  7,
+  7,
+  6,
+  5,
+  5,
+  5,
+  4,
+  4,
+  4,
+  4,
+  4,
+  4,
+  3,
+  3,
+  3,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  2,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1,
+  1
+ ],
+ "components": 41,
+ "concept_types": {
+  "Constraint": 59,
+  "Entity": 46,
+  "Logic": 78,
+  "Observation": 30,
+  "Resource": 173
+ },
+ "concepts": 386,
+ "depth2_ball": {
+  "eq1": 248,
+  "max": 20,
+  "mean": 2.634715025906736,
+  "median": 1.0,
+  "p90": 7.0
+ },
+ "edge_density": 0.007025099253078528,
+ "edge_types_all": {
+  "Causal": 207,
+  "CoOccurrence": 202,
+  "Dependency": 94,
+  "Derives": 402,
+  "Hierarchical": 25,
+  "Temporal": 97
+ },
+ "edge_types_cc": {
+  "Causal": 207,
+  "CoOccurrence": 202,
+  "Dependency": 94,
+  "Hierarchical": 25
+ },
+ "edges_concept_concept": 528,
+ "edges_total": 1027,
+ "interactions": 98,
+ "isolated_nodes": 11,
+ "largest_component": 266,
+ "mean_undirected_degree": 2.704663212435233,
+ "nodes_with_any_structural_dependent": 65,
+ "nodes_with_blast_gt0": 59,
+ "reinforcements_max": 1,
+ "session": "lambo-dev",
+ "stored_blast_non_null": 0,
+ "structural_components": 144,
+ "structural_edges": 326,
+ "structural_isolated": 132,
+ "structural_largest": 221,
+ "top_degree": [
+  {
+   "content": "Committed the J2 round-2 review remediation on wt/j2 as 7205...",
+   "deg": 18,
+   "node": "a1c331aa-e73e-4590-b317-c799853eb513"
+  },
+  {
+   "content": "Committed the J1 round-2 remediation as f083a5a on wt/j1 \u2014 a...",
+   "deg": 15,
+   "node": "4c22c3aa-3e20-45dd-9f5e-599e5cfdd65c"
+  },
+  {
+   "content": "dev-diary/lambo-for-mooshik/J-multi-client.md",
+   "deg": 15,
+   "node": "fb6019d1-7c25-41bd-8e8d-a39973f102ae"
+  },
+  {
+   "content": "Committed J2 stage 1 as 7f51bb6 on wt/j2 \u2014 session_leases ga...",
+   "deg": 15,
+   "node": "fee3b6fa-2635-4085-a42b-71b4e6ab3d78"
+  },
+  {
+   "content": "Committed the J1 round-1 remediation as 4a9c6a2 on wt/j1 \u2014 a...",
+   "deg": 13,
+   "node": "ad552aca-2365-481c-b781-72e04d3f229e"
+  },
+  {
+   "content": "Implemented J3 (writes acknowledged before the embedder) on ...",
+   "deg": 13,
+   "node": "c620ce53-17e8-4a7e-9d15-841ecaba5eab"
+  },
+  {
+   "content": "Landed J1 (per-call agent identity, cooperative and loudly d...",
+   "deg": 13,
+   "node": "d72ece2f-dad6-4a20-8900-3b25c85b3aaf"
+  },
+  {
+   "content": "Committed J2 stages 3+4 as 275b418 on wt/j2 \u2014 MemoryBuilder:...",
+   "deg": 12,
+   "node": "f281c28b-a6b4-4480-b8b6-e4c5cee3a403"
+  },
+  {
+   "content": "src/mcp/server.rs",
+   "deg": 11,
+   "node": "21ce8ff3-73d4-40a3-af90-5756f77c4959"
+  },
+  {
+   "content": "J2-R2-1 decision, made at the true number (2026-08-20): the ...",
+   "deg": 11,
+   "node": "43f6206e-6512-416f-b29f-31c6226134ac"
+  }
+ ],
+ "traversable_edges": 528,
+ "undirected_degree_hist": {
+  "0": 11,
+  "1": 179,
+  "10": 2,
+  "11": 2,
+  "12": 1,
+  "13": 3,
+  "15": 3,
+  "18": 1,
+  "2": 56,
+  "3": 41,
+  "4": 38,
+  "5": 14,
+  "6": 13,
+  "7": 6,
+  "8": 12,
+  "9": 4
+ },
+ "undirected_distinct_pairs": 522,
+ "weight_by_type": {
+  "Causal": [
+   0.5
+  ],
+  "CoOccurrence": [
+   0.5
+  ],
+  "Dependency": [
+   0.5
+  ],
+  "Derives": [
+   0.9
+  ],
+  "Hierarchical": [
+   0.5
+  ],
+  "Temporal": [
+   1.0
+  ]
+ },
+ "with_embedding": 22
+}

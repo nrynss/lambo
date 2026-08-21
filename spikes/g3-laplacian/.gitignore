@@ -1,0 +1,11 @@
+# Local copies of live dogfood data — reproduce with the commands in README.md
+# ("Reproducing"), never commit. They are snapshots of ~/lambo-dogfood/, which
+# is not repo state.
+snapshot.db
+snapshot.db-wal
+snapshot.db-shm
+calls.jsonl
+
+# Regenerable in seconds by `python3 step2_diffusion.py`; ~1 MB of per-query
+# node-id lists for 18 variants. The summaries beside it are committed.
+out/h1_rows.json

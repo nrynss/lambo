@@ -1,0 +1,152 @@
+{
+ "CONTROL_fixed_undirected": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.4684900079953058,
+  "n_queries": 22,
+  "n_set_disagreements": 20
+ },
+ "heat_t0.5_plain": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.6417195372640058,
+  "mean_tau": 0.26982172521043984,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "heat_t0.5_typed": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.6445912720492347,
+  "mean_tau": 0.3588968979630614,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "heat_t1.0_plain": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.5899139741503202,
+  "mean_tau": 0.22839233355232005,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "heat_t1.0_typed": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.6075609252737669,
+  "mean_tau": 0.2569647895273609,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "heat_t2.0_plain": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.5197179943664695,
+  "mean_tau": 0.12041085618171658,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "heat_t2.0_typed": {
+  "frac_set_disagreements": 0.8636363636363636,
+  "mean_jaccard": 0.552765308920685,
+  "mean_tau": 0.22079452324025745,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 19
+ },
+ "ppr_dir_a0.15_plain": {
+  "frac_set_disagreements": 0.3181818181818182,
+  "mean_jaccard": 0.9699783207073088,
+  "mean_tau": 0.2612752927280497,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 13,
+  "n_set_disagreements": 7
+ },
+ "ppr_dir_a0.15_typed": {
+  "frac_set_disagreements": 0.3181818181818182,
+  "mean_jaccard": 0.9667408174698054,
+  "mean_tau": 0.2538467767725571,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 13,
+  "n_set_disagreements": 7
+ },
+ "ppr_dir_a0.3_plain": {
+  "frac_set_disagreements": 0.18181818181818182,
+  "mean_jaccard": 0.985346471710108,
+  "mean_tau": 0.2769015246047053,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 16,
+  "n_set_disagreements": 4
+ },
+ "ppr_dir_a0.3_typed": {
+  "frac_set_disagreements": 0.2727272727272727,
+  "mean_jaccard": 0.9764413524391352,
+  "mean_tau": 0.2778902928081428,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 14,
+  "n_set_disagreements": 6
+ },
+ "ppr_dir_a0.5_plain": {
+  "frac_set_disagreements": 0.09090909090909091,
+  "mean_jaccard": 0.9941111520058888,
+  "mean_tau": 0.3001713019046249,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 18,
+  "n_set_disagreements": 2
+ },
+ "ppr_dir_a0.5_typed": {
+  "frac_set_disagreements": 0.09090909090909091,
+  "mean_jaccard": 0.9958251243080963,
+  "mean_tau": 0.3019450273612673,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 18,
+  "n_set_disagreements": 2
+ },
+ "ppr_und_a0.15_plain": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.4590552346794793,
+  "mean_tau": 0.25375414540712077,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 20
+ },
+ "ppr_und_a0.15_typed": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.4406395213444663,
+  "mean_tau": 0.17629060301396823,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 20
+ },
+ "ppr_und_a0.3_plain": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.522455894721993,
+  "mean_tau": 0.2949407019802434,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 20
+ },
+ "ppr_und_a0.3_typed": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.5092944153578373,
+  "mean_tau": 0.2569040679215184,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 20
+ },
+ "ppr_und_a0.5_plain": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.5781864677061275,
+  "mean_tau": 0.19283229649242206,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 1,
+  "n_set_disagreements": 20
+ },
+ "ppr_und_a0.5_typed": {
+  "frac_set_disagreements": 0.9090909090909091,
+  "mean_jaccard": 0.5665600062600827,
+  "mean_tau": 0.2672614517292781,
+  "n_queries": 22,
+  "n_rank_only_disagreements": 0,
+  "n_set_disagreements": 20
+ }
+}
