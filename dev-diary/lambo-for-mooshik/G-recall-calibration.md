@@ -128,3 +128,55 @@ is now tested as behavior: the actual 0.3991 vector lift outranks unrelated rece
 concepts, rather than asserting that recency is exactly 0.50. C2/SoloPolicy did not
 land in this worktree, so there were no boundary tests to re-run; C should calibrate
 against the 0.35 floor.
+
+## G3 — Exploratory: the graph Laplacian for expansion and blast radius
+
+**Status: EXPLORATORY, unscheduled** (added 2026-08-21, operator decision, from the J3
+pause's math discussion). A spike, not a commitment: it produces measurements and a
+recommendation, never a merged behaviour change on its own. Runs whenever an agent has
+idle capacity after J closes; it blocks nothing and nothing blocks it — the diffusion
+half works on edges alone, so it does not even wait for the embedding backfill.
+
+**The two hypotheses, stated so the spike can falsify them:**
+
+1. **Recall phase-2 expansion as diffusion, not fixed-depth traversal.** Today phase 2
+   expands hits by graph traversal with a hard depth cliff (`traversal_depth`, default 2):
+   a node at depth 2 counts fully, a node at depth 3 not at all, and one path counts the
+   same as five. The principled alternative is diffusion over the concept graph's
+   Laplacian — heat-kernel weighting or personalized PageRank seeded at the phase-1 hits —
+   where relevance decays *continuously* with distance and *accumulates* over path
+   multiplicity. Hypothesis: on the dogfood graph, diffusion ranks the genuinely related
+   neighbourhood above the incidentally adjacent one in cases where fixed-depth cannot
+   distinguish them. Falsifier: if diffusion's ranking disagrees with fixed-depth on
+   fewer than ~1 in 10 real recalls, or disagrees only on ties, the cliff is harmless at
+   session scale and the idea is shelved with numbers.
+2. **Blast radius as effective resistance, not a count.** `blast_radius` today counts
+   dependents; it cannot tell a dependent connected by five independent paths (deeply
+   load-bearing) from one connected by a single chain (fragile linkage, cheap to verify by
+   hand). Effective resistance between two nodes — computed from the Laplacian
+   pseudoinverse — is exactly the quantity that knows the difference. Hypothesis: on the
+   dogfood graph, resistance-ranked dependents reorder the warning-worthy set vs the
+   count-ranked ones in a way a human judge endorses. Falsifier: if the two rankings agree
+   on the dogfood graph's real cases, the count is sufficient at this scale.
+
+**Method (all read-only against a copy of `~/lambo-dogfood/lambo-dev.db`):** export the
+node/edge set; compute both scores offline (a ~200-line Python spike beside the
+observability kit, NOT product code — n≈124 nodes, so dense pseudoinverse is trivial);
+replay the ledger's real recall queries through both rankings; table the disagreements;
+have the operator judge a sample. Costs to respect from the start: the graph mutates under
+the daemon (spike works on a snapshot; product code would need incremental updates —
+Laplacian solvers at session scale are cheap, but say so with a measured number); recall's
+§6.4 lock discipline (diffusion must be computable outside the graph lock or precomputed);
+and determinism (issue #2's lesson — no randomized solvers without pinned seeds).
+
+**Relationship to the rest of the map:** independent of G1/G2's constants (this is about
+*which nodes*, not *what score floor*). Feeds C's eviction-resistance thinking if
+resistance proves informative (a concept's resistance profile is a canonization signal).
+Post-Mooshik it is the natural growth path for recall at autobiography scale, where a
+fixed depth-2 ball around every hit stops being cheap or meaningful.
+
+**Done when (as an exploration):** the disagreement tables exist with real dogfood
+queries; each hypothesis is upheld or falsified with numbers; the recommendation
+(adopt / adapt / shelve) is recorded here with the evidence, and if "adopt", the product
+design questions (incremental maintenance, lock discipline, determinism) each have a
+measured answer rather than an assumption.

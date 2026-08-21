@@ -34,7 +34,7 @@ has (D).
 | [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
 | [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
 | [F — SQLite vectors](F-sqlite-vectors.md) | issue #5, the query path, the fail-closed capability trap |
-| [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run |
+| [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run. G3 (exploratory, unscheduled): graph-Laplacian diffusion for phase-2 expansion and effective-resistance blast radius, spiked read-only against the dogfood graph |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
@@ -62,7 +62,7 @@ H1 ⇢ B0               (soft: the parity harness is the extraction's behavioura
 D1 ─→ D2 ─→ C2
 C1 ─────────↗
 F1 ─→ F2
-F2 ─→ G1 ─→ G2
+F2 ─→ G1 ─→ G2 ⇢ G3   (G3 exploratory: read-only spike, blocks nothing)
 F2 ─→ H1 ─→ H2        (H2 needs a DSN-bearing machine or post-merge CI)
 I1 ─→ I2 ─→ I3        (I first among remaining starts, by decision — feeds DOGFOOD's metrics)
 J0                    (independent: I round-3 advisories, carried by decision 2026-08-20)
