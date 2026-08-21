@@ -113,8 +113,8 @@ use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
-    StoreConfig,
+    map_write_err, tables_in_ddl, unprovisioned_store_err, validate_vector_candidate_limit,
+    Capabilities, GraphStore, SessionFlushStats, StoreConfig,
 };
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
@@ -1967,6 +1967,32 @@ impl GraphStore for CockroachStore {
             .await
             .map_err(backend)?;
         Ok(())
+    }
+
+    /// J3 F5. One `information_schema.tables` read in the connection's current
+    /// schema, diffed against the table names in the DDL this build ships.
+    /// Cockroach is provisioned by `scripts/provision.sh`, not by `init_schema`
+    /// on the attach path, so the same upgrade-without-reprovision hazard
+    /// applies — and here every failed statement is also a round trip.
+    async fn preflight_schema(&self) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        let present: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(backend)?;
+        let required = tables_in_ddl(INIT_SQL);
+        let missing: Vec<&str> = required
+            .into_iter()
+            .filter(|t| !present.iter().any(|p| p == t))
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(unprovisioned_store_err("cockroach", &missing))
+        }
     }
 
     fn capabilities(&self) -> Capabilities {

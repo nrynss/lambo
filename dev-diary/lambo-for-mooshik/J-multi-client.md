@@ -2112,6 +2112,74 @@ list.
 lib-side counts is two calibration-bound tests merged into
 `no_rate_can_move_the_bounds`; everything else is additions.)
 
+### Round-1 review remediation (`adve-review-mooshik-J3-redesign-round1.md`)
+
+Round 1 upheld the founding invariant at the binary and closed all six round-3
+findings, then returned **REQUEST_CHANGES** on the durable half's *promise*:
+1 P1, 3 P2, 1 unconfirmed P2 candidate, 9 P3. Dispositions below, in the order
+they were worked.
+
+**F5 — an un-migrated store: CONFIRMED, and not the shape the review
+suspected.** The reviewer observed a `serve` acking 64 writes against a store
+with no `write_intents` table but could not read the store files to settle the
+mechanism, and named `IF NOT EXISTS` as the likely benign explanation. Settled
+by construction and by driving the real binary:
+
+* `init_schema` is called from **exactly one place in the product** —
+  `src/cli/provision.rs:29`, i.e. `lambo provision`. Nothing on the attach path
+  calls it, so `IF NOT EXISTS` never runs at attach and cannot be the answer.
+  "Provisioned by the previous build, binary upgraded, never re-provisioned" is
+  therefore reachable through the product's own path — and this branch is the
+  one that made it bite, because `write_intents` is a **new table** (the only
+  schema change on the branch: one `CREATE TABLE` per adapter).
+* Driven at the serve binary against such a store: it **attached, acked four
+  derives, settled two of them `applied`, reported `degraded=false
+  dead_lettered=0` for the whole session — and left `concepts=0 embedded=0`.**
+  The loss is **total, not intent-scoped**: a write's mutations and its
+  `PutWriteIntent` share one flush transaction, so one missing table rolls every
+  batch back whole. That is worse than the review guessed.
+* It is **not silent**, which is why it does not outrank N1: the close fails at
+  three log sites (`close: final flush failed; 24 tail mutations returned`,
+  `final flush failed — tail lost on exit`, `Memory dropped after a close() that
+  did not finish`) and `serve` exits non-zero naming the missing table. The
+  founding invariant is scoped to a **clean** close, and this close is not one —
+  its precondition is violated loudly rather than the invariant being satisfied
+  falsely. Graded **P2**: no in-session signal, an ack surface that says
+  "accepted" and "applied" throughout, and total durability loss.
+* **Fixed, not just recorded.** `GraphStore::preflight_schema` (default
+  `Ok(())`, so no test double changes) diffs the tables present in the store
+  against the table names **derived from the DDL the build ships**
+  (`store::tables_in_ddl` over the already-`include_str!`d migration) — so the
+  check cannot drift behind the next schema addition the way `write_intents`
+  drifted past every existing path. Implemented for both SQL adapters
+  (`sqlite_master`; `information_schema.tables`), called at
+  `Memory::builder().build()` **before the lease acquire** so a refusal leaves no
+  lease row to strand the session for a TTL, and returning
+  `StoreError::Capability` with a message that names the missing table and
+  `lambo provision`. Refusal beats the alternative of disabling only the async
+  ack path: with the table absent the whole batch fails, so a "degraded" mode
+  would keep the invariant silently void — exactly F5's complaint.
+* **Not covered, stated plainly:** missing *columns*. Those converge through
+  `init_schema`'s `ensure_column` / `ADD COLUMN IF NOT EXISTS` ladders, which
+  are on the same provision-only path. The preflight checks tables.
+* Pinned three ways: at the binary
+  (`an_unmigrated_store_refuses_the_attach_naming_lambo_provision`, which also
+  asserts no lease row is left), at the adapter
+  (`preflight_schema_refuses_an_unprovisioned_or_unmigrated_target`), and at the
+  derivation (`ddl_table_names_are_derived_from_the_shipped_migration`, which
+  fails if a DDL rewrite ever empties the required set).
+
+**Register sweep, F5 (per file, including the nulls).**
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/store/mod.rs` | any claim about when the schema is created or converged | the new trait method states that `init_schema` is provision-only and that the check covers **tables, not columns**; `tables_in_ddl` states which DDL idiom it matches and that it deliberately matches no other |
+| `src/store/sqlite.rs` | the same, plus the inline `include_str!` | the migration hoisted to `INIT_SQL` (one authority for execution and for the preflight); `preflight_schema` states its cost (one statement, no DDL, no write) and its lease ordering |
+| `src/store/cockroach.rs` | the same | `preflight_schema` added, noting that Cockroach is provisioned by `scripts/provision.sh` — so the hazard is the same — and that here each statement is a round trip |
+| `src/memory.rs` | the attach-path comment ladder | step (0a) added ahead of the lease with the measured consequence and the ordering reason recorded at the site |
+| `src/cli/provision.rs` | its "idempotent" claim | **nothing** — the claim is true and is now the thing the refusal points at |
+| `migrations/*/001_init.sql` | the DDL idiom the preflight reads | **nothing** — both files already use `CREATE TABLE IF NOT EXISTS` uniformly; a unit test now fails if that stops being true |
+
 ## J4 — Lease conflicts leave an artifact
 
 A serve that loses the lease exits before it can open a ledger, so the most common

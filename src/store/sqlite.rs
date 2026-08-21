@@ -245,7 +245,8 @@ use super::batch::{seed_concept_rows, seed_edge_rows};
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::vector::{decode_vector, encode_vector};
 use super::{
-    map_write_err, validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats,
+    map_write_err, tables_in_ddl, unprovisioned_store_err, validate_vector_candidate_limit,
+    Capabilities, GraphStore, SessionFlushStats,
 };
 use crate::types::{
     CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
@@ -292,6 +293,11 @@ const _: () = assert!(
 );
 
 const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
+
+/// T3.1 DDL — embedded and executed verbatim by [`SqliteStore::init_schema`],
+/// and read for its table names by [`SqliteStore::preflight_schema`] (J3 F5).
+/// Idempotent by construction (`IF NOT EXISTS` everywhere).
+const INIT_SQL: &str = include_str!("../../migrations/sqlite/001_init.sql");
 
 /// §4.1 interaction-span SQL (twin-shaped with Cockroach's
 /// `INTERACTION_SPAN_SQL`; `?` placeholders). The span gates on BOTH the edge
@@ -625,7 +631,7 @@ impl GraphStore for SqliteStore {
         // The T3.1 DDL is idempotent (every statement IF NOT EXISTS); the
         // SQLite driver executes multi-statement strings statement-by-statement
         // and aborts on the first error.
-        sqlx::query(include_str!("../../migrations/sqlite/001_init.sql"))
+        sqlx::query(INIT_SQL)
             .execute(self.pool())
             .await
             .map_err(|e| db_err("init_schema (migrations/sqlite/001_init.sql)", e))?;
@@ -692,6 +698,27 @@ impl GraphStore for SqliteStore {
         )
         .await?;
         Ok(())
+    }
+
+    /// J3 F5. One `sqlite_master` read, diffed against the table names in the
+    /// DDL this build ships. Cheap (one statement, no DDL, no write) and run
+    /// before the lease is taken, so a refusal leaves no lease to release.
+    async fn preflight_schema(&self) -> Result<(), StoreError> {
+        let present: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(self.pool())
+                .await
+                .map_err(|e| db_err("preflight_schema: list tables", e))?;
+        let required = tables_in_ddl(INIT_SQL);
+        let missing: Vec<&str> = required
+            .into_iter()
+            .filter(|t| !present.iter().any(|p| p == t))
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(unprovisioned_store_err("sqlite", &missing))
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -2732,6 +2759,40 @@ mod tests {
         let store = test_store();
         store.init_schema().await.unwrap();
         store.init_schema().await.unwrap();
+    }
+
+    /// J3 F5, at the adapter. An un-provisioned target fails the preflight; a
+    /// provisioned one passes it; and dropping the one table this branch added
+    /// (a pre-J3 store, exactly) fails it by name.
+    #[tokio::test]
+    async fn preflight_schema_refuses_an_unprovisioned_or_unmigrated_target() {
+        let store = test_store();
+        let err = store
+            .preflight_schema()
+            .await
+            .expect_err("an empty database must not pass the preflight");
+        assert!(
+            matches!(err, StoreError::Capability(_)),
+            "an un-migrated store is a missing capability, not a backend fault: {err:?}"
+        );
+
+        store.init_schema().await.unwrap();
+        store
+            .preflight_schema()
+            .await
+            .expect("a provisioned store must pass");
+
+        sqlx::query("DROP TABLE write_intents")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let err = store
+            .preflight_schema()
+            .await
+            .expect_err("a pre-J3 store must not pass")
+            .to_string();
+        assert!(err.contains("write_intents"), "{err}");
+        assert!(err.contains("lambo provision"), "{err}");
     }
 
     #[tokio::test]

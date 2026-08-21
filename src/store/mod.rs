@@ -89,6 +89,47 @@ pub fn validate_vector_candidate_limit(limit: usize) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Every table name the embedded DDL creates, in DDL order.
+///
+/// Derived from the migration text an adapter already `include_str!`s rather
+/// than from a hand-kept list, so [`GraphStore::preflight_schema`] cannot drift
+/// behind a future schema addition — which is the whole failure mode F5 is: a
+/// table added to the DDL and no path that notices it is absent. Matches the
+/// project's one DDL idiom, `CREATE TABLE IF NOT EXISTS <name> (`; a statement
+/// written any other way is deliberately not matched, because a preflight that
+/// guesses is worse than one whose coverage is stated.
+pub fn tables_in_ddl(ddl: &str) -> Vec<&str> {
+    const NEEDLE: &str = "CREATE TABLE IF NOT EXISTS ";
+    ddl.lines()
+        .filter_map(|line| line.trim().strip_prefix(NEEDLE))
+        .filter_map(|rest| {
+            let name = rest
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("");
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// The refusal [`GraphStore::preflight_schema`] returns, shared by both SQL
+/// adapters so the operator reads one sentence whichever store they run.
+pub fn unprovisioned_store_err(kind: &str, missing: &[&str]) -> StoreError {
+    StoreError::Capability(format!(
+        "{kind} store is missing {} the current build requires ({}) — its schema was \
+         provisioned by an older lambo and never migrated. Nothing would become durable: \
+         a write's mutations and its durable intent share one flush transaction, so one \
+         missing table rolls every batch back whole and the failure surfaces only at \
+         close. Run `lambo provision` (idempotent) against this store, then retry",
+        if missing.len() == 1 {
+            "a table"
+        } else {
+            "tables"
+        },
+        missing.join(", "),
+    ))
+}
+
 bitflags! {
     /// Adapter capabilities (spec §3.2).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +144,35 @@ bitflags! {
 pub trait GraphStore: Send + Sync {
     async fn init_schema(&self) -> Result<(), StoreError>;
     fn capabilities(&self) -> Capabilities;
+
+    /// Refuse an **un-provisioned or un-migrated** store before it can accept a
+    /// write (J3 round-1, F5).
+    ///
+    /// `init_schema` runs from exactly one place in the product — `lambo
+    /// provision` (`crate::cli::provision`) — and never on the attach path. So a
+    /// store provisioned by an older build, whose operator upgraded the binary
+    /// without re-provisioning, is missing whatever tables the newer DDL added.
+    /// Measured consequence when the missing table is `write_intents`: the
+    /// session attaches, every write is **acked**, and nothing whatever becomes
+    /// durable — not the intents and not the concepts — because
+    /// `Mutation::PutWriteIntent` rides the same flush transaction as the
+    /// write's own mutations, so one missing table rolls each batch back whole.
+    /// The operator learns at `close()`, from a failed final flush.
+    ///
+    /// This runs before the single-writer lease is acquired (nothing in it
+    /// depends on the lease) and returns [`StoreError::Capability`]: an
+    /// un-migrated store genuinely does not offer the durable surface asked of
+    /// it, and the message names `lambo provision` so the refusal is actionable.
+    ///
+    /// **Tables only.** Post-DDL *columns* converge through `init_schema`'s
+    /// `ensure_column` / `ADD COLUMN IF NOT EXISTS` ladders, which are on the
+    /// same provision-only path; a missing column is not covered here.
+    ///
+    /// Default `Ok(())`: an adapter with no external schema (`MemoryStore`, the
+    /// test doubles) has nothing to check.
+    async fn preflight_schema(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
 
     /// Dense-vector width this store will accept, when it persists embeddings.
     ///
@@ -743,6 +813,60 @@ pub fn store_from_env() -> Result<Box<dyn GraphStore>, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// J3 F5. The preflight's coverage is derived from the DDL, so this pins the
+    /// derivation — including that it reads EVERY table in the shipped
+    /// migration, which is what stops the check drifting behind the next schema
+    /// addition the way `write_intents` drifted past every existing path.
+    #[test]
+    fn ddl_table_names_are_derived_from_the_shipped_migration() {
+        let ddl = "\
+-- a comment mentioning CREATE TABLE IF NOT EXISTS decoy (
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT NOT NULL
+);
+  CREATE TABLE IF NOT EXISTS write_intents(
+    receipt TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
+";
+        assert_eq!(tables_in_ddl(ddl), vec!["sessions", "write_intents"]);
+
+        // The real migrations, so a DDL rewrite that breaks the idiom fails here
+        // rather than silently emptying the preflight.
+        #[cfg(feature = "store-sqlite")]
+        {
+            let sqlite = tables_in_ddl(include_str!("../../migrations/sqlite/001_init.sql"));
+            assert!(
+                sqlite.contains(&"write_intents") && sqlite.contains(&"sessions"),
+                "{sqlite:?}"
+            );
+            assert_eq!(sqlite.len(), 10, "sqlite DDL table count: {sqlite:?}");
+        }
+        #[cfg(feature = "store-cockroach")]
+        {
+            let crdb = tables_in_ddl(include_str!("../../migrations/cockroach/001_init.sql"));
+            assert!(
+                crdb.contains(&"write_intents") && crdb.contains(&"sessions"),
+                "{crdb:?}"
+            );
+            assert_eq!(crdb.len(), 10, "cockroach DDL table count: {crdb:?}");
+        }
+    }
+
+    /// The refusal an operator reads must name the missing table AND the command
+    /// that fixes it — a bare "capability not supported" would send them
+    /// hunting.
+    #[test]
+    fn the_unprovisioned_refusal_is_actionable() {
+        let one = unprovisioned_store_err("sqlite", &["write_intents"]).to_string();
+        assert!(one.contains("missing a table"), "{one}");
+        assert!(one.contains("write_intents"), "{one}");
+        assert!(one.contains("lambo provision"), "{one}");
+        let two = unprovisioned_store_err("cockroach", &["write_intents", "sessions"]).to_string();
+        assert!(two.contains("missing tables"), "{two}");
+        assert!(two.contains("write_intents, sessions"), "{two}");
+    }
 
     #[test]
     fn vector_candidate_limit_is_bounded_and_checked() {

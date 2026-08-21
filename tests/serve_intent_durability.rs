@@ -554,6 +554,89 @@ fn a_kill_nine_mid_replay_re_replays_idempotently() {
     }
 }
 
+/// **F5 (J3 round 1)**: a store whose schema predates this change refuses the
+/// attach instead of acking into a void.
+///
+/// `init_schema` runs only from `lambo provision`, never on the attach path, so
+/// "provisioned by the previous build, binary upgraded, never re-provisioned" is
+/// reachable through the product's own path. Before the preflight this test
+/// pins, that store **attached, acked four derives (two even settling
+/// `applied`), reported `degraded=false dead_lettered=0` all session, and left
+/// `concepts=0 embedded=0`** — total durability loss, because a write's
+/// mutations and its `PutWriteIntent` share one flush transaction, so the one
+/// missing table rolled every batch back whole and the only signal was the
+/// failed final flush at close.
+///
+/// Dropping `write_intents` after `init_schema` is byte-equivalent to a pre-J3
+/// store: the table is this branch's ONLY schema change
+/// (`git diff 867b650..HEAD -- migrations/` is one `CREATE TABLE` per adapter).
+#[test]
+fn an_unmigrated_store_refuses_the_attach_naming_lambo_provision() {
+    let rig = Rig::new("unmigrated", "j3-unmigrated");
+    rig.seed(Vec::new());
+    let db = rig.db.clone();
+    rig.rt.block_on(async move {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{db}"))
+            .await
+            .expect("open to un-migrate");
+        sqlx::query("DROP TABLE write_intents")
+            .execute(&pool)
+            .await
+            .expect("drop write_intents");
+    });
+
+    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .args([
+            "--config",
+            rig.cfg.to_str().unwrap(),
+            "serve",
+            "--session",
+            "j3-unmigrated",
+            "--agent",
+            "agent-a",
+            "--transport",
+            "stdio",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn lambo serve");
+
+    assert!(
+        !out.status.success(),
+        "serve must refuse an un-migrated store, not attach to it: {:?}",
+        out.status
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("write_intents"),
+        "the refusal must name the missing table: {err}"
+    );
+    assert!(
+        err.contains("lambo provision"),
+        "the refusal must name the fix: {err}"
+    );
+    // And it must refuse BEFORE taking the lease — otherwise a refused attach
+    // locks the session out for the whole TTL.
+    let db = rig.db.clone();
+    let leases: i64 = rig.rt.block_on(async move {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{db}"))
+            .await
+            .expect("open to count leases");
+        sqlx::query_scalar("SELECT count(*) FROM session_leases WHERE session_id = ?")
+            .bind("j3-unmigrated")
+            .fetch_one(&pool)
+            .await
+            .expect("count leases")
+    });
+    assert_eq!(leases, 0, "a refused attach must leave no lease row");
+}
+
 /// Placeholder swapped for the real seeded interaction id by
 /// [`fix_interactions`] — the id is minted inside [`Rig::seed`], after the
 /// intent list is built.

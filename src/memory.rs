@@ -678,6 +678,18 @@ impl MemoryBuilder {
         config.validate()?;
         let clock = self.clock.unwrap_or_else(|| Arc::new(Utc::now));
 
+        // (0a) Schema preflight (J3 round-1 F5), BEFORE the lease: `init_schema`
+        // runs only from `lambo provision`, never here, so a store provisioned
+        // by an older build is missing whatever tables this build's DDL added.
+        // Measured on such a store: the session attaches, every write is acked,
+        // and NOTHING becomes durable — a write's mutations and its
+        // `PutWriteIntent` share one flush transaction, so one missing table
+        // rolls each batch back whole and the operator learns only from the
+        // failed final flush at close. Refusing here is honest and actionable;
+        // acking into a void is neither. Ordered before the acquire so the
+        // refusal has no lease to release.
+        store.preflight_schema().await.map_err(LamboError::Store)?;
+
         // (0) Single-writer lease (spec §2.2, T8.6) — the store-enforced gate,
         // taken BEFORE the startup load (T86-1). Claiming the session first means
         // a losing racer gets the honest, named refusal below rather than an
