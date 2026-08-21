@@ -29,7 +29,7 @@ has (D).
 
 | Doc | Covers |
 | --- | --- |
-| [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard |
+| [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard. A′ (exploratory, unscheduled): candle in-crate BGE-M3 bypassing llama.cpp — three measurements (cosine parity, CPU+Metal throughput vs the 110–141 items/s baseline, compile/binary cost), falsifiers stated |
 | [B — Postgres-family store](B-postgres-store.md) | `pg` base extracted from the Cockroach adapter, `postgres` + `cockroach` as dialects; clean alias split, templated width, hnsw from init. Redesigned 2026-08-19 from copy-then-edit to extract-then-extend |
 | [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
 | [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
@@ -55,7 +55,7 @@ answered in that file.
 ```
 T0 ─→ everything
 
-A1 ─→ A2 ─→ A3 ─→ A4
+A1 ─→ A2 ─→ A3 ─→ A4 ⇢ A′  (A′ exploratory: candle spike, blocks nothing)
 B0 ─→ B1 ─→ B2 ─→ B3
             B2 ─→ B4
 H1 ⇢ B0               (soft: the parity harness is the extraction's behavioural lock)
