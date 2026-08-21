@@ -261,6 +261,18 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   math and this seam is where it plugs in. ("Know" items likewise: Kaplan–Meier's
   censoring lesson is already structural — unsettled receipts never expire — and Freedman
   / t-digest have no consumer.)
+* **Two further techniques were pre-approved and then became moot, recorded here so nobody
+  goes looking for them in the code.** **Laplace's rule of succession** — `(s+1)/(n+2)` —
+  was the right estimator for the cold-count era, where 0 failures in 4 probe samples reads
+  as "never fails" and produced round 3's overconfidence; it is unnecessary now for the same
+  reason Part 2 is, because there is no cold-count era left to be overconfident in. And the
+  **Laplace–Stieltjes / busy-period reading** (Takács, Pollaczek–Khinchine) is the classical
+  theory of exactly the question the close-drain asks — "how long until this queue empties,
+  given heterogeneous service times" — and was kept as a *cross-check* on a conformal
+  admission rule rather than as an implementation, since it needs a parametric service
+  distribution, which is the assumption conformal exists to avoid. With admission demoted to
+  two static bounds, there is nothing left to cross-check. Both stay in this section rather
+  than in the code, which is the correct place for math that a design decision retired.
 * **Proof obligation 4 (the e-process firing on a constructed lie)** falls with Part 2,
   by the same argument.
 * **Proof obligation 5 (intents ride the ledger)** is deferred to J4, whose
