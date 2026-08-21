@@ -204,16 +204,27 @@ pub enum CanonizationStatus {
     Canonical,
 }
 
-/// Which concepts a recall is allowed to match — **and, on the write path,
-/// whether a derive embeds.**
+/// Which concepts a recall is allowed to match — **one of three consequences
+/// this setting has, and the two others are on the write path.**
 ///
-/// The second half was undocumented here and it is the half with the
-/// availability consequence (J3 round-1 F3, found by that finding's own register
-/// sweep). `crate::graph::hybrid::derive` is selected by this setting, so
-/// `Hybrid` means a new concept is stored **with its embedding or not at all**:
-/// an embedder that is unreachable, refusing or too slow fails the write rather
-/// than applying a concept semantic recall could never find. `Canonical` is the
-/// declared keyword-only mode (spec §3.2) and needs no embedder to write.
+/// The first two consequences were the ones documented for a long time (the
+/// third was found by J3-R2R-7, which is also the finding that made this
+/// authority name all three):
+///
+/// 1. **Recall scope** — which concepts a recall may match: canonical facts
+///    only (`Canonical`) or canonical and ordinary memory together (`Hybrid`).
+/// 2. **Whether a derive embeds** — `crate::graph::hybrid::derive` is selected
+///    by this setting, so `Hybrid` stores a new concept **with its embedding
+///    or not at all**: an embedder that is unreachable, refusing or too slow
+///    fails the write rather than applying a concept semantic recall could
+///    never find. `Canonical` is the declared keyword-only mode (spec §3.2)
+///    and needs no embedder to write.
+/// 3. **The call-time validation rule set** — `Canonical` additionally runs
+///    `reject_repeated_observation` and the single-`Hierarchical`-parent rule,
+///    while `Hybrid` uses the laxer hybrid rule set
+///    (`crate::memory::Memory::derive`, `crate::graph::derive::validate`). So
+///    the opt-out a user is sent to — flip to `Canonical` — also starts
+///    rejecting inputs `Hybrid` accepted (J3-R2R-7).
 ///
 /// **Note the two defaults are not the same**, deliberately and confusingly: the
 /// `Default` impl here is `Canonical` (the conservative choice for a
@@ -571,13 +582,18 @@ pub struct WriteIntentOutcome {
     /// The human sentence the receipt carries (an applied summary, or the
     /// failure reason).
     pub summary: String,
-    /// When the intent was consumed (process clock of the consumer). Doubles
-    /// as the purge clock: adapters delete consumed rows older than the
-    /// receipt-retention window.
+    /// When the intent was consumed (process clock of the consumer).
+    ///
+    /// Doubles as the **purge** clock, but the purging is *lazy* (J3-R2R-5):
+    /// adapters delete consumed rows older than the receipt-retention window
+    /// only as a side-effect of the next consume, scoped to one
+    /// `session_id`, so a session that goes quiet after a burst keeps its
+    /// consumed rows until its next consume — there is no sweeper. See
+    /// [`WRITE_INTENT_RETENTION`]'s docstring for the two-mechanism precise
+    /// statement.
     pub consumed_at: DateTime<Utc>,
 }
 
-/// Ordered write-behind unit (spec §2.4). Apply nodes → edges → deletions → transitions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct MutationBatch {
     /// The mutations, in the order they were appended.

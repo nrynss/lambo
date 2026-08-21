@@ -545,7 +545,10 @@ impl MemoryBuilder {
     }
 
     /// `Canonical` (keyword-only) or `Hybrid` (keyword + vector merge).
-    /// Dispatched on by [`Memory::derive`]. Overrides `Config::match_strategy`.
+    /// Selects the recall matching scope, whether a derive embeds, **and** the
+    /// call-time validation rule set (see [`MatchStrategy`] in `types`, which
+    /// documents all three consequences). Dispatched on by [`Memory::derive`].
+    /// Overrides `Config::match_strategy`.
     pub fn match_strategy(mut self, strategy: MatchStrategy) -> Self {
         self.match_strategy = Some(strategy);
         self
@@ -4876,6 +4879,70 @@ mod tests {
         assert!(
             concept.embedding.is_some(),
             "judged at the EMBEDDING column (J3-R3-1)"
+        );
+    }
+
+    /// **J3-R2R-2 (in-session symmetry).** A write the worker reaches DURING an
+    /// embedder outage is not destroyed as `failed`: its durable intent is left
+    /// unconsumed so the next serve can re-attempt it, even though the live
+    /// caller's receipt says `failed` (nothing was written by this process).
+    /// Red before the fix: the in-session arm consumed *any* error class as
+    /// `failed`, so this intent's row was settled and the write could never
+    /// come back — the same transient condition N1 was raised about, on the
+    /// path that handles almost every write.
+    #[tokio::test]
+    async fn a_write_reached_during_an_in_session_embedder_outage_is_not_consumed() {
+        let inner = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("in-session-outage");
+        let agent = AgentId::new("agent-a");
+        let mem = Memory::builder()
+            .session("in-session-outage")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(DeadEmbedder) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build a session whose embedder is dead");
+        let submitted = mem
+            .derive_async_as(
+                &agent,
+                &[("user schema", ConceptType::Entity)],
+                &ParentOf::none(),
+            )
+            .await
+            .expect("ack");
+        assert!(
+            !submitted.dropped(),
+            "admitted — an embedder outage must not drop the write at the door"
+        );
+        // Wait for the worker to reach it (a dead embedder fails fast).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let a = mem.pipeline().lookup(&agent, submitted.receipt);
+            if a.is_settled() {
+                assert_eq!(
+                    a.tag(),
+                    "failed",
+                    "the in-session caller learns its write failed: {a:?}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never settled the receipt"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        mem.close().await.expect("clean close");
+        let snap = inner.load_session(&sid).await.expect("reload");
+        assert_eq!(snap.write_intents.len(), 1);
+        assert!(
+            snap.write_intents[0].outcome.is_none(),
+            "an EmbedUnavailable must leave the intent UNCONSUMED for replay: {:?}",
+            snap.write_intents[0].outcome
         );
     }
 

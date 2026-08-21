@@ -128,10 +128,11 @@ pub struct Config {
     pub default_max_tokens: usize,
     pub default_traversal_depth: usize,
 
-    /// Recall's matching rule **and** the write path's embedding rule — see
-    /// [`MatchStrategy`], which documents both and which of them carries the
-    /// availability consequence. The product default is `Hybrid` (below), which
-    /// is **not** `MatchStrategy`'s own `Default`.
+    /// Recall's matching rule, the write path's embedding rule, **and** the
+    /// call-time validation rule set — see [`MatchStrategy`], which documents
+    /// all three and which of them carries the availability consequence. The
+    /// product default is `Hybrid` (below), which is **not**
+    /// `MatchStrategy`'s own `Default`.
     pub match_strategy: MatchStrategy,
 }
 
