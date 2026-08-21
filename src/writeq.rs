@@ -381,21 +381,19 @@ pub const OBSERVED_MIN_SAMPLES: u64 = PROBE_CONCURRENCY as u64;
 pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 
 /// Bound on the calibration probe — **all [`PROBE_EMBEDS`] of its embeds
-/// together**, so it is still the worst case an admission can wait.
+/// together**.
 ///
-/// The probe is *spawned*, not awaited, at session build, so this is not
-/// startup latency in any real deployment. It is nonetheless the worst case an
-/// admission can wait, because admission blocks on the probe's result rather
-/// than falling back to a constant bound.
+/// The probe is *spawned*, not awaited, at session build — and since the J3
+/// redesign **nothing else awaits it either**: admission uses the static caps,
+/// so this budget prices only how long the telemetry may take to publish.
+/// (Its earlier career as "the worst case an admission can wait" ended with
+/// `await_calibration`.)
 ///
-/// Unchanged at 5 s even though the probe now takes seven embeds rather than
-/// four, one of them at [`PROBE_TEXT_BYTES`], and that is a deliberate trade:
-/// raising it would raise the worst ack latency, and a deployment too cold to
-/// answer seven embeds in 5 s is better served by starting on the floor and
-/// being **corrected by observation** ([`OBSERVED_MIN_SAMPLES`]) than by
-/// believing a number taken while its model was still loading. Before the
-/// observed rate existed, "unmeasurable" meant the floor for the whole
-/// session's life, which is why this was generous.
+/// Unchanged at 5 s even though the probe takes seven embeds rather than
+/// four, one of them at [`PROBE_TEXT_BYTES`]: a deployment too cold to answer
+/// seven embeds in 5 s is better served by reporting `unmeasured` and being
+/// **corrected by observation** ([`OBSERVED_MIN_SAMPLES`]) than by publishing
+/// a number taken while its model was still loading.
 ///
 /// The J3 redesign makes the trade almost free: the probe is telemetry, so a
 /// blown budget costs `write_queue_measured: false` and an absent baseline for
@@ -2893,11 +2891,11 @@ impl Submitted {
 ///    the serial one wherever that is known to be answerable.
 ///
 /// Any **required** leg failing or the budget running out means the same thing:
-/// this deployment's ceiling is not known, and saying so beats inventing a
-/// number. Unlike before, saying so is not a life sentence — the observed rate
-/// replaces it after [`OBSERVED_MIN_SAMPLES`] real writes, and since J3-R2-1 the
-/// difference between `Unmeasured` and `Probe` is a lane bound of one against
-/// [`PROBE_LANE_CEILING`] rather than a whole session's exposure.
+/// this deployment's rate is not known, and saying so beats inventing a
+/// number. Saying so costs nothing but the telemetry (J3 redesign): the
+/// difference between `Unmeasured` and `Probe` is `write_queue_measured` and an
+/// absent `probe_optimism` baseline — never a bound, and the observed rate
+/// still replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
 async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
     let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
 
@@ -4411,8 +4409,8 @@ mod pipeline_tests {
     /// the shape every transformer has, and the shape `PROBE_TEXT`'s old
     /// docstring denied ("it is measuring the deployment's embedder, not its own
     /// input"). One millisecond per 5 bytes here, so the probe's 35-byte text
-    /// costs 7 ms and a 512-byte concept costs 102 ms: a 14.6x gap, against a
-    /// `DRAIN_PROJECTION_SHARE` worth 2x.
+    /// costs 7 ms and a 512-byte concept costs 102 ms: a 14.6x gap, which the
+    /// estimator era projected bounds through and the redesign only reports.
     struct LengthProportionalEmbedder {
         per_5_bytes: Duration,
         inner: FixtureEmbedder,

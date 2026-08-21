@@ -5676,16 +5676,14 @@ mod tests {
         const AGENTS: usize = 8;
         const PER_AGENT: usize = 60;
 
-        // **A warm-up that is a precondition, not decoration** (J3-R2-1). Every
-        // call below is `agent-a`, so they share one lane, and a lane's depth
-        // rests on the calibration probe until `OBSERVED_MIN_SAMPLES` real
-        // writes have completed — after which it rests on this deployment's own
-        // observed service time. The probe measures its own text rather than the
-        // caller's content, so a probe-era lane bound is capped at
-        // `PROBE_LANE_CEILING`, and an instantaneous 8-wide burst against a cap
-        // of four is refused for the first few calls. Compressing a day into
-        // milliseconds is the test's artifact; retiring the probe's estimate
-        // first is how the test says so out loud.
+        // **A warm-up kept for its second job** (J3-R2-1 originally; J3
+        // redesign since). It was a precondition when a probe-era lane was
+        // capped at four and an 8-wide burst would be refused until observation
+        // took over; under the static fair-share bound (64) nothing refuses
+        // this day either way. It stays because it also pins the flip: the
+        // assertion below requires `bound_source == "observed"` before the
+        // burst, which is the one-way probe→observed transition doing its
+        // telemetry job.
         const WARM: usize = crate::writeq::OBSERVED_MIN_SAMPLES as usize;
         for i in 0..WARM {
             let ack = call(
