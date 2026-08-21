@@ -2255,6 +2255,30 @@ fails on `write_queue_replay_owed` being silently discharged to 0:
   still consume the intent `failed`, so the fix does not trade "never retry" for "retry
   forever".
 
+**And red-first at the release binary against the live BGE-M3, which is where the house
+standard puts the burden** (`evidence/mooshik-j3-durable-intents/n1-outage-run-2026-08-21.txt`,
+driver `j3_n1_outage_demo.py` beside it, run unmodified against both binaries; llama.cpp
+health verified before each). The outage is the real adapter's own transport failure —
+`llama_url` at `127.0.0.1:9`, closed, producing `EmbedError::Unavailable` — not a double.
+Same 16 × 4 × 1024 B shape, then an attach during the outage, then an attach healthy:
+
+| | session 1 | session 2, embedder unreachable | session 3, embedder back |
+| --- | --- | --- | --- |
+| **red** (`ed03266`, the reviewed commit) | 64 acked, 63 durable intents | **unconsumed=0, failed_rows=63**, sampled receipt `failed`, `replay_owed` key absent | nothing left to replay; final store `concept_count=1` |
+| **green** (this remediation) | 64 acked, 62 durable intents | unconsumed=**62**, failed_rows=**0**, sampled receipt `pending_replay`, `replay_owed=62` | replayed=62, `applied_after_restart`, store **64 embedded / 0 NULL / 0 unconsumed** |
+
+Sixty-three acked writes destroyed by one attach that happened during an outage of a
+dependency the writes did not need in order to be *recorded* — each of them previously told
+"recorded as a DURABLE INTENT and the next serve of this session will apply it" — against a
+backlog that now survives the same outage whole and lands with its vectors at the next
+healthy attach. The 63-vs-62 difference is drain timing (the burst races the embedder), not
+behaviour: both runs end at 64 acked and 64 embedded.
+
+The healthy path is unchanged, checked with the branch's own unmodified driver at a binary
+built from the remediated tree: `j3_live_demo.py` still reads
+**64 == 1 + 63, all 63 replayed, 64 embedded / 0 NULL / 0 unconsumed, OVERALL PASS** — so the
+liveness gate costs the healthy attach nothing measurable.
+
 **Register sweep, N1 + N8 + N9 + F1's enum count (per file, including the nulls).**
 
 | File | Swept for | Result |

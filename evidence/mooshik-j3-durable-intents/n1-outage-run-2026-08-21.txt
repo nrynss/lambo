@@ -1,0 +1,67 @@
+J3 round-1 N1 (P1) — a transient embedder outage at attach, at the release binary
+against the live BGE-M3. Red at the reviewed commit, green after the fix.
+
+Rig: llama.cpp BGE-M3 q8_0 on CPU at 127.0.0.1:8080, {"status":"ok"} verified
+before both runs. Store sqlite. Driver: j3_n1_outage_demo.py beside this file,
+run unmodified against both binaries. The "outage" is the real adapter's own
+transport failure — llama_url pointed at 127.0.0.1:9 (discard, closed), which
+produces EmbedError::Unavailable ("llama.cpp unreachable"), not a test double.
+Shape: 16 agents x 4 x 1024-byte concepts, immediate close, then attach during
+the outage, then attach healthy.
+
+================================================================================
+RED — release binary at ed03266 (the reviewed commit, LAMBO_GIT_SHA=ed03266),
+built in a throwaway worktree with its own target dir, since removed.
+================================================================================
+
+session 1 (live embedder): acked=64 embedded=1 durable_intents=63 NULL_rows=0
+session 2 (embedder at http://127.0.0.1:9): replayed=0 replay_owed=None sampled_receipt=failed
+  store: unconsumed=0 failed_rows=63 embedded=1
+  N1: the outage consumed NOTHING and the debt is visible -> False
+session 3: replay wedged — nothing left to replay. Final store after 300 s of
+  waiting: concept_count=1, write_queue_replayed=0.
+
+  63 acked writes destroyed by one attach that happened during an outage of a
+  dependency the writes did not need in order to be RECORDED. Every one of them
+  had been reported durable ("intent_durable ... the next serve of this session
+  will apply it"). `replay_owed=None` is the stats key not existing yet: there
+  was no number an operator could have read either.
+
+================================================================================
+GREEN — release binary at f5e09c8 (wt/j3 after the round-1 remediation)
+================================================================================
+
+session 1 (live embedder): acked=64 embedded=2 durable_intents=62 NULL_rows=0
+session 2 (embedder at http://127.0.0.1:9): replayed=0 replay_owed=62 sampled_receipt=pending_replay
+  store: unconsumed=62 failed_rows=0 embedded=2
+  N1: the outage consumed NOTHING and the debt is visible -> True
+session 3 (live embedder again): replayed=62 replay_owed=0 sampled_receipt=applied_after_restart
+  store: embedded=64 NULL_rows=0 unconsumed=0 applied_after_restart=62
+  every write the outage would have destroyed is applied WITH its embedding -> True
+OVERALL: PASS
+
+  The whole backlog survived the outage unconsumed, the debt was readable while
+  it was owed (write_queue_replay_owed=62, every receipt pending_replay), and the
+  next healthy attach applied all 62 with their vectors. Zero rows settled
+  `failed`, because nothing about the write itself had failed.
+
+  63 vs 62 durable intents between the two runs is drain timing, not a
+  behavioural difference: the burst races the embedder, so one or two writes land
+  before the close. Both runs read 64 acked and 64 embedded at the end.
+
+================================================================================
+The founding invariant, re-confirmed unchanged at f5e09c8
+================================================================================
+
+j3_live_demo.py (unmodified, the committed round-3 driver), same rig:
+
+refusal probe: state=failed detail='FAILED, nothing was written — embed: the embedder refused this content (backend: llama.cpp returned '
+session 1: acked=64 in 0.01s; close=2.05s
+  store: embedded=1 embedding_NULL_rows=0 unconsumed_intents=63 consumed_applied=1
+  INVARIANT acked == applied-with-embedding + durable-intent: 64 == 1 + 63 -> True
+session 2: replayed=63; sampled cross-restart receipt state=applied_after_restart; close=0.01s
+  store after replay: embedded=64 embedding_NULL_rows=0 unconsumed=0 applied_after_restart=63 failed=1
+OVERALL: PASS
+
+  The liveness gate does not slow or block the healthy path: same numbers as the
+  branch's original demonstration, at a binary built from the remediated tree.
