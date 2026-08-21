@@ -2439,6 +2439,74 @@ flush loses nothing, which is what J3 bought.
 | this file | §J3's arithmetic paragraph | the fourth term added, with the drift's lesson recorded rather than quietly patched |
 | `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | whether any user-facing text repeats a bound-from-a-rate claim or the three-term accounting | **nothing** — the round-3 pass had already rewritten the bounds and rates paragraphs correctly, and the accounting expression appears in neither mirror. Checked rather than assumed: `write_queue_outstanding` is described as a count, not a formula |
 
+**The two items round 1 could not verify, settled.** The reviewer's second pass lost
+filesystem access and listed both as residuals rather than clearing them. Both are now
+checked by name, at the artifact.
+
+* **The `mcp.mdx` byte-identity claim — TRUE, and about the right thing.** Diffing the two
+  change bodies of `5ef7038` (`git show 5ef7038 -- <path> | grep '^[+-][^+-]'`, both mirrors)
+  returns empty: the five rewritten passages are byte-identical between them. Worth stating
+  what the claim never was: the two **files** are not identical and must not be. The site
+  mirror carries `MdxNote`/`MdxWarning` Astro imports, site-relative link prefixes
+  (`/lambo/config/#http-transport` against the docs site's `/config#http-transport`) and an
+  extra "Verified clients" section. The invariant is that a *change* lands identically in
+  both, and it held at round 3 and holds for all three of this remediation's mirror edits,
+  each diffed the same way at commit time.
+* **The −1 test-name set diff — TRUE, and nothing was silently dropped.** Extracted every
+  `#[test]` / `#[tokio::test]` function name from the source at both revisions (name-level, so
+  no build was needed: 1020 at `ed22476`, 1025 at `66f5aaa`) and set-differenced them. Five
+  names disappear and ten appear, and **every disappearance is accounted for**:
+  * The claimed merge, confirmed: `the_bounds_track_their_own_legs_between_the_clamps` and
+    `the_measured_bound_is_clamped_at_both_ends` (two calibration-bound tests) are gone and
+    `no_rate_can_move_the_bounds` is new — 2 out, 1 in, which is exactly the −1 in the
+    cockroach count, and `writeq.rs` is a file that binary compiles.
+  * The other three are **renames with their replacements present**:
+    `embed_failure_degrades_to_fresh_concept` → `embed_failure_fails_the_write_and_writes_
+    nothing` (the reversed pin), `a_burst_of_concepts_larger_than_the_probes_text_still_
+    drains_at_a_clean_close` → `..._loses_nothing_at_a_clean_close`, and
+    `one_agents_burst_never_outruns_its_own_lanes_drain_at_a_clean_close` →
+    `one_agents_burst_never_loses_an_acked_write_at_a_clean_close`. All three renames follow
+    the same substantive change: the claim being pinned stopped being about draining and
+    started being about not losing.
+  * No name vanishes without either a merge target or a rename target. The totals were
+    consistent with the arithmetic; the names are what prove it, and that is what was owed.
+
+**Dispositions, all fourteen.** Nothing carried to the integration pass: the operator's rule
+is that a remediation round closes the P3s too.
+
+| # | Sev | Disposition |
+| --- | --- | --- |
+| N1 | P1 | **Fixed.** Liveness gate + a structural (typed) failure classification; the prescribed `attempts` bound argued down; limits and describe() restated. Red-first, both directions. |
+| N2 | P2 | **Fixed.** The timeout arm pinned on a paused clock. |
+| N3 | P2 | **Fixed.** All twelve sites, both log lines included, each quoting what it said. |
+| F3 | P2 | **Fixed as stated; behaviour argued and kept.** Boundary corrected at the source, availability consequence declared in both mirrors and the box. Turned up a further finding (`MatchStrategy`'s recall-only docstring), also fixed. |
+| F5 | P2 (was an unconfirmed candidate) | **Confirmed real, graded, and fixed.** Not P1: the failure is loud at close and `serve` exits non-zero, so the invariant's clean-close precondition is violated rather than the invariant falsely satisfied. DDL-derived schema preflight at attach. |
+| N4 | P3 | **Fixed.** The build-time coupling cut; both bounds now structural in magnitude as well as kind. |
+| N5 | P3 | **Fixed** in both prose copies. |
+| N6 | P3 | **Scoped**, and the offered code fix checked and declined with the analysis recorded. |
+| N7 | P3 | **Labelled and argued** — the prediction is named as one; deferring the settle is worse and the reason is written down. |
+| N8 | P3 | **Fixed** in the N1 commit: `pending_replay` is a distinct state, and part of N1's visibility answer. |
+| N9 | P3 | **Fixed** in the N1 commit: five commits → six, in both narratives. |
+| F1 | P3 | **Fixed** in the N1 commit: "Seven variants" at eleven, and the docstring now enumerates all of them. |
+| F2 | P3 | **Fixed**, one layer up from where it was prescribed, plus the two conflated mechanisms separated. |
+| F4 | P3 | **Stated at real size**, with the purge's placement argued and the B/Mooshik risk assessment written out. |
+
+**Gates after the four remediation commits (repo-wide, all 15 result lines — never the lib
+line alone):**
+
+| Gate | At `ed03266` | After |
+| --- | --- | --- |
+| `cargo test --all --features fixtures` | 901 / 0 / 3 | **908 / 0 / 3** |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | 991 / 0 / 3 | **1000 / 0 / 3** |
+| `cargo test --no-default-features --features store-cockroach` | 563 / 0 / 0 | **565 / 0 / 0** |
+| `scripts/observability/verify.sh` | 46 ok | **46 ok** |
+
+Every delta is an addition; no test was removed or renamed by this remediation, so the
+name-level check above needs no successor. `cargo fmt --all -- --check` clean;
+`cargo clippy --all-targets -- -D warnings` clean on the default row, on
+`store-sqlite,fixtures`, on `ship,fixtures` and on `--no-default-features
+store-cockroach,embed-fixture`.
+
 ## J4 — Lease conflicts leave an artifact
 
 A serve that loses the lease exits before it can open a ledger, so the most common
