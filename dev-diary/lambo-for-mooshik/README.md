@@ -37,6 +37,15 @@ has (D).
 | [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run. G3 (exploratory, unscheduled): graph-Laplacian diffusion for phase-2 expansion and effective-resistance blast radius, spiked read-only against the dogfood graph |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
+> **J3 is landed but unmerged, on branch `wt/j3` (pushed to origin).** Six redesign
+> commits, two adversarial reviews and five remediation commits live there; this branch's
+> §J3 still describes the pre-redesign state. Round 2's verdict is REQUEST_CHANGES
+> (1 P1 / 3 P2 / 5 P3) and the zero-residue rule gates integration: close every finding,
+> re-gate, round 3, then merge. The prescribed fix for the P1, the integration procedure and
+> the items wanting a Cockroach-capable machine are all in
+> [J3-durability-redesign.md](J3-durability-redesign.md) **on `wt/j3`** — not on this branch.
+> To pick it up elsewhere: `git fetch origin && git worktree add .claude/worktrees/j3 wt/j3`.
+
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
 | [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D |
 | [J3 durability redesign](J3-durability-redesign.md) | PROPOSAL (paused, not adopted): durable post-validation intents decouple the async-ack invariant from estimator correctness; ACI conformal bounds + an e-process breaker replace chosen constants. Written after three P1-bearing J3 rounds |
