@@ -24,6 +24,26 @@
 //! it — retry, shorten, or accept keyword-only by configuring
 //! `MatchStrategy::Canonical`.
 //!
+//! **The blast radius of that rule, stated (J3 round-1 F3).** "The
+//! capability-absent arm stays a degrade" is a claim about the **store**, and it
+//! is easy to misread as a claim about the embedder. `vector_ok` below is
+//! `store.capabilities().contains(VECTOR_SEARCH)`, `SqliteStore` advertises that
+//! capability **unconditionally**, `embed::build_embedder` yields either an
+//! embedder or a startup error (there is no "no embedder configured" state that
+//! reaches this function), and `MatchStrategy::Hybrid` is the config default. So
+//! **there is no arm in which a missing or dead *embedder* degrades**: on a
+//! default deployment an unreachable or timing-out llama.cpp fails *every*
+//! `lambo_derive` for as long as it is unreachable. That is deliberate — it is
+//! the honesty rule above, and the alternative is the silent
+//! `embedding: NULL` write it replaced — but it is an **availability** fact, not
+//! only a correctness one, and the lawful keyword-only mode spec §3.2 promises is
+//! reached by *declaring* it (`match_strategy = "canonical"`), never by an
+//! embedder's silence. A per-call failure cannot be promoted to a
+//! session-uniform degrade because the two are indistinguishable at the
+//! protocol: N1's classification can tell "not reached" from "refused", but not
+//! "not reached, and will not be for the rest of this session" from "not
+//! reached, for 200 ms". Declared or refused, never guessed.
+//!
 //! # The seam (design decision of record)
 //!
 //! The sync twin [`crate::graph::derive::derive`] takes `&mut Graph` and cannot
@@ -2186,6 +2206,77 @@ mod tests {
         assert!(
             g.embedding().is_none(),
             "a failed embed must not bind the session to an embedding contract"
+        );
+        g.assert_invariants().unwrap();
+    }
+
+    /// **J3 round-1 N2** — the deviation's own arm, finally pinned.
+    ///
+    /// The design of record's honesty clause named the embedder *refusal*; this
+    /// branch also made an embed **timeout** an `Err`, and that deviation shipped
+    /// with an argument but no test — while being the commoner field condition of
+    /// the two (a slow or wedged llama.cpp is likelier than a refusing one). The
+    /// refusal arm was pinned thoroughly; the added arm was not.
+    ///
+    /// The clock is paused, so `timeout_at` fires the moment every task is idle:
+    /// tokio auto-advances a paused clock to the next deadline, which makes a
+    /// 30-second `HYBRID_IO_TIMEOUT` cost no wall time and keeps the test out of
+    /// the flaky-stopwatch class. The embedder never resolves, so the *only* way
+    /// out of `derive` is the timeout arm.
+    #[tokio::test(start_paused = true)]
+    async fn an_embed_timeout_fails_the_write_and_writes_nothing() {
+        struct HangingEmbedder;
+        #[async_trait]
+        impl Embedder for HangingEmbedder {
+            fn dimensions(&self) -> usize {
+                1024
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+                std::future::pending().await
+            }
+        }
+        let sess = "hybrid-embedtimeout";
+        let (graph, i1) = graph_with_interaction(sess, 1, 0, "auth flow");
+        let err = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![]),
+            &HangingEmbedder,
+            &contract("fixture", 1024),
+            i1,
+            &agent(),
+            &[("create account", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await
+        .unwrap_err();
+        // A timeout is an unreachable embedder, not a rejected input: the
+        // durable-intent replay must be able to tell them apart (N1).
+        assert!(
+            matches!(err, LamboError::EmbedUnavailable(_)),
+            "an embed timeout is EmbedUnavailable: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("timed out"),
+            "the message must name the timeout, not a generic failure: {err}"
+        );
+        assert!(
+            err.to_string().contains("nothing was written"),
+            "the timeout arm owes the same honesty as the refusal arm: {err}"
+        );
+        let g = graph.read();
+        assert_eq!(
+            g.node_count(),
+            1,
+            "interaction only — a timed-out write must not create a concept"
+        );
+        // MINOR-2: no vector ever came back, so the session must not be bound to
+        // an embedding contract by a write that failed.
+        assert!(
+            g.embedding().is_none(),
+            "a timed-out embed must not bind the session to an embedding contract"
         );
         g.assert_invariants().unwrap();
     }

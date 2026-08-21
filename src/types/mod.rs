@@ -204,14 +204,31 @@ pub enum CanonizationStatus {
     Canonical,
 }
 
-/// Which concepts a recall is allowed to match.
+/// Which concepts a recall is allowed to match — **and, on the write path,
+/// whether a derive embeds.**
+///
+/// The second half was undocumented here and it is the half with the
+/// availability consequence (J3 round-1 F3, found by that finding's own register
+/// sweep). `crate::graph::hybrid::derive` is selected by this setting, so
+/// `Hybrid` means a new concept is stored **with its embedding or not at all**:
+/// an embedder that is unreachable, refusing or too slow fails the write rather
+/// than applying a concept semantic recall could never find. `Canonical` is the
+/// declared keyword-only mode (spec §3.2) and needs no embedder to write.
+///
+/// **Note the two defaults are not the same**, deliberately and confusingly: the
+/// `Default` impl here is `Canonical` (the conservative choice for a
+/// programmatically built value), while `Config::default().match_strategy` is
+/// `Hybrid` — the product default a `lambo serve` runs under. Read the config,
+/// not this attribute, when asking what a deployment does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub enum MatchStrategy {
-    /// Match canonical facts only.
+    /// Recall matches canonical facts only; a derive writes keyword-only
+    /// concepts and never calls the embedder.
     #[default]
     Canonical,
-    /// Match canonical facts and ordinary memory together.
+    /// Recall matches canonical facts and ordinary memory together; a derive
+    /// embeds, and fails if it cannot.
     Hybrid,
 }
 

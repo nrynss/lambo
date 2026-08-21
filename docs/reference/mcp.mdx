@@ -166,6 +166,8 @@ Store new concepts learned from the current interaction.
 
 Writes you send one after another are applied in that order, whatever other agents are doing through the same server. Two calls you fire concurrently are a different matter: each one's place in the session's order is fixed when it is accepted, so two overlapping calls can be accepted in either order, and Lambo does not invent one for you. Duplicate detection is unaffected: the embedding still happens before the insert.
 
+**A derive needs the embedder, and on the default configuration it needs it for every write.** With `match_strategy = "hybrid"` — the default — a concept is stored with its embedding or it is not stored at all: an embedder that is unreachable, restarting or too slow fails the write rather than applying a concept that semantic recall could never find. The failure is honest and per call (the receipt says `failed` and that nothing was written), and nothing is lost that was already acked — an acked write is a durable intent, so it waits for an embedder rather than dying with one. But it does mean a server whose embedder is down accepts reads and refuses writes. If you would rather keep writing without an embedder, that is a lawful mode and you get it by **declaring** it: set `match_strategy = "canonical"` for keyword-only concepts, session-wide and deliberately, instead of having it happen to you one call at a time.
+
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |

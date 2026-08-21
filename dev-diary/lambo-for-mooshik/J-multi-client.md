@@ -2264,6 +2264,63 @@ fails on `write_queue_replay_owed` being silently discharged to 0:
 | this file | the Done-when box's limits (4) and the receipt-state count, the seventeen-keys bullet, the §J3 commit list | limit (4) restated at its own magnitude with the class boundary, limit (5) added; "seven states" → eleven; the key bullet grown to eighteen and the new key explained; the commit list grown to six |
 | `scripts/observability/*` | the new stats key and the new receipt state | **nothing** — `verify.sh` asserts on ledger and heartbeat shapes, not on the write-queue key set; still 46 ok |
 
+**N2 (P2) — the deviation's own arm is pinned.** The branch's one deviation from the design
+of record made an embed **timeout** an `Err` as well as a refusal, argued it, and shipped it
+without a test — while it is the commoner field condition of the two, a slow or wedged
+llama.cpp being likelier than a refusing one. `an_embed_timeout_fails_the_write_and_writes_
+nothing` now drives an embedder that never resolves under
+`#[tokio::test(start_paused = true)]`: tokio auto-advances a paused clock to the next
+deadline once every task is idle, so a 30-second `HYBRID_IO_TIMEOUT` fires **immediately**
+and the test runs in 0.00 s — a property test, not a stopwatch. It asserts the four things
+the refusal arm's pin asserts, and one more the classification now requires:
+`LamboError::EmbedUnavailable` (not `Embed` — a timeout is an unreachable embedder), the
+message naming "timed out", "nothing was written", `node_count() == 1`, and
+`embedding().is_none()` (MINOR-2: a failed embed must not bind the session's contract). Its
+sibling `a_content_refusal_stays_an_embed_error_not_an_unavailable_one` pins the other side,
+and the pre-existing `embed_failure_fails_the_write_and_writes_nothing` was sharpened rather
+than left ambiguous: the failure it drives is `Unavailable("server down")`, so the class it
+must produce is `EmbedUnavailable`. The reversed pin now covers all three arms — refusal,
+timeout, and transport — where §J3's round-3 register row could only honestly say "the L82-4
+test pin reversed", singular.
+
+**F3 (P2) — the reversed pin's blast radius, now stated where it is read; the behaviour
+deliberately unchanged.** The review's finding was not that the behaviour is wrong but that
+its *boundary* was misstated and its *availability* consequence undeclared. Both halves
+answered:
+
+* **The misstatement**, at the source that makes the claim: `hybrid.rs`'s module doc now says
+  outright that "the capability-absent arm stays a degrade" is a claim about the **store**,
+  that `SqliteStore` advertises `VECTOR_SEARCH` unconditionally, that `build_embedder`
+  yields an embedder or a startup error so no embedder-absent state reaches `derive`, that
+  `Hybrid` is the config default — and therefore that **no arm degrades on a dead
+  embedder**.
+* **The declaration**, where a user reads it: a new paragraph in both `mcp.mdx` mirrors under
+  `lambo_derive` and limit (6) of the Done-when box, both naming the consequence (a server
+  whose embedder is down accepts reads and refuses writes), what is *not* at risk (nothing
+  acked — an acked write is a durable intent that waits for an embedder rather than dying
+  with one, which is exactly what N1's fix restored), and the opt-out
+  (`match_strategy = "canonical"`).
+* **The behaviour: argued and kept.** The review's second half asked whether a
+  connection-level failure deserves the same "declared, session-uniform" treatment the
+  absent store capability gets. It does not, and the reason is the same one N1 just
+  established at the type level: the classification can separate *refused this content* from
+  *not reached*, and nothing can separate *not reached, transiently* from *not reached, for
+  the rest of this session*. Promoting the second to a session-wide keyword-only degrade
+  would mean guessing that the embedder is gone for good — and guessing wrong writes
+  exactly the unfindable `embedding: NULL` concepts the honesty fix exists to end, silently,
+  session-wide. Spec §3.2's lawful degraded mode is reachable, and it is reachable the only
+  honest way: by declaration.
+
+**Register sweep, N2 + F3 (per file, including the nulls).**
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/graph/hybrid.rs` | the degrade taxonomy's boundary claim, and the coverage claim about the reversed pin | the module doc now states the store/embedder boundary explicitly and why a per-call failure cannot be promoted to a session-uniform degrade; three arms pinned where one was |
+| `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | any statement of what a derive needs and what happens when it is missing | one paragraph added under `lambo_derive` in each, change bodies diffed and identical between the mirrors |
+| `src/types/mod.rs`, `src/config.rs` | whether `match_strategy`'s own docs support the opt-out F3 now points users at | **a finding of its own, fixed.** `MatchStrategy`'s docstring read "Which concepts a **recall** is allowed to match" and its two variants described recall only — while the same setting decides whether a *derive* embeds, which is the half with the availability consequence and the half F3's remediation tells a user to change. Sending someone to a write-path setting documented as a read-path filter is the same false-stated-reason family this review round exists for. Both variants now document both axes, and one live trap is recorded beside them: the `Default` impl is `Canonical` while `Config::default()` is `Hybrid`, so the attribute and the product disagree and only the config answers "what does a deployment do". The `Config` field, which had **no** docstring, points at it |
+| `src/embed/mod.rs` | whether `build_embedder`'s "always an embedder or a startup error" is stated where the degrade claim is made | **nothing at the source** — it is true and unchanged; what was missing was the *consequence*, now recorded at `hybrid.rs` where the claim it falsifies lives |
+| this file | the Done-when limits | limit (6) added, at its own magnitude, with the behaviour argued rather than only described |
+
 ## J4 — Lease conflicts leave an artifact
 
 A serve that loses the lease exits before it can open a ledger, so the most common
@@ -2432,9 +2489,26 @@ Every figure is one rig, not a property of lambo.
       TTL.** After a `kill -9` the next `serve` is refused for the remaining 30–45 s of the
       lease (the J2 arithmetic two limits above), so "the next serve replays them" is not
       "the next serve *attempt*": every receipt in that window answers `restart_lost` and
-      the replay happens only at the attempt that wins the lapsed lease. None of the five is
-      a loss on the clean path, which is what this box exists to exclude; all five are
-      reasons not to tick it flat
+      the replay happens only at the attempt that wins the lapsed lease. (6) **On the
+      default configuration a write needs the embedder, every time** (round-1 F3). The
+      honesty fix's stated boundary — "the capability-absent arm stays a degrade" — is about
+      the **store**: `vector_ok` is `VECTOR_SEARCH`, SQLite advertises it unconditionally,
+      `build_embedder` always yields an embedder or a startup error, and `hybrid` is the
+      config default, so **no arm degrades on a missing or dead embedder** and an
+      unreachable llama.cpp fails every `lambo_derive` while it is unreachable. That is the
+      intended trade — the alternative is the silent `embedding: NULL` write it replaced,
+      and nothing acked is lost, since an acked write is a durable intent that waits for an
+      embedder rather than dying with one — but it is an *availability* consequence and it
+      was stated nowhere a user reads. It is now in both `mcp.mdx` mirrors together with
+      the way to opt out, which is to **declare** the degraded mode
+      (`match_strategy = "canonical"`, keyword-only, session-wide) rather than receive it
+      one call at a time. The behaviour is deliberately unchanged: a per-call failure
+      cannot be promoted to a session-uniform degrade, because "not reached, and will not be
+      for this session" is not distinguishable at the protocol from "not reached, for
+      200 ms" — N1's classification separates *refused* from *not reached*, and no
+      classification can separate *transient* from *permanent*. None of the six is a loss on
+      the clean path, which is what this box exists to exclude; all six are reasons not to
+      tick it flat
 - [x] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
       with two agents interleaving through one process, the §13 conflict sentence's `writer`
       is **measured** rather than assumed: J1 made the same-instant collision path
