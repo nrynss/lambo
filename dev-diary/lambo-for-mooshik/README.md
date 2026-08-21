@@ -29,7 +29,7 @@ has (D).
 
 | Doc | Covers |
 | --- | --- |
-| [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard. A′ (exploratory, unscheduled): candle in-crate BGE-M3 bypassing llama.cpp — three measurements (cosine parity, CPU+Metal throughput vs the 110–141 items/s baseline, compile/binary cost), falsifiers stated |
+| [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard. The hosted answer — and the reason J3's transport-failure classification is load-bearing rather than legacy |
 | [B — Postgres-family store](B-postgres-store.md) | `pg` base extracted from the Cockroach adapter, `postgres` + `cockroach` as dialects; clean alias split, templated width, hnsw from init. Redesigned 2026-08-19 from copy-then-edit to extract-then-extend |
 | [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
 | [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
@@ -38,6 +38,7 @@ has (D).
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
+| [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D |
 | [J3 durability redesign](J3-durability-redesign.md) | PROPOSAL (paused, not adopted): durable post-validation intents decouple the async-ack invariant from estimator correctness; ACI conformal bounds + an e-process breaker replace chosen constants. Written after three P1-bearing J3 rounds |
 | [DOGFOOD-FINDINGS](DOGFOOD-FINDINGS.md) | Running log of what dogfooding actually returned: metrics 1-5 read from the live ledger, the embedding-coverage gap, canonical=0 as C's motivating evidence, protocol changes the graph forced |
 
@@ -55,7 +56,8 @@ answered in that file.
 ```
 T0 ─→ everything
 
-A1 ─→ A2 ─→ A3 ─→ A4 ⇢ A′  (A′ exploratory: candle spike, blocks nothing)
+A1 ─→ A2 ─→ A3 ─→ A4
+K1 ─→ K2              (K2 conditional on K1's falsifiers; K2 bundles the re-embed verb)
 B0 ─→ B1 ─→ B2 ─→ B3
             B2 ─→ B4
 H1 ⇢ B0               (soft: the parity harness is the extraction's behavioural lock)

@@ -148,65 +148,12 @@ hosted embedder is the *convenient* answer, no longer the only correct one).
 - [ ] `embed-gemini` matrix row in CI: compile plus unit, no network. Live Vertex calls stay
       `#[ignore]`d — there is no API key in CI
 
-## A′ — Exploratory: candle in-crate BGE-M3, bypassing llama.cpp
+## A′ moved out — see workstream K
 
-**Status: EXPLORATORY SPIKE, unscheduled** (added 2026-08-21, operator idea from the J3
-pause). A measurement task, not a commitment; "shelve with numbers" is a first-class
-outcome, per G3's precedent. Runs post-J on idle capacity. Only local BGE-M3 and Metal
-are in scope — every other planned embedder is hosted (A proper, Bedrock).
-
-**The idea:** an `embed-candle` feature running BGE-M3 in-process via
-candle-core/candle-transformers, weights fetched once by hf-hub, deleting llama.cpp from
-the prerequisites. Level B was built for exactly this shape: adapter + feature +
-registry arm.
-
-**Why it earns a spike** (all met in production already):
-
-1. It deletes two failure classes we have real scars from: *embedder unreachable* (the
-   92/100 unembedded-concepts damage) and *server-side input refusals* (J3-R3-1's HTTP
-   500 at 1536 B — in-process, truncation policy becomes ours, explicit and tested).
-2. It completes the single-binary story: `cargo install lambo`, first-run weight fetch,
-   then offline — the ten-minute quickstart the adoption path needs.
-3. It competes with A for Mooshik's two-machine case: pinned weights on both machines =
-   one embedding space, $0, offline — and a candle adapter would stamp real model
-   identity where `bge_m3.rs` stamps NULL today.
-
-**Support, verified 2026-08-21 (web research):** candle-transformers has a native
-`xlm_roberta` module (`XLMRobertaModel` base encoder — BGE-M3 is XLM-RoBERTa-large +
-RetroMAE, 8192-token capacity, exact match) plus MaskedLM/SequenceClassification. There
-is **no packaged bge-m3 example in candle's tree** — the spike writes its own ~100–200
-line loading/CLS-pooling/normalize path. The Metal backend is real
-(candle-metal-kernels; red-candle ships Metal-accelerated embeddings downstream) but no
-published BGE-M3-on-Metal throughput exists. Fallback if hand-rolled pooling fights
-back: fastembed-rs has first-class BGE-M3 (dense+sparse+ColBERT in one pass — future
-hybrid-recall value) but rides ONNX Runtime, a C++ dependency with no advertised macOS
-GPU path — the dependency class this idea exists to delete, so fallback only.
-
-**The three measurements, each with its falsifier:**
-
-1. **Correctness — cosine agreement.** Embed the dogfood corpus's embedded concepts (and
-   a synthetic multilingual/size spread) through the spike and through the rig's
-   llama-server; compare pairwise. Falsifier: median self-agreement below ~0.99 means the
-   pooling is wrong (fix or fall back), not that the idea is dead — but agreement is also
-   *not* a licence to mix spaces: **runtime switch = re-embed event** regardless (the dim
-   doc's law), which pairs this spike with the already-required `re-embed` backfill verb.
-2. **Throughput — CPU and Metal on this rig**, measured by the J3 probe methodology
-   (representative input sizes, warm-up discarded, serial and concurrent legs).
-   Baseline: llama.cpp q8_0 measures 110–141 items/s here. Falsifier: if candle Metal
-   AND candle CPU both land under ~half of llama.cpp's figure, shelve — the operational
-   wins don't justify a 2× recall-latency regression on the default path.
-3. **Cost — compile time and binary size** with `embed-candle` on vs off, stated as
-   numbers. No falsifier (feature-gated, so it prices an option rather than a default),
-   but the quickstart claim dies if first-run weight fetch plus model load exceeds a
-   stated bound — measure cold-start too.
-
-**Deliberately out of scope:** sparse/ColBERT legs (dense parity first), GGUF/quantized
-loading in candle (fp16 safetensors first; quantize later if RAM says so), replacing the
-default feature set (that is a decision for after the numbers, made against the
-`EmbeddingContract` migration story).
-
-**Done when (as an exploration):** the three numbers exist with their method stated; the
-falsifiers are applied honestly; the recommendation (adopt as `embed-candle` / fall back
-to fastembed / shelve) is recorded here with the evidence; and if adopt-ish, the
-follow-on task list is written (adapter, feature, CI row, contract stamping, re-embed
-pairing, weight-fetch UX) — not started.
+The candle in-crate embedder was drafted here as an A sibling on 2026-08-21 and moved the
+same day to [K — Local-native embedder](K-candle-embedder.md), by operator decision: it is
+a different bet with a different risk profile, not a variant of A. A stays the hosted
+answer. The one thing A must inherit from K's reasoning: **A makes transport failure a
+first-class permanent condition** — a hosted embedder fails over the network by definition —
+so J3's structural transport-vs-content failure classification is not legacy cleanup A can
+skip, it is the thing that makes A safe.
