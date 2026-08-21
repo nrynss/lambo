@@ -329,3 +329,146 @@ Live BGE-M3, release binary, 16 agents × 4 × 1024 B, immediate close: **64 ack
 applied-with-embedding + 63 durable intents; replay applies all 63; final store 64
 embedded / 0 NULL / 0 unconsumed** (`evidence/mooshik-j3-durable-intents/`). The red
 baseline it replaces: 326/361 and 13/16 acked writes abandoned (round 3, `ed22476`).
+
+---
+
+## Prescribed design for J3-R2R-1 (round 2's P1) — a rule table, not a wildcard
+
+Written 2026-08-21 at the operator's request, as the handoff to a Cockroach-capable machine.
+This is the design the next remediation should implement; deviate with argument as usual.
+
+**The defect, precisely.** `src/embed/bge_m3.rs:151-166` has exactly one non-success arm:
+
+```rust
+Err(EmbedError::Backend(format!(
+    "llama.cpp returned {status} for model {model:?}: {text_body}"
+)))
+```
+
+Every status that is not 2xx becomes `Backend`, and J3's own classifier reads `Backend` as
+*permanent for this input*. So `503 no slot available` — a live embedder under load, the most
+ordinary transient there is — is treated as a content refusal, and the replay arm consumes the
+intent and **continues the loop**. Round 2 measured 63 of 63 acked, reported-durable writes
+destroyed in about a second, with `write_queue_replay_owed` discharged to zero by destruction.
+A single wildcard arm re-opened the whole P1 that N1's transport classification had closed.
+
+**The principle to apply — Pāṇini's, not a new invention.** The Aṣṭādhyāyī's discipline is
+that no case is handled by default: rules are ordered, a general rule may not apply where a
+specific one does, and conflicts resolve by a stated metarule rather than by whichever rule
+happened to be reached first. The direct translation here: **an exhaustive, priority-ordered
+status table with no wildcard default, and "unrecognised" as its own named class** rather
+than a synonym for permanent.
+
+```
+transient  (leave the intent durable, break the loop, count the debt)
+    connection refused / reset / DNS / TLS failure   -> already Unavailable, unchanged
+    408 Request Timeout, 425 Too Early
+    429 Too Many Requests
+    500 Internal Server Error        (a loaded llama.cpp answers this)
+    502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
+    509 / 529 / any 5xx not named below
+content    (consume as failed — this input will never work)
+    400 Bad Request, 413 Payload Too Large, 415, 422 Unprocessable
+    (the 3072 B refusal this rig actually produces lands here)
+permanent-config (fail the write AND warn loudly; retrying cannot help)
+    401, 403      credentials or authorization — an operator must act
+    404           wrong URL or model name
+unclassified (treat as transient, and log the status that was not recognised)
+    everything else, by construction
+```
+
+Three properties this must have, each of which the current shape lacks:
+
+1. **No `_ =>` arm that produces `Backend`.** `unclassified` is the catch-all and it is
+   conservative: durability is preserved and the operator learns which status the table does
+   not know. An unknown status is a gap in *our* table, not a statement about the caller's
+   content — and the branch has already paid twice for treating absence of knowledge as
+   knowledge.
+2. **The class is decided where the status is known** (in the adapter), not re-derived from a
+   message string upstream. This is J1-R2-2's standing lesson: a variant is not a cause, and
+   string-matching an error text is not classification. `EmbedError` should carry the class,
+   not a formatted sentence a caller has to parse.
+3. **A termination measure on the loop, Euclid's discipline.** Round 2 asked for a
+   "consecutive-failure bound"; the honest form is a non-negative measure that strictly
+   decreases on every iteration, so termination is proven rather than hoped. Note *why* the
+   `attempts`-column proposal was rightly declined in round 1: it bounded the wrong quantity —
+   it decreased the **write's survival**, not the loop's measure. Bound the loop
+   (consecutive transient failures within one attach, after which the arm stops and leaves
+   the remaining backlog durable), never the write.
+
+**Also in scope for the same commit, because they are the same defect at other sites:**
+
+* **J3-R2R-2** — the classification was wired into the replay arm only; the in-session arm
+  (`src/writeq.rs:2487-2496`) still consumes `EmbedUnavailable` as `failed`, which contradicts
+  the paragraph this branch added to both `mcp.mdx` mirrors and to Done-when (6) ("an acked
+  write waits for an embedder rather than dying with one"). Symmetric handling, or the
+  documented promise changes.
+* **The self-bounding sentence** the fix wrote about itself ("at most the one intent that met
+  the fault, not the backlog") was falsified at the binary. Restate it at the magnitude the
+  new table actually delivers.
+
+**Where the ancient reading stops being useful:** Archimedes' two-sided bracketing is the
+right shape for the estimator work, and it is already discharged — the WAL made the bracket
+unnecessary, which is a better outcome than a better estimate. Wald's sequential probability
+ratio test is the principled version of "how many failures before blaming the embedder rather
+than the content", minimising intents burned before the decision; it is worth knowing and
+**not** worth building before the rule table exists. The rule table is the fix; the rest is
+shape.
+
+## Items that want the Cockroach-capable machine
+
+* **F4** — close-time latency against a real cluster: three statements plus two bucket drains
+  per write inside the close-time transaction, still the only unmeasured number on this
+  branch. Bounded in consequence (a slow or failed close-time flush now loses nothing), so
+  this is a measurement to schedule, not a defect to fear.
+* **J3-R2R-3** — F5's column gap, measured at F5's own magnitude: a store missing one column
+  attaches, acks, reports `applied=4 degraded=false`, and leaves `concepts=0`, loud only at
+  close with exit 1. The judgement call is column preflight versus a stated magnitude, and
+  the dialect-aware half (Cockroach's `VECTOR`, `CREATE VECTOR INDEX`, `::STRING`) is better
+  settled against a live cluster than by reading SQL.
+* **The `preflight_schema` DDL parser** generally — verify on the Cockroach dialect, not only
+  SQLite's.
+
+## This work must be integrated into `lambo-for-mooshik` — it is not done until it is
+
+**Where it lives.** All of J3 — six redesign commits, two adversarial reviews, five
+remediation commits — is on the branch **`wt/j3`**, pushed to origin so it travels between
+machines. The *worktree* at `.claude/worktrees/j3` is a local checkout and does not travel;
+the branch is the artifact. On another machine:
+
+```
+git fetch origin && git worktree add .claude/worktrees/j3 wt/j3
+```
+
+**The integration is owed.** `lambo-for-mooshik` carries J0, J1 and J2; J3 is the only
+landed-but-unmerged workstream, and §J3 of `J-multi-client.md` on the *branch* still
+describes the pre-redesign state. Until `wt/j3` merges, the branch's J3 story is wrong and every
+downstream workstream (J4's ledger states, J5's docs, the E2E cycle, K's second embedder
+adapter) builds against a J3 that is not there.
+
+**The rule that gates it (operator, standing).** Nothing integrates carrying open findings of
+any grade. Round 2's verdict is REQUEST_CHANGES with 1 P1 / 3 P2 / 5 P3, so the order is:
+close every finding → re-gate → round 3 → integrate. When a remediation round runs at all, it
+closes that round's P3s too; the orchestrator's fix-at-integration judgement applies only to a
+round that needs no remediation.
+
+**The procedure, matching how J0/J1/J2 landed:**
+
+```
+git -C .claude/worktrees/j3 rebase lambo-for-mooshik   # replay onto the tip
+git checkout lambo-for-mooshik && git merge --ff-only wt/j3
+git push origin lambo-for-mooshik
+git worktree remove .claude/worktrees/j3 && git branch -d wt/j3
+git push origin --delete wt/j3                          # the travelling copy is done
+```
+
+Note that `wt/j3` is **not** in `ci.yml`'s push trigger (`main`, `master`, `phase/**`,
+`lambo-for-mooshik`), so no CI has run against any of this work. The first CI signal arrives
+on the integration push — which is also the first time the nine gate invocations run on a
+machine that is not this one. Treat a red run there as expected-and-informative rather than
+surprising; I-R2-1 was exactly that shape, a race that every fast local machine won and CI
+lost.
+
+**Then, and only then:** J4 → J5 → the phase close (the rig re-pin and the DOGFOOD-SETUP
+runbook rewrite in one commit, per §"Rig re-pin rides with J's landing") → the E2E adversarial
+cycle → K1 → K2 if it clears → D.
