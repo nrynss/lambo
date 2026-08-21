@@ -361,3 +361,36 @@ finding **high** — it is a census, not an inference.
 **Feeds C** (per §G3's own note): resistance *is* informative, so a concept's conductance
 profile is a live canonization/eviction-resistance signal — but C should read the
 exclusivity caveat above before using `blast_radius` as a proxy for load-bearing-ness.
+
+### H2 scope correction and disposition (operator discussion, 2026-08-21)
+
+Three things settled after the spike, appended so H2 closes crisply:
+
+1. **What blast radius means on a memory graph, corrected.** Nothing "breaks" when a
+   memory is edited — the commits exist in git regardless. Blast radius here is
+   **belief-revision propagation**: when a concept is retracted, contradicted or
+   superseded, the warning's job is "N recorded conclusions were reasoned on top of this;
+   they inherit the doubt." That is only exercised by a workload that *revises* memories.
+   The dogfood corpus is append-mostly history, so H2's defect — real as math — is
+   **latent on this corpus**. The workloads where it bites are CloudOps (dependents are
+   live resources; breakage is literal) and Mooshik (an autobiography's facts change:
+   employers, providers, preferences).
+2. **The operator-judgement step is deferred, with a trigger.** Judging the
+   count-vs-resistance table against *this* corpus would judge it against data where the
+   warning guards nothing. The judgement runs when a corpus with real revision events
+   exists — concretely: **after the first ~10 retract/demote/supersede events on any live
+   store** (Mooshik's bootstrap corrections are the expected source), re-generate the
+   table from that store and judge then. Until that trigger, H2 stays "upheld,
+   unjudged" — not adopted.
+3. **The exclusivity-filter fix is a ride-along, not scheduled work.** It is a
+   correctness bug in a shipped metric and should be fixed by whichever workstream next
+   touches the daemon's scoring/blast code (C is the likely candidate — SoloPolicy sits
+   in the same neighbourhood), together with the `MIN_BLAST_RADIUS = 5` recalibration the
+   spike showed it forces. It does not justify its own cycle on a corpus where the
+   warning is latent.
+
+One measurement added to the dogfood watch-list by this discussion: **revision rate**
+(retract/demote/contradiction events per week). While it is zero, blast-radius and
+canonization semantics are both untestable in principle on this store — the same
+structural reason metric 5 is silent. When it moves, both H2's judgement and the
+canonization fair test get their real data.
