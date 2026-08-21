@@ -262,9 +262,11 @@ pub trait GraphStore: Send + Sync {
     /// un-migrated store genuinely does not offer the durable surface asked of
     /// it, and the message names `lambo provision` so the refusal is actionable.
     ///
-    /// **Tables only.** Post-DDL *columns* converge through `init_schema`'s
-    /// `ensure_column` / `ADD COLUMN IF NOT EXISTS` ladders, which are on the
-    /// same provision-only path; a missing column is not covered here.
+    /// **Tables and columns.** Missing *tables* are refused via the DDL-derived set;
+    /// missing *columns* are also refused, diffed from the same DDL source: SQLite via
+    /// `PRAGMA table_info`, Cockroach via `information_schema.columns`. A store missing
+    /// either cannot offer the durable surface asked of it, so the refusal is loud rather
+    /// than a silent ack into a void.
     ///
     /// Default `Ok(())`: an adapter with no external schema (`MemoryStore`, the
     /// test doubles) has nothing to check.
