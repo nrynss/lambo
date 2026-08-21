@@ -44,29 +44,36 @@ impl EmbedError {
     /// must be a type, and its converse is that a `format!`ed error is not a
     /// classification.
     ///
-    /// * [`Self::Unavailable`] — **transient.** The backend was never reached:
-    ///   the shipped BGE-M3 adapter produces it from a transport failure
-    ///   (`llama.cpp unreachable`), i.e. the server is down, restarting, or
-    ///   behind a broken socket. Nothing about the *input* was rejected, so the
-    ///   same input against a healthy server is untried.
-    /// * [`Self::Backend`] — **permanent for this input.** The backend answered
-    ///   and the answer was unusable: a non-success HTTP status for this model
-    ///   and this text, unparseable JSON, the wrong dimensionality, a
-    ///   non-finite or zero-norm vector. This is the closest thing the
-    ///   `/v1/embeddings` protocol offers to "I refuse this content", and it is
-    ///   what a llama.cpp refusal in fact produces.
+    /// * [`Self::Unavailable`] — **transient.** The backend was never reached,
+    ///   or reached and answered with a status the rule table classes as
+    ///   transient or unclassified. The shipped BGE-M3 adapter produces it
+    ///   from a transport failure (`llama.cpp unreachable`) and from every
+    ///   status in [`crate::embed::bge_m3::classify_status`]'s `Transient` /
+    ///   `Unclassified` classes (408/425/429/500/502/503/504, any un-named
+    ///   5xx, and unrecognised statuses). Nothing about the *input* was
+    ///   rejected, so the same input against a healthy server is untried.
+    /// * [`Self::Backend`] — **permanent for this input or this deployment.**
+    ///   The backend answered and the answer was unusable: a status the rule
+    ///   table classifies as content (400/413/415/422 — a genuine refusal of
+    ///   this text) or permanent-config (401/403/404 — a wrong URL, model, or
+    ///   credentials), unparseable JSON, the wrong dimensionality, a
+    ///   non-finite or zero-norm vector.
     ///
-    /// **Where this is imprecise, stated rather than hidden.** A server-side
-    /// fault that still answers — `503` while a model loads, a proxy's `502` —
-    /// lands in `Backend` and is called permanent, because HTTP does not let the
-    /// caller tell it from a content refusal. Two things bound the cost: the
-    /// replay path runs a liveness embed *before* its loop, so a whole outage
-    /// never reaches this classifier; and a misclassification can cost at most
-    /// the one intent that met the fault, not the backlog. The
-    /// [CON-7](Embedder::embed) empty-text guard also reports `Unavailable`,
-    /// i.e. transient, which is wrong in kind — but it is unreachable from any
-    /// validated write (content is gated at entry, GRAPH-8) and renaming a
-    /// documented cross-embedder contract is not this finding's business.
+    /// **Where this is imprecise, stated rather than hidden (J3-R2R-1).** The
+    /// durability decision turns on whether a non-success status speaks about
+    /// the *input*, the *deployment*, or the *server's momentary state* — HTTP
+    /// collapses those into three buckets plus "no rule". The adapter classifies
+    /// at the site that knows the status ([`crate::embed::bge_m3::classify_status`]),
+    /// and statuses that do not mention the input are `Transient` -> here, so a
+    /// `503`/`502`/`429` from a live embedder is no longer mistaken for a content
+    /// refusal. Two further things bound a residual misclassification rather than
+    /// letting it cost the backlog: the replay path runs a liveness embed
+    /// *before* its loop (so a whole outage never reaches this classifier), and
+    /// a session-wide status fault (the embedder answering transiently for every
+    /// intent) is caught by the replay's sequential decision rule — after
+    /// [`crate::writeq::EMBEDDER_SICK_THRESHOLD`] consecutive transients the loop
+    /// stops and leaves the remaining backlog durable. So a misclassification
+    /// costs at most that threshold of intents, never the backlog.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Unavailable(_) => true,

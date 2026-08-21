@@ -36,6 +36,49 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What a non-success HTTP status from llama.cpp says about retrying the same
+/// input (J3-R2R-1). The durability replay's consume-or-keep decision turns on
+/// whether the status speaks about *this input*, about *the deployment*, or
+/// about *the server being momentarily unwilling*; HTTP collapses those into
+/// three buckets plus "no rule". Pāṇini-ordered and exhaustive, with no
+/// wildcard that lands in `Backend`/content: an unrecognised status is a gap in
+/// OUR table, not a statement about the caller's input — and this branch has
+/// already paid twice (J3-R3-1, J3-R2R-1) for treating absence of knowledge as
+/// knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbedStatusClass {
+    /// The server was momentarily unwilling — retry later; leave the write durable.
+    Transient,
+    /// This input will never embed — settle it as `failed`, exactly as a refusal.
+    Content,
+    /// The deployment is misconfigured — fail the write AND warn loudly.
+    PermanentConfig,
+    /// No rule names this status — treat as transient and log the status it was.
+    Unclassified,
+}
+
+/// Classify a non-success HTTP status. Named statuses first; then every un-named
+/// 5xx is transient; everything else is [`EmbedStatusClass::Unclassified`]. The
+/// class is decided HERE (the site that knows the status) and carried out as an
+/// [`EmbedError`] variant, never re-derived from a message string upstream
+/// (J1-R2-2: a class a decision turns on must be a type).
+pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
+    match code {
+        // A statement about this input — consume as failed.
+        400 | 413 | 415 | 422 => EmbedStatusClass::Content,
+        // A statement about the deployment — an operator must act.
+        401 | 403 | 404 => EmbedStatusClass::PermanentConfig,
+        // The server was momentarily unwilling for reasons that do not
+        // mention the input (`500` is a loaded llama.cpp fast-failing a burst;
+        // `503` is "no slot available" / loading the model).
+        408 | 425 | 429 | 500 | 502 | 503 | 504 | 509 | 529 => EmbedStatusClass::Transient,
+        // Any 5xx the table does not name is still a server-side signal.
+        code if (500..=599).contains(&code) => EmbedStatusClass::Transient,
+        // Everything else: no rule, so conservatively transient AND logged.
+        _ => EmbedStatusClass::Unclassified,
+    }
+}
+
 /// BGE-M3 embeddings via a local llama.cpp server over HTTP.
 #[derive(Debug, Clone)]
 pub struct BgeM3LlamaCppEmbedder {
@@ -155,15 +198,56 @@ impl BgeM3LlamaCppEmbedder {
             });
         }
         let text_body = resp.text().await.unwrap_or_default();
-        tracing::error!(
-            url = %self.url,
-            model = %model,
-            status = %status,
-            "llama.cpp embeddings request rejected; not retrying without the model (CON-2)"
-        );
-        Err(EmbedError::Backend(format!(
-            "llama.cpp returned {status} for model {model:?}: {text_body}"
-        )))
+        let code = status.as_u16();
+        match classify_status(code) {
+            EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
+                "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}"
+            ))),
+            EmbedStatusClass::Unclassified => {
+                // The table does not name this status. Conservative: treat it
+                // as transient (the write stays durable) and log the status so
+                // the gap in OUR table is on the record (J3-R2R-1 property 2).
+                tracing::warn!(
+                    url = %self.url,
+                    model = %model,
+                    status = %status,
+                    "llama.cpp answered with status {status}, which the J3-R2R-1 rule table \
+                     does not name; treating it as transient so the write stays durable"
+                );
+                Err(EmbedError::Unavailable(format!(
+                    "llama.cpp answered {status} (unclassified by the J3 status rule table) for \
+                     model {model:?}: {text_body}"
+                )))
+            }
+            EmbedStatusClass::Content => {
+                tracing::error!(
+                    url = %self.url,
+                    model = %model,
+                    status = %status,
+                    "llama.cpp refused this content ({status}); not retrying (CON-2)"
+                );
+                Err(EmbedError::Backend(format!(
+                    "llama.cpp refused this content with {status} for model {model:?}: {text_body}"
+                )))
+            }
+            EmbedStatusClass::PermanentConfig => {
+                // 401/403/404 — a wrong URL, model name, or credentials. The
+                // write is failed (the class is permanent for the deployment,
+                // so retrying cannot help) AND an operator is told loudly.
+                tracing::error!(
+                    url = %self.url,
+                    model = %model,
+                    status = %status,
+                    "llama.cpp answered {status} — a PERMANENT configuration error (URL, model \
+                     name, or credentials). An operator must fix the embedder; every such \
+                     write is being failed because retrying cannot help"
+                );
+                Err(EmbedError::Backend(format!(
+                    "llama.cpp answered {status} (permanent configuration error) for model \
+                     {model:?}: {text_body}"
+                )))
+            }
+        }
     }
 }
 
@@ -279,8 +363,12 @@ mod tests {
         assert!(err.to_string().contains("512"));
     }
 
+    /// J3-R2R-1: `500` is in the rule table's TRANSIENT class — a loaded
+    /// llama.cpp fast-fails a burst with it, and it says nothing about the
+    /// input — so it must surface as `Unavailable` (leave the write durable),
+    /// never as the permanent-`Backend` that used to destroy the whole backlog.
     #[tokio::test]
-    async fn rejects_non_success_status() {
+    async fn rejects_500_as_transient() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings");
@@ -288,8 +376,74 @@ mod tests {
         });
         let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
         let err = e.embed("anything").await.unwrap_err();
-        assert!(matches!(err, EmbedError::Backend(_)));
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
         assert!(err.to_string().contains("500"));
+    }
+
+    /// J3-R2R-1 algorithm unit test: the rule table itself, exhaustive and
+    /// priority-ordered, with NO wildcard producing the permanent class.
+    #[test]
+    fn the_status_rule_table_classifies_every_named_status() {
+        use EmbedStatusClass::*;
+        // transient
+        for code in [
+            408, 425, 429, 500, 502, 503, 504, 509, 529, 505, 507, 508, 530, 599,
+        ] {
+            assert_eq!(classify_status(code), Transient, "status {code}");
+        }
+        // content — permanent for this input
+        for code in [400, 413, 415, 422] {
+            assert_eq!(classify_status(code), Content, "status {code}");
+        }
+        // permanent-config — an operator must act
+        for code in [401, 403, 404] {
+            assert_eq!(classify_status(code), PermanentConfig, "status {code}");
+        }
+        // unclassified — unnamed 4xx/3xx/1xx fall here, conservatively
+        for code in [
+            406, 409, 410, 411, 412, 414, 416, 418, 421, 300, 302, 101, 199,
+        ] {
+            assert_eq!(classify_status(code), Unclassified, "status {code}");
+        }
+        // No status OUTSIDE the four named content codes may be labeled Content
+        // by a wildcard: an unknown status is a gap in OUR table, not a
+        // statement about the caller's input (J3-R2R-1 properties 1 & 2).
+        let content_codes = [400, 413, 415, 422];
+        for code in 200..1000 {
+            if content_codes.contains(&code) {
+                continue;
+            }
+            assert_ne!(
+                classify_status(code),
+                EmbedStatusClass::Content,
+                "status {code} must never fall into the content class by default"
+            );
+        }
+    }
+
+    /// J3-R2R-1 end-to-end at the adapter: a content refusal (`413`) is the
+    /// absorbing permanent-`Backend` consumed as failed, while `503` is
+    /// transient-`Unavailable`. The two must never collapse.
+    #[tokio::test]
+    async fn status_class_drives_the_error_variant() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(413).body("payload too large");
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(503).body("no slot available");
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(!matches!(err, EmbedError::Backend(_)));
     }
 
     #[tokio::test]
