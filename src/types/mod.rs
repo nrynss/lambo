@@ -879,9 +879,34 @@ pub enum LamboError {
     /// The durable store failed. See [`StoreError`].
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// Producing an embedding failed.
+    /// Producing an embedding failed **for this input** — the embedder answered
+    /// and the answer was unusable, so a later attempt gets the same answer.
     #[error("embed: {0}")]
     Embed(String),
+    /// Producing an embedding failed because the embedder **could not be
+    /// reached or did not answer in time** — a transport failure or a timeout.
+    ///
+    /// Split out of [`LamboError::Embed`] by J3 round-1 N1 for the same reason
+    /// [`LamboError::SoftLock`] was split out of [`LamboError::Conflict`] by
+    /// J1-R2-2: a class a decision turns on must be a **type**, not a substring
+    /// of a message. The decision here is the durable-intent replay's, and it is
+    /// irreversible in both directions — settle an acked write `failed`, or
+    /// leave it durable for the next process. Before the split, the replay arm
+    /// could only see `LamboError::Embed(String)` and so treated a dead
+    /// llama.cpp exactly like a poison record, destroying the whole backlog on
+    /// one transient outage.
+    ///
+    /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
+    /// timeout arm, and its embed-error arm when
+    /// [`crate::embed::EmbedError::is_transient`] says so.
+    ///
+    /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
+    /// operator and to the ledger this is the same *class* of failure
+    /// (`error_kind` stays `"embedding error"`), and the receipt text for a
+    /// refused write is unchanged. The split is about what the replay may
+    /// conclude, not about renaming the failure.
+    #[error("embed: {0}")]
+    EmbedUnavailable(String),
     /// The configuration is unusable.
     #[error("config: {0}")]
     Config(String),

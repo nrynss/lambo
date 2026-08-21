@@ -32,6 +32,49 @@ pub enum EmbedError {
     Backend(String),
 }
 
+impl EmbedError {
+    /// **Could a later attempt at the same input plausibly succeed?** (J3
+    /// round-1 N1.)
+    ///
+    /// The durable-intent replay has to choose between two irreversible acts —
+    /// settle an acked write `failed`, or leave it durable for the next process
+    /// — and the choice turns entirely on this question. It is answered from the
+    /// *variant*, at the site that already knows the cause, because the
+    /// alternative is matching on message text: J1-R2-2's lesson is that a class
+    /// must be a type, and its converse is that a `format!`ed error is not a
+    /// classification.
+    ///
+    /// * [`Self::Unavailable`] — **transient.** The backend was never reached:
+    ///   the shipped BGE-M3 adapter produces it from a transport failure
+    ///   (`llama.cpp unreachable`), i.e. the server is down, restarting, or
+    ///   behind a broken socket. Nothing about the *input* was rejected, so the
+    ///   same input against a healthy server is untried.
+    /// * [`Self::Backend`] — **permanent for this input.** The backend answered
+    ///   and the answer was unusable: a non-success HTTP status for this model
+    ///   and this text, unparseable JSON, the wrong dimensionality, a
+    ///   non-finite or zero-norm vector. This is the closest thing the
+    ///   `/v1/embeddings` protocol offers to "I refuse this content", and it is
+    ///   what a llama.cpp refusal in fact produces.
+    ///
+    /// **Where this is imprecise, stated rather than hidden.** A server-side
+    /// fault that still answers — `503` while a model loads, a proxy's `502` —
+    /// lands in `Backend` and is called permanent, because HTTP does not let the
+    /// caller tell it from a content refusal. Two things bound the cost: the
+    /// replay path runs a liveness embed *before* its loop, so a whole outage
+    /// never reaches this classifier; and a misclassification can cost at most
+    /// the one intent that met the fault, not the backlog. The
+    /// [CON-7](Embedder::embed) empty-text guard also reports `Unavailable`,
+    /// i.e. transient, which is wrong in kind — but it is unreachable from any
+    /// validated write (content is gated at entry, GRAPH-8) and renaming a
+    /// documented cross-embedder contract is not this finding's business.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Unavailable(_) => true,
+            Self::Backend(_) => false,
+        }
+    }
+}
+
 /// Pluggable embedding backend (default: BGE-M3 via llama.cpp; Bedrock Titan V2 swap-in).
 ///
 /// **Input contract (CON-7):** `embed` MUST reject empty / whitespace-only text with

@@ -329,10 +329,14 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// When the store lacks `Capabilities::VECTOR_SEARCH`, the outcome is
 /// byte-identical to `derive` (fresh keyword-only concepts, no store I/O beyond
 /// the capability probe). When the **embedder** fails or times out, the call
-/// fails with [`LamboError::Embed`] and nothing is written (J3-R3-1): applying
-/// the concept with `embedding: NULL` would report a success the semantic tier
-/// can never serve, and — on the async path — hand the write queue a 3 ms
-/// non-embed to sample as a fast write.
+/// fails and nothing is written (J3-R3-1): applying the concept with
+/// `embedding: NULL` would report a success the semantic tier can never serve,
+/// and — on the async path — hand the write queue a 3 ms non-embed to sample as
+/// a fast write. **Which** failure it was is carried by the type, because the
+/// durable-intent replay's consume-or-keep decision turns on it (J3 round-1 N1):
+/// [`LamboError::EmbedUnavailable`] when the embedder could not be reached or
+/// did not answer in time, [`LamboError::Embed`] when it answered and the answer
+/// was unusable for this input. The two render identically to a caller.
 ///
 /// `embedding` is the live, resolved [`EmbeddingContract`] for the process's
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
@@ -605,12 +609,26 @@ async fn derive_planned(
                         // The capability-absent arm above is untouched: that is
                         // a declared, session-uniform configuration, not a
                         // per-input surprise.
+                        // J3 round-1 N1: a timeout is `EmbedUnavailable`, not
+                        // `Embed`. We never got an answer, so nothing was
+                        // learned about this *input* — and the durable-intent
+                        // replay's consume/keep decision turns on exactly that
+                        // difference. The message is unchanged; only the type
+                        // carries the new fact.
                         Err(_) => {
-                            return Err(LamboError::Embed(format!(
+                            return Err(LamboError::EmbedUnavailable(format!(
                                 "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was \
                                  written — the write is refused rather than applied without its \
                                  vector (a concept stored with no embedding is unfindable by \
                                  semantic recall)"
+                            )))
+                        }
+                        Ok(Err(e)) if e.is_transient() => {
+                            return Err(LamboError::EmbedUnavailable(format!(
+                                "the embedder could not be reached ({e}); nothing was written — \
+                                 the write is refused rather than applied without its vector (a \
+                                 concept stored with no embedding is unfindable by semantic \
+                                 recall)"
                             )))
                         }
                         Ok(Err(e)) => {
@@ -2140,9 +2158,18 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(failing.calls(), 1, "embed attempted once, then refused");
+        // J3 round-1 N1 sharpens this assertion without weakening it. The
+        // failure this test drives is `EmbedError::Unavailable("server down")`
+        // — a dead embedder, not a rejected input — so the class it must
+        // produce is `EmbedUnavailable`. The write still fails and still writes
+        // nothing (the whole point of the reversal above); what is new is that
+        // the durable-intent replay can now tell this failure from a content
+        // refusal instead of destroying an acked write over it. The refusal
+        // class has its own pin below.
         assert!(
-            matches!(err, LamboError::Embed(_)),
-            "an embedder refusal is an Embed error, not a degrade: {err:?}"
+            matches!(err, LamboError::EmbedUnavailable(_)),
+            "a dead embedder is EmbedUnavailable, not a degrade and not a content \
+             refusal: {err:?}"
         );
         assert!(
             err.to_string().contains("nothing was written"),
@@ -2160,6 +2187,60 @@ mod tests {
             g.embedding().is_none(),
             "a failed embed must not bind the session to an embedding contract"
         );
+        g.assert_invariants().unwrap();
+    }
+
+    /// **J3 round-1 N1, the other side of the classification.** A refusal the
+    /// embedder *answers* — `EmbedError::Backend`, which is what the shipped
+    /// adapter reports for a non-success HTTP status — must stay
+    /// `LamboError::Embed`, because that is the class the durable-intent replay
+    /// consumes on. If this collapsed into `EmbedUnavailable` the fix would have
+    /// traded "never retry" for "retry forever": a record no embedder will
+    /// accept would be re-attempted at every attach for the life of the session.
+    #[tokio::test]
+    async fn a_content_refusal_stays_an_embed_error_not_an_unavailable_one() {
+        struct RefusingEmbedder;
+        #[async_trait]
+        impl Embedder for RefusingEmbedder {
+            fn dimensions(&self) -> usize {
+                1024
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+                Err(EmbedError::Backend(
+                    "llama.cpp returned 500 Internal Server Error for model \"bge-m3\": \
+                     input is too long"
+                        .into(),
+                ))
+            }
+        }
+        let sess = "hybrid-embedrefuse";
+        let (graph, i1) = graph_with_interaction(sess, 1, 0, "auth flow");
+        let err = derive(
+            graph.clone(),
+            &SpyStore::with_vector(vec![]),
+            &RefusingEmbedder,
+            &contract("fixture", 1024),
+            i1,
+            &agent(),
+            &[("create account", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, LamboError::Embed(_)),
+            "an answered refusal is a content-level failure: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("nothing was written"),
+            "still refused, still nothing written: {err}"
+        );
+        let g = graph.read();
+        assert_eq!(g.node_count(), 1, "interaction only");
+        assert!(g.embedding().is_none());
         g.assert_invariants().unwrap();
     }
 

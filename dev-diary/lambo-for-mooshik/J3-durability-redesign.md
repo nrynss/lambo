@@ -159,9 +159,12 @@ The eventual round-1 reviewer should attack these, not re-attack estimation:
 
 ## As built (2026-08-21) — Part 1 shipped, Part 2 deferred with its seam
 
-Implemented on `wt/j3` in five staged commits (`8605f46` the honesty fix, `e7ff6f2`
+Implemented on `wt/j3` in **six** staged commits (`8605f46` the honesty fix, `e7ff6f2`
 durable intents, `9e48dca` the estimator demotion, `2bba0e9` the proof obligations at the
-binary, plus the docs commit carrying this section). The narrative of record — findings
+binary, `5ef7038` the docs commit carrying this section, and `66f5aaa` the register sweep —
+which round 1 caught this sentence omitting while claiming five, N9: the commit whose
+subject is register accuracy was the one missing from the register). The round-1 review
+remediation adds further commits on top; its dispositions are in §J3. The narrative of record — findings
 closed, live-binary numbers, register sweep, gates — is §J3's round-3 section in
 `J-multi-client.md`; this section records only what belongs to the design: the
 open-question decisions, the deviations, and what of Part 2 shipped.
@@ -191,7 +194,8 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   durable half.** Consumed rows are retained for `types::WRITE_INTENT_RETENTION`
   (const-asserted equal to `RECEIPT_RETENTION` — one window, or a receipt's answer would
   depend on whether a restart intervened) and answer `applied_after_restart` / `failed`
-  on the original receipt id, agent-scoped; unconsumed rows answer `pending`. Nothing
+  on the original receipt id, agent-scoped; unconsumed rows answer `pending_replay`
+  (`pending` until the round-1 review's N8 — the two waits are not the same wait). Nothing
   else survives: `restart_lost` remains the honest answer for receipts with no record.
 * **Does the proxy need to know? → No, verified**: intents are holder-internal,
   `src/mcp/proxy.rs` has no round-3 change, and -32002's wording stays correct for the
@@ -203,6 +207,32 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   *refusal*; the implementation also makes an embed **timeout** an `Err`. Same argument,
   same mechanism: a per-input surprise that used to become applied-with-`NULL` silently.
   The capability-absent arm stays a degrade — a declared, session-uniform configuration.
+  **Two things this deviation owed and did not pay, both raised at round 1 and both now
+  paid.** (a) The *boundary* as stated was wrong: `vector_ok` is the **store's**
+  `VECTOR_SEARCH` capability, not the embedder's reachability, and since SQLite advertises
+  it unconditionally and `build_embedder` always yields an embedder, there is no arm in
+  which a missing or dead *embedder* degrades — so on the default deployment (`hybrid` +
+  BGE-M3 at `127.0.0.1:8080`) an unreachable embedder fails **every** write. That
+  availability consequence is now stated where a user reads it (§J3's Done-when limits and
+  both `mcp.mdx` mirrors) together with the configuration that keeps a session writable
+  without an embedder. (b) The arm the deviation *added* — the timeout — had no test; it
+  has one now (`an_embed_timeout_fails_the_write_and_writes_nothing`, on a paused clock so
+  it costs no wall time).
+* **The replay's failure arm distinguishes two failures, where this doc named one**
+  (round-1 N1, a P1). The doc said a refused replay consumes its intent as `failed` rather
+  than retrying forever, and that is right for a *content* refusal. It is wrong for a
+  transient one: as first built, any embedder error consumed the intent, so a llama.cpp
+  that was down, restarting or merely slow at the moment of an attach settled the **whole
+  backlog** `failed` — a 63-intent backlog at one `HYBRID_IO_TIMEOUT` each — destroying
+  acked writes because a dependency the write does not need in order to be *recorded* had
+  blinked. The branch created that exposure itself by making a timeout an `Err`, and then
+  handled it as if it were the other failure. As built now: a liveness embed of
+  `PROBE_TEXT` gates the loop and consumes nothing on failure, and the failure arm consumes
+  only `LamboError::Embed` — the class meaning "the embedder answered and refused this
+  content" — leaving `EmbedUnavailable`, store and lease failures unconsumed and ending the
+  loop. The distinction is a **type**, not a string match: `EmbedError::is_transient`
+  classifies at the site that knows the cause and `LamboError::EmbedUnavailable` carries it
+  out, on the J1-R2-2 precedent that a class a decision turns on must be a type.
 * **Part 2 is deferred entirely, with its seam** — not for budget but because stage 3
   dissolved its premise: ACI conformal admission and the e-process breaker were specified
   for an admission that still estimates, and after the demotion no estimate gates
@@ -219,6 +249,22 @@ open-question decisions, the deviations, and what of Part 2 shipped.
   completion-line schema is the vehicle this doc itself names — the same disposition as
   §J3's declared metric-2 regression, and for the same one-append-path reason. The
   `write_intents` table is queryable in the meantime.
+* **The design's step (3) for N1 — an `attempts` column, consumed as `failed` after k —
+  was argued down rather than shipped, and this is the deviation with the most in it.** The
+  review prescribed it to bound "retry forever"; it bounds it by *destroying* the write
+  after k tries, which is a smaller version of the very trade N1 condemned ("the fix for
+  retry-forever was never retry"). Three facts make the bound unnecessary here. A record
+  no embedder will ever accept is a `LamboError::Embed` and is consumed on the **first**
+  attempt, so the poison case never retries at all. A transient failure now **ends** the
+  loop instead of churning through it, and the liveness gate means a dead embedder costs
+  one embed per attach rather than one timeout per intent — so the per-attach cost is O(1),
+  not O(backlog). What is left unbounded is only *how long an owed intent stays owed*
+  against a permanently absent embedder, and for that the honest answer is to keep the
+  write and make the debt visible, not to delete it: `write_queue_replay_owed` on the stats
+  surface, `pending_replay` on every affected receipt, and one warn line per attach naming
+  the backlog. A fourth reason is specific to this branch: a new column is exactly the
+  schema change the F5 preflight **cannot** see (it checks tables), so adding one now would
+  open a fresh un-migrated-store hazard in the one dimension left unguarded.
 * **One prediction of this doc corrected**: "receipts gain one honest state" — they
   gained two. `applied_after_restart` as designed, and `intent_durable`, because the
   closing process itself must answer honestly about a write it is deferring; settling it

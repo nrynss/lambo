@@ -4707,6 +4707,229 @@ mod tests {
         assert_eq!(outcome.tag, "applied_after_restart");
     }
 
+    /// Unreachable for everything, including the calibration probe's own text —
+    /// a llama.cpp that is down or restarting, as the shipped adapter reports it
+    /// (`EmbedError::Unavailable`, "llama.cpp unreachable").
+    struct DeadEmbedder;
+
+    #[async_trait]
+    impl Embedder for DeadEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Err(crate::embed::EmbedError::Unavailable(
+                "llama.cpp unreachable: connection refused".into(),
+            ))
+        }
+    }
+
+    /// Answers the probe's text, then **refuses real content the way a serving
+    /// llama.cpp refuses it** — a non-success HTTP status, which the adapter
+    /// reports as `EmbedError::Backend`. The liveness gate therefore passes and
+    /// the refusal reaches the classifier, which is the case that must still
+    /// consume.
+    struct RefusingEmbedder {
+        inner: FixtureEmbedder,
+    }
+
+    #[async_trait]
+    impl Embedder for RefusingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            if text.contains(crate::writeq::PROBE_TEXT) {
+                return self.inner.embed(text).await;
+            }
+            Err(crate::embed::EmbedError::Backend(
+                "llama.cpp returned 500 Internal Server Error for model \"bge-m3\": \
+                 input is too long"
+                    .into(),
+            ))
+        }
+    }
+
+    /// Session 1 defers an acked write as a durable intent, then close.
+    async fn defer_one_intent(
+        inner: &Arc<MemoryStore>,
+        session: &str,
+        agent: &AgentId,
+    ) -> crate::writeq::ReceiptId {
+        let mem = Memory::builder()
+            .session(session)
+            .agent(agent.as_str())
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(HangingEmbedder {
+                inner: FixtureEmbedder::new(),
+            }) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build the deferring session");
+        let submitted = mem
+            .derive_async_as(
+                agent,
+                &[("user schema", ConceptType::Entity)],
+                &ParentOf::none(),
+            )
+            .await
+            .expect("ack");
+        assert!(!submitted.dropped(), "the write must be ADMITTED");
+        mem.close().await.expect("clean close");
+        assert_eq!(mem.pipeline().counters().deferred(), 1);
+        submitted.receipt
+    }
+
+    /// **J3 round-1 N1, the P1**: a transient embedder outage at attach must not
+    /// destroy the durable-intent backlog.
+    ///
+    /// Red before the fix: `spawn_replay` ran unconditionally and its failure arm
+    /// consumed every intent as `failed` — so this test's session 2 settled the
+    /// acked write `failed` with nothing written, permanently, because a
+    /// dependency the write does not need in order to be *recorded* was down for
+    /// one attach. Green: the liveness embed fails, the loop never starts, the
+    /// intent is still unconsumed, and session 3 applies it.
+    #[tokio::test]
+    async fn a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_applies_it() {
+        let inner = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("intent-outage");
+        let agent = AgentId::new("agent-a");
+        let receipt = defer_one_intent(&inner, "intent-outage", &agent).await;
+
+        // Session 2: the embedder is down for the whole attach.
+        let mem2 = Memory::builder()
+            .session("intent-outage")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(DeadEmbedder) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("a dead embedder must not refuse the attach");
+        // Give the replay task every chance to misbehave.
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            mem2.pipeline().counters().replayed(),
+            0,
+            "nothing can be applied with no embedder"
+        );
+        assert_eq!(
+            mem2.pipeline().counters().replay_owed(),
+            1,
+            "the debt must be visible on the stats surface, not silently discharged"
+        );
+        let answer = mem2.pipeline().lookup(&agent, receipt);
+        assert_eq!(
+            answer.tag(),
+            "pending_replay",
+            "an outage at attach must not settle an acked write failed: {answer:?}"
+        );
+        mem2.close().await.expect("clean close 2");
+        let snap = inner.load_session(&sid).await.expect("reload");
+        assert_eq!(snap.write_intents.len(), 1);
+        assert!(
+            snap.write_intents[0].outcome.is_none(),
+            "the intent must survive the outage UNCONSUMED: {:?}",
+            snap.write_intents[0].outcome
+        );
+
+        // Session 3: the embedder is back. The write the outage would have
+        // destroyed is applied, with its embedding.
+        let mem3 = Memory::builder()
+            .session("intent-outage")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build session 3");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while mem3.pipeline().counters().replayed() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the intent must still be replayable after the outage"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            mem3.pipeline().lookup(&agent, receipt).tag(),
+            "applied_after_restart"
+        );
+        assert_eq!(mem3.pipeline().counters().replay_owed(), 0, "debt paid");
+        mem3.close().await.expect("clean close 3");
+        let snap = inner.load_session(&sid).await.expect("reload");
+        let concept = snap
+            .concepts
+            .iter()
+            .find(|c| c.content == "user schema")
+            .expect("the write survived a whole outage and then landed");
+        assert!(
+            concept.embedding.is_some(),
+            "judged at the EMBEDDING column (J3-R3-1)"
+        );
+    }
+
+    /// **The other half of N1's classification**: a content-level refusal still
+    /// consumes. Without this, "leave it for the next process" would become
+    /// retry-forever for a record no embedder will ever accept — the objection
+    /// the original consume-always arm was built to answer, which the fix must
+    /// not trade away.
+    #[tokio::test]
+    async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
+        let inner = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("intent-poison");
+        let agent = AgentId::new("agent-a");
+        let receipt = defer_one_intent(&inner, "intent-poison", &agent).await;
+
+        let mem2 = Memory::builder()
+            .session("intent-poison")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(RefusingEmbedder {
+                inner: FixtureEmbedder::new(),
+            }) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build session 2");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let answer = mem2.pipeline().lookup(&agent, receipt);
+            if answer.tag() == "failed" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a refused replay must settle, not hang: {answer:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(mem2.pipeline().counters().replay_owed(), 0);
+        mem2.close().await.expect("clean close 2");
+        let snap = inner.load_session(&sid).await.expect("reload");
+        let outcome = snap.write_intents[0]
+            .outcome
+            .as_ref()
+            .expect("a poison record IS consumed — otherwise it retries forever");
+        assert_eq!(outcome.tag, "failed");
+        assert!(
+            snap.concepts.is_empty(),
+            "nothing was written for a refused replay"
+        );
+    }
+
     // -- close / drain ------------------------------------------------------
 
     #[tokio::test]

@@ -547,7 +547,11 @@ fn note_facts(facts: impl FnOnce() -> serde_json::Value) {
 fn err_class(err: &LamboError) -> &'static str {
     match err {
         LamboError::Store(_) => "store error",
-        LamboError::Embed(_) => "embedding error",
+        // J3 round-1 N1: same pairing as the Conflict/SoftLock one below. The
+        // split lets the durable-intent replay tell "not reached" from "refused
+        // this input"; it must not give the model, the operator or the ledger a
+        // new error class to learn.
+        LamboError::Embed(_) | LamboError::EmbedUnavailable(_) => "embedding error",
         LamboError::Config(_) => "configuration error",
         // J1-R2-2: two variants, one class. The split exists so N4 can tell a
         // model-safe §11 refusal from a lease-lost one; an operator and the
@@ -1120,6 +1124,11 @@ impl LamboServer {
             // this session's own accepted jobs, so `outstanding` stays exact).
             obj.insert("write_queue_deferred".into(), json!(c.deferred()));
             obj.insert("write_queue_replayed".into(), json!(c.replayed()));
+            // J3 round-1 N1: the replay DEBT, not a total — durable intents
+            // this session found owed and has not yet paid. Non-zero with
+            // `replayed` not advancing is the visible form of "the embedder was
+            // not answering at attach, so nothing was consumed".
+            obj.insert("write_queue_replay_owed".into(), json!(c.replay_owed()));
             obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));
         }
         payload
@@ -3216,6 +3225,7 @@ mod tests {
             "write_queue_dropped_closed",
             "write_queue_deferred",
             "write_queue_replayed",
+            "write_queue_replay_owed",
             "receipts_retained",
         ] {
             assert!(p.get(key).is_some(), "{key} missing from {p}");

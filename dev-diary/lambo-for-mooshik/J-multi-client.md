@@ -1471,7 +1471,7 @@ Probe output from the same runs, which is where the queue bound comes from:
   `write_queue_deferred`, never in `abandoned`.
 * **The daemon's wake is unchanged**: a background write pokes it through the
   same `Notify` the synchronous path uses, via a new `Daemon::waker`.
-* **`lambo_stats` gains seventeen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`; round 2 added `write_queue_probe_serial_items_per_sec`; round 3 added `write_queue_deferred` and `write_queue_replayed`). The keys added since first landing are the ones that need explaining, and J3-R2-8 was right that the bullet did not explain them: **`write_queue_lane_bound`** is the bound that actually refuses one agent's burst, reported beside the aggregate `write_queue_bound` — since round 3 both are static caps (the per-agent fair share and the memory ceiling), not measurements; **`write_queue_bound_source`** says which evidence the *rate telemetry* rests on (`probe`, `observed`, `unmeasured`), because "measured" alone cannot distinguish a startup estimate from this deployment's own timed writes and the two differ by 4× on ordinary content; **`write_queue_serial_items_per_sec`** is the 1-wide rate the lane drains at — telemetry since round 3, never a bound input; **`write_queue_probe_serial_items_per_sec`** keeps the probe's figure beside whichever rate is in force, because the *gap* between them is the diagnosis (J3-R2-4); **`write_queue_dropped_closed`** separates a refused shutdown tail from real backpressure; **`write_queue_deferred`** counts acked writes a clean close handed to the next serve as durable intents (a fourth settle class — neither applied, failed, nor lost); and **`write_queue_replayed`** counts a previous process's intents this session applied at attach, deliberately not summed into `applied` so `outstanding = accepted − applied − failed − deferred` stays exact. The difference from the
+* **`lambo_stats` gains eighteen unconditional keys** (ten at first landing; round 1 added `write_queue_lane_bound`, `write_queue_bound_source`, `write_queue_serial_items_per_sec` and `write_queue_dropped_closed`; round 2 added `write_queue_probe_serial_items_per_sec`; round 3 added `write_queue_deferred` and `write_queue_replayed`; the round-1 review remediation added `write_queue_replay_owed`). The keys added since first landing are the ones that need explaining, and J3-R2-8 was right that the bullet did not explain them: **`write_queue_lane_bound`** is the bound that actually refuses one agent's burst, reported beside the aggregate `write_queue_bound` — since round 3 both are static caps (the per-agent fair share and the memory ceiling), not measurements; **`write_queue_bound_source`** says which evidence the *rate telemetry* rests on (`probe`, `observed`, `unmeasured`), because "measured" alone cannot distinguish a startup estimate from this deployment's own timed writes and the two differ by 4× on ordinary content; **`write_queue_serial_items_per_sec`** is the 1-wide rate the lane drains at — telemetry since round 3, never a bound input; **`write_queue_probe_serial_items_per_sec`** keeps the probe's figure beside whichever rate is in force, because the *gap* between them is the diagnosis (J3-R2-4); **`write_queue_dropped_closed`** separates a refused shutdown tail from real backpressure; **`write_queue_deferred`** counts acked writes a clean close handed to the next serve as durable intents (a fourth settle class — neither applied, failed, nor lost); **`write_queue_replayed`** counts a previous process's intents this session applied at attach, deliberately not summed into `applied` so `outstanding = accepted − applied − failed − deferred` stays exact; and **`write_queue_replay_owed`** is the replay DEBT rather than a total — intents this session found owed and has not yet paid — which is what makes "the embedder was down at attach, so nothing was consumed" a number an operator can read instead of an absence they have to infer (J3 round-1 N1). The difference from the
   `ledger_*` keys' gating is not an inconsistency: the ledger is an optional
   subsystem, so "off means byte-identical" is a promise that can be kept for it;
   the write queue has no off switch, so there is no baseline payload left to
@@ -1920,7 +1920,10 @@ estimator's correctness**, and the estimator was falsified on a new workload
 axis each round (width, warmth, length, failure shape, concurrency scaling —
 five axes in three rounds; the series does not converge, because an estimator
 is wrong in as many ways as the workload has covariates). The cut:
-**durable post-validation intents.** Five staged commits on `wt/j3`:
+**durable post-validation intents.** Six staged commits on `wt/j3` (round 1 caught this
+list saying five and enumerating five, N9 — the missing one was `66f5aaa`, the register
+sweep; the commit whose subject is register accuracy was the one missing from the
+register):
 
 1. **`8605f46` — the honesty fix (J3-R3-1's root), standalone because it is
    correct under either design.** An embedder failure or timeout on the hybrid
@@ -1973,7 +1976,10 @@ is wrong in as many ways as the workload has covariates). The cut:
    publication, the observed takeover, `probe_optimism`, the flip line — none
    of it sizing anything.
 4. **`2bba0e9` — the proof obligations at the shipped binary** (below).
-5. **This note.**
+5. **`5ef7038` — the docs**: this note, the design doc's as-built section, and both
+   `mcp.mdx` mirrors.
+6. **`66f5aaa` — the register sweep**: the three estimator-era stated reasons the
+   demotion left behind.
 
 **The invariant, demonstrated at the release binary against the live BGE-M3**
 (`evidence/mooshik-j3-durable-intents/`, script committed beside the transcript;
@@ -2180,6 +2186,84 @@ by construction and by driving the real binary:
 | `src/cli/provision.rs` | its "idempotent" claim | **nothing** — the claim is true and is now the thing the refusal points at |
 | `migrations/*/001_init.sql` | the DDL idiom the preflight reads | **nothing** — both files already use `CREATE TABLE IF NOT EXISTS` uniformly; a unit test now fails if that stops being true |
 
+**N1 (P1) — a transient embedder outage at attach no longer destroys the backlog.**
+The mechanism the review measured: `spawn_replay` ran unconditionally at attach and its
+failure arm consumed **every** failed intent as `failed`, with no discrimination between a
+content refusal and an unreachable or timed-out embedder — a distinction this branch created
+by making the timeout an `Err`. A 63-intent backlog therefore burned in ~31 minutes against
+a *hanging* embedder (one `HYBRID_IO_TIMEOUT` each) or in ~2 minutes against a dead one, and
+J2's lease arithmetic aims the attach at exactly the unhealthy window. Fixed in four parts,
+in the review's dependency order:
+
+1. **A liveness gate.** One embed of `PROBE_TEXT` (35 bytes, chosen because every embedder
+   accepts it) against `PROBE_BUDGET`, before the loop. On failure: one `tracing::warn!`
+   naming the session and the backlog, and `return` — **nothing consumed**, every intent
+   still durable and `pending_replay`. A dead or hanging embedder at attach now costs one
+   embed, not one timeout per intent.
+2. **A structural classification, not a string match.** The failure arm consumes only
+   `LamboError::Embed` — "the embedder answered and the answer is unusable for *this
+   content*" — and leaves everything else unconsumed, ending the loop. The type carries the
+   fact rather than the message: `EmbedError::is_transient` classifies at the site that
+   knows the cause (`Unavailable` = never reached, `Backend` = answered and unusable), and
+   the new `LamboError::EmbedUnavailable` carries it out of `hybrid::derive`. This follows
+   **J1-R2-2's precedent exactly** — `SoftLock` was split from `Conflict` for the same
+   reason, and like that split the `Display`, the `err_class` and therefore the receipt text
+   and the ledger's `error_kind` are unchanged. Where the classification is imprecise it
+   says so at the type: a `503`-while-loading lands in `Backend` and is called permanent,
+   because HTTP does not let a caller tell it from a refusal — bounded by the liveness gate
+   (a whole outage never reaches the classifier) and by costing at most the one intent that
+   met the fault.
+3. **The design's `attempts`-column bound argued down, not shipped** — see the design doc's
+   deviations section for the argument. In short: the poison case is consumed on the first
+   attempt by (2), a transient failure now *ends* the loop, and what remains is a debt that
+   should be visible rather than deleted. Plus one branch-specific reason: a new column is
+   precisely the schema change the F5 preflight cannot see.
+4. **The restatements.** Done-when limit (4) now states the class boundary and the magnitude
+   it had wrong, and a fifth limit records the crash-blocks-replay window the review
+   measured live; `IntentRecorded::describe()` says the next serve will **re-attempt** the
+   write, not "will apply it", and names the three answers that can follow; the design doc's
+   as-built section carries the deviation; both `mcp.mdx` mirrors carry the `intent_durable`
+   wording and the new state.
+
+**What the operator sees, which is the other half of the answer** — a never-consumed intent
+must not become an invisible retry loop. Per attach: one warn line naming the backlog and
+the reason. Per receipt: `pending_replay`, a **new** state (N8) whose `describe()` says the
+write was admitted by an earlier serve and may settle in a later one — the taxonomy's one
+tag collision, since a live `pending` settles in ~27 ms and a replay-owed one can outlive
+several processes. Per session: `write_queue_replay_owed`, the eighteenth unconditional
+`lambo_stats` key, holding the debt — non-zero while `write_queue_replayed` does not move is
+the readable form of "the embedder was not answering at attach and nothing was discarded".
+
+Pinned red-first at `Memory` level, both directions, and both verified red by mutating the
+two new guards off (`if false &&` on the liveness gate and on the classification), which
+fails on `write_queue_replay_owed` being silently discharged to 0:
+
+* `a_dead_embedder_at_attach_leaves_the_backlog_durable_and_a_later_serve_applies_it` —
+  session 1 defers an intent, session 2 attaches against an embedder that refuses even the
+  probe (`EmbedError::Unavailable`, the shipped adapter's transport error) and must leave the
+  intent unconsumed and answering `pending_replay`, and session 3 applies it **with its
+  embedding**. The last leg is the point: the write an outage would have destroyed is still
+  a write.
+* `a_content_refusal_at_replay_still_settles_the_intent_failed` — a probe-answering embedder
+  that refuses real content with `EmbedError::Backend` (the shape of a llama.cpp `500`) must
+  still consume the intent `failed`, so the fix does not trade "never retry" for "retry
+  forever".
+
+**Register sweep, N1 + N8 + N9 + F1's enum count (per file, including the nulls).**
+
+| File | Swept for | Result |
+| --- | --- | --- |
+| `src/embed/mod.rs` | every claim about what an embed failure means | `EmbedError::is_transient` added with the axis, both variants' meanings, and the two places it is imprecise (the `503` case, CON-7's empty-text guard) stated at the method rather than left to be discovered |
+| `src/types/mod.rs` | `LamboError`'s variant docs | `Embed`'s doc now says "for this input"; `EmbedUnavailable` records the split, the J1-R2-2 precedent, its only two producers, and that `Display` is identical on purpose |
+| `src/graph/hybrid.rs` | `derive`'s docstring and both failure arms' in-comments | the docstring names which type each failure produces and why; the timeout arm's comment records that only the type changed, not the message |
+| `src/mcp/server.rs` | `err_class`, the stats payload comments, the key-list test | the two embed variants share one class, annotated with the same pairing note the `Conflict`/`SoftLock` arm carries; the new key documented as a depth, not a total |
+| `src/writeq.rs` | `spawn_replay`'s doc bullets, `ReceiptAnswer`'s docstring and `describe`s, the counters' docs | the **Failure** bullet rewritten around the class boundary and a **Liveness** bullet added; the enum docstring's count corrected (F1) and now enumerates all eleven; `IntentRecorded::describe` no longer promises application; `PendingReplay` documented as the distinct wait it is; `replay_owed` documented as the only counter that can go down |
+| `src/mcp/proxy.rs` | any receipt-state claim, since a state was added | **nothing** — the proxy renders whatever the holder answers and its -32002 wording is about record-*less* receipts, which `pending_replay` is not |
+| `docs/reference/mcp.mdx`, `site/src/content/docs/mcp.mdx` | the receipt-state table, the `intent_durable` promise, the write-queue key list and the paragraph that reads it | 4 passages in each, change bodies diffed and identical between the mirrors |
+| `dev-diary/lambo-for-mooshik/J3-durability-redesign.md` | the commit count, the deviations, the unconsumed-row answer | five staged commits → six (N9); the timeout deviation's unpaid debts recorded as paid; the new N1 deviation and the argued-down `attempts` bound written in full |
+| this file | the Done-when box's limits (4) and the receipt-state count, the seventeen-keys bullet, the §J3 commit list | limit (4) restated at its own magnitude with the class boundary, limit (5) added; "seven states" → eleven; the key bullet grown to eighteen and the new key explained; the commit list grown to six |
+| `scripts/observability/*` | the new stats key and the new receipt state | **nothing** — `verify.sh` asserts on ledger and heartbeat shapes, not on the write-queue key set; still 46 ok |
+
 ## J4 — Lease conflicts leave an artifact
 
 A serve that loses the lease exits before it can open a ledger, so the most common
@@ -2286,7 +2370,7 @@ Every figure is one rig, not a property of lambo.
       returns with the write parked in a gated embedder), because a timing assertion in CI
       would be flaky
 - [x] Every write ack carries a receipt; outcomes are retrievable by it; expired and
-      restart-lost answer distinctly, never "unknown" (J3) — seven states, `expired` /
+      restart-lost answer distinctly, never "unknown" (J3) — eleven states, `expired` /
       `restart_lost` / `never_issued` all distinct, and `forbidden` for another agent's
       receipt (per-agent scoping, J1). Retrieval is `lambo_stats(receipt=…)`, **not an
       eighth tool** — deviation argued in §J3 Status. `restart_lost`'s wording is
@@ -2309,10 +2393,11 @@ Every figure is one rig, not a property of lambo.
       unconsumed — `evidence/mooshik-j3-durable-intents/`). Admission survives for fairness
       and memory only — `WRITE_QUEUE_LANE_MAX` (64, one agent's 1/16 share) and
       `WRITE_QUEUE_MAX` (1024, the receipt-store cap) — and being wrong there costs a
-      refusal or a deferral, never a loss. Drops are `write_queue_dropped` beside sixteen
+      refusal or a deferral, never a loss. Drops are `write_queue_dropped` beside seventeen
       other keys, with `write_queue_dropped_closed` separating a refused shutdown tail from
-      real backpressure, `write_queue_deferred` counting close-deferred intents and
-      `write_queue_replayed` counting a predecessor's intents applied at attach; each drop
+      real backpressure, `write_queue_deferred` counting close-deferred intents,
+      `write_queue_replayed` counting a predecessor's intents applied at attach and
+      `write_queue_replay_owed` the ones still owed; each drop
       says on its own receipt which cap refused it, as what it is (J3-R3-4). The embedder
       telemetry (probe + observed rates, `probe_optimism`, the flip line) is kept and gates
       nothing. **Tilde, and here are the honest limits of the redesign — its own, not the
@@ -2328,11 +2413,28 @@ Every figure is one rig, not a property of lambo.
       replayed intents only**: a fresh write submitted after reattach can land before a
       replayed intent from the same agent (replay deliberately bypasses admission so a
       backlog cannot starve the fresh session — the same concurrent-submission scope
-      §Ordering declares). (4) **A replay failure consumes the intent as `failed`** rather
-      than retrying on every restart forever — an embedder still refusing that content at
-      replay time settles it, mirroring the in-session worker; the receipt says so, for one
-      retention window. None of the four is a loss on the clean path, which is what this
-      box exists to exclude; all four are reasons not to tick it flat
+      §Ordering declares). (4) **A replay failure consumes the intent as `failed` only when
+      the failure is about the write itself** — an embedder that answers and refuses *this
+      content* settles it, mirroring the in-session worker, and the receipt says so for one
+      retention window. That is the only class that is destroyed, and the boundary is a
+      type, not a guess: `LamboError::Embed`. Everything else leaves the intent durable and
+      stops the replay — the embedder unreachable or timed out, the store failing, the lease
+      moved — because those say nothing about the write and a later serve may be in a
+      position to apply it. **Stated at its own magnitude, which is what round 1 caught this
+      line failing to do** (J3-R3-6's lesson, missed once here): before that fix the
+      magnitude was not one poison record but *the entire backlog*, settled `failed` at one
+      `HYBRID_IO_TIMEOUT` each, on any embedder outage overlapping one attach; now a replay
+      does not begin at all until one liveness embed has been answered, so an outage costs
+      one embed and no intents. What remains, honestly: a *permanently* unreachable embedder
+      leaves the intents owed forever — visible as `write_queue_replay_owed` and as
+      `pending_replay` on every affected receipt, and preferred over destroying acked writes
+      on a dependency's silence. (5) **A crash blocks replay for the rest of the lease
+      TTL.** After a `kill -9` the next `serve` is refused for the remaining 30–45 s of the
+      lease (the J2 arithmetic two limits above), so "the next serve replays them" is not
+      "the next serve *attempt*": every receipt in that window answers `restart_lost` and
+      the replay happens only at the attempt that wins the lapsed lease. None of the five is
+      a loss on the clean path, which is what this box exists to exclude; all five are
+      reasons not to tick it flat
 - [x] One agent's writes apply in submission order, pinning the `Temporal` chain (J3) — and
       with two agents interleaving through one process, the §13 conflict sentence's `writer`
       is **measured** rather than assumed: J1 made the same-instant collision path

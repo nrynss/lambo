@@ -796,14 +796,32 @@ pub struct AppliedSummary {
 
 /// The answer to "what happened to this receipt?".
 ///
-/// Seven variants, and **none of them is "unknown"**. The three the spec calls
+/// **Eleven** variants, and **none of them is "unknown"** (J3 round-1 F1: this
+/// count said "seven" at eight, then at ten; it is checked by a test now rather
+/// than restated by hand). Two of the eleven are unsettled —
+/// [`ReceiptAnswer::Pending`] and [`ReceiptAnswer::PendingReplay`] — and the
+/// other nine are terminal for the process answering. The three the spec calls
 /// out by name are [`ReceiptAnswer::Expired`], [`ReceiptAnswer::RestartLost`]
 /// and [`ReceiptAnswer::NeverIssued`] — a receipt this process discarded, one
-/// another process issued, and one nobody issued.
+/// another process issued, and one nobody issued; the remaining six are
+/// [`ReceiptAnswer::Applied`], [`ReceiptAnswer::AppliedAfterRestart`],
+/// [`ReceiptAnswer::Failed`], [`ReceiptAnswer::IntentRecorded`],
+/// [`ReceiptAnswer::Dropped`] and [`ReceiptAnswer::Forbidden`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptAnswer {
     /// Admitted, not yet decided. Also what a timed-out wait answers.
     Pending,
+    /// Admitted by a **previous** process, recorded as a durable intent, and
+    /// still owed a replay (J3 round-1 N8).
+    ///
+    /// Split from [`ReceiptAnswer::Pending`] because the two are not the same
+    /// situation and the taxonomy's own principle is that every non-answer is a
+    /// *specific* non-answer. A live `pending` settles in tens of milliseconds
+    /// inside this process. This one sits behind a sequential backlog, is
+    /// interrupted by `close()`, is re-seeded by the *next* process, and can
+    /// therefore be a caller's answer across arbitrarily many processes — so
+    /// "ask again" is true but "ask again here, shortly" is not.
+    PendingReplay,
     /// Applied through the ordinary path.
     Applied(AppliedSummary),
     /// Attempted and rejected. The write did not happen.
@@ -845,6 +863,7 @@ impl ReceiptAnswer {
     pub fn tag(&self) -> &'static str {
         match self {
             ReceiptAnswer::Pending => "pending",
+            ReceiptAnswer::PendingReplay => "pending_replay",
             ReceiptAnswer::Applied(_) => "applied",
             ReceiptAnswer::Failed(_) => "failed",
             ReceiptAnswer::AppliedAfterRestart(_) => "applied_after_restart",
@@ -859,13 +878,20 @@ impl ReceiptAnswer {
 
     /// `true` once the answer can no longer change.
     pub fn is_settled(&self) -> bool {
-        !matches!(self, ReceiptAnswer::Pending)
+        !matches!(self, ReceiptAnswer::Pending | ReceiptAnswer::PendingReplay)
     }
 
     /// One line, addressed to the model that will read it.
     pub fn describe(&self) -> String {
         match self {
             ReceiptAnswer::Pending => "pending — admitted, not yet applied; ask again".into(),
+            ReceiptAnswer::PendingReplay => "pending — admitted by an EARLIER serve of this \
+                                             session and recorded as a durable intent; still \
+                                             owed a replay, behind a backlog replayed one write \
+                                             at a time. It may settle in this process or in a \
+                                             later one; ask again, and recall rather than \
+                                             re-deriving."
+                .into(),
             ReceiptAnswer::Applied(s) => format!("applied — {}", s.summary),
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
             ReceiptAnswer::AppliedAfterRestart(summary) => format!(
@@ -874,9 +900,10 @@ impl ReceiptAnswer {
             ),
             ReceiptAnswer::IntentRecorded => "not applied before this session closed — the \
                                               validated write is recorded as a DURABLE INTENT \
-                                              and the next serve of this session will apply it, \
-                                              idempotently and in submission order. Fetch this \
-                                              receipt id there, or recall."
+                                              and the next serve of this session will \
+                                              RE-ATTEMPT it, idempotently and in submission \
+                                              order. Fetch this receipt id there to learn the \
+                                              outcome, or recall."
                 .into(),
             ReceiptAnswer::Dropped(why) => {
                 format!("DROPPED before it was attempted, nothing was written — {why}")
@@ -1180,6 +1207,19 @@ pub struct WriteQueueCounters {
     /// session's own accepted jobs; a replayed intent was never accepted
     /// here), so `outstanding` stays exact.
     replayed: AtomicU64,
+    /// Durable intents from a previous process that this session found owed and
+    /// has **not** paid — the live replay debt (J3 round-1 N1).
+    ///
+    /// Set to the backlog when the replay task is spawned and decremented as
+    /// each intent is applied or settled `failed`. It is the operator-visible
+    /// answer to "the embedder was down at attach — what happened to my
+    /// writes?": a non-zero value with `write_queue_replayed` not advancing says
+    /// the debt is intact, which is the honest state and the one the N1 fix
+    /// preserves instead of destroying. Unlike the other counters this one can
+    /// go **down as well as up**, because it is a depth, not a total; it is
+    /// therefore not a term in `outstanding` (those intents were never accepted
+    /// by this process).
+    replay_owed: AtomicU64,
 }
 
 impl WriteQueueCounters {
@@ -1209,6 +1249,9 @@ impl WriteQueueCounters {
     }
     pub fn replayed(&self) -> u64 {
         self.replayed.load(Ordering::Relaxed)
+    }
+    pub fn replay_owed(&self) -> u64 {
+        self.replay_owed.load(Ordering::Relaxed)
     }
 
     /// Every refused admission, whatever the bound that refused it. The three
@@ -2672,10 +2715,21 @@ impl WritePipeline {
     /// * **Idempotency**: consumption rides the same commit lock as the apply
     ///   (see [`WriteCtx::run`]), so a `kill -9` mid-replay re-replays exactly
     ///   the intents whose applies did not flush — never one whose apply did.
-    /// * **Failure**: a refused replay (embedder refusal under the J3-R3-1
-    ///   contract, a vanished interaction) consumes the intent with a `failed`
+    /// * **Liveness before anything is consumed** (J3 round-1 N1): one embed of
+    ///   [`PROBE_TEXT`] gates the loop. If it fails, the task warns and returns
+    ///   **without consuming a single intent** — the backlog stays durable and
+    ///   the next serve tries again. A dead or hanging embedder at attach
+    ///   therefore costs one embed, not one `HYBRID_IO_TIMEOUT` per intent.
+    /// * **Failure**: a replay that fails **for its own content**
+    ///   ([`LamboError::Embed`] under the J3-R3-1 contract, a vanished
+    ///   interaction, a validation refusal) consumes the intent with a `failed`
     ///   outcome — mirroring what the in-session worker does — rather than
-    ///   retrying on every restart forever.
+    ///   retrying on every restart forever. A replay that fails for a reason
+    ///   that says nothing about the intent (the embedder unreachable or timed
+    ///   out, the store failing, the lease lost) leaves it **unconsumed** and
+    ///   ends the loop: those are conditions a later process can be in a
+    ///   position to fix, and settling an acked write `failed` because a
+    ///   dependency blinked is the defect N1 named.
     /// * **Shutdown**: `close()` aborts this task before the quiesce; whatever
     ///   is still unconsumed stays durable for the next serve.
     pub(crate) fn spawn_replay(self: &Arc<Self>, intents: Vec<WriteIntent>) {
@@ -2697,7 +2751,9 @@ impl WritePipeline {
                     continue;
                 };
                 let answer = match &intent.outcome {
-                    None => ReceiptAnswer::Pending,
+                    // J3 round-1 N8: `pending_replay`, not `pending` — this one
+                    // is owed to a replay that may not finish in this process.
+                    None => ReceiptAnswer::PendingReplay,
                     Some(o) if o.tag == "failed" => ReceiptAnswer::Failed(o.summary.clone()),
                     Some(o) => ReceiptAnswer::AppliedAfterRestart(o.summary.clone()),
                 };
@@ -2718,8 +2774,46 @@ impl WritePipeline {
             "write queue: replaying {backlog} durable write intent(s) left by a previous \
              process, one at a time, in admission order"
         );
+        self.counters
+            .replay_owed
+            .store(backlog as u64, Ordering::Relaxed);
         let this = self.clone();
         let handle = tokio::spawn(async move {
+            // J3 round-1 N1, step 1 — the liveness gate. Nothing below may
+            // consume an intent until the embedder has answered once, because
+            // the failure arm cannot tell "this content is unembeddable" from
+            // "there is no embedder right now" any better than the error type
+            // lets it, and an outage spanning one attach would otherwise settle
+            // the WHOLE backlog `failed` at one HYBRID_IO_TIMEOUT each. Costs
+            // one embed of PROBE_TEXT (35 bytes, chosen because every embedder
+            // accepts it) against PROBE_BUDGET.
+            //
+            // On failure the intents are left exactly as they were: durable,
+            // unconsumed, `pending_replay`. What the operator sees is this one
+            // warn line per attach — not a loop — plus `write_queue_replay_owed`
+            // holding the backlog and every receipt answering `pending_replay`.
+            // That is the bound on "retry forever without visibility": the retry
+            // is one embed per session start, and the debt is on the stats
+            // surface until it is paid.
+            let live =
+                tokio::time::timeout(PROBE_BUDGET, this.ctx.embedder.embed(PROBE_TEXT)).await;
+            if !matches!(live, Ok(Ok(_))) {
+                let why: String = match &live {
+                    Err(_) => format!("no answer within {PROBE_BUDGET:?}"),
+                    Ok(Err(e)) => e.to_string(),
+                    Ok(Ok(_)) => unreachable!("the guard above excluded success"),
+                };
+                tracing::warn!(
+                    session = %this.ctx.session,
+                    backlog,
+                    error = %why,
+                    "write queue: the embedder did not answer a liveness embed, so the durable \
+                     intent replay was NOT started — all {backlog} intent(s) stay durable and \
+                     unconsumed for the next serve of this session. Nothing was settled failed; \
+                     nothing was written."
+                );
+                return;
+            }
             let mut applied = 0usize;
             let mut failed = 0usize;
             for intent in pending {
@@ -2743,11 +2837,38 @@ impl WritePipeline {
                 let answer = match this.ctx.run(&job, Some(stamp)).await {
                     Ok(summary) => {
                         applied += 1;
+                        this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         this.counters.replayed.fetch_add(1, Ordering::Relaxed);
                         ReceiptAnswer::AppliedAfterRestart(summary.summary)
                     }
+                    // J3 round-1 N1, step 2 — consume only what a later process
+                    // cannot do better with. `LamboError::Embed` means the
+                    // embedder answered and the answer was unusable FOR THIS
+                    // CONTENT, so the next attach gets the same answer: that is
+                    // the poison record the design meant, and it settles
+                    // `failed` exactly as the in-session worker would. Every
+                    // other class says nothing about the intent — the embedder
+                    // unreachable or timed out (`EmbedUnavailable`), the store
+                    // failing, the lease moved — so the intent stays durable and
+                    // the loop ENDS: those conditions are session-wide, the next
+                    // job would hit them too, and burning the backlog against
+                    // them is the P1 this closes.
+                    Err(e) if !matches!(e, LamboError::Embed(_)) => {
+                        tracing::warn!(
+                            session = %this.ctx.session,
+                            receipt = %intent.receipt,
+                            error = %e,
+                            applied,
+                            remaining = backlog - applied - failed,
+                            "write queue: a durable intent's replay failed for a reason that says \
+                             nothing about the write itself; it stays DURABLE and unconsumed, and \
+                             the replay stops here so the rest of the backlog survives too"
+                        );
+                        break;
+                    }
                     Err(e) => {
                         failed += 1;
+                        this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         let why =
                             format!("replay after restart was refused ({e}); nothing was written");
                         // A failure has no commit to ride — consume on its own
@@ -2782,6 +2903,7 @@ impl WritePipeline {
                 session = %this.ctx.session,
                 applied,
                 failed,
+                owed = this.counters.replay_owed.load(Ordering::Relaxed),
                 "write queue: durable intent replay finished"
             );
         });
