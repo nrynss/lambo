@@ -1049,7 +1049,7 @@ impl LamboServer {
             let obj = payload.as_object_mut().expect("json! built an object");
             obj.insert(
                 "write_queue_bound".into(),
-                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_MIN, |c| c.bound)),
+                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_MAX, |c| c.bound)),
             );
             // The bound that actually refuses one agent's burst, reported
             // beside the aggregate one because they come from different
@@ -1058,7 +1058,7 @@ impl LamboServer {
             // that explains a drop a single-agent session sees.
             obj.insert(
                 "write_queue_lane_bound".into(),
-                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_LANE_MIN, |c| c.lane_bound)),
+                json!(calibration.map_or(crate::writeq::WRITE_QUEUE_LANE_MAX, |c| c.lane_bound)),
             );
             obj.insert(
                 "write_queue_measured".into(),
@@ -3225,21 +3225,19 @@ mod tests {
         // One real write has been applied, which is under OBSERVED_MIN_SAMPLES,
         // so the probe's figure is still the one in force.
         assert_eq!(p["write_queue_bound_source"], json!("probe"), "{p}");
-        // **And a probe-era bound is capped, however fast the probe read**
-        // (J3-R2-1). The FixtureEmbedder is instant (~98 000 items/s measured),
-        // so before J3-R2-1 both bounds sat on the retention-derived clamp
-        // (`WRITE_QUEUE_MAX`) — a 4096-deep lane authorised by a measurement of
-        // an embedder that does no work. The probe measures an embedder on the
-        // probe's own text; only observation measures the workload, so only
-        // observation may reach `WRITE_QUEUE_MAX`.
+        // **And the bounds are the static fairness/memory caps, however fast
+        // the probe read** (J3 redesign). The FixtureEmbedder is instant
+        // (~98 000 items/s measured) and the bounds must not move for it —
+        // rate-derived bounds are the retired estimator role whose five
+        // falsified axes this workstream spent three rounds on.
         assert_eq!(
             p["write_queue_lane_bound"],
-            json!(crate::writeq::PROBE_LANE_CEILING),
+            json!(crate::writeq::WRITE_QUEUE_LANE_MAX),
             "{p}"
         );
         assert_eq!(
             p["write_queue_bound"],
-            json!(crate::writeq::PROBE_AGGREGATE_CEILING),
+            json!(crate::writeq::WRITE_QUEUE_MAX),
             "{p}"
         );
         assert!(
