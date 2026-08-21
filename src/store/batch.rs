@@ -378,7 +378,9 @@ pub fn batch_session_ids(mutations: &[Mutation]) -> Vec<&str> {
             Mutation::UpsertEdge { edge } => edge.session_id.as_str(),
             Mutation::CanonizationTransition { event } => event.session_id.as_str(),
             Mutation::SetRootGoal { session_id, .. }
-            | Mutation::SetEmbedding { session_id, .. } => session_id.as_str(),
+            | Mutation::SetEmbedding { session_id, .. }
+            | Mutation::ConsumeWriteIntent { session_id, .. } => session_id.as_str(),
+            Mutation::PutWriteIntent { intent } => intent.session_id.as_str(),
             Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
         };
         if !out.contains(&sid) {

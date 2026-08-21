@@ -289,6 +289,57 @@ impl MemoryStore {
                 }
                 snap.embedding = embedding.clone();
             }
+            // J3 durable intents. Keyed by receipt id; a re-put of the same
+            // receipt replaces the row (last write wins, same as an upsert).
+            Mutation::PutWriteIntent { intent } => {
+                if intent.session_id != snap.session_id {
+                    return Err(StoreError::Invariant(format!(
+                        "write intent session {} != snapshot {}",
+                        intent.session_id, snap.session_id
+                    )));
+                }
+                match snap
+                    .write_intents
+                    .iter_mut()
+                    .find(|i| i.receipt == intent.receipt)
+                {
+                    Some(row) => *row = intent.clone(),
+                    None => snap.write_intents.push(intent.clone()),
+                }
+            }
+            // Consume marks the row with its outcome (retained for the
+            // receipt-retention window so `applied_after_restart` is
+            // answerable), and purges consumed rows older than that window —
+            // clocked by this mutation's own `consumed_at`, so no adapter
+            // needs a clock of its own. Consuming an absent receipt is a
+            // no-op: the put may have been purged, or this is a replayed batch
+            // (idempotent, like the canonization no-op above).
+            Mutation::ConsumeWriteIntent {
+                session_id,
+                receipt,
+                outcome,
+            } => {
+                if *session_id != snap.session_id {
+                    return Err(StoreError::Invariant(format!(
+                        "consume_write_intent session {session_id} != snapshot {}",
+                        snap.session_id
+                    )));
+                }
+                if let Some(row) = snap
+                    .write_intents
+                    .iter_mut()
+                    .find(|i| i.receipt == *receipt)
+                {
+                    row.outcome = Some(outcome.clone());
+                }
+                let cutoff = outcome.consumed_at
+                    - chrono::Duration::from_std(crate::types::WRITE_INTENT_RETENTION)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(300));
+                snap.write_intents.retain(|i| match &i.outcome {
+                    Some(o) => o.consumed_at >= cutoff,
+                    None => true,
+                });
+            }
         }
         Ok(())
     }
@@ -458,6 +509,8 @@ impl GraphStore for MemoryStore {
                 Mutation::CanonizationTransition { event } => Some(event.session_id.clone()),
                 Mutation::SetRootGoal { session_id, .. } => Some(session_id.clone()),
                 Mutation::SetEmbedding { session_id, .. } => Some(session_id.clone()),
+                Mutation::PutWriteIntent { intent } => Some(intent.session_id.clone()),
+                Mutation::ConsumeWriteIntent { session_id, .. } => Some(session_id.clone()),
                 Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
                 Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
             }
@@ -517,6 +570,8 @@ impl GraphStore for MemoryStore {
                 Mutation::CanonizationTransition { event } => event.session_id.clone(),
                 Mutation::SetRootGoal { session_id, .. } => session_id.clone(),
                 Mutation::SetEmbedding { session_id, .. } => session_id.clone(),
+                Mutation::PutWriteIntent { intent } => intent.session_id.clone(),
+                Mutation::ConsumeWriteIntent { session_id, .. } => session_id.clone(),
                 Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
                     Some(s) => s,
                     None => continue,

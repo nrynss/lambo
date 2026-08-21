@@ -287,6 +287,8 @@ mod tests {
                 // a future fixture carrying one would count here.
                 Mutation::SetRootGoal { .. } => "set_root_goal",
                 Mutation::SetEmbedding { .. } => "set_embedding",
+                Mutation::PutWriteIntent { .. } => "put_write_intent",
+                Mutation::ConsumeWriteIntent { .. } => "consume_write_intent",
             };
             kinds.insert(k);
         }

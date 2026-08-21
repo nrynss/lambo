@@ -213,6 +213,30 @@ CREATE TABLE IF NOT EXISTS session_leases (
     endpoint    STRING
 );
 
+-- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
+-- a validated, acked background write that has not yet been applied. Written
+-- at ack time through the write-behind log, so the close-time final flush
+-- carries it — at a clean close every acked write is either applied or here.
+-- An unconsumed row (consumed_at IS NULL) is owed a replay by the next serve
+-- of the session; a consumed row is retained for the receipt-retention window
+-- (300 s) so a restarted session can answer applied_after_restart, then purged
+-- by the adapter's consume step. payload is the serialized WriteIntentPayload
+-- JSON; receipt is the ReceiptId display form and the idempotency key.
+CREATE TABLE IF NOT EXISTS write_intents (
+    session_id      STRING NOT NULL REFERENCES sessions(session_id),
+    receipt         STRING NOT NULL,
+    agent           STRING NOT NULL,
+    interaction_id  UUID NOT NULL,
+    lane_seq        INT NOT NULL,
+    issued_ms       INT NOT NULL,
+    payload         STRING NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL,
+    consumed_at     TIMESTAMPTZ,
+    outcome_tag     STRING,
+    outcome_summary STRING,
+    PRIMARY KEY (session_id, receipt)
+);
+
 -- Flush stats published by the writer's FlushTask (T85-3): one row per
 -- session, upserted after each flush cycle so a reader in another process can
 -- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers

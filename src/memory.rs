@@ -748,6 +748,7 @@ impl MemoryBuilder {
         let startup = async {
             let loaded = load_session_async(store.as_ref(), &session).await?;
             let existing = !loaded.graph.is_empty();
+            let write_intents = loaded.write_intents;
             let mut graph = loaded.graph;
 
             // (2) Level B / STORE-1 — the model-mixing refusal's second half.
@@ -801,10 +802,10 @@ impl MemoryBuilder {
                     }
                 }
             }
-            Ok::<_, LamboError>((existing, graph, loaded.index))
+            Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
         }
         .await;
-        let (existing, graph, index) = match startup {
+        let (existing, graph, index, write_intents) = match startup {
             Ok(startup) => startup,
             Err(startup_error) => {
                 if let Err(release_error) = store.release_lease(&session, &lease_holder).await {
@@ -893,6 +894,14 @@ impl MemoryBuilder {
             },
             clock.clone(),
         ));
+
+        // J3 durable intents: replay whatever a previous process acked and
+        // could not apply — one at a time, in admission order, concurrent with
+        // (never ahead of) this session's own calls. Also seeds the
+        // cross-restart receipt answers, so those ids answer
+        // `pending`/`applied_after_restart`/`failed` instead of
+        // `restart_lost`.
+        pipeline.spawn_replay(write_intents);
 
         // Last, so nothing registers for a `build()` that failed. Released by
         // a successful `close()` (R2-4) or, failing that, by `Drop` (T81-8).
@@ -1295,6 +1304,9 @@ impl Memory {
                     parent_of,
                     self.config.max_cooccurrence_per_derive,
                     self.config.semantic_match_threshold,
+                    // The synchronous path has no durable intent to consume —
+                    // the caller holds the outcome directly (J3).
+                    None,
                 )
                 .await?
             }
@@ -2077,6 +2089,12 @@ impl Memory {
         // workers. Bounded by `WRITE_QUEUE_DRAIN_BUDGET`; anything left over is
         // abandoned with an honest receipt rather than waited for.
         self.pipeline.abort_probe();
+        // The intent replay is stopped — aborted AND joined — before the
+        // quiesce and therefore well before the final drain: an aborted task
+        // can still finish a synchronous stretch that appends to the log until
+        // the join returns (R3-1). Whatever it had not yet consumed stays
+        // durable for the next serve.
+        self.pipeline.stop_replay().await;
         self.pipeline.quiesce().await;
 
         let _quiesced = self.writers.write().await;
@@ -4447,6 +4465,234 @@ mod tests {
              forgotten one: {logged}"
         );
         assert!(logged.contains(&kept.to_string()), "{logged}");
+    }
+
+    // -- J3 durable intents: defer at close, replay at the next attach ------
+
+    /// `MemoryStore` behind a `VECTOR_SEARCH` face whose candidate reads
+    /// succeed (empty), so hybrid's below-threshold arm actually persists its
+    /// vectors — the *embedding column* is what the J3 assertions read.
+    struct VectorSearchable(Arc<MemoryStore>);
+
+    #[async_trait]
+    impl GraphStore for VectorSearchable {
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities() | Capabilities::VECTOR_SEARCH
+        }
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.0.init_schema().await
+        }
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            self.0.flush(batch, token).await
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.0.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.0.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            Ok(Vec::new())
+        }
+        async fn vector_candidates_checked(
+            &self,
+            _session: &SessionId,
+            _embedding: &[f32],
+            _expected_contract: &EmbeddingContract,
+            _limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            Ok(Vec::new())
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<u64, StoreError> {
+            self.0.blast_radius(session, node, min_edge_age, now).await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            self.0.interaction_span(session, node, min_age, now).await
+        }
+        async fn record_canonization(
+            &self,
+            event: &crate::types::CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.0.record_canonization(event, token).await
+        }
+        async fn acquire_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::LeaseOutcome, StoreError> {
+            self.0.acquire_lease(session, holder, ttl).await
+        }
+        async fn read_lease(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::LeaseInfo>, StoreError> {
+            self.0.read_lease(session).await
+        }
+        async fn refresh_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::LeaseHolder,
+            ttl: Duration,
+        ) -> Result<crate::store::LeaseOutcome, StoreError> {
+            self.0.refresh_lease(session, holder, ttl).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &crate::store::LeaseHolder,
+        ) -> Result<(), StoreError> {
+            self.0.release_lease(session, holder).await
+        }
+    }
+
+    /// Answers the calibration probe's own texts instantly and hangs forever
+    /// on real content — the shape that leaves an ADMITTED write undrainable
+    /// at close, which is the case J3's durable intents exist for.
+    struct HangingEmbedder {
+        inner: FixtureEmbedder,
+    }
+
+    #[async_trait]
+    impl Embedder for HangingEmbedder {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            if text.contains(crate::writeq::PROBE_TEXT) {
+                return self.inner.embed(text).await;
+            }
+            std::future::pending().await
+        }
+    }
+
+    /// **J3's founding invariant, end to end at `Memory` level**: acked ⇒
+    /// (applied ∨ durable intent) at a clean close — and the durable half is a
+    /// real write, not a tombstone: the next attach replays it, the concept
+    /// lands **with its embedding** (the J3-R3-1 rule: durability is judged at
+    /// the store's embedding column, never at `applied` counts), and the
+    /// original receipt id answers `applied_after_restart` in the new process.
+    #[tokio::test]
+    async fn an_acked_write_survives_a_clean_close_as_a_durable_intent_and_replays() {
+        let inner = Arc::new(MemoryStore::new());
+        let sid = SessionId::new("intent-replay");
+        let agent = AgentId::new("agent-a");
+
+        // Session 1: the embedder hangs on real content, so the acked write
+        // cannot drain inside close()'s budget.
+        let mem1 = Memory::builder()
+            .session("intent-replay")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(HangingEmbedder {
+                inner: FixtureEmbedder::new(),
+            }) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build session 1");
+        let submitted = mem1
+            .derive_async_as(
+                &agent,
+                &[("user schema", ConceptType::Entity)],
+                &ParentOf::none(),
+            )
+            .await
+            .expect("ack");
+        assert!(!submitted.dropped(), "the write must be ADMITTED");
+
+        mem1.close().await.expect("clean close");
+        assert_eq!(
+            mem1.pipeline().lookup(&agent, submitted.receipt).tag(),
+            "intent_durable",
+            "an undrained acked write settles intent_durable at a clean close"
+        );
+        assert_eq!(mem1.pipeline().counters().deferred(), 1);
+        assert_eq!(mem1.pipeline().counters().abandoned(), 0);
+
+        // Durable: the intent survived the close; the concept did not apply.
+        let snap = inner.load_session(&sid).await.expect("session durable");
+        assert!(
+            snap.concepts.is_empty(),
+            "nothing applied — the embed never returned"
+        );
+        assert_eq!(snap.write_intents.len(), 1, "the acked write IS durable");
+        assert!(snap.write_intents[0].outcome.is_none(), "unconsumed");
+        assert_eq!(snap.write_intents[0].receipt, submitted.receipt.to_string());
+
+        // Session 2: a working embedder. The attach replays the intent.
+        let mem2 = Memory::builder()
+            .session("intent-replay")
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .match_strategy(MatchStrategy::Hybrid)
+            .build()
+            .await
+            .expect("build session 2");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while mem2.pipeline().counters().replayed() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the replay task must apply the intent"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let answer = mem2.pipeline().lookup(&agent, submitted.receipt);
+        assert_eq!(
+            answer.tag(),
+            "applied_after_restart",
+            "the ORIGINAL receipt id answers its truth in the new process: {answer:?}"
+        );
+        // Agent-scoped across restart, like everything else about receipts.
+        assert_eq!(
+            mem2.pipeline()
+                .lookup(&AgentId::new("agent-b"), submitted.receipt)
+                .tag(),
+            "forbidden"
+        );
+
+        mem2.close().await.expect("clean close 2");
+        let snap = inner.load_session(&sid).await.expect("reload");
+        let concept = snap
+            .concepts
+            .iter()
+            .find(|c| c.content == "user schema")
+            .expect("the replayed write landed");
+        assert!(
+            concept.embedding.is_some(),
+            "durability is judged at the EMBEDDING column, never at applied counts (J3-R3-1)"
+        );
+        let intent = &snap.write_intents[0];
+        let outcome = intent.outcome.as_ref().expect("consumed by the replay");
+        assert_eq!(outcome.tag, "applied_after_restart");
     }
 
     // -- close / drain ------------------------------------------------------

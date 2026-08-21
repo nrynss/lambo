@@ -136,6 +136,7 @@ use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::{
     AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId, SessionId,
+    WriteIntent, WriteIntentOutcome, WriteIntentPayload,
 };
 
 // ---------------------------------------------------------------------------
@@ -558,6 +559,16 @@ const fn is_ascii(s: &str) -> bool {
 /// [`settle_one`] discarded its outcome.
 pub const RECEIPT_RETENTION: Duration = Duration::from_secs(300);
 
+/// Build-time invariant: the durable intent record's retention (the
+/// cross-restart receipt window — `applied_after_restart` is answerable only
+/// while the consumed row survives) is the SAME window as the in-RAM receipt
+/// retention. Two numbers here would mean a receipt whose answer changes
+/// depending on whether a restart happened to intervene.
+const _: () = assert!(
+    RECEIPT_RETENTION.as_secs() == crate::types::WRITE_INTENT_RETENTION.as_secs(),
+    "RECEIPT_RETENTION and WRITE_INTENT_RETENTION are one window; see types::WRITE_INTENT_RETENTION"
+);
+
 /// The worst `flush_lag` measured on this rig, in seconds (§Measurements).
 ///
 /// A constant rather than a sentence for the same reason
@@ -858,6 +869,20 @@ pub enum ReceiptAnswer {
     Applied(AppliedSummary),
     /// Attempted and rejected. The write did not happen.
     Failed(String),
+    /// Applied, but not by the process that acked it: the write survived a
+    /// close (or crash-with-flushed-tail) as a durable intent, and a later
+    /// serve of the session applied it — or applied it before restarting and
+    /// the consumed intent record carried the fact across. The payload is the
+    /// applied summary sentence; node ids are not retained across the restart
+    /// (recall finds the concepts).
+    AppliedAfterRestart(String),
+    /// Not applied before this session closed, and **not lost**: the validated
+    /// job is recorded as a durable intent that the close's final flush
+    /// persists, and the next serve of this session applies it — idempotently,
+    /// in submission order (J3 durable intents). Terminal *for this process*;
+    /// the next process's answer for this id is `applied_after_restart` (or
+    /// `failed`, if the replay is refused).
+    IntentRecorded,
     /// Never attempted: the queue was full when the ack was issued.
     Dropped(String),
     /// This process issued it and has since discarded its outcome — either the
@@ -883,6 +908,8 @@ impl ReceiptAnswer {
             ReceiptAnswer::Pending => "pending",
             ReceiptAnswer::Applied(_) => "applied",
             ReceiptAnswer::Failed(_) => "failed",
+            ReceiptAnswer::AppliedAfterRestart(_) => "applied_after_restart",
+            ReceiptAnswer::IntentRecorded => "intent_durable",
             ReceiptAnswer::Dropped(_) => "dropped",
             ReceiptAnswer::Expired => "expired",
             ReceiptAnswer::RestartLost => "restart_lost",
@@ -902,6 +929,16 @@ impl ReceiptAnswer {
             ReceiptAnswer::Pending => "pending — admitted, not yet applied; ask again".into(),
             ReceiptAnswer::Applied(s) => format!("applied — {}", s.summary),
             ReceiptAnswer::Failed(why) => format!("FAILED, nothing was written — {why}"),
+            ReceiptAnswer::AppliedAfterRestart(summary) => format!(
+                "applied after a restart — {summary} (confirmed from the durable intent \
+                 record; recall to see the concepts)"
+            ),
+            ReceiptAnswer::IntentRecorded => "not applied before this session closed — the \
+                                              validated write is recorded as a DURABLE INTENT \
+                                              and the next serve of this session will apply it, \
+                                              idempotently and in submission order. Fetch this \
+                                              receipt id there, or recall."
+                .into(),
             ReceiptAnswer::Dropped(why) => {
                 format!("DROPPED before it was attempted, nothing was written — {why}")
             }
@@ -1230,6 +1267,18 @@ pub struct WriteQueueCounters {
     /// degraded", and "the embedder is the bottleneck" and "the session is
     /// shutting down and refused a tail" want opposite responses.
     dropped_closed: AtomicU64,
+    /// Acked writes a clean `close()` did **not** apply and did not lose:
+    /// their durable intents survive the close and the next serve of the
+    /// session applies them (J3 durable intents). A fourth settle class beside
+    /// `applied`/`failed` — never a subset of either — because "your write
+    /// will happen, later, in another process" is neither a success nor a
+    /// failure and must not be counted as one.
+    deferred: AtomicU64,
+    /// Durable intents from a **previous** process that this session's replay
+    /// applied at attach. Not summed into `applied` (those count this
+    /// session's own accepted jobs; a replayed intent was never accepted
+    /// here), so `outstanding` stays exact.
+    replayed: AtomicU64,
 }
 
 impl WriteQueueCounters {
@@ -1254,6 +1303,12 @@ impl WriteQueueCounters {
     pub fn dropped_closed(&self) -> u64 {
         self.dropped_closed.load(Ordering::Relaxed)
     }
+    pub fn deferred(&self) -> u64 {
+        self.deferred.load(Ordering::Relaxed)
+    }
+    pub fn replayed(&self) -> u64 {
+        self.replayed.load(Ordering::Relaxed)
+    }
 
     /// Every refused admission, whatever the bound that refused it. The three
     /// classes are disjoint and this is their sum, so splitting
@@ -1265,16 +1320,21 @@ impl WriteQueueCounters {
 
     /// Jobs accepted and not yet settled.
     ///
-    /// `accepted − applied − failed`, and correct **only because** a refused
-    /// admission never enters `accepted` — the same exclusivity argument
-    /// `ledger_queued_lines` rests on, re-derived here against these counter
-    /// sites rather than inherited. `abandoned` is deliberately absent: an
-    /// abandoned job is already counted in `failed`, and subtracting it twice
-    /// is the drift this one shared expression exists to prevent.
+    /// `accepted − applied − failed − deferred`, and correct **only because**
+    /// a refused admission never enters `accepted` — the same exclusivity
+    /// argument `ledger_queued_lines` rests on, re-derived here against these
+    /// counter sites rather than inherited. `abandoned` is deliberately
+    /// absent: an abandoned job is already counted in `failed`, and
+    /// subtracting it twice is the drift this one shared expression exists to
+    /// prevent. `deferred` IS a term: a close-deferred job settled
+    /// `intent_durable` is out of this process's custody without being applied
+    /// or failed. `replayed` is not: a replayed intent never entered
+    /// `accepted`.
     pub fn outstanding(&self) -> u64 {
         self.accepted()
             .saturating_sub(self.applied())
             .saturating_sub(self.failed())
+            .saturating_sub(self.deferred())
     }
 }
 
@@ -1312,6 +1372,47 @@ impl JobPayload {
         match self {
             JobPayload::Derive { .. } => WriteKind::Derive,
             JobPayload::Action { .. } => WriteKind::RecordAction,
+        }
+    }
+
+    /// The durable form of this job, exactly as validated (J3 intents).
+    fn to_intent_payload(&self) -> WriteIntentPayload {
+        match self {
+            JobPayload::Derive { concepts, pairs } => WriteIntentPayload::Derive {
+                concepts: concepts.clone(),
+                pairs: pairs.clone(),
+            },
+            JobPayload::Action {
+                action,
+                produces,
+                modifies,
+                depends_on,
+            } => WriteIntentPayload::Action {
+                action: action.clone(),
+                produces: produces.clone(),
+                modifies: modifies.clone(),
+                depends_on: depends_on.clone(),
+            },
+        }
+    }
+
+    /// Rehydrate a job payload from its durable form (replay).
+    fn from_intent_payload(p: WriteIntentPayload) -> Self {
+        match p {
+            WriteIntentPayload::Derive { concepts, pairs } => {
+                JobPayload::Derive { concepts, pairs }
+            }
+            WriteIntentPayload::Action {
+                action,
+                produces,
+                modifies,
+                depends_on,
+            } => JobPayload::Action {
+                action,
+                produces,
+                modifies,
+                depends_on,
+            },
         }
     }
 
@@ -1407,9 +1508,73 @@ fn truncate_ids(ids: &[NodeId]) -> Vec<String> {
         .collect()
 }
 
+/// When — and as what — a job's durable intent is consumed at commit (J3).
+///
+/// `tag` is `"applied"` when the acking process itself applies the job, and
+/// `"applied_after_restart"` when a later serve replays it. `at` is the
+/// consumer's clock at job start; it stamps [`WriteIntentOutcome::consumed_at`]
+/// and therefore starts the consumed row's retention window.
+#[derive(Clone, Copy)]
+pub(crate) struct ConsumeStamp {
+    tag: &'static str,
+    at: DateTime<Utc>,
+}
+
+/// The receipt sentence for an applied derive — one function, because the
+/// receipt's copy and the durable intent outcome's copy (written inside the
+/// commit lock by the [`hybrid::CommitHook`]) must be the same sentence.
+///
+/// Applied ≠ embedded (J3-R3-1): only the hybrid strategy can embed, so only
+/// it reports the count — and its sentence carries the number, so a write
+/// applied without its vector is never read as an unqualified success.
+fn derive_sentence(
+    strategy: MatchStrategy,
+    submitted: usize,
+    outcome: &crate::graph::derive::DeriveOutcome,
+) -> String {
+    match strategy {
+        MatchStrategy::Hybrid => format!(
+            "derived {} concept(s): {} created ({} embedded), {} matched existing",
+            submitted,
+            outcome.created.len(),
+            outcome.embedded,
+            outcome.matched.len()
+        ),
+        MatchStrategy::Canonical => format!(
+            "derived {} concept(s): {} created, {} matched existing",
+            submitted,
+            outcome.created.len(),
+            outcome.matched.len()
+        ),
+    }
+}
+
+/// The receipt sentence for an applied `record_action` — shared with the
+/// intent outcome for [`derive_sentence`]'s reason.
+fn action_sentence(outcome: &crate::graph::action::ActionOutcome) -> String {
+    format!(
+        "recorded action: {} concept(s) created, {} edge(s)",
+        outcome.created.len(),
+        outcome.edges
+    )
+}
+
 impl WriteCtx {
     /// Run one job through the ordinary write path.
-    async fn run(&self, job: &Job) -> Result<AppliedSummary, LamboError> {
+    ///
+    /// `consume`, when present, consumes the job's durable intent **inside the
+    /// same write-lock critical section as the commit** (J3): for the hybrid
+    /// path via [`hybrid::CommitHook`], for the canonical and action paths
+    /// inline under the guard the graph write already holds. The flush drain
+    /// takes that same lock, so the applied mutations and the
+    /// `ConsumeWriteIntent` always travel in one batch — one store
+    /// transaction — and a crash can never leave the write durable beside a
+    /// still-unconsumed intent (the double-apply this design excludes).
+    async fn run(
+        &self,
+        job: &Job,
+        consume: Option<ConsumeStamp>,
+    ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
             JobPayload::Derive { concepts, pairs } => {
                 let borrowed: Vec<(&str, ConceptType)> =
@@ -1423,8 +1588,26 @@ impl WriteCtx {
                 } else {
                     ParentOf::from_pairs(&borrowed_pairs)
                 };
-                let outcome = match self.match_strategy {
+                let strategy = self.match_strategy;
+                let submitted = borrowed.len();
+                let outcome = match strategy {
                     MatchStrategy::Hybrid => {
+                        let on_commit: Option<hybrid::CommitHook> = consume.map(|stamp| {
+                            let receipt = job.receipt.to_string();
+                            Box::new(
+                                move |g: &mut Graph,
+                                      outcome: &crate::graph::derive::DeriveOutcome| {
+                                    g.consume_write_intent(
+                                        receipt,
+                                        WriteIntentOutcome {
+                                            tag: stamp.tag.into(),
+                                            summary: derive_sentence(strategy, submitted, outcome),
+                                            consumed_at: stamp.at,
+                                        },
+                                    );
+                                },
+                            ) as hybrid::CommitHook
+                        });
                         hybrid::derive(
                             self.graph.clone(),
                             self.store.as_ref(),
@@ -1436,19 +1619,32 @@ impl WriteCtx {
                             &parent_of,
                             self.max_cooccurrence_per_derive,
                             self.semantic_match_threshold,
+                            on_commit,
                         )
                         .await?
                     }
                     MatchStrategy::Canonical => {
                         let mut g = self.graph.write();
-                        graph_derive(
+                        let outcome = graph_derive(
                             &mut g,
                             job.interaction,
                             &job.agent,
                             &borrowed,
                             &parent_of,
                             self.max_cooccurrence_per_derive,
-                        )?
+                        )?;
+                        // Same lock hold as the commit — see `run`'s doc.
+                        if let Some(stamp) = consume {
+                            g.consume_write_intent(
+                                job.receipt.to_string(),
+                                WriteIntentOutcome {
+                                    tag: stamp.tag.into(),
+                                    summary: derive_sentence(strategy, submitted, &outcome),
+                                    consumed_at: stamp.at,
+                                },
+                            );
+                        }
+                        outcome
                     }
                 };
                 // No `.await` between here and the caller's settle: that is
@@ -1461,34 +1657,13 @@ impl WriteCtx {
                 self.daemon_wake.notify_one();
                 let created = truncate_ids(&outcome.created);
                 let matched = truncate_ids(&outcome.matched);
-                // Applied ≠ embedded (J3-R3-1): only the hybrid strategy can
-                // embed, so only it reports the count — and its receipt
-                // sentence carries the number so a write applied without its
-                // vector is never read as an unqualified success.
-                let (embedded, summary) = match self.match_strategy {
-                    MatchStrategy::Hybrid => (
-                        Some(outcome.embedded),
-                        format!(
-                            "derived {} concept(s): {} created ({} embedded), {} matched existing",
-                            borrowed.len(),
-                            outcome.created.len(),
-                            outcome.embedded,
-                            outcome.matched.len()
-                        ),
-                    ),
-                    MatchStrategy::Canonical => (
-                        None,
-                        format!(
-                            "derived {} concept(s): {} created, {} matched existing",
-                            borrowed.len(),
-                            outcome.created.len(),
-                            outcome.matched.len()
-                        ),
-                    ),
+                let embedded = match strategy {
+                    MatchStrategy::Hybrid => Some(outcome.embedded),
+                    MatchStrategy::Canonical => None,
                 };
                 Ok(AppliedSummary {
                     kind: WriteKind::Derive,
-                    summary,
+                    summary: derive_sentence(strategy, submitted, &outcome),
                     created,
                     matched,
                     created_count: outcome.created.len(),
@@ -1510,7 +1685,7 @@ impl WriteCtx {
                 let d: Vec<&str> = depends_on.iter().map(String::as_str).collect();
                 let outcome = {
                     let mut g = self.graph.write();
-                    graph_record_action(
+                    let outcome = graph_record_action(
                         &mut g,
                         job.interaction,
                         &job.agent,
@@ -1520,7 +1695,19 @@ impl WriteCtx {
                             modifies: &m,
                             depends_on: &d,
                         },
-                    )?
+                    )?;
+                    // Same lock hold as the commit — see `run`'s doc.
+                    if let Some(stamp) = consume {
+                        g.consume_write_intent(
+                            job.receipt.to_string(),
+                            WriteIntentOutcome {
+                                tag: stamp.tag.into(),
+                                summary: action_sentence(&outcome),
+                                consumed_at: stamp.at,
+                            },
+                        );
+                    }
+                    outcome
                 };
                 let mut touched = outcome.created.clone();
                 touched.push(outcome.action_node);
@@ -1529,11 +1716,7 @@ impl WriteCtx {
                 let created = truncate_ids(&outcome.created);
                 Ok(AppliedSummary {
                     kind: WriteKind::RecordAction,
-                    summary: format!(
-                        "recorded action: {} concept(s) created, {} edge(s)",
-                        outcome.created.len(),
-                        outcome.edges
-                    ),
+                    summary: action_sentence(&outcome),
                     created,
                     matched: Vec::new(),
                     created_count: outcome.created.len(),
@@ -1785,6 +1968,18 @@ pub struct WritePipeline {
     /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
     observed: Arc<PlMutex<ObservedRate>>,
     probe: PlMutex<Option<JoinHandle<()>>>,
+    /// Cross-restart receipt answers (J3 durable intents): receipts issued by
+    /// **previous** processes whose fate this process knows — from the loaded
+    /// intent records at attach (unconsumed → `Pending`; consumed → the stored
+    /// outcome) and from this process's own replay as it settles them. Checked
+    /// by [`WritePipeline::lookup`] before the epoch fallback, so these ids
+    /// answer their truth instead of `restart_lost`. Agent-scoped like the
+    /// live store.
+    restart: PlMutex<HashMap<ReceiptId, (AgentId, ReceiptAnswer)>>,
+    /// The replay task (J3), when this session attached over a durable intent
+    /// backlog. Aborted at close — unconsumed intents stay durable for the
+    /// next serve.
+    replay: PlMutex<Option<JoinHandle<()>>>,
     epoch: u64,
     seq: AtomicU64,
     /// Latched the first time a drop is logged, so a sustained overload logs
@@ -1858,6 +2053,8 @@ impl WritePipeline {
             calibration: rx,
             observed: Arc::new(PlMutex::new(ObservedRate::default())),
             probe: PlMutex::new(Some(probe)),
+            restart: PlMutex::new(HashMap::new()),
+            replay: PlMutex::new(None),
             epoch: rand_epoch(),
             seq: AtomicU64::new(0),
             drop_logged: AtomicBool::new(false),
@@ -2005,7 +2202,16 @@ impl WritePipeline {
         // one that binds in the case J3-R1-1 measured: one busy agent, whose
         // single-consumer lane drains 1-wide however wide the deployment's
         // embedder is.
+        //
+        // Lock order: **graph write, then lanes** — held together across the
+        // accept branch so the durable intent is in the mutation log *before*
+        // the job is visible to a worker. A worker pops under the lanes lock
+        // and consumes under the graph lock, so with both held here the log
+        // can never carry a `ConsumeWriteIntent` ahead of its
+        // `PutWriteIntent`. No other site nests these two locks (workers take
+        // them strictly in sequence), so the order cannot deadlock.
         let refusal = {
+            let mut graph = self.ctx.graph.write();
             let mut lanes = self.lanes.lock();
             if lanes.sealed {
                 Some((DropReason::Closed, calibration.lane_bound))
@@ -2016,6 +2222,22 @@ impl WritePipeline {
             } else if lanes.bytes.saturating_add(bytes) > WRITE_QUEUE_MAX_BYTES {
                 Some((DropReason::QueueBytes, calibration.bound))
             } else {
+                // J3 durable intents: the ack's other half. Recorded at
+                // admission, through the ordinary write-behind log, so the
+                // close-time final flush ("session closed, tail durable")
+                // carries it — acked ⇒ (applied ∨ durable intent) at a clean
+                // close by construction, independent of any drain estimate.
+                graph.record_write_intent(WriteIntent {
+                    session_id: self.ctx.session.clone(),
+                    receipt: receipt.to_string(),
+                    agent: agent.clone(),
+                    interaction,
+                    lane_seq: receipt.seq(),
+                    issued_ms: receipt.issued_ms(),
+                    payload: payload.to_intent_payload(),
+                    created_at: now,
+                    outcome: None,
+                });
                 lanes.queued += 1;
                 lanes.bytes += bytes;
                 lanes
@@ -2200,9 +2422,17 @@ impl WritePipeline {
                 // owns.
                 let outcome = if ctx.lease_lost.load(Ordering::Acquire) {
                     counters.abandoned.fetch_add(1, Ordering::Relaxed);
+                    // The durable intent is deliberately NOT consumed here: it
+                    // is not ours to consume any more. If it flushed before
+                    // the fence, the session's current holder replays it
+                    // (fenced flushes are refused at the store, so this
+                    // process can neither apply nor consume it now); if it
+                    // never flushed, it dies with this process's tail.
                     Err(format!(
                         "this handle lost its single-writer lease before the write was applied; \
-                         nothing was written for session {}",
+                         this process wrote nothing for session {} — if the write's durable \
+                         intent reached the store first, the session's current holder will \
+                         apply it",
                         ctx.session
                     ))
                 } else {
@@ -2226,9 +2456,35 @@ impl WritePipeline {
                     // rate. Only work that went all the way through the pipeline
                     // is evidence about the pipeline.
                     let started = tokio::time::Instant::now();
-                    let outcome = ctx.run(&job).await.map_err(|e| e.to_string());
+                    let stamp = ConsumeStamp {
+                        tag: "applied",
+                        at: (clock)(),
+                    };
+                    let outcome = ctx.run(&job, Some(stamp)).await.map_err(|e| e.to_string());
                     if outcome.is_ok() {
                         observed.lock().sample(started.elapsed().as_secs_f64());
+                    } else {
+                        // A failed job's intent must ALSO be consumed — with
+                        // the failure — or the next serve would replay a write
+                        // whose receipt said "FAILED, nothing was written".
+                        // `run` consumes only at a commit, and a failure has
+                        // no commit to ride, so this is its own lock hold: a
+                        // consume-without-apply is a single mutation and needs
+                        // no transactional partner. (Crash window: if this
+                        // consume never flushes, the next serve re-attempts a
+                        // write this process reported failed — replaying an
+                        // acked, validated write is never a loss, and the
+                        // durable record then says what actually happened.)
+                        if let Err(why) = &outcome {
+                            ctx.graph.write().consume_write_intent(
+                                job.receipt.to_string(),
+                                WriteIntentOutcome {
+                                    tag: "failed".into(),
+                                    summary: why.clone(),
+                                    consumed_at: (clock)(),
+                                },
+                            );
+                        }
                     }
                     outcome
                 };
@@ -2279,9 +2535,21 @@ impl WritePipeline {
             }
             return entry.answer.clone();
         }
+        drop(r);
+        // J3: a receipt from a previous process whose fate the durable intent
+        // record carries answers its truth — `pending` while its replay is
+        // owed, `applied_after_restart`/`failed` once decided — instead of
+        // falling through to `restart_lost`.
+        if let Some((owner, answer)) = self.restart.lock().get(&id) {
+            if owner != agent {
+                return ReceiptAnswer::Forbidden;
+            }
+            return answer.clone();
+        }
         if id.epoch != self.epoch {
             return ReceiptAnswer::RestartLost;
         }
+        let r = self.receipts.lock();
         if id.seq > r.highest_seq {
             return ReceiptAnswer::NeverIssued;
         }
@@ -2403,11 +2671,14 @@ impl WritePipeline {
     ///
     /// Bounded by [`WRITE_QUEUE_DRAIN_BUDGET`], which is the same number
     /// admission promised. Anything still outstanding when it runs out is
-    /// **abandoned**: workers are aborted and joined (aborting alone proves
-    /// nothing — the R3-1 lesson), every still-pending receipt is settled
-    /// `failed` with a session-closed reason, and the count lands in
-    /// `lambo_stats`. Better a receipt that says the write did not happen than
-    /// one that says `pending` forever in a process that is exiting.
+    /// **deferred, not lost** (J3 durable intents): workers are aborted and
+    /// joined (aborting alone proves nothing — the R3-1 lesson), every
+    /// still-pending receipt is settled `intent_durable`, and the count lands
+    /// in `lambo_stats` as `write_queue_deferred`. The jobs themselves were
+    /// recorded as durable intents at admission and the close's final flush —
+    /// which runs AFTER this quiesce — persists them; the next serve of the
+    /// session applies them in order. Acked ⇒ (applied ∨ durable intent) at a
+    /// clean close, **by construction**, whatever any drain estimate said.
     pub(crate) async fn quiesce(&self) -> usize {
         self.seal();
         let deadline = tokio::time::Instant::now() + WRITE_QUEUE_DRAIN_BUDGET;
@@ -2425,21 +2696,22 @@ impl WritePipeline {
                 break;
             }
         }
-        let abandoned = self.abort_workers().await;
-        if abandoned > 0 {
-            tracing::error!(
+        let deferred = self.abort_workers().await;
+        if deferred > 0 {
+            tracing::warn!(
                 session = %self.ctx.session,
-                abandoned,
-                "write queue: {abandoned} acked write(s) were NOT applied — the queue did not \
-                 drain within {:?} of close(); their receipts say so",
+                deferred,
+                "write queue: {deferred} acked write(s) did not drain within {:?} of close(); \
+                 their durable intents survive the close and the next serve of this session \
+                 applies them — receipts say intent_durable",
                 WRITE_QUEUE_DRAIN_BUDGET
             );
         }
-        abandoned
+        deferred
     }
 
-    /// Stop every worker and settle whatever is left. Returns how many receipts
-    /// this abandoned.
+    /// Stop every worker and settle whatever is left as `intent_durable`.
+    /// Returns how many receipts this deferred to the next serve.
     pub(crate) async fn abort_workers(&self) -> usize {
         self.seal();
         let (handles, orphans) = {
@@ -2463,11 +2735,14 @@ impl WritePipeline {
             let _ = handle.await;
         }
         // Whatever the aborted workers had in flight is now provably not
-        // running, so any receipt still `Pending` names a write that did not
-        // happen — including the ones that were still queued.
-        let mut abandoned = 0usize;
+        // running, so any receipt still `Pending` names a write this process
+        // will not apply — including the ones that were still queued. Every
+        // such job has a durable intent (recorded at admission, in the log the
+        // close's final flush persists), so the honest settle is
+        // `intent_durable`, not `failed`: the write is deferred to the next
+        // serve of this session, not lost.
+        let mut deferred = 0usize;
         let now = (self.clock)();
-        let session = self.ctx.session.clone();
         {
             let mut r = self.receipts.lock();
             let pending: Vec<ReceiptId> = r
@@ -2478,22 +2753,18 @@ impl WritePipeline {
                 .collect();
             for id in pending.iter().chain(orphans.iter()) {
                 if let Some(entry) = r.entries.get_mut(id) {
-                    let answer = ReceiptAnswer::Failed(format!(
-                        "session {session} closed before this write was applied; nothing was \
-                         written"
-                    ));
-                    if entry.settle(answer, now) {
+                    if entry.settle(ReceiptAnswer::IntentRecorded, now) {
                         let agent = entry.agent.clone();
                         r.undelivered.entry(agent).or_default().push_back(*id);
-                        abandoned += 1;
+                        deferred += 1;
                     }
                 }
             }
         }
-        if abandoned > 0 {
-            let n = abandoned as u64;
-            self.counters.failed.fetch_add(n, Ordering::Relaxed);
-            self.counters.abandoned.fetch_add(n, Ordering::Relaxed);
+        if deferred > 0 {
+            self.counters
+                .deferred
+                .fetch_add(deferred as u64, Ordering::Relaxed);
         }
         {
             let mut lanes = self.lanes.lock();
@@ -2503,7 +2774,7 @@ impl WritePipeline {
             lanes.bytes = 0;
         }
         self.settled.notify_waiters();
-        abandoned
+        deferred
     }
 
     /// Abort the calibration probe. Called from `Memory`'s `Drop` and from
@@ -2514,11 +2785,173 @@ impl WritePipeline {
         }
     }
 
+    /// Replay durable write intents left by previous processes (J3), spawned
+    /// at attach.
+    ///
+    /// * **Order**: intents arrive from `load_session` sorted by
+    ///   (`issued_ms`, `lane_seq`) and are applied strictly one at a time —
+    ///   exact admission order within one issuing process (the per-lane
+    ///   promise, since a total order refines every lane's), wall-clock order
+    ///   across crashed processes.
+    /// * **Throttling — the open question, decided here**: replay runs
+    ///   sequentially in the background, at most ONE write in flight, and does
+    ///   not pass through admission. A restart over a deep backlog therefore
+    ///   costs the fresh session at most one embedder slot and brief graph
+    ///   locks — it can never *refuse* the fresh session's first calls, which
+    ///   admission-routed replay would do (a lane pre-filled with backlog
+    ///   answers `lane_full` to the very calls the restart interrupted).
+    ///   Admission exists for fairness among live callers; a replayed intent
+    ///   already paid for admission in the session that acked it. The cost of
+    ///   this choice is that a fresh write can land *before* a replayed intent
+    ///   from the same agent — cross-restart interleaving is unordered, which
+    ///   is the same scope §Ordering already declares (one agent's sequential
+    ///   submissions, within a session).
+    /// * **Idempotency**: consumption rides the same commit lock as the apply
+    ///   (see [`WriteCtx::run`]), so a `kill -9` mid-replay re-replays exactly
+    ///   the intents whose applies did not flush — never one whose apply did.
+    /// * **Failure**: a refused replay (embedder refusal under the J3-R3-1
+    ///   contract, a vanished interaction) consumes the intent with a `failed`
+    ///   outcome — mirroring what the in-session worker does — rather than
+    ///   retrying on every restart forever.
+    /// * **Shutdown**: `close()` aborts this task before the quiesce; whatever
+    ///   is still unconsumed stays durable for the next serve.
+    pub(crate) fn spawn_replay(self: &Arc<Self>, intents: Vec<WriteIntent>) {
+        if intents.is_empty() {
+            return;
+        }
+        // Seed the cross-restart answers before the task starts, so a lookup
+        // racing the replay sees `pending` rather than `restart_lost`.
+        {
+            let mut map = self.restart.lock();
+            for intent in &intents {
+                let Ok(id) = ReceiptId::from_str(&intent.receipt) else {
+                    tracing::warn!(
+                        session = %self.ctx.session,
+                        receipt = %intent.receipt,
+                        "write intent carries an unparseable receipt id; it will replay but \
+                         cannot be looked up"
+                    );
+                    continue;
+                };
+                let answer = match &intent.outcome {
+                    None => ReceiptAnswer::Pending,
+                    Some(o) if o.tag == "failed" => ReceiptAnswer::Failed(o.summary.clone()),
+                    Some(o) => ReceiptAnswer::AppliedAfterRestart(o.summary.clone()),
+                };
+                map.insert(id, (intent.agent.clone(), answer));
+            }
+        }
+        let pending: Vec<WriteIntent> = intents
+            .into_iter()
+            .filter(|i| i.outcome.is_none())
+            .collect();
+        let backlog = pending.len();
+        if backlog == 0 {
+            return;
+        }
+        tracing::info!(
+            session = %self.ctx.session,
+            backlog,
+            "write queue: replaying {backlog} durable write intent(s) left by a previous \
+             process, one at a time, in admission order"
+        );
+        let this = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut applied = 0usize;
+            let mut failed = 0usize;
+            for intent in pending {
+                if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
+                    break;
+                }
+                let Ok(receipt) = ReceiptId::from_str(&intent.receipt) else {
+                    continue;
+                };
+                let job = Job {
+                    receipt,
+                    agent: intent.agent.clone(),
+                    interaction: intent.interaction,
+                    bytes: 0,
+                    payload: JobPayload::from_intent_payload(intent.payload),
+                };
+                let stamp = ConsumeStamp {
+                    tag: "applied_after_restart",
+                    at: (this.clock)(),
+                };
+                let answer = match this.ctx.run(&job, Some(stamp)).await {
+                    Ok(summary) => {
+                        applied += 1;
+                        this.counters.replayed.fetch_add(1, Ordering::Relaxed);
+                        ReceiptAnswer::AppliedAfterRestart(summary.summary)
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        let why =
+                            format!("replay after restart was refused ({e}); nothing was written");
+                        // A failure has no commit to ride — consume on its own
+                        // (see the worker's failure arm for the argument).
+                        this.ctx.graph.write().consume_write_intent(
+                            intent.receipt.clone(),
+                            WriteIntentOutcome {
+                                tag: "failed".into(),
+                                summary: why.clone(),
+                                consumed_at: (this.clock)(),
+                            },
+                        );
+                        tracing::warn!(
+                            session = %this.ctx.session,
+                            receipt = %intent.receipt,
+                            error = %e,
+                            "write queue: a durable intent's replay was refused; its record says so"
+                        );
+                        ReceiptAnswer::Failed(why)
+                    }
+                };
+                this.restart
+                    .lock()
+                    .insert(receipt, (intent.agent.clone(), answer));
+                this.settled.notify_waiters();
+                // The throttle: yield between jobs so a deep backlog cannot
+                // monopolize the runtime between two of the fresh session's
+                // polls.
+                tokio::task::yield_now().await;
+            }
+            tracing::info!(
+                session = %this.ctx.session,
+                applied,
+                failed,
+                "write queue: durable intent replay finished"
+            );
+        });
+        *self.replay.lock() = Some(handle);
+    }
+
+    /// Stop the replay task (J3): abort **and join**, because an aborted task
+    /// can still finish a synchronous stretch — and append to the log — until
+    /// the join returns (the R3-1 lesson). `close()` calls this before its
+    /// final drain so no replay write can land after the drain's last word.
+    /// Unconsumed intents stay durable for the next serve.
+    pub(crate) async fn stop_replay(&self) {
+        let handle = self.replay.lock().take();
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    /// Abort the replay task without joining — the `Drop` path, which cannot
+    /// await (same shape as [`WritePipeline::abort_all_sync`]).
+    pub(crate) fn abort_replay_sync(&self) {
+        if let Some(handle) = self.replay.lock().take() {
+            handle.abort();
+        }
+    }
+
     /// Abort the workers without awaiting them — the `Drop` path, which cannot
     /// await. Receipts are not settled here: a dropped `Memory` never flushes
     /// its tail either, and a process that is going away has nobody to answer.
     pub(crate) fn abort_all_sync(&self) {
         self.abort_probe();
+        self.abort_replay_sync();
         let mut lanes = self.lanes.lock();
         lanes.sealed = true;
         for (_, handle) in lanes.workers.drain() {
@@ -4449,6 +4882,139 @@ mod pipeline_tests {
             CalibrationSource::Probe,
             "{} fast refusals must not flip the source to observed: {calibration:?}",
             counters.failed()
+        );
+    }
+
+    /// **J3 durable intents, the write-side half.** Every accepted job's
+    /// intent enters the mutation log AT ADMISSION — before the job is visible
+    /// to a worker — and its consumption is appended when the job applies,
+    /// with the applied outcome, strictly after its put. This ordering is what
+    /// the admit-side graph⊃lanes lock nesting exists for: a log that could
+    /// carry a consume ahead of its put would let one flush transaction
+    /// consume an intent whose put it never wrote.
+    #[tokio::test]
+    async fn an_accepted_write_puts_a_durable_intent_and_applying_consumes_it() {
+        let rig = Rig::fixture("wq-intent-lifecycle");
+        let agent = AgentId::new("agent-a");
+        let submitted = rig.derive(&agent, "user schema").await;
+        assert!(!submitted.dropped());
+        let settled = rig
+            .pipeline
+            .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+            .await;
+        assert_eq!(settled.tag(), "applied");
+
+        let log = rig.graph.write().drain_log();
+        let receipt = submitted.receipt.to_string();
+        let put_at = log.mutations.iter().position(|m| {
+            matches!(m, crate::types::Mutation::PutWriteIntent { intent } if intent.receipt == receipt && intent.outcome.is_none())
+        });
+        let consume_at = log.mutations.iter().position(|m| {
+            matches!(m, crate::types::Mutation::ConsumeWriteIntent { receipt: r, outcome, .. } if *r == receipt && outcome.tag == "applied")
+        });
+        let put_at = put_at.expect("the ack must have put a durable intent in the log");
+        let consume_at =
+            consume_at.expect("the apply must have consumed the intent, tagged applied");
+        assert!(
+            put_at < consume_at,
+            "the put ({put_at}) must precede its consume ({consume_at}) in the log"
+        );
+        // And the consume carries the SAME sentence the receipt carries, so
+        // the durable record and the live answer can never tell two stories.
+        let ReceiptAnswer::Applied(summary) = settled else {
+            unreachable!()
+        };
+        match &log.mutations[consume_at] {
+            crate::types::Mutation::ConsumeWriteIntent { outcome, .. } => {
+                assert_eq!(outcome.summary, summary.summary);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// **J3 durable intents, the close-side half — the founding invariant, by
+    /// construction.** A clean close over a queue that cannot drain defers the
+    /// remainder instead of abandoning it: receipts settle `intent_durable`
+    /// (never `failed`), the count lands in `deferred` (never `abandoned`),
+    /// and the log still holds every undrained job's intent, unconsumed, for
+    /// the close's final flush to persist.
+    #[tokio::test(start_paused = true)]
+    async fn a_close_that_cannot_drain_defers_acked_writes_as_durable_intents() {
+        // 3 s per embed: slower than the whole drain budget, and slow enough
+        // that the probe cannot finish inside PROBE_BUDGET — the floors era,
+        // one write per lane, which is exactly the regime where a write CAN be
+        // admitted and yet not drain. Four agents, one acked write each.
+        const EMBED: Duration = Duration::from_secs(3);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rig = Rig::hybrid(
+            "wq-close-defers",
+            Arc::new(SlowEmbedder {
+                delay: EMBED,
+                inner: FixtureEmbedder::new(),
+                calls: calls.clone(),
+            }),
+        );
+        let agents: Vec<AgentId> = (0..4).map(|i| AgentId::new(format!("agent-{i}"))).collect();
+        let mut receipts = Vec::new();
+        for (i, agent) in agents.iter().enumerate() {
+            let submitted = rig.derive(agent, &format!("burst concept {i}")).await;
+            assert!(!submitted.dropped(), "submission {i} must be admitted");
+            receipts.push((agent.clone(), submitted.receipt));
+        }
+
+        // Every embed needs 3 s of a 2 s budget: nothing can drain, everything
+        // MUST defer.
+        let deferred = rig.pipeline.quiesce().await;
+        let counters = rig.pipeline.counters();
+        assert!(deferred > 0, "a 2 s budget cannot cover a 3 s embed");
+        assert_eq!(counters.deferred(), deferred as u64);
+        assert_eq!(
+            counters.abandoned(),
+            0,
+            "a clean close abandons NOTHING under durable intents"
+        );
+        assert_eq!(counters.failed(), 0, "deferral is not failure");
+        assert_eq!(counters.outstanding(), 0, "every job is accounted for");
+
+        let mut applied = 0usize;
+        let mut durable = 0usize;
+        for (agent, receipt) in &receipts {
+            match rig.pipeline.lookup(agent, *receipt) {
+                ReceiptAnswer::Applied(_) => applied += 1,
+                ReceiptAnswer::IntentRecorded => durable += 1,
+                other => panic!("an acked write ended {other:?} at a clean close"),
+            }
+        }
+        assert_eq!(applied + durable, receipts.len());
+        assert_eq!(durable, deferred);
+
+        // The log's word matches the receipts': one unconsumed intent per
+        // deferred write, none for the applied ones.
+        let log = rig.graph.write().drain_log();
+        let puts: Vec<&str> = log
+            .mutations
+            .iter()
+            .filter_map(|m| match m {
+                crate::types::Mutation::PutWriteIntent { intent } => Some(intent.receipt.as_str()),
+                _ => None,
+            })
+            .collect();
+        let consumed: Vec<&str> = log
+            .mutations
+            .iter()
+            .filter_map(|m| match m {
+                crate::types::Mutation::ConsumeWriteIntent { receipt, .. } => {
+                    Some(receipt.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(puts.len(), receipts.len(), "one intent per acked write");
+        assert_eq!(consumed.len(), applied, "one consume per APPLIED write");
+        let unconsumed = puts.iter().filter(|r| !consumed.contains(*r)).count();
+        assert_eq!(
+            unconsumed, durable,
+            "every deferred write's intent survives, unconsumed, for the final flush"
         );
     }
 

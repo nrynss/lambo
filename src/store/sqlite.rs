@@ -606,6 +606,12 @@ impl SqliteStore {
             .await
             .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;
         }
+        // J3 write intents ride the seed for adapter parity: MemoryStore's
+        // seed stores the whole snapshot, so dropping them here would make a
+        // seeded-then-loaded session differ by adapter.
+        for intent in &snapshot.write_intents {
+            put_write_intent(&mut *tx, intent).await?;
+        }
         tx.commit()
             .await
             .map_err(|e| map_write_err(e, |m| format!("commit seed transaction: {m}")))?;
@@ -828,6 +834,12 @@ impl GraphStore for SqliteStore {
                 Mutation::SetEmbedding { session_id, .. } => {
                     sessions.insert(session_id.0.clone());
                 }
+                Mutation::PutWriteIntent { intent } => {
+                    sessions.insert(intent.session_id.0.clone());
+                }
+                Mutation::ConsumeWriteIntent { session_id, .. } => {
+                    sessions.insert(session_id.0.clone());
+                }
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }
         }
@@ -927,6 +939,7 @@ impl GraphStore for SqliteStore {
         let synonyms = load_synonyms(&mut *tx, session).await?;
         let reservations = load_reservations(&mut *tx, session).await?;
         let canonization_events = load_canonization_events(&mut *tx, session).await?;
+        let write_intents = load_write_intents(&mut *tx, session).await?;
 
         tx.commit()
             .await
@@ -946,6 +959,7 @@ impl GraphStore for SqliteStore {
             reservations,
             canonization_events,
             embedding,
+            write_intents,
         })
     }
 
@@ -1640,8 +1654,172 @@ async fn apply_single(tx: &mut sqlx::SqliteConnection, m: &Mutation) -> Result<(
         } => {
             set_embedding(&mut *tx, session_id, embedding.as_ref()).await?;
         }
+        Mutation::PutWriteIntent { intent } => {
+            put_write_intent(&mut *tx, intent).await?;
+        }
+        Mutation::ConsumeWriteIntent {
+            session_id,
+            receipt,
+            outcome,
+        } => {
+            consume_write_intent(&mut *tx, session_id, receipt, outcome).await?;
+        }
     }
     Ok(())
+}
+
+/// Upsert one durable write intent (J3). Keyed by (session, receipt); a re-put
+/// replaces the row, matching the memory adapter.
+async fn put_write_intent(
+    tx: &mut sqlx::SqliteConnection,
+    intent: &crate::types::WriteIntent,
+) -> Result<(), StoreError> {
+    let payload = serde_json::to_string(&intent.payload)
+        .map_err(|e| StoreError::Backend(format!("serialize write intent payload: {e}")))?;
+    sqlx::query(
+        "INSERT INTO write_intents \
+             (session_id, receipt, agent, interaction_id, lane_seq, issued_ms, payload, \
+              created_at, consumed_at, outcome_tag, outcome_summary) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (session_id, receipt) DO UPDATE SET \
+             agent = excluded.agent, \
+             interaction_id = excluded.interaction_id, \
+             lane_seq = excluded.lane_seq, \
+             issued_ms = excluded.issued_ms, \
+             payload = excluded.payload, \
+             created_at = excluded.created_at, \
+             consumed_at = excluded.consumed_at, \
+             outcome_tag = excluded.outcome_tag, \
+             outcome_summary = excluded.outcome_summary",
+    )
+    .bind(intent.session_id.as_str())
+    .bind(&intent.receipt)
+    .bind(intent.agent.0.as_str())
+    .bind(intent.interaction.0.to_string())
+    .bind(i64::try_from(intent.lane_seq).unwrap_or(i64::MAX))
+    .bind(intent.issued_ms)
+    .bind(payload)
+    .bind(ts_to_text(intent.created_at))
+    .bind(intent.outcome.as_ref().map(|o| ts_to_text(o.consumed_at)))
+    .bind(intent.outcome.as_ref().map(|o| o.tag.clone()))
+    .bind(intent.outcome.as_ref().map(|o| o.summary.clone()))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("put write intent: {m}")))?;
+    Ok(())
+}
+
+/// Mark one intent consumed with its outcome, then purge consumed rows older
+/// than [`crate::types::WRITE_INTENT_RETENTION`] — clocked by the mutation's
+/// own `consumed_at`, so the adapter needs no clock. Consuming an absent
+/// receipt is a no-op (the put may already be purged; replay is idempotent).
+async fn consume_write_intent(
+    tx: &mut sqlx::SqliteConnection,
+    session_id: &SessionId,
+    receipt: &str,
+    outcome: &crate::types::WriteIntentOutcome,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ? \
+         WHERE session_id = ? AND receipt = ?",
+    )
+    .bind(ts_to_text(outcome.consumed_at))
+    .bind(&outcome.tag)
+    .bind(&outcome.summary)
+    .bind(session_id.as_str())
+    .bind(receipt)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;
+    let cutoff = cutoff_text(outcome.consumed_at, crate::types::WRITE_INTENT_RETENTION)?;
+    sqlx::query(
+        "DELETE FROM write_intents \
+         WHERE session_id = ? AND consumed_at IS NOT NULL AND consumed_at < ?",
+    )
+    .bind(session_id.as_str())
+    .bind(cutoff)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("purge consumed write intents: {m}")))?;
+    Ok(())
+}
+
+/// Load a session's write intents (J3), in replay order — (`issued_ms`,
+/// `lane_seq`), which is exact admission order within one issuing process and
+/// wall-clock order across processes.
+async fn load_write_intents(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<Vec<crate::types::WriteIntent>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT receipt, agent, interaction_id, lane_seq, issued_ms, payload, created_at, \
+                consumed_at, outcome_tag, outcome_summary \
+         FROM write_intents WHERE session_id = ? ORDER BY issued_ms ASC, lane_seq ASC",
+    )
+    .bind(&session.0)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| db_err("load write intents", e))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let receipt: String = row
+            .try_get(0)
+            .map_err(|e| db_err("load write intents", e))?;
+        let agent: String = row
+            .try_get(1)
+            .map_err(|e| db_err("load write intents", e))?;
+        let interaction: String = row
+            .try_get(2)
+            .map_err(|e| db_err("load write intents", e))?;
+        let lane_seq: i64 = row
+            .try_get(3)
+            .map_err(|e| db_err("load write intents", e))?;
+        let issued_ms: i64 = row
+            .try_get(4)
+            .map_err(|e| db_err("load write intents", e))?;
+        let payload: String = row
+            .try_get(5)
+            .map_err(|e| db_err("load write intents", e))?;
+        let created_at: String = row
+            .try_get(6)
+            .map_err(|e| db_err("load write intents", e))?;
+        let consumed_at: Option<String> = row
+            .try_get(7)
+            .map_err(|e| db_err("load write intents", e))?;
+        let outcome_tag: Option<String> = row
+            .try_get(8)
+            .map_err(|e| db_err("load write intents", e))?;
+        let outcome_summary: Option<String> = row
+            .try_get(9)
+            .map_err(|e| db_err("load write intents", e))?;
+        let payload: crate::types::WriteIntentPayload = serde_json::from_str(&payload)
+            .map_err(|e| StoreError::Backend(format!("parse write intent payload: {e}")))?;
+        let outcome = match (consumed_at, outcome_tag, outcome_summary) {
+            (Some(at), Some(tag), Some(summary)) => Some(crate::types::WriteIntentOutcome {
+                tag,
+                summary,
+                consumed_at: text_to_ts(&at)?,
+            }),
+            (None, None, None) => None,
+            _ => {
+                return Err(StoreError::Invariant(format!(
+                    "write intent {receipt}: consumed_at/outcome columns are partially set"
+                )))
+            }
+        };
+        out.push(crate::types::WriteIntent {
+            session_id: session.clone(),
+            receipt,
+            agent: crate::types::AgentId::new(&agent),
+            interaction: node_id(&interaction, "write intent interaction")?,
+            lane_seq: u64::try_from(lane_seq).unwrap_or(u64::MAX),
+            issued_ms,
+            payload,
+            created_at: text_to_ts(&created_at)?,
+            outcome,
+        });
+    }
+    Ok(out)
 }
 
 async fn upsert_interactions(

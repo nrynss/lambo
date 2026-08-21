@@ -46,11 +46,15 @@ use crate::types::{LamboError, SessionId, StoreError};
 
 use super::GraphStore;
 
-/// A session materialized into RAM: the graph plus its rebuilt inverted index.
+/// A session materialized into RAM: the graph plus its rebuilt inverted index,
+/// and any durable write intents the store holds for it (J3 — unconsumed ones
+/// are owed a replay by the loading process; consumed-and-retained ones answer
+/// `applied_after_restart` receipt lookups).
 #[derive(Debug)]
 pub struct LoadedSession {
     pub graph: Graph,
     pub index: InvertedIndex,
+    pub write_intents: Vec<crate::types::WriteIntent>,
 }
 
 /// Default timeout for the sync bridge's store call (F2): without it the
@@ -83,15 +87,23 @@ pub async fn load_session_async(
             return Ok(LoadedSession {
                 graph: Graph::new(session.clone()),
                 index: InvertedIndex::new(),
+                write_intents: Vec::new(),
             })
         }
         Err(e) => return Err(e),
     };
     quarantine_legacy_vectors(&mut snap);
+    // Intents are not graph state (Graph::snapshot documents why): take them
+    // out before the snapshot is consumed, for the owner's replay task.
+    let write_intents = std::mem::take(&mut snap.write_intents);
     // Index first (borrows the snapshot), then move the snapshot into the graph.
     let index = InvertedIndex::from_snapshot(&snap);
     let graph = Graph::from_snapshot(snap).map_err(lambo_to_store)?;
-    Ok(LoadedSession { graph, index })
+    Ok(LoadedSession {
+        graph,
+        index,
+        write_intents,
+    })
 }
 
 /// Safely upgrade pre-contract snapshots. Width alone cannot identify the

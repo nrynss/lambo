@@ -1109,6 +1109,14 @@ impl LamboServer {
                 "write_queue_dropped_closed".into(),
                 json!(c.dropped_closed()),
             );
+            // J3 durable intents: `deferred` counts this session's acked
+            // writes a clean close handed to the NEXT serve as durable
+            // intents (a fourth settle class — neither applied nor failed);
+            // `replayed` counts a PREVIOUS process's intents this session
+            // applied at attach (not summed into `applied`, which counts only
+            // this session's own accepted jobs, so `outstanding` stays exact).
+            obj.insert("write_queue_deferred".into(), json!(c.deferred()));
+            obj.insert("write_queue_replayed".into(), json!(c.replayed()));
             obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));
         }
         payload
@@ -3203,6 +3211,8 @@ mod tests {
             "write_queue_abandoned",
             "write_queue_dropped",
             "write_queue_dropped_closed",
+            "write_queue_deferred",
+            "write_queue_replayed",
             "receipts_retained",
         ] {
             assert!(p.get(key).is_some(), "{key} missing from {p}");

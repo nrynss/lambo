@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::types::{
     CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot,
     Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId,
-    StoreError, Synonym,
+    StoreError, Synonym, WriteIntent, WriteIntentOutcome,
 };
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
@@ -294,6 +294,12 @@ impl Graph {
             reservations: self.reservations.clone(),
             canonization_events: self.canonization_events.clone(),
             embedding: self.embedding.clone(),
+            // Write intents are not graph state: they pass through this
+            // graph's mutation log (`record_write_intent` /
+            // `consume_write_intent`) into the store, and only
+            // `load_session` materializes them. A RAM snapshot therefore has
+            // none to offer — the store is their single home.
+            write_intents: Vec::new(),
         }
     }
 
@@ -1134,6 +1140,41 @@ impl Graph {
             return;
         }
         self.mutation_log.splice(0..0, mutations);
+    }
+
+    /// Append a durable write intent to the log (J3 — appended at ack, so the
+    /// write-behind drain and the close-time final flush carry it exactly as
+    /// they carry every other mutation).
+    ///
+    /// The epoch is deliberately **not** bumped: an intent is not graph state —
+    /// no node, edge, or recall-visible fact changes — and bumping would force
+    /// a concurrent hybrid commit to replan against a graph that has not
+    /// changed, and invalidate every recall cache entry for a record recall
+    /// cannot see. The mutation log is the only thing touched.
+    pub fn record_write_intent(&mut self, intent: WriteIntent) {
+        debug_assert_eq!(intent.session_id, self.session_id);
+        self.mutation_log.push(Mutation::PutWriteIntent { intent });
+    }
+
+    /// Append the consumption of a write intent (J3).
+    ///
+    /// **Must be called in the same write-lock critical section as the commit
+    /// of the mutations the intent produced.** The flush loop's drain takes
+    /// this same lock, so mutations appended under one hold always travel in
+    /// one batch — and a batch is one store transaction, which is what makes
+    /// "the applied write is durable" and "the intent is consumed" a single
+    /// fact. Consuming under a *separate* hold opens the window this design
+    /// exists to close: a flush between the two commits the applied mutations,
+    /// the process dies, and the next serve replays an intent whose write is
+    /// already durable — the double-apply.
+    ///
+    /// Epoch not bumped, for [`Graph::record_write_intent`]'s reason.
+    pub fn consume_write_intent(&mut self, receipt: String, outcome: WriteIntentOutcome) {
+        self.mutation_log.push(Mutation::ConsumeWriteIntent {
+            session_id: self.session_id.clone(),
+            receipt,
+            outcome,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -2967,7 +3008,9 @@ mod tests {
                 // the endpoint-ordering contract.
                 Mutation::CanonizationTransition { .. }
                 | Mutation::SetRootGoal { .. }
-                | Mutation::SetEmbedding { .. } => {}
+                | Mutation::SetEmbedding { .. }
+                | Mutation::PutWriteIntent { .. }
+                | Mutation::ConsumeWriteIntent { .. } => {}
             }
         }
         assert!(saw_delete);
@@ -3066,6 +3109,8 @@ mod tests {
                 Mutation::CanonizationTransition { .. } => "transition",
                 Mutation::SetRootGoal { .. } => "set_root_goal",
                 Mutation::SetEmbedding { .. } => "set_embedding",
+                Mutation::PutWriteIntent { .. } => "put_write_intent",
+                Mutation::ConsumeWriteIntent { .. } => "consume_write_intent",
             })
             .collect();
         let expected = [
@@ -3211,6 +3256,7 @@ mod tests {
             root_goal: None,
             created_at: None,
             closed_at: None,
+            write_intents: Vec::new(),
             interactions: vec![i],
             concepts: (0..N)
                 .map(|k| {

@@ -200,6 +200,14 @@ fn best_candidate(
         })
 }
 
+/// A caller-supplied action to run **inside the commit critical section**,
+/// under the same write-lock hold as the committed mutations, with the final
+/// outcome in hand (J3 durable intents: the write pipeline consumes the job's
+/// intent here, so the applied mutations and the intent consumption travel in
+/// one flush batch — one store transaction — and a crash can never leave the
+/// write durable beside a still-unconsumed intent).
+pub type CommitHook = Box<dyn FnOnce(&mut Graph, &DeriveOutcome) + Send>;
+
 /// The per-concept resolution computed by the async gather phase.
 enum Resolution {
     /// Canonical key already matched an existing concept — reuse it (byte-identical
@@ -342,6 +350,7 @@ pub async fn derive(
     parent_of: &ParentOf<'_>,
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
+    on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
 
@@ -361,6 +370,7 @@ pub async fn derive(
         max_cooccurrence_per_derive,
         semantic_match_threshold,
         io_deadline,
+        on_commit,
     )
     .await
 }
@@ -463,7 +473,10 @@ async fn derive_planned(
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
     io_deadline: tokio::time::Instant,
+    on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
+    // Survives replans: the hook fires exactly once, at the commit that wins.
+    let mut on_commit = on_commit;
     for _attempt in 0..MAX_HYBRID_REPLANS {
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).
@@ -969,6 +982,13 @@ async fn derive_planned(
         }
 
         *guard = g;
+        // J3: run the commit hook (intent consumption) under THIS write-lock
+        // hold, after the swap — the flush drain takes the same lock, so the
+        // committed mutations and whatever the hook appends travel in one
+        // batch, i.e. one store transaction. See `CommitHook`.
+        if let Some(hook) = on_commit.take() {
+            hook(&mut guard, &outcome);
+        }
         return Ok(outcome);
     }
 
@@ -1393,6 +1413,7 @@ mod tests {
                     &ParentOf::none(),
                     10,
                     SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                    None,
                 )
                 .await
             })
@@ -1429,6 +1450,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1489,6 +1511,7 @@ mod tests {
                     &ParentOf::none(),
                     10,
                     SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                    None,
                 )
                 .await
             })
@@ -1533,6 +1556,7 @@ mod tests {
                     &ParentOf::none(),
                     10,
                     SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                    None,
                 )
                 .await
             })
@@ -1565,6 +1589,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap_err();
@@ -1591,6 +1616,7 @@ mod tests {
             &ParentOf::from_pairs(&parent_refs),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap_err();
@@ -1610,6 +1636,7 @@ mod tests {
             &ParentOf::none(),
             10,
             f64::NAN,
+            None,
         )
         .await
         .unwrap_err();
@@ -1641,6 +1668,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1660,6 +1688,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1748,6 +1777,7 @@ mod tests {
                 &ParentOf::none(),
                 10,
                 SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
             )
             .await
             .unwrap();
@@ -1771,6 +1801,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1822,6 +1853,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1850,6 +1882,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1884,6 +1917,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1921,6 +1955,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -1976,6 +2011,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -2060,6 +2096,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap_err();
@@ -2098,6 +2135,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap_err();
@@ -2142,6 +2180,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap_err();
@@ -2254,6 +2293,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -2299,6 +2339,7 @@ mod tests {
                 &ParentOf::none(),
                 10,
                 SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
             )
             .await
             .unwrap();
@@ -2325,6 +2366,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();
@@ -2373,6 +2415,7 @@ mod tests {
             &ParentOf::none(),
             10,
             SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
         )
         .await
         .unwrap();

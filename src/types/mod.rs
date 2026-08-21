@@ -426,6 +426,120 @@ pub enum Mutation {
         /// The new embedding space, or `None` to clear it.
         embedding: Option<EmbeddingContract>,
     },
+    /// A validated, acked background write that has not yet been applied
+    /// (J3 durable intents — `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`).
+    ///
+    /// Appended at **ack** time by the write pipeline, through this same
+    /// write-behind log, so the C-series "session closed, tail durable"
+    /// guarantee carries it: at a clean close, every acked write is either
+    /// applied or durable as an intent — **by construction**, independent of
+    /// any drain estimate being right. The next serve of the session replays
+    /// unconsumed intents (idempotent per receipt id, per-lane order
+    /// preserved). A `kill -9` loses unflushed intents exactly as it loses the
+    /// rest of the write-behind tail; receipts stay honest (`restart_lost`).
+    PutWriteIntent {
+        /// The intent record.
+        intent: WriteIntent,
+    },
+    /// The intent was applied (or attempted and failed) — appended **in the
+    /// same graph-lock critical section as the applied mutations**, so one
+    /// flush transaction carries both and a crash can never leave the applied
+    /// write durable beside a still-unconsumed intent (the double-apply this
+    /// design excludes). Adapters retain the consumed row, with its outcome,
+    /// for the receipt-retention window so a restarted session can answer
+    /// `applied_after_restart`; rows older than that are purged.
+    ConsumeWriteIntent {
+        /// The session the intent belongs to.
+        session_id: SessionId,
+        /// The receipt id, in its display form — the intent's primary key.
+        receipt: String,
+        /// What became of the write.
+        outcome: WriteIntentOutcome,
+    },
+}
+
+/// The payload of a [`WriteIntent`] — the validated job, exactly as acked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WriteIntentPayload {
+    /// A `lambo_derive` job.
+    Derive {
+        /// `(content, concept_type)` pairs, in submission order.
+        concepts: Vec<(String, ConceptType)>,
+        /// `(parent, child)` hierarchy pairs, in submission order.
+        pairs: Vec<(String, String)>,
+    },
+    /// A `lambo_record_action` job.
+    Action {
+        /// The action sentence.
+        action: String,
+        /// Concept contents this action produces.
+        produces: Vec<String>,
+        /// Concept contents this action modifies.
+        modifies: Vec<String>,
+        /// Concept contents this action depends on.
+        depends_on: Vec<String>,
+    },
+}
+
+/// A durable post-validation write intent (J3). See
+/// [`Mutation::PutWriteIntent`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WriteIntent {
+    /// The session the write was acked into.
+    pub session_id: SessionId,
+    /// The receipt id the caller holds, in display form — the primary key, and
+    /// what makes replay idempotent.
+    pub receipt: String,
+    /// The agent whose lane the write was queued on. Replay preserves order
+    /// **within** an agent's intents (the lane promise), and receipts stay
+    /// agent-scoped across restart.
+    pub agent: AgentId,
+    /// The interaction the write hangs from. Durable by the same close that
+    /// made this intent durable (the call path writes the interaction to the
+    /// log before the ack).
+    pub interaction: NodeId,
+    /// The receipt's sequence number — strictly increasing per issuing
+    /// process, so sorting by (`issued_ms`, `lane_seq`) replays one process's
+    /// intents in exact admission order and multiple crashed processes'
+    /// intents in wall-clock order.
+    pub lane_seq: u64,
+    /// The receipt's issue timestamp (epoch millis), for cross-process
+    /// ordering.
+    pub issued_ms: i64,
+    /// The validated job.
+    pub payload: WriteIntentPayload,
+    /// When the intent was recorded (ack time, process clock).
+    pub created_at: DateTime<Utc>,
+    /// `None` while unconsumed (replay is owed); `Some` once applied or
+    /// failed. Consumed rows are retained for the receipt-retention window so
+    /// the answer survives the restart, then purged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<WriteIntentOutcome>,
+}
+
+/// How long a **consumed** write intent row is retained before an adapter may
+/// purge it — the cross-restart receipt window: a consumed intent is the only
+/// durable carrier of "your write applied after a restart", so it lives as
+/// long as an in-RAM receipt would ([`crate::writeq::RECEIPT_RETENTION`] is
+/// const-asserted equal to this). Purging happens inside the adapters' consume
+/// step, clocked by the mutation's own `consumed_at`, and expired rows are
+/// skipped at load.
+pub const WRITE_INTENT_RETENTION: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What became of a consumed [`WriteIntent`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WriteIntentOutcome {
+    /// `"applied"`, `"applied_after_restart"`, or `"failed"` — the receipt
+    /// answer tag the outcome renders as.
+    pub tag: String,
+    /// The human sentence the receipt carries (an applied summary, or the
+    /// failure reason).
+    pub summary: String,
+    /// When the intent was consumed (process clock of the consumer). Doubles
+    /// as the purge clock: adapters delete consumed rows older than the
+    /// receipt-retention window.
+    pub consumed_at: DateTime<Utc>,
 }
 
 /// Ordered write-behind unit (spec §2.4). Apply nodes → edges → deletions → transitions.
@@ -484,6 +598,11 @@ pub struct GraphSnapshot {
     /// Set on first embed; refuse swaps without re-embed (see `EmbeddingContract`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<EmbeddingContract>,
+    /// Durable write intents (J3): unconsumed ones are owed a replay by the
+    /// loading process; consumed-and-retained ones answer
+    /// `applied_after_restart` lookups. Expired consumed rows are not loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_intents: Vec<WriteIntent>,
 }
 
 /// Identity of the dense embedding space used in a session.

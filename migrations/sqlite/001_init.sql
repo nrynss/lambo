@@ -172,6 +172,30 @@ CREATE TABLE IF NOT EXISTS session_stats (
     updated_at   TEXT NOT NULL
 );
 
+-- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
+-- a validated, acked background write that has not yet been applied. Written
+-- at ack time through the write-behind log, so the close-time final flush
+-- carries it — at a clean close every acked write is either applied or here.
+-- An unconsumed row (consumed_at IS NULL) is owed a replay by the next serve
+-- of the session; a consumed row is retained for the receipt-retention window
+-- (300 s) so a restarted session can answer applied_after_restart, then purged
+-- by the adapter's consume step. payload is the serialized WriteIntentPayload
+-- JSON; receipt is the ReceiptId display form and the idempotency key.
+CREATE TABLE IF NOT EXISTS write_intents (
+    session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+    receipt         TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    interaction_id  TEXT NOT NULL,
+    lane_seq        INTEGER NOT NULL,
+    issued_ms       INTEGER NOT NULL,
+    payload         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    consumed_at     TEXT,
+    outcome_tag     TEXT,
+    outcome_summary TEXT,
+    PRIMARY KEY (session_id, receipt)
+);
+
 -- Spec §4 INDEX clauses, as separate statements (order preserved):
 CREATE INDEX IF NOT EXISTS interactions_session_created_idx ON interactions (session_id, created_at);
 CREATE INDEX IF NOT EXISTS concepts_session_status_idx ON concepts (session_id, canonization_status);
