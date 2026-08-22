@@ -3718,6 +3718,7 @@ mod tests {
 
         fn assert_closed(m: &Memory, ctx: &str) {
             let action = Action {
+                event_time: None,
                 action: "post-close write",
                 produces: &[],
                 modifies: &[],

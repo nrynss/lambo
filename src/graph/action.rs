@@ -55,6 +55,13 @@ const CAUSAL_WEIGHT: f64 = 0.5;
 const DEPENDENCY_WEIGHT: f64 = 0.5;
 
 /// One agent action to record (pinned T2.4 contract, spec §6.1).
+///
+/// `event_time` is D's optional about-time: the instant the action was
+/// originally made, supplied by an ingester replaying history. `None` — the
+/// live default — keeps every timestamp flush-domain. The interaction this
+/// call opens carries the value, and every edge the call creates inherits the
+/// interaction's resolved about-time at creation; see
+/// `crate::canon::event_time` for the design decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action<'a> {
     /// The action itself — becomes a `Resource` concept.
@@ -65,6 +72,10 @@ pub struct Action<'a> {
     pub modifies: &'a [&'a str],
     /// Things this action depends on; `Dependency` edges from the action node.
     pub depends_on: &'a [&'a str],
+    /// When the action was originally made, when the caller knows it
+    /// (`None` = live fact; the fallback rule is then the interaction's own
+    /// flush stamp). In-process only — no serde wire form to version.
+    pub event_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Result of a successful [`record_action`].
@@ -163,6 +174,7 @@ pub fn record_action(
             _ => unreachable!("record_action only plans Causal/Dependency edges"),
         };
         let edge = Edge {
+            event_time: None,
             id: NodeId::new(),
             session_id: session_id.clone(),
             source: src,
@@ -423,6 +435,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<NodeId>, at_min: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid(),
             agent_id: agent(),
@@ -458,6 +471,7 @@ mod tests {
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {
         Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, id)),
             session_id: sid(),
             source: src,
@@ -485,6 +499,7 @@ mod tests {
         depends_on: &'a [&'a str],
     ) -> Action<'a> {
         Action {
+            event_time: None,
             action,
             produces,
             modifies,

@@ -1753,6 +1753,7 @@ impl LamboServer {
         let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
         let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
         let action = Action {
+            event_time: None,
             action: p.action.as_str(),
             produces: &produces,
             modifies: &modifies,
@@ -4110,6 +4111,7 @@ mod tests {
             .expect("derive");
         s.mem
             .record_action(&Action {
+                event_time: None,
                 action: "default action",
                 produces: &[],
                 modifies: &[],

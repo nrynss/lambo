@@ -237,6 +237,7 @@ mod tests {
 
     fn interaction() -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, 1)),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),

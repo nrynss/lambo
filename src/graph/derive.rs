@@ -385,6 +385,7 @@ fn derive_after_validation(
                 outcome.reinforced += 1;
             }
             graph.upsert_edge(Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: session_id.clone(),
                 source,
@@ -458,6 +459,7 @@ fn derive_after_validation(
             outcome.reinforced += 1;
         }
         graph.upsert_edge(Edge {
+            event_time: None,
             id: NodeId::new(),
             session_id: session_id.clone(),
             source: parent_node,
@@ -728,6 +730,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<NodeId>, at_min: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid(),
             agent_id: agent(),
@@ -1129,6 +1132,7 @@ mod tests {
         g.insert_concept(parent, iid).unwrap();
         g.insert_concept(child, iid).unwrap();
         g.upsert_edge(Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, 1)),
             session_id: sid(),
             source: parent_id,

@@ -320,6 +320,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<u64>, at: i64) -> crate::types::Interaction {
         crate::types::Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(0, id)),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),

@@ -906,6 +906,7 @@ async fn derive_planned(
                             (id, *target)
                         };
                         g.upsert_edge(Edge {
+                            event_time: None,
                             id: NodeId::new(),
                             session_id: session_id.clone(),
                             source: s,
@@ -945,6 +946,7 @@ async fn derive_planned(
                     outcome.reinforced += 1;
                 }
                 g.upsert_edge(Edge {
+                    event_time: None,
                     id: NodeId::new(),
                     session_id: session_id.clone(),
                     source,
@@ -1007,6 +1009,7 @@ async fn derive_planned(
                 outcome.reinforced += 1;
             }
             g.upsert_edge(Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: session_id.clone(),
                 source: parent_node,
@@ -1151,6 +1154,7 @@ mod tests {
     /// context the hybrid step must embed alongside the concept name).
     fn interaction(id: u64, prev: Option<NodeId>, at_min: i64, prompt: &str) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid("hybrid-test"),
             agent_id: agent(),
@@ -2372,6 +2376,7 @@ mod tests {
         let b = NodeId(Uuid::from_u64_pair(2, 2));
         let at = ts(0);
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i,
             session_id: sid("matrix"),
             agent_id: agent(),
@@ -2425,6 +2430,7 @@ mod tests {
         )
         .unwrap();
         g.upsert_edge(Edge {
+            event_time: None,
             id: NodeId::new(),
             session_id: sid("matrix"),
             source: a,

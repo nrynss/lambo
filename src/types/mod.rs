@@ -247,7 +247,21 @@ pub enum MatchStrategy {
 // Nodes & edges
 // ---------------------------------------------------------------------------
 
-/// One turn of agent work: the unit that concepts are derived from.
+/// One turn of agent work: the unit that facts are derived from.
+///
+/// ## Flush time and event time (workstream D)
+///
+/// [`Self::created_at`] is **flush time**: when Lambo recorded the turn. It is
+/// stamped by the process clock and never accepted from a caller — the
+/// server-authoritative ordering that F18 protects on the CLI surface too.
+///
+/// [`Self::event_time`] is **event time**: the instant this turn is *about* —
+/// a commit date, a transcript timestamp — supplied per fact by an ingester
+/// replaying history. `None` (the default) means the turn has no about-time:
+/// a live session, whose facts are about now. The resolver every time-based
+/// canonization gate reads is [`Self::about_time`], never a bare field, so
+/// the fallback rule lives in exactly one place; see
+/// `crate::canon::event_time` for the design decisions behind it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Interaction {
     /// This interaction's node id.
@@ -262,6 +276,25 @@ pub struct Interaction {
     pub previous_id: Option<NodeId>,
     /// When Lambo recorded this. Lambo stamps it, never the caller.
     pub created_at: DateTime<Utc>,
+    /// When this turn was originally made, when the ingester knows it.
+    ///
+    /// `None` for live sessions. Serde-defaulted so existing fixture JSON —
+    /// which has no `event_time` key — loads unchanged; a missing key *is*
+    /// the no-event-time case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time: Option<DateTime<Utc>>,
+}
+
+impl Interaction {
+    /// The instant this fact is about: its event time, or its flush time when
+    /// the ingester supplied none (D's fallback rule — see
+    /// `crate::canon::event_time`). Every age/coverage/separation measurement
+    /// resolves timestamps through this, so a fact without event time behaves
+    /// exactly as it did before D while an event-timed fact ages by its own
+    /// about-time.
+    pub fn about_time(&self) -> DateTime<Utc> {
+        self.event_time.unwrap_or(self.created_at)
+    }
 }
 
 /// One piece of remembered meaning, and the node type recall returns.
@@ -340,6 +373,14 @@ impl Node {
 }
 
 /// A typed, weighted link between two nodes.
+///
+/// Like [`Interaction`], an edge carries flush time ([`Self::created_at`]) and
+/// optional event time ([`Self::event_time`]). Edges are stamped from the
+/// interaction that wrote them (`record_action`/`derive` timestamp edges with
+/// that interaction's clock), so the edge inherits the writing interaction's
+/// event time at creation — an edge manufactured during a historical ingest is
+/// as old as what it is about, while a live edge falls back to its own flush
+/// time and keeps F17's fresh-evidence guard intact.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
     /// This edge's own id.
@@ -360,6 +401,20 @@ pub struct Edge {
     pub created_at: DateTime<Utc>,
     /// When it was last strengthened.
     pub last_reinforced: DateTime<Utc>,
+    /// When the relation the edge records was originally made, if the writing
+    /// interaction carried an event time. Serde-defaulted like
+    /// [`Interaction::event_time`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_time: Option<DateTime<Utc>>,
+}
+
+impl Edge {
+    /// The instant this relation is about: its event time, or its flush time
+    /// when the writing interaction had none (same fallback rule as
+    /// [`Interaction::about_time`]).
+    pub fn about_time(&self) -> DateTime<Utc> {
+        self.event_time.unwrap_or(self.created_at)
+    }
 }
 
 // ---------------------------------------------------------------------------

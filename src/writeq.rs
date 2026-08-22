@@ -1855,6 +1855,7 @@ impl WriteCtx {
                         job.interaction,
                         &job.agent,
                         &Action {
+                            event_time: None,
                             action: action.as_str(),
                             produces: &p,
                             modifies: &m,
@@ -4180,6 +4181,7 @@ mod pipeline_tests {
             let previous_id = g.temporal_chain().last().copied();
             let session_id = g.session_id().clone();
             g.insert_interaction(Interaction {
+                event_time: None,
                 id,
                 session_id,
                 agent_id: agent.clone(),

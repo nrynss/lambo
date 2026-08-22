@@ -835,6 +835,7 @@ mod tests {
     #[cfg(feature = "store-memory")]
     fn interaction(id: u64, prev: Option<u64>, at: DateTime<Utc>) -> Interaction {
         Interaction {
+            event_time: None,
             id: iid(id),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -1054,6 +1055,7 @@ mod tests {
 
         fn edge(id: u64, src: u64, tgt: u64, at: DateTime<Utc>) -> Edge {
             Edge {
+                event_time: None,
                 id: eid(id),
                 session_id: sid(),
                 source: nid(src),

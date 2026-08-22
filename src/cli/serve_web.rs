@@ -1935,6 +1935,7 @@ mod tests {
         created: DateTime<Utc>,
     ) -> Edge {
         Edge {
+            event_time: None,
             id,
             session_id: sid,
             source,
@@ -1960,6 +1961,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -2015,6 +2017,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -2060,6 +2063,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -2674,6 +2678,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -2964,6 +2969,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -3433,6 +3439,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: iid,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("agent-a"),

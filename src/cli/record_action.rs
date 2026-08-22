@@ -46,6 +46,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let modifies: Vec<&str> = args.modifies.iter().map(String::as_str).collect();
     let depends_on: Vec<&str> = args.depends_on.iter().map(String::as_str).collect();
     let action = Action {
+        event_time: None,
         action: args.action.as_str(),
         produces: &produces,
         modifies: &modifies,

@@ -488,6 +488,7 @@ mod tests {
 
     fn interaction(id: NodeId, previous_id: Option<NodeId>) -> Interaction {
         Interaction {
+            event_time: None,
             id,
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -520,6 +521,7 @@ mod tests {
 
     fn edge(id: NodeId, source: NodeId, target: NodeId, ty: EdgeType) -> Edge {
         Edge {
+            event_time: None,
             id,
             session_id: sid(),
             source,

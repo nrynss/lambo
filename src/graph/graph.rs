@@ -390,6 +390,7 @@ impl Graph {
 
         if let Some(prev) = i.previous_id {
             let edge = Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: self.session_id.clone(),
                 source: i.id,
@@ -478,6 +479,7 @@ impl Graph {
         self.append_mutation(Mutation::UpsertNode { node });
 
         let edge = Edge {
+            event_time: None,
             id: NodeId::new(),
             session_id: self.session_id.clone(),
             source: derives_from,
@@ -1774,6 +1776,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<NodeId>, at_min: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid(),
             agent_id: crate::types::AgentId::from("agent-a"),
@@ -1806,6 +1809,7 @@ mod tests {
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {
         Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, id)),
             session_id: sid(),
             source: src,

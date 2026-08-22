@@ -1068,6 +1068,7 @@ mod tests {
 
     fn interaction(id: u64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(0, id)),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -1283,6 +1284,7 @@ mod tests {
         at: chrono::DateTime<Utc>,
     ) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(0, id)),
             session_id: sid(),
             agent_id: AgentId::from(agent),
@@ -1321,6 +1323,7 @@ mod tests {
 
     fn dep_edge_at(id: u64, source: NodeId, target: NodeId, at: chrono::DateTime<Utc>) -> Edge {
         Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, id)),
             session_id: sid(),
             source,
