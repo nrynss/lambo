@@ -213,6 +213,17 @@ CREATE TABLE IF NOT EXISTS session_leases (
     endpoint    STRING
 );
 
+-- J4 lease refusals (dev-diary/lambo-for-mooshik/J-multi-client.md §J4): a
+-- writer refused the single-writer lease records the refusal here so the
+-- incumbent holder can learn it turned away a takeover ("from both sides").
+-- refused_at is the STORE clock (F18 — never a caller instant).
+CREATE TABLE IF NOT EXISTS lease_refusals (
+    session_id     STRING NOT NULL,
+    refused_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    refused_by     STRING NOT NULL,
+    current_holder STRING NOT NULL
+);
+
 -- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
 -- a validated, acked background write that has not yet been applied. Written
 -- at ack time through the write-behind log, so the close-time final flush

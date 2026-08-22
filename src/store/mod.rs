@@ -547,6 +547,38 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
+    /// **J4.** Record that the session's lease was just refused to `refused_by`
+    /// (the refused writer's holder token) against `current_holder` (the
+    /// incumbent, from the lease row at refusal time). `at` is stamped by the
+    /// store's own clock — never a caller instant (F18).
+    ///
+    /// The refused writer is alive on this path and calls this when it learns
+    /// it lost; the incumbent learns the fact here too (its
+    /// [`Self::pending_lease_refusals`] poll), which is what lets a refused
+    /// acquisition appear in the ledger **from both sides** (J4). Best-effort: a
+    /// store that cannot record (advisory default) is still a store that
+    /// refuses; the refusal simply carries no cross-process record.
+    async fn record_lease_refusal(
+        &self,
+        _session: &SessionId,
+        _refused_by: &str,
+        _current_holder: &str,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// **J4.** Refusals recorded against `session` at or after store-clock
+    /// `since`, newest first. The incumbent holder polls this to learn it
+    /// turned away a takeover and to append its own ledger line. Default:
+    /// none (advisory stores record nothing).
+    async fn pending_lease_refusals(
+        &self,
+        _session: &SessionId,
+        _since: DateTime<Utc>,
+    ) -> Result<Vec<lease::LeaseRefusal>, StoreError> {
+        Ok(vec![])
+    }
+
     // -----------------------------------------------------------------------
     // Flush stats publication (T85-3)
     // -----------------------------------------------------------------------
@@ -941,7 +973,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 sqlite.contains(&"write_intents") && sqlite.contains(&"sessions"),
                 "{sqlite:?}"
             );
-            assert_eq!(sqlite.len(), 10, "sqlite DDL table count: {sqlite:?}");
+            assert_eq!(sqlite.len(), 11, "sqlite DDL table count: {sqlite:?}");
         }
         #[cfg(feature = "store-cockroach")]
         {
@@ -950,7 +982,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 crdb.contains(&"write_intents") && crdb.contains(&"sessions"),
                 "{crdb:?}"
             );
-            assert_eq!(crdb.len(), 10, "cockroach DDL table count: {crdb:?}");
+            assert_eq!(crdb.len(), 11, "cockroach DDL table count: {crdb:?}");
         }
     }
 

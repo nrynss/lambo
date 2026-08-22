@@ -2225,7 +2225,56 @@ impl GraphStore for CockroachStore {
             .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
         Ok(())
     }
+    // J4. Record a lease refusal against this session at the store's clock.
+    async fn record_lease_refusal(
+        &self,
+        session: &SessionId,
+        refused_by: &str,
+        current_holder: &str,
+    ) -> Result<(), StoreError> {
+        let pool = self.pool().await?;
+        sqlx::query(
+            "INSERT INTO lease_refusals (session_id, refused_at, refused_by, current_holder) \
+             VALUES ($1, now(), $2, $3)",
+        )
+        .bind(&session.0)
+        .bind(refused_by)
+        .bind(current_holder)
+        .execute(pool)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("record lease refusal: {m}")))?;
+        Ok(())
+    }
 
+    // J4. Refusals recorded against this session at/after `since`, newest first.
+    async fn pending_lease_refusals(
+        &self,
+        session: &SessionId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
+        let pool = self.pool().await?;
+        type Row = (DateTime<Utc>, String, String);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT refused_at, refused_by, current_holder FROM lease_refusals \
+             WHERE session_id = $1 AND refused_at >= $2 ORDER BY refused_at DESC",
+        )
+        .bind(&session.0)
+        .bind(since)
+        .fetch_all(pool)
+        .await
+        .map_err(backend)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(at, refused_by, current_holder)| crate::store::lease::LeaseRefusal {
+                    session: session.clone(),
+                    at,
+                    refused_by,
+                    current_holder,
+                },
+            )
+            .collect())
+    }
     async fn write_flush_stats(
         &self,
         session: &SessionId,

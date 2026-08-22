@@ -87,6 +87,11 @@ pub struct MemoryStore {
     /// session id. Separate lock so publish/read contention never touches the
     /// graph data or lease locks.
     flush_stats: RwLock<HashMap<String, SessionFlushStats>>,
+    /// J4 lease refusals, in-memory (advisory stores record nothing across
+    /// processes, but the in-process holder still learns it turned one away).
+    /// Separate lock so refusal recording never touches the graph or lease
+    /// locks.
+    refusals: RwLock<Vec<crate::store::lease::LeaseRefusal>>,
 }
 
 impl MemoryStore {
@@ -472,6 +477,37 @@ impl GraphStore for MemoryStore {
             leases.remove(&session.0);
         }
         Ok(())
+    }
+
+    async fn record_lease_refusal(
+        &self,
+        session: &SessionId,
+        refused_by: &str,
+        current_holder: &str,
+    ) -> Result<(), StoreError> {
+        self.refusals
+            .write()
+            .push(crate::store::lease::LeaseRefusal {
+                session: session.clone(),
+                at: Utc::now(),
+                refused_by: refused_by.to_string(),
+                current_holder: current_holder.to_string(),
+            });
+        Ok(())
+    }
+
+    async fn pending_lease_refusals(
+        &self,
+        session: &SessionId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
+        Ok(self
+            .refusals
+            .read()
+            .iter()
+            .filter(|r| r.session == *session && r.at >= since)
+            .cloned()
+            .collect())
     }
 
     async fn write_flush_stats(

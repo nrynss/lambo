@@ -808,6 +808,55 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
+    // J4. Record a lease refusal against this session at the store's clock.
+    async fn record_lease_refusal(
+        &self,
+        session: &SessionId,
+        refused_by: &str,
+        current_holder: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO lease_refusals \
+                 (session_id, refused_at, refused_by, current_holder) \
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, ?3)",
+        )
+        .bind(&session.0)
+        .bind(refused_by)
+        .bind(current_holder)
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("record lease refusal", e))?;
+        Ok(())
+    }
+
+    // J4. Refusals recorded against this session at/after `since`, newest first.
+    async fn pending_lease_refusals(
+        &self,
+        session: &SessionId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
+        type Row = (String, String, String); // refused_at, refused_by, current_holder
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT refused_at, refused_by, current_holder FROM lease_refusals \
+             WHERE session_id = ?1 AND refused_at >= ?2 ORDER BY refused_at DESC",
+        )
+        .bind(&session.0)
+        .bind(ts_to_text(since))
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| db_err("pending lease refusals", e))?;
+        rows.into_iter()
+            .map(|(refused_at, refused_by, current_holder)| {
+                Ok(crate::store::lease::LeaseRefusal {
+                    session: session.clone(),
+                    at: text_to_ts(&refused_at)?,
+                    refused_by,
+                    current_holder,
+                })
+            })
+            .collect()
+    }
+
     async fn write_flush_stats(
         &self,
         session: &SessionId,

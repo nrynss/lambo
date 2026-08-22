@@ -257,6 +257,28 @@ impl LeaseOutcome {
     }
 }
 
+/// A recorded lease refusal (J4): a writer attempted to take a session's
+/// single-writer lease and the incumbent holder refused it.
+///
+/// This is the durable fact "from both sides" names: a refused acquisition
+/// produces a **loser-side** ledger line (written by the refused writer, which
+/// is alive on this path) and a **holder-side** ledger line (written by the
+/// incumbent once it learns of the refusal through the store). [`LeaseRefusal`]
+/// is the store-side record that carries the fact from one process to the
+/// other. `at` is **stamped by the store's clock** (F18 — never a caller
+/// instant), the same discipline every lease timestamp obeys.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseRefusal {
+    /// The session the refusal was about.
+    pub session: crate::types::SessionId,
+    /// Store-clock instant of the refusal.
+    pub at: DateTime<Utc>,
+    /// The refused writer's holder token ([`LeaseHolder::token`]).
+    pub refused_by: String,
+    /// The incumbent holder's token, from the lease row at refusal time.
+    pub current_holder: String,
+}
+
 /// Best-effort host name, dependency-free. Only needs to distinguish hosts (see
 /// [`LeaseHolder::for_this_process`]).
 fn detect_host() -> String {

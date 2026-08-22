@@ -160,6 +160,19 @@ CREATE TABLE IF NOT EXISTS session_leases (
     endpoint    TEXT
 );
 
+-- J4 lease refusals (dev-diary/lambo-for-mooshik/J-multi-client.md §J4): a
+-- writer that was refused the single-writer lease records the refusal here so
+-- the incumbent holder can learn it turned away a takeover ("from both sides").
+-- refused_at is the STORE clock (F18 — never a caller instant). The incumbent
+-- polls these and appends its own ledger line; rows are read by the poller and
+-- need no retention (each poller dedups by refused_by+refused_at).
+CREATE TABLE IF NOT EXISTS lease_refusals (
+    session_id     TEXT NOT NULL,
+    refused_at     TEXT NOT NULL,
+    refused_by     TEXT NOT NULL,
+    current_holder TEXT NOT NULL
+);
+
 -- Flush stats published by the writer's FlushTask (T85-3): one row per
 -- session, upserted after each flush cycle so a reader in another process can
 -- render real flush_lag_ms / log_depth instead of n/a. Writers WRITE, readers
