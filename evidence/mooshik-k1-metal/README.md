@@ -66,6 +66,13 @@ both are recorded below: the load is ~1.0–1.8 s rather than an mmap, and reque
 reads f32 and converts, so *peak* memory during load is higher than the resident model.
 Converting once to local fp16 safetensors is a K2 option, not a K1 finding.
 
+> **Annotation (2026-08-22, after this capture):** the conversion was subsequently done,
+> bitwise-verified, and published as
+> [`rockus/bge-m3-f16-safetensors`](https://huggingface.co/rockus/bge-m3-f16-safetensors)
+> (operator-owned, provenance anchored to this same canonical artifact — see "Weight
+> artifact published" in [K-candle-embedder.md](../../dev-diary/lambo-for-mooshik/K-candle-embedder.md)
+> and `scripts/embedder/convert_bgem3_f16.py`). Everything above is unchanged capture.
+
 ---
 
 ## Artifacts

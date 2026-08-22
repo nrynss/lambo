@@ -261,7 +261,8 @@ warm, ~60 s once for the weight fetch.
 
 The "weight-file story" decision both legs handed to K2 is half-made: the fp32 → f16
 conversion was done once, verified, and published to
-**`rockus/bge-m3-f16-safetensors`** (public, MIT inherited). Provenance chain, each link
+**[`rockus/bge-m3-f16-safetensors`](https://huggingface.co/rockus/bge-m3-f16-safetensors)**
+(public, MIT inherited). Provenance chain, each link
 checked at conversion time and recorded in the repo's model card:
 
 * Source: canonical `BAAI/bge-m3` rev `5617a9f6…b181`, `pytorch_model.bin` sha256
