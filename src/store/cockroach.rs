@@ -3332,6 +3332,55 @@ mod tests {
         assert_eq!(edge_sql.matches("ON CONFLICT").count(), 1);
     }
 
+    /// D-R1-2 (no live cluster: SQL text is the contract). A **non-NULL**
+    /// event_time must survive the whole statement path: bound as the LAST
+    /// column of both multi-row upserts (matching the column list, so a bind
+    /// that drifted onto `created_at`'s slot changes the placeholder count),
+    /// carried by `DO UPDATE SET` so the natural-key replace cannot erase it,
+    /// and read back by name in both SELECTs. The sqlite adapter reads this
+    /// column positionally — this is where a column-order regression shows.
+    #[test]
+    fn event_time_rides_the_upsert_and_select_shape() {
+        let stamped_at = Utc.timestamp_opt(946_684_799, 0).unwrap();
+
+        let mut i = test_interaction(NodeId::new());
+        i.event_time = Some(stamped_at);
+        let i_sql = interaction_upsert_query(&[&i]).sql().to_string();
+        assert_eq!(placeholder_max(&i_sql), 7, "1 row x 7 columns: {i_sql}");
+        assert!(
+            i_sql.contains("previous_id, created_at, event_time"),
+            "event_time closes the INSERT column list: {i_sql}"
+        );
+
+        let mut e = test_edge(NodeId::new(), NodeId::new(), EdgeType::Causal);
+        e.event_time = Some(stamped_at);
+        let e_sql = edge_upsert_query(&[&e]).sql().to_string();
+        assert_eq!(placeholder_max(&e_sql), 10, "1 row x 10 columns: {e_sql}");
+        assert!(
+            e_sql.contains("last_reinforced, event_time"),
+            "event_time closes the INSERT column list: {e_sql}"
+        );
+
+        // Whole-record replace on conflict is only consistent while BOTH
+        // halves carry the stamp (I2 convention).
+        for sql in [&i_sql, &e_sql] {
+            let (_, on_conflict) = sql
+                .split_once("ON CONFLICT")
+                .expect("the upsert has a conflict clause");
+            assert!(
+                on_conflict.contains("event_time = EXCLUDED.event_time"),
+                "conflict update must re-stamp from the incoming row: {sql}"
+            );
+        }
+
+        for sql in [SELECT_INTERACTIONS_SQL, SELECT_EDGES_SQL] {
+            assert!(
+                sql.contains("event_time"),
+                "load must read event_time back by name: {sql}"
+            );
+        }
+    }
+
     /// R2-1 (no live cluster: SQL text is the contract). The three
     /// canonization columns are INSERT-only — present in the column list so a
     /// brand-new row carries them, absent from `DO UPDATE SET` so a stale

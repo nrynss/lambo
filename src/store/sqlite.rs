@@ -7937,4 +7937,87 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+    /// D-R1-2: the flush→load round-trip claim had no test that actually wrote
+    /// a **non-NULL** event_time — every existing adapter row is NULL on both
+    /// sides, so NULL ≡ NULL passes while a mis-bind of `created_at` (or the
+    /// positional `try_get(9)` edge read drifting) would re-age every
+    /// historical fact onto flush time invisibly. Both stamps here are
+    /// distinct instants, so a mis-bind cannot pass; companion rows stay None.
+    #[tokio::test]
+    async fn event_time_survives_the_flush_load_round_trip() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("event-time-roundtrip");
+        let about = Utc.with_ymd_and_hms(1999, 12, 31, 23, 59, 59).unwrap();
+        let flushed = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+
+        let i_stamped = NodeId::new();
+        let i_plain = NodeId::new();
+        let e_stamped = NodeId::new();
+        let e_plain = NodeId::new();
+
+        let interaction =
+            |id: NodeId, prev: Option<NodeId>, et: Option<DateTime<Utc>>| Mutation::UpsertNode {
+                node: NodeKind::Interaction(Interaction {
+                    event_time: et,
+                    id,
+                    session_id: sid.clone(),
+                    agent_id: AgentId::from("a"),
+                    prompt_text: Some("prompt".into()),
+                    previous_id: prev,
+                    created_at: flushed,
+                }),
+            };
+        let edge = |id: NodeId, et: Option<DateTime<Utc>>| Mutation::UpsertEdge {
+            edge: Edge {
+                event_time: et,
+                id,
+                session_id: sid.clone(),
+                source: NodeId::new(),
+                target: NodeId::new(),
+                edge_type: EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: flushed,
+                last_reinforced: flushed,
+            },
+        };
+
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        interaction(i_stamped, None, Some(about)),
+                        interaction(i_plain, Some(i_stamped), None),
+                        edge(e_stamped, Some(about)),
+                        edge(e_plain, None),
+                    ],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(&sid).await.unwrap();
+        let stamped_i = loaded
+            .interactions
+            .iter()
+            .find(|i| i.id == i_stamped)
+            .expect("stamped interaction loaded");
+        assert_eq!(stamped_i.event_time, Some(about));
+        // Distinct from created_at by construction: a bind that swaps them fails.
+        assert_eq!(stamped_i.created_at, flushed);
+        let plain_i = loaded
+            .interactions
+            .iter()
+            .find(|i| i.id == i_plain)
+            .expect("plain interaction loaded");
+        assert_eq!(plain_i.event_time, None);
+
+        let stamped_e = loaded.edges.iter().find(|e| e.id == e_stamped).unwrap();
+        assert_eq!(stamped_e.event_time, Some(about));
+        assert_eq!(stamped_e.created_at, flushed);
+        let plain_e = loaded.edges.iter().find(|e| e.id == e_plain).unwrap();
+        assert_eq!(plain_e.event_time, None);
+    }
 }
