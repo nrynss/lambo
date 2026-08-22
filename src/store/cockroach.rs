@@ -296,8 +296,9 @@ ON CONFLICT (id) DO UPDATE SET
     event_time = EXCLUDED.event_time
 "#;
 
-/// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
-/// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable.
+/// 17 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
+/// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable;
+/// `human_confirmed` (C2 solo-score input) is the 17th, bound as an INT count.
 ///
 /// **R2-1 — canonization columns are insert-only here.**
 /// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
@@ -314,7 +315,7 @@ INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
     gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
-    chunk_group_id
+    chunk_group_id, human_confirmed
 ) "#;
 
 const ON_CONFLICT_CONCEPT_SQL: &str = r#"
@@ -330,7 +331,8 @@ ON CONFLICT (id) DO UPDATE SET
     last_accessed = EXCLUDED.last_accessed,
     gc_survived = EXCLUDED.gc_survived,
     embedding = EXCLUDED.embedding,
-    chunk_group_id = EXCLUDED.chunk_group_id
+    chunk_group_id = EXCLUDED.chunk_group_id,
+    human_confirmed = EXCLUDED.human_confirmed
 "#;
 
 /// Natural-key conflict target `(source, target, edge_type)` matches the graph tier's
@@ -470,7 +472,7 @@ const SELECT_CONCEPTS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, content, canonical_key, concept_type,
        origin_interaction::STRING AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding::STRING AS embedding, chunk_group_id
+       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -1061,6 +1063,7 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
     let access_count: i64 = row.try_get("access_count").map_err(backend)?;
     let gc_survived: i64 = row.try_get("gc_survived").map_err(backend)?;
     let blast_radius: Option<i64> = row.try_get("blast_radius").map_err(backend)?;
+    let human_confirmed: i64 = row.try_get("human_confirmed").map_err(backend)?;
     Ok(Concept {
         id: parse_node_id(&id)?,
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
@@ -1082,6 +1085,7 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         embedding: embedding.as_deref().map(decode_vector).transpose()?,
+        human_confirmed: human_confirmed as i32,
         chunk_group_id: row.try_get("chunk_group_id").map_err(backend)?,
     })
 }
@@ -1531,7 +1535,8 @@ fn concept_upsert_query<'a>(
                 // literal, so the cast is part of the value expression — it must
                 // ride with this placeholder, not with the separator.
                 .push_unseparated("::VECTOR")
-                .push_bind(c.chunk_group_id.as_deref());
+                .push_bind(c.chunk_group_id.as_deref())
+                .push_bind(c.human_confirmed);
         },
     );
     qb.push(ON_CONFLICT_CONCEPT_SQL);
@@ -2879,6 +2884,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }

@@ -150,6 +150,7 @@ pub fn demote(
             // one; recorded in dev-diary/notes/adve-wave3-graph-decisions.md).
             last_demotion_time: Some(interaction_created_at),
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: Some(chunk_group_id.to_string()),
         };
         let id = concept.id;
@@ -234,6 +235,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }

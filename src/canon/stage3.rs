@@ -182,6 +182,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: last_demotion,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }

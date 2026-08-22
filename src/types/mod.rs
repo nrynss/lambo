@@ -325,6 +325,19 @@ pub struct Concept {
     pub last_accessed: Option<DateTime<Utc>>,
     /// How many garbage-collection sweeps this concept has survived.
     pub gc_survived: i32,
+    /// How many times a human has explicitly confirmed this concept (C2, spec
+    /// §3.2's "Human Confirmed" term).
+    ///
+    /// The one solo-score input no existing structure carries (the other three
+    /// derive from interactions, structural edges and the canonization event
+    /// log — see `crate::canon::policy`), so it is persisted rather than
+    /// invented: bumped only through [`crate::Memory::confirm_human`], a verb
+    /// no agent write path can reach, so agent activity cannot inflate it.
+    /// Serde-defaulted (like `event_time` and `chunk_group_id`) so existing
+    /// fixture JSON — which has no key — loads unchanged; a missing key *is*
+    /// the never-confirmed case.
+    #[serde(default)]
+    pub human_confirmed: i32,
     /// How far along the path to canonical this concept is.
     pub canonization_status: CanonizationStatus,
     /// How many concepts depend on this one. `None` until it is computed.
@@ -1101,6 +1114,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         };
         let node = Node::Concept(c.clone());

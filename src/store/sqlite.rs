@@ -269,7 +269,10 @@ use crate::types::{
 /// mirroring the Cockroach constant (F4).
 const BULK_LIMITS: BulkLimits = BulkLimits {
     interactions: 100,
-    concepts: 60,
+    // C2 added a 17th concept column (`human_confirmed`); 60 × 17 = 1020
+    // breaches the conservative 999-variable ceiling, so the chunk drops to 58
+    // (58 × 17 = 986) to keep the R1-4 assert honest on pre-3.32 SQLite.
+    concepts: 58,
     edges: 99,
 };
 
@@ -278,9 +281,9 @@ const BULK_LIMITS: BulkLimits = BulkLimits {
 const SQLITE_MAX_VARIABLE_NUMBER: usize = 999;
 
 // R1-4: the arithmetic in the doc comment above is prose, and prose does not
-// fail a build. Raising `concepts` to 70 (70 × 16 = 1120) passes the whole local
-// suite against a modern bundled SQLite and only breaks on an old one, in
-// production. These turn that into a compile error.
+// fail a build. Raising `concepts` past the 58-row chunk (see `BULK_LIMITS`)
+// passes the whole local suite against a modern bundled SQLite and only breaks
+// on an old one, in production. These turn that into a compile error.
 const _: () = assert!(
     BULK_LIMITS.interactions * INTERACTION_COLUMNS <= SQLITE_MAX_VARIABLE_NUMBER,
     "interactions chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
@@ -651,6 +654,16 @@ impl GraphStore for SqliteStore {
             "concepts",
             "chunk_group_id",
             "ALTER TABLE concepts ADD COLUMN chunk_group_id TEXT",
+        )
+        .await?;
+        // C2 (SoloPolicy): the explicit human-confirmation count. Existing
+        // databases converge here; fresh ones carry the column inline from the
+        // DDL and this is a no-op.
+        ensure_column(
+            self.pool(),
+            "concepts",
+            "human_confirmed",
+            "ALTER TABLE concepts ADD COLUMN human_confirmed INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
         ensure_column(
@@ -2153,7 +2166,7 @@ async fn upsert_concepts(
              id, session_id, content, canonical_key, concept_type, origin_interaction, \
              origin_agent, created_at, access_count, last_accessed, gc_survived, \
              canonization_status, blast_radius, last_demotion_time, embedding, \
-             chunk_group_id) ",
+             chunk_group_id, human_confirmed) ",
     );
     qb.push_values(rows.iter().zip(encoded.iter()), |mut b, (r, enc)| {
         let c = r.concept;
@@ -2172,7 +2185,8 @@ async fn upsert_concepts(
             .push_bind(r.canonization.blast_radius)
             .push_bind(r.canonization.last_demotion_time.map(ts_to_text))
             .push_bind(enc.embedding.clone())
-            .push_bind(c.chunk_group_id.clone());
+            .push_bind(c.chunk_group_id.clone())
+            .push_bind(c.human_confirmed);
     });
     // Conflict target is the `id` PRIMARY KEY. The partial unique index
     // (session_id, canonical_key) WHERE concept_type <> 'Observation' is NOT a
@@ -2200,7 +2214,8 @@ async fn upsert_concepts(
              last_accessed = excluded.last_accessed, \
              gc_survived = excluded.gc_survived, \
              embedding = excluded.embedding, \
-             chunk_group_id = excluded.chunk_group_id",
+             chunk_group_id = excluded.chunk_group_id, \
+             human_confirmed = excluded.human_confirmed",
     );
     qb.build()
         .execute(&mut *tx)
@@ -2577,7 +2592,7 @@ async fn load_concepts(
         "SELECT id, session_id, content, canonical_key, concept_type, origin_interaction, \
                 origin_agent, created_at, access_count, last_accessed, gc_survived, \
                 canonization_status, blast_radius, last_demotion_time, embedding, \
-                chunk_group_id \
+                chunk_group_id, human_confirmed \
          FROM concepts WHERE session_id = ? ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -2619,6 +2634,7 @@ async fn load_concepts(
         };
         let chunk_group_id: Option<String> =
             row.try_get(15).map_err(|e| db_err("load concepts", e))?;
+        let human_confirmed: i32 = row.try_get(16).map_err(|e| db_err("load concepts", e))?;
         out.push(Concept {
             id: node_id(&id, "concept id")?,
             session_id: SessionId::from(sid),
@@ -2636,6 +2652,7 @@ async fn load_concepts(
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             embedding,
             chunk_group_id,
+            human_confirmed,
         });
     }
     Ok(out)
@@ -2835,6 +2852,7 @@ mod tests {
                 blast_radius: None,
                 last_demotion_time: None,
                 embedding: None,
+                human_confirmed: 0,
                 chunk_group_id: None,
             }),
         }
@@ -4271,6 +4289,7 @@ mod tests {
                         blast_radius: None,
                         last_demotion_time: None,
                         embedding: Some(emb.clone()),
+                        human_confirmed: 0,
                         chunk_group_id: None,
                     }),
                 },
@@ -4448,6 +4467,7 @@ mod tests {
                     blast_radius: None,
                     last_demotion_time: None,
                     embedding: Some(vec![0.1, 0.2, 0.3]),
+                    human_confirmed: 0,
                     chunk_group_id: None,
                 }],
                 embedding: Some(contract.clone()),
@@ -4769,6 +4789,7 @@ mod tests {
                         blast_radius: None,
                         last_demotion_time: None,
                         embedding: None,
+                        human_confirmed: 0,
                         chunk_group_id: Some("legacy-chunk".into()),
                     }),
                 },

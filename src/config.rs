@@ -238,20 +238,13 @@ impl Config {
                 self.canonization_eval_interval
             )));
         }
-        // C1 declares the seam; C2 supplies the solo formula, and C2 is
-        // blocked on D2 (event time). Refuse here rather than at the first
-        // eval cycle: a policy that cannot promote is indistinguishable from
-        // one that merely promoted nothing, so the failure has to happen
-        // where it can still name the reason. `canon::SoloScorer` is the
-        // backstop if this check is ever bypassed.
-        if !self.promotion_policy.is_implemented() {
-            return Err(LamboError::Config(format!(
-                "promotion_policy {:?} is declared but not implemented — C2 (the solo \
-                 promotion formula) depends on D2 (event time); use {:?} until it lands",
-                self.promotion_policy.as_str(),
-                PromotionPolicy::Swarm.as_str()
-            )));
-        }
+        // C1's Solo refusal lived here while the solo scorer was
+        // unimplemented ("a policy that cannot promote is indistinguishable
+        // from one that merely promoted nothing — fail where the reason can be
+        // named"). C2 landed the formula, so both the refusal and its
+        // `unimplemented!()` backstop are gone together: every variant of
+        // `promotion_policy` names a policy that can run a cycle, and there is
+        // nothing left to refuse here.
         Ok(())
     }
 }
@@ -430,25 +423,22 @@ mod tests {
         assert_eq!(c.scoring, back);
     }
 
-    /// An unimplemented promotion policy must fail at `validate`, not at the
-    /// first eval cycle — and must say what it is waiting on.
+    /// C2 clean cutover: with the solo formula landed, `Solo` validates — the
+    /// C1-era refusal (and its `unimplemented!()` backstop) is gone, and every
+    /// `promotion_policy` value names a runnable cycle.
     ///
-    /// Mutation: delete the `is_implemented` arm in `Config::validate` (or
-    /// make `PromotionPolicy::Solo.is_implemented()` return `true`) and this
-    /// goes red on the `is_err` assertion. Verified.
+    /// Mutation: reintroduce a refusal arm for non-default policies in
+    /// `Config::validate` → red on the `is_ok` assertion.
     #[test]
-    fn unimplemented_promotion_policy_fails_closed() {
-        let c = Config {
-            promotion_policy: PromotionPolicy::Solo,
-            ..Config::default()
-        };
-        let err = c
-            .validate()
-            .expect_err("Solo is not implemented and must not validate");
-        let msg = err.to_string();
-        assert!(msg.contains("promotion_policy"), "message: {msg}");
-        assert!(msg.contains("Solo"), "message: {msg}");
-        assert!(msg.contains("Swarm"), "message: {msg}");
+    fn every_promotion_policy_validates() {
+        for policy in [PromotionPolicy::Swarm, PromotionPolicy::Solo] {
+            let c = Config {
+                promotion_policy: policy,
+                ..Config::default()
+            };
+            c.validate()
+                .unwrap_or_else(|e| panic!("{policy:?} must validate: {e}"));
+        }
     }
 
     /// The refusal above must not be over-broad: the default config still
