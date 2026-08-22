@@ -191,6 +191,16 @@ jobs:
           # (dead-code-clean under -D warnings); live tests are #[ignore]d.
           - name: cockroach
             command: cargo test --no-default-features --features store-cockroach
+          # K2 — the in-crate candle BGE-M3 embedder compiles and its
+          # weightless unit tests pass on the default runner. The base feature
+          # is CPU-capable candle only: no accelerator Cargo features, no
+          # weights downloaded, no network — the adapter's live weight-loading
+          # tests stay #[ignore]d and its device-resolution / identity /
+          # batching unit tests are pure. A separate row rather than folding
+          # into `check` because the default build must not pay candle's
+          # compile cost; a named red row beats one line in an 800-test log.
+          - name: candle
+            command: cargo test --features embed-candle
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --features demo
