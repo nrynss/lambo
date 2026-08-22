@@ -1,0 +1,6 @@
+[store]
+kind = "cockroach"
+
+[embedder]
+kind = "fixture"
+dim = 1024

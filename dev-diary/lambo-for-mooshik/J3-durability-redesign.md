@@ -429,10 +429,48 @@ shape.
 
 ## Items that want the Cockroach-capable machine
 
-* **F4** — close-time latency against a real cluster: three statements plus two bucket drains
-  per write inside the close-time transaction, still the only unmeasured number on this
-  branch. Bounded in consequence (a slow or failed close-time flush now loses nothing), so
-  this is a measurement to schedule, not a defect to fear.
+* **F4 — now measured, not scheduled** (`evidence/mooshik-f4-cockroach/README.md`): close-time
+  latency against the real cluster (live CockroachDB serverless, fixture embedder) is
+  `close_ms ≈ 221 + 249·K`, where K is the durable-intent tail the close flush carries
+  (K=10→2718 ms, K=25→6449 ms, K=30→7708 ms; linear fit slope 249.4 ms per durable intent,
+  intercept 221 ms). **The budget crosses 8 s at ≈ 31 durable intents, and at ≥ 35 the close
+  abandons and loses the tail** (K=35 → 0/35 durable, exit 1; K=400 → 22/400; every lost
+  write was acked on the wire). One sentence of the old framing was inverted by the data:
+  "Bounded in consequence (a slow or failed close-time flush now loses nothing)" — on the
+  **serve** path there is no on-disk WAL, so an abandoned close is followed by process exit
+  and the in-memory tail dies with it (`serve.rs`: "the un-flushed tail is LOST").
+  The pessimistic barrier model (2 drains + 3 statements per durable-intent write) is
+  confirmed, not the benign planned-statement model: the multi-row batching L82-1
+  introduced is fragmented at every durable-intent barrier, so a realistic burst over the
+  1 s write-behind rate is a *data-loss close*, not a slow one. This is no longer a
+  measurement to schedule — the design doc's own "if the risk below materialises, the
+  barriers are what to attack" is now the standing recommendation: attack `plan_flush`'s
+  per-intent `bucket.drain_into` so durable-intent mutations stop fragmenting the bulk
+  batching.
+
+  **Fix attempted (2026-08-22) and found insufficient — the barriers were not the
+  dominant cost.** `plan_flush` was changed to batch `PutWriteIntent`/`ConsumeWriteIntent`
+  into multi-row `write_intents` statements instead of emitting a per-intent barrier
+  (new `FlushStep::PutIntents`/`ConsumeIntents`; `batch.rs` + both adapters; unit-tested,
+  no regression on either adapter's full suite). Re-measuring against the live cluster
+  (fixed binary, same driver, K ∈ {30, 50, 100, 200}): the close flush is **unchanged** —
+  K=30 is still ≥ 8 s tail-lost (pre-fix it was 7.7 s durable; both sit on the 8 s cliff),
+  so the intent savings are swamped. The earlier "249 ms per durable intent" fit was a
+  misattribution: K correlates one-for-one with the per-action flood, and the real cost is
+  the **aggregate round-trip count** of the tail (≈ 54 mutations per `record_action`,
+  ~110 ms effective per statement) — dominated by un-batched `interactions`
+  (`BULK_LIMITS.interactions = 1`, one RTT each) plus the concept/edge vector upserts and
+  the distributed-txn commit latency. A realistic burst tail (~1 000+ mutations) cannot
+  flush inside an 8 s serverless close regardless of the intent barriers.
+
+  **Next (in flight): Option 1 — batch `interactions`** by raising `BULK_LIMITS.interactions`,
+  reusing the R1-1 first-position self-FK dedupe that already makes multi-row interactions
+  safe; per-action this removes most of the per-statement RTTs a `record_action` tail
+  carries. If that still does not fit the budget, the honest options are (2) fold the
+  per-concept embedding write into the concept upsert (bigger, needs a mutation-composition
+  diagnosis first — the premise is unverified), or (3) accept and document the serverless
+  close-flush ceiling rather than move the grace budget (reviewers rejected budget-moving as
+  masking).
 * **J3-R2R-3** — F5's column gap, measured at F5's own magnitude: a store missing one column
   attaches, acks, reports `applied=4 degraded=false`, and leaves `concepts=0`, loud only at
   close with exit 1. The judgement call is column preflight versus a stated magnitude, and
@@ -556,9 +594,10 @@ preflight diffs those against `PRAGMA table_info` (SQLite) / `information_schema
 confirmed `LAMBO_COCKROACH_DSN` is reachable on this machine; the DSN was sourced from
 `.env` for the run and never printed or committed): `init_schema`, a passing preflight, a
 required column renamed away → preflight refused by table + column name, then renamed back.
-The one named follow-up that remains is **F4** — close-time latency against the live
-cluster (three extra statements + two bucket drains per write) — which the design doc
-already records as a *measurement to schedule*, not a blocker.
+The one named follow-up that remained, **F4**, is now measured — close-time latency against
+the live cluster blows the 8 s close budget at ≈ 31 durable intents and abandons/loses the
+tail at ≥ 35 (see the F4 bullet in "Items that want the Cockroach-capable machine"), so it
+is no longer the unmeasured item on this branch.
 
 ### R-6 — PROBE_TEXT, numbers dropped rather than restated
 
@@ -572,6 +611,7 @@ option.
 
 ### Uncertainties / named follow-ups
 
-* **F4** — close-time latency against live Cockroach: a measurement to schedule, not a
-  blocker (R-3 row above).
+* **F4** — now measured, resolved (see the F4 bullet above): `close_ms ≈ 221 + 249·K`,
+  budget crosses 8 s at K ≈ 31, tail lost at K ≥ 35 — the standing recommendation is to
+  attack the `plan_flush` barriers, not to keep scheduling a measurement.
 

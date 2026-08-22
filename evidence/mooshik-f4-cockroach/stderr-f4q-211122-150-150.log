@@ -1,0 +1,11 @@
+2026-08-21T15:41:46.242507Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=f4q-211122-150 agent=f4-capture existing=false match_strategy=Hybrid embedder=fixture dim=1024
+2026-08-21T15:41:46.242614Z  INFO lambo::writeq: write queue: bounds are static (lane 64, queue 1024) and no rate moves them; the rates below are telemetry measured on this deployment's embedder — the serial leg 1-wide, the aggregate 4-wide session=f4q-211122-150 items_per_sec=138840.68031933357 serial_items_per_sec=158730.15873015873 bound=1024 lane_bound=64 concurrency=4
+2026-08-21T15:41:46.242909Z  INFO lambo::mcp::serve: lambo serve: session endpoint bound — other clients on this machine can attach to this session through it endpoint=/run/user/1000/lambo/f4q-211122-150-aa92ed9529ce7302.sock
+2026-08-21T15:41:46.242933Z  INFO lambo::mcp::serve: lambo serve: session attached session=f4q-211122-150 agent=f4-capture transport=Http
+2026-08-21T15:41:46.242958Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-21T15:41:46.243026Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:8450
+2026-08-21T15:41:47.896679Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-21T15:41:55.897593Z ERROR lambo::mcp::serve: lambo serve: close() did not finish within the grace window — abandoning it and exiting; the un-flushed tail is LOST (the write-behind log is in-memory only, there is no on-disk WAL, and a restart will NOT recover it) grace_secs=8
+2026-08-21T15:41:56.002001Z ERROR lambo::mcp::serve: lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL) error=config: close timed out after 8s; tail lost on exit, not durable
+2026-08-21T15:41:56.002103Z  WARN lambo::memory: Memory dropped with live background tasks (never closed, or a close() was cancelled): tasks aborted and 5670 un-flushed mutations in the log were discarded — after a cancelled close(), mutations held in the flush task's buffer are lost as well and are not in this count session=f4q-211122-150 mutations=5670
+lambo serve: config: close timed out after 8s; tail lost on exit, not durable

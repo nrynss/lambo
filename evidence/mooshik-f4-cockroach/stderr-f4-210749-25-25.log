@@ -1,0 +1,8 @@
+2026-08-21T15:37:50.722790Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=f4-210749-25 agent=f4-capture existing=false match_strategy=Hybrid embedder=fixture dim=1024
+2026-08-21T15:37:50.722903Z  INFO lambo::writeq: write queue: bounds are static (lane 64, queue 1024) and no rate moves them; the rates below are telemetry measured on this deployment's embedder — the serial leg 1-wide, the aggregate 4-wide session=f4-210749-25 items_per_sec=138504.15512465374 serial_items_per_sec=125786.16352201258 bound=1024 lane_bound=64 concurrency=4
+2026-08-21T15:37:50.723129Z  INFO lambo::mcp::serve: lambo serve: session endpoint bound — other clients on this machine can attach to this session through it endpoint=/run/user/1000/lambo/f4-210749-25-18a7fbeebcf14c56.sock
+2026-08-21T15:37:50.723153Z  INFO lambo::mcp::serve: lambo serve: session attached session=f4-210749-25 agent=f4-capture transport=Http
+2026-08-21T15:37:50.723172Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-21T15:37:50.723226Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:8025
+2026-08-21T15:37:57.650113Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-21T15:37:57.742922Z  INFO lambo::mcp::serve: lambo serve: session closed, tail durable
