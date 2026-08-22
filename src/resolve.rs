@@ -153,9 +153,18 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     }
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
+    // K2 task 3: the candle adapter stamps its served-artifact identity
+    // (source revision + weight sha256 prefix) rather than a raw model string,
+    // so a kind/dim match cannot hide a between two quantizations. bge_m3
+    // keeps stamping `llama_model` as today (empty => server default).
+    let model = if embedder_cfg.kind == crate::embed::EmbedderKind::Candle {
+        crate::embed::candle_identity(embedder.as_ref())
+    } else {
+        embedder_cfg.llama_model.clone().filter(|s| !s.is_empty())
+    };
     let embedding = EmbeddingContract {
         kind: embedder_cfg.kind.to_string(),
-        model: embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
+        model,
         dim: embed_dim,
     };
 
@@ -308,6 +317,7 @@ mod tests {
                 dim: 1024,
                 llama_url: None,
                 llama_model: None,
+                ..Default::default()
             },
             daemon: Default::default(),
         };
@@ -346,6 +356,7 @@ mod tests {
                 dim: 1024,
                 llama_url: None,
                 llama_model: None,
+                ..Default::default()
             },
             daemon: Default::default(),
         };

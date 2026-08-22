@@ -269,6 +269,7 @@ mod tests {
                 dim: 1024,
                 llama_url: None,
                 llama_model: None,
+                ..Default::default()
             },
             embedding: EmbeddingContract {
                 kind: "fixture".into(),
@@ -673,6 +674,7 @@ mod tests {
                 dim: 1024,
                 llama_url: None,
                 llama_model: None,
+                ..Default::default()
             },
             embedding: EmbeddingContract {
                 kind: "fixture".into(),

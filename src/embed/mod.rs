@@ -1,6 +1,6 @@
 //! Embedder trait, Level B factory, and optional adapter modules (P1 / P7).
 //!
-//! Packaging: Cargo features gate adapters (`embed-bge`, `embed-fixture`, `embed-bedrock`);
+//! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`, `embed-bedrock`);
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
@@ -8,6 +8,8 @@ mod math;
 
 #[cfg(feature = "embed-bge")]
 mod bge_m3;
+#[cfg(feature = "embed-candle")]
+mod candle;
 #[cfg(feature = "embed-fixture")]
 mod fixture;
 
@@ -15,6 +17,8 @@ pub use math::cosine;
 
 #[cfg(feature = "embed-bge")]
 pub use bge_m3::BgeM3LlamaCppEmbedder;
+#[cfg(feature = "embed-candle")]
+pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-fixture")]
 pub use fixture::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
 
@@ -122,6 +126,13 @@ pub trait Embedder: Send + Sync {
     /// (and rejects a zero-norm vector), and `FixtureEmbedder` emits unit vectors by
     /// construction. `A-gemini-embedder.md` instructs the next one to.
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
+
+    /// Optional downcast hook so the registry can ask a concrete adapter for
+    /// identity data (K2 task 3: the candle adapter stamps its artifact
+    /// identity). The default returns `None`; the candle adapter overrides it.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 /// Embedding backend selector (TOML `embedder.kind` / `LAMBO_EMBEDDER`).
@@ -133,6 +144,8 @@ pub enum EmbedderKind {
     /// BGE-M3 weights served by a local llama.cpp server (default). Feature: `embed-bge`.
     #[default]
     BgeM3,
+    /// In-process BGE-M3 via candle (K2). Feature: `embed-candle`.
+    Candle,
     /// Amazon Titan Text Embeddings V2 on Bedrock. Feature: `embed-bedrock` (T7.1).
     Bedrock,
     /// Deterministic offline embedder. Feature: `embed-fixture`.
@@ -152,6 +165,7 @@ impl EmbedderKind {
     pub const fn feature_name(self) -> &'static str {
         match self {
             Self::BgeM3 => "embed-bge",
+            Self::Candle => "embed-candle",
             Self::Bedrock => "embed-bedrock",
             Self::Fixture => "embed-fixture",
         }
@@ -163,6 +177,7 @@ impl EmbedderKind {
     pub const fn is_compiled(self) -> bool {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
+            Self::Candle => cfg!(feature = "embed-candle"),
             Self::Bedrock => cfg!(feature = "embed-bedrock"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
         }
@@ -172,6 +187,7 @@ impl EmbedderKind {
     pub const fn is_ready(self) -> bool {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
+            Self::Candle => cfg!(feature = "embed-candle"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
             // T7.1 not implemented yet.
             Self::Bedrock => false,
@@ -186,15 +202,16 @@ impl FromStr for EmbedderKind {
         let t = s.trim();
         if t.is_empty() {
             return Err(EmbedError::Unavailable(
-                "empty embedder kind (expected bge_m3 | bedrock | fixture)".into(),
+                "empty embedder kind (expected bge_m3 | candle | bedrock | fixture)".into(),
             ));
         }
         match t.to_ascii_lowercase().as_str() {
             "bge_m3" | "bge-m3" | "bge" => Ok(Self::BgeM3),
+            "candle" => Ok(Self::Candle),
             "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
             other => Err(EmbedError::Unavailable(format!(
-                "unknown embedder kind {other:?} (expected bge_m3 | bedrock | fixture)"
+                "unknown embedder kind {other:?} (expected bge_m3 | candle | bedrock | fixture)"
             ))),
         }
     }
@@ -204,6 +221,7 @@ impl std::fmt::Display for EmbedderKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BgeM3 => write!(f, "bge_m3"),
+            Self::Candle => write!(f, "candle"),
             Self::Bedrock => write!(f, "bedrock"),
             Self::Fixture => write!(f, "fixture"),
         }
@@ -228,6 +246,28 @@ pub struct EmbedderConfig {
     /// Model id sent to llama.cpp (empty => server default).
     #[serde(default, alias = "model")]
     pub llama_model: Option<String>,
+    /// candle device selection: `auto` | `cpu` (K2).
+    ///
+    /// `auto` (default) resolves Metal on Apple silicon, CUDA elsewhere, and
+    /// refuses to start when neither accelerator exists. `cpu` pins the CPU
+    /// backend explicitly — the only way to serve without an accelerator.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// candle hf-hub weights repo (default: the published f16 safetensors).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// candle hf-hub revision within `repo`.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// candle weight filename to load (`model.safetensors` | `pytorch_model.bin`).
+    #[serde(default)]
+    pub weights_file: Option<String>,
+    /// candle offline mode: never touch the network; fail if weights are not cached.
+    #[serde(default)]
+    pub offline: Option<bool>,
+    /// candle explicit local weights dir; bypasses hf-hub cache entirely.
+    #[serde(default)]
+    pub weights_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for EmbedderConfig {
@@ -237,6 +277,12 @@ impl Default for EmbedderConfig {
             dim: 1024,
             llama_url: None,
             llama_model: None,
+            device: None,
+            repo: None,
+            revision: None,
+            weights_file: None,
+            offline: None,
+            weights_dir: None,
         }
     }
 }
@@ -277,6 +323,11 @@ impl EmbedderConfig {
                 self.llama_model = Some(v);
             }
         }
+        if let Ok(v) = env::var("LAMBO_EMBED_DEVICE") {
+            if !v.is_empty() {
+                self.device = Some(v);
+            }
+        }
         Ok(self)
     }
 }
@@ -285,6 +336,26 @@ impl EmbedderConfig {
 pub fn embedder_from_env() -> Result<Box<dyn Embedder>, EmbedError> {
     let cfg = EmbedderConfig::from_env()?;
     build_embedder(cfg)
+}
+
+/// The served-artifact identity the candle adapter stamps into the session
+/// contract (`EmbeddingContract.model`). Returns the empty string when the
+/// embedder is not the candle adapter (the caller falls back to bge_m3's
+/// `llama_model`). `build_embedder` returns a `Box<dyn Embedder>`, which erases
+/// the concrete type, so this downcast name is how resolve.rs learns the
+/// identity (K2 task 3).
+#[cfg(feature = "embed-candle")]
+pub fn candle_identity(embedder: &dyn Embedder) -> Option<String> {
+    embedder
+        .as_any()
+        .and_then(|a| a.downcast_ref::<candle::CandleEmbedder>())
+        .map(|c| c.model_identity().to_string())
+}
+
+/// Same as [`candle_identity`] on builds without the candle feature.
+#[cfg(not(feature = "embed-candle"))]
+pub fn candle_identity(_embedder: &dyn Embedder) -> Option<String> {
+    None
 }
 
 fn missing_feature(kind: EmbedderKind) -> EmbedError {
@@ -331,6 +402,26 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                 Err(missing_feature(EmbedderKind::BgeM3))
             }
         }
+        EmbedderKind::Candle => {
+            #[cfg(feature = "embed-candle")]
+            {
+                Ok(Box::new(candle::CandleEmbedder::new(
+                    cfg.dim,
+                    crate::embed::candle::CandleOpts {
+                        device: cfg.device,
+                        repo: cfg.repo,
+                        revision: cfg.revision,
+                        weights_file: cfg.weights_file,
+                        offline: cfg.offline.unwrap_or(false),
+                        weights_dir: cfg.weights_dir.clone(),
+                    },
+                )?))
+            }
+            #[cfg(not(feature = "embed-candle"))]
+            {
+                Err(missing_feature(EmbedderKind::Candle))
+            }
+        }
         EmbedderKind::Fixture => {
             #[cfg(feature = "embed-fixture")]
             {
@@ -371,6 +462,10 @@ mod tests {
         assert_eq!(
             "BGE-M3".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::BgeM3
+        );
+        assert_eq!(
+            "candle".parse::<EmbedderKind>().unwrap(),
+            EmbedderKind::Candle
         );
         assert_eq!(
             "bedrock".parse::<EmbedderKind>().unwrap(),
@@ -458,6 +553,8 @@ mod tests {
         assert_eq!(w.kind, EmbedderKind::Bedrock);
         let w: Wrap = toml::from_str(r#"kind = "fake""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Fixture);
+        let w: Wrap = toml::from_str(r#"kind = "candle""#).unwrap();
+        assert_eq!(w.kind, EmbedderKind::Candle);
     }
 
     #[test]
@@ -480,6 +577,7 @@ mod tests {
             dim: 1024,
             llama_url: None,
             llama_model: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(e.dimensions(), 1024);
@@ -493,6 +591,7 @@ mod tests {
             dim: 0,
             llama_url: None,
             llama_model: None,
+            ..Default::default()
         });
         let Err(err) = r else {
             panic!("expected err");
@@ -509,6 +608,7 @@ mod tests {
             dim: 64,
             llama_url: None,
             llama_model: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(e.dimensions(), 64);
@@ -522,6 +622,7 @@ mod tests {
             dim: 1024,
             llama_url: Some("http://127.0.0.1:8080".into()),
             llama_model: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(e.dimensions(), 1024);
@@ -535,6 +636,7 @@ mod tests {
             dim: 1024,
             llama_url: None,
             llama_model: None,
+            ..Default::default()
         });
         let Err(err) = r else {
             panic!("expected Unavailable, got Ok — silent fallback forbidden");
@@ -551,6 +653,7 @@ mod tests {
     #[test]
     fn kind_feature_names() {
         assert_eq!(EmbedderKind::BgeM3.feature_name(), "embed-bge");
+        assert_eq!(EmbedderKind::Candle.feature_name(), "embed-candle");
         assert_eq!(EmbedderKind::Fixture.feature_name(), "embed-fixture");
         assert_eq!(EmbedderKind::Bedrock.feature_name(), "embed-bedrock");
     }
