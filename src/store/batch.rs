@@ -61,7 +61,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
 use crate::types::{
-    CanonizationStatus, Concept, Edge, EdgeType, Interaction, Mutation, Node, NodeId,
+    CanonizationStatus, Concept, Edge, EdgeType, Interaction, Mutation, Node, NodeId, SessionId,
+    WriteIntent, WriteIntentOutcome,
 };
 
 /// Columns bound per row of each multi-row upsert, i.e. bind parameters per row.
@@ -75,8 +76,14 @@ pub const INTERACTION_COLUMNS: usize = 6;
 pub const CONCEPT_COLUMNS: usize = 16;
 /// See [`INTERACTION_COLUMNS`].
 pub const EDGE_COLUMNS: usize = 9;
-
+///
+/// Rows per multi-row durable-intent statement. `write_intents` has 11 columns,
+/// so this keeps the binder far under the backend limit while still collapsing
+/// a realistic close tail (a few hundred intents) into a handful of statements.
+pub const INTENT_BATCH: usize = 1024;
+///
 /// Rows per multi-row statement, per table.
+
 ///
 /// Each adapter picks its own: the ceiling is the backend's bind-parameter
 /// limit divided by the column count ([`CONCEPT_COLUMNS`] and friends), and the
@@ -175,6 +182,15 @@ pub enum FlushStep<'a> {
     /// Never [`Mutation::UpsertNode`] or [`Mutation::UpsertEdge`] — those always
     /// arrive in one of the bucket variants.
     Single(&'a Mutation),
+    /// A multi-row `write_intents` upsert (J3/F4). The table is isolated — nothing
+    /// in the graph observes it — so a whole run of durable-intent puts is one
+    /// statement instead of a per-intent barrier.
+    PutIntents(Vec<&'a WriteIntent>),
+    /// A multi-row `write_intents` consume (J3/F4): one UPDATE marking each
+    /// receipt consumed, plus the lazy retention purge. Puts drain before
+    /// consumes and each consume's put precedes it in the log, so
+    /// put-before-consume holds within and across drains.
+    ConsumeIntents(Vec<(&'a SessionId, &'a str, &'a WriteIntentOutcome)>),
 }
 
 /// Plan the statements one [`crate::types::MutationBatch`] costs.
@@ -195,6 +211,12 @@ pub fn plan_flush<'a>(mutations: &'a [Mutation], limits: BulkLimits) -> Vec<Flus
                 node: Node::Concept(c),
             } => buckets.concepts.push(c),
             Mutation::UpsertEdge { edge } => buckets.edges.push(edge),
+            Mutation::PutWriteIntent { intent } => buckets.put_intents.push(intent),
+            Mutation::ConsumeWriteIntent {
+                session_id,
+                receipt,
+                outcome,
+            } => buckets.consume_intents.push((session_id, receipt, outcome)),
             barrier => {
                 buckets.drain_into(&mut steps, limits);
                 steps.push(FlushStep::Single(barrier));
@@ -210,6 +232,8 @@ struct Buckets<'a> {
     interactions: Vec<&'a Interaction>,
     concepts: Vec<&'a Concept>,
     edges: Vec<&'a Edge>,
+    put_intents: Vec<&'a WriteIntent>,
+    consume_intents: Vec<(&'a SessionId, &'a str, &'a WriteIntentOutcome)>,
 }
 
 impl<'a> Buckets<'a> {
@@ -235,6 +259,33 @@ impl<'a> Buckets<'a> {
         });
         for chunk in chunks(edges, limits.edges) {
             steps.push(FlushStep::Edges(chunk));
+        }
+
+        // Durable intents (J3/F4). `write_intents` is an isolated table — nothing
+        // in the graph observes it — so a whole run of intents is one batch of
+        // statements instead of a barrier per intent. Before F4 a close tail of
+        // K durable intents cost K × (2 bucket drains + a per-intent statement)
+        // round-trips against a serverless cluster — ~4-6 RTTs each, which blew
+        // `CLOSE_FLUSH_GRACE` at ~31 intents (F4 section of J3-durability-redesign).
+        //
+        // Ordering: puts are emitted before consumes, and each consume's put
+        // precedes it in the log (drains preserve log order, so a put can never
+        // appear in a later drain than its consume), so put-before-consume holds.
+        // Dedupe by (session, receipt) so a repeat within one statement cannot
+        // collide on the conflict target — the same rule as the upsert buckets.
+        let puts = dedupe_last_at_first_position(std::mem::take(&mut self.put_intents), |i| {
+            (i.session_id.0.clone(), i.receipt.clone())
+        });
+        for chunk in chunks(puts, INTENT_BATCH) {
+            steps.push(FlushStep::PutIntents(chunk));
+        }
+
+        let consumes = dedupe_last_at_first_position(
+            std::mem::take(&mut self.consume_intents),
+            |c| (c.0 .0.clone(), c.1.to_string()),
+        );
+        for chunk in chunks(consumes, INTENT_BATCH) {
+            steps.push(FlushStep::ConsumeIntents(chunk));
         }
     }
 }
@@ -393,7 +444,22 @@ pub fn batch_session_ids(mutations: &[Mutation]) -> Vec<&str> {
 /// Statement count a planned flush costs. Handy for tests and for the
 /// latency arithmetic in the module docs.
 pub fn planned_statements(mutations: &[Mutation], limits: BulkLimits) -> usize {
-    plan_flush(mutations, limits).len()
+    plan_flush(mutations, limits)
+        .iter()
+        .map(|s| match s {
+            // The batched UPDATE is one round-trip; each distinct session's lazy
+            // retention purge is one more (F4).
+            FlushStep::ConsumeIntents(cs) => {
+                let distinct = cs
+                    .iter()
+                    .map(|c| c.0)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                1 + distinct
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 /// Edge natural key, spelled out so the dedupe key and the SQL conflict target
@@ -466,7 +532,24 @@ mod tests {
             last_reinforced: ts(0),
         }
     }
-
+    fn write_intent(receipt: &str, lane_seq: u64) -> WriteIntent {
+        WriteIntent {
+            session_id: sid(),
+            receipt: receipt.into(),
+            agent: AgentId::from("agent-a"),
+            interaction: NodeId::new(),
+            lane_seq,
+            issued_ms: 1_752_000_000_000,
+            payload: crate::types::WriteIntentPayload::Action {
+                action: "a".into(),
+                produces: vec![],
+                modifies: vec![],
+                depends_on: vec![],
+            },
+            created_at: ts(0),
+            outcome: None,
+        }
+    }
     /// The shape `Memory::record_action` actually appends: `insert_concept`
     /// emits `UpsertNode` **then** the concept's `Derives` `UpsertEdge`, so the
     /// log interleaves node and edge upserts one for one. A planner that only
@@ -633,16 +716,22 @@ mod tests {
         );
     }
 
-    /// Each barrier variant really is one. A concept upsert on either side of
-    /// each must land in a different statement.
+    /// Each *genuine* barrier variant really is one. A concept upsert on either
+    /// side of each must land in a different statement.
     ///
-    /// All **five** non-upsert variants of `Mutation` are listed (R1-5). The
+    /// The **five** row-observing non-upsert variants are listed (R1-5). The
     /// catch-all `barrier =>` arm in [`plan_flush`] makes this correct by
     /// construction, but `CanonizationTransition` is the barrier the concept
     /// dedupe rule leans on — the first-occurrence-canonization choice in
     /// [`ConceptRow`] is only sound because a demote between two upserts of one
     /// concept cannot be collapsed across — so it is the one that most needs an
     /// executable statement of the property rather than a comment.
+    ///
+    /// [`Mutation::PutWriteIntent`]/[`Mutation::ConsumeWriteIntent`] are the two
+    /// deliberate exceptions: they touch only the isolated `write_intents` table
+    /// (nothing in the graph observes it), so they are batched rather than
+    /// emitted as per-intent barriers — see
+    /// `durable_intents_are_batched_not_per_intent_barriers`.
     #[test]
     fn every_non_upsert_variant_is_a_barrier() {
         let iid = NodeId::new();
@@ -687,6 +776,71 @@ mod tests {
                 "{barrier:?} must split the two concept upserts: {steps:?}"
             );
         }
+    }
+
+    /// F4: durable intents are batched, not per-intent barriers. Before F4 every
+    /// `PutWriteIntent`/`ConsumeWriteIntent` drained the open buckets and emitted
+    /// one statement, so a close tail of K durable intents cost ~4-6 round-trips
+    /// each against a serverless cluster and blew `CLOSE_FLUSH_GRACE` at ~31
+    /// (J3-durability-redesign F4 section). A run of intents is now a small
+    /// constant number of statements regardless of K.
+    #[test]
+    fn durable_intents_are_batched_not_per_intent_barriers() {
+        let mut mutations = Vec::new();
+        let iid = NodeId::new();
+        mutations.push(Mutation::UpsertNode {
+            node: Node::Interaction(interaction(iid, None)),
+        });
+        for i in 0..40 {
+            mutations.push(Mutation::UpsertNode {
+                node: Node::Concept(concept(NodeId::new(), iid, "c")),
+            });
+            mutations.push(Mutation::PutWriteIntent {
+                intent: write_intent(&format!("r{i}"), i as u64),
+            });
+        }
+        for i in 0..40 {
+            mutations.push(Mutation::ConsumeWriteIntent {
+                session_id: sid(),
+                receipt: format!("r{i}"),
+                outcome: WriteIntentOutcome {
+                    tag: "applied".into(),
+                    summary: "ok".into(),
+                    consumed_at: ts(1000),
+                },
+            });
+        }
+
+        let steps = plan_flush(&mutations, LIMITS);
+        let put_steps = steps
+            .iter()
+            .filter(|s| matches!(s, FlushStep::PutIntents(_)))
+            .count();
+        let consume_steps = steps
+            .iter()
+            .filter(|s| matches!(s, FlushStep::ConsumeIntents(_)))
+            .count();
+        assert_eq!(put_steps, 1, "40 puts must be one batched step: {steps:?}");
+        assert_eq!(
+            consume_steps, 1,
+            "40 consumes must be one batched step: {steps:?}"
+        );
+        assert!(
+            planned_statements(&mutations, LIMITS) < 10,
+            "40 intents must cost << 40 statements: {}",
+            planned_statements(&mutations, LIMITS)
+        );
+
+        // Put-before-consume must hold: a consume can only follow its put.
+        let first_put = steps
+            .iter()
+            .position(|s| matches!(s, FlushStep::PutIntents(_)))
+            .unwrap();
+        let first_consume = steps
+            .iter()
+            .position(|s| matches!(s, FlushStep::ConsumeIntents(_)))
+            .unwrap();
+        assert!(first_put < first_consume, "puts must precede consumes");
     }
 
     /// A repeated concept id collapses to one row — required, because both
@@ -907,6 +1061,8 @@ mod tests {
                 FlushStep::Concepts(r) => r.len(),
                 FlushStep::Edges(r) => r.len(),
                 FlushStep::Single(_) => 1,
+                FlushStep::PutIntents(r) => r.len(),
+                FlushStep::ConsumeIntents(r) => r.len(),
             })
             .sum();
         assert_eq!(

@@ -1671,6 +1671,22 @@ async fn apply_step(
         FlushStep::Concepts(rows) => upsert_concepts(&mut *tx, rows).await,
         FlushStep::Edges(rows) => upsert_edges(&mut *tx, rows).await,
         FlushStep::Single(m) => apply_single(&mut *tx, m).await,
+        // Durable intents (J3/F4). SQLite is a local file — no network round-trip
+        // per statement — so there is nothing to batch for and the existing
+        // per-intent statements are both simpler and exactly the old behaviour.
+        // The F4 win is Cockroach-specific; the planner's steps are the same here.
+        FlushStep::PutIntents(intents) => {
+            for intent in intents {
+                put_write_intent(&mut *tx, intent).await?;
+            }
+            Ok(())
+        }
+        FlushStep::ConsumeIntents(consumes) => {
+            for (session_id, receipt, outcome) in consumes {
+                consume_write_intent(&mut *tx, session_id, receipt, outcome).await?;
+            }
+            Ok(())
+        }
     }
 }
 

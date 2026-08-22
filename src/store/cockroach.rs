@@ -1560,6 +1560,132 @@ fn edge_upsert_query<'a>(rows: &'a [&'a Edge]) -> sqlx::QueryBuilder<'a, sqlx::P
     qb.push(ON_CONFLICT_EDGE_SQL);
     qb
 }
+/// Multi-row upsert of one planned [`FlushStep::PutIntents`] chunk (J3/F4).
+///
+/// `intents` is already deduplicated on `(session_id, receipt)` and capped at
+/// [`crate::store::batch::INTENT_BATCH`].
+async fn bulk_put_write_intents(
+    tx: &mut sqlx::PgConnection,
+    intents: &[&crate::types::WriteIntent],
+) -> Result<(), StoreError> {
+    if intents.is_empty() {
+        return Ok(());
+    }
+    let payloads: Vec<String> = intents
+        .iter()
+        .map(|i| {
+            serde_json::to_string(&i.payload)
+                .map_err(|e| backend(format!("serialize write intent payload: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+    put_write_intents_upsert(intents, &payloads)
+        .build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("put write intent: {m}")))?;
+    Ok(())
+}
+
+/// The statement [`bulk_put_write_intents`] runs, built but not executed.
+fn put_write_intents_upsert<'a>(
+    intents: &'a [&'a crate::types::WriteIntent],
+    payloads: &'a [String],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(INSERT_WRITE_INTENT_PREFIX_SQL);
+    qb.push_values(intents.iter().zip(payloads), |mut b, (i, payload)| {
+        b.push_bind(i.session_id.0.as_str())
+            .push_bind(&i.receipt)
+            .push_bind(i.agent.0.as_str())
+            .push_bind(i.interaction.0)
+            .push_bind(i64::try_from(i.lane_seq).unwrap_or(i64::MAX))
+            .push_bind(i.issued_ms)
+            .push_bind(payload)
+            .push_bind(i.created_at)
+            .push_bind(i.outcome.as_ref().map(|o| o.consumed_at))
+            .push_bind(i.outcome.as_ref().map(|o| o.tag.clone()))
+            .push_bind(i.outcome.as_ref().map(|o| o.summary.clone()));
+    });
+    qb.push(ON_CONFLICT_WRITE_INTENT_SQL);
+    qb
+}
+
+/// Multi-row `write_intents` consume of one planned [`FlushStep::ConsumeIntents`]
+/// chunk (J3/F4): one UPDATE marking each receipt consumed, then the lazy
+/// retention purge — one DELETE per distinct session in the chunk, clocked by
+/// the chunk's oldest `consumed_at` minus the retention window.
+async fn bulk_consume_write_intents(
+    tx: &mut sqlx::PgConnection,
+    consumes: &[(&crate::types::SessionId, &str, &crate::types::WriteIntentOutcome)],
+) -> Result<(), StoreError> {
+    if consumes.is_empty() {
+        return Ok(());
+    }
+    consume_write_intents_update(consumes)
+        .build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;
+
+    // Lazy retention purge (J3-R2R-5), clocked by the chunk's oldest
+    // `consumed_at` minus the retention window, one DELETE per distinct session.
+    let cutoff = consumes
+        .iter()
+        .map(|c| c.2.consumed_at)
+        .min()
+        .expect("consume batch is non-empty")
+        - chrono::Duration::from_std(crate::types::WRITE_INTENT_RETENTION)
+            .map_err(|e| backend(format!("retention duration out of range: {e}")))?;
+    let sessions: std::collections::HashSet<&crate::types::SessionId> =
+        consumes.iter().map(|c| c.0).collect();
+    for session in sessions {
+        sqlx::query(
+            "DELETE FROM write_intents \
+             WHERE session_id = $1 AND consumed_at IS NOT NULL AND consumed_at < $2",
+        )
+        .bind(session.0.as_str())
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("purge consumed write intents: {m}")))?;
+    }
+    Ok(())
+}
+
+const INSERT_WRITE_INTENT_PREFIX_SQL: &str = "INSERT INTO write_intents \
+    (session_id, receipt, agent, interaction_id, lane_seq, issued_ms, payload, \
+     created_at, consumed_at, outcome_tag, outcome_summary) VALUES ";
+
+const ON_CONFLICT_WRITE_INTENT_SQL: &str = " ON CONFLICT (session_id, receipt) DO UPDATE SET \
+    agent = excluded.agent, interaction_id = excluded.interaction_id, \
+    lane_seq = excluded.lane_seq, issued_ms = excluded.issued_ms, \
+    payload = excluded.payload, created_at = excluded.created_at, \
+    consumed_at = excluded.consumed_at, outcome_tag = excluded.outcome_tag, \
+    outcome_summary = excluded.outcome_summary";
+
+const CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL: &str = "UPDATE write_intents SET \
+    consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary \
+    FROM (VALUES ";
+
+const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = ") AS v(session_id, receipt, consumed_at, \
+    outcome_tag, outcome_summary) \
+    WHERE write_intents.session_id = v.session_id AND write_intents.receipt = v.receipt";
+
+/// The statement [`bulk_consume_write_intents`] runs, built but not executed.
+fn consume_write_intents_update<'a>(
+    consumes: &'a [(&'a crate::types::SessionId, &'a str, &'a crate::types::WriteIntentOutcome)],
+) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb =
+        sqlx::QueryBuilder::<sqlx::Postgres>::new(CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL);
+    qb.push_values(consumes.iter(), |mut b, (sid, receipt, outcome)| {
+        b.push_bind(sid.0.as_str())
+            .push_bind(receipt)
+            .push_bind(outcome.consumed_at)
+            .push_bind(&outcome.tag)
+            .push_bind(&outcome.summary);
+    });
+    qb.push(CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL);
+    qb
+}
 
 /// Apply one planned [`FlushStep`].
 async fn apply_step(tx: &mut sqlx::PgConnection, step: &FlushStep<'_>) -> Result<(), StoreError> {
@@ -1568,6 +1694,10 @@ async fn apply_step(tx: &mut sqlx::PgConnection, step: &FlushStep<'_>) -> Result
         FlushStep::Concepts(rows) => bulk_upsert_concepts(&mut *tx, rows).await,
         FlushStep::Edges(rows) => bulk_upsert_edges(&mut *tx, rows).await,
         FlushStep::Single(m) => apply_single(&mut *tx, m).await,
+        FlushStep::PutIntents(intents) => bulk_put_write_intents(&mut *tx, intents).await,
+        FlushStep::ConsumeIntents(consumes) => {
+            bulk_consume_write_intents(&mut *tx, consumes).await
+        }
     }
 }
 
