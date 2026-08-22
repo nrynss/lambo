@@ -155,7 +155,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
 
     // K2 task 3: the candle adapter stamps its served-artifact identity
     // (source revision + weight sha256 prefix) rather than a raw model string,
-    // so a kind/dim match cannot hide a between two quantizations. bge_m3
+    // so a kind/dim match cannot hide a swap between two quantizations. bge_m3
     // keeps stamping `llama_model` as today (empty => server default).
     let model = if embedder_cfg.kind == crate::embed::EmbedderKind::Candle {
         crate::embed::candle_identity(embedder.as_ref())

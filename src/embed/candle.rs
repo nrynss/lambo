@@ -19,11 +19,13 @@
 //! the canonical `BAAI/bge-m3` revision, 391/391 tensors f16-equal — see
 //! `dev-diary/lambo-for-mooshik/K-candle-embedder.md`). Weights are fetched on
 //! first use via hf-hub and cached under the hub cache; `offline = true` (or an
-//! explicit `weights_dir`) never touches the network and fails loudly if the
-//! weights are absent. Weights are never committed to the repo (standing rule).
+//! explicit `weights_dir`) NEVER touches the network — resolution is
+//! cache-only ([`cache_get`]) and fails loudly naming the missing artifact
+//! (K2-R1-3). Weights are never committed to the repo (standing rule).
 //!
 //! **Contract identity (K2 task 3).** The adapter stamps the loaded artifact —
-//! the canonical source revision plus the loaded weight file's sha256 prefix —
+//! the effective source revision plus the sha256 prefix of the weight file's
+//! actual bytes, hashed on every path including explicit overrides (K2-R1-1) —
 //! rather than the raw `llama_model` string, so a kind/dim match can no longer
 //! hide a swap between two quantizations of the same model.
 //!
@@ -32,13 +34,14 @@
 //! *one forward per batch*, not from thread concurrency (the command queue
 //! serializes). So this adapter coalesces concurrent `embed()` calls: each call
 //! pushes `(text, oneshot)` onto a pending queue and awaits its result, and a
-//! single background thread drains the queue into batches, runs one forward per
-//! batch, and resolves every caller's oneshot. A short debounce bounds lone-call
+//! single supervised background thread drains the queue into batches of at most
+//! [`MAX_BATCH`], runs one forward per batch inside `catch_unwind` (K2-R1-5),
+//! and resolves every caller's oneshot. A short debounce bounds lone-call
 //! latency (a solitary `embed()` is not starved waiting for a batch that never
 //! fills), while a burst of concurrent calls shares one forward.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,7 +52,8 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use super::{EmbedError, Embedder};
 
-/// Canonical upstream source of the weights (what the contract stamps).
+/// Canonical upstream source of the weights (what the contract stamps for the
+/// verified default artifact).
 const SOURCE_REPO: &str = "BAAI/bge-m3";
 /// The revision both K1 legs pinned and the f16 repo was converted from.
 const SOURCE_REVISION: &str = "5617a9f61b028005a4858fdac845db406aefb181";
@@ -66,11 +70,20 @@ const WEIGHT_SHA256: &str = "68440cc1b73b9af8ab85ecdc138b51877493ffbcec92a0a16e5
 /// BGE-M3 is XLM-RoBERTa-large with 8194 position slots; position ids are
 /// offset by `pad_token_id`, so the usable sequence length is 8192.
 const MAX_SEQ_LEN: usize = 8192;
+/// BGE-M3's architectural output width: XLM-RoBERTa-large's hidden size. Not
+/// configurable — a configured `dim` that disagrees is refused at construction
+/// (K2-R1-4), never silently served under the wrong contract.
+const BGE_M3_DIM: usize = 1024;
 /// How long the coalescer waits for extra callers to join an incomplete batch
 /// before running the forward alone. Bounds lone-call latency (K1).
 const BATCH_DEBOUNCE: Duration = Duration::from_millis(2);
 /// Hard cap on one forward's batch width (bounds GPU memory + forward compute).
 const MAX_BATCH: usize = 32;
+/// Upper bound one `embed()` waits on its coalescer oneshot (K2-R1-5). This is
+/// a deadlock guard, not a latency bound: with the supervised coalescer it can
+/// only fire if nothing scheduled a forward for ten minutes — which is exactly
+/// the wedge this bound exists to name instead of hanging forever.
+const EMBED_WAIT: Duration = Duration::from_secs(600);
 
 /// Operator-supplied options for a candle embedder (subset of the candle
 /// config keys on [`super::EmbedderConfig`]).
@@ -104,13 +117,104 @@ struct Pending {
     tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, EmbedError>>,
 }
 
-/// Shared state between the adapter handles and the coalescer thread.
-struct Shared {
-    queue: Mutex<Vec<Pending>>,
+/// Queue of pending requests shared between the adapter handles and the
+/// coalescer thread, plus the shutdown flag (K2-R1-7).
+struct BatchQueue {
+    inner: Mutex<Vec<Pending>>,
     wake: Condvar,
+    /// Set when the last adapter handle dropped: finish what is queued, then
+    /// exit so the model is freed with the handles.
+    shutdown: Mutex<bool>,
+}
+
+impl BatchQueue {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(Vec::new()),
+            wake: Condvar::new(),
+            shutdown: Mutex::new(false),
+        }
+    }
+
+    fn push(&self, pending: Pending) {
+        let mut q = self.lock_queue();
+        q.push(pending);
+        self.wake.notify_all();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock_queue().len()
+    }
+
+    /// K2-R1-7: stop accepting work and wake the coalescer.
+    fn request_shutdown(&self) {
+        *self.lock_shutdown() = true;
+        self.wake.notify_all();
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        *self.lock_shutdown()
+    }
+
+    /// Block until at least one request is queued, then take up to `max_batch`.
+    ///
+    /// K2-R1-2: the take is CLAMPED to `max_batch` — anything beyond the cap
+    /// STAYS queued for the next iteration, it is never destroyed. Returns
+    /// `None` only once shutdown was requested with an empty queue.
+    fn wait_for_batch(&self, max_batch: usize) -> Option<Vec<Pending>> {
+        let mut q = self.lock_queue();
+        loop {
+            if !q.is_empty() {
+                let take = q.len().min(max_batch);
+                return Some(q.drain(..take).collect());
+            }
+            if *self.lock_shutdown() {
+                return None;
+            }
+            q = self.wake.wait(q).unwrap_or_else(unpoison);
+        }
+    }
+
+    /// Debounce top-up during an open batch: extend by at most the remaining
+    /// capacity. Leftovers stay queued (K2-R1-2: there is no `clear()`).
+    fn top_up(&self, batch: &mut Vec<Pending>, max_batch: usize) {
+        if batch.len() >= max_batch {
+            return;
+        }
+        let mut q = self.lock_queue();
+        let additional = q.len().min(max_batch - batch.len());
+        batch.extend(q.drain(..additional));
+    }
+
+    /// Fail everything still queued at shutdown (their callers are awaiting).
+    fn drain_all(&self) -> Vec<Pending> {
+        std::mem::take(&mut *self.lock_queue())
+    }
+
+    fn lock_queue(&self) -> MutexGuard<'_, Vec<Pending>> {
+        // K2-R1-5: never unwrap a poisoned lock — a panicked forward must not
+        // wedge every future embed behind poison.
+        self.inner.lock().unwrap_or_else(unpoison)
+    }
+
+    fn lock_shutdown(&self) -> MutexGuard<'_, bool> {
+        self.shutdown.lock().unwrap_or_else(unpoison)
+    }
+}
+
+fn unpoison<T>(poisoned: std::sync::PoisonError<T>) -> T {
+    poisoned.into_inner()
+}
+
+/// State owned jointly by all adapter handles and the coalescer thread. The
+/// model goes with the coalescer's last `Arc<Shared>` drop.
+struct Shared {
+    queue: BatchQueue,
     core: BgeM3Core,
-    max_batch: usize,
-    debounce: Duration,
+    /// The width the contract pins; forward output is checked against it
+    /// before any vector reaches a caller (K2-R1-4 defense in depth).
+    dim: usize,
 }
 
 /// A loaded BGE-M3 (model + tokenizer on a device), moved behind the coalescer.
@@ -223,9 +327,9 @@ pub fn resolve_device(
                             device: d,
                             dtype: DType::F16,
                         })
-                        .map_err(|e| no_accelerator(e, has_cuda, false))
+                        .map_err(|e| no_accelerator("Metal", e))
                 } else {
-                    Err(no_accelerator("no Metal backend compiled", has_cuda, true))
+                    Err(no_accelerator("Metal", "no Metal backend compiled"))
                 }
             } else if has_cuda {
                 Device::new_cuda(0)
@@ -233,9 +337,9 @@ pub fn resolve_device(
                         device: d,
                         dtype: DType::F16,
                     })
-                    .map_err(|e| no_accelerator(e, false, false))
+                    .map_err(|e| no_accelerator("CUDA", e))
             } else {
-                Err(no_accelerator("no CUDA backend compiled", false, false))
+                Err(no_accelerator("CUDA", "no CUDA backend compiled"))
             }
         }
         "metal" => {
@@ -285,16 +389,12 @@ pub fn resolve_device(
     }
 }
 
-fn no_accelerator(_err: impl std::fmt::Display, has_cuda: bool, macos: bool) -> EmbedError {
-    let accelerator = if macos {
-        "Metal"
-    } else if has_cuda {
-        "CUDA"
-    } else {
-        "an accelerator"
-    };
+/// K2-R1-9: name the accelerator that actually failed. The old signature
+/// derived the name from `(has_cuda, macos)` flags its callers mis-fed, so a
+/// genuine `Device::new_metal`/`new_cuda` failure printed "an accelerator".
+fn no_accelerator(accelerator: &str, err: impl std::fmt::Display) -> EmbedError {
     EmbedError::Unavailable(format!(
-        "{accelerator} is unavailable and device was not pinned to \"cpu\": the candle \
+        "{accelerator} is unavailable ({err}) and device was not pinned to \"cpu\": the candle \
          embedder refuses to serve on CPU unless the operator explicitly sets device = \\\"cpu\\\" \
          (expect ~3% of the llama.cpp path's throughput). Set [embedder] device = \\\"cpu\\\" to \
          proceed, or build with the accelerator's Cargo feature."
@@ -381,26 +481,63 @@ fn load_varbuilder(
     Ok(vb)
 }
 
+/// Compile-time accelerator facts (cfg-gated so the plain build stays clean).
+fn has_metal_backend() -> bool {
+    cfg!(all(target_os = "macos", feature = "embed-candle-metal"))
+}
+
+fn has_cuda_backend() -> bool {
+    cfg!(all(not(target_os = "macos"), feature = "embed-candle-cuda"))
+}
+
+fn is_macos() -> bool {
+    cfg!(target_os = "macos")
+}
+
 /// The in-process BGE-M3 embedder. Cheap to clone; the model + coalescer are
 /// shared behind an `Arc`.
 #[derive(Clone)]
 pub struct CandleEmbedder {
     dim: usize,
-    shared: Arc<Shared>,
-    /// The served-artifact identity stamped into the session contract.
     identity: String,
+    /// Shutdown ownership: `Handle::drop` fires only when the LAST adapter
+    /// handle is gone (K2-R1-7), so dropping one clone never kills the
+    /// coalescer the other clones still serve.
+    handle: Arc<Handle>,
+}
+
+struct Handle {
+    shared: Arc<Shared>,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.shared.queue.request_shutdown();
+    }
 }
 
 impl CandleEmbedder {
     /// Load weights (fetching/caching via hf-hub on first use), resolve the
     /// device, and spawn the batch-coalescing thread.
     ///
-    /// Fails with [`EmbedError::Unavailable`] when weights are absent/offline,
-    /// and (per the K device rule) when no accelerator is available and the
+    /// Fails with [`EmbedError::Unavailable`] when weights are absent/offline
+    /// or the configured `dim` disagrees with BGE-M3's architectural width, and
+    /// (per the K device rule) when no accelerator is available and the
     /// operator did not pin `device = "cpu"`.
     pub fn new(dim: usize, opts: CandleOpts) -> Result<Self, EmbedError> {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
+        }
+        // K2-R1-4: BGE-M3 emits a fixed-width dense vector — the width check
+        // downstream cannot catch a wrong config because the stored vectors all
+        // share it, so a wrong `dim` would resolve and stamp a lying contract.
+        // Refuse here like the bge_m3 sibling refuses at response time.
+        if dim != BGE_M3_DIM {
+            return Err(EmbedError::Unavailable(format!(
+                "candle BGE-M3 emits fixed {BGE_M3_DIM}-dim embeddings but dim = {dim} is \
+                 configured — refusing to resolve: stored vectors would disagree with the \
+                 stamped contract width"
+            )));
         }
         let repo = opts.repo.clone().unwrap_or_else(|| WEIGHT_REPO.to_string());
         let revision = opts
@@ -411,119 +548,102 @@ impl CandleEmbedder {
             .weights_file
             .clone()
             .unwrap_or_else(|| DEFAULT_WEIGHT_FILE.to_string());
-        let _weight_file_path = Path::new(&weight_file);
 
         // Resolve device + dtype BEFORE loading (f16 on GPU, f32 on CPU).
-        #[cfg(all(target_os = "macos", feature = "embed-candle-metal"))]
-        let has_metal = true;
-        #[cfg(not(all(target_os = "macos", feature = "embed-candle-metal")))]
-        let has_metal = false;
-        #[cfg(not(target_os = "macos"))]
-        #[cfg(feature = "embed-candle-cuda")]
-        let has_cuda = true;
-        #[cfg(any(target_os = "macos", not(feature = "embed-candle-cuda")))]
-        let has_cuda = false;
-        #[cfg(target_os = "macos")]
-        let is_macos = true;
-        #[cfg(not(target_os = "macos"))]
-        let is_macos = false;
-        let DeviceChoice { device, dtype } =
-            resolve_device(opts.device.as_deref(), has_metal, has_cuda, is_macos)?;
+        let DeviceChoice { device, dtype } = resolve_device(
+            opts.device.as_deref(),
+            has_metal_backend(),
+            has_cuda_backend(),
+            is_macos(),
+        )?;
 
-        let weights_dir = if let Some(dir) = &opts.weights_dir {
+        let weights_path = if let Some(dir) = &opts.weights_dir {
             // Explicit local dir: use it directly, never the network.
             dir.join(&weight_file)
         } else if opts.offline {
-            resolve_offline(&repo, &revision, &weight_file)?
+            // K2-R1-3: cache-only lookup — never dials the network.
+            cache_get(&repo, &revision, &weight_file)?
         } else {
-            resolve_hf(&repo, &revision, &weight_file)?
+            hub_get(&repo, &revision, &weight_file)?
         };
 
         // config.json + tokenizer.json come from the same repo as the weights.
-        let config_path = if let Some(dir) = &opts.weights_dir {
-            dir.join("config.json")
-        } else if opts.offline {
-            let p = hf_path(&repo, &revision, "config.json")?;
-            if !p.exists() {
-                return Err(EmbedError::Unavailable(format!(
-                    "offline: config.json not cached for {repo}@{revision} (fetch once online, then go offline)"
-                )));
-            }
-            p
-        } else {
-            hub_get(&repo, &revision, "config.json")?
+        let config_path = match &opts.weights_dir {
+            Some(dir) => dir.join("config.json"),
+            None if opts.offline => cache_get(&repo, &revision, "config.json")?,
+            None => hub_get(&repo, &revision, "config.json")?,
         };
-        let tokenizer_path = if let Some(dir) = &opts.weights_dir {
-            dir.join("tokenizer.json")
-        } else if opts.offline {
-            let p = hf_path(&repo, &revision, "tokenizer.json")?;
-            if !p.exists() {
-                return Err(EmbedError::Unavailable(format!(
-                    "offline: tokenizer.json not cached for {repo}@{revision}"
-                )));
-            }
-            p
-        } else {
-            hub_get(&repo, &revision, "tokenizer.json")?
+        let tokenizer_path = match &opts.weights_dir {
+            Some(dir) => dir.join("tokenizer.json"),
+            None if opts.offline => cache_get(&repo, &revision, "tokenizer.json")?,
+            None => hub_get(&repo, &revision, "tokenizer.json")?,
         };
 
-        let core = load_core(&config_path, &tokenizer_path, &weights_dir, &device, dtype)?;
-
-        // Verify the loaded weight file against the pinned hash when it is the
-        // shipped artifact (same-artifact rule becomes machine-checked). Only
-        // checked for the default artifact we published; a custom repo is the
-        // operator's provenance.
-        if repo == WEIGHT_REPO && weight_file == DEFAULT_WEIGHT_FILE {
-            verify_hash(&weights_dir, WEIGHT_SHA256)?;
+        // K2-R1-8: hash BEFORE any model work — refuse tampered/corrupt bytes
+        // before they influence anything. K2-R1-1: this digest is also what the
+        // contract stamps, on EVERY path including explicit overrides.
+        let weight_sha256 = sha256_file(&weights_path)?;
+        // The shipped artifact is machine-checked against the pinned digest;
+        // any override (repo/revision/file/dir) is stamped from its own bytes.
+        let is_default_artifact = opts.weights_dir.is_none()
+            && repo == WEIGHT_REPO
+            && revision == WEIGHT_REVISION
+            && weight_file == DEFAULT_WEIGHT_FILE;
+        if is_default_artifact && weight_sha256 != WEIGHT_SHA256 {
+            return Err(EmbedError::Backend(format!(
+                "weight file {} sha256 mismatch: expected {WEIGHT_SHA256}, got {weight_sha256} — \
+                 refusing to serve unverified weights (same-artifact rule)",
+                weights_path.display()
+            )));
         }
 
+        let core = load_core(&config_path, &tokenizer_path, &weights_path, &device, dtype)?;
+
         let shared = Arc::new(Shared {
-            queue: Mutex::new(Vec::new()),
-            wake: Condvar::new(),
+            queue: BatchQueue::new(),
             core,
-            max_batch: MAX_BATCH,
-            debounce: BATCH_DEBOUNCE,
+            dim,
         });
         spawn_coalescer(Arc::clone(&shared));
 
-        let identity = format!(
-            "{SOURCE_REPO}@{SOURCE_REVISION} {} sha256:{}",
-            weight_file,
-            &WEIGHT_SHA256[..12],
-        );
+        // K2-R1-1: the stamp ALWAYS describes the artifact actually loaded —
+        // canonical source for the verified default, effective source plus the
+        // computed digest for every override.
+        let identity = if is_default_artifact {
+            stamp_identity(
+                SOURCE_REPO,
+                SOURCE_REVISION,
+                DEFAULT_WEIGHT_FILE,
+                None,
+                &weight_sha256,
+            )
+        } else {
+            stamp_identity(
+                &repo,
+                &revision,
+                &weight_file,
+                opts.weights_dir.as_deref(),
+                &weight_sha256,
+            )
+        };
 
         Ok(Self {
             dim,
-            shared,
             identity,
+            handle: Arc::new(Handle { shared }),
         })
     }
 
     /// The served-artifact identity string to stamp into the session's
-    /// `EmbeddingContract.model` (K2 task 3): the canonical source revision and
-    /// the loaded weight file's sha256 prefix, so a kind/dim match cannot hide
-    /// a model swap.
+    /// `EmbeddingContract.model` (K2 task 3): the loaded artifact's source and
+    /// sha256 prefix, so a kind/dim match cannot hide a swap between two
+    /// quantizations of the same model.
     pub fn model_identity(&self) -> &str {
         &self.identity
     }
 }
 
-/// Find a cached weight file under hf-hub's cache without dialling the network.
-fn hf_path(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedError> {
-    use hf_hub::api::sync::Api;
-    let api = Api::new().map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
-    let repo_api = api.repo(hf_hub::Repo::with_revision(
-        repo.to_string(),
-        hf_hub::RepoType::Model,
-        revision.to_string(),
-    ));
-    let path = repo_api
-        .get(filename)
-        .map_err(|e| EmbedError::Unavailable(format!("{filename}: {e}")))?;
-    Ok(path)
-}
-
-/// Fetch `filename` via hf-hub's cache (downloading on first use).
+/// Fetch `filename` via hf-hub (cache hit, or network download on first use).
 fn hub_get(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedError> {
     use hf_hub::api::sync::Api;
     let api = Api::new().map_err(|e| EmbedError::Unavailable(format!("hf-hub init: {e}")))?;
@@ -538,16 +658,27 @@ fn hub_get(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedE
     Ok(path)
 }
 
-fn resolve_hf(repo: &str, revision: &str, weight_file: &str) -> Result<PathBuf, EmbedError> {
-    hub_get(repo, revision, weight_file)
+/// Cache-only hf-hub lookup: NEVER dials the network (K2-R1-3). Fails loudly
+/// naming the missing artifact, telling the operator how to fix it.
+fn cache_get(repo: &str, revision: &str, filename: &str) -> Result<PathBuf, EmbedError> {
+    hf_hub::Cache::from_env()
+        .repo(hf_hub::Repo::with_revision(
+            repo.to_string(),
+            hf_hub::RepoType::Model,
+            revision.to_string(),
+        ))
+        .get(filename)
+        .ok_or_else(|| {
+            EmbedError::Unavailable(format!(
+                "offline: {filename} not cached for {repo}@{revision} (fetch once online, then \
+                 go offline)"
+            ))
+        })
 }
 
-fn resolve_offline(repo: &str, revision: &str, weight_file: &str) -> Result<PathBuf, EmbedError> {
-    hf_path(repo, revision, weight_file)
-}
-
-/// Verify a file's sha256 against a pinned digest (the same-artifact rule).
-fn verify_hash(path: &Path, expected: &str) -> Result<(), EmbedError> {
+/// sha256 of a file's bytes, streamed (K2-R1-8: computed BEFORE the model is
+/// built, so an unverified artifact never influences anything).
+fn sha256_file(path: &Path) -> Result<String, EmbedError> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)
         .map_err(|e| EmbedError::Backend(format!("open weights for hash: {e}")))?;
@@ -562,76 +693,161 @@ fn verify_hash(path: &Path, expected: &str) -> Result<(), EmbedError> {
         }
         hasher.update(&buf[..n]);
     }
-    let got = format!("{:x}", hasher.finalize());
-    if got != expected {
-        return Err(EmbedError::Backend(format!(
-            "weight file {path:?} sha256 mismatch: expected {expected}, got {got} — refusing to \
-             serve unverified weights (same-artifact rule)"
-        )));
-    }
-    Ok(())
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 use sha2::{Digest, Sha256};
 
-/// Spawn the batch-coalescing thread. It owns the model exclusively (the
-/// forward is synchronous and CPU/GPU-bound), drains a debounced batch, runs
-/// one forward, and resolves each caller's oneshot.
+/// Build the contract-stamp identity from the RESOLVED artifact facts.
+///
+/// K2-R1-1: `sha256_hex` must be the digest of the bytes actually hashed —
+/// never a compile-time constant for an artifact whose bytes were not verified.
+/// For the shipped default the caller passes the canonical
+/// `SOURCE_REPO`/`SOURCE_REVISION` AFTER verifying the digest equals the pinned
+/// `WEIGHT_SHA256`; for every override the effective source and the computed
+/// digest go in directly.
+fn stamp_identity(
+    repo: &str,
+    revision: &str,
+    weight_file: &str,
+    weights_dir: Option<&Path>,
+    sha256_hex: &str,
+) -> String {
+    let source = match weights_dir {
+        Some(dir) => format!("dir:{}", dir.display()),
+        None => format!("{repo}@{revision}"),
+    };
+    format!("{source} {weight_file} sha256:{}", &sha256_hex[..12])
+}
+
+/// Spawn the SUPERVISED batch-coalescing thread (K2-R1-5): the worker's
+/// forward runs inside `catch_unwind` and the loop survives poisoned locks, so
+/// a worker exit should be impossible — if one ever dies anyway, the supervisor
+/// resurrects it instead of wedging every future `embed()` forever.
 fn spawn_coalescer(shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("lambo-candle-coalescer".into())
-        .spawn(move || coalesce_loop(shared))
+        .spawn(move || supervise(shared))
         .expect("spawn candle coalescer");
 }
 
+fn supervise(shared: Arc<Shared>) {
+    while !shared.queue.shutdown_requested() {
+        let worker_shared = Arc::clone(&shared);
+        let worker = std::thread::Builder::new()
+            .name("lambo-candle-coalescer-worker".into())
+            .spawn(move || coalesce_loop(worker_shared))
+            .expect("spawn candle coalescer worker");
+        // A healthy worker returns only on shutdown.
+        let _ = worker.join();
+        if shared.queue.shutdown_requested() {
+            break;
+        }
+        eprintln!("lambo: candle coalescer worker died unexpectedly; restarting it");
+    }
+}
+
 fn coalesce_loop(shared: Arc<Shared>) {
-    // The model goes with the thread; the queue is shared.
     loop {
-        // Wait for at least one pending request.
-        let mut first_batch = {
-            let mut q = shared.queue.lock().unwrap();
-            while q.is_empty() {
-                q = shared.wake.wait(q).unwrap();
+        let Some(mut batch) = shared.queue.wait_for_batch(MAX_BATCH) else {
+            // K2-R1-7: shutdown with the queue drained — exit so the model is
+            // freed with the handles. Fail anything that raced in.
+            for item in shared.queue.drain_all() {
+                let _ = item.tx.send(Err(EmbedError::Unavailable(
+                    "candle embedder dropped while the request was queued".into(),
+                )));
             }
-            std::mem::take(&mut *q)
+            return;
         };
 
         // Debounce: allow a burst of concurrent callers to land in the same
         // batch before we run the forward. A lone caller waits at most one
         // debounce, bounding lone-call latency.
-        if first_batch.len() < shared.max_batch {
-            std::thread::sleep(shared.debounce);
-            let mut q = shared.queue.lock().unwrap();
-            let additional = q.len().min(shared.max_batch - first_batch.len());
-            let tail: Vec<Pending> = q.drain(..additional).collect();
-            q.clear(); // already-drained first_batch is separate; keep leftovers
-            first_batch.extend(tail);
-            // Re-arm the queue: anything left beyond max_batch stays for the
-            // next loop iteration.
-            if !q.is_empty() {
-                shared.wake.notify_all();
-            }
+        if batch.len() < MAX_BATCH {
+            std::thread::sleep(shared_debounce());
+            shared.queue.top_up(&mut batch, MAX_BATCH);
         }
 
-        let texts: Vec<&str> = first_batch.iter().map(|p| p.text.as_str()).collect();
-        let result = shared.core.forward(&texts);
+        let texts: Vec<&str> = batch.iter().map(|p| p.text.as_str()).collect();
+        let batch_len = batch.len();
+        // K2-R1-5: a candle panic fails THIS batch and the loop goes on.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shared.core.forward(&texts)));
         match result {
-            Ok(vectors) => {
-                debug_assert_eq!(vectors.len(), first_batch.len());
-                for (item, vector) in first_batch.into_iter().zip(vectors) {
-                    let _ = item.tx.send(Ok(vector));
+            Ok(Ok(vectors)) => {
+                debug_assert_eq!(vectors.len(), batch.len());
+                // K2-R1-4 defense in depth: never hand a caller a vector whose
+                // width disagrees with the stamped contract.
+                if vectors.iter().any(|v| v.len() != shared.dim) {
+                    let got = vectors.first().map(Vec::len).unwrap_or(0);
+                    fail_batch(
+                        batch,
+                        &format!(
+                            "candle returned {got}-wide vectors but the contract pins {} — \
+                             refusing to serve width-mismatched embeddings",
+                            shared.dim
+                        ),
+                    );
+                } else {
+                    for (item, vector) in batch.into_iter().zip(vectors) {
+                        let _ = item.tx.send(Ok(vector));
+                    }
                 }
             }
-            Err(e) => {
-                let msg = format!(
-                    "candle forward failed for a batch of {}: {e}",
-                    first_batch.len()
-                );
-                for item in first_batch {
-                    let _ = item.tx.send(Err(EmbedError::Backend(msg.clone())));
-                }
-            }
+            Ok(Err(e)) => fail_batch(
+                batch,
+                &format!("candle forward failed for a batch of {batch_len} texts: {e}"),
+            ),
+            Err(panic) => fail_batch(
+                batch,
+                &format!(
+                    "candle coalescer panicked running a batch of {} texts: {}; the worker \
+                     keeps serving",
+                    batch_len,
+                    panic_message(panic.as_ref())
+                ),
+            ),
         }
+    }
+}
+
+/// Debounce is a constant today; kept as a fn so the loop reads against the
+/// shared state it actually uses.
+fn shared_debounce() -> Duration {
+    BATCH_DEBOUNCE
+}
+
+fn fail_batch(batch: Vec<Pending>, msg: &str) {
+    for item in batch {
+        let _ = item.tx.send(Err(EmbedError::Backend(msg.to_string())));
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
+/// Bounded wait on the coalescer oneshot (K2-R1-5): a dead worker produces a
+/// named error, never an indefinite hang.
+async fn recv_bounded(
+    rx: tokio::sync::oneshot::Receiver<Result<Vec<f32>, EmbedError>>,
+    limit: Duration,
+) -> Result<Vec<f32>, EmbedError> {
+    match tokio::time::timeout(limit, rx).await {
+        Ok(Ok(result)) => result,
+        // Sender dropped without sending: the batch died with a dead worker.
+        Ok(Err(_)) => Err(EmbedError::Backend(
+            "candle coalescer dropped the request (worker exited mid-batch)".into(),
+        )),
+        Err(_) => Err(EmbedError::Unavailable(format!(
+            "candle embed did not complete within {} s — the coalescer appears wedged; \
+             retry or restart",
+            limit.as_secs()
+        ))),
     }
 }
 
@@ -644,22 +860,45 @@ impl Embedder for CandleEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         reject_empty(text)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        {
-            let mut q = self.shared.queue.lock().unwrap();
-            q.push(Pending {
-                text: text.to_string(),
-                tx,
-            });
-            self.shared.wake.notify_all();
-        }
-        rx.await
-            .map_err(|_| EmbedError::Backend("candle coalescer dropped the request".into()))?
+        self.handle.shared.queue.push(Pending {
+            text: text.to_string(),
+            tx,
+        });
+        recv_bounded(rx, EMBED_WAIT).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fail_batch_resolves_every_caller_even_after_a_panic() {
+        // K2-R1-5: the panic path fails each oneshot with the panic named.
+        let mut rxs = Vec::new();
+        let batch: Vec<Pending> = (0..3)
+            .map(|_| {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                rxs.push(rx);
+                Pending {
+                    text: "x".into(),
+                    tx,
+                }
+            })
+            .collect();
+        fail_batch(
+            batch,
+            "candle coalescer panicked running a batch of 3 texts: bad tensor; the worker \
+             keeps serving",
+        );
+        for rx in rxs {
+            let err = rx.await.unwrap().unwrap_err().to_string();
+            assert!(
+                err.contains("panicked") && err.contains("bad tensor"),
+                "{err}"
+            );
+        }
+    }
 
     #[test]
     fn reject_empty_contract_con7() {
@@ -697,6 +936,24 @@ mod tests {
     }
 
     #[test]
+    fn auto_names_the_missing_accelerator() {
+        // K2-R1-9: the failure names Metal/CUDA, never "an accelerator".
+        let e = resolve_device(None, false, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("CUDA is unavailable"), "{e}");
+
+        // The runtime-failure arm (feature compiled, device creation failed)
+        // names the accelerator too; exercised directly so the test stays
+        // host-independent.
+        let direct = no_accelerator("Metal", "stub failure").to_string();
+        assert!(
+            direct.contains("Metal is unavailable (stub failure)"),
+            "{direct}"
+        );
+    }
+
+    #[test]
     fn empty_string_device_falls_back_to_auto() {
         // "" / whitespace == unset -> auto -> hard error without accelerator.
         assert!(resolve_device(Some("  "), false, false, false).is_err());
@@ -704,17 +961,261 @@ mod tests {
 
     #[test]
     fn identity_stamps_source_revision_and_sha_prefix() {
-        // Constructed logic mirrors `CandleEmbedder::new`'s identity string.
-        let identity = format!(
-            "{SOURCE_REPO}@{SOURCE_REVISION} {DEFAULT_WEIGHT_FILE} sha256:{}",
-            &WEIGHT_SHA256[..12],
+        // Default artifact: canonical source + VERIFIED pinned digest.
+        let identity = stamp_identity(
+            SOURCE_REPO,
+            SOURCE_REVISION,
+            DEFAULT_WEIGHT_FILE,
+            None,
+            WEIGHT_SHA256,
         );
         assert_eq!(identity, "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181 model.safetensors sha256:68440cc1b73b");
+    }
+
+    #[test]
+    fn override_identity_describes_the_loaded_artifact_not_the_default_stamp() {
+        // K2-R1-1: a non-default source stamps ITS OWN bytes' digest — never
+        // the default f16 sha256 prefix that made a quantization swap invisible.
+        let identity = stamp_identity(
+            "BAAI/bge-m3",
+            "main",
+            "pytorch_model.bin",
+            None,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+        assert!(!identity.contains(&WEIGHT_SHA256[..12]), "{identity}");
+        assert!(identity.contains("sha256:001122334455"), "{identity}");
+        assert!(
+            identity.contains("BAAI/bge-m3@main pytorch_model.bin"),
+            "{identity}"
+        );
+
+        // An explicit weights_dir names the directory it loaded from.
+        let local = stamp_identity(
+            WEIGHT_REPO,
+            WEIGHT_REVISION,
+            DEFAULT_WEIGHT_FILE,
+            Some(Path::new("/srv/lambo/bge-m3")),
+            WEIGHT_SHA256,
+        );
+        assert!(local.starts_with("dir:/srv/lambo/bge-m3 "), "{local}");
+        assert!(
+            local.contains("model.safetensors sha256:68440cc1b73b"),
+            "{local}"
+        );
+    }
+
+    #[test]
+    fn sha256_file_hashes_the_bytes_actually_on_disk() {
+        // K2-R1-1/R1-8 foundation: the digest comes from the file, not a const.
+        let dir =
+            std::env::temp_dir().join(format!("lambo-candle-sha-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("artifact.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let got = sha256_file(&path).unwrap();
+        assert_eq!(
+            got,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wrong_dim_is_refused_at_construction_before_any_resolution() {
+        // K2-R1-4: dim=768 must hard-error BEFORE device/weights resolution
+        // (no network, no model) — the old code resolved and stamped it.
+        let err = match CandleEmbedder::new(
+            768,
+            CandleOpts {
+                device: Some("cpu".into()),
+                offline: true,
+                ..Default::default()
+            },
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("dim=768 must be refused at construction"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1024"), "{msg}");
+        assert!(msg.contains("dim = 768"), "{msg}");
+    }
+
+    #[test]
+    fn initial_take_never_exceeds_max_batch_and_leftovers_survive() {
+        // K2-R1-2: 50 concurrent callers against MAX_BATCH=32 — the old code
+        // mem::take'd all 50 onto ONE forward, destroyed the 19 beyond the cap
+        // with q.clear(), and every one of them failed. Now the take is clamped
+        // and every survivor keeps its sender alive.
+        let q = BatchQueue::new();
+        let mut rxs = Vec::new();
+        for i in 0..50 {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            q.push(Pending {
+                text: format!("t{i}"),
+                tx,
+            });
+            rxs.push(rx);
+        }
+        let first = q.wait_for_batch(MAX_BATCH).expect("first batch");
+        assert_eq!(first.len(), MAX_BATCH, "initial take must respect the cap");
+        assert_eq!(
+            q.len(),
+            50 - MAX_BATCH,
+            "leftovers stay queued, never cleared"
+        );
+
+        let second = q.wait_for_batch(MAX_BATCH).expect("second batch");
+        assert_eq!(second.len(), 50 - MAX_BATCH);
+
+        // Not one queued request lost its sender (old code: 19 Disconnected).
+        for mut rx in rxs {
+            assert!(
+                !matches!(
+                    rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ),
+                "a queued request was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn debounce_top_up_takes_only_the_remaining_capacity() {
+        // K2-R1-2, second half: during debounce the drain is bounded by the
+        // batch's remaining capacity and leftovers stay queued.
+        let q = BatchQueue::new();
+        let mut rxs = Vec::new();
+        for i in 0..10 {
+            let (tx, _) = tokio::sync::oneshot::channel();
+            q.push(Pending {
+                text: format!("a{i}"),
+                tx,
+            });
+        }
+        let mut batch = q.wait_for_batch(MAX_BATCH).unwrap();
+        assert_eq!(batch.len(), 10);
+        for i in 0..30 {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            q.push(Pending {
+                text: format!("b{i}"),
+                tx,
+            });
+            rxs.push(rx);
+        }
+        q.top_up(&mut batch, MAX_BATCH);
+        assert_eq!(batch.len(), MAX_BATCH, "top-up stops at capacity");
+        assert_eq!(q.len(), 8, "beyond-capacity requests remain queued");
+        for mut rx in rxs {
+            assert!(
+                !matches!(
+                    rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ),
+                "a queued request was dropped by the top-up"
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_exits_only_after_draining_queued_work() {
+        // K2-R1-7: the wait loop returns None (thread exits) once shutdown is
+        // requested AND the queue is drained — not while work remains.
+        let q = BatchQueue::new();
+        q.request_shutdown();
+        assert!(
+            q.wait_for_batch(MAX_BATCH).is_none(),
+            "empty + shutdown exits"
+        );
+
+        let q = BatchQueue::new();
+        for i in 0..2 {
+            let (tx, _) = tokio::sync::oneshot::channel();
+            q.push(Pending {
+                text: format!("t{i}"),
+                tx,
+            });
+        }
+        q.request_shutdown();
+        let batch = q
+            .wait_for_batch(MAX_BATCH)
+            .expect("queued work drains first");
+        assert_eq!(batch.len(), 2);
+        assert!(q.wait_for_batch(MAX_BATCH).is_none(), "then the loop exits");
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_reports_a_dropped_sender_as_a_named_error() {
+        // K2-R1-5: a dead worker drops the sender; embed() surfaces a named
+        // Backend error instead of hanging on rx.await forever.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<f32>, EmbedError>>();
+        drop(tx);
+        let err = recv_bounded(rx, Duration::from_secs(1)).await.unwrap_err();
+        assert!(err.to_string().contains("dropped the request"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bounded_wait_times_out_instead_of_hanging_forever() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<f32>, EmbedError>>();
+        let err = recv_bounded(rx, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(err.to_string().contains("did not complete within"), "{err}");
+    }
+
+    #[test]
+    fn offline_weight_resolution_is_cache_only_and_loud() {
+        // K2-R1-3: offline resolution consults ONLY the local hub cache. A miss
+        // fails instantly naming the artifact — the old code called Api::get,
+        // which DOWNLOADS on a miss (silent network on an online rig, a raw
+        // fetch error on an airgapped one).
+        let err =
+            cache_get("lambo-ci/no-such-repo-k2r13", "main", "model.safetensors").unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("not cached"), "{msg}");
+        assert!(msg.contains("model.safetensors"), "{msg}");
+        assert!(msg.contains("fetch once online"), "{msg}");
+    }
+
+    /// LIVE test: loads the real published f16 weights via hf-hub (a ~1.1 GB
+    /// download on first run, then cached) and embeds two texts on CPU.
+    ///
+    /// Ignored by default — CI's candle row is deliberately weightless and
+    /// offline. Run explicitly with:
+    /// `cargo test --features embed-candle -- --ignored live_weights`.
+    #[ignore]
+    #[tokio::test]
+    async fn live_weights_load_and_embed_on_cpu() {
+        let embedder = CandleEmbedder::new(
+            BGE_M3_DIM,
+            CandleOpts {
+                device: Some("cpu".into()),
+                ..Default::default()
+            },
+        )
+        .expect("live weights must load and verify");
+        let near = embedder.embed("user schema").await.expect("embed");
+        let far = embedder
+            .embed("the mitochondria is the powerhouse of the cell")
+            .await
+            .expect("embed");
+        assert_eq!(near.len(), BGE_M3_DIM);
+        assert_eq!(far.len(), BGE_M3_DIM);
+        assert!(
+            near.iter()
+                .zip(&far)
+                .filter(|(a, b)| (**a - **b).abs() > 1e-3)
+                .count()
+                > BGE_M3_DIM / 2,
+        );
     }
 
     // Compile-time sanity (clippy wants const assertions, not runtime tests).
     const _: () = {
         assert!(MAX_BATCH >= 1);
         assert!(MAX_SEQ_LEN >= 8192);
+        assert!(BGE_M3_DIM == 1024);
     };
 }
