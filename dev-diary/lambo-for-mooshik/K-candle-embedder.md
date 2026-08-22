@@ -14,6 +14,12 @@ hosted embedder fails over the network by definition).
 the long workstream and will be dogfooded heavily, so a rig that actually embeds what it
 stores is worth having first.
 
+**Amended 2026-08-22 (operator): K1 unblocked early.** K1 is read-only measurement touching
+no J surface, so it runs concurrently with the J E2E adversarial cycle — the CUDA leg on an
+NVIDIA machine, the Metal/CPU leg on this rig in an isolated worktree. The K2 gate is
+unchanged: the build / retreat / shelve decision waits for K1's numbers **and** the E2E
+verdict, because K2's economics read J2's proxy architecture as settled.
+
 ---
 
 ## Why this is a workstream and not a nicety
