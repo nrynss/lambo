@@ -261,7 +261,7 @@ use crate::types::{
 ///
 /// Chosen against SQLite's *most conservative* `SQLITE_MAX_VARIABLE_NUMBER` of
 /// 999 rather than the 32766 a modern build ships: 16 columns × 60 rows = 960
-/// and 9 × 100 = 900 both fit either way, and a statement that silently depends
+/// and 10 × 99 = 990 both fit either way, and a statement that silently depends
 /// on how the library was compiled is not worth the extra rows. The limits exist so
 /// the shape matches Cockroach's, not to hit a latency target. `interactions`
 /// batches too (100): its self-foreign-key chain is safe under the R1-1
@@ -270,7 +270,7 @@ use crate::types::{
 const BULK_LIMITS: BulkLimits = BulkLimits {
     interactions: 100,
     concepts: 60,
-    edges: 100,
+    edges: 99,
 };
 
 /// The conservative `SQLITE_MAX_VARIABLE_NUMBER` the limits above are sized
