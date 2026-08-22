@@ -200,6 +200,17 @@ step "the J4 completion join restores metric 2 for an async-acked session"
 #      line, so without them a join that read ANY state would still pass, because
 #      the key check alone would find nothing to add. A fixture that cannot fail
 #      is not a fixture (J0-R2), and this one failed exactly that way once.
+#   4. Receipt `…7` is the same trap one state over (JE2E-R2-7): its TERMINAL
+#      completion is `deferred`, carrying absurd counts (90/90), shadowing an
+#      earlier `applied` line that carries the real ones (7/7). Round 2 showed
+#      that widening APPLIED_STATES to admit `deferred` survived green, because
+#      `…4`'s deferred line carries no counts AND is shadowed by a later terminal
+#      line — nothing opposed the state. This receipt opposes it from both
+#      directions at once: admitting `deferred` reads 90/90 (the totals move),
+#      and taking the first completion per receipt rather than the terminal one
+#      reads 7/7 (the totals move the other way). The terminal state here is a
+#      real shape: a write applied in one process, then a LATER serve deferring
+#      a replay it could not drain, both on one shared ledger.
 #
 # Planted arithmetic: created 3+1+5 = 9, matched 1+2+0 = 3 across the three
 # joinable calls, so the rate is 3/12 = 0.250 — a number no zero-fold and no
@@ -210,6 +221,8 @@ cat >"$work/j4-completion.jsonl" <<'J4DONE'
 {"v":1,"ts":"2026-08-21T10:00:11+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"deferred","reason":"close_drain_exceeded"}
 {"v":1,"ts":"2026-08-21T10:00:12+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"applied_after_restart","created_count":5,"matched_count":0}
 {"v":1,"ts":"2026-08-21T10:00:13+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-5","state":"failed","error":"embedding error (the detail was logged server-side)","created_count":40,"matched_count":40}
+{"v":1,"ts":"2026-08-21T10:00:14+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-7","state":"applied","created_count":7,"matched_count":7}
+{"v":1,"ts":"2026-08-21T10:00:15+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-7","state":"deferred","reason":"close_drain_exceeded","created_count":90,"matched_count":90}
 {"v":1,"ts":"2026-08-21T10:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":900,"query":"what did we decide","top_k":8,"hit_count":0,"hits":[]}
 {"v":1,"ts":"2026-08-21T10:00:01+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":48,"concepts_requested":4,"admitted":true,"receipt":"r-1"}
 {"v":1,"ts":"2026-08-21T10:00:02+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":51,"concepts_requested":3,"admitted":true,"receipt":"r-2"}
@@ -217,18 +230,19 @@ cat >"$work/j4-completion.jsonl" <<'J4DONE'
 {"v":1,"ts":"2026-08-21T10:00:04+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":5,"admitted":true,"receipt":"r-4"}
 {"v":1,"ts":"2026-08-21T10:00:05+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":2,"admitted":true,"receipt":"r-5"}
 {"v":1,"ts":"2026-08-21T10:00:06+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":2,"admitted":true,"receipt":"r-6"}
+{"v":1,"ts":"2026-08-21T10:00:08+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":2,"admitted":true,"receipt":"r-7"}
 {"v":1,"ts":"2026-08-21T10:00:07+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-3","state":"applied","created_count":2,"matched_count":0}
 J4DONE
 out="$("$py" "$here/dedup_rate.py" --bucket all "$work/j4-completion.jsonl")"
 echo "$out"
-check "counts the completion lines in the header" "$out" "6 completion"
+check "counts the completion lines in the header" "$out" "8 completion"
 check "reports a real rate for an async-acked session" "$out" "0.250"
 check "says the facts were joined from completion lines" "$out" \
   "3 derive call(s) were acknowledged asynchronously"
 check "warns that sem.merged is an undercount, not a zero" "$out" \
   "undercount, not a zero"
-check "the failed and record-less derives stay fact-less" "$out" \
-  "2 SUCCESSFUL derive call(s) carried NO created/matched facts"
+check "the failed, deferred and record-less derives stay fact-less" "$out" \
+  "3 SUCCESSFUL derive call(s) carried NO created/matched facts"
 check "and the message names the replay as a cause" "$out" "still owed a replay"
 if "$py" "$here/dedup_rate.py" --json "$work/j4-completion.jsonl" \
    | "$py" -c 'import json,sys
@@ -242,11 +256,11 @@ assert abs(t["dedup_rate"] - 0.25) < 1e-9, t
 # the 0/0 its earlier `deferred` line would have implied.
 assert d["derive_facts_from_completion"] == 3, d["derive_facts_from_completion"]
 assert d["derive_facts_from_line"] == 0, d["derive_facts_from_line"]
-assert d["derive_calls_without_facts"] == 2, d["derive_calls_without_facts"]
+assert d["derive_calls_without_facts"] == 3, d["derive_calls_without_facts"]
 # record_action rides the same join, or the store cross-check reports a phantom
 # surplus for every async session.
 assert d["record_action_created"] == 2, d["record_action_created"]
-assert d["ledger_schema"]["completion_lines"] == 6, d["ledger_schema"]'; then
+assert d["ledger_schema"]["completion_lines"] == 8, d["ledger_schema"]'; then
   printf '    ok   --json carries the joined totals, the terminal state, and the split\n'
 else
   printf '    FAIL --json did not carry the completion join correctly\n'
