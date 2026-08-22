@@ -36,8 +36,31 @@ Run (identical on both platforms):
 
 ```sh
 nohup llama-server --embedding -m ~/models/bge-m3-q8_0.gguf \
-  --port 8080 --host 127.0.0.1 > /tmp/llama-embed-8080.log 2>&1 &
+  --port 8080 --host 127.0.0.1 \
+  --batch-size 8192 --ubatch-size 8192 -c 8192 \
+  > /tmp/llama-embed-8080.log 2>&1 &
 curl -s 127.0.0.1:8080/health   # {"status":"ok"}
+```
+
+**The three capacity flags are load-bearing, not tuning** (found by K1's NVIDIA leg
+2026-08-22, confirmed live on the Mac rig the same day). Without them this build clamps
+`n_batch = n_ubatch = 512`, and **any input over ~512 tokens fails with HTTP 500** —
+`input (N tokens) is too large to process. increase the physical batch size`. That is the
+J3-R3-1 failure class reachable by plain input length: before J3 the write applied with
+`embedding = NULL` while the receipt said "applied", so on a pre-J3 binary every
+long-content write silently lost its vector. BGE-M3 carries 8192-token capacity; the
+defaults throw away fifteen sixteenths of it. Long flags only — this build rejects `-u`.
+Verify after starting, not just `/health`:
+
+```sh
+python3 - <<'EOF'
+import json, urllib.request
+req = urllib.request.Request("http://127.0.0.1:8080/v1/embeddings",
+    data=json.dumps({"input": "word " * 900, "model": "bge-m3"}).encode(),
+    headers={"Content-Type": "application/json"})
+print(len(json.load(urllib.request.urlopen(req, timeout=60))["data"][0]["embedding"]))
+EOF
+# 1024 = capacity is real; HTTP 500 = the flags did not take
 ```
 
 Keep it on `127.0.0.1`. (Sharing one embedder over LAN works — instances are fungible —
