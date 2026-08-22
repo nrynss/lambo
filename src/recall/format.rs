@@ -298,6 +298,7 @@ mod tests {
 
     fn interaction(id: u64, agent: &str) -> Interaction {
         Interaction {
+            event_time: None,
             id: iid(id),
             session_id: sid(),
             agent_id: AgentId::from(agent),
@@ -337,6 +338,7 @@ mod tests {
                 .unwrap();
         }
         let dep = |s: NodeId, t: NodeId, m: i64| crate::types::Edge {
+            event_time: None,
             id: uid(100 + m as u64),
             session_id: sid(),
             source: s,
@@ -363,6 +365,7 @@ mod tests {
         // reachable case.
         // Provenance Derives (i1 -> a) and a Temporal edge: must not count.
         g.upsert_edge(crate::types::Edge {
+            event_time: None,
             id: uid(106),
             session_id: sid(),
             source: i1.id,
@@ -375,6 +378,7 @@ mod tests {
         })
         .unwrap();
         g.upsert_edge(crate::types::Edge {
+            event_time: None,
             id: uid(107),
             session_id: sid(),
             source: i2.id,
@@ -667,6 +671,7 @@ mod tests {
     fn dep_edge(id: u64, src: NodeId, tgt: NodeId) -> crate::types::Edge {
         let now = ts(0);
         crate::types::Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(7, id)),
             session_id: sid(),
             source: src,
@@ -682,6 +687,7 @@ mod tests {
     fn non_structural_edge(id: u64, src: NodeId, tgt: NodeId) -> crate::types::Edge {
         let now = ts(0);
         crate::types::Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(8, id)),
             session_id: sid(),
             source: src,

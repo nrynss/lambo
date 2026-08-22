@@ -71,11 +71,11 @@ use crate::types::{
 /// the per-adapter bind-parameter const-asserts (R1-4) cannot drift from the
 /// column lists they are meant to bound. `cockroach::upsert_placeholder_shapes_match_structs`
 /// pins them against the real generated SQL.
-pub const INTERACTION_COLUMNS: usize = 6;
+pub const INTERACTION_COLUMNS: usize = 7;
 /// See [`INTERACTION_COLUMNS`]. Includes `embedding` and `chunk_group_id`.
 pub const CONCEPT_COLUMNS: usize = 16;
 /// See [`INTERACTION_COLUMNS`].
-pub const EDGE_COLUMNS: usize = 9;
+pub const EDGE_COLUMNS: usize = 10;
 ///
 /// Rows per multi-row durable-intent statement. `write_intents` has 11 columns,
 /// so this keeps the binder far under the backend limit while still collapsing
@@ -95,7 +95,7 @@ pub struct BulkLimits {
     pub interactions: usize,
     /// Rows per `concepts` statement (16 columns).
     pub concepts: usize,
-    /// Rows per `edges` statement (9 columns).
+    /// Rows per `edges` statement (10 columns).
     pub edges: usize,
 }
 
@@ -488,6 +488,7 @@ mod tests {
 
     fn interaction(id: NodeId, previous_id: Option<NodeId>) -> Interaction {
         Interaction {
+            event_time: None,
             id,
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -520,6 +521,7 @@ mod tests {
 
     fn edge(id: NodeId, source: NodeId, target: NodeId, ty: EdgeType) -> Edge {
         Edge {
+            event_time: None,
             id,
             session_id: sid(),
             source,

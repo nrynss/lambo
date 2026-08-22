@@ -739,7 +739,9 @@ impl GraphStore for MemoryStore {
             let mut from_node = false;
             let mut from_other = false;
             for e in &data.snapshot.edges {
-                if e.target != c.id || e.created_at > min_created {
+                // D: an edge ages on its resolved about-time (event time when
+                // the writing interaction carried one, else flush time).
+                if e.target != c.id || e.about_time() > min_created {
                     continue;
                 }
                 if !structural.contains(&e.edge_type) || !concept_ids.contains(&e.source) {
@@ -785,7 +787,7 @@ impl GraphStore for MemoryStore {
             if e.target != node || !structural.contains(&e.edge_type) {
                 continue;
             }
-            if e.created_at > min_created {
+            if e.about_time() > min_created {
                 continue;
             }
             let Some(src) = data.snapshot.concepts.iter().find(|c| c.id == e.source) else {
@@ -799,11 +801,11 @@ impl GraphStore for MemoryStore {
             else {
                 continue;
             };
-            if ix.created_at > min_created {
+            if ix.about_time() > min_created {
                 continue;
             }
             if interaction_ids.insert(ix.id) {
-                times.push(ix.created_at);
+                times.push(ix.about_time());
             }
         }
         let distinct = interaction_ids.len() as u64;
@@ -812,11 +814,13 @@ impl GraphStore for MemoryStore {
         } else {
             let lo = times.iter().min().copied().unwrap();
             let hi = times.iter().max().copied().unwrap();
+            // D: the session extent is measured on resolved about-times too,
+            // so a historical corpus widens it even when flush stamps cluster.
             let all: Vec<_> = data
                 .snapshot
                 .interactions
                 .iter()
-                .map(|i| i.created_at)
+                .map(|i| i.about_time())
                 .collect();
             let sess_lo = all.iter().min().copied().unwrap_or(lo);
             let sess_hi = all.iter().max().copied().unwrap_or(hi);
@@ -1096,6 +1100,7 @@ mod tests {
             mutations: vec![
                 Mutation::UpsertNode {
                     node: Node::Interaction(Interaction {
+                        event_time: None,
                         id: i1,
                         session_id: sid.clone(),
                         agent_id: AgentId::from("a"),
@@ -1132,6 +1137,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: sid.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1245,6 +1251,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: sid.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1319,6 +1326,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: sid.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1420,6 +1428,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: s1.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1431,6 +1440,7 @@ mod tests {
                         plant_concept(&s1, c1, i1, "alpha", ts),
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i2,
                                 session_id: s2.clone(),
                                 agent_id: AgentId::from("b"),
@@ -1469,6 +1479,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: sid.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1502,6 +1513,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: sid.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1566,6 +1578,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: i1,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("a"),
@@ -1585,6 +1598,7 @@ mod tests {
         // orphan <- only pillar
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: pillar,
@@ -1599,6 +1613,7 @@ mod tests {
         // shared <- pillar and other
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: pillar,
@@ -1612,6 +1627,7 @@ mod tests {
         });
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: other,
@@ -1645,6 +1661,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: i1,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("a"),
@@ -1657,6 +1674,7 @@ mod tests {
         batch.push(plant_concept(&sid, orphan, i1, "orphan", ts));
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: pillar,
@@ -1700,6 +1718,7 @@ mod tests {
         let mut batch = MutationBatch::new();
         batch.push(Mutation::UpsertNode {
             node: Node::Interaction(Interaction {
+                event_time: None,
                 id: i1,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("a"),
@@ -1713,6 +1732,7 @@ mod tests {
         // pillar -> orphan (Dependency): the real dependency relationship.
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: pillar,
@@ -1727,6 +1747,7 @@ mod tests {
         // orphan also has a Derives from its origin interaction (mandatory §5.7).
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: i1,
@@ -1762,6 +1783,7 @@ mod tests {
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i1,
                                 session_id: s1.clone(),
                                 agent_id: AgentId::from("a"),
@@ -1773,6 +1795,7 @@ mod tests {
                         plant_concept(&s1, c1, i1, "keep-me-elsewhere-name", ts),
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
+                                event_time: None,
                                 id: i2,
                                 session_id: s2.clone(),
                                 agent_id: AgentId::from("b"),
@@ -1817,6 +1840,7 @@ mod tests {
                         mutations: vec![
                             Mutation::UpsertNode {
                                 node: Node::Interaction(Interaction {
+                                    event_time: None,
                                     id: i1,
                                     session_id: sid.clone(),
                                     agent_id: AgentId::from("a"),
@@ -1858,6 +1882,7 @@ mod tests {
                 &MutationBatch {
                     mutations: vec![Mutation::UpsertNode {
                         node: Node::Interaction(Interaction {
+                            event_time: None,
                             id: i1,
                             session_id: s1.clone(),
                             agent_id: AgentId::from("a"),
@@ -1901,6 +1926,7 @@ mod tests {
                 &MutationBatch {
                     mutations: vec![Mutation::UpsertNode {
                         node: Node::Interaction(Interaction {
+                            event_time: None,
                             id: i1,
                             session_id: sid.clone(),
                             agent_id: AgentId::from("a"),

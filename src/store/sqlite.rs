@@ -319,22 +319,24 @@ const INIT_SQL: &str = include_str!("../../migrations/sqlite/001_init.sql");
 /// ratio, both against a session `MemoryStore` never sees. The extent CTE was
 /// already session-filtered, so the two halves of the ratio disagreed.
 const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
-     SELECT DISTINCT i.id, i.created_at \
+     SELECT DISTINCT i.id, COALESCE(i.event_time, i.created_at) AS about_ts \
      FROM edges e \
      JOIN concepts src ON src.id = e.source \
      JOIN interactions i ON i.id = src.origin_interaction \
      WHERE e.target = ? AND e.session_id = ? AND i.session_id = ? \
        AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-       AND e.created_at <= ? AND i.created_at <= ? \
+       AND COALESCE(e.event_time, e.created_at) <= ? \
+       AND COALESCE(i.event_time, i.created_at) <= ? \
  ), \
  extent AS ( \
-     SELECT min(created_at) AS lo, max(created_at) AS hi \
+     SELECT min(COALESCE(event_time, created_at)) AS lo, \
+            max(COALESCE(event_time, created_at)) AS hi \
      FROM interactions WHERE session_id = ? \
  ) \
  SELECT \
      (SELECT count(*) FROM span), \
-     (SELECT min(created_at) FROM span), \
-     (SELECT max(created_at) FROM span), \
+     (SELECT min(about_ts) FROM span), \
+     (SELECT max(about_ts) FROM span), \
      extent.lo, extent.hi \
  FROM extent";
 
@@ -1279,7 +1281,8 @@ impl GraphStore for SqliteStore {
         // Spec §4.1 ported to `?` placeholders; the cutoff is computed in Rust
         // (SQLite has no INTERVAL) and bound as the fixed ISO-8601 TEXT.
         // Divergence from the spec text (for MemoryStore agreement): `c.id <> ?`
-        // excludes the node itself, and `e.created_at <= ?` gates the edge age
+        // excludes the node itself, and the edge about-time (D fallback rule:
+        // `COALESCE(e.event_time, e.created_at)`) gates the edge age
         // exactly like MemoryStore (the spec's span query gates only the
         // interaction age — see interaction_span).
         //
@@ -1306,14 +1309,13 @@ impl GraphStore for SqliteStore {
                    SELECT 1 FROM edges e \
                    JOIN concepts src ON src.id = e.source AND src.session_id = ? \
                    WHERE e.target = c.id AND e.source = ? \
-                     AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-                     AND e.created_at <= ?) \
+                     AND COALESCE(e.event_time, e.created_at) <= ?) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM edges e2 \
                    JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = ? \
                    WHERE e2.target = c.id AND e2.source <> ? \
                      AND e2.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-                     AND e2.created_at <= ?)"
+                     AND COALESCE(e2.event_time, e2.created_at) <= ?)"
         ))
         .bind(&session.0)
         .bind(&node_text)
@@ -1974,7 +1976,7 @@ async fn upsert_interactions(
         return Ok(());
     }
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "INSERT INTO interactions (id, session_id, agent_id, prompt_text, previous_id, created_at) ",
+        "INSERT INTO interactions (id, session_id, agent_id, prompt_text, previous_id, created_at, event_time) ",
     );
     qb.push_values(rows.iter(), |mut b, i| {
         b.push_bind(i.id.0.to_string())
@@ -1982,7 +1984,8 @@ async fn upsert_interactions(
             .push_bind(i.agent_id.0.clone())
             .push_bind(i.prompt_text.clone())
             .push_bind(i.previous_id.map(|id| id.0.to_string()))
-            .push_bind(ts_to_text(i.created_at));
+            .push_bind(ts_to_text(i.created_at))
+            .push_bind(i.event_time.map(ts_to_text));
     });
     qb.push(
         " ON CONFLICT (id) DO UPDATE SET \
@@ -1990,7 +1993,8 @@ async fn upsert_interactions(
              agent_id = excluded.agent_id, \
              prompt_text = excluded.prompt_text, \
              previous_id = excluded.previous_id, \
-             created_at = excluded.created_at",
+             created_at = excluded.created_at, \
+             event_time = excluded.event_time",
     );
     qb.build()
         .execute(&mut *tx)
@@ -2216,7 +2220,7 @@ async fn upsert_edges(tx: &mut sqlx::SqliteConnection, rows: &[&Edge]) -> Result
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
         "INSERT INTO edges (\
              id, session_id, source, target, edge_type, weight, reinforcements, \
-             created_at, last_reinforced) ",
+             created_at, last_reinforced, event_time) ",
     );
     qb.push_values(rows.iter().zip(types.iter()), |mut b, (e, edge_type)| {
         b.push_bind(e.id.0.to_string())
@@ -2227,7 +2231,8 @@ async fn upsert_edges(tx: &mut sqlx::SqliteConnection, rows: &[&Edge]) -> Result
             .push_bind(e.weight)
             .push_bind(e.reinforcements)
             .push_bind(ts_to_text(e.created_at))
-            .push_bind(ts_to_text(e.last_reinforced));
+            .push_bind(ts_to_text(e.last_reinforced))
+            .push_bind(e.event_time.map(ts_to_text));
     });
     // Natural-key preference (MemoryStore parity): the table-level
     // UNIQUE (source, target, edge_type) autoindexes and is a legal target.
@@ -2238,7 +2243,8 @@ async fn upsert_edges(tx: &mut sqlx::SqliteConnection, rows: &[&Edge]) -> Result
              weight = excluded.weight, \
              reinforcements = excluded.reinforcements, \
              created_at = excluded.created_at, \
-             last_reinforced = excluded.last_reinforced",
+             last_reinforced = excluded.last_reinforced, \
+             event_time = excluded.event_time",
     );
     qb.build()
         .execute(&mut *tx)
@@ -2529,7 +2535,7 @@ async fn load_interactions(
     session: &SessionId,
 ) -> Result<Vec<Interaction>, StoreError> {
     let rows = sqlx::query(
-        "SELECT id, session_id, agent_id, prompt_text, previous_id, created_at \
+        "SELECT id, session_id, agent_id, prompt_text, previous_id, created_at, event_time \
          FROM interactions WHERE session_id = ? ORDER BY created_at ASC, id ASC",
     )
     .bind(&session.0)
@@ -2544,6 +2550,8 @@ async fn load_interactions(
         let prompt: Option<String> = row.try_get(3).map_err(|e| db_err("load interactions", e))?;
         let prev: Option<String> = row.try_get(4).map_err(|e| db_err("load interactions", e))?;
         let created: String = row.try_get(5).map_err(|e| db_err("load interactions", e))?;
+        let event_time: Option<String> =
+            row.try_get(6).map_err(|e| db_err("load interactions", e))?;
         out.push(Interaction {
             id: node_id(&id, "interaction id")?,
             session_id: SessionId::from(sid),
@@ -2551,6 +2559,7 @@ async fn load_interactions(
             prompt_text: prompt,
             previous_id: prev.as_deref().map(node_id_str).transpose()?,
             created_at: text_to_ts(&created)?,
+            event_time: event_time.as_deref().map(text_to_ts).transpose()?,
         });
     }
     Ok(out)
@@ -2638,7 +2647,7 @@ async fn load_edges(
 ) -> Result<Vec<Edge>, StoreError> {
     let rows = sqlx::query(
         "SELECT id, session_id, source, target, edge_type, weight, reinforcements, \
-                created_at, last_reinforced \
+                created_at, last_reinforced, event_time \
          FROM edges WHERE session_id = ? ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -2656,6 +2665,7 @@ async fn load_edges(
         let reinforcements: i32 = row.try_get(6).map_err(|e| db_err("load edges", e))?;
         let created: String = row.try_get(7).map_err(|e| db_err("load edges", e))?;
         let last_reinforced: String = row.try_get(8).map_err(|e| db_err("load edges", e))?;
+        let event_time: Option<String> = row.try_get(9).map_err(|e| db_err("load edges", e))?;
         out.push(Edge {
             id: node_id(&id, "edge id")?,
             session_id: SessionId::from(sid),
@@ -2666,6 +2676,7 @@ async fn load_edges(
             reinforcements,
             created_at: text_to_ts(&created)?,
             last_reinforced: text_to_ts(&last_reinforced)?,
+            event_time: event_time.as_deref().map(text_to_ts).transpose()?,
         });
     }
     Ok(out)
@@ -2837,6 +2848,7 @@ mod tests {
     ) -> Mutation {
         Mutation::UpsertNode {
             node: NodeKind::Interaction(Interaction {
+                event_time: None,
                 id,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("a"),
@@ -2857,6 +2869,7 @@ mod tests {
     ) -> Mutation {
         Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source,
@@ -4317,6 +4330,7 @@ mod tests {
                         concept_mutation,
                         Mutation::UpsertEdge {
                             edge: Edge {
+                                event_time: None,
                                 id: NodeId::new(),
                                 session_id: sid.clone(),
                                 source: interaction,
@@ -4410,6 +4424,7 @@ mod tests {
             .seed(&GraphSnapshot {
                 session_id: sid.clone(),
                 interactions: vec![Interaction {
+                    event_time: None,
                     id: i1,
                     session_id: sid.clone(),
                     agent_id: AgentId::from("a"),
@@ -4535,6 +4550,7 @@ mod tests {
         };
         let i1 = NodeId::new();
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i1,
             session_id: sid.clone(),
             agent_id: AgentId::from("agent-a"),
@@ -4545,6 +4561,7 @@ mod tests {
         .unwrap();
         let i2 = NodeId::new();
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i2,
             session_id: sid.clone(),
             agent_id: AgentId::from("agent-a"),
@@ -4759,6 +4776,7 @@ mod tests {
                 // exactly as demote would create it.
                 Mutation::UpsertEdge {
                     edge: crate::types::Edge {
+                        event_time: None,
                         id: NodeId::new(),
                         session_id: sid.clone(),
                         source: i1,
@@ -6183,13 +6201,16 @@ mod tests {
     /// [`structural_queries_aged_vs_fresh_edge_agree_with_memory`]).
     #[test]
     fn structural_span_sql_gates_both_timestamps() {
+        // D: each gate resolves the stored instant through the fallback rule
+        // (COALESCE(event_time, created_at)), so the assertion tracks the
+        // about-time expression, not a bare column.
         assert!(
-            INTERACTION_SPAN_SQL.contains("e.created_at <= ?"),
-            "span SQL must gate the EDGE timestamp"
+            INTERACTION_SPAN_SQL.contains("COALESCE(e.event_time, e.created_at) <= ?"),
+            "span SQL must gate the EDGE about-time"
         );
         assert!(
-            INTERACTION_SPAN_SQL.contains("i.created_at <= ?"),
-            "span SQL must gate the ORIGIN-INTERACTION timestamp"
+            INTERACTION_SPAN_SQL.contains("COALESCE(i.event_time, i.created_at) <= ?"),
+            "span SQL must gate the ORIGIN-INTERACTION about-time"
         );
     }
 
@@ -6286,6 +6307,7 @@ mod tests {
                 plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, ts),
                 Mutation::UpsertEdge {
                     edge: Edge {
+                        event_time: None,
                         id: NodeId::new(),
                         session_id: sid.clone(),
                         source: pillar,
@@ -6798,6 +6820,7 @@ mod tests {
         for n in 0..ids.len() - 1 {
             mutations.push(Mutation::UpsertEdge {
                 edge: Edge {
+                    event_time: None,
                     id: NodeId::new(),
                     session_id: sid.clone(),
                     source: ids[n],

@@ -432,6 +432,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<u64>, agent: &str, at: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: nid(0, id),
             session_id: sid(),
             agent_id: AgentId::from(agent),
@@ -464,6 +465,7 @@ mod tests {
 
     fn dep_edge(id: u64, source: NodeId, target: NodeId, at: i64) -> Edge {
         Edge {
+            event_time: None,
             id: nid(3, id),
             session_id: sid(),
             source,

@@ -20,6 +20,7 @@ fn fresh_graph() -> (Graph, NodeId) {
     let sid = SessionId::from("p2-integration");
     let mut g = Graph::new(sid.clone());
     let i = Interaction {
+        event_time: None,
         id: NodeId::new(),
         session_id: sid,
         agent_id: AgentId::from("agent-a"),
@@ -127,6 +128,7 @@ fn write_paths_interleave_with_mutation_log_and_invariants() {
         produces: &["migrations/003.sql"],
         modifies: &[],
         depends_on: &["user schema"],
+        event_time: None,
     };
     let ao = record_action(&mut g, iid, &agent_a, &action).unwrap();
     assert!(g.edge_count() > 0);

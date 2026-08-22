@@ -1132,6 +1132,7 @@ impl MemoryBuilder {
 ///     produces: &["migrations/003.sql"],
 ///     depends_on: &["user schema"],
 ///     modifies: &[],
+///     event_time: None,
 /// })?;
 ///
 /// mem.demote("The caching layer was the bottleneck.", "chunk-1")?;
@@ -1418,6 +1419,43 @@ impl Memory {
         concepts: &[(&str, ConceptType)],
         parent_of: &ParentOf<'_>,
     ) -> Result<DeriveOutcome, LamboError> {
+        self.derive_for_ingest_as(agent, None, concepts, parent_of)
+            .await
+    }
+
+    /// [`Memory::derive`] for a fact whose about-time the caller knows (D).
+    ///
+    /// This is the historical-corpus entry point: `event_time` — a commit
+    /// date, a transcript timestamp — is carried on the interaction this call
+    /// opens and inherited by every concept and edge derived under it. Flush
+    /// time stays process-stamped exactly as in [`Memory::derive`]; F18's
+    /// server-authority rule is about *observed-at* claims, not about-time,
+    /// which no store-side clock could know. Canonization's age floors,
+    /// coverage bar and session separation then measure the replayed history
+    /// on its own timeline; see [`crate::canon::event_time`].
+    ///
+    /// Passing `None` is exactly [`Memory::derive`]: the fallback rule makes
+    /// the interaction behave as if D never happened.
+    pub async fn derive_for_ingest(
+        &self,
+        event_time: DateTime<Utc>,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+    ) -> Result<DeriveOutcome, LamboError> {
+        self.derive_for_ingest_as(&self.agent, Some(event_time), concepts, parent_of)
+            .await
+    }
+
+    /// [`Memory::derive_for_ingest`] on behalf of `agent` (J1), with an
+    /// explicit `Option` so an ingester can mix timestamped turns with live
+    /// ones through one seam.
+    pub async fn derive_for_ingest_as(
+        &self,
+        agent: &AgentId,
+        event_time: Option<DateTime<Utc>>,
+        concepts: &[(&str, ConceptType)],
+        parent_of: &ParentOf<'_>,
+    ) -> Result<DeriveOutcome, LamboError> {
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
@@ -1426,7 +1464,7 @@ impl Memory {
             .map(|(content, _)| *content)
             .collect::<Vec<_>>()
             .join("; ");
-        let interaction = self.begin_interaction_as(agent, Some(prompt))?;
+        let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
         let outcome = match self.config.match_strategy {
             MatchStrategy::Hybrid => {
@@ -1479,13 +1517,18 @@ impl Memory {
 
     /// [`Memory::record_action`] on behalf of `agent` (J1). See
     /// [`Memory::derive_as`] for what the per-call id does and does not change.
+    ///
+    /// The action's own `event_time` (D) — when it carries one — stamps the
+    /// interaction opened for this call, and through it every edge the call
+    /// creates. Flush time is still process-stamped here, never caller-set.
     pub fn record_action_as(
         &self,
         agent: &AgentId,
         action: &Action<'_>,
     ) -> Result<ActionOutcome, LamboError> {
         let _writing = self.begin_write_sync()?;
-        let interaction = self.begin_interaction_as(agent, Some(action.action.to_string()))?;
+        let interaction =
+            self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
             let mut g = self.graph.write();
             graph_record_action(&mut g, interaction, agent, action)?
@@ -1617,6 +1660,9 @@ impl Memory {
     /// queue would have let a later synchronous `record_action` overtake an
     /// earlier queued `derive` on the same agent's chain.
     ///
+    /// The interaction — and with it the action's optional D `event_time` — is
+    /// pinned at submit time exactly as in [`Memory::record_action_as`].
+    ///
     /// See [`Memory::derive_async_as`] for what stays on the call path.
     pub async fn record_action_async_as(
         &self,
@@ -1628,7 +1674,8 @@ impl Memory {
             let g = self.graph.read();
             crate::graph::action::validate(&g, action)?;
         }
-        let interaction = self.begin_interaction_as(agent, Some(action.action.to_string()))?;
+        let interaction =
+            self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         Ok(self
             .pipeline
             .submit_action(
@@ -2418,7 +2465,7 @@ impl Memory {
     /// Reading the chain tail and inserting happen under one write lock, so two
     /// concurrent writers cannot both claim the same predecessor.
     fn begin_interaction(&self, prompt: Option<String>) -> Result<NodeId, LamboError> {
-        self.begin_interaction_as(&self.agent, prompt)
+        self.begin_interaction_full(&self.agent, prompt, None)
     }
 
     /// [`Memory::begin_interaction`] stamping `agent` as the interaction's
@@ -2434,6 +2481,24 @@ impl Memory {
         agent: &AgentId,
         prompt: Option<String>,
     ) -> Result<NodeId, LamboError> {
+        self.begin_interaction_full(agent, prompt, None)
+    }
+
+    /// The one interaction-opening seam, with D's optional **event time**.
+    ///
+    /// F18's rule guards flush time only: `created_at` remains process-stamped
+    /// no matter what arrives here. `event_time` is a different concept — the
+    /// instant the fact is *about* (a commit date, transcript timestamp), not
+    /// an observation claim about the present — and it is stored verbatim as
+    /// [`Interaction::event_time`] (`None` = live fact, fallback rule). Every
+    /// edge the write creates inherits this interaction's about-time at
+    /// creation, so one parameter stamps the whole turn.
+    fn begin_interaction_full(
+        &self,
+        agent: &AgentId,
+        prompt: Option<String>,
+        event_time: Option<DateTime<Utc>>,
+    ) -> Result<NodeId, LamboError> {
         let id = NodeId::new();
         let created_at = (self.clock)();
         let mut g = self.graph.write();
@@ -2445,6 +2510,7 @@ impl Memory {
             prompt_text: prompt,
             previous_id,
             created_at,
+            event_time,
         })?;
         Ok(id)
     }
@@ -3373,6 +3439,7 @@ mod tests {
             let produces_refs: Vec<&str> = produces.iter().map(String::as_str).collect();
             let depends_refs: Vec<&str> = depends_on.iter().map(String::as_str).collect();
             mem.record_action(&Action {
+                event_time: None,
                 action: &format!("burst action {call}"),
                 produces: &produces_refs,
                 modifies: &[],
@@ -4466,6 +4533,7 @@ mod tests {
 
         let action_err = first
             .record_action(&Action {
+                event_time: None,
                 action: "write after loss",
                 produces: &["x"],
                 modifies: &[],
@@ -5160,6 +5228,7 @@ mod tests {
                 session_id: sid.clone(),
                 embedding: Some(contract("fixture", 1024)),
                 interactions: vec![Interaction {
+                    event_time: None,
                     id: interaction,
                     session_id: sid.clone(),
                     agent_id: agent.clone(),
@@ -5277,6 +5346,7 @@ mod tests {
         .await
         .unwrap();
         mem.record_action(&Action {
+            event_time: None,
             action: "created migrations/003.sql",
             produces: &["migrations/003.sql"],
             modifies: &[],
@@ -5392,6 +5462,7 @@ mod tests {
 
         // Fresh writes land in the log *after* the retained batch was drained.
         mem.record_action(&Action {
+            event_time: None,
             action: "wrote docs/api.md",
             produces: &["docs/api.md"],
             modifies: &[],
@@ -5883,6 +5954,7 @@ mod tests {
 
         // A write after degradation is still in the log when close drains it.
         mem.record_action(&Action {
+            event_time: None,
             action: "wrote docs/api.md",
             produces: &["docs/api.md"],
             modifies: &[],
@@ -5919,6 +5991,7 @@ mod tests {
         // Write, then let a degraded cycle drain-and-drop it: log empty, tail
         // gone. Exactly the state the shortcut used to bless.
         mem.record_action(&Action {
+            event_time: None,
             action: "wrote docs/api.md",
             produces: &["docs/api.md"],
             modifies: &[],
@@ -6138,6 +6211,7 @@ mod tests {
         let gate = mem.writers.write().await;
         let err = mem
             .record_action(&Action {
+                event_time: None,
                 action: "late",
                 produces: &[],
                 modifies: &[],
@@ -6248,6 +6322,7 @@ mod tests {
         );
         closed(
             mem.record_action(&Action {
+                event_time: None,
                 action: "late",
                 produces: &[],
                 modifies: &[],
@@ -6306,6 +6381,7 @@ mod tests {
         assert!(!mem.index().read().search("limiter", 10).is_empty());
 
         mem.record_action(&Action {
+            event_time: None,
             action: "wrote docs/api.md",
             produces: &["docs/api.md"],
             modifies: &[],
@@ -6350,6 +6426,7 @@ mod tests {
         .await
         .unwrap();
         mem.record_action(&Action {
+            event_time: None,
             action: "wired the client",
             produces: &[],
             modifies: &[],

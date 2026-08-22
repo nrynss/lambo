@@ -326,6 +326,7 @@ mod tests {
 
     fn interaction() -> Interaction {
         Interaction {
+            event_time: None,
             id: iid(1),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),

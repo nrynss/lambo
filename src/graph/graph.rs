@@ -390,6 +390,7 @@ impl Graph {
 
         if let Some(prev) = i.previous_id {
             let edge = Edge {
+                event_time: i.event_time,
                 id: NodeId::new(),
                 session_id: self.session_id.clone(),
                 source: i.id,
@@ -421,12 +422,15 @@ impl Graph {
                 c.id, c.session_id, self.session_id
             )));
         }
-        if !matches!(self.nodes.get(&derives_from), Some(Node::Interaction(_))) {
-            return Err(invariant(format!(
-                "concept {} derives from {derives_from}, which is not an interaction in this graph",
-                c.id
-            )));
-        }
+        let interaction_event_time = match self.nodes.get(&derives_from) {
+            Some(Node::Interaction(i)) => i.event_time,
+            _ => {
+                return Err(invariant(format!(
+                    "concept {} derives from {derives_from}, which is not an interaction in this graph",
+                    c.id
+                )));
+            }
+        };
         if let Some(vector) = &c.embedding {
             let contract = self.embedding.as_ref().ok_or_else(|| {
                 invariant(format!(
@@ -487,6 +491,7 @@ impl Graph {
             reinforcements: 1,
             created_at: c.created_at,
             last_reinforced: c.created_at,
+            event_time: interaction_event_time,
         };
         let final_edge = self.record_edge(edge)?;
         self.append_mutation(Mutation::UpsertEdge { edge: final_edge });
@@ -1774,6 +1779,7 @@ mod tests {
 
     fn interaction(id: u64, prev: Option<NodeId>, at_min: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid(),
             agent_id: crate::types::AgentId::from("agent-a"),
@@ -1806,6 +1812,7 @@ mod tests {
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {
         Edge {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(3, id)),
             session_id: sid(),
             source: src,

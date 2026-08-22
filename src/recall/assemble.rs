@@ -398,6 +398,7 @@ mod tests {
 
     fn interaction(id: u64) -> Interaction {
         Interaction {
+            event_time: None,
             id: iid(id),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -1427,6 +1428,7 @@ mod tests {
 
     fn dep_edge(src: u64, dst: u64) -> crate::types::Edge {
         crate::types::Edge {
+            event_time: None,
             id: NodeId::new(),
             session_id: sid(),
             source: uid(src),

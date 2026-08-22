@@ -192,6 +192,7 @@ mod tests {
     fn graph_with_node() -> (Graph, NodeId) {
         let mut g = Graph::new(sid());
         let i = Interaction {
+            event_time: None,
             id: uid(1),
             session_id: sid(),
             agent_id: agent("agent-a"),

@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS interactions (
     agent_id        TEXT NOT NULL,
     prompt_text     TEXT,
     previous_id     TEXT REFERENCES interactions(id),
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    event_time      TEXT      -- D: nullable about-time; NULL = live fact (fallback created_at)
 );
 
 CREATE TABLE IF NOT EXISTS concepts (
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight          REAL NOT NULL,
     reinforcements  INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
+    event_time      TEXT,     -- D: inherited from the writing interaction
     last_reinforced TEXT NOT NULL,
     UNIQUE (source, target, edge_type)
 );

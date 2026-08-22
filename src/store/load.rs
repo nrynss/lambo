@@ -252,6 +252,7 @@ mod tests {
 
     fn interaction(sid: &SessionId, id: u64, prev: Option<NodeId>, at_min: i64) -> Interaction {
         Interaction {
+            event_time: None,
             id: NodeId(Uuid::from_u64_pair(1, id)),
             session_id: sid.clone(),
             agent_id: agent_a(),

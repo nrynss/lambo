@@ -340,6 +340,7 @@ mod tests {
         let c2 = NodeId::new();
         let derives_edge = |target: NodeId| Mutation::UpsertEdge {
             edge: crate::types::Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source: i1,
@@ -364,6 +365,7 @@ mod tests {
         };
         let interaction = Mutation::UpsertNode {
             node: crate::types::Node::Interaction(Interaction {
+                event_time: None,
                 id: i1,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("seeder"),

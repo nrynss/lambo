@@ -406,6 +406,7 @@ mod tests {
 
     fn edge(id: u64, src: u64, tgt: u64, ty: EdgeType, weight: f64) -> Edge {
         Edge {
+            event_time: None,
             id: NodeId(uuid::Uuid::from_u64_pair(3, id)),
             session_id: sid(),
             source: NodeId(uuid::Uuid::from_u64_pair(2, src)),
@@ -427,6 +428,7 @@ mod tests {
     fn exhibit() -> Graph {
         let mut g = Graph::new(sid());
         let i1 = Interaction {
+            event_time: None,
             id: NodeId(uuid::Uuid::from_u64_pair(1, 1)),
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),
@@ -713,6 +715,7 @@ mod tests {
         let mut g = Graph::new(sid());
         let i1 = NodeId(uuid::Uuid::from_u64_pair(1, 1));
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i1,
             session_id: sid(),
             agent_id: AgentId::from("agent-a"),

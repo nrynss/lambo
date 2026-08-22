@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     prompt_text     STRING,
     previous_id     UUID REFERENCES interactions(id),
     created_at      TIMESTAMPTZ NOT NULL,
+    event_time      TIMESTAMPTZ, -- D: nullable about-time; NULL = live fact
     INDEX (session_id, created_at)
 );
 
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight          FLOAT NOT NULL,
     reinforcements  INT NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL,
+    event_time      TIMESTAMPTZ, -- D: inherited from the writing interaction
     last_reinforced TIMESTAMPTZ NOT NULL,
     UNIQUE (source, target, edge_type),
     INDEX (session_id, target, edge_type),
