@@ -689,6 +689,7 @@ kind = "fake"
                 dim: 1024,
                 llama_url: None,
                 llama_model: None,
+                ..Default::default()
             },
             daemon: Default::default(),
         };

@@ -37,6 +37,8 @@ demo with `store-cockroach` + `embed-bge`, and leaves Bedrock optional until aut
 | `store-sqlite` | `SqliteStore` (P3) + `sqlx` sqlite | no until T3.3 |
 | `embed-fixture` | `FixtureEmbedder` | **yes** |
 | `embed-bge` | `BgeM3LlamaCppEmbedder` + `reqwest` | **yes** |
+| `embed-candle` | `CandleEmbedder` (in-crate BGE-M3 via candle-transformers) + `tokenizers` | no until K2 ships a build |
+| `embed-candle-metal` / `-accelerate` / `-cuda` | accelerator backends for candle (layer features implying `embed-candle`) | opt-in at build time |
 | `embed-bedrock` | Bedrock Titan (T7.1) + AWS SDK | no until authorized |
 | `fixtures` | T1.4 JSON loader (implies `store-memory`) | **yes** |
 
@@ -173,6 +175,9 @@ Adding a backend:
 1. `impl GraphStore` or `impl Embedder` in a gated module  
 2. Cargo feature (+ optional deps)  
 3. One registry arm (+ `is_ready` when the impl is complete)  
+   *(K2 note: the candle adapter additionally overrides the embedder's
+   artifact-identity hook so its contract stamps repo@revision + weight sha256
+   rather than a config string — see `dev-diary/lambo-for-mooshik/K-candle-embedder.md`.)*  
 4. Document `kind` in this note + `lambo.example.toml`  
 5. For stores with vectors: implement `vector_dimensions() -> Some(n)`
 

@@ -21,9 +21,14 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
         .concepts()
         .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
         .count();
+    // K2: embedded/total answers "how many concepts actually carry a vector"
+    // from the durable snapshot — the counter that makes NULL-embedding rows
+    // visible without opening a writer.
+    let embedded = g.concepts().filter(|c| c.embedding.is_some()).count();
     let text = format!(
         "session '{}' (reader snapshot)\n\
          nodes={} edges={} concepts={} canonical={}\n\
+         embedded={}/{}\n\
          epoch={}\n\
          flush_lag=n/a log_depth=n/a daemon_cycles=n/a canonization_cycles=n/a\n\
          note: flush_lag / log_depth / daemon_cycles / canonization_cycles are writer-only; \
@@ -33,6 +38,8 @@ pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliErr
         g.edge_count(),
         concept_count,
         canonical_count,
+        embedded,
+        concept_count,
         g.epoch(),
     );
     Ok(text)
