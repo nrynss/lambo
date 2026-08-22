@@ -89,6 +89,76 @@ Read-only measurement. Aborting after K1 is a **successful outcome** if the numb
    start that does not leave generous headroom under ~30 s forces lazy-load-on-first-embed
    into K2's design rather than leaving it optional.
 
+### K1 — MacBook Pro leg (spike, measured 2026-08-22). All three falsifiers clear.
+
+**Scope: one machine, one chip — the Metal/CPU half of K1.** The CUDA leg runs separately
+on an NVIDIA machine; the build / retreat / shelve call merges both legs **and** the J E2E
+verdict, per the amendment above. Full capture, method, raw vectors and per-item results:
+[`evidence/mooshik-k1-metal/`](../../evidence/mooshik-k1-metal/README.md), landed at
+`ba558a4`. Spike crate: `spikes/k1-candle-bgem3/` (471 lines, standalone — nothing wired
+into `src/`).
+
+**Rig.** MacBook Pro, Apple M3 Pro (6P+6E cores), 18 GB, macOS 26.6.2. Rust 1.97.1,
+**candle 0.11.0** (`metal` for the Metal leg, `accelerate` for the CPU leg), tokenizers
+0.21.4, hf-hub 0.4.3 — exact resolved graph in the evidence directory.
+
+**Model under test (spike side).** `BAAI/bge-m3`, revision
+`5617a9f61b028005a4858fdac845db406aefb181`, via `candle-transformers`' `XLMRobertaModel`
+(CLS pool, pad id 1, L2-normalize). **Correction to this doc's premise: `BAAI/bge-m3`
+ships no safetensors at all** — the only full-precision artifact is the fp32
+`pytorch_model.bin` (2,271,145,830 B, sha256
+`b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38`), loaded through
+`VarBuilder::from_pth` rather than a third-party safetensors mirror (same-artifact rule,
+DOGFOOD-SETUP §1). Run as f16 and f32 on Metal, f32 on CPU. The weight-file story (keep
+`from_pth` vs convert once to local fp16 safetensors, which would also remove the f16
+load transient) is a K2 decision.
+
+**Reference tested against.** The dogfood rig's own embedder artifact: BGE-M3 **q8_0
+GGUF** (`~/models/bge-m3-q8_0.gguf`, 634,553,760 B, sha256
+`aa473d51f451a22f0fcf39ba3330c14bed38a385712b1113440f69df4047a173` — the exact file
+DOGFOOD-SETUP §1 pins), served by **llama.cpp build 10520** — genuinely independent
+tokenizer, graph and quantization. The sweep ran its own server on :8099 (8 KiB capacity
+flags); the rig's live :8080 server was left untouched and cross-checked against :8099 at
+**cosine 1.000000** (n=9), so the gate's reference is provably the rig's reference.
+(:8080 is the BGE-M3 dogfood embedder itself, not an unrelated rig — recorded here
+because the spike's brief said otherwise.)
+
+**The three numbers.**
+
+1. **Parity: PASS outright.** Median **0.999720** (Metal f16) over 82 texts — the nine
+   committed evidence texts, a 10-language × 7-size spread (32 B → 8 KiB), three non-prose
+   shapes. **Every individual item clears 0.99** (worst 0.997920, a 32-byte Spanish
+   fragment — where q8_0 rounding has the fewest tokens to average over). Pooling right on
+   the first attempt; no debugging round; **no fastembed retreat recorded**. f16 vs f32:
+   identical to the fifth decimal.
+2. **Throughput: falsifier does not fire.** At J3's probe shapes, 4-wide: Metal f16
+   **69.6 items/s** at 35 B and **11.6** at 1024 B — clears half of the recorded 110–141 /
+   ~19–22 bands at both sizes; CPU+Accelerate 30.2 / 4.6 — under at both, so **CPU alone is
+   not a viable default on this rig**. The harness re-measured llama.cpp at 146.2 / 20.7,
+   inside the recorded bands — calibrated. Stated without varnish: Metal does not match
+   llama.cpp like-for-like; it wins only batched (next paragraph).
+3. **Cost: ~15–25× headroom.** First vector 1.2–1.5 s median, worst of fifteen launches
+   **2.00 s** against the ~30 s gate — **lazy-load stays optional**. From-clean compile
+   72 s; binary 10.6 MiB (8.5 stripped); first-run fetch 99 s for 2.27 GB (one sample).
+   Peak RSS 2.7 GB (CPU f32) / 3.5 GB resident, 4.7 GB transient peak (Metal f16 — the
+   fp32 pickle is read then converted; the transient is what bites on a small machine).
+
+**The finding K2's design turns on: Metal scales with batching, not thread concurrency.**
+Four threads buy 4% (66.9 → 69.6 items/s — the Metal command queue serializes); the same
+four items in **one forward** read **190.5 items/s, beating the reference's 146.2**. An
+in-process adapter must coalesce concurrent `embed()` calls into batched forwards, not
+mutex the model — done naively it loses to llama.cpp by half. The gain is a small-input
+effect (287-token sequences already saturate the GPU), which is the shape most recall
+queries have.
+
+**Recommendation for this rig: BUILD-WORTHY**, carried into K2 if the NVIDIA leg agrees:
+Metal default on Apple silicon (CPU is a fallback, not a peer); coalesce into batched
+forwards; build with `accelerate` for the CPU fallback (1.6–2.1×); f16 on Metal (same
+parity, ~27% faster, half the resident weights); the spike's pinned revision + weight
+sha256 are the natural values for the contract's `model` field K2 task 3 wants stamped.
+Says nothing about the CUDA leg or the default-feature-set decision, which stays deferred
+to the migration story.
+
 ---
 
 ## K2 — Implement, if K1 clears
