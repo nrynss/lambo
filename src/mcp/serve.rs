@@ -1318,40 +1318,80 @@ async fn record_refused_takeovers(
     }
 }
 
-/// The holder-side refusal poller's read window and its dedup set (JE2E-1).
+/// How far **below** the cursor each poll re-reads (JE2E-R2-5).
 ///
-/// Two invariants, and the second is what the finding was about:
+/// A refusal's `refused_at` and the moment its row becomes *visible* are not the
+/// same instant. On Cockroach `now()` is the transaction's read timestamp while
+/// visibility is commit-ordered, so a slow-committing INSERT can surface a row
+/// stamped *earlier* than one that committed before it — and a cursor that had
+/// already advanced past that stamp would exclude it with `refused_at >= since`
+/// forever. A cursor that only moves forward trades unbounded re-reads for that
+/// window; re-reading a fixed slice below it trades the window back for a
+/// bounded, constant overlap.
 ///
-/// * **No refusal is logged twice.** The store read is inclusive at its lower
-///   bound, so the row (or rows) at the cursor instant come back on every poll;
-///   `at_cursor` is what retires them.
-/// * **Neither the window nor the set grows with uptime.** The cursor only
-///   moves forward, so a poll reads the rows since the last one rather than the
-///   whole history, and `at_cursor` holds only the rows a poll can *re-deliver*
-///   — the ones stamped at the cursor instant — rather than every refusal ever
-///   seen.
+/// One second is chosen against the thing being absorbed — commit latency plus
+/// store-clock offset between two processes — the same quantity
+/// [`lease::LEASE_TTL`]'s slack covers at a much larger scale, and two orders
+/// above the measured refusal path (a refused start's INSERT is a single
+/// statement). It costs one extra second of rows per poll, deduped, and the
+/// dedup set is bounded by the same second rather than by uptime.
+const REFUSAL_OVERLAP_SECS: i64 = 1;
+
+/// The holder-side refusal poller's read window and its dedup set (JE2E-1,
+/// widened by JE2E-R2-5).
 ///
-/// The cursor lands **on** the newest row seen, never past it, deliberately: a
-/// store stamp has finite resolution, so two refusals can share one instant and
-/// advancing past it would drop the second. Paying for that with a one-instant
-/// overlap and a set the dedup already needed is the cheap side of the trade.
+/// Three invariants:
+///
+/// * **No refusal is logged twice.** The read is inclusive at its lower bound
+///   *and* deliberately overlaps the previous one, so rows come back; `seen` is
+///   what retires them.
+/// * **No refusal is skipped because it arrived late.** The read starts
+///   [`REFUSAL_OVERLAP_SECS`] below the cursor, so a row whose stamp lands under
+///   an already-advanced cursor — commit-order versus stamp-order, see the
+///   constant — is still delivered and still logged.
+/// * **Neither the window nor the set grows with uptime.** The cursor moves
+///   forward with the newest row seen, and `seen` is pruned to the overlap
+///   window on every poll, so both are bounded by a second of traffic rather
+///   than by how long this holder has been up.
+///
+/// The cursor lands **on** the newest row seen, never past it: a store stamp has
+/// finite resolution, so two refusals can share one instant and advancing past
+/// it would drop the second. The overlap subsumes that, but the property is
+/// kept because it is the cheaper of the two guarantees and does not depend on
+/// the constant being right.
+///
+/// **The residual, stated rather than implied.** A row that becomes visible more
+/// than [`REFUSAL_OVERLAP_SECS`] below the cursor is still never logged. The
+/// window is not "rows older than the cursor cannot be *re*-logged" — it is that
+/// they can never be logged at all — and the constant is what bounds how late a
+/// row may be. What survives regardless: the loser's own `refused` line (written
+/// by the loser, on its own ledger) and the store row itself, retained for
+/// [`lease::LEASE_REFUSAL_RETENTION`]. Only the holder-side `refused_takeover`
+/// line is lost, and the recorder is best-effort by construction — a store error
+/// already drops a poll.
 struct RefusalCursor {
-    since: chrono::DateTime<chrono::Utc>,
-    /// `refused_by` tokens already logged at exactly [`RefusalCursor::since`].
-    at_cursor: std::collections::HashSet<String>,
+    cursor: chrono::DateTime<chrono::Utc>,
+    /// `(refused_by, at)` already logged, for rows inside the overlap window.
+    /// Pruned to that window on every poll, which is what bounds it.
+    seen: std::collections::HashSet<(String, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl RefusalCursor {
-    fn starting_at(since: chrono::DateTime<chrono::Utc>) -> Self {
+    fn starting_at(cursor: chrono::DateTime<chrono::Utc>) -> Self {
         Self {
-            since,
-            at_cursor: Default::default(),
+            cursor,
+            seen: Default::default(),
         }
     }
 
-    /// The lower bound to read from on the next poll.
+    fn overlap() -> chrono::Duration {
+        chrono::Duration::seconds(REFUSAL_OVERLAP_SECS)
+    }
+
+    /// The lower bound to read from on the next poll: the cursor, less the
+    /// overlap.
     fn since(&self) -> chrono::DateTime<chrono::Utc> {
-        self.since
+        self.cursor - Self::overlap()
     }
 
     /// Consume one poll's rows: return the ones that are new to this holder,
@@ -1368,37 +1408,27 @@ impl RefusalCursor {
         my_token: &str,
     ) -> Vec<crate::store::lease::LeaseRefusal> {
         let mut new = Vec::new();
-        let mut newest = self.since;
-        let mut at_newest: std::collections::HashSet<String> = Default::default();
+        let mut newest = self.cursor;
         for r in refusals {
             if r.current_holder != my_token {
                 continue;
             }
-            if r.at > self.since || !self.at_cursor.contains(&r.refused_by) {
+            // One key, one question: has this exact refusal been logged? The
+            // overlap makes re-delivery the normal case rather than an edge, so
+            // the dedup carries the stamp as well as the token.
+            if self.seen.insert((r.refused_by.clone(), r.at)) {
                 new.push(r.clone());
             }
-            match r.at.cmp(&newest) {
-                std::cmp::Ordering::Greater => {
-                    newest = r.at;
-                    at_newest.clear();
-                    at_newest.insert(r.refused_by);
-                }
-                std::cmp::Ordering::Equal => {
-                    at_newest.insert(r.refused_by);
-                }
-                // Older than something else in this batch: unreachable by the
-                // next poll's read, so it needs no dedup entry.
-                std::cmp::Ordering::Less => {}
+            if r.at > newest {
+                newest = r.at;
             }
         }
-        if newest > self.since {
-            self.since = newest;
-            self.at_cursor = at_newest;
-        } else {
-            // The cursor did not move, so everything logged at it must stay
-            // remembered — including anything this poll added.
-            self.at_cursor.extend(at_newest);
-        }
+        self.cursor = newest;
+        // Everything the next read can re-deliver, and nothing else. This is
+        // the line that keeps the set bounded by a second of traffic instead of
+        // by this holder's uptime (JE2E-1's other half).
+        let floor = self.since();
+        self.seen.retain(|(_, at)| *at >= floor);
         new
     }
 }
@@ -1594,8 +1624,18 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // races the signal against the lease fence, so losing the lease ends the
     // transport by the same route SIGTERM does. `shutdown_signal()` is still
     // CALLED here, so its eager registration is unmoved — only the polling is
-    // wrapped.
-    let shutdown = wind_down(shutdown_signal(), mem.clone());
+    // wrapped; the contract is documented at `shutdown_signal` itself, which is
+    // the function it is a property of (JE2E-R2-1).
+    //
+    // The ledger goes in too (JE2E-R2-4), so the fence arm can book the
+    // `lease:lost` line before it cancels the transport.
+    //
+    // **This line is the whole of the ruling's behaviour**, and severing it —
+    // passing a bare `shutdown_signal()` here while still constructing
+    // `wind_down` — used to pass the entire suite (JE2E-R2-2). It is now pinned
+    // by `serve_feeds_the_fence_into_the_transports_shutdown`, which drives
+    // `run_transport_until_shutdown` the way this call site does.
+    let shutdown = holder_shutdown(mem.clone(), ledger.clone());
     tokio::pin!(shutdown);
 
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
@@ -1669,7 +1709,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // the instant after the bind. It is what licenses the unlink at exit; see
     // `SessionEndpoint::unlink_if_ours` for why the path and the lease are not
     // licences of their own.
-    let mut bound_socket: Option<(u64, u64)> = None;
+    let mut bound_socket: Option<crate::mcp::endpoint::SocketIdentity> = None;
     let hub = match endpoint
         .as_ref()
         .map(|ep| (ep.path().display().to_string(), ep.bind()))
@@ -2062,7 +2102,7 @@ async fn serve_endpoint(
 /// the tail still in the log.
 async fn serve_stdio(
     server: LamboServer,
-    mut shutdown: Pin<&mut impl Future<Output = ()>>,
+    mut shutdown: Pin<&mut HolderShutdown>,
 ) -> Result<(), LamboError> {
     // Race the handshake against the shutdown signal (R2-a). `shutdown.as_mut()`
     // reborrows, so the same registration is still live for the transport race
@@ -2111,7 +2151,7 @@ async fn serve_stdio(
 async fn serve_http(
     server: LamboServer,
     opts: &ServeOptions,
-    mut shutdown: Pin<&mut impl Future<Output = ()>>,
+    mut shutdown: Pin<&mut HolderShutdown>,
 ) -> Result<(), LamboError> {
     // CLONED, not rebuilt (I1): every request handler must share the one call
     // ledger, and `LamboServer::new` per request would also rebuild the whole
@@ -2210,30 +2250,14 @@ async fn serve_http_bounded(
     }
 }
 
-/// Ctrl-C (and SIGTERM on unix), so `close()` still runs.
-///
-/// Registration is EAGER: the handlers are installed when this function is
-/// *called*, not when the returned future is first polled. An `async fn` body
-/// runs on first poll, which left a window between the "session attached" log
-/// and the transport's first poll of this future where a signal still had the
-/// default disposition — a SIGTERM in that window killed the process outright
-/// (R2-a; observed as a CI-only failure of the pre-handshake durability test
-/// on a loaded runner). `tokio::signal::unix::signal()` registers with the
-/// runtime immediately and buffers a signal that arrives before `recv()` is
-/// polled, so calling this before the attach log closes that window. Eagerness
-/// only makes the arming *point* effective; it does not move it. Everything
-/// before the call site in [`serve`] — the pre-lease group (the endpoint
-/// derivation, `Ledger::open` and its startup line, J4) and `resolve_role`,
-/// which takes the lease — is still unguarded, which is why the call site sits
-/// as early as it does (I-R2-1). It cannot move above `resolve_role`: that loop
-/// is allowed to run for the whole of [`ELECTION_BUDGET`], **20 seconds**, by
-/// design, and arming over it would make that wait unkillable (J2-R1-7). The
-/// figure was written here as 50 seconds — the pre-J2-L2 budget — until JE2E-7;
-/// the argument holds at 20s, since the window it would buy is ~1.1 ms in a
-/// process that holds no lease and no tail. See the arming comment in [`serve`]
-/// for the trade written out.
 /// What ends a holder's transport: a signal, **or** losing the single-writer
 /// lease (JE2E-4; operator ruling, 2026-08-22).
+///
+/// The `signal` half is [`shutdown_signal`]'s, and the **eager registration**
+/// that makes it work is a property of *that* function and of its call site —
+/// `shutdown_signal()` is evaluated as this function's argument, so wrapping it
+/// here defers only the polling. Nothing about the arming point moves; see
+/// there.
 ///
 /// # A fenced ex-holder winds down instead of living forever
 ///
@@ -2265,10 +2289,90 @@ async fn serve_http_bounded(
 /// The exit is therefore non-zero — `close`'s fenced branch returns its refusal
 /// — which is the honest code: this process's tail was discarded. Both facts a
 /// reader needs are in one line here, before any of it runs.
-async fn wind_down(signal: impl std::future::Future<Output = ()>, mem: Arc<Memory>) {
+///
+/// # It leaves an artifact, not just a stderr line (JE2E-R2-4)
+///
+/// §J4's bar is that **lease conflicts leave an artifact**, and a lease *loss*
+/// is the largest lease event a holder can suffer. It was stderr-only: this
+/// arm's `tracing::warn!` and `close()`'s fenced `tracing::error!`, neither of
+/// which reaches the shared ledger. `completion` lines cover it only when
+/// writes were in flight at the fence — and the commonest fence, like the
+/// commonest holder death (JE2E-3's own argument), is **idle**, so an idle
+/// fenced holder's ledger simply stopped mid-air. An operator asking "why did
+/// this holder exit at T" could reconstruct it from the respawn's `startup` and
+/// `proxying` lines, but only inferentially, which is the exact state JE2E-3
+/// was filed against.
+///
+/// So the arm appends `kind:"lease", event:"lost", side:"holder"` naming the
+/// winner, **before** it returns and thereby cancels the transport. It survives
+/// by the existing ordering rather than by a new guarantee: the ledger is
+/// drained at the very end of [`serve`], after `run_and_close`, on the error
+/// path as much as the success one. [`crate::ledger::party_key`]'s fallback
+/// already files an unlisted event's other party under `counterparty`, which is
+/// what this is — a lease token, not a socket path.
+/// The only shutdown future [`serve`]'s transports will accept (JE2E-R2-2).
+///
+/// # Why a newtype instead of `impl Future`
+///
+/// The ruling's entire behaviour lives in one expression — which future `serve`
+/// hands to the transport — and round 2 demonstrated that **severing it passed
+/// the whole suite**: replacing [`wind_down`]'s result with a bare
+/// `shutdown_signal()` left 1016 tests green while every fenced holder went back
+/// to living forever. Two tests pinned `wind_down` and the fenced close in
+/// isolation; nothing pinned that `serve` composes them.
+///
+/// A test is the weaker answer to that, because it pins one spelling of a line
+/// that a refactor is free to re-spell. So the transports take
+/// `Pin<&mut HolderShutdown>` rather than a generic, and this type has exactly
+/// one constructor — [`holder_shutdown`], which always wraps `wind_down`. The
+/// severing mutation is now a **type error**, and any future re-plumbing of
+/// `serve`'s shutdown still has to produce one of these, which still runs the
+/// fence race. Closed by construction rather than by vigilance.
+///
+/// The box costs one allocation per serve process, at startup, for a future
+/// that is polled until the process ends. `wind_down` is an `async fn` and so
+/// has no nameable type; boxing is what lets the *type* be the guarantee.
+pub(crate) struct HolderShutdown(Pin<Box<dyn Future<Output = ()> + Send>>);
+
+impl Future for HolderShutdown {
+    type Output = ();
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+/// Build this holder's wind-down future — **the only way to get a
+/// [`HolderShutdown`]** (JE2E-R2-2).
+///
+/// `shutdown_signal()` is evaluated here, as an argument, so its eager handler
+/// registration happens at this call and not at the first poll; see that
+/// function for why that matters and what a lazier spelling would re-open.
+fn holder_shutdown(mem: Arc<Memory>, ledger: Option<Arc<Ledger>>) -> HolderShutdown {
+    HolderShutdown(Box::pin(wind_down(shutdown_signal(), mem, ledger)))
+}
+
+async fn wind_down(
+    signal: impl std::future::Future<Output = ()>,
+    mem: Arc<Memory>,
+    ledger: Option<Arc<Ledger>>,
+) {
     tokio::select! {
         () = signal => {}
         winner = mem.lease_lost_latched() => {
+            if let Some(ledger) = &ledger {
+                ledger.append(&crate::ledger::lease_line(
+                    "lost",
+                    "holder",
+                    &mem.session().to_string(),
+                    &mem.agent().to_string(),
+                    &winner,
+                    None,
+                ));
+            }
             tracing::warn!(
                 session = %mem.session(),
                 holder = %winner,
@@ -2281,6 +2385,41 @@ async fn wind_down(signal: impl std::future::Future<Output = ()>, mem: Arc<Memor
     }
 }
 
+/// Ctrl-C (and SIGTERM on unix), so `close()` still runs.
+///
+/// Registration is EAGER: the handlers are installed when this function is
+/// *called*, not when the returned future is first polled. An `async fn` body
+/// runs on first poll, which left a window between the "session attached" log
+/// and the transport's first poll of this future where a signal still had the
+/// default disposition — a SIGTERM in that window killed the process outright
+/// (R2-a; observed as a CI-only failure of the pre-handshake durability test
+/// on a loaded runner). `tokio::signal::unix::signal()` registers with the
+/// runtime immediately and buffers a signal that arrives before `recv()` is
+/// polled, so calling this before the attach log closes that window. Eagerness
+/// only makes the arming *point* effective; it does not move it. Everything
+/// before the call site in [`serve`] — the pre-lease group (the endpoint
+/// derivation, `Ledger::open` and its startup line, J4) and `resolve_role`,
+/// which takes the lease — is still unguarded, which is why the call site sits
+/// as early as it does (I-R2-1). It cannot move above `resolve_role`: that loop
+/// is allowed to run for the whole of [`ELECTION_BUDGET`], **20 seconds**, by
+/// design, and arming over it would make that wait unkillable (J2-R1-7). The
+/// figure was written here as 50 seconds — the pre-J2-L2 budget — until JE2E-7;
+/// the argument holds at 20s, since the window it would buy is ~1.1 ms in a
+/// process that holds no lease and no tail. See the arming comment in [`serve`]
+/// for the trade written out.
+///
+/// **The eagerness survives [`wind_down`]** (JE2E-4), and the reason is which
+/// expression runs when: `serve` writes `wind_down(shutdown_signal(), …)`, so
+/// this function is *called* — and its handlers installed — while the argument
+/// is evaluated, before `wind_down`'s body has been polled at all. A future
+/// edit that moved the call inside `wind_down`'s body, or replaced the argument
+/// with a lazily-constructed future, would silently re-open the R2-a window with
+/// every gate green. That is the whole reason this contract is documented here,
+/// on the function it is a property of, rather than beside the wrapper.
+/// (JE2E-R2-1: it briefly *was* beside the wrapper — a `wind_down` inserted
+/// between this docstring and this signature took the block with it, leaving
+/// `shutdown_signal` undocumented and the eager-registration contract attached
+/// to an `async fn` that installs nothing at call time.)
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
@@ -2599,10 +2738,13 @@ mod tests {
     /// matters. Three properties, asserted over the extracted bookkeeping
     /// because the loop around it is an infinite `sleep`:
     ///
-    /// 1. the window advances onto the newest row seen (quadratic re-reads gone);
-    /// 2. a re-delivered row at the cursor is not logged twice (the dedup the
-    ///    overlap costs);
-    /// 3. the dedup set holds only the rows at the cursor, never the history.
+    /// 1. the window advances with the newest row seen (quadratic re-reads gone);
+    /// 2. a re-delivered row is not logged twice (the dedup the overlap costs);
+    /// 3. the dedup set holds only the overlap window, never the history.
+    ///
+    /// Since JE2E-R2-5 the read starts [`REFUSAL_OVERLAP_SECS`] *below* the
+    /// cursor, so re-delivery is the normal case rather than an edge; the last
+    /// section pins what that buys and what it still does not.
     #[test]
     fn the_refusal_pollers_window_advances_and_its_dedup_set_stays_bounded() {
         fn refusal(secs: i64, by: &str, holder: &str) -> crate::store::lease::LeaseRefusal {
@@ -2628,24 +2770,27 @@ mod tests {
         assert_eq!(new.len(), 2, "both of ours are new: {new:?}");
         assert_eq!(
             cursor.since(),
-            refusal(2, "", "").at,
-            "the window advances onto OUR newest row — not past it, and not onto \
-             another holder's"
+            refusal(2 - REFUSAL_OVERLAP_SECS, "", "").at,
+            "the window advances with OUR newest row — not past it, and not onto \
+             another holder's — less the overlap it deliberately re-reads"
         );
         assert_eq!(
-            cursor.at_cursor.len(),
-            1,
-            "only the row AT the cursor needs remembering, not the history: {:?}",
-            cursor.at_cursor
+            cursor.seen.len(),
+            2,
+            "the set holds the overlap window, not the history: {:?}",
+            cursor.seen
         );
 
-        // Poll 2: the store re-delivers the row at the cursor (its read is
-        // inclusive at the lower bound). It must not be logged again.
-        let new = cursor.take_new(vec![refusal(2, "c@h#1", "me")], "me");
-        assert!(new.is_empty(), "the row at the cursor is not new: {new:?}");
+        // Poll 2: the store re-delivers everything in the overlap. None of it
+        // may be logged again.
+        let new = cursor.take_new(
+            vec![refusal(1, "b@h#1", "me"), refusal(2, "c@h#1", "me")],
+            "me",
+        );
+        assert!(new.is_empty(), "re-delivered rows are not new: {new:?}");
         assert_eq!(
             cursor.since(),
-            refusal(2, "", "").at,
+            refusal(2 - REFUSAL_OVERLAP_SECS, "", "").at,
             "and the window holds"
         );
 
@@ -2656,13 +2801,15 @@ mod tests {
             .collect();
         let new = cursor.take_new(burst, "me");
         assert_eq!(new.len(), 100, "every respawn is recorded once");
-        assert_eq!(cursor.since(), refusal(102, "", "").at);
         assert_eq!(
-            cursor.at_cursor.len(),
-            1,
-            "a hundred refusals later the dedup set is still one entry — this is the \
-             unbounded-growth half of JE2E-1: {:?}",
-            cursor.at_cursor
+            cursor.since(),
+            refusal(102 - REFUSAL_OVERLAP_SECS, "", "").at
+        );
+        assert!(
+            cursor.seen.len() <= 2,
+            "a hundred refusals later the dedup set still holds only the overlap window — \
+             this is the unbounded-growth half of JE2E-1: {:?}",
+            cursor.seen
         );
 
         // Two refusals stamped at the SAME store instant are both recorded, and
@@ -2674,12 +2821,110 @@ mod tests {
             "me",
         );
         assert_eq!(new.len(), 2, "one instant, two refusals, both recorded");
-        assert_eq!(cursor.at_cursor.len(), 2);
+        assert_eq!(cursor.seen.len(), 2);
         assert!(
             cursor
                 .take_new(vec![refusal(5, "y@h#1", "me")], "me")
                 .is_empty(),
             "and neither is re-recorded on the next poll"
+        );
+    }
+
+    /// **JE2E-R2-5.** A refusal whose row becomes *visible* after the cursor has
+    /// already passed its stamp must still be logged.
+    ///
+    /// `refused_at` is the store's clock at statement time; visibility is
+    /// commit-ordered. On Cockroach a slow-committing INSERT (push-with-refresh
+    /// keeps the evaluated `now()`) therefore surfaces a row stamped *earlier*
+    /// than one that committed before it. A cursor that only moved forward
+    /// excluded that row with `refused_at >= since` **forever** — the fix for
+    /// JE2E-1's unbounded re-read traded an unbounded window for a permanent
+    /// skip, which is a worse defect on a rarer path.
+    ///
+    /// Both halves are asserted here, because the overlap is a *bound*, not a
+    /// cure: a row late by less than the overlap is recovered, and one late by
+    /// more is not. The second assertion is the residual the docstring states,
+    /// pinned so it cannot quietly become something else.
+    #[test]
+    fn a_late_committing_refusal_below_the_cursor_is_still_logged() {
+        // Stamps in MILLISECONDS, and the lateness below is an absolute figure
+        // rather than one derived from `REFUSAL_OVERLAP_SECS`. That is
+        // deliberate: a test whose input moves with the constant it is testing
+        // cannot see the constant change — shrinking the overlap to zero would
+        // shrink the "late" row's lateness to zero with it and stay green. The
+        // fixture has to oppose the constant, not track it.
+        fn refusal(millis: i64, by: &str) -> crate::store::lease::LeaseRefusal {
+            crate::store::lease::LeaseRefusal {
+                session: crate::types::SessionId::new("s"),
+                at: chrono::DateTime::from_timestamp_millis(1_800_000_000_000 + millis)
+                    .expect("stamp"),
+                refused_by: by.to_string(),
+                current_holder: "me".to_string(),
+            }
+        }
+        // 500 ms of commit lag sits inside a one-second overlap and outside a
+        // zero-second one, which is what makes the mutation visible.
+        const LATE_MS: i64 = 500;
+        // Compile-time, so shrinking the overlap fails the BUILD rather than
+        // letting this test quietly become vacuous. (With this guard bypassed,
+        // the behavioural assertion below fires on its own — verified.)
+        const _: () = assert!(
+            REFUSAL_OVERLAP_SECS * 1_000 > LATE_MS,
+            "this test's lateness must sit INSIDE the overlap, or its assertions are about \
+             nothing"
+        );
+        let start = chrono::DateTime::from_timestamp_millis(1_800_000_000_000).expect("stamp");
+
+        // One poll, modelled the way the loop actually runs it: the STORE
+        // filters by `refused_at >= since` and hands over what is left. The
+        // filter is the half that skips, so a test calling `take_new` directly
+        // with rows the store would never return proves nothing about the
+        // window — it would assert the dedup, twice.
+        fn poll(
+            cursor: &mut RefusalCursor,
+            rows: &[crate::store::lease::LeaseRefusal],
+        ) -> Vec<crate::store::lease::LeaseRefusal> {
+            let since = cursor.since();
+            let delivered: Vec<_> = rows.iter().filter(|r| r.at >= since).cloned().collect();
+            cursor.take_new(delivered, "me")
+        }
+
+        let mut cursor = RefusalCursor::starting_at(start);
+
+        // L2 commits fast and is seen; the cursor advances onto its stamp (10).
+        assert_eq!(
+            poll(&mut cursor, &[refusal(10_000, "L2@h#1")]).len(),
+            1,
+            "the fast committer is logged"
+        );
+
+        // L1 started earlier — stamped 10 - overlap — and only now becomes
+        // visible, BELOW the advanced cursor. Under a forward-only cursor the
+        // store's own predicate excludes it for the rest of this process's life;
+        // the overlap is what keeps it inside the read.
+        let late = refusal(10_000 - LATE_MS, "L1@h#1");
+        let new = poll(&mut cursor, &[refusal(10_000, "L2@h#1"), late]);
+        assert_eq!(
+            new.len(),
+            1,
+            "the late committer is logged and the re-delivered one is not: {new:?}"
+        );
+        assert_eq!(new[0].refused_by, "L1@h#1");
+
+        // And the residual, pinned at its own magnitude: later than the overlap
+        // is still never logged, because the store never delivers it. This is
+        // the sentence the docstring owes a reader — "older rows cannot be
+        // RE-logged" was true and incomplete; they can also be never logged.
+        let mut cursor = RefusalCursor::starting_at(start);
+        poll(&mut cursor, &[refusal(10_000, "L2@h#1")]);
+        let too_late = refusal(10_000 - REFUSAL_OVERLAP_SECS * 1_000 - 1, "L0@h#1");
+        assert!(
+            too_late.at < cursor.since(),
+            "a row this old is outside the read window by construction"
+        );
+        assert!(
+            poll(&mut cursor, &[too_late]).is_empty(),
+            "beyond the overlap the skip is permanent — bounded by the constant, not cured"
         );
     }
 
@@ -3577,7 +3822,7 @@ mod tests {
             // signal, so the ONLY thing that can complete this is the fence.
             let healthy = tokio::time::timeout(
                 Duration::from_millis(50),
-                wind_down(std::future::pending::<()>(), m.clone()),
+                wind_down(std::future::pending::<()>(), m.clone(), None),
             )
             .await;
             assert!(
@@ -3589,7 +3834,7 @@ mod tests {
             // fires on its 15s interval).
             let waiting = tokio::spawn({
                 let m = m.clone();
-                async move { wind_down(std::future::pending::<()>(), m).await }
+                async move { wind_down(std::future::pending::<()>(), m, None).await }
             });
             tokio::task::yield_now().await;
             m.simulate_lease_loss_to("agent-b@host#7");
@@ -3616,6 +3861,131 @@ mod tests {
                 out.is_err(),
                 "a fenced close must not claim success: {out:?}"
             );
+        }
+
+        /// **JE2E-R2-2 — the composition, which the two tests above leave
+        /// untested.** They pin `wind_down` and the fenced `run_and_close` in
+        /// isolation; round 2 showed that severing the one expression which
+        /// *joins* them — `serve`'s `holder_shutdown(...)` handed to the
+        /// transport — left the whole 1016-test suite green while every fenced
+        /// holder went back to living forever.
+        ///
+        /// Two devices close that, and this test is the second of them:
+        ///
+        /// 1. **The type.** [`HolderShutdown`] has one constructor and the
+        ///    transports take `Pin<&mut HolderShutdown>`, so passing the bare
+        ///    signal no longer compiles. That is what makes the *wiring*
+        ///    unseverable; a test cannot, because a test pins one spelling of a
+        ///    line a refactor may re-spell.
+        /// 2. **This test**, which pins the other half: that the future the
+        ///    constructor builds actually *cancels a running transport* when the
+        ///    fence latches. The type guarantees `serve` hands over a
+        ///    `HolderShutdown`; this guarantees a `HolderShutdown` is worth
+        ///    handing over.
+        ///
+        /// The transport is real — `serve_http_bounded` on an ephemeral port,
+        /// the same function `serve_http` ends in — with a handler that never
+        /// returns, so nothing but the shutdown future can end it. It also
+        /// asserts JE2E-R2-4's artifact, because this is the one test that has a
+        /// ledger, a fence and the exit path in the same place.
+        ///
+        /// **Declined, with the gap stated:** a binary-level self-heal test —
+        /// two real serves, the holder wedged until its lease lapses, the
+        /// successor winning it, the ex-holder exiting and its client's respawn
+        /// arriving as a proxy. It needs a real `LEASE_TTL` expiry (45 s) plus an
+        /// election, cannot use a paused clock (the processes have their own),
+        /// and would be the slowest test in the tree by an order of magnitude.
+        /// What stays unproven without it: that a *real client* respawns a
+        /// serve that exits non-zero. That is client behaviour, not lambo's, and
+        /// it is the same assumption the J2 outage story already rests on.
+        #[tokio::test]
+        async fn a_fenced_holder_shutdown_cancels_a_running_transport_and_books_the_loss() {
+            let dir = std::env::temp_dir().join(format!(
+                "lambo-r2-compose-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let path = dir.join("calls.jsonl");
+            let ledger = Ledger::open(&path);
+
+            let m = mem("serve-fence-composition").await;
+
+            // A transport that never finishes on its own: if it returns, the
+            // shutdown future is the only thing that can have ended it.
+            let app = axum::Router::new().route(
+                "/never",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(Duration::from_secs(3_600)).await;
+                    "unreachable"
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind ephemeral port");
+
+            // Built exactly as `serve` builds it, through the one constructor.
+            let shutdown = holder_shutdown(m.clone(), Some(Arc::clone(&ledger)));
+            let server = tokio::spawn(serve_http_bounded(
+                listener,
+                app,
+                shutdown,
+                Duration::from_millis(200),
+            ));
+
+            // It must NOT end on its own — otherwise the assertion below would
+            // pass against a transport that was never cancelled at all.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(
+                !server.is_finished(),
+                "the transport must still be running while this holder owns its lease"
+            );
+
+            m.simulate_lease_loss_to("agent-b@host#9");
+
+            let out = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .expect(
+                    "losing the lease must cancel the transport — this is the composition \
+                     JE2E-R2-2 found severable with every gate green",
+                )
+                .expect("server task");
+            assert!(
+                out.is_ok(),
+                "a wound-down transport is not an error: {out:?}"
+            );
+
+            // **JE2E-R2-4.** The largest lease event a holder can suffer must
+            // leave an artifact, not just a stderr line. Written by the fence
+            // arm before it cancelled the transport, so it is on the ledger by
+            // the time the drain runs.
+            ledger.shutdown();
+            let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+                .expect("ledger file")
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
+                .collect();
+            let lost = lines
+                .iter()
+                .find(|l| l["kind"] == "lease" && l["event"] == "lost")
+                .unwrap_or_else(|| {
+                    panic!("a lease loss must reach the ledger, not only stderr: {lines:?}")
+                });
+            assert_eq!(
+                lost["side"], "holder",
+                "the loser here is the holder itself"
+            );
+            assert_eq!(
+                lost["counterparty"], "agent-b@host#9",
+                "and it names who took the session: {lost}"
+            );
+            assert!(
+                lost.get("dialled").is_none(),
+                "the winner is a lease token, not a socket path (JE2E-11): {lost}"
+            );
+
+            std::fs::remove_dir_all(&dir).ok();
         }
     }
 }

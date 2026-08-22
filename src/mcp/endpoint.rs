@@ -97,6 +97,61 @@ pub struct SessionEndpoint {
     path: PathBuf,
 }
 
+/// What identifies the socket file a holder bound
+/// ([`SessionEndpoint::file_identity`]).
+///
+/// `(device, inode)` plus the inode's **change time**, and the third field is
+/// not decoration (JE2E-R2-3): `(dev, ino)` alone recycles. On an
+/// inode-recycling filesystem — ext4 allocates first-free — a successor that
+/// binds after this process's inode has been freed can be handed the *same*
+/// `(dev, ino)`, and a licence checking only those two would then "match" a live
+/// successor's socket and delete it. A recreated inode gets a fresh `ctime`, so
+/// all three together do not recycle.
+///
+/// **`ctime` rather than birth time**, deliberately: `st_birthtime` is absent on
+/// some Linux filesystems and reaches Rust as a fallible `Metadata::created()`,
+/// so an identity built on it is `Option`-shaped exactly where the guarantee is
+/// wanted. `ctime` is on every unix `stat`, is set at creation, and is stable
+/// for this socket's life — nothing re-permissions the file after
+/// [`SessionEndpoint::bind`]'s one `set_permissions`, which runs before the
+/// capture.
+///
+/// Every way this comparison can be wrong fails toward **not deleting**: a
+/// spurious mismatch leaves a socket for the next holder's `bind` to clear under
+/// the lease's licence, which is the mechanism that existed before any of this
+/// and still backstops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl SocketIdentity {
+    /// This identity's `(dev, ino)` carrying `other`'s change time — **what an
+    /// inode-recycling filesystem hands back**, built directly because no
+    /// filesystem this suite runs on will produce it.
+    ///
+    /// APFS and tmpfs (the two default endpoint directories) do not reuse inode
+    /// numbers, so a test that merely creates, removes and re-creates a socket
+    /// gets two distinct inodes and passes with or without the `ctime` field —
+    /// it would be a fixture that cannot fail, which is the defect this
+    /// remediation round was already convicted of once (JE2E-R2-7). This
+    /// constructor is the opposing input: the successor's inode wearing the
+    /// predecessor's timestamp, which is precisely the collision `(dev, ino)`
+    /// alone cannot see.
+    #[cfg(test)]
+    pub(crate) fn with_ctime_of(&self, other: &Self) -> Self {
+        Self {
+            dev: self.dev,
+            ino: self.ino,
+            ctime: other.ctime,
+            ctime_nsec: other.ctime_nsec,
+        }
+    }
+}
+
 impl SessionEndpoint {
     /// This session's endpoint, or `None` when the store cannot be shared
     /// between processes at all.
@@ -306,16 +361,22 @@ impl SessionEndpoint {
         Ok(listener)
     }
 
-    /// The `(device, inode)` of the socket file at this path right now, or
-    /// `None` if nothing is there.
+    /// The identity of the socket file at this path right now, or `None` if
+    /// nothing is there.
     ///
     /// Taken immediately after a successful [`SessionEndpoint::bind`] and
     /// handed back to [`SessionEndpoint::unlink_if_ours`] at exit — see there
-    /// for why the *path* is not enough to identify our own socket.
-    pub fn file_identity(&self) -> Option<(u64, u64)> {
+    /// for why the *path* is not enough to identify our own socket, and for the
+    /// one window this cannot close.
+    pub fn file_identity(&self) -> Option<SocketIdentity> {
         std::fs::symlink_metadata(&self.path)
             .ok()
-            .map(|m| (m.dev(), m.ino()))
+            .map(|m| SocketIdentity {
+                dev: m.dev(),
+                ino: m.ino(),
+                ctime: m.ctime(),
+                ctime_nsec: m.ctime_nsec(),
+            })
     }
 
     /// Remove the socket file on the way out — **but only when it is still the
@@ -344,16 +405,40 @@ impl SessionEndpoint {
     ///   holder can lawfully win it and bind in the gap. The window is small;
     ///   it is not zero.
     ///
-    /// So the licence is identity, not authority: `bound` is the `(dev, ino)`
-    /// this process saw the instant after it bound, and the file is removed only
-    /// while the path still resolves to it. A new holder's `bind` unlinks the
-    /// old file and creates a new inode, so a superseded endpoint's identity can
-    /// never match and its owner can never delete a live successor's socket —
-    /// by construction rather than by an argument about who holds what.
+    /// So the licence is identity, not authority: `bound` is the
+    /// [`SocketIdentity`] this process saw the instant after it bound, and the
+    /// file is removed only while the path still resolves to it. A new holder's
+    /// `bind` unlinks the old file and creates a new one, and the fresh inode
+    /// carries a fresh `ctime`, so a superseded endpoint's identity does not
+    /// match a live successor's socket — including on a filesystem that recycles
+    /// inode numbers, which `(dev, ino)` alone did not survive (JE2E-R2-3).
+    ///
+    /// # The window this cannot close, named rather than claimed away
+    ///
+    /// This said "can never match … by construction". It is not *by
+    /// construction*, and the residual is worth stating precisely, because it is
+    /// inherent to reading an identity through a path:
+    ///
+    /// **The capture instant.** `bound` comes from a `stat` of the path taken
+    /// just after `bind` returns, not from the listener itself. If this process
+    /// were descheduled between those two steps for longer than a lease TTL —
+    /// long enough for a successor to fence it, win the lapsed lease and bind
+    /// its own socket — the `stat` would capture the *successor's* identity as
+    /// ours, and the exit would then match and delete it. `fstat` on the
+    /// listening fd cannot help: for a unix socket it reports the socket
+    /// object's inode, not the filesystem inode of the path, so it is not
+    /// comparable with what the exit can see. The window is a few microseconds
+    /// of ordinary scheduling against a 45-second precondition.
+    ///
+    /// What is left after that is bounded by the backstop that predates all of
+    /// this: a socket wrongly removed is re-created by the next holder's `bind`,
+    /// and the cost is the multi-client attach of one holder generation — the
+    /// original JE2E-2 failure, at a probability the fix moved from "any wedged
+    /// predecessor's exit" to "a wedge landing inside two adjacent statements".
     ///
     /// `None` means the bind never happened (or the stat failed), and nothing is
     /// removed: this process put no file here to clean up.
-    pub fn unlink_if_ours(&self, bound: Option<(u64, u64)>) {
+    pub fn unlink_if_ours(&self, bound: Option<SocketIdentity>) {
         let Some(bound) = bound else { return };
         match self.file_identity() {
             Some(now) if now == bound => {}
@@ -1178,6 +1263,80 @@ mod tests {
         // not earn.
         b.unlink_if_ours(Some(b_bound));
         assert_eq!(b.file_identity(), None, "a holder clears its own socket");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **JE2E-R2-3.** The licence used to be `(dev, ino)`, and inode numbers are
+    /// recycled: ext4 allocates first-free, so a successor binding after this
+    /// process's inode is freed can be handed the same pair back — and a licence
+    /// checking only those two then "matches" a live successor's socket and
+    /// deletes it, which is JE2E-2's failure returning through a narrower door.
+    ///
+    /// The recycle cannot be provoked on the developer filesystems this suite
+    /// runs on (APFS and tmpfs do not reuse inode numbers), so the property is
+    /// asserted where it lives instead: **an identity captured for one file does
+    /// not match a different file at the same path**, even when the first is
+    /// removed before the second is made — which is exactly the recycling
+    /// sequence, minus the allocator's cooperation. Under a `(dev, ino)`-only
+    /// licence this assertion is what a recycling filesystem would break.
+    #[tokio::test]
+    async fn a_recreated_socket_at_the_same_path_is_not_the_one_we_bound() {
+        let root = short_scratch("r");
+        let dir = root.join("l");
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        let ep = SessionEndpoint::resolve_in(&dir, "s", &store).unwrap();
+
+        let first = ep.bind().expect("first bind");
+        let first_id = ep.file_identity().expect("first socket exists");
+
+        // Free it, then make a new socket at the same path — the sequence an
+        // inode-recycling allocator turns into "same (dev, ino)".
+        drop(first);
+        std::fs::remove_file(ep.path()).expect("free the inode");
+        // `ctime` has second-and-nanosecond resolution; sleep past any tick
+        // boundary so the assertion is about identity rather than timer luck.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let _second = ep.bind().expect("second bind at the same path");
+        let second_id = ep.file_identity().expect("second socket exists");
+
+        assert_ne!(
+            first_id, second_id,
+            "a recreated socket must not carry the identity of the one it replaced"
+        );
+
+        // **The recycle itself.** APFS and tmpfs never hand the same inode
+        // number back, so the assertion above passes with or without the
+        // `ctime` field and proves nothing about it. This is the opposing
+        // input, built rather than provoked: the predecessor's identity as a
+        // recycling allocator would have produced it — the *successor's*
+        // `(dev, ino)`, wearing the *predecessor's* timestamp.
+        //
+        // Under a `(dev, ino)`-only licence this equals `second_id`, the
+        // comparison "matches", and a live successor's socket is deleted by a
+        // dead predecessor's exit — JE2E-2's failure returning through a
+        // narrower door.
+        let recycled = second_id.with_ctime_of(&first_id);
+        assert_ne!(
+            recycled, second_id,
+            "the same inode number with an older change time is NOT the same file; a licence \
+             that cannot tell these apart deletes live sockets on a recycling filesystem"
+        );
+        ep.unlink_if_ours(Some(recycled));
+        assert_eq!(
+            ep.file_identity(),
+            Some(second_id),
+            "a predecessor holding a recycled identity must not delete the live socket"
+        );
+
+        // And the plain case: the first holder's own exit leaves the second's
+        // socket alone too.
+        ep.unlink_if_ours(Some(first_id));
+        assert_eq!(
+            ep.file_identity(),
+            Some(second_id),
+            "the live socket survives a superseded holder's exit"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
