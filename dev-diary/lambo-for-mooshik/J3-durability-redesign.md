@@ -490,6 +490,15 @@ shape.
   (bigger; first diagnose the mutation composition — premise still unverified), or (3)
   accept-and-document the serverless close-flush ceiling rather than move the grace budget
   (reviewers rejected budget-moving as masking).
+
+  **Accepted operating range (operator, 2026-08-22).** The branch ships with the
+  close-flush guarantee bounded as: **durable-intent tails ≤ ~150 (≈ 2 700 mutations, a
+  `record_action`-shaped burst) fit inside `CLOSE_FLUSH_GRACE` with ~5 s headroom at
+  K=100**; bursts beyond that on serverless Cockroach may abandon the close and lose part
+  of the acked tail (`evidence/mooshik-f4-cockroach/opt1/` for the K=30..400 re-measurement
+  after Option 1). This range is **documented, not budget-raised** — moving the 8 s budget
+  was rejected as masking. Option 2 (fold per-concept embedding into the concept upsert)
+  remains the open lever if a deployment needs a larger guaranteed envelope.
 * **J3-R2R-3** — F5's column gap, measured at F5's own magnitude: a store missing one column
   attaches, acks, reports `applied=4 degraded=false`, and leaves `concepts=0`, loud only at
   close with exit 1. The judgement call is column preflight versus a stated magnitude, and

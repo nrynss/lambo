@@ -1,0 +1,65 @@
+2026-08-22T02:35:47.281236Z  INFO lambo::memory: Memory session attached (daemon + flush + canonization running) session=f4o1b-400-1787366145 agent=f4-capture existing=false match_strategy=Hybrid embedder=fixture dim=1024
+2026-08-22T02:35:47.281337Z  INFO lambo::writeq: write queue: bounds are static (lane 64, queue 1024) and no rate moves them; the rates below are telemetry measured on this deployment's embedder — the serial leg 1-wide, the aggregate 4-wide session=f4o1b-400-1787366145 items_per_sec=128534.70437017994 serial_items_per_sec=161290.32258064515 bound=1024 lane_bound=64 concurrency=4
+2026-08-22T02:35:47.281589Z  INFO lambo::mcp::serve: lambo serve: session endpoint bound — other clients on this machine can attach to this session through it endpoint=/run/user/1000/lambo/f4o1b-400-178736-ad4d262b9839b900.sock
+2026-08-22T02:35:47.281611Z  INFO lambo::mcp::serve: lambo serve: session attached session=f4o1b-400-1787366145 agent=f4-capture transport=Http
+2026-08-22T02:35:47.281626Z  INFO lambo::mcp::serve: mcp http: request guard armed auth_required=true max_sessions=32 rate_limit_rps=50
+2026-08-22T02:35:47.281735Z  INFO lambo::mcp::serve: mcp http: listening on /mcp addr=127.0.0.1:8100
+2026-08-22T02:36:11.064788Z  INFO lambo::mcp::serve: lambo serve: shutdown signal received, winding down
+2026-08-22T02:36:19.180025Z ERROR lambo::mcp::serve: lambo serve: close() did not finish within the grace window — abandoning it and exiting; the un-flushed tail is LOST (the write-behind log is in-memory only, there is no on-disk WAL, and a restart will NOT recover it) grace_secs=8
+2026-08-22T02:36:19.264417Z ERROR lambo::mcp::serve: lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL) error=config: close timed out after 8s; tail lost on exit, not durable
+lambo serve: config: close timed out after 8s; tail lost on exit, not durable
+2026-08-22T02:36:19.264527Z  WARN lambo::memory: Memory dropped with live background tasks (never closed, or a close() was cancelled): tasks aborted and 18509 un-flushed mutations in the log were discarded — after a cancelled close(), mutations held in the flush task's buffer are lost as well and are not in this count session=f4o1b-400-1787366145 mutations=18509
+^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1141, in _send_output
+    self.send(msg)
+    ~~~~~~~~~^^^^^
+  File "/usr/lib/python3.14/http/client.py", line 1085, in send
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/client.py", line 1051, in connect
+    self.sock = self._create_connection(
+                ~~~~~~~~~~~~~~~~~~~~~~~^
+        (self.host,self.port), self.timeout, self.source_address)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/socket.py", line 874, in create_connection
+    raise exceptions[0]
+  File "/usr/lib/python3.14/socket.py", line 859, in create_connection
+    sock.connect(sa)
+    ~~~~~~~~~~~~^^^^
+ConnectionRefusedError: [Errno 111] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/nryn/work/lambo/evidence/mooshik-f4-cockroach/f4_drive.py", line 149, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/nryn/work/lambo/evidence/mooshik-f4-cockroach/f4_drive.py", line 123, in main
+    status, reply = mcp.call("tools/call", {
+                    ~~~~~~~~^^^^^^^^^^^^^^^^
+        "name": "lambo_record_action", "arguments": params})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nryn/work/lambo/evidence/mooshik-f4-cockroach/f4_drive.py", line 79, in call
+    status, reply = self._post(
+                    ~~~~~~~~~~^
+        {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nryn/work/lambo/evidence/mooshik-f4-cockroach/f4_drive.py", line 46, in _post
+    with urllib.request.urlopen(req, timeout=120) as r:
+         ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/urllib/request.py", line 187, in urlopen
+    return opener.open(url, data, timeout)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/urllib/request.py", line 487, in open
+    response = self._open(req, data)
+  File "/usr/lib/python3.14/urllib/request.py", line 504, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+                              '_open', req)
+  File "/usr/lib/python3.14/urllib/request.py", line 464, in _call_chain
+    result = func(*args)
+  File "/usr/lib/python3.14/urllib/request.py", line 1349, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/urllib/request.py", line 1323, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 111] Connection refused>

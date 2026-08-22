@@ -96,6 +96,12 @@ below materialises, the barriers are what to attack" anticipated.
   — verbatim serve stderr per K (the close lines are the primary evidence).
 - `stderr-f4-210749-{25,50,100,200,400}-*.log` — settled-sweep corroboration.
 - `ledger-*.jsonl` — driver response ledger per K (acks / receipts / errors).
+- `opt1/` — post-Option-1 (interaction batching) re-measurement: K=30..400 stderr logs
+  showing the 8 s cliff moved from ≈ 31 to ≈ 150 durable intents (K=30/50/100 now flush
+  in 1.4–2.6 s, tail-durable 1:1; K=200/400 still exceed the budget). See the F4 bullet in
+  `dev-diary/lambo-for-mooshik/J3-durability-redesign.md` for the accepted operating range
+  and the corrected diagnosis (the dominant cost is un-batched interactions, not the
+  durable-intent barriers).
 
 All scratch sessions and rows left in the cluster were cleaned up; nothing in
 this directory contains the DSN or a password.
