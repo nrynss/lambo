@@ -38,13 +38,17 @@ for ln in text.split('\n'):
     # Astro component imports (site copy only).
     if re.match(r"^import \S+ from '[^']*\.astro';$", ln):
         continue
-    # The site-only mcp.mdx block, from "## Verified clients" up to (but not
-    # including) the shared "## Limits" section.
-    if ln.strip() == '## Verified clients':
+    # The site-only mcp.mdx block, delimited by explicit markers so a benign
+    # rename of the site-only section's headings does not break the strip
+    # (J5 round-1 P3). The site copy wraps its site-only content in
+    # <!-- lambo-site-only:start --> ... <!-- lambo-site-only:end -->; the
+    # reference copy carries no such block.
+    if ln.strip() == '<!-- lambo-site-only:start -->':
         site_only = True
         continue
-    if site_only and ln.strip() == '## Limits':
+    if site_only and ln.strip() == '<!-- lambo-site-only:end -->':
         site_only = False
+        continue
     if site_only:
         continue
     lines.append(ln)

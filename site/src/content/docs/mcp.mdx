@@ -349,6 +349,8 @@ writes you send one after another are applied in that order (two you fire at onc
 order to keep).
 ```
 
+<!-- lambo-site-only:start -->
+
 ## Verified clients
 
 Lambo speaks standard MCP, so any compliant client should work. These are the ones actually exercised against the server, rather than assumed:
@@ -386,6 +388,7 @@ Three independent MCP clients have now produced this table from the managed serv
 
 Full transcripts for every run live in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) in the repository: `mcp-client-stdio/` for the Claude Code handshake and the seven-tool stdio capture, `mcp-client-interop/` for the Cursor runs and the managed-server capture above, and `managed-mcp-canonization-events.md` for the OMP capture.
 
+<!-- lambo-site-only:end -->
 ## Limits
 
 Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
