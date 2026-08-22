@@ -2643,7 +2643,11 @@ mod tests {
         // inclusive at the lower bound). It must not be logged again.
         let new = cursor.take_new(vec![refusal(2, "c@h#1", "me")], "me");
         assert!(new.is_empty(), "the row at the cursor is not new: {new:?}");
-        assert_eq!(cursor.since(), refusal(2, "", "").at, "and the window holds");
+        assert_eq!(
+            cursor.since(),
+            refusal(2, "", "").at,
+            "and the window holds"
+        );
 
         // Poll 3: a hundred fresh respawns, each a new instant. Every one is
         // logged once, the window ends on the last, and the set is still one.
@@ -2672,7 +2676,9 @@ mod tests {
         assert_eq!(new.len(), 2, "one instant, two refusals, both recorded");
         assert_eq!(cursor.at_cursor.len(), 2);
         assert!(
-            cursor.take_new(vec![refusal(5, "y@h#1", "me")], "me").is_empty(),
+            cursor
+                .take_new(vec![refusal(5, "y@h#1", "me")], "me")
+                .is_empty(),
             "and neither is re-recorded on the next poll"
         );
     }

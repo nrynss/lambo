@@ -235,7 +235,9 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
         loser_line["agent_id"], "agent-b",
         "loser line is the loser's"
     );
-    let loser_holder = loser_line["counterparty"].as_str().expect("counterparty token");
+    let loser_holder = loser_line["counterparty"]
+        .as_str()
+        .expect("counterparty token");
     assert!(
         loser_holder.starts_with("agent-a@"),
         "loser line names the incumbent; got {loser_holder}"
@@ -249,7 +251,9 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
         holder_line["agent_id"], "agent-a",
         "holder line is the holder's"
     );
-    let holder_refused = holder_line["counterparty"].as_str().expect("counterparty token");
+    let holder_refused = holder_line["counterparty"]
+        .as_str()
+        .expect("counterparty token");
     assert!(
         holder_refused.starts_with("agent-b@"),
         "holder line names the refused loser; got {holder_refused}"
@@ -541,7 +545,8 @@ fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
         .filter(|l| l["kind"] == "lease" && l["event"] == "proxying_stopped")
         .count();
     assert_eq!(
-        episodes, 1,
+        episodes,
+        1,
         "one holder death is one episode: {:?}",
         lines
             .iter()

@@ -2704,6 +2704,211 @@ drift.
   carry the resolved config path. A placeholder-template emit would be a half-verb, so it
   is documented here instead of scaffolded.
 
+## J E2E round-1 remediation
+
+Reviewed **REQUEST_CHANGES** at `313c447` — no P1, five P2, seven P3
+([adve-review-mooshik-J-e2e-round1.md](../adversarial-review/adve-review-mooshik-J-e2e-round1.md)).
+The first whole-workstream pass: it attacked the *composition* of J0–J5 rather
+than any task's deliverables, which is why every one of the five P2s is
+something a per-task round structurally could not have seen — a moved ordering
+whose blast radius lands in other tasks' files, a handoff one task declared and
+another claimed without finishing, two correct mechanisms composing into one
+race, a fixed defect's dual on the untested path, and an old round's sweep
+audited as a claim.
+
+**All twelve are closed here. Nothing carried** — the operator's rule is that a
+remediation round closes the P3s too, and this round had two P3s (JE2E-9,
+JE2E-12) whose whole content was "prose the tree already falsified", which is
+the class this workstream keeps re-learning.
+
+### Two operator rulings (2026-08-22)
+
+**JE2E-4 — EXIT ON FENCE.** The review graded it P3 and asked only for an
+explicit decision either way. The operator made it, and made it a behaviour
+change: **a fenced ex-holder winds down instead of living forever.** The
+reasoning is that J2 changed the alternatives and nobody re-made the choice
+afterwards. Before J2, a fenced serve that exited left its client with nothing,
+so staying up — refusing writes, serving stale reads — was the lesser harm.
+After J2 the client respawns the serve, the respawn loses the election to the
+real holder, and it comes back as a **proxy** to it: working memory restored
+automatically, through the door J2 already built. So exiting is now the
+self-heal and staying up is the strictly worse option, and the thing being
+preserved by staying up — reads — is the half that is *silently wrong*, since
+the fence gates writes only and there is no staleness label (which is precisely
+what §J2's rejected read-only-attach fallback was rejected for).
+
+Designed as the SIGTERM path rather than a second teardown, so nothing is
+duplicated and the exit-time ordering at `serve`'s tail is inherited whole:
+`close()` runs (its fenced branch drops the tail and does not release a lease
+that is no longer ours — there is nothing to flush past the fence, writes having
+been refused since it latched), the refusal poller and heartbeat are aborted,
+the endpoint is unlinked **only if it is still ours**, and the ledger drains
+last with its `startup` / `lease` / `completion` lines intact. That drain runs
+on the error path exactly as on the success one, which is what makes the exit
+honest rather than silent. The exit code is non-zero, correctly: this process's
+tail was discarded. The log line names the winner and says why it is leaving.
+
+Its Done-when implication is stated where §J2's wedge invariant is documented,
+at `HubProxy::run`, because it is that invariant's dual: a proxy may not promote
+itself into a holder, and an ex-holder may not go on answering as one. Both are
+the same rule — a process may only serve the role its client handshook with.
+
+**JE2E-5 — FINISH THE REPAIR.** The review offered two closes: finish the repair
+or narrow the claim. The operator chose finish. J3 specified the metric-2 repair
+as five named files; J4 shipped the producer, moved none of them, and claimed
+the restoration — while the observability README went on saying, in the present
+tense, that the completion line was *missing*. A producer with no consumer
+restores no metric, and narrowing the claim would have left `dedup_rate.py` and
+`duplicates.py` blind to every MCP session on a tree that has the data.
+
+### Per-finding closures
+
+| # | Sev | Closed by |
+| --- | --- | --- |
+| **JE2E-1** | P2 | `RefusalCursor` — the poller's window advances onto the newest row seen (**onto**, not past: a store stamp has finite resolution and two refusals can share one instant), and its dedup set is rebuilt per poll from that instant rather than accumulated. Plus a lazy retention purge on all three adapters riding `record_lease_refusal`, the shape `consume_write_intent` uses, and a `(session_id, refused_at)` index in both `001_init.sql` files |
+| **JE2E-2** | P2 | `unlink_if_ours` — licensed by the socket's `(dev, ino)` captured at bind, not by the path and not by the lease |
+| **JE2E-3** | P2 | `proxying_stopped` on any `Closed` of the current generation, `lost` as detail; the reconnect books a `proxying` line so the pair brackets an episode |
+| **JE2E-4** | P3→behaviour | `wind_down` races the fence against the signal; ruling above |
+| **JE2E-5** | P2 | All five consumers moved; `verify.sh` 46 → 55 ok |
+| **JE2E-6** | P2 | The ordering sweep J4 owed, recorded in §J4's as-built: 85 hits, 5 stale |
+| **JE2E-7** | P3 | Both sites restated at `ELECTION_BUDGET` = 20s, argument re-made at the true number |
+| **JE2E-8** | P3 | The duplicate J4 box deleted, J5's ticked with its evidence |
+| **JE2E-9** | P3 | The runbook checklist quotes the shipped line; its `proxying` sibling corrected too |
+| **JE2E-10** | P3 | The gate refuses `/lambo/` in the reference copies, before normalising |
+| **JE2E-11** | P3 | `counterparty` / `dialled`, chosen by event in `ledger::party_key` |
+| **JE2E-12** | P3 | The `Failed` receipt carries the N4 class, from the same `err_class` the sync path uses |
+
+**JE2E-1 — what the fix is *about*, since the finding names two defects.** The
+unbounded table and the unbounded re-read are one root cause: nothing ever
+retired a refusal, in the store or in the poller's memory. The cursor is
+extracted as a type for the reason `waiting_fits` was — the claim about it was
+what a review could check, and an infinite `sleep` loop is not testable. The
+retention constant is derived rather than picked: one `LEASE_TTL` is the widest
+window any reader looks back over, so it is the floor and it is build-guarded;
+the hour above it is for the table's *other* reader, an operator asking "why did
+this client have no memory" minutes later, whose question a 45-second retention
+would have swept away before it was asked. **Considered and rejected:** a
+retention *task*, which is a timer and a clock in three adapters to do what one
+`DELETE` beside the one `INSERT` already does.
+
+**JE2E-2 — why the lease is not the licence, which is the part worth keeping.**
+"The lease is what licenses the stale-socket unlink" is true at `bind` and false
+at exit, and the review is right that the two compose into a race. But the fix
+is not "check the fence": a *clean* close releases the lease several statements
+before the unlink runs, so a lawful new holder can bind in that gap too. Both
+windows close the same way — the file is removed only while it is still the
+inode this process created, which a successor's `bind` (which unlinks and
+re-creates) can never be. Identity rather than authority, by construction rather
+than by an argument about who holds what.
+
+**JE2E-3 — the shape chosen, and the two rejected.** One line per **degradation
+episode**, where the episode is "this proxy has no holder to forward to": it
+opens at the `Closed` of the current generation and closes at the `proxying`
+line the reconnect books. Per-retry was the alternative in two forms and both
+were rejected at the append site — a line on each failed re-dial is N lines for
+one outage with no way to tell them from N outages, and a line on *any*
+generation's `Closed` books a second one for a connection already superseded,
+whose ending is the tail of an episode already recorded. The reconnect line is
+the piece the finding did not ask for and the episode framing requires: without
+an end marker, "how long did this client have no memory" is unanswerable, which
+is the question J4 exists for.
+
+**JE2E-5 — what the join does *not* restore, stated rather than glossed.**
+`semantic_merged` and `reinforced` stay receipt-only: the completion line
+carries the created/matched pair and no more. Both reports say so where the
+number would otherwise read as a zero — and in `duplicates.py` that is
+load-bearing, because its own text reads a zero `semantic_merged` as "the vector
+merge never fired at all", which would have been a conclusion about the write
+path drawn from a gap in the reader. Only *applied* completions contribute (a
+failed write created nothing; a deferred one has not created it yet), and a
+missing completion is still counted as fact-less rather than folded into a zero.
+
+**And the fixture failed the J0-R2 test once, which is recorded because it is the
+lesson repeating.** The first version of `verify.sh`'s completion-join step
+passed green under a mutation that removed the applied-state guard — nothing
+lambo emits today puts counts on a non-applied line, so the key check alone
+found nothing to add and the guard was unopposed. The fixture now plants a
+`failed` completion carrying absurd counts (40/40), which only that guard can
+exclude. *A fixture must oppose the shape it exists to check*, and the only way
+to know it does is to make the mutation and watch it go red.
+
+**JE2E-6 — why this one is the round's most important P2 even though it changes
+no behaviour.** The stale docstring at `ledger.rs` is the **third generation** of
+staleness at one site: I-R2-1 corrected it, I-R3-1 corrected it again, J4
+falsified it a third time. A claim that goes stale three times is not an
+accident of attention, it is a claim living somewhere its subject does not, and
+the availability argument that follows it had come to rest on false premises —
+so it is re-made on true ones rather than patched. The sweep also found two
+sites no finding named, including `authorize_bind`'s pre-lease-group argument,
+which J4 falsified by putting the first member in that group that *does* leave
+something behind. That is the sweep earning its keep: the review found the three
+sites a careful reader reaches from the moved code, and the sweep found the two
+that only an `rg` over the family reaches.
+
+**JE2E-11 — renamed rather than documented, and the sweep's null results.** A
+docstring cannot make a grep honest, and `holder:` returning tokens and file
+paths interchangeably is a defect in the data. `ledger::party_key` chooses the
+key from the event so the builder and the name cannot drift. The sweep's
+interesting results are the nulls: no kit script reads `lease` lines and no
+`verify.sh` fixture carries one (checked rather than assumed), and the four
+`.mdx` mirrors mention "holder" only as prose about the lease holder. The one
+real consumer is `evidence/j4-live-multiclient/README.md`, and it is **annotated,
+not rewritten** — the J1-R1-6 precedent: a capture is evidence only while it
+stays byte-exact, so the header says which key each `"holder":` became.
+`LINE_VERSION` is not bumped, because J4 landed this kind the same day and no
+released consumer reads it.
+
+**JE2E-12 — flatten, and the site the review did not name.** The N4 precedent in
+`server.rs` is unambiguous — `tool_err` gives the model a class and a pointer to
+the log — and the async path leaking what the synchronous path hides had no
+argument behind it. `err_class` becomes `pub(crate)` rather than being
+re-matched in `writeq`, which is how a new `LamboError` variant would come to
+have two classes. The third site is the one worth recording: the **durable
+intent row's `summary`**, which is the durable half of the receipt store, so a
+restart answers `failed` straight out of it — flattening the receipt and not the
+row would have leaked across a restart instead of at it. `redact_urls` is
+unweakened and is documented at `attach_receipts` as the second layer it now is:
+it matches `scheme://`, and the thing that reached a model was a store *file
+path*.
+
+### Gates (repo-wide, house convention)
+
+Baselines are `313c447`, the review head.
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | clean |
+| `cargo test --all --features fixtures` | **918 / 0 / 3** (911 at the review head) |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | **1016 / 0 / 3** (1011 at the review head) |
+| `cargo clippy --all-targets --features store-sqlite,embed-fixture,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --no-default-features --features store-cockroach,embed-fixture -- -D warnings` | clean |
+| `scripts/observability/verify.sh` | **56 ok, ALL CHECKS PASSED** (46 at the review head) |
+| `scripts/docs/check-mirror-drift.sh` | green; red on the reviewer's demonstrated false-pass input; still red on a shared-prose mutation |
+
+Every delta reconciles to a named test. **+5 on the sqlite row**, which is the
+whole of it: `the_refusal_pollers_window_advances_and_its_dedup_set_stays_bounded`,
+`recording_a_lease_refusal_purges_this_sessions_expired_ones`,
+`a_superseded_holders_exit_does_not_unlink_the_live_holders_socket`,
+`losing_the_lease_winds_the_serve_down_like_a_sigterm`, and
+`an_idle_proxy_books_the_degraded_state_when_its_holder_dies` (the integration
+test, which needs a real store). **+7 on `--all`**: those five minus the two that
+need `store-sqlite`, plus the doctests the new `pub` items carry. No test was
+renamed or removed; `j4_line_builders_carry_the_field_head_and_no_aliases` and
+`an_embedder_refusal_fails_the_write_and_is_never_sampled` gained assertions
+inside existing tests, which is why JE2E-11 and JE2E-12 show no count change.
+`verify.sh`'s +10 is one new step (6 text checks, 1 `--json` check, 3
+`duplicates.py` checks).
+
+Every new or extended test was mutation-checked and every mutation reverted: the
+refusal cursor's advance, the retention `DELETE`, the unlink licence, the fence
+arm of `wind_down`, the `lost > 0` guard, `party_key`'s proxying arm, the
+completion join (three ways), and the receipt's error string.
+
+**Cleanliness note.** The review flagged two untracked probe-debris files at the
+repo root (`r2-shape.stderr`, `r2-shape2.stderr`, J2-round-2 leftovers from
+2026-08-20). They are not present in this remediation's worktree and were left
+for the operator's own checkout.
+
 ---
 
 ## Measurements (2026-08-19, pinned `3039b82`, SQLite + BGE-M3 q8_0 on CPU)
@@ -2892,10 +3097,24 @@ Every figure is one rig, not a property of lambo.
       the drain, for the separate reason that insertion order decides which of two identical
       concepts is `created` and which is `matched`
       (`each_agents_writes_drain_in_that_agents_submission_order`)
-- [ ] A refused lease acquisition appears in the ledger from both sides (J4)
-- [ ] Docs state the multi-client default and the every-layer config rule (J5)
+- [x] Docs state the multi-client default and the every-layer config rule (J5) — both
+      `cli.mdx` mirrors and both `mcp.mdx` mirrors carry the shared prose: HTTP as the
+      default for a machine running more than one *independent* client (the reason is
+      single-writer, not subagents), and the config-layering gotcha (a transport migration
+      touches every layer; a stale `command` beside a new `url` is rejected). Landed with
+      the drift gate that protects it — `scripts/docs/check-mirror-drift.sh` plus the
+      `docs-mirror` CI job, added FIRST per §J5's own catch, and verified red under a
+      shared-prose mutation. `--print-client-config` was decided NOT built; the argument is
+      in §J5's as-built
 - [x] The concurrent-client probe from 2026-08-19 is a committed test, not a shell transcript
       (J2) — `tests/serve_proxy_multi_client.rs`
+
+*(A duplicate, unticked J4 box sat here beside J5's, and J5's was unticked though
+§J5 had landed — a reader auditing this register from the bottom concluded both
+tasks were open, while the same J4 box thirty lines up was ticked with its
+evidence. JE2E-8; the duplicate is deleted rather than ticked twice, since the
+ticked one carries the pointers, and J5's is ticked here with its own. The
+recurrence is the workstream's named defect class arriving in its own register.)*
 
 ---
 
@@ -2950,9 +3169,18 @@ that edit has to work through, written while the changes were fresh.
   degrade when it is not. The user-facing half of this now lives in `mcp.mdx`, so the
   runbook can point at it instead of restating it.
 * **New, and worth its own line:** the operator-visible artifact of a proxying serve is a
-  stderr line, `lambo serve: proxying to the session holder`. Nothing reaches the ledger
-  (J4's), so "which of my serves is the hub" is answered from the lease row or from that
-  line, and the runbook should say which.
+  stderr line, `lambo serve: proxying to the session holder`, naming both the socket it
+  `dialled=` and the one it `derived=`. **And it reaches the ledger too, since J4** — a
+  `kind:"lease"` line with `event:"proxying"` and the socket under `dialled`, closed by a
+  `proxying_stopped` line when that connection ends. The pair brackets the window in which
+  that client had no memory, which is the question a runbook reader is usually asking. So
+  "which of my serves is the hub" is answered three ways — the lease row, the stderr line,
+  or the ledger — and the runbook should say which it prefers.
+
+  *(This bullet said "Nothing reaches the ledger (J4's)", written while J4 was still
+  unbuilt and true then. J4 built it; found by JE2E-9's neighbourhood, in the same
+  checklist and the same failure class — a section written to be executed later, aging
+  against the tree it describes.)*
 * **J3, §7's agent protocol.** The instruction the runbook hands agents — derive
   decisions-with-why, then recall — now needs one clause: `lambo_derive` and
   `lambo_record_action` return before the write is applied, so an agent that must
@@ -2962,9 +3190,27 @@ that edit has to work through, written while the changes were fresh.
   block) needs no instruction at all. The MCP server's own `instructions` string
   already says this to every model that connects; the runbook line is for the
   operator reading a transcript and wondering why a recall came back empty.
-* **J3, §2's startup line.** A J3-carrying serve logs one more INFO at startup,
-  `write queue: bound measured on this deployment's embedder`, with the measured
-  `items_per_sec` and the bound. That line is the fastest way to tell whether the
-  rig's llama-server was reachable at startup — a `WARN` in its place means the
-  queue is on its unmeasured floor — so it belongs in §6's smoke test beside the
-  lease-row check.
+* **J3, §2's startup line.** A J3-carrying serve logs one more INFO at startup:
+
+  > `write queue: bounds are static (lane 64, queue 1024) and no rate moves them;
+  > the rates below are telemetry measured on this deployment's embedder — the
+  > serial leg 1-wide, the aggregate 4-wide`
+
+  That line is the fastest way to tell whether the rig's llama-server was
+  reachable at startup — a `WARN` in its place says the probe timed out, so there
+  is no rate telemetry this session, **and** that with `match_strategy=hybrid`
+  (the default) an embedder that cannot answer the probe will also fail every
+  derive. That second half is the operationally important one and the WARN says
+  it out loud. Belongs in §6's smoke test beside the lease-row check.
+
+  *(This bullet said the line reads `write queue: bound measured on this
+  deployment's embedder` and that "a `WARN` in its place means the queue is on
+  its **unmeasured floor**". Both were retired by J3's round-3 redesign and its
+  N3 sweep: bounds stopped being measured at all, and `WRITE_QUEUE_MIN` — the
+  floor — was deleted. N3 corrected `writeq.rs`'s twelve sites, including this
+  exact log line, and did not reach this diary bullet; JE2E-9 did. It matters
+  more than a stale sentence usually would, because this section is explicitly
+  the checklist the future DOGFOOD-SETUP edit "has to work through" — executed
+  as written it would have installed false operating instructions in a runbook,
+  telling an operator to grep for a line no binary emits and to diagnose a state
+  that no longer exists.)*
