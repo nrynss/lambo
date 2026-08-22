@@ -2628,6 +2628,31 @@ observability sample). J5 edits all four; add the one-line `diff` of each pair t
 *before* editing them, so the edit lands against a gate instead of installing the first
 drift.
 
+### As-built (J5, 2026-08-22)
+
+* **The gate, landed FIRST (before the prose edits, per the catch).**
+  `scripts/docs/check-mirror-drift.sh` + a `docs-mirror` job in `.github/workflows/ci.yml`,
+  and the four mirror mdx paths + the script were added to CI's path filter so a
+  mirror-only push still triggers it. It is **not** a raw byte `diff`: per the correction
+  above (J2 round-1 review), the copies are deliberately not byte-identical, so the gate
+  compares each pair's canonical shared-prose form — strips the Astro imports, drops
+  mcp.mdx's site-only "Verified clients"/managed-CockroachDB section, and normalises the
+  `/lambo/` link prefix and trailing slashes. Green on arrival, green after the edits.
+* **The gate surfaced one genuine pre-existing drift:** site `cli.mdx` said the only
+  `--scenario` was "v0.2", while the source (`src/cli/demo.rs`) and the reference copy
+  both say v0.1. Reconciled to v0.1 inside the gate commit so the gate lands green.
+* **The prose** (all four mirrors, byte-identical shared prose) documents HTTP as the
+  default for a machine running more than one independent client — the reason is
+  single-writer, not subagents (one orchestrator + its subagents is one connection, fine
+  on stdio) — and the config-layering gotcha (transport touches every layer; a stale
+  `command` beside a new `url` is rejected).
+* **`--print-client-config <client>` — decided NOT built.** Emitting a paste-ready
+  registration would need a client→registration-shape registry plus rig-specific operator
+  paths (the pinned binary, config, session, ledger, and agent-ids of DOGFOOD-SETUP.md §4)
+  that are DOGFOOD-rig configuration rather than lambo invariants, and the binary does not
+  carry the resolved config path. A placeholder-template emit would be a half-verb, so it
+  is documented here instead of scaffolded.
+
 ---
 
 ## Measurements (2026-08-19, pinned `3039b82`, SQLite + BGE-M3 q8_0 on CPU)
