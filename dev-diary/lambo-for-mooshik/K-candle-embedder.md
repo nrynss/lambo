@@ -176,6 +176,31 @@ here and byte-identical), loaded through `VarBuilder::from_pth`; f16 is a post-l
 third-party safetensors conversion (`Bylaw/BAAI-bge-m3`) produced bit-for-bit the same
 agreement statistics; all recorded numbers below are from the canonical artifact.
 
+**Deviations from the MacBook-leg method, in run order (all corrected or bounded):**
+
+1. **Weights: third-party safetensors first.** The first pass loaded
+   `model.safetensors` from `Bylaw/BAAI-bge-m3` (a conversion mirror; this spike
+   pre-dated reading the MacBook leg's same-artifact correction). Parity against the
+   q8_0 reference on that pass: median 0.99925, min 0.98951, ρ = 0.9995 — numerically
+   identical to the canonical-`pytorch_model.bin` re-run, so the mirror is effect-equivalent,
+   but the recorded gate rests on the canonical artifact only.
+2. **Reference server: rig's live :8080, not a dedicated sweep server.** The MacBook leg
+   ran its own :8099 and cross-checked :8080 at cosine 1.000000 (n=9); this leg tested
+   against :8080 directly with `--batch-size/--ubatch-size 8192`, so no independent
+   cross-check pair exists here. Mitigation: the reference artifact is the exact pinned
+   GGUF file, and the throughput baseline was re-measured today through the same harness
+   (99.8–205 items/s short inputs) rather than citing J3's numbers.
+3. **First-run fetch sample taken on the wrong artifact.** The 57.9 s fresh-cache number
+   was measured downloading the mirror's 2.27 GB safetensors before the switch to the
+   canonical bin; treat it as a size-class sample (the MacBook leg measured 99 s for the
+   actual `pytorch_model.bin`). Warm-start numbers are unaffected (weights already local).
+4. **Corpus differs slightly:** 71 live dogfood concepts + 30 synthetic (n=101) here vs
+   82 texts there; both follow the K brief (dogfood corpus + multilingual spread,
+   32 B → 8 KiB). Gate margins are far wider than the corpus delta.
+5. **Toolchain drift:** hf-hub 1.0.0 / tokenizers 0.23.x here vs 0.4.3 / 0.21.4 on the
+   MacBook (candle 0.11.0 on both); noted because K2 pins these and the two legs must not
+   silently diverge again.
+
 **Reference tested against.** The rig's own dogfood embedder: BGE-M3 q8_0 GGUF (the file
 DOGFOOD-SETUP §1 pins) via llama.cpp build 10520 on `127.0.0.1:8080`. One rig fix was
 required and is a finding of its own: this llama.cpp build clamps
