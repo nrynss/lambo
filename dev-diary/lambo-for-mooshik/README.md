@@ -48,6 +48,7 @@ has (D).
 
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
 | [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D |
+| [FUTURE](FUTURE.md) | Decided-but-unbuilt direction (first entry: the bootstrap ingest is a bulk verb, not a serve-path workload). Never a source of schedulable work |
 | [J3 durability redesign](J3-durability-redesign.md) | PROPOSAL (paused, not adopted): durable post-validation intents decouple the async-ack invariant from estimator correctness; ACI conformal bounds + an e-process breaker replace chosen constants. Written after three P1-bearing J3 rounds |
 | [DOGFOOD-FINDINGS](DOGFOOD-FINDINGS.md) | Running log of what dogfooding actually returned: metrics 1-5 read from the live ledger, the embedding-coverage gap, canonical=0 as C's motivating evidence, protocol changes the graph forced |
 
@@ -340,14 +341,9 @@ video. **Depends on:** E1.
 **Not crates.io.** A dated 0.3.0 release during the judging window is far more visible than a
 branch, and the README links crates.io. Release after 2026-09-15.
 
-**The bootstrap ingest is a separate method, decided 2026-08-22.** Mooshik's decade-scale
-bootstrap will not ride the interactive serve path (acks, receipts, the J3 intent WAL, close
-budgets) — F4 measured that path at ~110 ms effective per statement on serverless Cockroach,
-which no bulk ingest survives. It gets a bulk verb instead: exclusive store ownership, batch
-embedding, direct bulk flushes, checkpoint/resume. The pieces are already planned elsewhere —
-`seed()`'s deliberate off-lease bypass, K2's `re-embed` pipeline, and **D as the true
-blocker** (event time first, or the ingest breaks every temporal gate). Full reasoning beside
-the F4 envelope in [J3-durability-redesign.md](J3-durability-redesign.md).
+**The bootstrap ingest is a separate method — future guideline, not scheduled work.**
+Decided 2026-08-22; direction, blockers (D first) and the pieces it composes are in
+[FUTURE.md](FUTURE.md).
 
 ---
 
