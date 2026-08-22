@@ -194,6 +194,13 @@ impl PromotionScorer for SwarmScorer {
 ///
 /// The real gate is `validate`, at startup, with a message that names the
 /// missing work. This is the backstop behind it.
+///
+/// D has landed the recurrence term's primitive: D2's 24-hour session
+/// separation counts through [`crate::canon::separated_session_count`],
+/// measured on resolved about-times (`Interaction::about_time`). When C2
+/// implements the formula, "three or more sessions separated by ≥ 24 hours"
+/// resolves session starts through that helper — never through flush stamps,
+/// which give a decade-long bulk ingest no separation at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoloScorer;
 
