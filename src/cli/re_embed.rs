@@ -88,58 +88,80 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         snapshot
     };
 
+    // Every path below — success or any mid-run abort — funnels into
+    // close_writer at the end of this function (K2-R1-6): a failed migration
+    // must release the writer lease immediately, not hold it to TTL.
     let out = if concepts.is_empty() {
         Ok(format!(
             "session '{}' has no concepts; nothing to re-embed",
             args.session
         ))
     } else {
-        // All-or-nothing: embed EVERY concept BEFORE mutating the graph. Any
-        // embed failure aborts here — no mutation appended, no partial rewrite,
-        // no mixed-space state — and close_writer still releases the lease.
-        let mut updates: Vec<(NodeId, Vec<f32>)> = Vec::with_capacity(concepts.len());
-        for (id, content) in &concepts {
-            let vector = embedder.embed(content).await.map_err(|e| {
-                CliError::Runtime(format!(
-                    "re-embed aborted BEFORE mutating the graph: embedding concept {id} \
-                     ({content:?}) failed: {e}"
-                ))
-            })?;
-            updates.push((*id, vector));
-        }
-
-        // Under the graph WRITE lock: capture before-coverage, append the whole
-        // ordered batch, capture after-coverage. Deliberately NO manual drain:
-        // close_writer's Memory::close final flush drains this exact log —
-        // UpsertNodes then SetEmbedding — and flushes it transactionally with
-        // the lease token before releasing the lease. The write lock makes the
-        // append sequence atomic against the flush task's drain_log, so no
-        // partial batch can ever be flushed between the two coverages.
-        let total = concepts.len();
-        let (before, after) = {
-            let mut g = mem.graph().write();
-            let before = g.concepts().filter(|c| c.embedding.is_some()).count();
-            g.reembed_all(updates, live_contract.clone())
-                .map_err(CliError::from)?;
-            let after = g.concepts().filter(|c| c.embedding.is_some()).count();
-            (before, after)
-        };
-
-        Ok(format!(
-            "re-embedded session '{}' as agent '{}': {total} concept(s) rewritten into the \
-             live space\n\
-             coverage: embedded {before}/{total} -> {after}/{total}\n\
-             contract now: kind={} model={} dim={}\n\
-             the vector rewrite and contract swap flush as ONE transaction with this \
-             writer's lease release",
-            args.session,
-            args.agent,
-            live_contract.kind,
-            live_contract.model.as_deref().unwrap_or("<unset>"),
-            live_contract.dim,
-        ))
+        rewrite_all(
+            &mem,
+            &args.session,
+            &args.agent,
+            &embedder,
+            &live_contract,
+            &concepts,
+        )
+        .await
     };
     close_writer(mem, out).await
+}
+
+/// The all-or-nothing rewrite body: embed EVERY concept BEFORE mutating the
+/// graph. Any embed failure aborts here — no mutation appended, no partial
+/// rewrite, no mixed-space state — and the caller's `close_writer` still
+/// releases the lease on this error path (K2-R1-6).
+async fn rewrite_all(
+    mem: &Memory,
+    session: &str,
+    agent: &str,
+    embedder: &Arc<dyn Embedder>,
+    live_contract: &EmbeddingContract,
+    concepts: &[(NodeId, String)],
+) -> Result<String, CliError> {
+    let mut updates: Vec<(NodeId, Vec<f32>)> = Vec::with_capacity(concepts.len());
+    for (id, content) in concepts {
+        let vector = embedder.embed(content).await.map_err(|e| {
+            CliError::Runtime(format!(
+                "re-embed aborted BEFORE mutating the graph: embedding concept {id} \
+                 ({content:?}) failed: {e}"
+            ))
+        })?;
+        updates.push((*id, vector));
+    }
+
+    // Under the graph WRITE lock: capture before-coverage, append the whole
+    // ordered batch, capture after-coverage. Deliberately NO manual drain:
+    // close_writer's Memory::close final flush drains this exact log —
+    // UpsertNodes then SetEmbedding — and flushes it transactionally with
+    // the lease token before releasing the lease. The write lock makes the
+    // append sequence atomic against the flush task's drain_log, so no
+    // partial batch can ever be flushed between the two coverages.
+    let total = concepts.len();
+    debug_assert_eq!(mem.session().as_str(), session);
+    let (before, after) = {
+        let mut g = mem.graph().write();
+        let before = g.concepts().filter(|c| c.embedding.is_some()).count();
+        g.reembed_all(updates, live_contract.clone())
+            .map_err(CliError::from)?;
+        let after = g.concepts().filter(|c| c.embedding.is_some()).count();
+        (before, after)
+    };
+
+    Ok(format!(
+        "re-embedded session '{session}' as agent '{agent}': {total} concept(s) rewritten into \
+         the live space\n\
+         coverage: embedded {before}/{total} -> {after}/{total}\n\
+         contract now: kind={} model={} dim={}\n\
+         the vector rewrite and contract swap flush as ONE transaction with this \
+         writer's lease release",
+        live_contract.kind,
+        live_contract.model.as_deref().unwrap_or("<unset>"),
+        live_contract.dim,
+    ))
 }
 
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
@@ -468,5 +490,66 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("already held"), "{err}");
+    }
+
+    /// An embedder whose every embed fails — drives the mid-run abort path.
+    struct FailingEmbedder;
+
+    #[async_trait::async_trait]
+    impl Embedder for FailingEmbedder {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            Err(crate::embed::EmbedError::Backend("failing embedder".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn re_embed_embed_failure_still_releases_the_lease() {
+        // K2-R1-6: the old code returned from run() on an embed failure
+        // WITHOUT close_writer, so the session stayed unwritable for the rest
+        // of the TTL. The abort message is honest AND the lease goes back.
+        let store = Arc::new(MemoryStore::new());
+        seed_damaged_session(&store).await;
+        let mut backends = backends_on(store.clone(), "fixture", "m");
+        backends.embedder = Box::new(FailingEmbedder);
+
+        let err = run(
+            backends,
+            Args {
+                session: SESSION.into(),
+                agent: AGENT.into(),
+                allow_embedding_mismatch: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("re-embed aborted BEFORE mutating the graph"),
+            "{err}"
+        );
+
+        // Durable state untouched: old contract and old vectors survive.
+        let (kind, widths) = durable_state(&store).await;
+        assert_eq!(kind.as_deref(), Some("legacy"));
+        assert_eq!(widths, vec![None, Some(1024)]);
+
+        // The point of the fix: a DIFFERENT writer can take the lease right
+        // now, not after the TTL.
+        let verifier = LeaseHolder::for_this_process(&AgentId::from("lease-verifier"));
+        match store
+            .acquire_lease(
+                &SessionId::from(SESSION),
+                &verifier,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap()
+        {
+            LeaseOutcome::Acquired(_) => {}
+            other => panic!("lease must be released after a failed migration, got {other:?}"),
+        }
     }
 }
