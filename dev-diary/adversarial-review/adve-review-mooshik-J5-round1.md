@@ -134,3 +134,46 @@ heading -> a benign rename spuriously reds the gate) is closed:
 - Verified: baseline drift gate green; renaming `## Verified clients` -> `## Supported
   CLIENTSS` leaves the gate GREEN (no spurious red); a genuine shared-prose mutation still
   FAILS the mcp pair (gate remains meaningful); revert -> green.
+
+## Disposition — round-2 confirmation (REVIEW-ONLY, commit `f6296c0`)
+
+**Reviewer**: `J5Review2`, independent. REVIEW-ONLY — the only file written is this
+disposition; no commit amended, no code changed. **Scope**: commit `f6296c0`
+(remediation of round-1 P3 J5-R1-1). **Verdict**: **APPROVE** — P3 genuinely closed,
+gate integrity verified, clean and ready to integrate. **HEAD `f6296c0` ==
+`origin/wt/j5`; worktree clean** (no modified/untracked files apart from this doc).
+
+### Source-level confirmation
+
+- **Markers in site mcp.mdx** — the site-only block is wrapped in
+  `<!-- lambo-site-only:start -->` (inserted between the code fence and
+  `## Verified clients`) and `<!-- lambo-site-only:end -->` (inserted between the
+  final site-only transcript line and the shared `## Limits` section). The
+  `f6296c0` diff to `site/src/content/docs/mcp.mdx` is **exactly those two marker
+  lines plus one blank separator** (the `+<!-- lambo-site-only:start -->` at
+  `+349`/`+351` and `+<!-- lambo-site-only:end -->` at `+389`) — nothing else.
+- **Script keys on markers, not heading text** —
+  `scripts/docs/check-mirror-drift.sh` `canon()` now sets `site_only` on the literal
+  `<!-- lambo-site-only:start -->` line and drops lines until the
+  `<!-- lambo-site-only:end -->` line (lines 46-53); the `## Verified clients`
+  heading-match logic is gone. The reference copy carries no such block, so a
+  marker-free ref is unaffected.
+
+### Gate behavior (independently re-run by this reviewer)
+
+- **Baseline**: `./scripts/docs/check-mirror-drift.sh` -> both pairs `ok`,
+  `mirror drift check passed`, exit 0.
+- **Heading-rename mutation** (site `## Verified clients` -> `## Supported CLIENTSS`):
+  gate stays GREEN (both pairs `ok`, exit 0) — no spurious red; strip is genuinely
+  marker-keyed.
+- **Shared-prose mutation** (shared `## Limits` prose, outside markers): gate FAILS
+  the mcp pair and `exit 1` — the gate remains meaningful (false-pass-free on the
+  load-bearing shared prose).
+- All mutations reverted; tree clean after verification.
+
+### Conclusion
+
+Round-1 P3 J5-R1-1 is closed at source: the strip is keyed on explicit markers, the
+site-only diff is exactly the marker lines, and the gate is green-by-default,
+rename-tolerant, and still red on genuine shared drift. No new issues introduced.
+**APPROVE — clean, ready to integrate.**
