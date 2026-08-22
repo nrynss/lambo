@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     last_demotion_time  TIMESTAMPTZ,
     embedding           VECTOR(1024),
     chunk_group_id      STRING,
+    human_confirmed     INT NOT NULL DEFAULT 0,
     INDEX (session_id, canonization_status)
 );
 
@@ -59,6 +60,15 @@ CREATE TABLE IF NOT EXISTS concepts (
 -- (idempotent — IF NOT EXISTS on ADD COLUMN) covers them; fresh installs get it
 -- from the CREATE TABLE above and the ALTER is a no-op.
 ALTER TABLE concepts ADD COLUMN IF NOT EXISTS chunk_group_id STRING;
+
+-- C2 (SoloPolicy): concepts persists `human_confirmed` — the count of explicit
+-- human confirmations, the one spec §3.2 solo-score input no existing structure
+-- carries (sessions, valid actions and reverts derive from interactions,
+-- structural edges and the canonization event log). Bumped only through the
+-- confirm verb; agents cannot write it. Existing clusters predate the column,
+-- so the idempotent ALTER covers them; fresh installs get it from the CREATE
+-- TABLE above and the ALTER is a no-op.
+ALTER TABLE concepts ADD COLUMN IF NOT EXISTS human_confirmed INT NOT NULL DEFAULT 0;
 
 -- Errata (2026-08-11, P2 integration / muse-spark M1-M2): the schema's
 -- table-level UNIQUE (session_id, canonical_key) is **partial** — it
