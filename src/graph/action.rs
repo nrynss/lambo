@@ -123,8 +123,8 @@ pub fn record_action(
 ) -> Result<ActionOutcome, LamboError> {
     // Step 1 — the interaction must exist (a concept id is equally rejected:
     // `record_action` attaches the action to a specific interaction).
-    let created_at = match graph.node(interaction) {
-        Some(Node::Interaction(i)) => i.created_at,
+    let (created_at, event_time) = match graph.node(interaction) {
+        Some(Node::Interaction(i)) => (i.created_at, i.event_time),
         _ => {
             return Err(LamboError::Store(StoreError::NotFound(format!(
                 "interaction {interaction} not found"
@@ -174,7 +174,7 @@ pub fn record_action(
             _ => unreachable!("record_action only plans Causal/Dependency edges"),
         };
         let edge = Edge {
-            event_time: None,
+            event_time,
             id: NodeId::new(),
             session_id: session_id.clone(),
             source: src,

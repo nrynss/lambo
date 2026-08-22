@@ -205,8 +205,8 @@ pub fn derive(
 ) -> Result<DeriveOutcome, LamboError> {
     // Step 1 — validate the interaction node. Both a missing node and a node
     // that is not an Interaction are NotFound per the pinned contract.
-    let interaction_created_at = match graph.node(interaction) {
-        Some(Node::Interaction(i)) => i.created_at,
+    let (interaction_created_at, interaction_event_time) = match graph.node(interaction) {
+        Some(Node::Interaction(i)) => (i.created_at, i.event_time),
         Some(_) => {
             return Err(LamboError::Store(StoreError::NotFound(format!(
                 "derive: node {interaction} exists but is not an Interaction"
@@ -230,6 +230,7 @@ pub fn derive(
         parent_of,
         max_cooccurrence_per_derive,
         interaction_created_at,
+        interaction_event_time,
         session_id,
     )
 }
@@ -327,6 +328,7 @@ fn derive_after_validation(
     parent_of: &ParentOf,
     max_cooccurrence_per_derive: usize,
     interaction_created_at: DateTime<Utc>,
+    interaction_event_time: Option<DateTime<Utc>>,
     session_id: SessionId,
 ) -> Result<DeriveOutcome, LamboError> {
     let mut outcome = DeriveOutcome::default();
@@ -385,7 +387,7 @@ fn derive_after_validation(
                 outcome.reinforced += 1;
             }
             graph.upsert_edge(Edge {
-                event_time: None,
+                event_time: interaction_event_time,
                 id: NodeId::new(),
                 session_id: session_id.clone(),
                 source,
@@ -459,7 +461,7 @@ fn derive_after_validation(
             outcome.reinforced += 1;
         }
         graph.upsert_edge(Edge {
-            event_time: None,
+            event_time: interaction_event_time,
             id: NodeId::new(),
             session_id: session_id.clone(),
             source: parent_node,

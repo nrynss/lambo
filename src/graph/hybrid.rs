@@ -505,12 +505,22 @@ async fn derive_planned(
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).
         // -----------------------------------------------------------------------
-        let (planned_epoch, session_id, interaction_created_at, origin_text, stamped, items) = {
+        let (
+            planned_epoch,
+            session_id,
+            interaction_created_at,
+            interaction_event_time,
+            origin_text,
+            stamped,
+            items,
+        ) = {
             let g = graph.read();
             let planned_epoch = g.epoch();
             let session_id = g.session_id().clone();
-            let (interaction_created_at, origin_text) = match g.node(interaction) {
-                Some(Node::Interaction(i)) => (i.created_at, i.prompt_text.clone()),
+            let (interaction_created_at, interaction_event_time, origin_text) = match g
+                .node(interaction)
+            {
+                Some(Node::Interaction(i)) => (i.created_at, i.event_time, i.prompt_text.clone()),
                 Some(_) => {
                     return Err(LamboError::Store(StoreError::NotFound(format!(
                         "hybrid derive: node {interaction} exists but is not an Interaction"
@@ -566,6 +576,7 @@ async fn derive_planned(
                 planned_epoch,
                 session_id,
                 interaction_created_at,
+                interaction_event_time,
                 origin_text,
                 stamped,
                 items,
@@ -906,7 +917,7 @@ async fn derive_planned(
                             (id, *target)
                         };
                         g.upsert_edge(Edge {
-                            event_time: None,
+                            event_time: interaction_event_time,
                             id: NodeId::new(),
                             session_id: session_id.clone(),
                             source: s,
@@ -946,7 +957,7 @@ async fn derive_planned(
                     outcome.reinforced += 1;
                 }
                 g.upsert_edge(Edge {
-                    event_time: None,
+                    event_time: interaction_event_time,
                     id: NodeId::new(),
                     session_id: session_id.clone(),
                     source,
@@ -1009,7 +1020,7 @@ async fn derive_planned(
                 outcome.reinforced += 1;
             }
             g.upsert_edge(Edge {
-                event_time: None,
+                event_time: interaction_event_time,
                 id: NodeId::new(),
                 session_id: session_id.clone(),
                 source: parent_node,

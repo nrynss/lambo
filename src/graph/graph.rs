@@ -390,7 +390,7 @@ impl Graph {
 
         if let Some(prev) = i.previous_id {
             let edge = Edge {
-                event_time: None,
+                event_time: i.event_time,
                 id: NodeId::new(),
                 session_id: self.session_id.clone(),
                 source: i.id,
@@ -422,12 +422,15 @@ impl Graph {
                 c.id, c.session_id, self.session_id
             )));
         }
-        if !matches!(self.nodes.get(&derives_from), Some(Node::Interaction(_))) {
-            return Err(invariant(format!(
-                "concept {} derives from {derives_from}, which is not an interaction in this graph",
-                c.id
-            )));
-        }
+        let interaction_event_time = match self.nodes.get(&derives_from) {
+            Some(Node::Interaction(i)) => i.event_time,
+            _ => {
+                return Err(invariant(format!(
+                    "concept {} derives from {derives_from}, which is not an interaction in this graph",
+                    c.id
+                )));
+            }
+        };
         if let Some(vector) = &c.embedding {
             let contract = self.embedding.as_ref().ok_or_else(|| {
                 invariant(format!(
@@ -479,7 +482,6 @@ impl Graph {
         self.append_mutation(Mutation::UpsertNode { node });
 
         let edge = Edge {
-            event_time: None,
             id: NodeId::new(),
             session_id: self.session_id.clone(),
             source: derives_from,
@@ -489,6 +491,7 @@ impl Graph {
             reinforcements: 1,
             created_at: c.created_at,
             last_reinforced: c.created_at,
+            event_time: interaction_event_time,
         };
         let final_edge = self.record_edge(edge)?;
         self.append_mutation(Mutation::UpsertEdge { edge: final_edge });
