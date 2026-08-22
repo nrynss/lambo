@@ -1084,6 +1084,21 @@ impl HubProxy {
     /// client byte has been exchanged, when winning the lease is safe because
     /// this process can then be a real holder.
     ///
+    /// ## The invariant's other side: a fenced HOLDER exits (JE2E-4)
+    ///
+    /// The wedge invariant forbids a proxy from *becoming* the writer. Its dual
+    /// is what a writer does when it stops being one, and since JE2E-4 the
+    /// answer is symmetric: it winds down (`mcp::serve::wind_down`). The two are
+    /// the same argument from opposite ends — a process may only serve the role
+    /// its client handshook with, so a proxy may not promote itself into a
+    /// holder and an ex-holder may not go on answering as one.
+    ///
+    /// It is also what makes the exit cheap rather than an outage, and the
+    /// reason is *this* function: the client respawns its serve, the respawn
+    /// loses the election to the real holder, and it arrives here as a proxy.
+    /// That is the self-heal the "no in-process promotion" residual otherwise
+    /// costs, arriving through the door J2 already built.
+    ///
     /// What a dead holder gets instead: every forwarded call fails honestly and
     /// *bounded* — never hangs — and the next call re-reads the row, so the
     /// moment a new holder exists this proxy is working again with no restart.

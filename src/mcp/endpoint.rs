@@ -306,13 +306,69 @@ impl SessionEndpoint {
         Ok(listener)
     }
 
-    /// Remove the socket file on the way out, best effort.
+    /// The `(device, inode)` of the socket file at this path right now, or
+    /// `None` if nothing is there.
+    ///
+    /// Taken immediately after a successful [`SessionEndpoint::bind`] and
+    /// handed back to [`SessionEndpoint::unlink_if_ours`] at exit — see there
+    /// for why the *path* is not enough to identify our own socket.
+    pub fn file_identity(&self) -> Option<(u64, u64)> {
+        std::fs::symlink_metadata(&self.path)
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+    }
+
+    /// Remove the socket file on the way out — **but only when it is still the
+    /// one this process bound** (JE2E-2).
     ///
     /// Not required for correctness — the next holder's [`SessionEndpoint::bind`]
     /// clears a stale socket under the lease's licence — but a clean exit should
     /// not leave a file behind that makes the *next* start log a stale-socket
     /// warning it did not earn.
-    pub fn unlink(&self) {
+    ///
+    /// # Why the path is not a licence, and the lease is not one either
+    ///
+    /// The address is a **pure function** of session and store, so every holder
+    /// generation binds the same path. "The lease is what licenses the
+    /// stale-socket unlink" is true at `bind` — while we hold the lease, a file
+    /// at this path cannot belong to a live holder — and it is *not* true here,
+    /// because the exit path runs after the lease has stopped being ours:
+    ///
+    /// * A **fenced** ex-holder (its lease expired, another writer took the
+    ///   session) reaches its exit still holding a `SessionEndpoint` for a path
+    ///   the *new* holder is now listening on. Removing it silently disabled
+    ///   multi-client attach for the new holder's whole lifetime, with every
+    ///   later loser told the holder "has most likely died" — the original J
+    ///   outage recreated by a race, with a misleading refusal on top.
+    /// * A **clean** close releases the lease *before* this runs, so a new
+    ///   holder can lawfully win it and bind in the gap. The window is small;
+    ///   it is not zero.
+    ///
+    /// So the licence is identity, not authority: `bound` is the `(dev, ino)`
+    /// this process saw the instant after it bound, and the file is removed only
+    /// while the path still resolves to it. A new holder's `bind` unlinks the
+    /// old file and creates a new inode, so a superseded endpoint's identity can
+    /// never match and its owner can never delete a live successor's socket —
+    /// by construction rather than by an argument about who holds what.
+    ///
+    /// `None` means the bind never happened (or the stat failed), and nothing is
+    /// removed: this process put no file here to clean up.
+    pub fn unlink_if_ours(&self, bound: Option<(u64, u64)>) {
+        let Some(bound) = bound else { return };
+        match self.file_identity() {
+            Some(now) if now == bound => {}
+            Some(_) => {
+                tracing::info!(
+                    endpoint = %self.path.display(),
+                    "lambo serve: the session endpoint at this path is no longer the socket this \
+                     process bound — another holder has taken the session and bound its own, so \
+                     it is left alone (removing it would silently disable multi-client attach for \
+                     the new holder)"
+                );
+                return;
+            }
+            None => return,
+        }
         match std::fs::remove_file(&self.path) {
             Ok(()) => tracing::debug!(
                 endpoint = %self.path.display(),
@@ -1066,6 +1122,64 @@ mod tests {
             &cfg(StoreKind::Cockroach, None, Some("postgres://h/db"))
         )
         .is_some());
+    }
+
+    /// **JE2E-2, the reviewer's own test shape.** Bind a holder, bind a second
+    /// at the same address (which is what a lawful takeover does — the address
+    /// is a pure function of session and store, so every generation lands here),
+    /// then run the *first* one's exit path. The second's socket must survive.
+    ///
+    /// The failure this pins is not theoretical: the exit unlink was
+    /// unconditional, so a fenced ex-holder resuming after a >45 s wedge deleted
+    /// the live holder's socket, silently disabling multi-client attach for the
+    /// new holder's whole lifetime — and every later loser was then told the
+    /// holder "has most likely died", which was false.
+    ///
+    /// The socket is a real `UnixListener`, not a placed file: the identity that
+    /// licenses the unlink is the inode `bind` created, and `bind`'s own
+    /// stale-socket branch is what replaces it.
+    #[tokio::test]
+    async fn a_superseded_holders_exit_does_not_unlink_the_live_holders_socket() {
+        let root = short_scratch("u");
+        // `bind` creates its parent at 0700 and then insists on it; a scratch
+        // directory made by the test would carry the umask's mode instead, so
+        // the endpoint lives one rung down where `bind` owns the mode.
+        let dir = root.join("l");
+        let store = cfg(StoreKind::Sqlite, Some("/one.db"), None);
+        let a = SessionEndpoint::resolve_in(&dir, "s", &store).unwrap();
+
+        let a_listener = a.bind().expect("A binds");
+        let a_bound = a.file_identity().expect("A's socket exists");
+
+        // B takes the session and binds the same derived address: `bind` clears
+        // A's now-stale socket under the lease's licence and creates its own.
+        let b = SessionEndpoint::resolve_in(&dir, "s", &store).unwrap();
+        assert_eq!(a.path(), b.path(), "every generation binds one address");
+        drop(a_listener);
+        let _b_listener = b.bind().expect("B binds after clearing the stale socket");
+        let b_bound = b.file_identity().expect("B's socket exists");
+        assert_ne!(
+            a_bound, b_bound,
+            "B's bind made a NEW inode — which is the fact the licence rests on"
+        );
+
+        // A's exit path runs, holding the endpoint it derived and the identity
+        // it bound.
+        a.unlink_if_ours(Some(a_bound));
+
+        assert_eq!(
+            b.file_identity(),
+            Some(b_bound),
+            "the live holder's socket must still be there, and must still be ITS socket"
+        );
+
+        // And the licence is not a blanket refusal: B's own exit does clean up
+        // after itself, or every start would log a stale-socket warning it did
+        // not earn.
+        b.unlink_if_ours(Some(b_bound));
+        assert_eq!(b.file_identity(), None, "a holder clears its own socket");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

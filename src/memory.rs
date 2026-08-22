@@ -323,6 +323,50 @@ fn unregister_session(session: &SessionId, agent: &AgentId) {
     }
 }
 
+/// The serve-facing half of the single-writer fence (JE2E-4).
+///
+/// The fence itself is the `AtomicBool` that [`FlushTask::with_fence`] and every
+/// [`Memory`] write path read. It is the **safety** mechanism, it is unchanged,
+/// and it remains the authority on whether this handle still owns the session.
+/// This type carries the two things a *serve* additionally needs in order to
+/// **act** on the latch rather than merely obey it:
+///
+/// * a wake-up, so a wind-down does not have to poll for a transition that
+///   happens at most once in a process's life; and
+/// * the id of the writer that took the session, captured at the latch, so the
+///   exit line can name it instead of saying "someone".
+///
+/// Deliberately not folded into the `AtomicBool`: `FlushTask::with_fence`'s
+/// contract is a plain flag shared with the write gate, and widening it would
+/// put a notifier on the flush hot path to serve one waiter that only ever wakes
+/// once.
+#[derive(Debug, Default)]
+pub(crate) struct LeaseLostSignal {
+    /// The new holder's token, from the refresh that found the lease gone.
+    winner: parking_lot::Mutex<Option<String>>,
+    woken: tokio::sync::Notify,
+}
+
+impl LeaseLostSignal {
+    /// Record the winner and wake every waiter. Idempotent, like the fence
+    /// beside it — the heartbeat keeps beating after a loss and may call this
+    /// again; the first winner recorded is kept, because it is the one that was
+    /// true at the transition.
+    fn latch(&self, winner: &str) {
+        let mut slot = self.winner.lock();
+        if slot.is_none() {
+            *slot = Some(winner.to_string());
+        }
+        drop(slot);
+        self.woken.notify_waiters();
+    }
+
+    /// Who took the session, if the fence has latched.
+    fn winner(&self) -> Option<String> {
+        self.winner.lock().clone()
+    }
+}
+
 /// Spawn the single-writer lease heartbeat (T8.6).
 ///
 /// Refreshes the lease every [`LEASE_HEARTBEAT_INTERVAL`] (a third of the TTL),
@@ -336,15 +380,22 @@ fn unregister_session(session: &SessionId, agent: &AgentId) {
 /// latches the shared `fence` (T86-2): the owning [`Memory`] then refuses every
 /// further write and its write-behind flush loop stops and drops its pending
 /// tail, so the two writers can no longer flush divergent graphs into one
-/// session. The loss is still logged loudly and the fenced handle does not
-/// self-destruct — the operator reconciles — but it is now a loud, *safe* stop
-/// rather than silent split-brain corruption. Setting the fence is idempotent,
-/// so the heartbeat may keep beating after it without changing anything.
+/// session. The loss is still logged loudly, and the fence is idempotent, so the
+/// heartbeat may keep beating after it without changing anything.
+///
+/// **What the process does about it is `serve`'s decision, and since JE2E-4 it
+/// winds down** (operator ruling, 2026-08-22). The fence is a *safety*
+/// mechanism and stays exactly what it was; `signal` is how a serve learns of
+/// the latch promptly enough to act on it, and carries the id of the writer that
+/// took the session so the exit line can name it. A library caller that wants
+/// the old "stop safely and stay up" behaviour still gets it: nothing here ends
+/// anything.
 fn spawn_lease_heartbeat(
     store: Arc<dyn GraphStore>,
     session: SessionId,
     holder: LeaseHolder,
     fence: Arc<AtomicBool>,
+    signal: Arc<LeaseLostSignal>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LEASE_HEARTBEAT_INTERVAL);
@@ -358,6 +409,10 @@ fn spawn_lease_heartbeat(
                     // T86-2: fence the writer. From here every write is refused
                     // and the flush loop stops overwriting the new holder's rows.
                     fence.store(true, Ordering::Release);
+                    // JE2E-4: and wake whoever is waiting to act on it. The
+                    // fence is latched FIRST, so a waiter that wakes always
+                    // finds the flag already set.
+                    signal.latch(&current.holder);
                     tracing::error!(
                         session = %session,
                         holder = %holder,
@@ -864,6 +919,8 @@ impl MemoryBuilder {
         // lease was lost; from then the flush loop stops (and drops its tail)
         // and the write gate refuses. Created before both consumers.
         let lease_lost = Arc::new(AtomicBool::new(false));
+        // JE2E-4: the wake-up and the winner's id, latched beside the fence.
+        let lease_lost_signal = Arc::new(LeaseLostSignal::default());
 
         let flush = FlushTask::new(
             graph.clone(),
@@ -892,6 +949,7 @@ impl MemoryBuilder {
             session.clone(),
             lease_holder.clone(),
             lease_lost.clone(),
+            lease_lost_signal.clone(),
         );
 
         tracing::info!(
@@ -965,6 +1023,7 @@ impl MemoryBuilder {
             lease_token,
             lease_released: AtomicBool::new(false),
             lease_lost,
+            lease_lost_signal,
             clock,
         })))
     }
@@ -1147,6 +1206,10 @@ pub struct Memory {
     /// where two writers flush divergent graphs into one session into a loud,
     /// safe stop. Shared (`Arc`) with the heartbeat and the flush task.
     lease_lost: Arc<AtomicBool>,
+    /// The serve-facing half of that fence (JE2E-4): a wake-up and the winner's
+    /// id. See [`LeaseLostSignal`], and [`Memory::lease_lost_latched`] for what
+    /// waits on it.
+    lease_lost_signal: Arc<LeaseLostSignal>,
     /// **J3's background write pipeline** — bounded per-agent FIFO lanes and
     /// the receipt store their outcomes land in. Always present: there is no
     /// "async writes off" mode, because the two tools that use it
@@ -2508,7 +2571,17 @@ impl Memory {
     /// exist in a shipped binary.
     #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn simulate_lease_loss(&self) {
+        self.simulate_lease_loss_to("another-writer@host#1");
+    }
+
+    /// [`Memory::simulate_lease_loss`] naming the writer that took the session,
+    /// for the JE2E-4 wind-down tests that assert the exit line names it.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn simulate_lease_loss_to(&self, winner: &str) {
+        // Same order as the heartbeat: fence first, then wake, so a waiter that
+        // wakes always finds the flag already set.
         self.lease_lost.store(true, Ordering::Release);
+        self.lease_lost_signal.latch(winner);
     }
 
     fn closed_error(&self) -> LamboError {
@@ -2516,8 +2589,40 @@ impl Memory {
     }
 
     /// `true` once the heartbeat latched a lost lease (T86-2).
-    fn lease_lost(&self) -> bool {
+    ///
+    /// `pub(crate)` since JE2E-4, so `mcp::serve` can tell a fenced exit from an
+    /// ordinary one — it is the difference between "we released the lease" and
+    /// "another writer owns it", and it decides what the exit says.
+    pub(crate) fn lease_lost(&self) -> bool {
         self.lease_lost.load(Ordering::Acquire)
+    }
+
+    /// Resolve once this handle's single-writer lease has been lost, with the
+    /// id of the writer that took it (JE2E-4).
+    ///
+    /// **Waits forever on a healthy holder**, which is the point: it is one arm
+    /// of `serve`'s wind-down `select!`, beside SIGTERM. The fence latches at
+    /// most once in a process's life, so this is a wake-up rather than a poll.
+    ///
+    /// Race-free by construction, and the ordering is the whole of it: the
+    /// waiter is registered (`enable`) *before* the flag is re-read, so a latch
+    /// landing between the read and the await is still delivered. Both latch
+    /// sites set the flag before they notify, so a wake always finds it set —
+    /// but the flag, never the notification, is the authority, and the loop is
+    /// what makes a spurious wake harmless.
+    pub(crate) async fn lease_lost_latched(&self) -> String {
+        loop {
+            let notified = self.lease_lost_signal.woken.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lease_lost() {
+                return self
+                    .lease_lost_signal
+                    .winner()
+                    .unwrap_or_else(|| "another writer".to_string());
+            }
+            notified.await;
+        }
     }
 
     /// The honest refusal a fenced handle returns (T86-2): another writer owns

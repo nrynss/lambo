@@ -1548,7 +1548,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // deferred; see I-R2-1's recommendation.
     //
     // A fresh registration in `close_bounded` re-arms it for the close phase.
-    let shutdown = shutdown_signal();
+    //
+    // JE2E-4: and the *other* thing this process winds down for. `wind_down`
+    // races the signal against the lease fence, so losing the lease ends the
+    // transport by the same route SIGTERM does. `shutdown_signal()` is still
+    // CALLED here, so its eager registration is unmoved — only the polling is
+    // wrapped.
+    let shutdown = wind_down(shutdown_signal(), mem.clone());
     tokio::pin!(shutdown);
 
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
@@ -1618,12 +1624,18 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // is loud but is a real degradation, so the log line names it.
     // No endpoint: a store no second process can see, so there is no hub to be.
     // See `SessionEndpoint::for_store`.
+    // JE2E-2: the identity of the socket file this process creates, captured
+    // the instant after the bind. It is what licenses the unlink at exit; see
+    // `SessionEndpoint::unlink_if_ours` for why the path and the lease are not
+    // licences of their own.
+    let mut bound_socket: Option<(u64, u64)> = None;
     let hub = match endpoint
         .as_ref()
         .map(|ep| (ep.path().display().to_string(), ep.bind()))
     {
         None => None,
         Some((path, Ok(listener))) => {
+            bound_socket = endpoint.as_ref().and_then(|ep| ep.file_identity());
             tracing::info!(
                 endpoint = %path,
                 "lambo serve: session endpoint bound — other clients on this machine can attach \
@@ -1691,8 +1703,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(hub) = hub {
         hub.abort();
     }
+    // JE2E-2. Licensed by the socket's own identity, not by the path and not by
+    // the lease: this process may be a FENCED ex-holder whose successor is
+    // already listening at this address, and even a clean close released the
+    // lease a few statements ago. `unlink_if_ours` removes the file only while
+    // it is still the inode this process bound.
     if let Some(endpoint) = &endpoint {
-        endpoint.unlink();
+        endpoint.unlink_if_ours(bound_socket);
     }
     if let Some(ledger) = ledger {
         ledger.shutdown();
@@ -2169,6 +2186,55 @@ async fn serve_http_bounded(
 /// (I-R2-1). It cannot move above `resolve_role`: that loop is allowed to run
 /// for 50 seconds by design, and arming over it would make the wait unkillable
 /// (J2-R1-7).
+/// What ends a holder's transport: a signal, **or** losing the single-writer
+/// lease (JE2E-4; operator ruling, 2026-08-22).
+///
+/// # A fenced ex-holder winds down instead of living forever
+///
+/// The fence is an `AtomicBool` that gates *writes*. Before this, nothing tore
+/// the serve down when it latched: an ex-holder kept its endpoint listener, its
+/// established proxy connections and its own client, answering honest write
+/// refusals and — the part that is not honest — silently **stale reads**, with
+/// no staleness label, for as long as the process lived. That was the same trade
+/// pre-J2, so nobody had re-made it. J2 changed the alternatives: a fenced serve
+/// that *exits* is respawned by the client that spawned it, and the respawn
+/// finds a live holder and comes back as a **proxy** to it. So the wind-down is
+/// a self-heal, and staying up is now the strictly worse option.
+///
+/// # It is the SIGTERM path, deliberately, and not a faster one
+///
+/// The fence trip enters exactly the future the signal enters, so everything
+/// downstream is unchanged and unduplicated: the transport is cancelled with its
+/// grace window, `Memory::close` runs (its fenced branch drops the tail and does
+/// **not** release a lease that is no longer ours — there is nothing to flush
+/// past the fence, because writes have been refused since it latched), the
+/// refusal poller and the heartbeat are aborted, the endpoint is unlinked *only
+/// if it is still ours* (JE2E-2 — a fenced holder's successor is listening at
+/// the same address, and these two findings compose here), and the ledger is
+/// drained last with its `startup` / `lease` / `completion` lines intact. The
+/// ordering at `serve`'s tail is what makes that true and it is not changed by
+/// this: the drain runs after `run_and_close` returns, on the error path as much
+/// as the success one.
+///
+/// The exit is therefore non-zero — `close`'s fenced branch returns its refusal
+/// — which is the honest code: this process's tail was discarded. Both facts a
+/// reader needs are in one line here, before any of it runs.
+async fn wind_down(signal: impl std::future::Future<Output = ()>, mem: Arc<Memory>) {
+    tokio::select! {
+        () = signal => {}
+        winner = mem.lease_lost_latched() => {
+            tracing::warn!(
+                session = %mem.session(),
+                holder = %winner,
+                "lambo serve: lease lost to {winner}, exiting so the client can respawn into a \
+                 proxy — this process's writes have been refused since the fence latched and its \
+                 reads would go on silently serving a graph another writer now owns. The tail it \
+                 could not flush is discarded, exactly as a crash would discard it",
+            );
+        }
+    }
+}
+
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
@@ -3434,6 +3500,70 @@ mod tests {
                 .await
                 .expect("a clean close must release the lease so a new writer can attach");
             second.close().await.expect("close B");
+        }
+
+        /// **JE2E-4** (operator ruling, 2026-08-22). Losing the lease must end
+        /// the transport by the same route SIGTERM does, so the client respawns
+        /// the serve and it comes back as a proxy to the real holder.
+        ///
+        /// Before this, the fence gated writes and nothing else: an ex-holder
+        /// kept its listener, its attached proxies and its own client, serving
+        /// **silently stale reads** for as long as the process lived.
+        ///
+        /// Two halves, and both matter:
+        ///
+        /// 1. a healthy holder's wind-down does **not** fire (or every serve
+        ///    would exit at once, which is the failure a naive `select!` on a
+        ///    ready future produces);
+        /// 2. the fence latching resolves it, and names the winner so the exit
+        ///    line can say who took the session.
+        #[tokio::test]
+        async fn losing_the_lease_winds_the_serve_down_like_a_sigterm() {
+            let m = mem("serve-fence-winddown").await;
+
+            // A healthy holder waits. `std::future::pending` stands in for the
+            // signal, so the ONLY thing that can complete this is the fence.
+            let healthy = tokio::time::timeout(
+                Duration::from_millis(50),
+                wind_down(std::future::pending::<()>(), m.clone()),
+            )
+            .await;
+            assert!(
+                healthy.is_err(),
+                "a holder that still owns its lease must not wind down"
+            );
+
+            // Now the heartbeat's transition, driven directly (the real one
+            // fires on its 15s interval).
+            let waiting = tokio::spawn({
+                let m = m.clone();
+                async move { wind_down(std::future::pending::<()>(), m).await }
+            });
+            tokio::task::yield_now().await;
+            m.simulate_lease_loss_to("agent-b@host#7");
+            tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .expect("the fence must wake the wind-down, not leave it parked")
+                .expect("the wind-down task must not panic");
+
+            // And the identity the exit line names is the writer that won.
+            assert_eq!(
+                m.lease_lost_latched().await,
+                "agent-b@host#7",
+                "the exit line must name who took the session, not 'someone'"
+            );
+
+            // The close that follows is the fenced one: it refuses rather than
+            // flushing a tail another writer now owns, which is why the exit
+            // code is non-zero. `serve`'s tail — the ledger drain and the
+            // identity-licensed unlink — runs on this path exactly as it does
+            // on the clean one.
+            let pump = tokio::spawn(std::future::pending::<()>());
+            let out = run_and_close(m.clone(), async { Ok(()) }, pump).await;
+            assert!(
+                out.is_err(),
+                "a fenced close must not claim success: {out:?}"
+            );
         }
     }
 }
