@@ -1,0 +1,48 @@
+embedding 101 items through candle (cuda)... 0 20 40 60 80 100 done (cached to /home/nryn/work/lambo/wt/k1/spikes/k1-candle/data/candle-vecs-cuda-f16.json)
+embedding through llama-server q8_0...
+ 0 20 40 60 80 100 done
+dim check (both sides 1024): true
+
+per-item cosine(candle, llama):
+  dogfood#0        cos=0.99947
+  dogfood#1        cos=0.99942
+  dogfood#2        cos=0.99948
+  dogfood#3        cos=0.99952
+  dogfood#4        cos=0.99931
+  dogfood#5        cos=0.99900
+  dogfood#6        cos=0.99932
+  dogfood#7        cos=0.99945
+  synth-32B        cos=0.99914
+  synth-32B        cos=0.98952
+  synth-32B        cos=0.99942
+  synth-32B        cos=0.99950
+  synth-32B        cos=0.99915
+  synth-32B        cos=0.99943
+  synth-128B       cos=0.99941
+  synth-128B       cos=0.99918
+  synth-128B       cos=0.99930
+  synth-128B       cos=0.99753
+  synth-128B       cos=0.99926
+  synth-128B       cos=0.99922
+  synth-512B       cos=0.99796
+  synth-512B       cos=0.99754
+  synth-512B       cos=0.99946
+  synth-512B       cos=0.99913
+  synth-512B       cos=0.99946
+  synth-512B       cos=0.99927
+  synth-2048B      cos=0.99917
+  synth-2048B      cos=0.99939
+  synth-2048B      cos=0.99930
+  synth-2048B      cos=0.99894
+  synth-2048B      cos=0.99860
+  synth-2048B      cos=0.99901
+  synth-8192B      cos=0.99916
+  synth-8192B      cos=0.99885
+  synth-8192B      cos=0.99891
+  synth-8192B      cos=0.99810
+  synth-8192B      cos=0.99906
+  synth-8192B      cos=0.99912
+
+SELF-AGREEMENT: median=0.99924 min=0.98952 items_below_0.99=1/101
+RANK AGREEMENT (Spearman over all pairwise sims): rho=0.9995
+GATE (median >= 0.99): PASS

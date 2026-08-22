@@ -1,0 +1,5 @@
+{"mode":"bench","backend":"candle","device":"cuda"}
+input~   32B n= 24  serial:     186.7 items/s  batch8:    1431.5 items/s  batch16:    2825.7 items/s
+input~  256B n= 24  serial:     182.1 items/s  batch8:     680.6 items/s  batch16:    1020.4 items/s
+input~ 2048B n= 24  serial:      81.6 items/s  batch8:      73.3 items/s  batch16:      97.5 items/s
+Error: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")

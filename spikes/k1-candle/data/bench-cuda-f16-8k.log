@@ -1,0 +1,3 @@
+{"mode":"bench","backend":"candle","device":"cuda"}
+input~ 8192B n=  6  serial:      11.3 items/s
+baseline: llama.cpp q8_0 measured 110-141 items/s on this rig (J3 probe)

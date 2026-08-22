@@ -1,0 +1,5 @@
+{"mode":"bench","backend":"llama.cpp-q8_0","device":"cpu"}
+input~   32B n= 24  serial:      99.8 items/s
+input~  256B n= 24  serial:     205.3 items/s
+input~ 2048B n= 24  serial:      97.6 items/s
+input~ 8192B n= 24  serial:      23.7 items/s

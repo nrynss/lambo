@@ -1,0 +1,4 @@
+{"mode":"bench","backend":"candle","device":"cpu"}
+input~   32B n= 24  serial:       3.2 items/s  batch8:      12.0 items/s  batch16:      19.1 items/s
+input~  256B n= 24  serial:       2.0 items/s  batch8:       3.3 items/s  batch16:       4.5 items/s
+baseline: llama.cpp q8_0 measured 110-141 items/s on this rig (J3 probe)
