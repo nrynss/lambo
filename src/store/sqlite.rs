@@ -5120,6 +5120,701 @@ mod tests {
         assert_eq!(total_assertions, 40, "matrix dimensions drifted");
     }
 
+    // -----------------------------------------------------------------------
+    // H1 — cross-store recall parity harness
+    // (dev-diary/lambo-for-mooshik/H-cross-store-parity.md)
+    // -----------------------------------------------------------------------
+    //
+    // The matrix above (F's Done-when box 5, cluster-free half) proves SQLite
+    // agrees with a hand-rolled, non-`GraphStore` cosine oracle. H1 asks a
+    // narrower, harder question: do two independent *stores* — real
+    // `GraphStore` adapters, driven only through the public
+    // `vector_candidates_checked` surface — agree with EACH OTHER on the same
+    // seeded graph? That is "cross-store" rather than "adapter-vs-formula".
+    //
+    // H2 (live Cockroach, needs `LAMBO_COCKROACH_DSN`) and H3 (pgvector, needs
+    // B3) are OUT OF SCOPE here. The harness is written so both slot in by
+    // appending to `build_adapters` below — the pairwise loop, the measures,
+    // and the report schema need no changes; see the doc comment on
+    // `ParityReport` for why.
+    #[cfg(feature = "fixtures")]
+    mod h1_cross_store_parity {
+        use super::*;
+        use serde::{Deserialize, Serialize};
+
+        // ---- Report schema (v1) --------------------------------------------
+
+        /// H1 cross-store recall parity report — schema v1.
+        ///
+        /// Emitted so H1 (this file: SQLite + memory oracle), H2 (live
+        /// Cockroach) and H3 (pgvector, once B3 lands) all produce ONE shape,
+        /// diffable across runs and across whichever adapters happened to be
+        /// reachable in a given run. See `dev-diary/lambo-for-mooshik/
+        /// H-cross-store-parity.md`, "What parity means here, precisely", for
+        /// what each measure is and why exact-scan vs ANN adapters are
+        /// attributed differently.
+        ///
+        /// **Why this shape survives a third adapter untouched.** Nothing
+        /// here names a specific backend in a field: `adapters` and every
+        /// pair's `adapter_a`/`adapter_b` are free-text names ("sqlite",
+        /// "memory-oracle", "cockroach", "postgres", …), so H3 adds NEW ROWS
+        /// (postgres-vs-sqlite, postgres-vs-memory-oracle, postgres-vs-
+        /// cockroach if all three are reachable in one run) rather than new
+        /// FIELDS. The one per-adapter fact that varies by backend — whether
+        /// an index actually served the answer — is already a plain `bool`,
+        /// not an enum tied to one backend's `EXPLAIN` spelling: Cockroach's
+        /// `concepts_embedding_idx` probe (H2) and pgvector's `SET LOCAL
+        /// enable_indexscan = off` forced-exact lane (H3) both just set
+        /// `index_present` the same way. And every score in `pairs` is
+        /// already on the shared `1 − d²/2 ≡ cosine` scale BEFORE it reaches
+        /// this report — that conversion happens inside each adapter's own
+        /// `vector_candidates_checked` (SQLite/memory-oracle return `cosine`
+        /// directly; Cockroach's `distance_to_score` is `1 − d²/2` on the same
+        /// output type) — so the report never needs a per-adapter conversion
+        /// field either.
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct ParityReport {
+            /// Bump only for a breaking change (a field removed, retyped, or
+            /// repurposed). Adding an optional field is not breaking and does
+            /// not bump this.
+            schema_version: u32,
+            harness: HarnessInfo,
+            /// One entry per adapter that actually ran, across every fixture.
+            adapters: Vec<AdapterRun>,
+            /// One entry per (fixture, probe, limit, adapter pair).
+            pairs: Vec<PairResult>,
+        }
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+        struct HarnessInfo {
+            /// Populated by whatever captured this report (e.g. `git rev-parse
+            /// HEAD` at capture time), never by the harness itself — shelling
+            /// out from a unit test is its own source of flakiness.
+            git_rev: Option<String>,
+            /// Cargo features active when this report was generated.
+            features: Vec<String>,
+            /// Fixture / corpus labels this run actually exercised.
+            fixtures: Vec<String>,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        enum ScanKind {
+            /// Full scan, exact cosine — no approximation anywhere in the path.
+            Exact,
+            /// Approximate nearest-neighbour index (C-SPANN, HNSW, ...).
+            Ann,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        enum Attribution {
+            /// Both sides of the pair are exact-scan: any disagreement is
+            /// adapter skew, i.e. a bug. The harness asserts this, not just
+            /// reports it.
+            ExactMustMatch,
+            /// At least one side is an ANN adapter: divergence within a
+            /// stated envelope is expected and only reported.
+            AnnEnvelope,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct AdapterRun {
+            name: String,
+            scan: ScanKind,
+            /// Whether an index served the answer for this adapter in this
+            /// run (vs. a full/forced-exact scan). Always `false` for H1:
+            /// SQLite and the memory oracle are both linear scans by
+            /// construction (see F-sqlite-vectors.md, "Exact scan, not an
+            /// index").
+            index_present: bool,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct IdDisplacement {
+            /// The shared node id (stringified UUID — plain text so this
+            /// schema never depends on `NodeId`'s own serde shape).
+            id: String,
+            rank_a: usize,
+            rank_b: usize,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct PairResult {
+            fixture: String,
+            probe: String,
+            limit: usize,
+            adapter_a: String,
+            adapter_b: String,
+            attribution: Attribution,
+            /// Jaccard similarity of the top-k id sets.
+            candidate_jaccard: f64,
+            /// Length of the longest shared ordered prefix.
+            rank_prefix_match: usize,
+            /// Per shared id, its rank under `adapter_a` vs `adapter_b`, for
+            /// every id whose rank differs. Empty when every shared id ranks
+            /// identically.
+            displacement: Vec<IdDisplacement>,
+            /// Largest absolute score difference over ids present in both
+            /// answers (0.0 when neither side answered).
+            max_score_diff: f64,
+            /// `true` iff the two `Vec<Scored<NodeId>>` answers are bit-for-
+            /// bit equal (same ids, same order, same `f64` scores) — the
+            /// strongest of the three measures, and the one `ExactMustMatch`
+            /// pairs are asserted against.
+            exact_match: bool,
+        }
+
+        // ---- The "memory oracle" adapter -----------------------------------
+
+        /// `MemoryStore` plus an exact-cosine vector leg — H1's second
+        /// exact-scan `GraphStore`, independent of SQLite.
+        ///
+        /// This is deliberately the same design as `crate::memory`'s private
+        /// `VectorSearchStore` test wrapper, reimplemented here rather than
+        /// reused: that struct is private to `memory.rs`'s own test module,
+        /// exactly the situation this file's `cosine_oracle` doc comment
+        /// already explains for F ("Reimplemented here rather than reused
+        /// because `VectorSearchStore` is private... That is not a weakness
+        /// of the comparison: the oracle is deliberately the naive
+        /// formulation"). Same reasoning, same precedent, one adapter over.
+        struct MemoryOracleStore {
+            inner: MemoryStore,
+        }
+
+        impl MemoryOracleStore {
+            fn new() -> Self {
+                Self {
+                    inner: MemoryStore::new(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl GraphStore for MemoryOracleStore {
+            async fn init_schema(&self) -> Result<(), StoreError> {
+                self.inner.init_schema().await
+            }
+            fn capabilities(&self) -> Capabilities {
+                self.inner.capabilities() | Capabilities::VECTOR_SEARCH
+            }
+            async fn flush(
+                &self,
+                batch: &MutationBatch,
+                token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                self.inner.flush(batch, token).await
+            }
+            async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+                self.inner.load_session(session).await
+            }
+            async fn keyword_candidates(
+                &self,
+                session: &SessionId,
+                tokens: &[String],
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                self.inner.keyword_candidates(session, tokens, limit).await
+            }
+            async fn vector_candidates(
+                &self,
+                _session: &SessionId,
+                _embedding: &[f32],
+                _limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                panic!("MemoryOracleStore: unchecked vector lookup is unused by the H1 harness")
+            }
+            /// Same ordering contract as SQLite's `rank_by_cosine` and F's
+            /// `cosine_oracle`: best first by `total_cmp`, ties broken by the
+            /// smaller `NodeId`, truncated to `limit`.
+            async fn vector_candidates_checked(
+                &self,
+                session: &SessionId,
+                embedding: &[f32],
+                expected_contract: &EmbeddingContract,
+                limit: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                validate_vector_candidate_limit(limit)?;
+                let snapshot = match self.inner.load_session(session).await {
+                    Ok(s) => s,
+                    Err(StoreError::SessionNotFound(_)) => return Ok(Vec::new()),
+                    Err(e) => return Err(e),
+                };
+                match &snapshot.embedding {
+                    None => return Ok(Vec::new()),
+                    Some(durable) if durable == expected_contract => {}
+                    Some(durable) => {
+                        return Err(StoreError::Invariant(format!(
+                            "vector candidate lookup refused after embedding contract changed: \
+                             vectors were written by kind={} model={:?} dim={}, but the caller \
+                             expects kind={} model={:?} dim={}",
+                            durable.kind,
+                            durable.model,
+                            durable.dim,
+                            expected_contract.kind,
+                            expected_contract.model,
+                            expected_contract.dim,
+                        )));
+                    }
+                }
+                let mut scored: Vec<Scored<NodeId>> = snapshot
+                    .concepts
+                    .iter()
+                    .filter_map(|c| {
+                        let vector = c.embedding.as_ref()?;
+                        Some(Scored::new(
+                            c.id,
+                            f64::from(crate::embed::cosine(embedding, vector)),
+                        ))
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.item.0.cmp(&b.item.0))
+                });
+                scored.truncate(limit);
+                Ok(scored)
+            }
+            async fn blast_radius(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_edge_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<u64, StoreError> {
+                self.inner
+                    .blast_radius(session, node, min_edge_age, now)
+                    .await
+            }
+            async fn interaction_span(
+                &self,
+                session: &SessionId,
+                node: NodeId,
+                min_age: Duration,
+                now: DateTime<Utc>,
+            ) -> Result<InteractionSpan, StoreError> {
+                self.inner
+                    .interaction_span(session, node, min_age, now)
+                    .await
+            }
+            async fn record_canonization(
+                &self,
+                event: &CanonizationEvent,
+                token: Option<u64>,
+            ) -> Result<(), StoreError> {
+                self.inner.record_canonization(event, token).await
+            }
+        }
+
+        // ---- The three agreement measures ----------------------------------
+
+        fn jaccard(a: &[Scored<NodeId>], b: &[Scored<NodeId>]) -> f64 {
+            let sa: HashSet<NodeId> = a.iter().map(|s| s.item).collect();
+            let sb: HashSet<NodeId> = b.iter().map(|s| s.item).collect();
+            if sa.is_empty() && sb.is_empty() {
+                return 1.0;
+            }
+            let inter = sa.intersection(&sb).count() as f64;
+            let union = sa.union(&sb).count() as f64;
+            inter / union
+        }
+
+        fn rank_prefix_match(a: &[Scored<NodeId>], b: &[Scored<NodeId>]) -> usize {
+            a.iter()
+                .zip(b.iter())
+                .take_while(|(x, y)| x.item == y.item)
+                .count()
+        }
+
+        fn displacements(a: &[Scored<NodeId>], b: &[Scored<NodeId>]) -> Vec<IdDisplacement> {
+            let rank_a: HashMap<NodeId, usize> =
+                a.iter().enumerate().map(|(i, s)| (s.item, i)).collect();
+            let rank_b: HashMap<NodeId, usize> =
+                b.iter().enumerate().map(|(i, s)| (s.item, i)).collect();
+            let mut out: Vec<IdDisplacement> = rank_a
+                .iter()
+                .filter_map(|(id, &ra)| {
+                    rank_b.get(id).and_then(|&rb| {
+                        (ra != rb).then_some(IdDisplacement {
+                            id: id.0.to_string(),
+                            rank_a: ra,
+                            rank_b: rb,
+                        })
+                    })
+                })
+                .collect();
+            out.sort_by_key(|d| d.rank_a);
+            out
+        }
+
+        fn max_score_diff(a: &[Scored<NodeId>], b: &[Scored<NodeId>]) -> f64 {
+            let scores_b: HashMap<NodeId, f64> = b.iter().map(|s| (s.item, s.score)).collect();
+            a.iter()
+                .filter_map(|s| scores_b.get(&s.item).map(|&sb| (s.score - sb).abs()))
+                .fold(0.0_f64, f64::max)
+        }
+
+        // ---- Probe/limit grid (same shape as the F matrix above) -----------
+
+        /// Same probe shapes as `vector_candidates_agree_with_an_exact_cosine_
+        /// oracle_on_both_fixtures` above, generalised to any pool: a stored
+        /// vector itself, its negation, a midpoint between two stored
+        /// vectors, and an off-axis probe built from `synthetic_unit_vector`
+        /// regardless of where the pool's own vectors came from.
+        fn probe_set(pool: &[(NodeId, Vec<f32>)], dim: usize) -> Vec<(&'static str, Vec<f32>)> {
+            let first = &pool[0].1;
+            let second = &pool[1].1;
+            let negated: Vec<f32> = first.iter().map(|x| -x).collect();
+            let midpoint: Vec<f32> = {
+                let mut m: Vec<f32> = first
+                    .iter()
+                    .zip(second.iter())
+                    .map(|(a, b)| (a + b) / 2.0)
+                    .collect();
+                let n = m.iter().map(|x| x * x).sum::<f32>().sqrt();
+                for x in &mut m {
+                    *x /= n;
+                }
+                m
+            };
+            let off_axis = synthetic_unit_vector(usize::from(u8::MAX), dim);
+            vec![
+                ("stored-itself", first.clone()),
+                ("negated", negated),
+                ("midpoint", midpoint),
+                ("off-axis", off_axis),
+            ]
+        }
+
+        /// Adapters reachable from this process, at this `dim`. H1 always has
+        /// both entries: neither needs a DSN. H2/H3 extend this list — push
+        /// `("cockroach", ScanKind::Ann, <from an EXPLAIN probe>, Box::new(
+        /// CockroachStore::new(cfg)?))` once `LAMBO_COCKROACH_DSN` is set, and
+        /// the same for pgvector once B3 lands — with no change to the
+        /// pairwise loop below or to the report schema.
+        fn build_adapters(dim: usize) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
+            vec![
+                (
+                    "sqlite",
+                    ScanKind::Exact,
+                    false,
+                    Box::new(vec_test_store(dim)) as Box<dyn GraphStore>,
+                ),
+                (
+                    "memory-oracle",
+                    ScanKind::Exact,
+                    false,
+                    Box::new(MemoryOracleStore::new()) as Box<dyn GraphStore>,
+                ),
+            ]
+        }
+
+        /// Seed one fixture's batch into every reachable adapter and run the
+        /// full probe × limit grid pairwise across them, asserting exact
+        /// agreement for every `ExactMustMatch` pair (H1's whole point: any
+        /// disagreement between two exact-scan adapters is adapter skew, a
+        /// bug, not something to merely record).
+        async fn run_fixture_grid(
+            fixture_label: &str,
+            sid: &SessionId,
+            contract: &EmbeddingContract,
+            batch: &MutationBatch,
+            pool: &[(NodeId, Vec<f32>)],
+            dim: usize,
+            report: &mut ParityReport,
+        ) {
+            let adapters = build_adapters(dim);
+            for (_, _, _, adapter) in &adapters {
+                adapter.init_schema().await.unwrap();
+                adapter.flush(batch, None).await.unwrap();
+            }
+            for (name, scan, index_present, _) in &adapters {
+                if !report.adapters.iter().any(|a| a.name == *name) {
+                    report.adapters.push(AdapterRun {
+                        name: (*name).to_string(),
+                        scan: *scan,
+                        index_present: *index_present,
+                    });
+                }
+            }
+            if !report.harness.fixtures.iter().any(|f| f == fixture_label) {
+                report.harness.fixtures.push(fixture_label.to_string());
+            }
+
+            let probes = probe_set(pool, dim);
+            let limits = [1usize, 3, 5, pool.len(), pool.len() + 7];
+
+            for i in 0..adapters.len() {
+                for j in (i + 1)..adapters.len() {
+                    let (a_name, a_scan, _, a_store) = &adapters[i];
+                    let (b_name, b_scan, _, b_store) = &adapters[j];
+                    let attribution = if *a_scan == ScanKind::Exact && *b_scan == ScanKind::Exact {
+                        Attribution::ExactMustMatch
+                    } else {
+                        Attribution::AnnEnvelope
+                    };
+                    for (probe_label, probe) in &probes {
+                        for &limit in &limits {
+                            let got_a = a_store
+                                .vector_candidates_checked(sid, probe, contract, limit)
+                                .await
+                                .unwrap();
+                            let got_b = b_store
+                                .vector_candidates_checked(sid, probe, contract, limit)
+                                .await
+                                .unwrap();
+                            let pair = PairResult {
+                                fixture: fixture_label.to_string(),
+                                probe: (*probe_label).to_string(),
+                                limit,
+                                adapter_a: (*a_name).to_string(),
+                                adapter_b: (*b_name).to_string(),
+                                attribution,
+                                candidate_jaccard: jaccard(&got_a, &got_b),
+                                rank_prefix_match: rank_prefix_match(&got_a, &got_b),
+                                displacement: displacements(&got_a, &got_b),
+                                max_score_diff: max_score_diff(&got_a, &got_b),
+                                exact_match: got_a == got_b,
+                            };
+                            if attribution == Attribution::ExactMustMatch {
+                                assert!(
+                                    pair.exact_match,
+                                    "H1: exact-scan adapters {a_name} and {b_name} disagree on \
+                                     fixture {fixture_label:?} probe {probe_label:?} limit \
+                                     {limit}: jaccard={} prefix={} score_diff={} \
+                                     displacement={:?}",
+                                    pair.candidate_jaccard,
+                                    pair.rank_prefix_match,
+                                    pair.max_score_diff,
+                                    pair.displacement,
+                                );
+                            }
+                            report.pairs.push(pair);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Leg 1: the two committed fixture graphs, synthetic vectors ----
+
+        /// The required half of H1: both committed fixture graphs, a stamped
+        /// contract, and `synthetic_unit_vector` — same construction as the F
+        /// matrix above, run cross-adapter instead of adapter-vs-oracle.
+        async fn run_synthetic_leg(report: &mut ParityReport) {
+            const DIM: usize = 8;
+            for fixture in ["session-rest-api", "session-drift"] {
+                let snap: GraphSnapshot = crate::fixtures::load_snapshot(fixture).unwrap();
+                let sid = snap.session_id.clone();
+                let contract = vec_contract(DIM);
+
+                let pool: Vec<(NodeId, Vec<f32>)> = snap
+                    .concepts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.id, synthetic_unit_vector(i, DIM)))
+                    .collect();
+
+                // Structure first (interactions are FK targets for concepts),
+                // then the contract, then the vector-bearing concepts — the
+                // same write-gate ordering F1 relies on.
+                let mut mutations = snapshot_to_batch(&snap).mutations;
+                mutations.push(Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(contract.clone()),
+                });
+                for (i, c) in snap.concepts.iter().enumerate() {
+                    let mut concept = c.clone();
+                    concept.embedding = Some(synthetic_unit_vector(i, DIM));
+                    mutations.push(Mutation::UpsertNode {
+                        node: NodeKind::Concept(concept),
+                    });
+                }
+                let batch = MutationBatch { mutations };
+
+                run_fixture_grid(fixture, &sid, &contract, &batch, &pool, DIM, report).await;
+            }
+        }
+
+        // ---- Leg 2 (optional): the real BGE-M3 evidence corpus --------------
+
+        /// Best-effort: seeds H1's grid from the committed real-embedder
+        /// corpus (`evidence/mooshik-f-sqlite-bge/f-bge.db`) instead of
+        /// synthetic vectors, so cross-store agreement is also checked on
+        /// vectors an actual embedder produced. Optional by design (H doc,
+        /// "H1 — the harness"): a missing or unreadable corpus skips this leg
+        /// with a message rather than failing the test — the required
+        /// evidence is the synthetic leg above. Returns whether it ran.
+        async fn run_real_embedder_leg(report: &mut ParityReport) -> bool {
+            let src = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/evidence/mooshik-f-sqlite-bge/f-bge.db"
+            );
+            if !std::path::Path::new(src).exists() {
+                eprintln!("H1: no real-embedder corpus at {src}, skipping optional leg");
+                return false;
+            }
+            // Copy rather than open in place: a live pool may write WAL/SHM
+            // sidecars next to whatever it opens, and the committed evidence
+            // file must never pick up untracked write artifacts.
+            let tmp =
+                std::env::temp_dir().join(format!("lambo-h1-bge-{}.db", uuid::Uuid::new_v4()));
+            if std::fs::copy(src, &tmp).is_err() {
+                eprintln!("H1: could not copy the real-embedder corpus, skipping optional leg");
+                return false;
+            }
+            let loaded: Result<GraphSnapshot, StoreError> = async {
+                let source = SqliteStore::connect(tmp.to_str().unwrap())?;
+                // Idempotent (`CREATE TABLE IF NOT EXISTS`): adds any table
+                // this schema has grown since the corpus was captured
+                // (`lease_refusals`, `write_intents`), touches no existing
+                // column or row.
+                source.init_schema().await?;
+                source
+                    .load_session(&SessionId::from("f-bge-semantic"))
+                    .await
+            }
+            .await;
+            let _ = std::fs::remove_file(&tmp);
+            let snap = match loaded {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "H1: could not load the real-embedder corpus ({e}), skipping optional leg"
+                    );
+                    return false;
+                }
+            };
+            let Some(contract) = snap.embedding.clone() else {
+                eprintln!(
+                    "H1: real-embedder corpus carries no embedding contract, skipping optional leg"
+                );
+                return false;
+            };
+            let pool: Vec<(NodeId, Vec<f32>)> = snap
+                .concepts
+                .iter()
+                .filter_map(|c| c.embedding.clone().map(|v| (c.id, v)))
+                .collect();
+            if pool.len() < 2 {
+                eprintln!("H1: real-embedder corpus has fewer than 2 embedded concepts, skipping");
+                return false;
+            }
+            let dim = contract.dim;
+
+            // Unlike the synthetic leg, these concepts already carry real
+            // vectors, so the contract mutation only needs to land BEFORE
+            // them — no separate raw-then-vector pass.
+            let mut mutations = Vec::new();
+            for i in &snap.interactions {
+                mutations.push(Mutation::UpsertNode {
+                    node: NodeKind::Interaction(i.clone()),
+                });
+            }
+            mutations.push(Mutation::SetEmbedding {
+                session_id: snap.session_id.clone(),
+                embedding: Some(contract.clone()),
+            });
+            for c in &snap.concepts {
+                mutations.push(Mutation::UpsertNode {
+                    node: NodeKind::Concept(c.clone()),
+                });
+            }
+            for e in &snap.edges {
+                mutations.push(Mutation::UpsertEdge { edge: e.clone() });
+            }
+            let batch = MutationBatch { mutations };
+
+            run_fixture_grid(
+                "mooshik-f-sqlite-bge (real bge_m3 embedder)",
+                &snap.session_id,
+                &contract,
+                &batch,
+                &pool,
+                dim,
+                report,
+            )
+            .await;
+            true
+        }
+
+        fn active_features() -> Vec<String> {
+            let mut v = vec!["fixtures".to_string()];
+            for (flag, name) in [
+                (cfg!(feature = "store-sqlite"), "store-sqlite"),
+                (cfg!(feature = "store-memory"), "store-memory"),
+                (cfg!(feature = "store-cockroach"), "store-cockroach"),
+                (cfg!(feature = "embed-fixture"), "embed-fixture"),
+                (cfg!(feature = "embed-bge"), "embed-bge"),
+            ] {
+                if flag {
+                    v.push(name.to_string());
+                }
+            }
+            v
+        }
+
+        /// **Acceptance: H1's Done-when box** — "H1 harness runs the full grid
+        /// against SQLite + memory-oracle anywhere, with exact agreement
+        /// asserted (this much runs in normal CI)". Not `#[ignore]`d: unlike
+        /// H2/H3, nothing here needs a DSN.
+        ///
+        /// Set `LAMBO_H1_EMIT_EVIDENCE=1` to also write the JSON report to
+        /// `evidence/mooshik-h1-cross-store-parity/report.json` (skipped by
+        /// default so a normal `cargo test` never touches the working tree).
+        #[tokio::test]
+        async fn h1_sqlite_and_memory_oracle_agree_exactly() {
+            let mut report = ParityReport {
+                schema_version: 1,
+                harness: HarnessInfo {
+                    git_rev: None,
+                    features: active_features(),
+                    fixtures: Vec::new(),
+                },
+                adapters: Vec::new(),
+                pairs: Vec::new(),
+            };
+
+            run_synthetic_leg(&mut report).await;
+            // Pinned exactly, not `>=`: the optional leg below adds more pairs
+            // when it runs, which would mask a drop in the synthetic leg's
+            // own count under a loose bound. 2 fixtures × 4 probes × 5 limits
+            // × 1 adapter pair (sqlite, memory-oracle).
+            assert_eq!(
+                report.pairs.len(),
+                2 * 4 * 5,
+                "H1: synthetic-leg matrix dimensions drifted"
+            );
+            let ran_real_leg = run_real_embedder_leg(&mut report).await;
+
+            assert!(
+                report
+                    .pairs
+                    .iter()
+                    .all(|p| p.attribution != Attribution::ExactMustMatch || p.exact_match),
+                "H1: an ExactMustMatch pair was recorded without being asserted — harness bug"
+            );
+            println!(
+                "H1: {} pairs checked across {} fixture(s) ({}), {} adapters, real-embedder \
+                 leg {}",
+                report.pairs.len(),
+                report.harness.fixtures.len(),
+                report.harness.fixtures.join(", "),
+                report.adapters.len(),
+                if ran_real_leg { "ran" } else { "skipped" },
+            );
+
+            if std::env::var_os("LAMBO_H1_EMIT_EVIDENCE").is_some() {
+                let dir = concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/evidence/mooshik-h1-cross-store-parity"
+                );
+                std::fs::create_dir_all(dir).unwrap();
+                let json = serde_json::to_string_pretty(&report).unwrap();
+                std::fs::write(format!("{dir}/report.json"), json).unwrap();
+            }
+        }
+    }
+
     /// Acceptance (T3.6): the three-way agreement matrix on BOTH fixture
     /// graphs — `session-rest-api` (the Canonical hub 1001, the Venerable
     /// 1012, the D1–D8 orphans C1013–C1020, the P1/P2 peers C1021/C1022 and
