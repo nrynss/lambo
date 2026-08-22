@@ -725,7 +725,7 @@ pub async fn build_memory(
     // Cadence overrides from `[daemon]` reach the writer here. Without this the
     // daemon always runs at Config::default() and `gc_interval` in lambo.toml
     // would parse, validate, and then do nothing at all.
-    serve_builder(opts, backends, endpoint)
+    serve_builder(opts, backends, endpoint, None)
         .build()
         .await
         .map_err(explain_startup_failure)
@@ -745,6 +745,7 @@ fn serve_builder(
     opts: &ServeOptions,
     backends: ResolvedBackends,
     endpoint: Option<&SessionEndpoint>,
+    ledger: Option<Arc<Ledger>>,
 ) -> crate::memory::MemoryBuilder {
     let config = backends.config.clone();
     let mut builder = Memory::builder()
@@ -759,6 +760,10 @@ fn serve_builder(
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint(endpoint.published());
     }
+    // J4: the ledger this process opens pre-lease (so its own conflict and
+    // write-intent completion lines ride it) is handed straight into the
+    // Memory it builds.
+    builder = builder.ledger(ledger);
     builder.backends(backends)
 }
 
@@ -1020,11 +1025,17 @@ async fn resolve_role(
     opts: &ServeOptions,
     builder: &crate::memory::MemoryBuilder,
     endpoint: Option<&SessionEndpoint>,
+    ledger: &Option<Arc<Ledger>>,
 ) -> Result<Role, LamboError> {
     let our_host =
         lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(&opts.agent)).host;
     let deadline = Instant::now() + ELECTION_BUDGET;
     let mut waited_for = None;
+    let session = crate::types::SessionId::new(&opts.session);
+    let my_token =
+        lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(&opts.agent)).token();
+    // J4: the loser side of a refused acquisition is recorded in
+    // [`record_refused_loser`] below.
     loop {
         let held = match builder
             .clone()
@@ -1047,6 +1058,15 @@ async fn resolve_role(
         // No prospect of proxying: refuse now, with exactly the message a
         // pre-J2 serve produced.
         if opts.transport != Transport::Stdio {
+            record_refused_loser(
+                ledger,
+                &held.store,
+                &session,
+                &opts.agent,
+                &my_token,
+                &held.current.holder,
+            )
+            .await;
             tracing::warn!(
                 "lambo serve: --transport http cannot proxy to the session holder (its \
                  client-facing wire is not line-framed); refusing as it did before J2"
@@ -1054,9 +1074,17 @@ async fn resolve_role(
             return Err(LamboError::Conflict(held.message));
         }
         let Some(endpoint) = endpoint else {
+            record_refused_loser(
+                ledger,
+                &held.store,
+                &session,
+                &opts.agent,
+                &my_token,
+                &held.current.holder,
+            )
+            .await;
             return Err(LamboError::Conflict(held.message));
         };
-
         // Can we forward to this holder? Three checks, no guessing.
         // The address to dial, which may sit in a directory this process would
         // not have derived — see `proxy::proxyable` and J2-L1.
@@ -1067,6 +1095,7 @@ async fn resolve_role(
                     endpoint.clone(),
                     Arc::clone(&held.store),
                     our_host,
+                    ledger.clone(),
                 ))))
             }
             Err(why) => why,
@@ -1082,6 +1111,15 @@ async fn resolve_role(
             .unwrap_or(Duration::ZERO);
         let left = deadline.saturating_duration_since(Instant::now());
         if !waiting_fits(lapses_in, left) {
+            record_refused_loser(
+                ledger,
+                &held.store,
+                &session,
+                &opts.agent,
+                &my_token,
+                &held.current.holder,
+            )
+            .await;
             return Err(LamboError::Conflict(format!(
                 "{} {outcome} That holder's lease does not lapse for {}s, and this process will \
                  not block the client that spawned it for longer than {}s waiting — an MCP \
@@ -1098,8 +1136,16 @@ async fn resolve_role(
         // Not proxyable *yet*. The two live cases are a CLI verb holding the
         // lease for one command and a holder that died without releasing; both
         // resolve inside one TTL, the first by finishing and the second by
-        // lapsing.
         if Instant::now() >= deadline {
+            record_refused_loser(
+                ledger,
+                &held.store,
+                &session,
+                &opts.agent,
+                &my_token,
+                &held.current.holder,
+            )
+            .await;
             // Backstop. The arithmetic above normally refuses first; this fires
             // for a row whose `expires_at` keeps moving (a live holder that
             // refreshes but cannot be forwarded to) or has already passed
@@ -1122,6 +1168,101 @@ async fn resolve_role(
         }
         waited_for = Some(outcome);
         tokio::time::sleep(ELECTION_RETRY).await;
+    }
+}
+
+/// The J4 pre-lease startup line: this serve's intent to acquire the
+/// single-writer lease, written to the ledger before `resolve_role` makes its
+/// first acquire attempt. See [`crate::ledger::startup_line`].
+fn serve_startup_line(
+    opts: &ServeOptions,
+    _endpoint: &Option<SessionEndpoint>,
+) -> serde_json::Value {
+    crate::ledger::startup_line(
+        &opts.session,
+        &opts.agent,
+        match opts.transport {
+            Transport::Stdio => "stdio",
+            Transport::Http => "http",
+        },
+    )
+}
+
+/// J4 — the loser side of a refused acquisition: append the serve's own
+/// `lease:refused` line to its ledger AND persist the fact to the store so the
+/// incumbent holder learns it turned away a takeover ("from both sides").
+/// Best-effort: neither failure is allowed to change the refusal decision.
+async fn record_refused_loser(
+    ledger: &Option<Arc<Ledger>>,
+    store: &Arc<dyn crate::store::GraphStore>,
+    session: &crate::types::SessionId,
+    agent: &str,
+    my_token: &str,
+    holder: &str,
+) {
+    if let Some(ledger) = ledger {
+        ledger.append(&crate::ledger::lease_line(
+            "refused",
+            "loser",
+            &session.to_string(),
+            agent,
+            holder,
+            None,
+        ));
+    }
+    let _ = store.record_lease_refusal(session, my_token, holder).await;
+}
+
+/// How often the holder's refusal-recorder task re-checks the store.
+const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// J4 — the holder side of a refused acquisition. Spawned only in the holder
+/// branch of [`serve`]: it polls the store for lease refusals this process
+/// turned away and appends a `lease:refused_takeover` line for each it has not
+/// yet recorded. This and [`record_refused_loser`] together make "a refused
+/// lease acquisition appears in the ledger from both sides" true.
+///
+/// Refusals recorded against a *previous* holder are filtered out by matching
+/// `current_holder` against this process's own lease token, and each refusal is
+/// deduped by (refused_by, at) so a repeated poll never double-logs. The read
+/// window starts a little before the poller's own start so no refusal at the
+/// acquire boundary is missed; the dedup set is what keeps it exact.
+async fn record_refused_takeovers(
+    store: Arc<dyn crate::store::GraphStore>,
+    session: crate::types::SessionId,
+    agent: crate::types::AgentId,
+    my_token: String,
+    ledger: Arc<Ledger>,
+) {
+    let mut seen: std::collections::HashSet<(String, String)> = Default::default();
+    let since = chrono::Utc::now()
+        - chrono::Duration::from_std(lease::LEASE_TTL)
+            .unwrap_or_else(|_| chrono::Duration::seconds(0));
+    loop {
+        tokio::time::sleep(REFUSAL_POLL_INTERVAL).await;
+        match store.pending_lease_refusals(&session, since).await {
+            Ok(refusals) => {
+                for r in refusals {
+                    if r.current_holder != my_token {
+                        continue;
+                    }
+                    let key = (r.refused_by.clone(), r.at.to_rfc3339());
+                    if seen.insert(key) {
+                        ledger.append(&crate::ledger::lease_line(
+                            "refused_takeover",
+                            "holder",
+                            &session.to_string(),
+                            &agent.to_string(),
+                            &r.refused_by,
+                            Some(serde_json::json!({ "at": r.at.to_rfc3339() })),
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                // A seed / store blip; the next poll retries.
+            }
+        }
     }
 }
 
@@ -1177,12 +1318,36 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // one client working instead of none.
     let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg);
 
-    // J2 — the fork in the road. Everything above is pre-lease; `resolve_role`
-    // is where the lease is attempted, and where a loss stops being fatal.
-    let builder = serve_builder(&opts, backends, endpoint.as_ref());
-    let mem: Arc<Memory> = match resolve_role(&opts, &builder, endpoint.as_ref()).await? {
-        Role::Holder(mem) => Arc::from(mem),
-        Role::Proxy(proxy) => {
+    // J4 — the ledger opens HERE, before the acquire attempt inside
+    // `resolve_role`. That is the whole of J4's first half: a serve that LOSES
+    // the lease exits before it can reach the holder path below, where the
+    // ledger used to open, so the acquire itself could not be where a losing
+    // serve's story starts. Opening it pre-lease and writing the startup line
+    // means a serve about to lose the lease has already left an artifact.
+    // `Ledger::open` never fails or blocks the caller, so this is free to move
+    // into the pre-lease group; `authorize_ledger` above still refuses the
+    // misconfigured `--ledger-heartbeat`-without-`--ledger` pairing first.
+    let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
+    if let Some(ledger) = &ledger {
+        ledger.append(&serve_startup_line(&opts, &endpoint));
+    }
+    let builder = serve_builder(&opts, backends, endpoint.as_ref(), ledger.clone());
+    let role = resolve_role(&opts, &builder, endpoint.as_ref(), &ledger).await;
+    let mem: Arc<Memory> = match role {
+        // The startup election refused (or otherwise failed): this process's
+        // pre-lease ledger was opened and the loser recorded its `startup` and
+        // `lease:refused` lines — DRAIN it before exiting, or the very artifact
+        // J4 exists to leave would sit unflushed in the writer thread's channel
+        // and die with the process. This is the exit the pre-lease line was
+        // written for, so it is the one that must not drop it.
+        Err(e) => {
+            if let Some(ledger) = &ledger {
+                ledger.shutdown();
+            }
+            return Err(e);
+        }
+        Ok(Role::Holder(mem)) => Arc::from(mem),
+        Ok(Role::Proxy(proxy)) => {
             // **The proxy branch is deliberately NOT armed for durability, and
             // this is the design decision the J0 review asked for by name.**
             //
@@ -1205,12 +1370,21 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             // SIGTERM-immune the way arming above the lease-taking attach
             // would.
             //
-            // Nothing else on this branch is skipped by accident: a proxy opens
-            // no ledger (it books no calls of its own — that is J4's, and §J2
-            // records it), spawns no heartbeat, binds no socket and builds no
-            // `LamboServer`. It is a pipe.
+            // Nothing else on this branch is skipped by accident (J4): the
+            // ledger this process opened **pre-lease** IS passed into the proxy
+            // (`HubProxy::new`), which now books its own `proxying` /
+            // `proxying_stopped` lines on it — a proxy is alive and can write,
+            // which is the whole of §J2's J4 handoff. What it still does not do
+            // is spawn a heartbeat, bind a socket or build a
             let outcome = proxy.run(shutdown_signal()).await;
             tracing::info!("lambo serve: proxy closed (no lease was ever taken by this process)");
+            // J4: the ledger this process opened pre-lease was used by the
+            // proxy's own `proxying` / `proxying_stopped` lines; drain it
+            // before exit. (This branch returns before the holder-path shutdown
+            // below, so exactly one of the two runs.)
+            if let Some(ledger) = &ledger {
+                ledger.shutdown();
+            }
             return outcome;
         }
     };
@@ -1264,7 +1438,6 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // serving memory. ONE server handle for the whole process (the HTTP factory
     // clones it), so every transport appends to the same file and the
     // heartbeat's uptime is the session's, not a request's.
-    let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
     let server = match &ledger {
         Some(ledger) => LamboServer::with_ledger(mem.clone(), Arc::clone(ledger)),
         None => LamboServer::new(mem.clone()),
@@ -1292,6 +1465,24 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             None
         }
         _ => None,
+    };
+    // J4 — the holder side of a refused takeover: record the incumbent's
+    // line when the store reports a refusal this process turned away. Spawned
+    // only when a ledger is attached, and only on the holder path (the proxy
+    // branch returned above). Aborted at close like the heartbeat.
+    let refusal_poller = match &ledger {
+        Some(ledger) => {
+            let holder_token =
+                crate::store::lease::LeaseHolder::for_this_process(mem.agent()).token();
+            Some(tokio::spawn(record_refused_takeovers(
+                mem.store().clone(),
+                mem.session().clone(),
+                mem.agent().clone(),
+                holder_token,
+                Arc::clone(ledger),
+            )))
+        }
+        None => None,
     };
 
     // J2 — the session endpoint, bound HERE: below the arming (so a signal
@@ -1369,6 +1560,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // filesystem is abandoned, never allowed to hold process exit.
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
+    }
+    // J4. The refusal-recorder task is stopped before the ledger drains, so it
+    // cannot enqueue a line into a closing ledger.
+    if let Some(poller) = refusal_poller {
+        poller.abort();
     }
     // J2. Aborted AFTER `close()` (that is where `run_and_close` returned from),
     // deliberately: a proxy's in-flight call must not be cut off before the tail

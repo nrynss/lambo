@@ -135,6 +135,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex as PlMutex, RwLock};
+use serde_json::json;
 use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -1590,6 +1591,12 @@ pub(crate) struct WriteCtx {
     pub(crate) daemon_wake: Arc<Notify>,
     /// The single-writer fence, shared with the heartbeat and the flush task.
     pub(crate) lease_lost: Arc<AtomicBool>,
+    /// J4. An optional call ledger this pipeline appends durable-intent
+    /// **completion** lines to (`applied` / `applied_after_restart` / `failed`
+    /// / `deferred`), on the same [`crate::ledger::Ledger::append`] path every
+    /// other line rides. `None` for every process run without `--ledger`, and
+    /// for every non-serve writer.
+    pub(crate) ledger: Option<Arc<crate::ledger::Ledger>>,
 }
 
 /// Mirror concept writes into the inverted index (the `src/graph/mod.rs`
@@ -2625,10 +2632,32 @@ impl WritePipeline {
                 let answer = match outcome {
                     Ok(summary) => {
                         counters.applied.fetch_add(1, Ordering::Relaxed);
+                        // J4 proof obligation 5: a closed acked write's applied
+                        // lifecycle is measurable — carry the metric-2 fact set,
+                        // which is exactly what a durable-intent replay hid.
+                        if let Some(ledger) = &ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "applied",
+                                Some(json!({
+                                    "created_count": summary.created_count,
+                                    "matched_count": summary.matched_count,
+                                })),
+                            ));
+                        }
                         ReceiptAnswer::Applied(summary)
                     }
                     Err(why) => {
                         counters.failed.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ledger) = &ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "failed",
+                                Some(json!({ "error": &why })),
+                            ));
+                        }
                         tracing::warn!(
                             session = %ctx.session,
                             agent = %job.agent,
@@ -2878,6 +2907,16 @@ impl WritePipeline {
                 if let Some(entry) = r.entries.get_mut(id) {
                     if entry.settle(ReceiptAnswer::IntentRecorded, now) {
                         let agent = entry.agent.clone();
+                        // J4 proof obligation 5: a close-deferred intent is a
+                        // lifecycle fact (admitted → deferred), measurable.
+                        if let Some(ledger) = &self.ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &agent.to_string(),
+                                &id.to_string(),
+                                "deferred",
+                                Some(json!({ "reason": "close_drain_exceeded" })),
+                            ));
+                        }
                         r.undelivered.entry(agent).or_default().push_back(*id);
                         deferred += 1;
                     }
@@ -3092,6 +3131,20 @@ impl WritePipeline {
                         applied += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         this.counters.replayed.fetch_add(1, Ordering::Relaxed);
+                        // J4 proof obligation 5: a replayed intent's applied
+                        // lifecycle + metric-2 facts ride the ledger — the
+                        // re-derivation-savings signal metric 2 previously lost.
+                        if let Some(ledger) = &this.ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "applied_after_restart",
+                                Some(json!({
+                                    "created_count": summary.created_count,
+                                    "matched_count": summary.matched_count,
+                                })),
+                            ));
+                        }
                         ReceiptAnswer::AppliedAfterRestart(summary.summary)
                     }
                     // Transient — the status-classifier draw is "embedder
@@ -3141,6 +3194,16 @@ impl WritePipeline {
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         let why =
                             format!("replay after restart was refused ({e}); nothing was written");
+                        // J4 proof obligation 5: a replayed intent settled
+                        // `failed` is a lifecycle fact, visible on the ledger.
+                        if let Some(ledger) = &this.ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "failed",
+                                Some(json!({ "error": &why, "replay": true })),
+                            ));
+                        }
                         // A failure has no commit to ride — consume on its own
                         // (see the worker's failure arm for the argument).
                         this.ctx.graph.write().consume_write_intent(
@@ -3994,6 +4057,16 @@ mod pipeline_tests {
         /// A pipeline over an empty in-RAM session, with a clock this test can
         /// move and an optional embedder gate.
         fn new(session: &str, embedder: Arc<dyn Embedder>) -> Self {
+            Self::new_with_ledger(session, embedder, None)
+        }
+
+        /// [`Rig::new`], with a call ledger attached so J4's durable-intent
+        /// completion lines land on a real file a test can read back.
+        fn new_with_ledger(
+            session: &str,
+            embedder: Arc<dyn Embedder>,
+            ledger: Option<Arc<crate::ledger::Ledger>>,
+        ) -> Self {
             let session = SessionId::new(session);
             let graph = Arc::new(RwLock::new(Graph::new(session.clone())));
             let index = Arc::new(RwLock::new(InvertedIndex::default()));
@@ -4016,6 +4089,7 @@ mod pipeline_tests {
                 semantic_match_threshold: 0.85,
                 daemon_wake: Arc::new(Notify::new()),
                 lease_lost: Arc::new(AtomicBool::new(false)),
+                ledger,
             };
             Rig {
                 pipeline: WritePipeline::spawn(ctx, clock),
@@ -5372,5 +5446,61 @@ mod pipeline_tests {
             "the outcome of a write that applied must not be silently discarded"
         );
         assert_eq!(rig.pipeline.counters().applied(), 1);
+    }
+    /// J4 proof obligation 5: a durable write intent's applied lifecycle rides
+    /// the ledger as a `completion` line carrying the metric-2 fact set. Fails
+    /// on pre-J4 code, where `WriteCtx` had no ledger and no completion line
+    /// was ever emitted.
+    #[tokio::test]
+    async fn j4_a_completion_line_records_the_applied_derive_lifecycle() {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-j4-wq-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger_path = dir.join("calls.jsonl");
+        let ledger = crate::ledger::Ledger::open(&ledger_path);
+
+        let rig = Rig::new_with_ledger(
+            "j4-completion",
+            Arc::new(FixtureEmbedder::new()),
+            Some(Arc::clone(&ledger)),
+        );
+        let agent = AgentId::new("agent-a");
+        let submitted = rig.derive(&agent, "a brand new completion concept").await;
+        assert_eq!(
+            rig.pipeline
+                .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+                .await
+                .tag(),
+            "applied",
+            "the derive must apply before its completion fact is readable"
+        );
+        ledger.shutdown();
+
+        let text = std::fs::read_to_string(&ledger_path).unwrap();
+        let completions: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|v| v["kind"] == "completion")
+            .collect();
+        assert!(
+            !completions.is_empty(),
+            "an applied durable intent must emit a completion line; ledger: {text}"
+        );
+        let c = completions
+            .iter()
+            .find(|c| c["receipt"] == submitted.receipt.to_string())
+            .unwrap_or_else(|| panic!("no completion line for the receipt; got {completions:?}"));
+        assert_eq!(c["state"], "applied");
+        assert_eq!(c["agent_id"], "agent-a");
+        // Metric 2's fact set: a fresh derive created one concept, matched none.
+        assert_eq!(c["created_count"], 1);
+        assert_eq!(c["matched_count"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

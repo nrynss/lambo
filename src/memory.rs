@@ -474,6 +474,14 @@ pub struct MemoryBuilder {
     // Crate-private, and not a knob: see `MemoryBuilder::clock`.
     clock: Option<Clock>,
     endpoint: Option<String>,
+    /// J4. An optional call ledger this process appends its own conflict and
+    /// write-intent **completion** lines to (pre-lease startup, lease refusals,
+    /// proxying/degraded, and durable-intent completion — see
+    /// `dev-diary/lambo-for-mooshik/J-multi-client.md` §J4). `None` for every
+    /// writer that is not a `serve` and for a `serve` run without `--ledger`.
+    /// Set only by [`crate::mcp::serve`]; every ordinary writer keeps the
+    /// default.
+    ledger: Option<Arc<crate::ledger::Ledger>>,
 }
 
 impl MemoryBuilder {
@@ -599,6 +607,13 @@ impl MemoryBuilder {
     /// dialling nothing. See `store::lease::LeaseHolder::endpoint`.
     pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Attach a call ledger (J4) for this serve's own conflict / completion
+    /// lines. `None` (the default) writes nothing.
+    pub fn ledger(mut self, ledger: Option<Arc<crate::ledger::Ledger>>) -> Self {
+        self.ledger = ledger;
         self
     }
 
@@ -906,6 +921,7 @@ impl MemoryBuilder {
                 semantic_match_threshold: config.semantic_match_threshold,
                 daemon_wake: daemon.waker(),
                 lease_lost: lease_lost.clone(),
+                ledger: self.ledger,
             },
             clock.clone(),
         ));

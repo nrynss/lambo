@@ -887,6 +887,12 @@ pub struct HubProxy {
     /// for `read_lease`.
     store: Arc<dyn crate::store::GraphStore>,
     our_host: String,
+    /// J4. An optional call ledger this proxy appends its own `lease` lines to
+    /// (`proxying` at the first successful dial, `proxying_stopped` when the
+    /// holder it forwards to stops answering). A proxy is alive and can write
+    /// its own lines — see §J2's handoff. `None` for a serve run without
+    /// `--ledger`.
+    ledger: Option<Arc<crate::ledger::Ledger>>,
 }
 
 impl HubProxy {
@@ -895,12 +901,14 @@ impl HubProxy {
         endpoint: SessionEndpoint,
         store: Arc<dyn crate::store::GraphStore>,
         our_host: String,
+        ledger: Option<Arc<crate::ledger::Ledger>>,
     ) -> Self {
         Self {
             session,
             endpoint,
             store,
             our_host,
+            ledger,
         }
     }
 
@@ -1160,6 +1168,18 @@ impl HubProxy {
             "lambo serve: proxying to the session holder (this process takes no lease and holds \
              no graph; every write happens in the holder, under the holder's fencing token)"
         );
+        // J4: a proxying serve is alive and books its own line — "proxying to
+        // holder <X>". This is the artifact §J2's handoff points at.
+        if let Some(ledger) = &self.ledger {
+            ledger.append(&crate::ledger::lease_line(
+                "proxying",
+                "loser",
+                &self.session.to_string(),
+                "proxy",
+                &dialled.display().to_string(),
+                None,
+            ));
+        }
 
         // stdin is read on its own task: a blocking read must not stop this loop
         // from noticing that the holder went away.
@@ -1403,6 +1423,18 @@ impl HubProxy {
                             // still the current one.
                             let lost = Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
                             if lost > 0 {
+                                // J4: "proxying to a holder that stopped
+                                // answering" — the degraded-state artifact.
+                                if let Some(ledger) = &self.ledger {
+                                    ledger.append(&crate::ledger::lease_line(
+                                        "proxying_stopped",
+                                        "loser",
+                                        &self.session.to_string(),
+                                        "proxy",
+                                        &self.endpoint.path().display().to_string(),
+                                        Some(serde_json::json!({ "lost": lost })),
+                                    ));
+                                }
                                 tracing::warn!(
                                     generation = gen,
                                     lost,
@@ -1651,6 +1683,7 @@ mod tests {
             ours(),
             Arc::new(HungLeaseStore),
             "this-host".to_string(),
+            None,
         )
     }
 

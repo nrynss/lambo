@@ -558,6 +558,92 @@ pub fn stats_line(stats: Value, uptime: Duration) -> Value {
     line
 }
 
+// ---------------------------------------------------------------------------
+// J4 line builders — lease conflicts leave an artifact
+// ---------------------------------------------------------------------------
+
+// The lexically-distinct shapes J4 appends all ride [`Ledger::append`] — the
+// same append path every other line uses. They are additive: no existing line
+// shape changes, `scripts/observability/*` and `verify.sh` keep parsing what
+// they always parsed, and the analysis kit ignores unknown `kind`s by design.
+
+/// A `startup` line: this serve's intent to acquire the single-writer lease,
+/// written **before** the acquire attempt (J4).
+///
+/// A serve that loses the lease — and so exits before it can open a ledger, or
+/// opens one only *after* acquiring — was structurally invisible to I1. This
+/// line is the fix's first half: it is appended the moment the ledger opens,
+/// before [`crate::mcp::serve`]'s `resolve_role` makes its first lease-acquire
+/// attempt, so even a serve that is about to lose the lease has already left an
+/// artifact recording that it tried.
+pub fn startup_line(session: &str, agent: &str, transport: &str) -> Value {
+    let mut line = head("startup");
+    let obj = line.as_object_mut().expect("head is an object");
+    obj.insert("session".into(), json!(session));
+    obj.insert("agent_id".into(), json!(agent));
+    obj.insert("transport".into(), json!(transport));
+    obj.insert("state".into(), json!("acquiring"));
+    line
+}
+
+/// A `lease` line: one side of a lease conflict (J4).
+///
+/// "From both sides" means exactly this: a refused lease acquisition produces
+/// two lines — the **refuser** (the serve that lost, which writes `refused`
+/// while it still has a process to write from) and the **holder** (which
+/// records the refused takeover it witnessed). A proxying serve writes
+/// `proxying` when it starts forwarding and `proxying_stopped` when the holder
+/// it forwarded to stops answering.
+///
+/// Fields: `event` is one of `refused` | `proxying` | `proxying_stopped` |
+/// `refused_takeover`; `side` is `loser` or `holder`. `holder` names the lease
+/// holder involved (the incumbent), and `detail` carries per-event facts that
+/// do not fit the fixed head.
+pub fn lease_line(
+    event: &str,
+    side: &str,
+    session: &str,
+    agent: &str,
+    holder: &str,
+    detail: Option<Value>,
+) -> Value {
+    let mut line = head("lease");
+    let obj = line.as_object_mut().expect("head is an object");
+    obj.insert("event".into(), json!(event));
+    obj.insert("side".into(), json!(side));
+    obj.insert("session".into(), json!(session));
+    obj.insert("agent_id".into(), json!(agent));
+    obj.insert("holder".into(), json!(holder));
+    if let Some(Value::Object(detail)) = detail {
+        for (k, v) in detail {
+            obj.insert(k, v);
+        }
+    }
+    line
+}
+
+/// A `completion` line: the durable lifecycle of one write intent, so a closed
+/// acked write is measurable (proof obligation 5, J4 — metric 2 regains its
+/// facts).
+///
+/// `state` is `applied` | `applied_after_restart` | `failed` | `deferred`.
+/// For an applied derive, `detail` carries the created/matched counts — the
+/// exact I1 metric-2 fact set that a replayed durable intent previously hid,
+/// because replay bypassed the ordinary call path that builds `call`-line facts.
+pub fn completion_line(agent: &str, receipt: &str, state: &str, detail: Option<Value>) -> Value {
+    let mut line = head("completion");
+    let obj = line.as_object_mut().expect("head is an object");
+    obj.insert("agent_id".into(), json!(agent));
+    obj.insert("receipt".into(), json!(receipt));
+    obj.insert("state".into(), json!(state));
+    if let Some(Value::Object(detail)) = detail {
+        for (k, v) in detail {
+            obj.insert(k, v);
+        }
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,5 +990,70 @@ mod tests {
         assert_eq!(ledger.counters().dropped_channel_full(), 0);
         assert_eq!(ledger.counters().written(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+    #[test]
+    fn j4_line_builders_carry_the_field_head_and_no_aliases() {
+        // Startup line: the J4 pre-lease intent record.
+        let s = startup_line("sess-1", "agent-a", "stdio");
+        assert_eq!(s["kind"], "startup");
+        assert_eq!(s["v"], LINE_VERSION);
+        assert_eq!(s["session"], "sess-1");
+        assert_eq!(s["agent_id"], "agent-a");
+        assert_eq!(s["transport"], "stdio");
+        assert_eq!(s["state"], "acquiring");
+
+        // Lease line, both sides of one refusal.
+        let loser = lease_line("refused", "loser", "sess-1", "agent-b", "agent-a@h#1", None);
+        assert_eq!(loser["kind"], "lease");
+        assert_eq!(loser["event"], "refused");
+        assert_eq!(loser["side"], "loser");
+        assert_eq!(loser["holder"], "agent-a@h#1");
+        let holder = lease_line(
+            "refused_takeover",
+            "holder",
+            "sess-1",
+            "agent-a",
+            "agent-b@h#2",
+            None,
+        );
+        assert_eq!(holder["event"], "refused_takeover");
+        assert_eq!(holder["side"], "holder");
+        assert_eq!(holder["holder"], "agent-b@h#2");
+
+        // Proxy lines ride the same builder.
+        let px = lease_line(
+            "proxying",
+            "loser",
+            "sess-1",
+            "agent-c",
+            "agent-a@h#1",
+            None,
+        );
+        assert_eq!(px["event"], "proxying");
+        let stopped = lease_line(
+            "proxying_stopped",
+            "loser",
+            "sess-1",
+            "agent-c",
+            "agent-a@h#1",
+            Some(json!({ "lost": 2, "ended_hang": true })),
+        );
+        assert_eq!(stopped["event"], "proxying_stopped");
+        assert_eq!(stopped["lost"], 2);
+        assert_eq!(stopped["ended_hang"], true);
+
+        // Completion line carries the metric-2 fact set.
+        let c = completion_line(
+            "agent-a",
+            "r-1",
+            "applied",
+            Some(json!({ "created_count": 1, "matched_count": 0, "receipt": "r-1" })),
+        );
+        assert_eq!(c["kind"], "completion");
+        assert_eq!(c["state"], "applied");
+        assert_eq!(c["created_count"], 1);
+        assert_eq!(c["matched_count"], 0);
+        // `receipt` lives on the fixed head; a fact must not overwrite it.
+        assert_eq!(c["receipt"], "r-1");
     }
 }
