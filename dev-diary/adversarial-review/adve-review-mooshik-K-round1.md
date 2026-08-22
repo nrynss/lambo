@@ -208,6 +208,127 @@ declared not-yet-run in the notes — recorded here as open, not a defect.)
 
 ## Closures
 
-*(left for round 2)*
+Remediated on `lambo-for-mooshik`, commits `60a8399` (adapter findings),
+`519cc92` (re-embed lease), `a55f966` (operator docs), this section (`docs(review)`).
+All gates re-run green after the fixes: `cargo fmt --all -- --check`;
+`cargo clippy --all-targets -- -D warnings`; `cargo clippy --all-targets
+--features embed-candle -- -D warnings`; `cargo test --features embed-candle`
+(890 passed / 0 failed / 2 ignored); `cargo test` default (873 passed / 0 failed);
+`scripts/docs/check-mirror-drift.sh`. Per the binding rule, every finding is
+closed below — none rebutted; all eleven were factually correct.
 
-— K2Review, 2026-08-23
+### K2-R1-1 (P1) — stamped identity now describes the loaded artifact — FIXED `60a8399`
+`CandleEmbedder::new` computes `sha256_file(weights_path)` from the file's actual
+bytes on EVERY path (hf-hub fetch, offline cache hit, explicit `weights_dir`) and
+stamps via the new pure `stamp_identity(source, file, dir, digest)`: the verified
+shipped artifact keeps the canonical `BAAI/bge-m3@5617… model.safetensors
+sha256:68440cc1b73b` stamp byte-for-byte; any repo/revision/file/dir override
+stamps its OWN effective source plus the computed digest prefix. The old constant
+stamp for an unverified artifact is unreachable. Verified by
+`override_identity_describes_the_loaded_artifact_not_the_default_stamp` (an fp32
+`pytorch_model.bin` stamp carries neither the f16 sha256 prefix nor the default's
+shape; a weights_dir stamp names `dir:<path>`),
+`identity_stamps_source_revision_and_sha_prefix` (default stamp unchanged), and
+`sha256_file_hashes_the_bytes_actually_on_disk`. A mutation reintroducing the
+compile-time stamp fails the first test.
+
+### K2-R1-2 (P2) — no queued request destroyed; MAX_BATCH enforced everywhere — FIXED `60a8399`
+Queue handling moved into `BatchQueue::wait_for_batch(max_batch)` (clamped take,
+leftovers stay) and `BatchQueue::top_up(batch, max_batch)` (debounce drain bounded
+by remaining capacity); `q.clear()` and the dead `notify_all` are gone. Verified by
+`initial_take_never_exceeds_max_batch_and_leftovers_survive` — 50 callers against
+MAX_BATCH=32 yield one 32-wide batch then an 18-wide batch with ZERO disconnected
+oneshot senders (the old code failed 19 with "coalescer dropped the request") — and
+`debounce_top_up_takes_only_the_remaining_capacity`.
+
+### K2-R1-3 (P2) — offline=true never dials the network — FIXED `60a8399`
+`resolve_offline`/`hf_path` are replaced by `cache_get`, a cache-only lookup via
+`hf_hub::Cache::from_env().repo(..).get(..)` (no `Api::get`, which downloads on a
+miss). Weights, config.json, and tokenizer.json all use it under `offline = true`;
+a miss returns `Unavailable: "offline: <file> not cached for <repo>@<revision>
+(fetch once online, then go offline)"`. Module doc and `lambo.example.toml`
+promises unchanged because they are now enforced. Verified by
+`offline_weight_resolution_is_cache_only_and_loud` against a guaranteed-absent
+cache entry: instant, network-free, message names the artifact (old code produced
+a raw fetch error without that text).
+
+### K2-R1-4 (P2) — width-vs-configured-dim check — FIXED `60a8399`
+`new` refuses any `dim != BGE_M3_DIM (1024)` BEFORE device or weight resolution
+(mirroring bge_m3's response-time guard as construction-time defense), and the
+coalescer refuses to deliver any forward output whose width disagrees with the
+pinned `Shared::dim`. Verified by
+`wrong_dim_is_refused_at_construction_before_any_resolution`:
+`CandleEmbedder::new(768, …)` errors naming both widths before touching network,
+device, or weights. The old code resolved dim=768 and stored 1024-wide vectors.
+
+### K2-R1-5 (P2) — panic-safe, supervised, bounded-wait embed — FIXED `60a8399`
+Three layers: (1) the forward runs inside `catch_unwind(AssertUnwindSafe(..))` —
+a panic fails exactly that batch with the panic named ("candle coalescer panicked
+running a batch of N texts: …") and the loop continues; mutex locks use
+`unwrap_or_else(unpoison)` so poisoning cannot wedge the queue; (2) `spawn_coalescer`
+now spawns a supervisor that restarts a dead worker (with catch_unwind + poison
+tolerance a worker exit should be impossible; if it happens anyway it is restarted
+and logged rather than wedging every future embed); (3) `embed()` awaits through
+`recv_bounded(rx, EMBED_WAIT)` (600 s deadlock guard) mapping a dropped sender to a
+named Backend error and a stall to Unavailable instead of hanging forever.
+Verified by `fail_batch_resolves_every_caller_even_after_a_panic`,
+`bounded_wait_reports_a_dropped_sender_as_a_named_error`,
+`bounded_wait_times_out_instead_of_hanging_forever`. Honest limit: no test kills a
+real worker thread (that needs live weights); the supervisor is eight lines of
+loop-and-join reviewed as such.
+
+### K2-R1-6 (P3) — lease released on every abort path — FIXED `519cc92`
+The rewrite body moved into `rewrite_all(..) -> Result<String, CliError>` and `run()`
+funnels BOTH success and every mid-run abort through `close_writer`; the false
+comment was rewritten to state the actual guarantee. Verified behaviorally by
+`re_embed_embed_failure_still_releases_the_lease`: a failing embedder aborts with
+the honest message, durable state stays old-consistent, and a DIFFERENT holder then
+acquires the lease immediately — impossible on the old code, which returned before
+`close_writer` and held the lease to TTL.
+
+### K2-R1-7 (P3) — coalescer exits at last-handle drop — FIXED `60a8399`
+Handles own `Arc<Handle>` whose `Drop` sets `BatchQueue.shutdown` and wakes the
+coalescer (per-clone drops do nothing — only the LAST handle signals); the loop
+drains queued work, fails anything that raced in, and exits, dropping the model.
+Verified by `shutdown_exits_only_after_draining_queued_work` (shutdown with work
+queued drains first, then exits; shutdown empty exits immediately). Full-model
+memory reclamation is not directly tested (needs live weights); the mechanism is
+Arc drop-order plus the tested queue semantics.
+
+### K2-R1-8 (P3) — hash-then-load — FIXED `60a8399`
+Order in `new` is now resolve paths → `sha256_file` → pinned-digest verification →
+`load_core` (VarBuilder/mmap). A tampered/corrupt default artifact is refused before
+any model work. `sha256_file_hashes_the_bytes_actually_on_disk` pins the hashing;
+the ordering itself is source-visible in `60a8399` (no behavioral test without
+weights — stated plainly).
+
+### K2-R1-9 (P3) — accelerator named correctly — FIXED `60a8399`
+`no_accelerator(accelerator, err)` takes the name directly; every call site passes
+"Metal" or "CUDA", so a genuine `Device::new_metal`/`new_cuda` failure no longer
+prints "an accelerator". Verified by `auto_names_the_missing_accelerator`.
+Pure-message P3: existing gate tests cover the refusal shape; no additional test.
+
+### K2-R1-10 (P3) — dead code, helper consolidation, typo — FIXED `60a8399`
+`_weight_file_path` deleted; `hf_path`/`hub_get`/`resolve_hf`/`resolve_offline`
+collapsed to two real helpers (`hub_get` = fetch-or-cache, `cache_get` =
+cache-only); `verify_hash` replaced by `sha256_file`; `resolve.rs:158` typo fixed
+("cannot hide a **swap** between two quantizations"). Verification: clean compile
+under `cargo clippy --all-targets --features embed-candle -- -D warnings` (dead
+code is a hard error there) and the grep-level absence of all four deleted names.
+
+### K2-R1-11 (P3) — cold-start documented operator-facing; live-test citations true — FIXED `a55f966`
+Cold start (~2–3 s warm per start; ~60 s / ~1.1 GB one-time hf-hub weight fetch)
+is now documented where a stdio operator reads: README's pluggable-backends
+section AND the cli.mdx mirror pair (`docs/reference/cli.mdx` +
+`site/src/content/docs/cli.mdx`, identical shared prose —
+`check-mirror-drift.sh` passes), plus `lambo.example.toml`'s candle block. The
+cited-but-missing `#[ignore]`d live weight-loading test now EXISTS:
+`embed::candle::tests::live_weights_load_and_embed_on_cpu` (real hf-hub weights,
+CPU embed + distinctness sanity; ignored by default so CI's candle row stays
+weightless/offline; run with `cargo test --features embed-candle -- --ignored`),
+making the CI row comment and K2 notes citations accurate as written. Stated
+plainly: the parity-in-shipped-adapter Done-when item remains UNTESTED pending a
+run of that live leg (matching K1's spike-only status); task 7 (dogfood migration)
+remains not-yet-run, as the notes already declare.
+
+— K2Remediate, 2026-08-23
