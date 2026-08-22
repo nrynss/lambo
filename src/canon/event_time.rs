@@ -101,8 +101,13 @@ use chrono::{DateTime, Utc};
 /// contribute one session each; stragglers further than `gap` out extend the
 /// chain.
 ///
-/// C2 consumes this from [`super::policy`]'s scorer once the solo formula
-/// lands; [`SoloScorer`](super::policy::SoloScorer) still refuses until then.
+/// **No production caller yet, by design** — this is D2's seam for C2, whose
+/// spec (`dev-diary/lambo-for-mooshik/C-solopolicy.md`) defines the solo
+/// formula that will call it. [`SoloScorer`](super::policy::SoloScorer)
+/// refuses until then; when C2 lands, its tests must kill a mutant that
+/// resolves session starts through flush stamps instead of
+/// [`crate::types::Interaction::about_time`]. Until that caller exists,
+/// only these unit tests exercise the helper.
 pub fn separated_session_count(starts: &[DateTime<Utc>], gap: Duration) -> usize {
     let gap = chrono::Duration::from_std(gap).unwrap_or(chrono::Duration::MAX);
     let mut sorted = starts.to_vec();
