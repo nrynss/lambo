@@ -97,7 +97,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::canon::stage3;
-use crate::canon::{stage1_candidates, stage2_passes};
+use crate::canon::{stage2_passes, PromotionPolicy};
 use crate::daemon::events::{self, EventSender};
 use crate::daemon::ScoreTable;
 use crate::graph::Graph;
@@ -134,6 +134,12 @@ pub struct EvalParams {
     /// what it costs is latency, which the cursors bound fairly.
     pub batch_size: usize,
     pub max_canonical_nodes: usize,
+    /// Which Stage-1 promotion policy this cycle runs (C1).
+    ///
+    /// A *selector*, not a threshold: it chooses which predicate reads the
+    /// knobs above, and duplicates none of them. Default
+    /// [`PromotionPolicy::Swarm`] — the policy the pipeline has always run.
+    pub promotion_policy: PromotionPolicy,
 }
 
 /// What one cycle wrote. `promotions` then `demotions` is the commit order.
@@ -207,6 +213,7 @@ impl EvalParams {
             cooldown: config.canonization_repromotion_cooldown,
             batch_size: config.canonization_eval_batch_size,
             max_canonical_nodes: config.max_canonical_nodes,
+            promotion_policy: config.promotion_policy,
         }
     }
 }
@@ -379,7 +386,7 @@ impl Evaluator {
         graph: &Graph,
         scores: &ScoreTable,
         params: &EvalParams,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> CyclePlan {
         let session = graph.session_id().clone();
 
@@ -403,7 +410,17 @@ impl Evaluator {
         // Stage 1 — still-None candidates, NodeId ascending. No cursor: the
         // set drains (a promoted node leaves it), unlike Stage 2, whose
         // members can fail their evidence gate cycle after cycle.
-        let stage1: Vec<NodeId> = stage1_candidates(graph, scores, params.min_peer_count)
+        //
+        // C1: the predicate is chosen by `promotion_policy` rather than
+        // welded in. The default arm is `SwarmScorer`, which forwards to
+        // `stage1_candidates` with the same argument this line always passed —
+        // the seam adds an indirection and nothing else. `now` is handed to
+        // the scorer even though swarm ignores it, so D2 can give the solo
+        // policy event time without widening the trait.
+        let stage1: Vec<NodeId> = params
+            .promotion_policy
+            .scorer()
+            .candidates(graph, scores, params, now)
             .into_iter()
             .filter(|&id| concept_status(graph, id) == Some(CanonizationStatus::None))
             .take(params.batch_size)
@@ -872,6 +889,68 @@ mod tests {
     #[cfg(feature = "store-memory")]
     fn status_of(graph: &Graph, id: NodeId) -> CanonizationStatus {
         concept_status(graph, id).expect("concept")
+    }
+
+    /// Twenty still-`None` peers off one interaction — enough to open the
+    /// Stage-1 session gate, which is all these two tests need.
+    #[cfg(feature = "store-memory")]
+    fn twenty_peer_graph() -> (Graph, ScoreTable) {
+        let mut g = Graph::new(sid());
+        g.insert_interaction(interaction(1, None, ts())).unwrap();
+        for id in 1..=20u64 {
+            g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
+                .unwrap();
+        }
+        let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
+        pairs.push((20, 1.0));
+        (g, table(&pairs))
+    }
+
+    /// **The seam is load-bearing in the pipeline, not merely present.**
+    ///
+    /// `canon::policy`'s own tests prove the dispatch table maps `Solo` to a
+    /// scorer that refuses. They do *not* prove `gather` ever asks. Reverting
+    /// `gather` to call `stage1_candidates` directly leaves swarm behaviour
+    /// identical, so every other test in this crate stays green while
+    /// `promotion_policy` silently becomes decorative — the exact "config
+    /// selection falls back to swarm" defect C1 has to rule out.
+    ///
+    /// Driving a non-default policy through `gather` is what makes that
+    /// revert observable: the refusal can only be reached if the cycle
+    /// actually consulted `params.promotion_policy`.
+    ///
+    /// Mutation: replace the dispatch in `gather` with the original
+    /// `stage1_candidates(graph, scores, params.min_peer_count)` → no panic,
+    /// and `should_panic` fails the test. Verified red.
+    #[cfg(feature = "store-memory")]
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn gather_dispatches_on_the_configured_promotion_policy() {
+        let (g, scores) = twenty_peer_graph();
+        let params = EvalParams {
+            promotion_policy: PromotionPolicy::Solo,
+            ..params()
+        };
+        let _ = Evaluator::new().gather(&g, &scores, &params, ts());
+    }
+
+    /// The complement: under the **default** policy the same fixture goes
+    /// through the seam and produces the Stage-1 set the welded pipeline
+    /// always produced — nearest-rank P90 over twenty peers leaves exactly
+    /// the one concept scoring strictly above it.
+    ///
+    /// Without this, `gather_dispatches_on_the_configured_promotion_policy`
+    /// would still pass if the swarm arm were broken to refuse as well.
+    ///
+    /// Mutation: make `SwarmScorer::candidates` return `Vec::new()` → red.
+    #[cfg(feature = "store-memory")]
+    #[test]
+    fn the_default_policy_still_gathers_the_welded_stage1_set() {
+        let (g, scores) = twenty_peer_graph();
+        let params = params();
+        assert_eq!(params.promotion_policy, PromotionPolicy::Swarm);
+        let plan = Evaluator::new().gather(&g, &scores, &params, ts());
+        assert_eq!(plan.stage1, vec![nid(20)]);
     }
 
     /// Ring arithmetic, degenerate inputs included: empty ring, zero window,

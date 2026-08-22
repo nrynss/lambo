@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::canon::PromotionPolicy;
 use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
@@ -121,6 +122,19 @@ pub struct Config {
     pub canonization_eval_batch_size: usize,
     pub canonization_repromotion_cooldown: Duration,
 
+    /// Which promotion policy canonization's Stage 1 runs (C1).
+    ///
+    /// A *selector*, not a threshold — it chooses which predicate reads the
+    /// canonization knobs above, and restates none of them. The bars
+    /// themselves still live in `canon::stage{1,2,3}` and are still not
+    /// settable from a file (see [`DaemonConfig`]).
+    ///
+    /// Only [`PromotionPolicy::Swarm`] is implemented; [`Config::validate`]
+    /// refuses `Solo`, which is waiting on C2 and its D2 (event-time)
+    /// dependency. Unlike [`MatchStrategy`], this field's `Default` and the
+    /// product default agree: both are `Swarm`.
+    pub promotion_policy: PromotionPolicy,
+
     pub semantic_match_threshold: f64,
     pub max_cooccurrence_per_derive: usize,
 
@@ -161,6 +175,8 @@ impl Default for Config {
             canonization_eval_interval: Duration::from_secs(60),
             canonization_eval_batch_size: 50,
             canonization_repromotion_cooldown: Duration::from_secs(300),
+
+            promotion_policy: PromotionPolicy::Swarm,
 
             semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             max_cooccurrence_per_derive: 10,
@@ -220,6 +236,20 @@ impl Config {
             return Err(LamboError::Config(format!(
                 "canonization_eval_interval must be > 0, got {:?}",
                 self.canonization_eval_interval
+            )));
+        }
+        // C1 declares the seam; C2 supplies the solo formula, and C2 is
+        // blocked on D2 (event time). Refuse here rather than at the first
+        // eval cycle: a policy that cannot promote is indistinguishable from
+        // one that merely promoted nothing, so the failure has to happen
+        // where it can still name the reason. `canon::SoloScorer` is the
+        // backstop if this check is ever bypassed.
+        if !self.promotion_policy.is_implemented() {
+            return Err(LamboError::Config(format!(
+                "promotion_policy {:?} is declared but not implemented — C2 (the solo \
+                 promotion formula) depends on D2 (event time); use {:?} until it lands",
+                self.promotion_policy.as_str(),
+                PromotionPolicy::Swarm.as_str()
             )));
         }
         Ok(())
@@ -372,6 +402,10 @@ mod tests {
             c.canonization_repromotion_cooldown,
             Duration::from_secs(300)
         );
+        // C1: swarm is the shipped default and the whole point of the seam is
+        // that it stays one. A default of `Solo` would also fail `validate`,
+        // but this is the assertion that says which policy runs.
+        assert_eq!(c.promotion_policy, PromotionPolicy::Swarm);
 
         assert_eq!(
             c.semantic_match_threshold,
@@ -394,6 +428,40 @@ mod tests {
         let s = serde_json::to_string(&c.scoring).unwrap();
         let back: ScoringWeights = serde_json::from_str(&s).unwrap();
         assert_eq!(c.scoring, back);
+    }
+
+    /// An unimplemented promotion policy must fail at `validate`, not at the
+    /// first eval cycle — and must say what it is waiting on.
+    ///
+    /// Mutation: delete the `is_implemented` arm in `Config::validate` (or
+    /// make `PromotionPolicy::Solo.is_implemented()` return `true`) and this
+    /// goes red on the `is_err` assertion. Verified.
+    #[test]
+    fn unimplemented_promotion_policy_fails_closed() {
+        let c = Config {
+            promotion_policy: PromotionPolicy::Solo,
+            ..Config::default()
+        };
+        let err = c
+            .validate()
+            .expect_err("Solo is not implemented and must not validate");
+        let msg = err.to_string();
+        assert!(msg.contains("promotion_policy"), "message: {msg}");
+        assert!(msg.contains("Solo"), "message: {msg}");
+        assert!(msg.contains("Swarm"), "message: {msg}");
+    }
+
+    /// The refusal above must not be over-broad: the default config still
+    /// validates. Without this, "reject every policy" would pass the test
+    /// above and silently break every session.
+    ///
+    /// Mutation: make `validate` refuse unconditionally → red here.
+    #[test]
+    fn the_default_promotion_policy_validates() {
+        assert_eq!(Config::default().promotion_policy, PromotionPolicy::Swarm);
+        Config::default()
+            .validate()
+            .expect("the shipped default must validate");
     }
 
     #[test]

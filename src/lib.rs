@@ -102,7 +102,9 @@ pub use config::{Config, DaemonConfig, LamboFile, RecallWeights, ScoringWeights}
 #[cfg(feature = "embed-bge")]
 pub use embed::BgeM3LlamaCppEmbedder;
 
-pub use canon::{CanonizationTask, EvalOutcome, EvalParams, Evaluator};
+pub use canon::{
+    CanonizationTask, EvalOutcome, EvalParams, Evaluator, PromotionPolicy, PromotionScorer,
+};
 pub use daemon::{Daemon, ScoreTable};
 pub use embed::{
     build_embedder, cosine, embedder_from_env, EmbedError, Embedder, EmbedderConfig, EmbedderKind,
