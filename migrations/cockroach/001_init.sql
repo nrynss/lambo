@@ -217,12 +217,27 @@ CREATE TABLE IF NOT EXISTS session_leases (
 -- writer refused the single-writer lease records the refusal here so the
 -- incumbent holder can learn it turned away a takeover ("from both sides").
 -- refused_at is the STORE clock (F18 — never a caller instant).
+-- JE2E-1: rows are retained and purged. `record_lease_refusal` deletes this
+-- session's rows older than `store::lease::LEASE_REFUSAL_RETENTION` (1 h) in
+-- the same call that appends one — the lazy-purge shape `write_intents` uses —
+-- because nothing deleted them before and a client auto-respawning a losing
+-- serve (the founding scenario) grew this table forever.
 CREATE TABLE IF NOT EXISTS lease_refusals (
     session_id     STRING NOT NULL,
     refused_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     refused_by     STRING NOT NULL,
     current_holder STRING NOT NULL
 );
+
+-- JE2E-1. Both accesses are (session_id, refused_at): the holder's recorder
+-- task polls `WHERE session_id = $1 AND refused_at >= $2` every 500 ms, and the
+-- retention purge deletes on the same two columns. Additive: a separate
+-- `IF NOT EXISTS` statement rather than an inline INDEX clause, so a cluster
+-- already carrying the table converges here on its next `scripts/provision.sh`
+-- run instead of needing a fresh one. A cluster that has not re-provisioned
+-- keeps working — the preflight checks tables and columns, never indexes.
+CREATE INDEX IF NOT EXISTS lease_refusals_session_time_idx
+    ON lease_refusals (session_id, refused_at);
 
 -- J3 durable write intents (dev-diary/lambo-for-mooshik/J3-durability-redesign.md):
 -- a validated, acked background write that has not yet been applied. Written

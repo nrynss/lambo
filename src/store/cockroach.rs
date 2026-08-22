@@ -2225,7 +2225,17 @@ impl GraphStore for CockroachStore {
             .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
         Ok(())
     }
-    // J4. Record a lease refusal against this session at the store's clock.
+    // J4. Record a lease refusal against this session at the store's clock,
+    // then purge this session's refusals older than
+    // `LEASE_REFUSAL_RETENTION` (JE2E-1).
+    //
+    // The purge is **lazy, on the write path**, mirroring `write_intents`'
+    // `consume_write_intent`: it rides the one statement that was going to
+    // touch this table anyway, so no adapter grows a clock and no task grows a
+    // timer. Two statements here rather than one, and each is a round trip on
+    // Cockroach — the same cost shape F4 records for the intent consume, and
+    // acceptable for the same reason: this path runs once per *refused start*,
+    // not once per write.
     async fn record_lease_refusal(
         &self,
         session: &SessionId,
@@ -2243,6 +2253,18 @@ impl GraphStore for CockroachStore {
         .execute(pool)
         .await
         .map_err(|e| map_write_err(e, |m| format!("record lease refusal: {m}")))?;
+        sqlx::query(
+            "DELETE FROM lease_refusals \
+             WHERE session_id = $1 AND refused_at < now() - $2::INTERVAL",
+        )
+        .bind(&session.0)
+        .bind(format!(
+            "{} seconds",
+            crate::store::lease::LEASE_REFUSAL_RETENTION.as_secs()
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("purge expired lease refusals: {m}")))?;
         Ok(())
     }
 

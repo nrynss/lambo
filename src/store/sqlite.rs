@@ -808,7 +808,18 @@ impl GraphStore for SqliteStore {
         Ok(())
     }
 
-    // J4. Record a lease refusal against this session at the store's clock.
+    // J4. Record a lease refusal against this session at the store's clock,
+    // then purge this session's refusals older than
+    // `LEASE_REFUSAL_RETENTION` (JE2E-1).
+    //
+    // The purge is **lazy, on the write path**, mirroring `write_intents`'
+    // `consume_write_intent`: the retention sweep rides the one statement that
+    // was going to touch this table anyway, so no adapter grows a clock, no
+    // task grows a timer, and a session nobody contends keeps its rows (which
+    // is free — nothing is being appended to sweep them out of the way of).
+    // The cutoff is the store's own clock, the same `strftime` that stamps the
+    // row, so the comparison is between two store instants and never a
+    // caller's (F18).
     async fn record_lease_refusal(
         &self,
         session: &SessionId,
@@ -826,6 +837,19 @@ impl GraphStore for SqliteStore {
         .execute(self.pool())
         .await
         .map_err(|e| db_err("record lease refusal", e))?;
+        sqlx::query(
+            "DELETE FROM lease_refusals \
+             WHERE session_id = ?1 \
+               AND refused_at < strftime('%Y-%m-%dT%H:%M:%fZ','now',?2)",
+        )
+        .bind(&session.0)
+        .bind(format!(
+            "-{} seconds",
+            crate::store::lease::LEASE_REFUSAL_RETENTION.as_secs()
+        ))
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("purge expired lease refusals", e))?;
         Ok(())
     }
 
@@ -2844,6 +2868,85 @@ mod tests {
                 last_reinforced: ts,
             },
         }
+    }
+
+    /// **JE2E-1.** `lease_refusals` had no retention at all — the DDL said so
+    /// out loud ("rows are read by the poller and need no retention") — so the
+    /// founding scenario, a client auto-respawning a losing serve, inserted one
+    /// row per respawn forever. The purge now rides the insert, the lazy shape
+    /// `consume_write_intent` uses.
+    ///
+    /// The old row is planted with an explicit stamp rather than by waiting out
+    /// the hour: the assertion is about the retention *boundary*, not about a
+    /// clock. Both sides of it are asserted in one call, so a purge that swept
+    /// everything would fail as loudly as one that swept nothing.
+    #[tokio::test]
+    async fn recording_a_lease_refusal_purges_this_sessions_expired_ones() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let session = SessionId::new("purge-me");
+        let other = SessionId::new("leave-me-alone");
+        let retention = crate::store::lease::LEASE_REFUSAL_RETENTION.as_secs() as i64;
+
+        // Two rows past the window and one inside it, plus one belonging to a
+        // different session (the purge is session-scoped, like every other
+        // statement on this path).
+        for (sid, ago, by) in [
+            (&session, retention + 60, "ancient-a@h#1"),
+            (&session, retention + 1, "ancient-b@h#1"),
+            (&session, retention - 60, "recent@h#1"),
+            (&other, retention + 60, "other-session@h#1"),
+        ] {
+            sqlx::query(
+                "INSERT INTO lease_refusals (session_id, refused_at, refused_by, current_holder) \
+                 VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now',?2), ?3, 'holder@h#1')",
+            )
+            .bind(&sid.0)
+            .bind(format!("-{ago} seconds"))
+            .bind(by)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+
+        store
+            .record_lease_refusal(&session, "fresh@h#1", "holder@h#1")
+            .await
+            .unwrap();
+
+        let long_ago = Utc.timestamp_opt(0, 0).unwrap();
+        let ours: Vec<String> = store
+            .pending_lease_refusals(&session, long_ago)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.refused_by)
+            .collect();
+        assert!(
+            !ours.iter().any(|b| b.starts_with("ancient")),
+            "rows past the retention window must be gone: {ours:?}"
+        );
+        assert!(
+            ours.iter().any(|b| b == "recent@h#1"),
+            "a row inside the window must survive — a purge that swept everything \
+             would break the holder-side line this table exists for: {ours:?}"
+        );
+        assert!(
+            ours.iter().any(|b| b == "fresh@h#1"),
+            "and the row just recorded is there: {ours:?}"
+        );
+        let theirs: Vec<String> = store
+            .pending_lease_refusals(&other, long_ago)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.refused_by)
+            .collect();
+        assert_eq!(
+            theirs,
+            vec!["other-session@h#1".to_string()],
+            "another session's expired row is not this session's to sweep"
+        );
     }
 
     #[tokio::test]

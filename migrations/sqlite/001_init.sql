@@ -164,8 +164,14 @@ CREATE TABLE IF NOT EXISTS session_leases (
 -- writer that was refused the single-writer lease records the refusal here so
 -- the incumbent holder can learn it turned away a takeover ("from both sides").
 -- refused_at is the STORE clock (F18 — never a caller instant). The incumbent
--- polls these and appends its own ledger line; rows are read by the poller and
--- need no retention (each poller dedups by refused_by+refused_at).
+-- polls these and appends its own ledger line, deduping by
+-- refused_by+refused_at.
+-- JE2E-1: rows ARE retained and purged. The earlier claim here — "rows are read
+-- by the poller and need no retention" — was false: nothing deleted them, so a
+-- client auto-respawning a losing serve (the founding scenario) grew this table
+-- forever. `record_lease_refusal` now purges this session's rows older than
+-- `store::lease::LEASE_REFUSAL_RETENTION` (1 h) in the same call that appends
+-- one, the lazy-purge shape `write_intents` uses.
 CREATE TABLE IF NOT EXISTS lease_refusals (
     session_id     TEXT NOT NULL,
     refused_at     TEXT NOT NULL,
@@ -215,3 +221,13 @@ CREATE INDEX IF NOT EXISTS concepts_session_status_idx ON concepts (session_id, 
 CREATE INDEX IF NOT EXISTS edges_session_target_type_idx ON edges (session_id, target, edge_type);
 CREATE INDEX IF NOT EXISTS edges_session_source_type_idx ON edges (session_id, source, edge_type);
 CREATE INDEX IF NOT EXISTS canonization_events_session_time_idx ON canonization_events (session_id, occurred_at);
+
+-- JE2E-1. Both accesses to lease_refusals are (session_id, refused_at): the
+-- holder's recorder task polls `WHERE session_id = ? AND refused_at >= ?` every
+-- 500 ms, and `record_lease_refusal`'s retention purge deletes on the same two
+-- columns. Additive: it is a separate `IF NOT EXISTS` statement rather than an
+-- inline clause, so a store already carrying the table converges here on its
+-- next `lambo provision` instead of needing a fresh one. A store that has NOT
+-- re-provisioned keeps working — the preflight checks tables and columns, never
+-- indexes, so a missing index costs a scan and never a refusal.
+CREATE INDEX IF NOT EXISTS lease_refusals_session_time_idx ON lease_refusals (session_id, refused_at);

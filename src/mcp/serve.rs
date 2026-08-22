@@ -1242,6 +1242,29 @@ const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// deduped by (refused_by, at) so a repeated poll never double-logs. The read
 /// window starts a little before the poller's own start so no refusal at the
 /// acquire boundary is missed; the dedup set is what keeps it exact.
+///
+/// # The cursor moves (JE2E-1)
+///
+/// `since` used to be computed **once**, at task start, and never advanced:
+/// every 500 ms poll therefore re-read and re-allocated the whole accumulated
+/// history from `start − LEASE_TTL` to now, and `seen` grew monotonically
+/// beside it. On a long-lived `--ledger` holder facing the workstream's own
+/// founding scenario — a client that auto-respawns a losing serve — that is
+/// quadratic work over the holder's uptime and an unbounded set.
+///
+/// The cursor is now advanced to the **maximum `at` this poll saw**, which is
+/// sound because [`crate::store::GraphStore::pending_lease_refusals`] is
+/// inclusive at its lower bound (`refused_at >= since`): the next poll re-reads
+/// exactly the newest instant, and the dedup set retires the duplicate. The
+/// overlap is deliberate — a cursor advanced *past* the newest row would drop a
+/// second refusal stamped at the same store instant.
+///
+/// `seen` is bounded by the same move: it only ever needs to hold the rows the
+/// next poll can re-deliver, which is the rows at the cursor instant, so it is
+/// rebuilt per poll from that instant rather than accumulated. Rows *older*
+/// than the cursor are unreachable by construction and cannot be re-logged.
+/// The bookkeeping is [`RefusalCursor`], extracted for the same reason
+/// [`waiting_fits`] was: the *claim about* it is what a review can check.
 async fn record_refused_takeovers(
     store: Arc<dyn crate::store::GraphStore>,
     session: crate::types::SessionId,
@@ -1249,35 +1272,115 @@ async fn record_refused_takeovers(
     my_token: String,
     ledger: Arc<Ledger>,
 ) {
-    let mut seen: std::collections::HashSet<(String, String)> = Default::default();
-    let since = chrono::Utc::now()
-        - chrono::Duration::from_std(lease::LEASE_TTL)
-            .unwrap_or_else(|_| chrono::Duration::seconds(0));
+    let mut cursor = RefusalCursor::starting_at(
+        chrono::Utc::now()
+            - chrono::Duration::from_std(lease::LEASE_TTL)
+                .unwrap_or_else(|_| chrono::Duration::seconds(0)),
+    );
     loop {
         tokio::time::sleep(REFUSAL_POLL_INTERVAL).await;
-        match store.pending_lease_refusals(&session, since).await {
+        match store.pending_lease_refusals(&session, cursor.since()).await {
             Ok(refusals) => {
-                for r in refusals {
-                    if r.current_holder != my_token {
-                        continue;
-                    }
-                    let key = (r.refused_by.clone(), r.at.to_rfc3339());
-                    if seen.insert(key) {
-                        ledger.append(&crate::ledger::lease_line(
-                            "refused_takeover",
-                            "holder",
-                            &session.to_string(),
-                            &agent.to_string(),
-                            &r.refused_by,
-                            Some(serde_json::json!({ "at": r.at.to_rfc3339() })),
-                        ));
-                    }
+                for r in cursor.take_new(refusals, &my_token) {
+                    ledger.append(&crate::ledger::lease_line(
+                        "refused_takeover",
+                        "holder",
+                        &session.to_string(),
+                        &agent.to_string(),
+                        &r.refused_by,
+                        Some(serde_json::json!({ "at": r.at.to_rfc3339() })),
+                    ));
                 }
             }
             Err(_) => {
                 // A seed / store blip; the next poll retries.
             }
         }
+    }
+}
+
+/// The holder-side refusal poller's read window and its dedup set (JE2E-1).
+///
+/// Two invariants, and the second is what the finding was about:
+///
+/// * **No refusal is logged twice.** The store read is inclusive at its lower
+///   bound, so the row (or rows) at the cursor instant come back on every poll;
+///   `at_cursor` is what retires them.
+/// * **Neither the window nor the set grows with uptime.** The cursor only
+///   moves forward, so a poll reads the rows since the last one rather than the
+///   whole history, and `at_cursor` holds only the rows a poll can *re-deliver*
+///   — the ones stamped at the cursor instant — rather than every refusal ever
+///   seen.
+///
+/// The cursor lands **on** the newest row seen, never past it, deliberately: a
+/// store stamp has finite resolution, so two refusals can share one instant and
+/// advancing past it would drop the second. Paying for that with a one-instant
+/// overlap and a set the dedup already needed is the cheap side of the trade.
+struct RefusalCursor {
+    since: chrono::DateTime<chrono::Utc>,
+    /// `refused_by` tokens already logged at exactly [`RefusalCursor::since`].
+    at_cursor: std::collections::HashSet<String>,
+}
+
+impl RefusalCursor {
+    fn starting_at(since: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            since,
+            at_cursor: Default::default(),
+        }
+    }
+
+    /// The lower bound to read from on the next poll.
+    fn since(&self) -> chrono::DateTime<chrono::Utc> {
+        self.since
+    }
+
+    /// Consume one poll's rows: return the ones that are new to this holder,
+    /// and advance the window over them.
+    ///
+    /// Rows whose `current_holder` is not `my_token` were refused by a
+    /// *previous* holder of this session and are none of this process's
+    /// business — they are skipped and, deliberately, do **not** move the
+    /// cursor: moving it over another holder's row could carry the window past
+    /// one of ours stamped at the same instant.
+    fn take_new(
+        &mut self,
+        refusals: Vec<crate::store::lease::LeaseRefusal>,
+        my_token: &str,
+    ) -> Vec<crate::store::lease::LeaseRefusal> {
+        let mut new = Vec::new();
+        let mut newest = self.since;
+        let mut at_newest: std::collections::HashSet<String> = Default::default();
+        for r in refusals {
+            if r.current_holder != my_token {
+                continue;
+            }
+            if r.at > self.since || !self.at_cursor.contains(&r.refused_by) {
+                new.push(r.clone());
+            }
+            match r.at.cmp(&newest) {
+                std::cmp::Ordering::Greater => {
+                    newest = r.at;
+                    at_newest.clear();
+                    at_newest.insert(r.refused_by);
+                }
+                std::cmp::Ordering::Equal => {
+                    at_newest.insert(r.refused_by);
+                }
+                // Older than something else in this batch: unreachable by the
+                // next poll's read, so it needs no dedup entry.
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        if newest > self.since {
+            self.since = newest;
+            self.at_cursor = at_newest;
+        } else {
+            // The cursor did not move, so everything logged at it must stay
+            // remembered — including anything this poll added.
+            self.at_cursor.extend(at_newest);
+        }
+        new
     }
 }
 
@@ -2374,6 +2477,92 @@ mod tests {
         }
         mem.close().await.expect("close");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **JE2E-1.** The holder's refusal poller must not re-read its whole
+    /// history every 500 ms, and its dedup set must not grow with uptime.
+    ///
+    /// The founding scenario is a client that auto-respawns a losing serve, so
+    /// "one row per respawn, forever, re-read on every poll" is the shape that
+    /// matters. Three properties, asserted over the extracted bookkeeping
+    /// because the loop around it is an infinite `sleep`:
+    ///
+    /// 1. the window advances onto the newest row seen (quadratic re-reads gone);
+    /// 2. a re-delivered row at the cursor is not logged twice (the dedup the
+    ///    overlap costs);
+    /// 3. the dedup set holds only the rows at the cursor, never the history.
+    #[test]
+    fn the_refusal_pollers_window_advances_and_its_dedup_set_stays_bounded() {
+        fn refusal(secs: i64, by: &str, holder: &str) -> crate::store::lease::LeaseRefusal {
+            crate::store::lease::LeaseRefusal {
+                session: crate::types::SessionId::new("s"),
+                at: chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0).expect("stamp"),
+                refused_by: by.to_string(),
+                current_holder: holder.to_string(),
+            }
+        }
+        let start = chrono::DateTime::from_timestamp(1_800_000_000, 0).expect("stamp");
+        let mut cursor = RefusalCursor::starting_at(start);
+
+        // Poll 1: two refusals against us, one against a previous holder.
+        let new = cursor.take_new(
+            vec![
+                refusal(1, "b@h#1", "me"),
+                refusal(2, "c@h#1", "me"),
+                refusal(3, "d@h#1", "someone-else"),
+            ],
+            "me",
+        );
+        assert_eq!(new.len(), 2, "both of ours are new: {new:?}");
+        assert_eq!(
+            cursor.since(),
+            refusal(2, "", "").at,
+            "the window advances onto OUR newest row — not past it, and not onto \
+             another holder's"
+        );
+        assert_eq!(
+            cursor.at_cursor.len(),
+            1,
+            "only the row AT the cursor needs remembering, not the history: {:?}",
+            cursor.at_cursor
+        );
+
+        // Poll 2: the store re-delivers the row at the cursor (its read is
+        // inclusive at the lower bound). It must not be logged again.
+        let new = cursor.take_new(vec![refusal(2, "c@h#1", "me")], "me");
+        assert!(new.is_empty(), "the row at the cursor is not new: {new:?}");
+        assert_eq!(cursor.since(), refusal(2, "", "").at, "and the window holds");
+
+        // Poll 3: a hundred fresh respawns, each a new instant. Every one is
+        // logged once, the window ends on the last, and the set is still one.
+        let burst: Vec<_> = (3..103)
+            .map(|n| refusal(n, &format!("r{n}@h#1"), "me"))
+            .collect();
+        let new = cursor.take_new(burst, "me");
+        assert_eq!(new.len(), 100, "every respawn is recorded once");
+        assert_eq!(cursor.since(), refusal(102, "", "").at);
+        assert_eq!(
+            cursor.at_cursor.len(),
+            1,
+            "a hundred refusals later the dedup set is still one entry — this is the \
+             unbounded-growth half of JE2E-1: {:?}",
+            cursor.at_cursor
+        );
+
+        // Two refusals stamped at the SAME store instant are both recorded, and
+        // both are remembered — which is why the cursor lands on the newest row
+        // rather than past it.
+        let mut cursor = RefusalCursor::starting_at(start);
+        let new = cursor.take_new(
+            vec![refusal(5, "x@h#1", "me"), refusal(5, "y@h#1", "me")],
+            "me",
+        );
+        assert_eq!(new.len(), 2, "one instant, two refusals, both recorded");
+        assert_eq!(cursor.at_cursor.len(), 2);
+        assert!(
+            cursor.take_new(vec![refusal(5, "y@h#1", "me")], "me").is_empty(),
+            "and neither is re-recorded on the next poll"
+        );
     }
 
     #[test]

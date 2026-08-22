@@ -102,6 +102,36 @@ pub const LEASE_TTL: Duration = Duration::from_secs(45);
 /// go.
 pub const LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How long a `lease_refusals` row survives before an adapter purges it
+/// (JE2E-1).
+///
+/// **Derived from the widest window any reader ever looks back over.** The only
+/// reader is the incumbent holder's recorder task
+/// (`mcp::serve::record_refused_takeovers`), which starts at `now − LEASE_TTL`
+/// and from there only ever moves its cursor *forward*. So a row older than one
+/// [`LEASE_TTL`] cannot be read by any poller that is already running, and the
+/// widest a freshly-started holder can look back is exactly one [`LEASE_TTL`]
+/// too. The retention has to be strictly above that or the purge would race the
+/// read it exists beside.
+///
+/// One hour, not 45 seconds, because the rows have a second reader the poller
+/// does not: an operator asking "why did this client have no memory" runs a
+/// `SELECT` against this table minutes or hours later, and a retention pinned
+/// to the read window would have swept the answer away before the question was
+/// asked. An hour is 80× the read window and still bounds the table on the
+/// founding scenario — a client auto-respawning a losing serve once a second
+/// keeps 3,600 rows rather than one row per respawn forever.
+///
+/// Build-guarded against the read window below, so a later change to either
+/// cannot silently invert the relationship.
+pub const LEASE_REFUSAL_RETENTION: Duration = Duration::from_secs(3600);
+
+const _: () = assert!(
+    LEASE_REFUSAL_RETENTION.as_secs() > LEASE_TTL.as_secs(),
+    "lease_refusals must be retained for longer than the widest window a holder's recorder \
+     task reads back (one LEASE_TTL), or the purge would delete rows the poller is about to read"
+);
+
 /// The operator override for a wedged-but-heartbeating squatter (documented, not
 /// automated — see the module docs on why there is no auto-preemption).
 ///

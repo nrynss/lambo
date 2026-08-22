@@ -479,20 +479,28 @@ impl GraphStore for MemoryStore {
         Ok(())
     }
 
+    /// J4, with JE2E-1's lazy retention purge for adapter parity: the SQL
+    /// adapters sweep this session's expired refusals inside the same call that
+    /// appends one, so this one does too — otherwise a `MemoryStore` test would
+    /// observe a growth the shipped adapters do not have.
     async fn record_lease_refusal(
         &self,
         session: &SessionId,
         refused_by: &str,
         current_holder: &str,
     ) -> Result<(), StoreError> {
-        self.refusals
-            .write()
-            .push(crate::store::lease::LeaseRefusal {
-                session: session.clone(),
-                at: Utc::now(),
-                refused_by: refused_by.to_string(),
-                current_holder: current_holder.to_string(),
-            });
+        let now = Utc::now();
+        let cutoff = now
+            - chrono::Duration::from_std(crate::store::lease::LEASE_REFUSAL_RETENTION)
+                .unwrap_or_else(|_| chrono::Duration::seconds(3600));
+        let mut refusals = self.refusals.write();
+        refusals.push(crate::store::lease::LeaseRefusal {
+            session: session.clone(),
+            at: now,
+            refused_by: refused_by.to_string(),
+            current_holder: current_holder.to_string(),
+        });
+        refusals.retain(|r| r.session != *session || r.at >= cutoff);
         Ok(())
     }
 
