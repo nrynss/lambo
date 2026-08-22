@@ -992,6 +992,8 @@ impl LamboServer {
             "node_count": s.node_count,
             "edge_count": s.edge_count,
             "concept_count": s.concept_count,
+            "total_concepts": s.concept_count,
+            "embedded_concepts": s.embedded_concepts,
             "canonical_count": s.canonical_count,
             "epoch": s.epoch,
             "daemon_cycles": s.daemon_cycles,
@@ -2095,6 +2097,7 @@ impl LamboServer {
         let text = format!(
             "session '{}' (owner agent '{}')\n\
              nodes={} edges={} concepts={} canonical={}\n\
+             embedded={}/{}\n\
              flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
              epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}",
             s.session.0,
@@ -2103,6 +2106,8 @@ impl LamboServer {
             s.edge_count,
             s.concept_count,
             s.canonical_count,
+            s.embedded_concepts,
+            s.concept_count,
             s.flush_lag,
             s.log_depth,
             s.flush_depth,
@@ -5674,6 +5679,8 @@ mod tests {
             "node_count",
             "edge_count",
             "concept_count",
+            "total_concepts",
+            "embedded_concepts",
             "canonical_count",
             "epoch",
             "daemon_cycles",
@@ -5686,6 +5693,46 @@ mod tests {
                 "{key} is missing from the payload: {payload}"
             );
         }
+        s.mem.close().await.expect("close");
+    }
+
+    /// **K2 acceptance.** The `lambo_stats` payload answers "how many of this
+    /// session's concepts actually carry a vector" — the counter that would
+    /// have made the 92/100 dogfood damage visible on day one. The default
+    /// server runs `MatchStrategy::Canonical`, where a derive deliberately does
+    /// NOT embed, so the honest reading here is 0/2: two concepts APPLIED, zero
+    /// EMBEDDED — precisely the applied-vs-embedded gap the field exists to
+    /// make visible (`lambo re-embed` is what closes it).
+    #[tokio::test]
+    async fn k2_stats_payload_reports_embedding_coverage() {
+        let s = server("k2-coverage").await;
+        let ack = call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "user schema", "concept_type": "entity"},
+                    {"content": "auth middleware", "concept_type": "entity"}
+                ]
+            }),
+        )
+        .await;
+        assert!(!ack.is_error.unwrap_or(false), "derive failed: {ack:?}");
+
+        // `call` settles the J3 receipt, so the write IS applied.
+        let stats = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        let payload = stats.structured_content.expect("stats payload");
+        assert_eq!(
+            payload["total_concepts"], payload["concept_count"],
+            "the alias must track concept_count exactly: {payload}"
+        );
+        assert_eq!(payload["total_concepts"], 2, "{payload}");
+        assert_eq!(
+            payload["embedded_concepts"].as_u64(),
+            Some(0),
+            "canonical derives do not embed; the counter must SAY so, not hide it: {payload}"
+        );
         s.mem.close().await.expect("close");
     }
 

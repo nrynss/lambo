@@ -310,6 +310,29 @@ enum Commands {
         #[arg(long)]
         allow_embedding_mismatch: bool,
     },
+    /// Migrate a session to the configured embedder: re-embed EVERY concept into the live space and swap the session's contract atomically (K2).
+    ///
+    /// Run with the NEW embedder configured (e.g. LAMBO_EMBEDDER=candle) after
+    /// stopping the serve process that holds the session. Every concept is
+    /// embedded BEFORE the graph is touched, and the vector rewrite plus
+    /// contract swap flush as ONE transaction with the lease release — a crash
+    /// mid-migration leaves the old contract and old vectors together, which
+    /// is consistent. Refuses --allow-embedding-mismatch: this verb IS the
+    /// migration; the relabel override would leave old-space vectors behind.
+    ReEmbed {
+        /// Session this process writes (acquires the single-writer lease).
+        #[arg(
+            long,
+            help = "Session this process writes (acquires the single-writer lease)."
+        )]
+        session: String,
+        /// Agent identity this migration writes as.
+        #[arg(long, help = "Agent identity this migration writes as.")]
+        agent: String,
+        /// REFUSED: re-embed is itself the migration; pairing it with the relabel override is contradictory and the flag exists only so the clap shape mirrors the other writers.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
+    },
 }
 
 impl Commands {
@@ -327,6 +350,7 @@ impl Commands {
             Self::RecordAction { .. } => "record-action",
             Self::Reserve { .. } => "reserve",
             Self::Release { .. } => "release",
+            Self::ReEmbed { .. } => "re-embed",
         }
     }
 
@@ -360,6 +384,10 @@ impl Commands {
                 ..
             }
             | Self::Release {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::ReEmbed {
                 allow_embedding_mismatch,
                 ..
             } => *allow_embedding_mismatch,
@@ -708,6 +736,27 @@ fn main() -> ExitCode {
                     session,
                     agent,
                     node,
+                },
+            ),
+        ),
+        (
+            Commands::ReEmbed {
+                session,
+                agent,
+                allow_embedding_mismatch: _,
+            },
+            Resolved::Full(backends),
+        ) => run_async(
+            "re-embed",
+            lambo::cli::re_embed::run(
+                *backends,
+                lambo::cli::re_embed::Args {
+                    session,
+                    agent,
+
+                    // The verb refuses it outright; the resolve-level flip
+                    // below still lands on ResolvedBackends and is ignored.
+                    allow_embedding_mismatch,
                 },
             ),
         ),

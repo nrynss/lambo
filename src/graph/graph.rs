@@ -3005,10 +3005,7 @@ mod tests {
                 target.clone(),
             )
             .unwrap_err();
-        assert!(
-            err.to_string().contains("non-finite or has width"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("non-finite or has width"), "{err}");
 
         // Non-finite values would poison hybrid ranking silently.
         let err = g

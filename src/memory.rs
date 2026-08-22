@@ -242,6 +242,14 @@ pub struct MemoryStats {
     pub concept_count: usize,
     /// Concepts that have reached canonical status.
     pub canonical_count: usize,
+    /// Concepts carrying a vector in this session's stamped embedding space
+    /// (K2). Applied != embedded at session scale: canonization status says
+    /// nothing about whether a vector exists, so before K2 nothing answered
+    /// "how many of these concepts actually carry a vector?" — the gap behind
+    /// the 92/100 dogfood damage (8 concepts with NULL embeddings ranked
+    /// keyword-only and nobody could see it). `embedded_concepts ==
+    /// concept_count` is the healthy state; anything less is NULL rows.
+    pub embedded_concepts: usize,
     /// `MutationEpoch` — recall-cache key (spec §8).
     pub epoch: u64,
     /// Background daemon cycles completed since the session opened.
@@ -519,6 +527,12 @@ pub struct MemoryBuilder {
     embedder: Option<Arc<dyn Embedder>>,
     embedding: Option<EmbeddingContract>,
     allow_embedding_mismatch: bool,
+    /// K2. Crate-internal attach mode for the re-embed migration: load the
+    /// session WITHOUT the Level B contract check, because this caller is about
+    /// to rewrite every vector into the live space atomically (see
+    /// [`crate::graph::Graph::reembed_all`]). Set only by `lambo re-embed`;
+    /// never relabels anything.
+    reembed_mode: bool,
     config: Config,
     // Held as overrides rather than written straight into `config`, so
     // `.config(..)` and the named setters commute — calling them in either
@@ -582,6 +596,24 @@ impl MemoryBuilder {
     /// a hard error.
     pub fn allow_embedding_mismatch(mut self, allow: bool) -> Self {
         self.allow_embedding_mismatch = allow;
+        self
+    }
+
+    /// Attach WITHOUT the Level B contract check (`pub(crate)`, K2).
+    ///
+    /// A normal attach refuses a stored/live contract mismatch because two
+    /// model spaces in one session is exactly the corruption Level B exists to
+    /// prevent. The re-embed migration needs the OPPOSITE: it must attach a
+    /// session that carries an old contract and old-space vectors, because it
+    /// is about to rewrite every one of those vectors into the live space
+    /// atomically ([`crate::graph::Graph::reembed_all`]) and swap the contract
+    /// in the same flushed batch. Skipping the check here loads the session
+    /// as-is — old contract, old vectors — and nothing is relabelled.
+    ///
+    /// Only `lambo re-embed` sets this; it is deliberately unreachable from
+    /// outside the crate, so no ordinary caller can bypass the mismatch refusal.
+    pub(crate) fn reembed_mode(mut self, on: bool) -> Self {
+        self.reembed_mode = on;
         self
     }
 
@@ -839,7 +871,17 @@ impl MemoryBuilder {
             // (2) Level B / STORE-1 — the model-mixing refusal's second half.
             // `None` on a fresh session is not a mismatch — it is an unstamped
             // space, so stamp it.
-            match session_embedding_compatibility(graph.embedding(), &embedding) {
+            //
+            // K2: reembed_mode (the `lambo re-embed` migration) skips this
+            // entire check and loads the session AS-IS — old contract, old
+            // vectors. That is safe precisely because that caller immediately
+            // rewrites every concept vector into the live space and swaps the
+            // contract in one ordered batch (`Graph::reembed_all`), which the
+            // final flush persists transactionally; nothing is ever relabelled.
+            // Without the skip, build_attach would refuse the very attach the
+            // migration exists to perform (cross-kind + vectors present).
+            if !self.reembed_mode {
+                match session_embedding_compatibility(graph.embedding(), &embedding) {
                 SessionEmbeddingCompatibility::Unrecorded => {
                     graph.stamp_embedding(embedding.clone())?;
                 }
@@ -874,16 +916,17 @@ impl MemoryBuilder {
                     // would otherwise hit the same E2E-1 refusal on its first
                     // write, and the startup-error path below releases the
                     // freshly acquired lease.
-                    let relabel = graph.drain_log();
-                    if !relabel.mutations.is_empty() {
-                        final_flush(store.as_ref(), &relabel, Some(lease_token))
-                            .await
-                            .map_err(|e| {
-                                LamboError::Store(StoreError::Backend(format!(
-                                    "session {session}: the operator override relabel could not \
-                                     be made durable before the first write: {e}"
-                                )))
-                            })?;
+                        let relabel = graph.drain_log();
+                        if !relabel.mutations.is_empty() {
+                            final_flush(store.as_ref(), &relabel, Some(lease_token))
+                                .await
+                                .map_err(|e| {
+                                    LamboError::Store(StoreError::Backend(format!(
+                                        "session {session}: the operator override relabel could not \
+                                         be made durable before the first write: {e}"
+                                    )))
+                                })?;
+                        }
                     }
                 }
             }
@@ -1935,6 +1978,7 @@ impl Memory {
             .concepts()
             .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
             .count();
+        let embedded_concepts = g.concepts().filter(|c| c.embedding.is_some()).count();
         let stats = MemoryStats {
             session: self.session.clone(),
             agent: self.agent.clone(),
@@ -1947,6 +1991,7 @@ impl Memory {
             edge_count: g.edge_count(),
             concept_count,
             canonical_count,
+            embedded_concepts,
             epoch: g.epoch(),
             daemon_cycles: self.daemon.cycles(),
             canonization_cycles: self.canon.cycles(),
