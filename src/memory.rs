@@ -1132,6 +1132,7 @@ impl MemoryBuilder {
 ///     produces: &["migrations/003.sql"],
 ///     depends_on: &["user schema"],
 ///     modifies: &[],
+///     event_time: None,
 /// })?;
 ///
 /// mem.demote("The caching layer was the bottleneck.", "chunk-1")?;
