@@ -227,14 +227,49 @@ C2 review should kill a flush-stamp substitution).
    demonstrably not run after the commit that changed the bind-limit constants. The
    remediation round should state which gates were executed for the fix commit.
 
-## Closures
-
-(Empty — for the remediation round to fill.)
+## Round 1 closures
 
 | Finding | Closure (commit + evidence) |
 | --- | --- |
-| D-R1-1 | |
-| D-R1-2 | |
-| D-R1-3 | |
-| D-R1-4 | |
-| D-R1-5 | |
+| D-R1-1 | `ec15d9e` — `BULK_LIMITS.edges` 100 → 99 (99 × 10 = 990 ≤ 999) and the
+  stale prose above the constant rewritten to the same arithmetic
+  (`store/sqlite.rs:262-274`). Verified post-fix: both sqlite+fixtures clippy gates
+  compile clean and the full `cargo test --features store-sqlite,fixtures` suite passes
+  (1047 passed, 0 failed) — confirming the reviewer's scratch-clone finding that nothing
+  else hid behind the compile error. Gates run for the fix commit: all six listed below. |
+| D-R1-2 | `4473c1a` — sqlite: `event_time_survives_the_flush_load_round_trip` flushes an
+  interaction and an edge stamped with an about-time distinct from `created_at`
+  (`1999-12-31T23:59:59Z` vs `2026-01-02T03:04:05Z`, so a mis-bind cannot pass), loads,
+  asserts survival, plus `None` companions asserting they stay `None`. Cockroach: no live
+  cluster per the Operator-leg items, so the SQL-shape contract is pinned instead —
+  `event_time_rides_the_upsert_and_select_shape` asserts the generated upserts bind
+  event_time as the last of 7/10 columns, `DO UPDATE SET` re-stamps it, and both SELECTs
+  read it back by name. |
+| D-R1-3 | `5c115cc` — `derive_async_as` now takes `Option<DateTime<Utc>>` and opens its
+  interaction via `begin_interaction_full` at submit time (the same seam
+  `record_action_async_as` already used), so every edge the queued derive creates inherits
+  the stamp; no `submit_derive` payload change was needed because the interaction is
+  pre-opened before queueing. Existing call sites pass `None` (MCP derive
+  `mcp/server.rs`, three in-crate tests). The dead-agent worktree hunk that dropped
+  `.collect::<Vec<_>>()` from the prompt builder was found and repaired.
+  `begin_interaction_as` lost its last caller and was removed (clean cutover). §1 of
+  `canon/event_time.rs` now describes this real mechanism instead of the impossible
+  "open through the sync seam first" workaround. |
+| D-R1-4 | `3a2c0d3` — `reinforcement_preserves_the_original_edge_event_time` (graph-tier
+  test): an edge written under a historical about-time is reinforced from a differently-
+  timed turn; the test asserts the original `event_time` survives while weight bump,
+  reinforcement count, and `last_reinforced` move exactly as the arm specifies. |
+| D-R1-5 | `1d30eee` — docs only, as the finding allows: `separated_session_count`'s doc
+  now states plainly that it has **no production caller by design**, names
+  `dev-diary/lambo-for-mooshik/C-solopolicy.md` as the consuming spec, and records the
+  mutant C2's tests must kill (flush-stamp substitution for `about_time`). No fake
+  callers were added. |
+
+Gates at closure HEAD (all green):
+
+- `cargo fmt --all && cargo fmt --all -- --check` — pass.
+- `cargo clippy --all-targets -- -D warnings` — pass.
+- `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` — pass.
+- `cargo clippy --all-targets --features store-cockroach -- -D warnings` — pass.
+- `cargo test` — pass (16 suites, 0 failures).
+- `cargo test --features store-sqlite,fixtures` — pass (1047 passed, 0 failed).
