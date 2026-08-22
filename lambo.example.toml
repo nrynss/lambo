@@ -46,6 +46,26 @@ url = "http://127.0.0.1:8080"
 # Optional model id sent to llama.cpp (empty => server default). Part of EmbeddingContract
 # (kind+model+dim) — do not change mid-session without re-embedding.
 # model = "bge-m3-FP16"
+#
+# In-crate candle BGE-M3 (kind = "candle", feature embed-candle): embeds locally, no
+# llama.cpp server. Weights fetch from hf-hub on first use and cache under the
+# hub cache; they are NEVER committed to the repo. The stamped EmbeddingContract
+# model is the loaded artifact's identity (repo@revision + weight sha256 prefix),
+# not the strings below. Migrating an existing session to candle:
+#   stop serve; LAMBO_EMBEDDER=candle lambo re-embed --session <s> --agent <a>
+# kind = "candle"
+# Device: auto (default) resolves Metal on Apple silicon / CUDA elsewhere and is
+# a HARD ERROR without one — CPU is never a silent default. Pin explicitly:
+# device = "cpu"          # auto | cpu | metal | cuda
+# hf-hub weights source overrides (defaults: the published f16 safetensors):
+# repo = "BAAI/bge-m3"
+# revision = "main"
+# weights_file = "model.safetensors"
+# Offline: never touch the network; fail loudly if weights are not cached.
+# offline = true
+# Or point at a local weights dir (config.json + tokenizer.json + weight file);
+# bypasses hf-hub entirely:
+# weights_dir = "/srv/lambo/bge-m3-f16"
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #

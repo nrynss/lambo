@@ -350,3 +350,65 @@ contract stamps a real model identity; `lambo re-embed` migrates a store between
 and repairs NULL-embedding rows, with coverage visible in `lambo_stats`; the dogfood rig
 runs on it with its full history intact; CI carries the compile row; and the cold-start
 number is documented where an operator wiring a stdio client will read it.
+
+---
+
+### K2 implemented (2026-08-23)
+
+What landed on `k2-candle`:
+
+* **Adapter** (`src/embed/candle.rs`, feature `embed-candle`): in-crate BGE-M3 via
+  candle-transformers' native `XLMRobertaModel`, CLS pool + L2 normalize, registry arm
+  (`kind = "candle"`), config keys on `EmbedderConfig` (`device`, `repo`, `revision`,
+  `weights_file`, `offline`, `weights_dir`). Layer features `embed-candle-metal` /
+  `-accelerate` / `-cuda` opt the accelerator backends into the build.
+* **Device resolution**: pure, unit-tested `resolve_device`. `auto` (default) resolves
+  **Metal on Apple silicon — a hard requirement there** (a Mac without a working Metal
+  device is an error, not a CPU fallback) and CUDA elsewhere; with no accelerator and no
+  explicit pin it is a hard resolve-time error. CPU is only ever an *explicit*
+  `device = "cpu"` choice (~3% of the llama.cpp path's throughput; the refusal message
+  names that number). f16 on GPU, f32 on CPU — same parity, ~half the resident weights
+  on Metal/CUDA.
+* **Batching coalescer**: `Embedder::embed` stays single-text/async on the trait, but a
+  dedicated thread owns the model and drains a debounced queue into one padded forward
+  pass per batch (K1's finding: the accelerator advantage is batch throughput). The
+  tokenizer pads to the batch max with the model's pad token (1 for XLM-R — tokenizers'
+  default 0 silently shifts every position; K1's "plausible but wrong" class).
+* **Identity stamping**: the contract's `model` field carries the loaded artifact's
+  identity — canonical repo@revision plus the weight file's sha256 prefix — not a config
+  string, so a kind/dim match can no longer hide a quantization swap. The shipped
+  artifact hash is machine-checked at load.
+* **Eager load**: weights load at embedder construction, not first embed. Rationale: the
+  alternative defers a multi-second, potentially failing step into the write path, where
+  J3 taught us a slow/failing embedder turns into silent NULL rows or half-applied
+  writes. Fail at startup, loudly, or don't serve.
+* **`lambo re-embed`** (`src/cli/re_embed.rs`) + `Graph::reembed_all`: the migration verb.
+  It attaches through a crate-private `reembed_mode` builder flag that skips the Level B
+  contract check (loading the session as-is: old contract, old vectors), embeds EVERY
+  concept content outside any lock (all-or-nothing: any embed failure aborts before the
+  graph is touched), then appends one ordered batch — every `UpsertNode` first, the
+  trailing `SetEmbedding` last. **Atomicity argument:** each store `flush(batch)` is one
+  transaction (BEGIN..COMMIT around the plan steps on SQLite; equivalent on Cockroach);
+  the graph write lock makes reembed_all's append sequence atomic against the flush
+  task's `drain_log`; and within a flushed batch the plan emits upserts before the
+  SetEmbedding barrier. So the durable session goes old-consistent → new-consistent in
+  one commit, no mixed-space state is ever observable, and a crash mid-migration leaves
+  old contract + old vectors together — which is consistent. Coverage before → after is
+  reported; `--allow-embedding-mismatch` is refused outright (re-embed IS the migration;
+  the relabel override would leave old-space vectors mislabelled).
+* **Coverage counter**: `embedded_concepts` on `MemoryStats`, surfaced as
+  `embedded_concepts` / `total_concepts` in `lambo_stats`, `embedded=NN/total=NN` in
+  `lambo stats` and the stats summary text. This is the counter that would have made the
+  92/100 dogfood damage visible on day one.
+* **CI**: a `candle` row compiles and unit-tests `--features embed-candle` — weightless,
+  offline, no accelerator features; live weight-loading tests stay `#[ignore]`d.
+
+**The operator invocation for the migration act** (not yet run — the dogfood session has
+NOT been migrated by this work):
+
+```sh
+# stop the serve process holding the session first (single-writer lease)
+LAMBO_EMBEDDER=candle lambo re-embed --session <dogfood> --agent <operator>
+# coverage proof:
+lambo stats --session <dogfood>   # expect embedded=N/N under kind=candle
+```
