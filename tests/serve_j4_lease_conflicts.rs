@@ -36,6 +36,13 @@ fn sigterm(pid: u32) {
         .status();
 }
 
+fn sigkill(pid: u32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status();
+}
+
 fn read_response(reader_rx: &mpsc::Receiver<String>, id: u64) -> String {
     let needle = format!("\"id\": {id}");
     let needle_compact = format!("\"id\":{id}");
@@ -400,6 +407,151 @@ fn a_proxying_serve_writes_a_proxying_line() {
     sigterm(b_pid);
     let _ = a.wait();
     let _ = b.wait();
+    let _ = reader.join();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **JE2E-3.** A holder that dies while the proxy is **idle** must still leave
+/// the degraded-state artifact.
+///
+/// The `proxying_stopped` line was appended only inside `if lost > 0`, so it
+/// fired for the rarer shape — a call in flight at the death — and booked
+/// nothing at all for the commoner one. Most of a session is *between* calls,
+/// so most holder deaths land on an idle proxy: the client's next N calls then
+/// failed `-32001`, the agent had no memory for up to 45 s, and the ledger's
+/// whole story was one `proxying` line. Exactly the "why did this agent have no
+/// memory" question J4 exists to answer, unanswerable from artifacts on the
+/// path it most often happens on. No test covered `proxying_stopped` at all.
+///
+/// The holder is `kill -9`'d rather than SIGTERM'd, so the socket closes with
+/// no graceful handshake — the real shape of a lost holder — and the proxy's
+/// stdin is deliberately left silent, so nothing but the connection ending can
+/// drive the line.
+#[test]
+fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
+    let dir = std::env::temp_dir().join(format!(
+        "lambo-j4-idle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let db = dir.join("lease.sqlite");
+    let ledger = dir.join("idle.jsonl");
+    let cfg = dir.join("lambo.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
+            db.display()
+        ),
+    )
+    .expect("write config");
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let store = SqliteStore::connect(db.to_str().unwrap()).expect("connect");
+        store.init_schema().await.expect("init_schema");
+    });
+
+    // Holder A on stdio.
+    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger);
+    let a_pid = a.id();
+    let mut a: Child = a;
+    let a_stdout = a.stdout.take().expect("A stdout");
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(a_stdout).lines();
+        while let Some(Ok(line)) = lines.next() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut a_stdin = a.stdin.take().expect("A stdin");
+    write_frame(
+        &mut a_stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"j4-test","version":"1"}}}"#,
+    );
+    assert!(read_response(&rx, 1).contains("\"serverInfo\""), "A holder");
+
+    // Proxy B: refused, degrades to a proxy, and then sits IDLE. Its own stdin
+    // is never written to, so no call is ever in flight.
+    let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger);
+    let b_pid = b.id();
+    wait_ledger(
+        &ledger,
+        "B's proxying line (it is forwarding before the holder dies)",
+        Duration::from_secs(10),
+        |ls| {
+            ls.iter().any(|l| {
+                l["kind"] == "lease" && l["event"] == "proxying" && l["agent_id"] == "agent-b"
+            })
+        },
+    );
+
+    // The holder dies uncleanly, with nothing in flight.
+    sigkill(a_pid);
+    let _ = a.wait();
+
+    let lines = wait_ledger(
+        &ledger,
+        "the idle proxy's proxying_stopped line",
+        Duration::from_secs(15),
+        |ls| {
+            ls.iter().any(|l| {
+                l["kind"] == "lease"
+                    && l["event"] == "proxying_stopped"
+                    && l["agent_id"] == "agent-b"
+            })
+        },
+    );
+
+    let stopped = lines
+        .iter()
+        .find(|l| l["kind"] == "lease" && l["event"] == "proxying_stopped")
+        .expect("proxying_stopped line");
+    assert_eq!(stopped["side"], "loser");
+    assert_eq!(
+        stopped["lost"], 0,
+        "nothing was in flight — which is precisely why the old `lost > 0` guard \
+         booked nothing here: {stopped:?}"
+    );
+    // The episode is bracketed: a `proxying` line opened it, this one closes it.
+    // That pair is what makes "how long did this client have no memory" a
+    // question the ledger can answer.
+    let opened = lines
+        .iter()
+        .position(|l| l["kind"] == "lease" && l["event"] == "proxying")
+        .expect("the episode's opening line");
+    let closed = lines
+        .iter()
+        .position(|l| l["kind"] == "lease" && l["event"] == "proxying_stopped")
+        .expect("the episode's closing line");
+    assert!(
+        opened < closed,
+        "the degradation episode opens before it closes: {lines:?}"
+    );
+
+    // Exactly one line per degradation episode, not one per retry.
+    let episodes = lines
+        .iter()
+        .filter(|l| l["kind"] == "lease" && l["event"] == "proxying_stopped")
+        .count();
+    assert_eq!(
+        episodes, 1,
+        "one holder death is one episode: {:?}",
+        lines
+            .iter()
+            .filter(|l| l["kind"] == "lease")
+            .collect::<Vec<_>>()
+    );
+
+    sigterm(b_pid);
+    let _ = b.wait();
+    drop(a_stdin);
     let _ = reader.join();
     let _ = std::fs::remove_dir_all(&dir);
 }

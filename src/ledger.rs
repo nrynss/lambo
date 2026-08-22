@@ -591,9 +591,16 @@ pub fn startup_line(session: &str, agent: &str, transport: &str) -> Value {
 /// "From both sides" means exactly this: a refused lease acquisition produces
 /// two lines — the **refuser** (the serve that lost, which writes `refused`
 /// while it still has a process to write from) and the **holder** (which
-/// records the refused takeover it witnessed). A proxying serve writes
-/// `proxying` when it starts forwarding and `proxying_stopped` when the holder
-/// it forwarded to stops answering.
+/// records the refused takeover it witnessed).
+///
+/// A proxying serve writes `proxying` when it starts forwarding — on its first
+/// dial and on every reconnect — and `proxying_stopped` when the connection it
+/// was forwarding over ends. Those two **bracket a degradation episode**: the
+/// window between them is the window in which that client had no memory, which
+/// is the question J4 exists to answer. One pair per episode, never one line
+/// per retry (JE2E-3); `proxying_stopped` carries `lost`, the calls that were
+/// in flight, which is commonly **0** because the commonest holder death is one
+/// that happens while the proxy is idle.
 ///
 /// Fields: `event` is one of `refused` | `proxying` | `proxying_stopped` |
 /// `refused_takeover`; `side` is `loser` or `holder`. `holder` names the lease

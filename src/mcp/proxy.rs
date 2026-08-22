@@ -1337,6 +1337,25 @@ impl HubProxy {
                                     derived = %self.endpoint.path().display(),
                                     "lambo serve: proxy reconnected to the current session holder"
                                 );
+                                // JE2E-3: this closes the degradation episode
+                                // the `proxying_stopped` line opened. Without
+                                // it, two consecutive `proxying_stopped` lines
+                                // are ambiguous — an operator cannot tell one
+                                // long outage from two short ones — and the
+                                // recovery, which is the thing J2 bought, has
+                                // no artifact at all. Same event and same line
+                                // as the first dial's: this proxy is forwarding
+                                // to a holder again, and `holder` names which.
+                                if let Some(ledger) = &self.ledger {
+                                    ledger.append(&crate::ledger::lease_line(
+                                        "proxying",
+                                        "loser",
+                                        &self.session.to_string(),
+                                        &self.agent,
+                                        &dialled.display().to_string(),
+                                        Some(serde_json::json!({ "generation": generation })),
+                                    ));
+                                }
                                 // Whatever the new holder said before answering
                                 // the replayed handshake is the client's traffic,
                                 // not ours to eat (J2-R1-12).
@@ -1344,6 +1363,12 @@ impl HubProxy {
                                     Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
                                 }
                             }
+                            // JE2E-3: deliberately no ledger line. The episode
+                            // this dial is failing inside was already booked by
+                            // the `proxying_stopped` line at the `Closed` that
+                            // started it, and a line here would be one per
+                            // retry — N lines for one outage, with no way to
+                            // tell them from N outages.
                             Dialled::Failed(e) => tracing::warn!(
                                 error = %e,
                                 "lambo serve: proxy cannot reach a session holder — failing this \
@@ -1445,18 +1470,6 @@ impl HubProxy {
                             // still the current one.
                             let lost = Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
                             if lost > 0 {
-                                // J4: "proxying to a holder that stopped
-                                // answering" — the degraded-state artifact.
-                                if let Some(ledger) = &self.ledger {
-                                    ledger.append(&crate::ledger::lease_line(
-                                        "proxying_stopped",
-                                        "loser",
-                                        &self.session.to_string(),
-                                        &self.agent,
-                                        &self.endpoint.path().display().to_string(),
-                                        Some(serde_json::json!({ "lost": lost })),
-                                    ));
-                                }
                                 tracing::warn!(
                                     generation = gen,
                                     lost,
@@ -1467,6 +1480,46 @@ impl HubProxy {
                                 );
                             }
                             if gen == generation {
+                                // J4 / **JE2E-3: the artifact is booked HERE,
+                                // on the current connection ending, not inside
+                                // `lost > 0`.**
+                                //
+                                // The shape chosen, stated where it is appended:
+                                // **one line per degradation episode**, and the
+                                // episode is "this proxy has no holder to
+                                // forward to". It begins exactly when the
+                                // current connection ends and it ends at the
+                                // `proxying` line the reconnect books, so the
+                                // pair brackets the window in which this
+                                // client had no memory.
+                                //
+                                // The rejected alternatives are both "per
+                                // retry": booking on each failed re-dial writes
+                                // one line per call the client makes into a
+                                // dead hub, and booking on any generation's
+                                // `Closed` writes a second line for a
+                                // connection already superseded — a
+                                // *superseded* connection ending is the tail of
+                                // an episode already booked, not a new one.
+                                //
+                                // `lost` stays as detail and is now often 0,
+                                // which is the whole finding: the commonest
+                                // degraded shape is a holder dying while the
+                                // proxy is IDLE (most of a session is between
+                                // calls), and under `lost > 0` that booked
+                                // nothing at all — leaving "why did this agent
+                                // have no memory" unanswerable from artifacts
+                                // on the very path J4 exists to answer it on.
+                                if let Some(ledger) = &self.ledger {
+                                    ledger.append(&crate::ledger::lease_line(
+                                        "proxying_stopped",
+                                        "loser",
+                                        &self.session.to_string(),
+                                        &self.agent,
+                                        &self.endpoint.path().display().to_string(),
+                                        Some(serde_json::json!({ "lost": lost })),
+                                    ));
+                                }
                                 tracing::warn!(
                                     generation = gen,
                                     "lambo serve: the session holder closed the connection — the \
