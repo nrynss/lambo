@@ -96,10 +96,39 @@ skew at zero candidate divergence.
 
 ## Done when
 
-- [ ] H1 harness runs the full grid against SQLite + memory-oracle anywhere, with exact
-      agreement asserted (this much runs in normal CI)
+- [x] H1 harness runs the full grid against SQLite + memory-oracle anywhere, with exact
+      agreement asserted (this much runs in normal CI).
+      `store::sqlite::tests::h1_cross_store_parity::h1_sqlite_and_memory_oracle_agree_exactly`
+      (`src/store/sqlite.rs`) seeds both committed fixture graphs plus a stamped contract and
+      `synthetic_unit_vector` — the same probe × limit grid as F's agreement matrix, reused
+      rather than re-derived — into `SqliteStore` and into a second, independent `GraphStore`
+      (`MemoryOracleStore`, an exact-cosine wrapper over `MemoryStore`; reimplemented rather
+      than reusing `crate::memory`'s private `VectorSearchStore`, same precedent F's own
+      `cosine_oracle` doc comment records for the same reason). Every probe × limit pair is
+      asserted bit-for-bit equal (`assert!(pair.exact_match, ...)`) — not merely reported —
+      per the attribution rule: two exact-scan adapters disagreeing is adapter skew, a bug.
+      Not `#[ignore]`d, so it runs in the same CI row F's matrix does
+      (`--features store-sqlite,fixtures`). A best-effort second leg (`run_real_embedder_leg`)
+      additionally seeds from the committed `evidence/mooshik-f-sqlite-bge/f-bge.db` corpus
+      (real BGE-M3 vectors) when present, skipping cleanly if not — the required evidence is
+      the synthetic leg; the real-embedder leg is the "optionally" in "H1 — the harness".
+      Every assertion was mutation-checked (perturb, confirm red, revert): reversing the
+      oracle's sort direction, a 1% order-preserving score skew, and an off-by-one truncation
+      each independently turned the corresponding measure (rank/candidate-set, score-only,
+      candidate-set-size) red; a fourth check caught a real bug in the harness itself — the
+      matrix-dimensions assertion was originally `>=` and stayed green when a probe/limit was
+      dropped from the synthetic leg, because the optional real-embedder leg's extra pairs
+      papered over the drop. Fixed to assert the synthetic leg's own count exactly.
+      Report: `evidence/mooshik-h1-cross-store-parity/report.json` (schema documented on
+      `ParityReport` in the harness module and in the evidence dir's README).
 - [ ] H2 evidence committed: live Cockroach run, skew zero on the score scale, ANN
       divergence stated with numbers against the C-SPANN envelope
 - [ ] F's Done-when box 5 flipped from `[~]` to done, citing H2's evidence
-- [ ] B3's parity box references this harness (note added to B doc at H1 landing)
-- [ ] The report format is stable enough that H2 and H3 evidence are directly comparable
+- [x] B3's parity box references this harness (note added to B doc at H1 landing)
+- [x] The report format is stable enough that H2 and H3 evidence are directly comparable.
+      `ParityReport` names adapters by free-text string, never by enum variant tied to a
+      backend, so H2/H3 add rows (new `adapters` entries, new `pairs` entries) rather than new
+      fields; `index_present` is a plain `bool` any backend's index-detection probe can set the
+      same way; and every score in `pairs` is already on the shared `1 − d²/2 ≡ cosine` scale
+      before it reaches the report, because that conversion happens inside each adapter's own
+      `vector_candidates_checked` rather than in the harness.

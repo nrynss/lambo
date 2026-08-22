@@ -159,6 +159,9 @@ output contract (documented under F) is what makes `1 − d²/2 ≡ cosine` hold
 reasoning across, not just the formula. **H3 is this row's verification**: the H harness's
 score-agreement measure catches a fumbled conversion as systematic score skew at zero
 candidate divergence — B3's parity box *is* H3, not a re-specified ad-hoc check.
+(H1 landed: `src/store/sqlite.rs`'s `h1_cross_store_parity` test module and its
+`evidence/mooshik-h1-cross-store-parity/` report — extend `build_adapters` there for the
+Postgres leg rather than writing a second harness; see H-cross-store-parity.md.)
 
 Preserve, unchanged and shared in `PgStore`: the fencing token on `flush` (a write below the
 session lease's `current_token` refused with `StaleWrite`, never dropped), idempotent upsert
