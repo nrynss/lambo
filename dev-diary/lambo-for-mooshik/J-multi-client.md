@@ -666,7 +666,10 @@ configuration change, both with full read, full write and a usable lock. The
   installed for **liveness** — it is how the pump's `select!` learns to stop —
   and it is polled first, so this cannot make the process SIGTERM-immune the way
   arming above the lease-taking attach would — which under J2 would mean arming
-  above `resolve_role`, a loop allowed to run 50 seconds by design (J2-R1-7). `serve_pre_handshake_durability`
+  above `resolve_role`, a loop allowed to run 50 seconds by design (J2-R1-7) —
+  **20 seconds since J2-L2; this sentence is J2-era and the figure was never
+  re-swept here** (JE2E-R2-6b). The argument is unchanged at the true number and
+  is re-made at it in `serve.rs`'s arming comment. `serve_pre_handshake_durability`
   gained the proxy case with **its own sync point**, `"proxying to the session
   holder"`, precisely because the review was right that the loose
   `"session attached"` matcher never fires for a proxy — anchoring on it would
@@ -1261,7 +1264,7 @@ defect — this is instance four, five and six).** Per file, including the nulls
 | --- | --- | --- |
 | `src/mcp/proxy.rs` | every numeric claim in the arm-body neighbourhood, re-derived from the constants | 4 corrected: the `2 × CONNECT_BUDGET` bound itself; `connect`'s own bound (`CONNECT_BUDGET + CONNECT_RETRY` + one attempt ≈ 2.1s, not 2.0s); `run`'s "fails honestly and **immediately**", which rounded three different numbers to one word (now written out — µs for a lost in-flight call, ≈2.1s for a dial onto a refusing socket, `DIAL_BUDGET` for the whole dial); "an honest error in **microseconds**", where the live measurement is 2.6 ms |
 | `src/mcp/proxy.rs` | premises invalidated by the race | 1 corrected: `Handshake::replay`'s "so the shutdown branch cannot be polled while this runs" — the premise the budgets-only argument rested on, now false and replaced by what is true |
-| `src/mcp/serve.rs` | the election's distribution claim and everything leaning on it | **2 corrected.** `ELECTION_BUDGET`'s parenthesis and its conclusion; and `ELECTION_SLACK`'s "absorbs store-clock skew and **one missed refresh interval**" — a second false-stated reason found by the sweep and not by the review. 5s is not one refresh interval (`LEASE_HEARTBEAT_INTERVAL` is 15s, three times it), and a missed interval needs no absorbing: a holder gets three chances inside one TTL and is *supposed* to lose the lease if it misses all of them. What 5s actually covers is the race between reading the row and acting on it. The `resolve_role` "what it waits for" section and the 31.96s / 20s / 50s figures re-checked and **still true** |
+| `src/mcp/serve.rs` | the election's distribution claim and everything leaning on it | **2 corrected.** `ELECTION_BUDGET`'s parenthesis and its conclusion; and `ELECTION_SLACK`'s "absorbs store-clock skew and **one missed refresh interval**" — a second false-stated reason found by the sweep and not by the review. 5s is not one refresh interval (`LEASE_HEARTBEAT_INTERVAL` is 15s, three times it), and a missed interval needs no absorbing: a holder gets three chances inside one TTL and is *supposed* to lose the lease if it misses all of them. What 5s actually covers is the race between reading the row and acting on it. The `resolve_role` "what it waits for" section and the 31.96s / 20s / 50s figures re-checked and **still true** — *and that last clause was **wrong**: two `serve.rs` sites still said the election runs "50 seconds by design", which JE2E-7 found and corrected. This row is the reason an E2E pass re-runs an old round's sweep against today's tree rather than trusting its verdict (JE2E-R2-6b)* |
 | `src/mcp/endpoint.rs` | the canonicalisation rule's four bullets | 1 narrowed (symlinks); the not-exists, neither-resolves and URI bullets re-read and **still true** |
 | `src/memory.rs` | the "byte-identical to what `build` returns" claim, after extracting the clause to a const | **still true** — the const preserves the bytes exactly; nothing else stale |
 | `tests/serve_proxy_multi_client.rs` | test docstrings whose measured numbers my edits touch | **nothing** — the 50s / 31.96s / 45s figures are all about the election, which did not change |
@@ -2651,7 +2654,7 @@ two J2 rounds did not. `rg` over `50 seconds`, `50s`,
 | Site | Claim | Verdict |
 | --- | --- | --- |
 | `serve.rs` arming comment | "`resolve_role` is a loop that can legitimately run for `LEASE_TTL + ELECTION_SLACK` = **50 seconds**" | **STALE** — J2-L2 cut it to `ELECTION_BUDGET` = 20s. Restated at 20s and the argument **re-made** at the true number, which is the only thing that makes restating it worthwhile: 20s of deliberate deafness against a ~1.1 ms window in a process holding no lease and no tail is four orders of magnitude, and the 20s is not a rare worst case (the probe's dead-holder election took 10.2s) |
-| `serve.rs` `shutdown_signal` docstring | "that loop is allowed to run for 50 seconds by design" | **STALE** — same correction, and its unguarded-work list now names the pre-lease group J4 added |
+| `serve.rs` `shutdown_signal` docstring | "that loop is allowed to run for 50 seconds by design" | **STALE** — same correction, and its unguarded-work list now names the pre-lease group J4 added. *(For one commit this row named a site that had moved: the JE2E-4 remediation inserted `wind_down` between this docstring and `fn shutdown_signal`, so the block documented the wrapper and `shutdown_signal` had no docs at all. Split back in the round-2 remediation — JE2E-R2-1 — and the row is accurate again.)* |
 | `serve.rs` `ELECTION_BUDGET` / `ELECTION_SLACK` / `waiting_fits` docs | 20s, 15s, the [30,45] derivation | clean — these are where the true number was already written, in the same file, which is what made the two stale sites self-contradicting |
 | `proxy.rs:168`, `proxy.rs:2254` | "worst case ≈ 50s" | clean — a **store** timeout (cockroach's 20s statement behind sqlx's 30s pool acquire), a different family that happens to share a number |
 | `tests/serve_proxy_multi_client.rs:1122, :1172` | "the election waited 50s", "the pre-fix behaviour was 50s" | clean — past tense, accurate history of what J2-L2 measured and removed |
@@ -2769,7 +2772,7 @@ restores no metric, and narrowing the claim would have left `dedup_rate.py` and
 | **JE2E-2** | P2 | `unlink_if_ours` — licensed by the socket's `(dev, ino)` captured at bind, not by the path and not by the lease |
 | **JE2E-3** | P2 | `proxying_stopped` on any `Closed` of the current generation, `lost` as detail; the reconnect books a `proxying` line so the pair brackets an episode |
 | **JE2E-4** | P3→behaviour | `wind_down` races the fence against the signal; ruling above |
-| **JE2E-5** | P2 | All five consumers moved; `verify.sh` 46 → 55 ok |
+| **JE2E-5** | P2 | All five consumers moved; `verify.sh` 46 → 56 ok |
 | **JE2E-6** | P2 | The ordering sweep J4 owed, recorded in §J4's as-built: 85 hits, 5 stale |
 | **JE2E-7** | P3 | Both sites restated at `ELECTION_BUDGET` = 20s, argument re-made at the true number |
 | **JE2E-8** | P3 | The duplicate J4 box deleted, J5's ticked with its evidence |
@@ -2908,6 +2911,118 @@ completion join (three ways), and the receipt's error string.
 repo root (`r2-shape.stderr`, `r2-shape2.stderr`, J2-round-2 leftovers from
 2026-08-20). They are not present in this remediation's worktree and were left
 for the operator's own checkout.
+
+## J E2E round-2 remediation
+
+Reviewed **REQUEST_CHANGES** at the merged round-1 head — **no P1, no P2**
+([adve-review-mooshik-J-e2e-round2.md](../adversarial-review/adve-review-mooshik-J-e2e-round2.md)).
+All twelve round-1 closures verified honest under mutation, including at the
+release binary. The seven P3s are all defects in the round-1 remediation's *own
+new material*, which is the useful thing about this round: a remediation is code
+like any other, and this one carried a fused docstring, a test-blind centrepiece,
+two absolutes with real residuals, a missing artifact on the path it had just
+created, register slips in its own record, and a second fixture vacuity beside
+the one it had already confessed.
+
+All seven closed; nothing carried. Ruled post-merge cleanup by the operator.
+
+| # | Closed by |
+| --- | --- |
+| **R2-1** | The fused `///` block split: the Ctrl-C / eager-registration paragraphs are back on `shutdown_signal`, `wind_down` has its own summary, and the diary sweep row records the move and its correction |
+| **R2-2** | `HolderShutdown` — a newtype with one constructor, taken by both transports, so severing the wiring is a **compile error**; plus a composition test that drives a real transport |
+| **R2-3** | Identity widened to `(dev, ino, ctime, ctime_nsec)`; the "never … by construction" claim softened to name the one window that remains |
+| **R2-4** | `kind:"lease", event:"lost", side:"holder"` appended in the fence arm before the transport is cancelled |
+| **R2-5** | The read starts `REFUSAL_OVERLAP_SECS` below the cursor, dedup keyed on `(refused_by, at)` and pruned to that window; the residual stated at its own magnitude |
+| **R2-6** | 55 → 56; `:669` and `:1264` annotated in place; the sweep row records what moved under it |
+| **R2-7** | A receipt whose *terminal* completion is `deferred` carrying absurd counts |
+
+**R2-2 is the round's point, and a test was the wrong answer to it.** The
+reviewer's finding is that severing one expression — which future `serve` hands
+to the transport — left 1016 tests green while every fenced holder went back to
+living forever. A test pins one *spelling* of that line, and the failure mode the
+finding names is a refactor re-spelling it. So the primary closure is a type:
+[`HolderShutdown`] has exactly one constructor, `holder_shutdown`, which always
+wraps `wind_down`, and both transports take `Pin<&mut HolderShutdown>` instead of
+a generic. The reviewer's own mutation is now a **compile error at both call
+sites** rather than a green suite. The test closes the other half — that the
+future the constructor builds actually cancels a *running* transport — by
+driving `serve_http_bounded` on an ephemeral port with a handler that never
+returns, so nothing but the shutdown can end it. It carries R2-4's assertion too,
+being the one place with a ledger, a fence and the exit path together.
+
+**Declined, with the gap stated:** the binary-level self-heal test (two real
+serves, the holder wedged past its TTL, the successor winning, the ex-holder
+exiting, the respawn arriving as a proxy). It needs a real 45 s expiry plus an
+election, cannot use a paused clock, and would be the slowest test in the tree by
+an order of magnitude. What stays unproven: that a *real client* respawns a serve
+which exits non-zero. That is client behaviour, and it is the same assumption the
+J2 outage story already rests on.
+
+**R2-3 — both halves, because the two holes are not the same kind.** The
+recycling hole is closable and is closed: `(dev, ino)` recycles (ext4 allocates
+first-free), so the identity gained the inode's change time, and a recreated
+inode cannot carry a predecessor's `ctime`. `ctime` rather than birth time
+deliberately — `Metadata::created()` is fallible on Linux, so an identity built
+on it is `Option`-shaped exactly where the guarantee is wanted. The
+capture-instant hole is **not** closable and is now named instead of claimed
+away: `bound` comes from a path `stat` just after `bind`, and `fstat` on the
+listener cannot substitute (for a unix socket it reports the socket object's
+inode, not the path's). Every way the comparison can be wrong fails toward *not
+deleting*, and a socket wrongly left behind is cleared by the next `bind` under
+the lease's licence.
+
+**And the R2-3 fixture failed the same test the round-1 fixture failed.** Written
+first as create → remove → recreate, it passed with the `ctime` field zeroed —
+because APFS and tmpfs, the two default endpoint directories, never hand an inode
+number back, so `(dev, ino)` alone already differed. That is JE2E-R2-7's vacuity
+in a third place. The fixture now *builds* the opposing input rather than hoping
+the allocator produces it: the successor's `(dev, ino)` wearing the
+predecessor's timestamp, which is exactly what a recycling filesystem returns.
+
+**R2-5 — the fix, and the residual at its own magnitude.** Reading from
+`cursor − 1s` with `(refused_by, at)` dedup recovers a row whose commit lands
+below an already-advanced cursor, which is the window JE2E-1's forward-only
+cursor opened. It is a **bound, not a cure**: a row later than the overlap is
+still never logged, and the docstring now says that in those words — "older rows
+cannot be *re*-logged" was true and incomplete. The test pins both directions,
+and its lateness is an absolute 500 ms rather than a figure derived from the
+constant, because a fixture that tracks the constant it tests cannot see it
+change (shrinking the overlap to zero shrank the test's own input to zero and
+stayed green, until it did not).
+
+**R2-6c resolved itself.** The sweep row naming "`serve.rs` `shutdown_signal`
+docstring" was accurate when written, wrong for exactly as long as R2-1's fused
+block existed, and accurate again once the block was split. The row records that
+rather than being silently re-pointed.
+
+### Gates (repo-wide, house convention)
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | clean |
+| `cargo test --all --features fixtures` | **921 / 0 / 3** (918 at the round-2 review head) |
+| `cargo test --features store-sqlite,embed-fixture,fixtures` | **1019 / 0 / 3** (1016) |
+| `cargo clippy --all-targets --features store-sqlite,embed-fixture,fixtures -- -D warnings` | clean |
+| `cargo clippy --all-targets --no-default-features --features store-cockroach,embed-fixture -- -D warnings` | clean |
+| `scripts/observability/verify.sh` | **56 ok, ALL CHECKS PASSED** |
+| `scripts/docs/check-mirror-drift.sh` | green |
+
+**+3 on both rows**, and every one is a named new test:
+`a_fenced_holder_shutdown_cancels_a_running_transport_and_books_the_loss`
+(R2-2, carrying R2-4's assertion),
+`a_recreated_socket_at_the_same_path_is_not_the_one_we_bound` (R2-3), and
+`a_late_committing_refusal_below_the_cursor_is_still_logged` (R2-5). Nothing was
+renamed or removed; R2-1 and R2-6 are prose, and R2-7 added fixture *rows* rather
+than checks — it re-pointed four existing assertions, so `verify.sh` stays at 56.
+
+Mutation-checked, every mutation reverted: the wiring severed at the call site
+(**compile error**, which is the closure) and inside the constructor (composition
+test red); the `lease:lost` append disabled (red, empty ledger); the identity
+collapsed to `(dev, ino)` (red on the recycled-identity assertion); the overlap
+set to zero (build fails on the const guard, and with the guard bypassed the
+behavioural assertion fires on its own); `APPLIED_STATES` widened to admit
+`deferred` — the reviewer's exact mutation — now **red on 5 checks** where it was
+green; and the terminal-completion selection reversed (red on 3).
 
 ---
 
