@@ -1617,7 +1617,7 @@ impl LamboServer {
         // canonicalize and insert happen in the background.
         let submitted = match self
             .mem
-            .derive_async_as(&acting, &concepts, &parent_of)
+            .derive_async_as(&acting, &concepts, &parent_of, None)
             .await
         {
             Ok(s) => s,

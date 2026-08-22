@@ -1595,6 +1595,14 @@ impl Memory {
     /// warm 27 ms `derive` — not the 0.4 ms round trip, which is not worth
     /// removing.
     ///
+    /// D's optional **event time** rides the same seam as on
+    /// [`Memory::record_action_async_as`]: the interaction is opened
+    /// synchronously at submit (before the job is queued), so the parameter is
+    /// stamped straight into that interaction via
+    /// [`Self::begin_interaction_full`] and every edge the queued derive later
+    /// creates inherits it. `None` is a live fact (fallback rule:
+    /// about-time = created-at).
+    ///
     /// Returns the receipt. **A refused admission is not an `Err`**: the
     /// receipt carries [`crate::writeq::ReceiptAnswer::Dropped`] and the drop
     /// is counted in `lambo_stats`. An `Err` here means the call was rejected
@@ -1605,6 +1613,7 @@ impl Memory {
         agent: &AgentId,
         concepts: &[(&str, ConceptType)],
         parent_of: &ParentOf<'_>,
+        event_time: Option<DateTime<Utc>>,
     ) -> Result<Submitted, LamboError> {
         let _writing = self.begin_write().await?;
         // The pre-pass, on the call path. The background path re-runs its own
@@ -1632,7 +1641,7 @@ impl Memory {
             .map(|(content, _)| *content)
             .collect::<Vec<_>>()
             .join("; ");
-        let interaction = self.begin_interaction_as(agent, Some(prompt))?;
+        let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
         Ok(self
             .pipeline
             .submit_derive(
@@ -2466,22 +2475,6 @@ impl Memory {
     /// concurrent writers cannot both claim the same predecessor.
     fn begin_interaction(&self, prompt: Option<String>) -> Result<NodeId, LamboError> {
         self.begin_interaction_full(&self.agent, prompt, None)
-    }
-
-    /// [`Memory::begin_interaction`] stamping `agent` as the interaction's
-    /// author (J1).
-    ///
-    /// `session_id` stays this handle's — a per-call agent is a writer inside
-    /// one session, not a session of its own — and `created_at` still comes
-    /// from the process clock, never from a caller. The temporal chain is
-    /// session-wide and unchanged: interleaved agents chain in arrival order,
-    /// which is what a shared session means.
-    fn begin_interaction_as(
-        &self,
-        agent: &AgentId,
-        prompt: Option<String>,
-    ) -> Result<NodeId, LamboError> {
-        self.begin_interaction_full(agent, prompt, None)
     }
 
     /// The one interaction-opening seam, with D's optional **event time**.
@@ -4870,6 +4863,7 @@ mod tests {
                 &agent,
                 &[("user schema", ConceptType::Entity)],
                 &ParentOf::none(),
+                None,
             )
             .await
             .expect("ack");
@@ -5011,6 +5005,7 @@ mod tests {
                 agent,
                 &[("user schema", ConceptType::Entity)],
                 &ParentOf::none(),
+                None,
             )
             .await
             .expect("ack");
@@ -5145,6 +5140,7 @@ mod tests {
                 &agent,
                 &[("user schema", ConceptType::Entity)],
                 &ParentOf::none(),
+                None,
             )
             .await
             .expect("ack");
