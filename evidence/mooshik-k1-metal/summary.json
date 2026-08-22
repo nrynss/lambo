@@ -1,0 +1,225 @@
+{
+  "throughput_items_per_s_median_of_repeats": {
+    "35": {
+      "candle metal f16": {
+        "n_repeats": 3,
+        "serial_items_per_s": 66.87051725912377,
+        "concurrent_items_per_s": 69.56125421445554,
+        "batched_items_per_s": 190.5029334594209,
+        "input_tokens": 12
+      },
+      "candle metal f32": {
+        "n_repeats": 3,
+        "serial_items_per_s": 52.77074590639638,
+        "concurrent_items_per_s": 54.67668639043266,
+        "batched_items_per_s": 143.99255695273484,
+        "input_tokens": 12
+      },
+      "candle cpu f32 (Accelerate)": {
+        "n_repeats": 3,
+        "serial_items_per_s": 12.390958956158512,
+        "concurrent_items_per_s": 30.166270345192075,
+        "batched_items_per_s": 25.946026589001562,
+        "input_tokens": 12
+      },
+      "llama.cpp q8_0 (reference)": {
+        "n_repeats": 3,
+        "serial_items_per_s": 75.61156006387525,
+        "concurrent_items_per_s": 146.21040939412129,
+        "batched_items_per_s": null,
+        "input_tokens": null
+      }
+    },
+    "1024": {
+      "candle metal f16": {
+        "n_repeats": 3,
+        "serial_items_per_s": 11.508513298096647,
+        "concurrent_items_per_s": 11.615059155479946,
+        "batched_items_per_s": 10.75174748445858,
+        "input_tokens": 287
+      },
+      "candle metal f32": {
+        "n_repeats": 3,
+        "serial_items_per_s": 10.785660214382839,
+        "concurrent_items_per_s": 10.869311390910964,
+        "batched_items_per_s": 9.959897537031193,
+        "input_tokens": 287
+      },
+      "candle cpu f32 (Accelerate)": {
+        "n_repeats": 3,
+        "serial_items_per_s": 1.5799371321468725,
+        "concurrent_items_per_s": 4.5704841409500645,
+        "batched_items_per_s": 1.67509058379498,
+        "input_tokens": 287
+      },
+      "llama.cpp q8_0 (reference)": {
+        "n_repeats": 3,
+        "serial_items_per_s": 20.19429435469344,
+        "concurrent_items_per_s": 20.742620385401263,
+        "batched_items_per_s": null,
+        "input_tokens": null
+      }
+    }
+  },
+  "falsifier_2_throughput": {
+    "35": {
+      "recorded_baseline_4wide": [
+        110,
+        141
+      ],
+      "half_baseline": [
+        55.0,
+        70.5
+      ],
+      "legs": {
+        "candle metal f16": {
+          "concurrent": 69.56125421445554,
+          "batched": 190.5029334594209,
+          "concurrent_vs_half": "clears",
+          "best_vs_half": "clears"
+        },
+        "candle metal f32": {
+          "concurrent": 54.67668639043266,
+          "batched": 143.99255695273484,
+          "concurrent_vs_half": "under",
+          "best_vs_half": "clears"
+        },
+        "candle cpu f32 (Accelerate)": {
+          "concurrent": 30.166270345192075,
+          "batched": 25.946026589001562,
+          "concurrent_vs_half": "under",
+          "best_vs_half": "under"
+        }
+      }
+    },
+    "1024": {
+      "recorded_baseline_4wide": [
+        19,
+        22
+      ],
+      "half_baseline": [
+        9.5,
+        11.0
+      ],
+      "legs": {
+        "candle metal f16": {
+          "concurrent": 11.615059155479946,
+          "batched": 10.75174748445858,
+          "concurrent_vs_half": "clears",
+          "best_vs_half": "clears"
+        },
+        "candle metal f32": {
+          "concurrent": 10.869311390910964,
+          "batched": 9.959897537031193,
+          "concurrent_vs_half": "clears",
+          "best_vs_half": "clears"
+        },
+        "candle cpu f32 (Accelerate)": {
+          "concurrent": 4.5704841409500645,
+          "batched": 1.67509058379498,
+          "concurrent_vs_half": "under",
+          "best_vs_half": "under"
+        }
+      }
+    }
+  },
+  "coldstart_ms": {
+    "cpu-f32": {
+      "runs": 5,
+      "weight_load_ms_median": 1040.7665829999999,
+      "process_to_first_vector_ms_median": 1172.8419580000002,
+      "process_to_first_vector_ms_max": 1999.669125,
+      "second_embed_ms_median": 77.739875
+    },
+    "metal-f16": {
+      "runs": 5,
+      "weight_load_ms_median": 1480.62375,
+      "process_to_first_vector_ms_median": 1522.631125,
+      "process_to_first_vector_ms_max": 1728.612832,
+      "second_embed_ms_median": 15.692000000000002
+    },
+    "metal-f32": {
+      "runs": 5,
+      "weight_load_ms_median": 1503.755417,
+      "process_to_first_vector_ms_median": 1628.636375,
+      "process_to_first_vector_ms_max": 1886.112666,
+      "second_embed_ms_median": 19.038
+    }
+  },
+  "parity": {
+    "parity-candle-cpu-f32": {
+      "label": "candle-cpu-f32 vs llama.cpp-q8_0",
+      "n": 82,
+      "median": 0.9997214007596722,
+      "min": 0.9979331215786957,
+      "max": 0.9998684581884844,
+      "p05": 0.9990656925664319,
+      "below_gate": 0,
+      "verdict": "PASS"
+    },
+    "parity-candle-metal-f16": {
+      "label": "candle-metal-f16 vs llama.cpp-q8_0",
+      "n": 82,
+      "median": 0.9997203066957456,
+      "min": 0.9979200493487214,
+      "max": 0.9998677498996948,
+      "p05": 0.9990700384960013,
+      "below_gate": 0,
+      "verdict": "PASS"
+    },
+    "parity-candle-metal-f32": {
+      "label": "candle-metal-f32 vs llama.cpp-q8_0",
+      "n": 82,
+      "median": 0.999721400923553,
+      "min": 0.9979331174273228,
+      "max": 0.9998684579125762,
+      "p05": 0.9990656613186174,
+      "below_gate": 0,
+      "verdict": "PASS"
+    },
+    "parity-reference-crosscheck": {
+      "label": "llama :8080 (baseline flags) vs llama :8099 (K1 flags)",
+      "n": 9,
+      "median": 1.0,
+      "min": 0.9999999999999999,
+      "max": 1.0000000000000002,
+      "p05": 0.9999999999999999,
+      "below_gate": 0,
+      "verdict": "PASS"
+    }
+  },
+  "cost_build": [
+    {
+      "config": "metal+accelerate",
+      "features": "metal,accelerate",
+      "compile_s": 72.005736,
+      "compile_kind": "from-clean",
+      "binary_bytes": 11148928,
+      "binary_stripped_bytes": 8923968
+    },
+    {
+      "config": "cpu-plain",
+      "features": "",
+      "compile_s": 27.451839,
+      "compile_kind": "warm-deps",
+      "binary_bytes": 10351888,
+      "binary_stripped_bytes": 8168240
+    },
+    {
+      "config": "cpu-accelerate",
+      "features": "accelerate",
+      "compile_s": 27.532691,
+      "compile_kind": "warm-deps",
+      "binary_bytes": 10146768,
+      "binary_stripped_bytes": 7999968
+    },
+    {
+      "config": "metal",
+      "features": "metal",
+      "compile_s": 28.894841,
+      "compile_kind": "warm-deps",
+      "binary_bytes": 11352944,
+      "binary_stripped_bytes": 9092240
+    }
+  ]
+}

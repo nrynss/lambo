@@ -1,0 +1,4 @@
+{"config":"metal+accelerate","features":"metal,accelerate","compile_s":72.005736000,"compile_kind":"from-clean","binary_bytes":11148928,"binary_stripped_bytes":8923968}
+{"config":"cpu-plain","features":"","compile_s":27.451839000,"compile_kind":"warm-deps","binary_bytes":10351888,"binary_stripped_bytes":8168240}
+{"config":"cpu-accelerate","features":"accelerate","compile_s":27.532691000,"compile_kind":"warm-deps","binary_bytes":10146768,"binary_stripped_bytes":7999968}
+{"config":"metal","features":"metal","compile_s":28.894841000,"compile_kind":"warm-deps","binary_bytes":11352944,"binary_stripped_bytes":9092240}

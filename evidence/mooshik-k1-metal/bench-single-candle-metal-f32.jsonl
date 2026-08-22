@@ -1,0 +1,2 @@
+{"backend":"metal-f32","batched_items_per_s":71.55708395821955,"concurrency":4,"concurrent_items_per_s":55.387637738886234,"input_bytes":35,"input_tokens":12,"iters":32,"op":"bench","serial_items_per_s":52.11612857781803,"serial_ms_per_item":19.18791796875,"warmup_discarded":4}
+{"backend":"metal-f32","batched_items_per_s":10.018352761306524,"concurrency":4,"concurrent_items_per_s":10.888640832720458,"input_bytes":1024,"input_tokens":287,"iters":32,"op":"bench","serial_items_per_s":10.836268870951223,"serial_ms_per_item":92.28268621874999,"warmup_discarded":4}

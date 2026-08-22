@@ -1,0 +1,11 @@
+k1-candle-bgem3 v0.1.0 (/Users/narayan/Documents/work/lambo/.claude/worktrees/agent-a0305bf54915ce23c/spikes/k1-candle-bgem3)
+│   ├── candle-core v0.11.0 (*)
+│   ├── candle-metal-kernels v0.11.0
+│   ├── candle-metal-kernels v0.11.0 (*)
+│   ├── candle-nn v0.11.0 (*)
+│   ├── tokenizers v0.22.2
+└── tokenizers v0.21.4
+├── candle-core v0.11.0
+├── candle-nn v0.11.0
+├── candle-transformers v0.11.0
+├── hf-hub v0.4.3

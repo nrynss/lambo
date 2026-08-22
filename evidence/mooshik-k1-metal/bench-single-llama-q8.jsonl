@@ -1,0 +1,2 @@
+{"op": "bench", "backend": "llama.cpp-q8_0", "url": "http://127.0.0.1:8099", "input_bytes": 35, "iters": 32, "warmup_discarded": 4, "concurrency": 4, "serial_items_per_s": 75.44216179308131, "serial_ms_per_item": 13.255187500362808, "concurrent_items_per_s": 170.39135242511574}
+{"op": "bench", "backend": "llama.cpp-q8_0", "url": "http://127.0.0.1:8099", "input_bytes": 1024, "iters": 32, "warmup_discarded": 4, "concurrency": 4, "serial_items_per_s": 20.217958552043783, "serial_ms_per_item": 49.46097784431913, "concurrent_items_per_s": 20.625950333197792}

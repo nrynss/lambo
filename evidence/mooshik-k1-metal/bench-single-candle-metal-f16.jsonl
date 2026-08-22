@@ -1,0 +1,2 @@
+{"backend":"metal-f16","batched_items_per_s":108.55557897227548,"concurrency":4,"concurrent_items_per_s":69.90263055067162,"input_bytes":35,"input_tokens":12,"iters":32,"op":"bench","serial_items_per_s":66.50584610911329,"serial_ms_per_item":15.036272125,"warmup_discarded":4}
+{"backend":"metal-f16","batched_items_per_s":10.818660889631575,"concurrency":4,"concurrent_items_per_s":11.691678382547432,"input_bytes":1024,"input_tokens":287,"iters":32,"op":"bench","serial_items_per_s":11.591315392692854,"serial_ms_per_item":86.27148568749999,"warmup_discarded":4}

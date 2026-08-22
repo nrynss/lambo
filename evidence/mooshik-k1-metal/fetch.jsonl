@@ -1,0 +1,4 @@
+{"config":"/Users/narayan/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/config.json","fetch_ms":99028.045625,"op":"fetch","repo":"BAAI/bge-m3","revision":"5617a9f61b028005a4858fdac845db406aefb181","tokenizer":"/Users/narayan/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/tokenizer.json","weights":"/Users/narayan/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181/pytorch_model.bin","weights_bytes":2271145830}
+real 99.69
+user 2.49
+sys 9.15
