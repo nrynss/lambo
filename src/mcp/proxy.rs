@@ -887,6 +887,11 @@ pub struct HubProxy {
     /// for `read_lease`.
     store: Arc<dyn crate::store::GraphStore>,
     our_host: String,
+    /// J4-R1-2. The agent id of this proxying serve, written as the `agent`
+    /// on its own `proxying` / `proxying_stopped` ledger lines so the proxying
+    /// actor is never anonymized — a reader of the line sees exactly who is
+    /// forwarding (and, on the proxy path, who was refused).
+    agent: String,
     /// J4. An optional call ledger this proxy appends its own `lease` lines to
     /// (`proxying` at the first successful dial, `proxying_stopped` when the
     /// holder it forwards to stops answering). A proxy is alive and can write
@@ -901,6 +906,7 @@ impl HubProxy {
         endpoint: SessionEndpoint,
         store: Arc<dyn crate::store::GraphStore>,
         our_host: String,
+        agent: String,
         ledger: Option<Arc<crate::ledger::Ledger>>,
     ) -> Self {
         Self {
@@ -908,6 +914,7 @@ impl HubProxy {
             endpoint,
             store,
             our_host,
+            agent,
             ledger,
         }
     }
@@ -1175,7 +1182,7 @@ impl HubProxy {
                 "proxying",
                 "loser",
                 &self.session.to_string(),
-                "proxy",
+                &self.agent,
                 &dialled.display().to_string(),
                 None,
             ));
@@ -1430,7 +1437,7 @@ impl HubProxy {
                                         "proxying_stopped",
                                         "loser",
                                         &self.session.to_string(),
-                                        "proxy",
+                                        &self.agent,
                                         &self.endpoint.path().display().to_string(),
                                         Some(serde_json::json!({ "lost": lost })),
                                     ));
@@ -1682,6 +1689,7 @@ mod tests {
             crate::types::SessionId::new("j2-r2-1"),
             ours(),
             Arc::new(HungLeaseStore),
+            "this-host".to_string(),
             "this-host".to_string(),
             None,
         )

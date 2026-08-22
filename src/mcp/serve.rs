@@ -1090,13 +1090,28 @@ async fn resolve_role(
         // not have derived — see `proxy::proxyable` and J2-L1.
         let outcome = match probe_holder(&held, endpoint, &our_host).await {
             Ok(()) => {
+                // J4 — the runner-up side of "from both sides" on the proxy
+                // path: this loser was refused the acquisition even though it
+                // can still proxy to the holder, so the holder must learn it
+                // was contended. Best-effort, exactly like the terminal-refusal
+                // exits above; the refusal decision never changes.
+                record_refused_loser(
+                    ledger,
+                    &held.store,
+                    &session,
+                    &opts.agent,
+                    &my_token,
+                    &held.current.holder,
+                )
+                .await;
                 return Ok(Role::Proxy(Box::new(crate::mcp::proxy::HubProxy::new(
                     crate::types::SessionId::new(&opts.session),
                     endpoint.clone(),
                     Arc::clone(&held.store),
                     our_host,
+                    opts.agent.clone(),
                     ledger.clone(),
-                ))))
+                ))));
             }
             Err(why) => why,
         };

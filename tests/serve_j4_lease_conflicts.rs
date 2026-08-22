@@ -330,15 +330,71 @@ fn a_proxying_serve_writes_a_proxying_line() {
     let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger);
     let b_pid = b.id();
 
-    let lines = wait_ledger(&ledger, "a proxying line", Duration::from_secs(5), |ls| {
-        ls.iter()
-            .any(|l| l["kind"] == "lease" && l["event"] == "proxying")
-    });
+    // J4 — the proxy path must also satisfy "from both sides" (finding
+    // J4-R1-1): B was refused the acquisition even though it degrades to a
+    // proxy, so the incumbent must learn it was contended. And the proxying
+    // line must name the real agent (finding J4-R1-2), never the literal
+    // "proxy".
+    let lines = wait_ledger(
+        &ledger,
+        "proxy line with the real agent and the refusal from both sides",
+        Duration::from_secs(5),
+        |ls| {
+            let proxying = ls.iter().any(|l| {
+                l["kind"] == "lease" && l["event"] == "proxying" && l["agent_id"] == "agent-b"
+            });
+            let loser = ls
+                .iter()
+                .any(|l| l["kind"] == "lease" && l["event"] == "refused" && l["side"] == "loser");
+            let holder = ls.iter().any(|l| {
+                l["kind"] == "lease" && l["event"] == "refused_takeover" && l["side"] == "holder"
+            });
+            proxying && loser && holder
+        },
+    );
+
+    // J4-R1-2: the proxying line carries the real agent.
     let px = lines
         .iter()
         .find(|l| l["kind"] == "lease" && l["event"] == "proxying")
         .expect("proxying line");
     assert_eq!(px["side"], "loser");
+    assert_eq!(
+        px["agent_id"], "agent-b",
+        "the proxying line must carry the real agent, not the literal 'proxy'"
+    );
+
+    // J4-R1-1: the proxy-degrading loser's refusal reaches the ledger on BOTH
+    // sides — B's own refused line, and A's refused_takeover (the incumbent
+    // learned it was contended, through the store, from a separate process).
+    let loser = lines
+        .iter()
+        .find(|l| l["kind"] == "lease" && l["event"] == "refused")
+        .expect("loser refused line on the proxy path");
+    assert_eq!(loser["side"], "loser");
+    assert_eq!(loser["agent_id"], "agent-b");
+    assert!(
+        loser["holder"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("agent-a@"),
+        "loser names the incumbent holder; got {:?}",
+        loser["holder"]
+    );
+    let holder = lines
+        .iter()
+        .find(|l| l["kind"] == "lease" && l["event"] == "refused_takeover")
+        .expect("holder refused_takeover line on the proxy path");
+    assert_eq!(holder["side"], "holder");
+    assert_eq!(holder["agent_id"], "agent-a");
+    assert!(
+        holder["holder"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("agent-b@"),
+        "holder names the refused loser; got {:?}",
+        holder["holder"]
+    );
 
     sigterm(a_pid);
     sigterm(b_pid);
