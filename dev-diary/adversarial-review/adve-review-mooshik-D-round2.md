@@ -148,3 +148,9 @@ demonstrably runnable and green at the closure HEAD.)
 
 Operator-leg item 1 (live-Cockroach parity) remains open as agreed; nothing in the
 remediation code contradicts it.
+
+## Round 2 closures
+
+| Finding | Commit | What changed | Verification |
+| --- | --- | --- | --- |
+| D-R2-1 | `486de8a` — `fix(d2): purge stale begin_interaction_as references left by 5c115cc` | All five surviving prose citations of the removed `begin_interaction_as` renamed to `begin_interaction_full` (the method that actually opens the interaction on every current write path): `writeq.rs` module doc lines 47/53/64, the `writeq.rs:4383` test comment, and the `mcp/server.rs:1747` comment. The two intra-doc links that warned were demoted to plain backticked names rather than re-pointed, because `begin_interaction_full` is private and a link from public docs trades an unresolved-link warning for a `private_intra_doc_links` one: `[`crate::Memory::begin_interaction_as`]` at `writeq.rs:47` (unresolved) and `[`Self::begin_interaction_full`]` at `memory.rs:1602` (private-item link in `derive_async_as`'s docstring). No runtime code touched — 3 files, 9 insertions / 9 deletions, comments only. `grep -rn begin_interaction_as src/` is empty. | `cargo doc --no-deps` warning count **44 → 42** (`grep -c warning`); full warning-set diff against the pre-fix tree shows exactly the two D-introduced warnings gone — `unresolved link to 'crate::Memory::begin_interaction_as'` and `public documentation for 'derive_async_as' links to private item 'Self::begin_interaction_full'` — with every remaining warning byte-identical to the pre-D baseline `d74efc2` set (no new warnings). Gates at closure HEAD: `cargo fmt --all -- --check` pass; `cargo clippy --all-targets -- -D warnings` pass. Not pushed. |
