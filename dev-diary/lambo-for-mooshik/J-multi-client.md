@@ -2542,6 +2542,69 @@ question stay unanswerable from artifacts.
 
 J2 makes it cheaper, since a proxying serve is alive and can write its own lines.
 
+### As-built (J4, 2026-08-22) — lease conflicts leave an artifact
+
+Implemented on `wt/j4`. The single-writer lease is untouched; J4 is a
+requirement placed on I1's existing ledger, not a second one, and every new line
+rides the same [`Ledger::append`] path the `call`/`stats` lines ride. Nothing
+existing changed shape — `scripts/observability/*` and `verify.sh` (still 46 ok,
+`sample/calls.jsonl` byte-identical) parse exactly what they always did; the new
+`startup` / `lease` / `completion` line kinds are additive and the kit ignores
+unknown kinds by design.
+
+**The pre-lease startup line.** `serve` now opens `Ledger::open` *before*
+`resolve_role` makes its acquire attempt (it was opened after, on the holder
+path, so a losing serve never reached it — the structural invisibility J4
+exists to remove) and appends a `kind:"startup"` line (session, agent, transport,
+`state:"acquiring"`). A serve about to lose the lease has therefore already left
+an artifact. On the refused-exit path the ledger is **drained before the process
+exits** — the startup/refused lines must not sit unflushed in the writer thread
+and die with the process, or J4 would have left nothing at the very exit it was
+written for.
+
+**Both sides of a refusal.** When `resolve_role` is refused it appends a
+`kind:"lease", event:"refused", side:"loser"` line (its own) naming the
+incumbent, and persists the fact to the store via the new `record_lease_refusal`
+(best-effort; `at` stamped by the store's clock, F18). The incumbent's serve
+spawns a small recorder task (only with `--ledger`, only on the holder path)
+that polls `pending_lease_refusals` for its own session, filters to refusals
+against *its own* lease token, dedups by (refused_by, at), and appends a
+`kind:"lease", event:"refused_takeover", side:"holder"` line. Together this is
+the Done-when line: **"a refused lease acquisition appears in the ledger from
+both sides"**. Persisting the fact in the store (not by reading the ledger on
+the serve path — I1's rule) is what lets a *different* process, the holder,
+write the second half.
+
+**Proxy / degraded lines (J2 handoff).** A proxy is alive and now books its own
+lines on the ledger it opened pre-lease: `kind:"lease", event:"proxying"` on a
+successful first dial, and `kind:"lease", event:"proxying_stopped"` (with the
+in-flight count) when the holder it forwarded to stops answering.
+
+**Proof obligation 5 — the completion-line schema.** The ledger gains a
+`kind:"completion"` line (agent, receipt, `state` ∈ applied /
+applied_after_restart / failed / deferred) emitted from the write pipeline for
+every durable write intent's lifecycle, on the same append path as every other
+line. Applied lines carry `created_count` / `matched_count` — the I1 metric-2
+fact set that a replayed durable intent previously hid because replay bypassed
+the ordinary call path that builds `call`-line facts. This restores the declared
+metric-2 regression and closes proof obligation 5 of `J3-durability-redesign.md`.
+
+**Deviation / disposition notes.**
+* `lease_refusals` is a **new required table** in both migrations (it is part of
+  the `INIT_SQL` both backends derive their preflight from, exactly like
+  `write_intents`). An existing provisioned store must be re-provisioned
+  (`lambo provision`) before this build preflights clean. This is deliberate and
+  matches J3's `write_intents` precedent; it is a deployment action on the
+  dogfood store, not a code path.
+* The refusal poll is serve-level (500 ms), not in `Memory`: it needs the
+  store, the session, the holder's own token and the ledger, all of which
+  `serve()` holds; `Memory` stays ledger-agnostic except for the one
+  `WriteCtx.ledger` the pipeline needs for completion lines.
+* A refused loser still records its store refusal even when it degrades to a
+  proxy (the acquire was refused; the holder should know it was contended).
+* `verify.sh`/kit untouched; the two DDL-table-count test assertions moved from
+  10 to 11 to account for the required `lease_refusals` table.
+
 ## J5 — Transport defaults and config layering
 
 * Document HTTP as the default for any machine running more than one client. DOGFOOD.md's
@@ -2628,6 +2691,18 @@ Every figure is one rig, not a property of lambo.
       runs and in DOGFOOD-FINDINGS, not inside `cargo test`, and re-verifying it after a
       re-pin is a runbook act (the probe harness is reusable). pi was unusable (no ready
       generative provider) and is NOT covered by this box
+- [x] A refused lease acquisition appears in the ledger from both sides (J4) — a
+      `kind:"startup"` line is written before the acquire; a refused serve writes its own
+      `kind:"lease", event:"refused", side:"loser"` line and persists the fact to the store;
+      the incumbent's recorder task writes `kind:"lease", event:"refused_takeover",
+      side:"holder"`. Pinned by `refused_acquire_appears_in_the_ledger_from_both_sides`, which
+      fails on pre-J4 code, plus the pre-lease/proxying/completion contract tests (§J4
+      As-built). **Fails-on-pre-J4 evidence:** the both-sides and completion-schema tests
+      require code that did not exist at the base `9eab99f` (a pre-lease `Ledger::open`, the
+      `lease_refusals` store record, `WriteCtx.ledger`, the `completion`/`lease`/`startup`
+      line builders) — on that base they could not even be written, and the observable
+      contracts they assert (a loser+holder pair of lines, a completion line with
+      created/matched counts) have no producer
 - [x] `lambo_derive` returns after validation without waiting on the embedder, and its call
       time drops to the round-trip floor (J3) — **measured at the release binary over real
       stdio against the rig's live BGE-M3 on CPU: 14.111 ms median before, 0.048 ms median
