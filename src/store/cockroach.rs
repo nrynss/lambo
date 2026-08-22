@@ -283,7 +283,7 @@ ON CONFLICT (session_id) DO UPDATE SET
 /// drifting apart. `sqlx::QueryBuilder` numbers the placeholders.
 const INSERT_INTERACTION_PREFIX_SQL: &str = r#"
 INSERT INTO interactions (
-    id, session_id, agent_id, prompt_text, previous_id, created_at
+    id, session_id, agent_id, prompt_text, previous_id, created_at, event_time
 ) "#;
 
 const ON_CONFLICT_INTERACTION_SQL: &str = r#"
@@ -292,7 +292,8 @@ ON CONFLICT (id) DO UPDATE SET
     agent_id = EXCLUDED.agent_id,
     prompt_text = EXCLUDED.prompt_text,
     previous_id = EXCLUDED.previous_id,
-    created_at = EXCLUDED.created_at
+    created_at = EXCLUDED.created_at,
+    event_time = EXCLUDED.event_time
 "#;
 
 /// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
@@ -341,7 +342,7 @@ ON CONFLICT (id) DO UPDATE SET
 const INSERT_EDGE_PREFIX_SQL: &str = r#"
 INSERT INTO edges (
     id, session_id, source, target, edge_type, weight, reinforcements,
-    created_at, last_reinforced
+    created_at, last_reinforced, event_time
 ) "#;
 
 const ON_CONFLICT_EDGE_SQL: &str = r#"
@@ -351,7 +352,8 @@ ON CONFLICT (source, target, edge_type) DO UPDATE SET
     weight = EXCLUDED.weight,
     reinforcements = EXCLUDED.reinforcements,
     created_at = EXCLUDED.created_at,
-    last_reinforced = EXCLUDED.last_reinforced
+    last_reinforced = EXCLUDED.last_reinforced,
+    event_time = EXCLUDED.event_time
 "#;
 
 const DELETE_NODE_EDGES_SQL: &str = r#"
@@ -458,7 +460,7 @@ WHERE session_id = $1
 
 const SELECT_INTERACTIONS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, agent_id, prompt_text,
-       previous_id::STRING AS previous_id, created_at
+       previous_id::STRING AS previous_id, created_at, event_time
 FROM interactions
 WHERE session_id = $1
 ORDER BY created_at, id
@@ -477,7 +479,7 @@ ORDER BY id
 const SELECT_EDGES_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, source::STRING AS source,
        target::STRING AS target, edge_type, weight, reinforcements,
-       created_at, last_reinforced
+       created_at, last_reinforced, event_time
 FROM edges
 WHERE session_id = $1
 ORDER BY id
@@ -520,14 +522,14 @@ WHERE c.session_id = $1
       JOIN concepts src ON src.id = e.source AND src.session_id = $1
       WHERE e.target = c.id AND e.source = $2
         AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
-        AND e.created_at <= $3
+        AND COALESCE(e.event_time, e.created_at) <= $3
   )
   AND NOT EXISTS (
       SELECT 1 FROM edges e2
       JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = $1
       WHERE e2.target = c.id AND e2.source <> $2
         AND e2.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
-        AND e2.created_at <= $3
+        AND COALESCE(e2.event_time, e2.created_at) <= $3
   )
 "#;
 
@@ -553,18 +555,19 @@ WHERE c.session_id = $1
 /// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
 const INTERACTION_SPAN_SQL: &str = r#"
 WITH span AS (
-    SELECT DISTINCT i.id AS iid, i.created_at AS ts
+    SELECT DISTINCT i.id AS iid, COALESCE(i.event_time, i.created_at) AS ts
     FROM edges e
     JOIN concepts src ON src.id = e.source AND src.session_id = $1
     JOIN interactions i ON i.id = src.origin_interaction AND i.session_id = $1
     WHERE e.target = $2
       AND e.session_id = $1
       AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
-      AND e.created_at <= $3
-      AND i.created_at <= $3
+      AND COALESCE(e.event_time, e.created_at) <= $3
+      AND COALESCE(i.event_time, i.created_at) <= $3
 ),
 extent AS (
-    SELECT min(created_at) AS lo, max(created_at) AS hi
+    SELECT min(COALESCE(event_time, created_at)) AS lo,
+           max(COALESCE(event_time, created_at)) AS hi
     FROM interactions WHERE session_id = $1
 )
 SELECT
@@ -1046,6 +1049,7 @@ fn row_to_interaction(row: &PgRow) -> Result<Interaction, StoreError> {
         prompt_text: row.try_get("prompt_text").map_err(backend)?,
         previous_id: previous.as_deref().map(parse_node_id).transpose()?,
         created_at: row.try_get("created_at").map_err(backend)?,
+        event_time: row.try_get("event_time").map_err(backend)?,
     })
 }
 
@@ -1097,6 +1101,7 @@ fn row_to_edge(row: &PgRow) -> Result<Edge, StoreError> {
         reinforcements: reinforcements as i32,
         created_at: row.try_get("created_at").map_err(backend)?,
         last_reinforced: row.try_get("last_reinforced").map_err(backend)?,
+        event_time: row.try_get("event_time").map_err(backend)?,
     })
 }
 
@@ -1460,7 +1465,8 @@ fn interaction_upsert_query<'a>(
             .push_bind(i.agent_id.0.as_str())
             .push_bind(i.prompt_text.as_deref())
             .push_bind(i.previous_id.map(|n| n.0))
-            .push_bind(i.created_at);
+            .push_bind(i.created_at)
+            .push_bind(i.event_time);
     });
     qb.push(ON_CONFLICT_INTERACTION_SQL);
     qb
@@ -1561,7 +1567,8 @@ fn edge_upsert_query<'a>(rows: &'a [&'a Edge]) -> sqlx::QueryBuilder<'a, sqlx::P
             .push_bind(e.weight)
             .push_bind(e.reinforcements)
             .push_bind(e.created_at)
-            .push_bind(e.last_reinforced);
+            .push_bind(e.last_reinforced)
+            .push_bind(e.event_time);
     });
     qb.push(ON_CONFLICT_EDGE_SQL);
     qb
@@ -3384,9 +3391,10 @@ mod tests {
             // Concept-sourced only: source JOIN pins src to a concept row.
             assert!(sql.contains("JOIN concepts src"), "{sql}");
         }
-        // MemoryStore parity: interaction_span filters BOTH edge and interaction age.
-        assert!(INTERACTION_SPAN_SQL.contains("e.created_at <= $3"));
-        assert!(INTERACTION_SPAN_SQL.contains("i.created_at <= $3"));
+        // MemoryStore parity: interaction_span filters BOTH edge and interaction
+        // age — each resolved through D's fallback rule (COALESCE with event_time).
+        assert!(INTERACTION_SPAN_SQL.contains("COALESCE(e.event_time, e.created_at) <= $3"));
+        assert!(INTERACTION_SPAN_SQL.contains("COALESCE(i.event_time, i.created_at) <= $3"));
     }
 
     /// F5: `origin_interaction` is a global FK, so the span CTE must scope the

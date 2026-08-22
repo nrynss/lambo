@@ -94,10 +94,11 @@ use chrono::{DateTime, Utc};
 /// through [`crate::types::Interaction::about_time`] (the earliest interaction
 /// of each session) before calling this.
 ///
-/// The rule is greedy and order-free: sort ascending, then count a start only
+/// The rule is greedy and order-free: sort ascending (deduplicating exact
+/// repeats — the same instant is one session start), then count a start only
 /// when it sits `gap` or more after the last *counted* one. Dense clusters
 /// contribute one session each; stragglers further than `gap` out extend the
-/// chain. Duplicate instants collapse naturally (a zero gap only counts once).
+/// chain.
 ///
 /// C2 consumes this from [`super::policy`]'s scorer once the solo formula
 /// lands; [`SoloScorer`](super::policy::SoloScorer) still refuses until then.
@@ -105,6 +106,7 @@ pub fn separated_session_count(starts: &[DateTime<Utc>], gap: Duration) -> usize
     let gap = chrono::Duration::from_std(gap).unwrap_or(chrono::Duration::MAX);
     let mut sorted = starts.to_vec();
     sorted.sort();
+    sorted.dedup();
     let mut count = 0;
     let mut anchor: Option<DateTime<Utc>> = None;
     for t in sorted {
@@ -260,8 +262,10 @@ mod tests {
     /// 2016/2018/2020.
     ///
     /// * Event time: every support is years past the 60s age floor at the
-    ///   flush instant, and the supports span 4 of the extent's 5 years →
-    ///   `distinct = 3`, `coverage = 0.8` → Stage 2 PASSES.
+    ///   flush instant, and the supports span 4 of the extent's 5 calendar
+    ///   years (the exact ratio is computed below in milliseconds — leap
+    ///   years make the years unequal) → `distinct = 3`, `coverage ≈ 0.8` →
+    ///   Stage 2 PASSES.
     /// * Ingest time (same rows, event times stripped): the flush stamps are
     ///   scale-free — supports at 12s/36s/60s of a 60s extent would cover
     ///   0.8 too — so the failure is purely AGE: nothing is 60s old yet,
@@ -339,9 +343,12 @@ mod tests {
             span.distinct, 3,
             "all supports clear 60s on their about-times"
         );
+        let ms =
+            |a: chrono::DateTime<Utc>, b: chrono::DateTime<Utc>| (b - a).num_milliseconds() as f64;
+        let expected = ms(event_times[1], event_times[5]) / ms(event_times[0], event_times[5]);
         assert!(
-            (span.coverage - 0.8).abs() < 1e-9,
-            "supports about 2016/2018/2020 span 4 of the 5-year extent: coverage={}",
+            (span.coverage - expected).abs() < 1e-9,
+            "supports about 2016/2018/2020 must span 4 of the 5-year extent:              coverage={} expected={expected}",
             span.coverage
         );
         assert!(

@@ -739,7 +739,9 @@ impl GraphStore for MemoryStore {
             let mut from_node = false;
             let mut from_other = false;
             for e in &data.snapshot.edges {
-                if e.target != c.id || e.created_at > min_created {
+                // D: an edge ages on its resolved about-time (event time when
+                // the writing interaction carried one, else flush time).
+                if e.target != c.id || e.about_time() > min_created {
                     continue;
                 }
                 if !structural.contains(&e.edge_type) || !concept_ids.contains(&e.source) {
@@ -785,7 +787,7 @@ impl GraphStore for MemoryStore {
             if e.target != node || !structural.contains(&e.edge_type) {
                 continue;
             }
-            if e.created_at > min_created {
+            if e.about_time() > min_created {
                 continue;
             }
             let Some(src) = data.snapshot.concepts.iter().find(|c| c.id == e.source) else {
@@ -799,11 +801,11 @@ impl GraphStore for MemoryStore {
             else {
                 continue;
             };
-            if ix.created_at > min_created {
+            if ix.about_time() > min_created {
                 continue;
             }
             if interaction_ids.insert(ix.id) {
-                times.push(ix.created_at);
+                times.push(ix.about_time());
             }
         }
         let distinct = interaction_ids.len() as u64;
@@ -812,11 +814,13 @@ impl GraphStore for MemoryStore {
         } else {
             let lo = times.iter().min().copied().unwrap();
             let hi = times.iter().max().copied().unwrap();
+            // D: the session extent is measured on resolved about-times too,
+            // so a historical corpus widens it even when flush stamps cluster.
             let all: Vec<_> = data
                 .snapshot
                 .interactions
                 .iter()
-                .map(|i| i.created_at)
+                .map(|i| i.about_time())
                 .collect();
             let sess_lo = all.iter().min().copied().unwrap_or(lo);
             let sess_hi = all.iter().max().copied().unwrap_or(hi);
