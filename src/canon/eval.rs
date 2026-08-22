@@ -933,10 +933,8 @@ mod tests {
         let mut g = Graph::new(sid());
         let mut prev = None;
         for n in 1..=4u64 {
-            let mut turn = interaction(n, prev.map(|p: u64| p), ts());
-            turn.event_time =
-                Some(ts() - chrono::Duration::hours(48 * (4 - n) as i64));
-            let id = turn.id;
+            let mut turn = interaction(n, prev, ts());
+            turn.event_time = Some(ts() - chrono::Duration::hours(48 * (4 - n) as i64));
             g.insert_interaction(turn).unwrap();
             prev = Some(n);
         }

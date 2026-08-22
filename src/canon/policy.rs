@@ -122,7 +122,6 @@ impl PromotionPolicy {
         }
     }
 
-
     /// The value as it is written in config, for error messages.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -287,9 +286,7 @@ pub fn revert_count(graph: &Graph, id: NodeId) -> usize {
     graph
         .canonization_events()
         .iter()
-        .filter(|ev| {
-            ev.node_id == id && status_rank(ev.to_status) < status_rank(ev.from_status)
-        })
+        .filter(|ev| ev.node_id == id && status_rank(ev.to_status) < status_rank(ev.from_status))
         .count()
 }
 
@@ -379,7 +376,6 @@ impl PromotionScorer for SoloScorer {
         ids
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -640,9 +636,10 @@ mod tests {
             .candidates(&graph, &scores, &params(), ts_at(60));
         assert_eq!(got, vec![hub]);
 
-        let empty = PromotionPolicy::Swarm
-            .scorer()
-            .candidates(&graph, &scores, &params(), ts_at(60));
+        let empty =
+            PromotionPolicy::Swarm
+                .scorer()
+                .candidates(&graph, &scores, &params(), ts_at(60));
         assert!(empty.is_empty(), "swarm must refuse the same corpus");
     }
 
@@ -699,11 +696,20 @@ mod tests {
 
         let (obs_graph, obs) = spread_support_graph(ConceptType::Observation);
         let scored = solo_score(&obs_graph, &concept_of(&obs_graph, obs));
-        assert!((scored - 2.8).abs() < 1e-9, "Observation resistance 0.7, got {scored}");
-        let admitted = PromotionPolicy::Solo
-            .scorer()
-            .candidates(&obs_graph, &ScoreTable::default(), &params(), ts_at(60));
-        assert!(admitted.is_empty(), "2.8 < 3.0: an Observation stays ordinary memory");
+        assert!(
+            (scored - 2.8).abs() < 1e-9,
+            "Observation resistance 0.7, got {scored}"
+        );
+        let admitted = PromotionPolicy::Solo.scorer().candidates(
+            &obs_graph,
+            &ScoreTable::default(),
+            &params(),
+            ts_at(60),
+        );
+        assert!(
+            admitted.is_empty(),
+            "2.8 < 3.0: an Observation stays ordinary memory"
+        );
     }
 
     /// Exact-boundary landings through the full formula (not just `classify`):
@@ -715,8 +721,7 @@ mod tests {
         let mut g = Graph::new(sid());
         let mut prev = None;
         for n in 1..=4u64 {
-            let mut turn =
-                interaction_at(n, (n * 15) as i64, Some(day((n - 1) as u64)));
+            let mut turn = interaction_at(n, (n * 15) as i64, Some(day(n - 1)));
             turn.previous_id = prev;
             let iid = turn.id;
             g.insert_interaction(turn).unwrap();
@@ -749,14 +754,8 @@ mod tests {
         action.canonical_key = action.content.clone();
         let aid = action.id;
         g.insert_concept(action, nid_inter(1)).unwrap();
-        g.upsert_edge(test_edge(
-            30,
-            aid,
-            hub.id,
-            EdgeType::Causal,
-            ts_at(90),
-        ))
-        .unwrap();
+        g.upsert_edge(test_edge(30, aid, hub.id, EdgeType::Causal, ts_at(90)))
+            .unwrap();
         let c = concept_of(&g, hub.id);
         assert_eq!(valid_action_count(&g, &c), 1);
         assert!((solo_score(&g, &c) - 10.0).abs() < 1e-9);
@@ -778,7 +777,10 @@ mod tests {
         assert_eq!(c.human_confirmed, 2);
         // 4×1 + 2×4 = 12.0 — Canonical band.
         assert!((solo_score(&graph, &c) - 12.0).abs() < 1e-9);
-        assert_eq!(classify(solo_score(&graph, &c)), CanonizationStatus::Canonical);
+        assert_eq!(
+            classify(solo_score(&graph, &c)),
+            CanonizationStatus::Canonical
+        );
 
         // The bumps were mutations: draining the log yields them for the
         // flush pipeline to persist.
@@ -792,7 +794,9 @@ mod tests {
         );
 
         // A missing node fails loudly instead of vanishing.
-        assert!(graph.confirm_human(NodeId(Uuid::from_u64_pair(9, 9))).is_err());
+        assert!(graph
+            .confirm_human(NodeId(Uuid::from_u64_pair(9, 9)))
+            .is_err());
     }
 
     /// Valid actions count DISTINCT action concepts once each, even when one
@@ -812,8 +816,14 @@ mod tests {
         g.insert_concept(action.clone(), nid_inter(1)).unwrap();
         g.upsert_edge(test_edge(30, action.id, hub, EdgeType::Causal, ts_at(90)))
             .unwrap();
-        g.upsert_edge(test_edge(31, action.id, hub, EdgeType::Dependency, ts_at(90)))
-            .unwrap();
+        g.upsert_edge(test_edge(
+            31,
+            action.id,
+            hub,
+            EdgeType::Dependency,
+            ts_at(90),
+        ))
+        .unwrap();
         assert_eq!(
             valid_action_count(&g, &concept_of(&g, hub)),
             1,
@@ -912,7 +922,11 @@ mod tests {
         }
     }
 
-    fn transition(node: NodeId, from: CanonizationStatus, to: CanonizationStatus) -> crate::types::CanonizationEvent {
+    fn transition(
+        node: NodeId,
+        from: CanonizationStatus,
+        to: CanonizationStatus,
+    ) -> crate::types::CanonizationEvent {
         crate::types::CanonizationEvent {
             id: NodeId::new(),
             session_id: sid(),

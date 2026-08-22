@@ -8041,4 +8041,80 @@ mod tests {
         let plain_e = loaded.edges.iter().find(|e| e.id == e_plain).unwrap();
         assert_eq!(plain_e.event_time, None);
     }
+
+    /// C2: the same D-R1-2 discipline for `human_confirmed` — a **non-zero**
+    /// count must survive flush→load on the real adapter. Every pre-existing
+    /// row carries 0 on both sides, so NULL/0 ≡ 0 passes while a mis-bind or
+    /// an index-drifted `try_get(16)` would silently reset every confirmed
+    /// concept to never-confirmed. Companion rows stay 0.
+    #[tokio::test]
+    async fn human_confirmed_survives_the_flush_load_round_trip() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("human-confirmed-roundtrip");
+        let flushed = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+
+        let iid = NodeId::new();
+        let c_confirmed = NodeId::new();
+        let c_plain = NodeId::new();
+        let concept = |id: NodeId, content: &str, confirmed: i32| Mutation::UpsertNode {
+            node: NodeKind::Concept(Concept {
+                id,
+                session_id: sid.clone(),
+                content: content.into(),
+                canonical_key: content.into(),
+                concept_type: ConceptType::Constraint,
+                origin_interaction: iid,
+                origin_agent: AgentId::from("a"),
+                created_at: flushed,
+                access_count: 0,
+                last_accessed: None,
+                gc_survived: 0,
+                canonization_status: CanonizationStatus::None,
+                blast_radius: None,
+                last_demotion_time: None,
+                embedding: None,
+                human_confirmed: confirmed,
+                chunk_group_id: None,
+            }),
+        };
+
+        store
+            .flush(
+                &MutationBatch {
+                    mutations: vec![
+                        Mutation::UpsertNode {
+                            node: NodeKind::Interaction(Interaction {
+                                event_time: None,
+                                id: iid,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("a"),
+                                prompt_text: Some("prompt".into()),
+                                previous_id: None,
+                                created_at: flushed,
+                            }),
+                        },
+                        concept(c_confirmed, "load-bearing warning", 7),
+                        concept(c_plain, "ordinary note", 0),
+                    ],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load_session(&sid).await.unwrap();
+        let confirmed = loaded
+            .concepts
+            .iter()
+            .find(|c| c.id == c_confirmed)
+            .expect("confirmed concept loaded");
+        assert_eq!(confirmed.human_confirmed, 7);
+        let plain = loaded
+            .concepts
+            .iter()
+            .find(|c| c.id == c_plain)
+            .expect("plain concept loaded");
+        assert_eq!(plain.human_confirmed, 0);
+    }
 }
