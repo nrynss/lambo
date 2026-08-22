@@ -2858,6 +2858,7 @@ mod tests {
             prompt_text: Some("p".into()),
             previous_id: None,
             created_at: sql_test_ts(),
+            event_time: None,
         }
     }
 
@@ -2893,6 +2894,7 @@ mod tests {
             reinforcements: 1,
             created_at: sql_test_ts(),
             last_reinforced: sql_test_ts(),
+            event_time: None,
         }
     }
 
@@ -3326,7 +3328,7 @@ mod tests {
         ];
         let refs: Vec<&Edge> = edges.iter().collect();
         let edge_sql = edge_upsert_query(&refs).sql().to_string();
-        assert_eq!(placeholder_max(&edge_sql), 18, "2 rows x 9 columns");
+        assert_eq!(placeholder_max(&edge_sql), 20, "2 rows x 10 columns");
         assert_eq!(edge_sql.matches("ON CONFLICT").count(), 1);
     }
 
