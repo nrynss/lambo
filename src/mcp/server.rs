@@ -544,7 +544,13 @@ fn note_facts(facts: impl FnOnce() -> serde_json::Value) {
 /// The full error can interpolate a DSN, a store URL, a file path or a driver
 /// message — none of which the model needs and any of which is worth keeping
 /// out of a model-facing string. Return the class; the detail is logged.
-fn err_class(err: &LamboError) -> &'static str {
+///
+/// `pub(crate)` since JE2E-12, so `writeq`'s async write path can render the
+/// same class the synchronous path does. The alternative was a second match in
+/// `writeq.rs`, which is how a new `LamboError` variant would come to have one
+/// class on the sync path and another on the async one — the drift this
+/// function exists to prevent, reintroduced one module over.
+pub(crate) fn err_class(err: &LamboError) -> &'static str {
     match err {
         LamboError::Store(_) => "store error",
         // J3 round-1 N1: same pairing as the Conflict/SoftLock one below. The
@@ -784,8 +790,14 @@ fn attach_warnings(out: &mut CallToolResult, warnings: &[String]) {
 /// that never reaches its client loses its piggyback, which is why the
 /// fetch-by-id surface on `lambo_stats` exists as well.
 ///
-/// URLs are redacted (N3): a `failed` answer carries a `LamboError`, and a
-/// store error can name a DSN.
+/// URLs are redacted (N3), and that is now the **second** layer rather than the
+/// only one. Since JE2E-12 a `failed` answer carries the N4 *class* —
+/// `err_class` plus "the detail was logged server-side", the same sentence
+/// `tool_err` renders on the synchronous path — instead of the `LamboError`'s
+/// own message. `redact_urls` stays because it is not the same guard: it matches
+/// `scheme://` tokens, and the thing that reached a model before this was a
+/// store **file path** ("unable to open database file: /path"), which has no
+/// `://` for it to catch. Neither layer is load-bearing alone.
 fn attach_receipts(
     out: &mut CallToolResult,
     taken: &[(ReceiptId, ReceiptAnswer)],

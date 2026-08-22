@@ -922,6 +922,24 @@ pub enum ReceiptAnswer {
     /// Applied through the ordinary path.
     Applied(AppliedSummary),
     /// Attempted and rejected. The write did not happen.
+    ///
+    /// **The string is the N4 class, not the error** (JE2E-12). This receipt is
+    /// the *only* channel a background write's failure has to the model, and it
+    /// used to interpolate `LamboError::to_string()` verbatim — so a sqlite
+    /// "unable to open database file: /path" or a driver message reached a
+    /// model here, where the same error through the synchronous path was
+    /// flattened by `tool_err` to "store error (the detail was logged
+    /// server-side)". Nothing credential-shaped had a producer on this path, and
+    /// `redact_urls` covers `scheme://` tokens on every render — but a store
+    /// file path has no `://`, and "no producer today" is a fact about today.
+    ///
+    /// So it carries what the synchronous path carries, built from the same
+    /// [`crate::mcp::server::err_class`] rather than a second match, and the
+    /// operator's copy is written at the same site twice over: the `completion`
+    /// line's `error` field (operator-facing JSONL) and a `tracing::warn!`.
+    /// [`ReceiptAnswer::Dropped`] is deliberately untouched — its string is
+    /// `DropReason::describe`, lambo's own text about lambo's own bounds, with
+    /// nothing of the environment in it.
     Failed(String),
     /// Applied, but not by the process that acked it: the write survived a
     /// close (or crash-with-flushed-tail) as a durable intent, and a later
@@ -975,6 +993,24 @@ pub enum ReceiptAnswer {
     NeverIssued,
     /// Held, but by another agent. Receipts are per-agent scoped (J1).
     Forbidden,
+}
+
+/// The model-facing form of a background write's failure (JE2E-12).
+///
+/// N4's rule, applied to the async path: the model gets a class and a pointer to
+/// the log, never the raw error, which can carry a store URL, a store file path
+/// or a driver message. This is the same sentence `mcp::server::tool_err`
+/// produces for the synchronous path, built from the same
+/// [`crate::mcp::server::err_class`] so the two cannot drift.
+///
+/// Every caller writes the raw error to the operator at the same site — a
+/// `completion` ledger line and a `tracing::warn!` — so nothing is lost, only
+/// relocated to the audience that can act on it.
+fn model_safe_failure(err: &LamboError) -> String {
+    format!(
+        "{} (the detail was logged server-side)",
+        crate::mcp::server::err_class(err)
+    )
 }
 
 impl ReceiptAnswer {
@@ -2545,13 +2581,21 @@ impl WritePipeline {
                     // (fenced flushes are refused at the store, so this
                     // process can neither apply nor consume it now); if it
                     // never flushed, it dies with this process's tail.
-                    Err(format!(
+                    //
+                    // JE2E-12: this arm hand-writes its own message and always
+                    // did, which is why the finding did not reach it — it is
+                    // lambo's own text about lambo's own lease, with nothing of
+                    // the environment in it. It carries the same string twice
+                    // because the model and the operator want the same words
+                    // here; the split exists for the arms where they do not.
+                    let fenced = format!(
                         "this handle lost its single-writer lease before the write was applied; \
                          this process wrote nothing for session {} — if the write's durable \
                          intent reached the store first, the session's current holder will \
                          apply it",
                         ctx.session
-                    ))
+                    );
+                    Err((fenced.clone(), fenced))
                 } else {
                     // Timed, because this lane is single-consumer: the wall
                     // clock around one `run` *is* this deployment's serial
@@ -2607,15 +2651,24 @@ impl WritePipeline {
                                 ctx.graph.write().consume_write_intent(
                                     job.receipt.to_string(),
                                     WriteIntentOutcome {
+                                        // JE2E-12: the intent row IS the durable
+                                        // half of the receipt store — a restart
+                                        // answers `failed` straight out of this
+                                        // `summary` — so what it holds must be
+                                        // what a receipt may say. The operator's
+                                        // copy is the completion line and the
+                                        // WARN below, both written from `detail`.
                                         tag: "failed".into(),
-                                        summary: e.to_string(),
+                                        summary: model_safe_failure(e),
                                         consumed_at: (clock)(),
                                     },
                                 );
                             }
                         }
                     }
-                    raw_outcome.map_err(|e| e.to_string())
+                    // Two strings from here on: the class for the model, the
+                    // error for the operator (JE2E-12).
+                    raw_outcome.map_err(|e| (model_safe_failure(&e), e.to_string()))
                 };
 
                 // No `.await` from here to the end of the iteration: an
@@ -2648,21 +2701,26 @@ impl WritePipeline {
                         }
                         ReceiptAnswer::Applied(summary)
                     }
-                    Err(why) => {
+                    Err((why, detail)) => {
                         counters.failed.fetch_add(1, Ordering::Relaxed);
+                        // JE2E-12: the ledger line is operator-facing JSONL and
+                        // gets the raw error; the receipt is model-facing and
+                        // gets the class. Same fact, two audiences, one site —
+                        // which is what keeps the detail from being lost rather
+                        // than merely hidden.
                         if let Some(ledger) = &ctx.ledger {
                             ledger.append(&crate::ledger::completion_line(
                                 &job.agent.to_string(),
                                 &job.receipt.to_string(),
                                 "failed",
-                                Some(json!({ "error": &why })),
+                                Some(json!({ "error": &detail })),
                             ));
                         }
                         tracing::warn!(
                             session = %ctx.session,
                             agent = %job.agent,
                             receipt = %job.receipt,
-                            error = %why,
+                            error = %detail,
                             "write queue: a background write failed; the outcome is on its receipt"
                         );
                         ReceiptAnswer::Failed(why)
@@ -3192,7 +3250,17 @@ impl WritePipeline {
                         transient_streak = 0;
                         failed += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
-                        let why =
+                        // JE2E-12, same split as the in-session worker's failure
+                        // arm: the class for the model, the embedder's own words
+                        // for the operator. The "replay after restart was
+                        // refused; nothing was written" framing is lambo's own
+                        // and is the useful half — it says *when* and *whether*
+                        // — so it survives on both.
+                        let why = format!(
+                            "replay after restart was refused ({}); nothing was written",
+                            crate::mcp::server::err_class(&LamboError::Embed(e.clone()))
+                        );
+                        let detail =
                             format!("replay after restart was refused ({e}); nothing was written");
                         // J4 proof obligation 5: a replayed intent settled
                         // `failed` is a lifecycle fact, visible on the ledger.
@@ -3201,11 +3269,13 @@ impl WritePipeline {
                                 &job.agent.to_string(),
                                 &job.receipt.to_string(),
                                 "failed",
-                                Some(json!({ "error": &why, "replay": true })),
+                                Some(json!({ "error": &detail, "replay": true })),
                             ));
                         }
                         // A failure has no commit to ride — consume on its own
-                        // (see the worker's failure arm for the argument).
+                        // (see the worker's failure arm for the argument). The
+                        // row holds the model-safe form for the same reason it
+                        // does there: a restart answers `failed` out of it.
                         this.ctx.graph.write().consume_write_intent(
                             intent.receipt.clone(),
                             WriteIntentOutcome {
@@ -5160,9 +5230,27 @@ mod pipeline_tests {
                      here is the applied-with-NULL-embedding dishonesty"
                 );
             };
+            // Asserted at `describe()`, the string a model is actually handed —
+            // `why` is the payload, and since JE2E-12 the "nothing was written"
+            // half comes from the variant's own rendering rather than from the
+            // payload. The property is unchanged and this is where it lives.
+            let rendered = ReceiptAnswer::Failed(why.clone()).describe();
             assert!(
-                why.contains("nothing was written"),
-                "the receipt must say nothing was written: {why}"
+                rendered.contains("nothing was written"),
+                "the receipt must say nothing was written: {rendered}"
+            );
+            // **JE2E-12.** The payload is the N4 class, not the embedder's own
+            // words. `EmbedError::Backend` here carries "HTTP 500: input
+            // refused" — a server's response body, which on a real deployment
+            // is whatever that server chose to say — and the model must not be
+            // handed it, exactly as the synchronous path does not hand it over.
+            assert_eq!(
+                why, "embedding error (the detail was logged server-side)",
+                "the receipt carries the N4 class, the same one `tool_err` renders"
+            );
+            assert!(
+                !rendered.contains("HTTP 500") && !rendered.contains("input refused"),
+                "the embedder's own message must not reach a model: {rendered}"
             );
         }
         assert!(
