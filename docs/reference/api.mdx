@@ -84,6 +84,7 @@ let mem = Memory::builder()
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
+| `promotion_policy` | `Swarm` | Which promotion policy Stage 1 runs. `Swarm` is spec §3.2 multi-agent convergence — a peer-count session gate and a P90 cut on the peer score distribution — and is the only implemented value. `Solo` (single-writer promotion) is declared but not built; `Config::validate()` refuses it. |
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
 
