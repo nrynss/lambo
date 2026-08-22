@@ -235,7 +235,7 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
         loser_line["agent_id"], "agent-b",
         "loser line is the loser's"
     );
-    let loser_holder = loser_line["holder"].as_str().expect("holder token");
+    let loser_holder = loser_line["counterparty"].as_str().expect("counterparty token");
     assert!(
         loser_holder.starts_with("agent-a@"),
         "loser line names the incumbent; got {loser_holder}"
@@ -249,7 +249,7 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
         holder_line["agent_id"], "agent-a",
         "holder line is the holder's"
     );
-    let holder_refused = holder_line["holder"].as_str().expect("holder token");
+    let holder_refused = holder_line["counterparty"].as_str().expect("counterparty token");
     assert!(
         holder_refused.starts_with("agent-b@"),
         "holder line names the refused loser; got {holder_refused}"
@@ -381,12 +381,12 @@ fn a_proxying_serve_writes_a_proxying_line() {
     assert_eq!(loser["side"], "loser");
     assert_eq!(loser["agent_id"], "agent-b");
     assert!(
-        loser["holder"]
+        loser["counterparty"]
             .as_str()
             .unwrap_or_default()
             .starts_with("agent-a@"),
         "loser names the incumbent holder; got {:?}",
-        loser["holder"]
+        loser["counterparty"]
     );
     let holder = lines
         .iter()
@@ -395,12 +395,12 @@ fn a_proxying_serve_writes_a_proxying_line() {
     assert_eq!(holder["side"], "holder");
     assert_eq!(holder["agent_id"], "agent-a");
     assert!(
-        holder["holder"]
+        holder["counterparty"]
             .as_str()
             .unwrap_or_default()
             .starts_with("agent-b@"),
         "holder names the refused loser; got {:?}",
-        holder["holder"]
+        holder["counterparty"]
     );
 
     sigterm(a_pid);

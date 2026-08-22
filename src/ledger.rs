@@ -603,15 +603,35 @@ pub fn startup_line(session: &str, agent: &str, transport: &str) -> Value {
 /// that happens while the proxy is idle.
 ///
 /// Fields: `event` is one of `refused` | `proxying` | `proxying_stopped` |
-/// `refused_takeover`; `side` is `loser` or `holder`. `holder` names the lease
-/// holder involved (the incumbent), and `detail` carries per-event facts that
-/// do not fit the fixed head.
+/// `refused_takeover`; `side` is `loser` or `holder`; `agent_id` is the id of
+/// the process writing the line; and `detail` carries per-event facts that do
+/// not fit the fixed head.
+///
+/// # The other party's key is named for what it is (JE2E-11)
+///
+/// It used to be `holder` on every event, and it meant three different things:
+/// the *incumbent's* token on `refused`, the **loser's** token on
+/// `refused_takeover`, and a **socket path** on `proxying` /
+/// `proxying_stopped`. Nothing broke — the kit ignores unknown `kind`s — but an
+/// operator grepping `holder:` got counterparties and file paths back
+/// interchangeably, which makes the field unusable for the question it exists
+/// to answer.
+///
+/// So [`party_key`] chooses the name from the event, in one place, and the two
+/// cannot drift apart:
+///
+/// * `counterparty` — the *other* process's lease token, on the two refusal
+///   events. Read it as "who was on the other side of this refusal", which is
+///   true from both sides without the reader having to know which side they are
+///   looking at.
+/// * `dialled` — the socket path this proxy was forwarding over, on the two
+///   proxying events. It is a path, and now it says so.
 pub fn lease_line(
     event: &str,
     side: &str,
     session: &str,
     agent: &str,
-    holder: &str,
+    party: &str,
     detail: Option<Value>,
 ) -> Value {
     let mut line = head("lease");
@@ -620,13 +640,28 @@ pub fn lease_line(
     obj.insert("side".into(), json!(side));
     obj.insert("session".into(), json!(session));
     obj.insert("agent_id".into(), json!(agent));
-    obj.insert("holder".into(), json!(holder));
+    obj.insert(party_key(event).into(), json!(party));
     if let Some(Value::Object(detail)) = detail {
         for (k, v) in detail {
             obj.insert(k, v);
         }
     }
     line
+}
+
+/// Which key [`lease_line`]'s other-party string lands under, for `event`
+/// (JE2E-11).
+///
+/// Exhaustive over the four events J4 produces. The fallback is
+/// `counterparty` and it is the safe half of the split — a future event that
+/// forgets to be added here labels a *process* as a process, where the failure
+/// mode this function exists to end was labelling a *path* as a holder.
+pub fn party_key(event: &str) -> &'static str {
+    match event {
+        "proxying" | "proxying_stopped" => "dialled",
+        // `refused`, `refused_takeover`, and anything added later.
+        _ => "counterparty",
+    }
 }
 
 /// A `completion` line: the durable lifecycle of one write intent, so a closed
@@ -1009,12 +1044,14 @@ mod tests {
         assert_eq!(s["transport"], "stdio");
         assert_eq!(s["state"], "acquiring");
 
-        // Lease line, both sides of one refusal.
+        // Lease line, both sides of one refusal. JE2E-11: the other party is a
+        // PROCESS on both refusal events, and it lands under `counterparty` —
+        // read from either side as "who was on the other side of this".
         let loser = lease_line("refused", "loser", "sess-1", "agent-b", "agent-a@h#1", None);
         assert_eq!(loser["kind"], "lease");
         assert_eq!(loser["event"], "refused");
         assert_eq!(loser["side"], "loser");
-        assert_eq!(loser["holder"], "agent-a@h#1");
+        assert_eq!(loser["counterparty"], "agent-a@h#1");
         let holder = lease_line(
             "refused_takeover",
             "holder",
@@ -1025,29 +1062,50 @@ mod tests {
         );
         assert_eq!(holder["event"], "refused_takeover");
         assert_eq!(holder["side"], "holder");
-        assert_eq!(holder["holder"], "agent-b@h#2");
+        assert_eq!(holder["counterparty"], "agent-b@h#2");
 
-        // Proxy lines ride the same builder.
+        // Proxy lines ride the same builder, and their other party is a PATH,
+        // so it lands under `dialled`. This is the whole of JE2E-11: one key
+        // used to carry both, so `holder:` returned tokens and file paths
+        // interchangeably.
         let px = lease_line(
             "proxying",
             "loser",
             "sess-1",
             "agent-c",
-            "agent-a@h#1",
+            "/run/user/1000/lambo/s-abc.sock",
             None,
         );
         assert_eq!(px["event"], "proxying");
+        assert_eq!(px["dialled"], "/run/user/1000/lambo/s-abc.sock");
         let stopped = lease_line(
             "proxying_stopped",
             "loser",
             "sess-1",
             "agent-c",
-            "agent-a@h#1",
+            "/run/user/1000/lambo/s-abc.sock",
             Some(json!({ "lost": 2, "ended_hang": true })),
         );
         assert_eq!(stopped["event"], "proxying_stopped");
+        assert_eq!(stopped["dialled"], "/run/user/1000/lambo/s-abc.sock");
         assert_eq!(stopped["lost"], 2);
         assert_eq!(stopped["ended_hang"], true);
+
+        // No event carries both, and no event carries the ambiguous old key.
+        for line in [&loser, &holder, &px, &stopped] {
+            assert!(
+                line.get("holder").is_none(),
+                "the ambiguous key is gone: {line}"
+            );
+            assert_ne!(
+                line.get("counterparty").is_some(),
+                line.get("dialled").is_some(),
+                "exactly one of the two, chosen by the event: {line}"
+            );
+        }
+        // The fallback labels a process as a process — the safe half of the
+        // split, since the failure this ends was labelling a PATH as a holder.
+        assert_eq!(party_key("some_future_event"), "counterparty");
 
         // Completion line carries the metric-2 fact set.
         let c = completion_line(

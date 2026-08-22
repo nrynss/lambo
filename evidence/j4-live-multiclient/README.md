@@ -28,6 +28,25 @@ python3 <scratch>/scenario2.py <A-pid>   # bursts 30 calls through B, SIGKILLs A
 rm -f /run/user/1000/lambo/session-j4val-17-*.sock; rm -rf /tmp/j4val-<ts>
 ```
 
+## What the J E2E round-1 remediation superseded (2026-08-22)
+
+**The transcripts below are untouched, deliberately** — a capture is only
+evidence while it stays byte-exact, so this note records what has moved since
+rather than editing the lines to match today's binary. Two changes affect how a
+reader should read them:
+
+* **JE2E-11.** The `lease` line's other-party key was `holder` on every event
+  and meant three different things — the incumbent's token, the loser's token,
+  and a socket path. It is now chosen by the event: `counterparty` on
+  `refused` / `refused_takeover`, `dialled` on `proxying` /
+  `proxying_stopped`. Every `"holder":` below is one of those two.
+* **JE2E-3.** `proxying_stopped` was booked only when calls were in flight,
+  which is why the run below had to kill the holder *with 30 calls in flight*
+  to provoke one ("its designed trigger", as the note says). It is now booked
+  on any ending of the current hub connection, so the commonest degraded shape
+  — a holder dying while the proxy is idle — produces the line too, with
+  `lost: 0`.
+
 ## Quoted artifact lines (shared ledger `shared.jsonl`)
 
 Earliest (holder) set — the **pre-lease startup line** (deliverable 1, written before acquire):
