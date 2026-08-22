@@ -499,6 +499,29 @@ shape.
   after Option 1). This range is **documented, not budget-raised** — moving the 8 s budget
   was rejected as masking. Option 2 (fold per-concept embedding into the concept upsert)
   remains the open lever if a deployment needs a larger guaranteed envelope.
+
+  **What this envelope is NOT for — the bootstrap uses another method (operator,
+  2026-08-22).** Mooshik's decade-scale bootstrap ingest will not ride the interactive
+  serve path at all, so the K ≤ ~150 envelope is not its constraint and Option 2 is not
+  its prerequisite. The serve path is shaped for interactive traffic — per-write acks,
+  receipts, the intent WAL, a close budget, a lease per session — and a bulk ingest wants
+  none of that: there is no agent awaiting an ack, no second client to coordinate with,
+  and no reason to pay per-write intent bookkeeping when the whole run is one resumable
+  job. The bootstrap's shape is a **bulk ingest verb**: a single process with exclusive
+  store ownership, batch embedding, direct bulk flushes, and checkpoint/resume at file
+  granularity — the WAL's job done per checkpoint instead of per write. F4's own
+  arithmetic endorses the split: at ~110 ms effective per statement on serverless
+  Cockroach, a decade of history through the interactive path was never viable, so the
+  bulk path is not an optimisation but the only shape the numbers permit.
+
+  The pieces already exist on the map rather than needing a new subsystem: `seed()` is
+  deliberately off-lease (`lease_permits_write` passes when no lease was ever minted —
+  the bulk bypass is part of the fencing contract, not a hack around it); K2's `re-embed`
+  verb is the same pipeline (bootstrap = re-embed + create-the-concepts); and **D is the
+  real blocker**, not throughput — without event time, a bulk ingest produces the
+  everything-happened-at-once graph that breaks every temporal gate, which is D's founding
+  premise. Sequencing therefore stays D → (K2's plumbing) → a thin bootstrap verb
+  composing the three, designed under E/Mooshik planning rather than as a J concern.
 * **J3-R2R-3** — F5's column gap, measured at F5's own magnitude: a store missing one column
   attaches, acks, reports `applied=4 degraded=false`, and leaves `concepts=0`, loud only at
   close with exit 1. The judgement call is column preflight versus a stated magnitude, and

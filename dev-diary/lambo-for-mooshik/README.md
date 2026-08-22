@@ -340,6 +340,15 @@ video. **Depends on:** E1.
 **Not crates.io.** A dated 0.3.0 release during the judging window is far more visible than a
 branch, and the README links crates.io. Release after 2026-09-15.
 
+**The bootstrap ingest is a separate method, decided 2026-08-22.** Mooshik's decade-scale
+bootstrap will not ride the interactive serve path (acks, receipts, the J3 intent WAL, close
+budgets) — F4 measured that path at ~110 ms effective per statement on serverless Cockroach,
+which no bulk ingest survives. It gets a bulk verb instead: exclusive store ownership, batch
+embedding, direct bulk flushes, checkpoint/resume. The pieces are already planned elsewhere —
+`seed()`'s deliberate off-lease bypass, K2's `re-embed` pipeline, and **D as the true
+blocker** (event time first, or the ingest breaks every temporal gate). Full reasoning beside
+the F4 envelope in [J3-durability-redesign.md](J3-durability-redesign.md).
+
 ---
 
 ## Open issues: absorbed and not
