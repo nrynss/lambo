@@ -154,3 +154,51 @@ remediation code contradicts it.
 | Finding | Commit | What changed | Verification |
 | --- | --- | --- | --- |
 | D-R2-1 | `486de8a` — `fix(d2): purge stale begin_interaction_as references left by 5c115cc` | All five surviving prose citations of the removed `begin_interaction_as` renamed to `begin_interaction_full` (the method that actually opens the interaction on every current write path): `writeq.rs` module doc lines 47/53/64, the `writeq.rs:4383` test comment, and the `mcp/server.rs:1747` comment. The two intra-doc links that warned were demoted to plain backticked names rather than re-pointed, because `begin_interaction_full` is private and a link from public docs trades an unresolved-link warning for a `private_intra_doc_links` one: `[`crate::Memory::begin_interaction_as`]` at `writeq.rs:47` (unresolved) and `[`Self::begin_interaction_full`]` at `memory.rs:1602` (private-item link in `derive_async_as`'s docstring). No runtime code touched — 3 files, 9 insertions / 9 deletions, comments only. `grep -rn begin_interaction_as src/` is empty. | `cargo doc --no-deps` warning count **44 → 42** (`grep -c warning`); full warning-set diff against the pre-fix tree shows exactly the two D-introduced warnings gone — `unresolved link to 'crate::Memory::begin_interaction_as'` and `public documentation for 'derive_async_as' links to private item 'Self::begin_interaction_full'` — with every remaining warning byte-identical to the pre-D baseline `d74efc2` set (no new warnings). Gates at closure HEAD: `cargo fmt --all -- --check` pass; `cargo clippy --all-targets -- -D warnings` pass. Not pushed. |
+
+## Round 3 verification
+
+**Reviewer**: independent adversarial reviewer, agent_id `DReview3`. Wrote nothing
+under review except this section. Worktree `/home/nryn/work/lambo`, branch
+`lambo-for-mooshik` @ `c976bb5` (verified before starting).
+**Verdict**: **APPROVE** — the single round-2 closure (D-R2-1 @ `486de8a`) **HOLDS**;
+zero new findings, zero failed closures. D's review cycle is closed.
+
+### Closure evidence (D-R2-1)
+
+* `grep -rn begin_interaction_as src/` → **empty**. Zero references remain.
+* `git show 486de8a` re-read in full: exactly 3 files / 9 insertions / 9 deletions,
+  comments and docstrings only, no runtime code touched. The two warning-emitting
+  sites were **demoted to plain backticked names**, not re-pointed at the private
+  `begin_interaction_full` — `writeq.rs:47`
+  (`[`crate::Memory::begin_interaction_as`]` → `` `begin_interaction_full` ``) and
+  `memory.rs:1602` ([`Self::begin_interaction_full`] → `` `begin_interaction_full` ``
+  in `derive_async_as`'s docstring). No new private-item links introduced.
+* Closure record in '## Round 2 closures' matches the actual diff site-for-site.
+
+### Doc-warning set vs pre-D baseline `d74efc2`
+
+* HEAD: `cargo doc --no-deps` → **42 warnings** (expected 42 ✓).
+* Baseline rebuilt from a throwaway worktree at `d74efc2` → 44 warnings; sets sorted
+  and diffed. HEAD = baseline **minus exactly two warnings**, zero additions:
+  + `public documentation for 'writeq' links to private item
+    'crate::Memory::begin_interaction_as'` — the D-introduced warning, removed by
+    this closure.
+  + `public documentation for 'separated_session_count' links to private item
+    'super::policy'` — a pre-existing baseline warning already removed by `1d30eee`
+    before round 2 opened (accepted there as a bonus).
+* Every remaining warning byte-identical to baseline; no new warnings of any kind.
+
+### Gates rerun at `c976bb5`
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | **pass** |
+| `cargo clippy --all-targets -- -D warnings` | **pass** |
+| `cargo test` (with `set -o pipefail`) | **pass** — exit 0, 878 lib passed / 0 failed (+ integration suites, all `ok`) |
+
+### Tree state
+
+Clean except the pre-existing untracked scratch dir (`?? local:/`, other agents'
+briefs — left untouched). Nothing pushed: HEAD is 30 commits ahead of
+`origin/lambo-for-mooshik`. Baseline worktree used for the doc comparison was
+removed after the run (`git worktree prune`; tree re-verified clean).
