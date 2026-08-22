@@ -2642,6 +2642,7 @@ mod tests {
         graph
             .write()
             .insert_interaction(Interaction {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: session.clone(),
                 agent_id: AgentId::from("agent-a"),
@@ -2942,6 +2943,7 @@ mod tests {
         graph
             .write()
             .insert_interaction(Interaction {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: session.clone(),
                 agent_id: AgentId::from("agent-a"),

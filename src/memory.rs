@@ -5228,6 +5228,7 @@ mod tests {
                 session_id: sid.clone(),
                 embedding: Some(contract("fixture", 1024)),
                 interactions: vec![Interaction {
+                    event_time: None,
                     id: interaction,
                     session_id: sid.clone(),
                     agent_id: agent.clone(),

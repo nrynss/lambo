@@ -282,6 +282,7 @@ impl Rig {
                     dim: 1024,
                 }),
                 interactions: vec![Interaction {
+                    event_time: None,
                     id: interaction_id,
                     session_id: session,
                     agent_id: AgentId::new("agent-a"),

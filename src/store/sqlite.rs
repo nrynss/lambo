@@ -335,8 +335,8 @@ const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
  ) \
  SELECT \
      (SELECT count(*) FROM span), \
-     (SELECT min(created_at) FROM span), \
-     (SELECT max(created_at) FROM span), \
+     (SELECT min(about_ts) FROM span), \
+     (SELECT max(about_ts) FROM span), \
      extent.lo, extent.hi \
  FROM extent";
 
@@ -2848,6 +2848,7 @@ mod tests {
     ) -> Mutation {
         Mutation::UpsertNode {
             node: NodeKind::Interaction(Interaction {
+                event_time: None,
                 id,
                 session_id: sid.clone(),
                 agent_id: AgentId::from("a"),
@@ -2868,6 +2869,7 @@ mod tests {
     ) -> Mutation {
         Mutation::UpsertEdge {
             edge: Edge {
+                event_time: None,
                 id: NodeId::new(),
                 session_id: sid.clone(),
                 source,
@@ -4328,6 +4330,7 @@ mod tests {
                         concept_mutation,
                         Mutation::UpsertEdge {
                             edge: Edge {
+                                event_time: None,
                                 id: NodeId::new(),
                                 session_id: sid.clone(),
                                 source: interaction,
@@ -4421,6 +4424,7 @@ mod tests {
             .seed(&GraphSnapshot {
                 session_id: sid.clone(),
                 interactions: vec![Interaction {
+                    event_time: None,
                     id: i1,
                     session_id: sid.clone(),
                     agent_id: AgentId::from("a"),
@@ -4546,6 +4550,7 @@ mod tests {
         };
         let i1 = NodeId::new();
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i1,
             session_id: sid.clone(),
             agent_id: AgentId::from("agent-a"),
@@ -4556,6 +4561,7 @@ mod tests {
         .unwrap();
         let i2 = NodeId::new();
         g.insert_interaction(Interaction {
+            event_time: None,
             id: i2,
             session_id: sid.clone(),
             agent_id: AgentId::from("agent-a"),
@@ -4770,6 +4776,7 @@ mod tests {
                 // exactly as demote would create it.
                 Mutation::UpsertEdge {
                     edge: crate::types::Edge {
+                        event_time: None,
                         id: NodeId::new(),
                         session_id: sid.clone(),
                         source: i1,
@@ -6300,6 +6307,7 @@ mod tests {
                 plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, ts),
                 Mutation::UpsertEdge {
                     edge: Edge {
+                        event_time: None,
                         id: NodeId::new(),
                         session_id: sid.clone(),
                         source: pillar,
@@ -6812,6 +6820,7 @@ mod tests {
         for n in 0..ids.len() - 1 {
             mutations.push(Mutation::UpsertEdge {
                 edge: Edge {
+                    event_time: None,
                     id: NodeId::new(),
                     session_id: sid.clone(),
                     source: ids[n],
