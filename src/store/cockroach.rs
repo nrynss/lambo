@@ -140,15 +140,21 @@ const MAX_POOL_CONNECTIONS: u32 = 4;
 /// statements, while keeping any one statement small enough that CockroachDB
 /// plans it without trouble and a retry re-sends little.
 ///
-/// **`interactions` is deliberately 1.** `interactions.previous_id REFERENCES
+/// **`interactions` batches now too.** `interactions.previous_id REFERENCES
 /// interactions(id)` is a *self* foreign key, and a batch's interactions form a
-/// chain. Both engines check foreign keys at end-of-statement, so a multi-row
-/// insert of a chain should be fine — but "should be" is not a thing this can
-/// verify from a machine with no cluster, and the payoff is nil: a burst carries
-/// one interaction per client call (four in the live repro) against hundreds of
-/// concepts and edges. Row-at-a-time here costs nothing and assumes nothing.
+/// chain — which is why this used to be 1 ("row-at-a-time costs nothing").
+/// F4 disproved the "costs nothing": `record_action` emits one interaction per
+/// call and concepts/edges batch, so the *un-batched* interactions became the
+/// largest per-statement contributor to the close-flush round-trip count (30 of
+/// ~37 at a K=30 deferred tail). Batching them is safe because
+/// `dedupe_last_at_first_position` (R1-1) emits each interaction at its first
+/// occurrence — reference-before-use — and both engines check the self-FK at
+/// end-of-statement, so a chain inside one multi-row statement is satisfied; a
+/// chain split across statements still passes because the reference is written
+/// in an earlier statement of the same transaction. Verified against the live
+/// Cockroach cluster (F4 re-measurement).
 const BULK_LIMITS: BulkLimits = BulkLimits {
-    interactions: 1,
+    interactions: 256,
     concepts: 256,
     edges: 512,
 };
@@ -1615,7 +1621,11 @@ fn put_write_intents_upsert<'a>(
 /// the chunk's oldest `consumed_at` minus the retention window.
 async fn bulk_consume_write_intents(
     tx: &mut sqlx::PgConnection,
-    consumes: &[(&crate::types::SessionId, &str, &crate::types::WriteIntentOutcome)],
+    consumes: &[(
+        &crate::types::SessionId,
+        &str,
+        &crate::types::WriteIntentOutcome,
+    )],
 ) -> Result<(), StoreError> {
     if consumes.is_empty() {
         return Ok(());
@@ -1651,31 +1661,45 @@ async fn bulk_consume_write_intents(
     Ok(())
 }
 
-const INSERT_WRITE_INTENT_PREFIX_SQL: &str = "INSERT INTO write_intents \
-    (session_id, receipt, agent, interaction_id, lane_seq, issued_ms, payload, \
-     created_at, consumed_at, outcome_tag, outcome_summary) VALUES ";
+const INSERT_WRITE_INTENT_PREFIX_SQL: &str = r#"
+INSERT INTO write_intents (
+    session_id, receipt, agent, interaction_id, lane_seq, issued_ms, payload,
+    created_at, consumed_at, outcome_tag, outcome_summary
+) "#;
 
-const ON_CONFLICT_WRITE_INTENT_SQL: &str = " ON CONFLICT (session_id, receipt) DO UPDATE SET \
-    agent = excluded.agent, interaction_id = excluded.interaction_id, \
-    lane_seq = excluded.lane_seq, issued_ms = excluded.issued_ms, \
-    payload = excluded.payload, created_at = excluded.created_at, \
-    consumed_at = excluded.consumed_at, outcome_tag = excluded.outcome_tag, \
-    outcome_summary = excluded.outcome_summary";
+const ON_CONFLICT_WRITE_INTENT_SQL: &str = r#"
+ON CONFLICT (session_id, receipt) DO UPDATE SET
+    agent = EXCLUDED.agent,
+    interaction_id = EXCLUDED.interaction_id,
+    lane_seq = EXCLUDED.lane_seq,
+    issued_ms = EXCLUDED.issued_ms,
+    payload = EXCLUDED.payload,
+    created_at = EXCLUDED.created_at,
+    consumed_at = EXCLUDED.consumed_at,
+    outcome_tag = EXCLUDED.outcome_tag,
+    outcome_summary = EXCLUDED.outcome_summary
+"#;
 
-const CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL: &str = "UPDATE write_intents SET \
-    consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary \
-    FROM (VALUES ";
+// `sqlx::QueryBuilder::push_values` emits the `VALUES` keyword itself, so the
+// prefix ends after `FROM (` and the suffix begins after the closing paren.
+const CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL: &str = r#"
+UPDATE write_intents SET
+    consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary
+    FROM ("#;
 
-const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = ") AS v(session_id, receipt, consumed_at, \
-    outcome_tag, outcome_summary) \
-    WHERE write_intents.session_id = v.session_id AND write_intents.receipt = v.receipt";
+const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = r#") AS v(
+    session_id, receipt, consumed_at, outcome_tag, outcome_summary
+) WHERE write_intents.session_id = v.session_id AND write_intents.receipt = v.receipt"#;
 
 /// The statement [`bulk_consume_write_intents`] runs, built but not executed.
 fn consume_write_intents_update<'a>(
-    consumes: &'a [(&'a crate::types::SessionId, &'a str, &'a crate::types::WriteIntentOutcome)],
+    consumes: &'a [(
+        &'a crate::types::SessionId,
+        &'a str,
+        &'a crate::types::WriteIntentOutcome,
+    )],
 ) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
-    let mut qb =
-        sqlx::QueryBuilder::<sqlx::Postgres>::new(CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL);
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL);
     qb.push_values(consumes.iter(), |mut b, (sid, receipt, outcome)| {
         b.push_bind(sid.0.as_str())
             .push_bind(receipt)
@@ -1695,9 +1719,7 @@ async fn apply_step(tx: &mut sqlx::PgConnection, step: &FlushStep<'_>) -> Result
         FlushStep::Edges(rows) => bulk_upsert_edges(&mut *tx, rows).await,
         FlushStep::Single(m) => apply_single(&mut *tx, m).await,
         FlushStep::PutIntents(intents) => bulk_put_write_intents(&mut *tx, intents).await,
-        FlushStep::ConsumeIntents(consumes) => {
-            bulk_consume_write_intents(&mut *tx, consumes).await
-        }
+        FlushStep::ConsumeIntents(consumes) => bulk_consume_write_intents(&mut *tx, consumes).await,
     }
 }
 

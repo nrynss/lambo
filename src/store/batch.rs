@@ -81,9 +81,8 @@ pub const EDGE_COLUMNS: usize = 9;
 /// so this keeps the binder far under the backend limit while still collapsing
 /// a realistic close tail (a few hundred intents) into a handful of statements.
 pub const INTENT_BATCH: usize = 1024;
-///
-/// Rows per multi-row statement, per table.
 
+/// Rows per multi-row statement, per table.
 ///
 /// Each adapter picks its own: the ceiling is the backend's bind-parameter
 /// limit divided by the column count ([`CONCEPT_COLUMNS`] and friends), and the
@@ -280,10 +279,10 @@ impl<'a> Buckets<'a> {
             steps.push(FlushStep::PutIntents(chunk));
         }
 
-        let consumes = dedupe_last_at_first_position(
-            std::mem::take(&mut self.consume_intents),
-            |c| (c.0 .0.clone(), c.1.to_string()),
-        );
+        let consumes =
+            dedupe_last_at_first_position(std::mem::take(&mut self.consume_intents), |c| {
+                (c.0 .0.clone(), c.1.to_string())
+            });
         for chunk in chunks(consumes, INTENT_BATCH) {
             steps.push(FlushStep::ConsumeIntents(chunk));
         }

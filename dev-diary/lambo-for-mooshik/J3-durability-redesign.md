@@ -463,14 +463,33 @@ shape.
   the distributed-txn commit latency. A realistic burst tail (~1 000+ mutations) cannot
   flush inside an 8 s serverless close regardless of the intent barriers.
 
-  **Next (in flight): Option 1 — batch `interactions`** by raising `BULK_LIMITS.interactions`,
+  **Option 1 — batch `interactions` — SHIPPED and measured (2026-08-22):** raised
+  `BULK_LIMITS.interactions` from 1 → 256 (Cockroach) / 100 (SQLite, 999-bind budget),
   reusing the R1-1 first-position self-FK dedupe that already makes multi-row interactions
-  safe; per-action this removes most of the per-statement RTTs a `record_action` tail
-  carries. If that still does not fit the budget, the honest options are (2) fold the
-  per-concept embedding write into the concept upsert (bigger, needs a mutation-composition
-  diagnosis first — the premise is unverified), or (3) accept and document the serverless
-  close-flush ceiling rather than move the grace budget (reviewers rejected budget-moving as
-  masking).
+  safe; the self-FK was verified against the live cluster (the old "cannot verify without a
+  cluster" blocker is gone). One real bug surfaced and was fixed along the way: the new
+  batched `write_intents` statements had a double-`VALUES` (the author wrote `VALUES` into
+  the prefix and `sqlx::QueryBuilder::push_values` emits it too) — a syntax error that only
+  appeared once interactions batched and the flush reached the (last-emitted) intent steps
+  before the 8 s timeout. Re-measured against the live cluster with both fixes:
+
+  | K durable intents | before Option 1 | after Option 1 |
+  |---|---|---|
+  | 30 | ≥ 8 s tail-lost | **1.4 s, 30/30 durable** |
+  | 50 | ≥ 8 s | **2.3 s, 50/50** |
+  | 100 | ≥ 8 s (0/100) | **2.6 s, 100/100 durable** |
+  | 200 | ≥ 8 s | 8.1 s, 154/200 (46 lost) |
+  | 400 | ≥ 8 s | 8.2 s, 152/398 |
+
+  So the budget cliff moved from ≈ 31 durable intents to ≈ 150–200; realistic deferred
+  tails (≤ 100 intents) now flush in ~2.6 s with ~5 s of headroom and 1:1 durability.
+  **Residual:** beyond ~150 intents / ~2 700 mutations the serverless close still cannot
+  flush inside 8 s and abandons (tail partially lost). That residual is a rare extreme (a
+  burst > ~150 deferred intents landed within seconds of close); the honest next options if
+  it must close are (2) fold the per-concept embedding write into the concept upsert
+  (bigger; first diagnose the mutation composition — premise still unverified), or (3)
+  accept-and-document the serverless close-flush ceiling rather than move the grace budget
+  (reviewers rejected budget-moving as masking).
 * **J3-R2R-3** — F5's column gap, measured at F5's own magnitude: a store missing one column
   attaches, acks, reports `applied=4 degraded=false`, and leaves `concepts=0`, loud only at
   close with exit 1. The judgement call is column preflight versus a stated magnitude, and
