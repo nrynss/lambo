@@ -2586,8 +2586,20 @@ applied_after_restart / failed / deferred) emitted from the write pipeline for
 every durable write intent's lifecycle, on the same append path as every other
 line. Applied lines carry `created_count` / `matched_count` — the I1 metric-2
 fact set that a replayed durable intent previously hid because replay bypassed
-the ordinary call path that builds `call`-line facts. This restores the declared
-metric-2 regression and closes proof obligation 5 of `J3-durability-redesign.md`.
+the ordinary call path that builds `call`-line facts. This closes proof
+obligation 5 of `J3-durability-redesign.md`.
+
+*This paragraph also said it "restores the declared metric-2 regression", and
+that was an **overclaim** — corrected by the JE2E-5 remediation (2026-08-22)
+rather than left standing. J3 specified the repair as a schema change that
+"moves `_ledger.py`, `dedup_rate.py`, `duplicates.py`, the observability README
+and `verify.sh`"; J4 shipped the producer and moved none of the five, so at that
+HEAD no consumer read a `completion` line, `dedup_rate.py` and `duplicates.py`
+still saw nothing from MCP sessions, and the observability README still said in
+the present tense that the completion line was **missing**. A producer with no
+consumer restores no metric. The five are moved by the remediation, and the
+completion join is now what makes an MCP-driven session's dedup rate a real
+number — see [J E2E round-1 remediation](#j-e2e-round-1-remediation) below.*
 
 **Deviation / disposition notes.**
 * `lease_refusals` is a **new required table** in both migrations (it is part of

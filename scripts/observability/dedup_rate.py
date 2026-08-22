@@ -16,11 +16,24 @@ created/matched keys at all is counted and reported on its own line rather than
 folded in as `created=0, matched=0` — the difference between "nothing was
 re-derived" and "this reader no longer understands these lines".
 
+**MCP-driven sessions are read through the completion join (J4).** J3 made
+`lambo_derive` return before the write is applied, so its call line cannot carry
+counts that do not exist yet; J4 put them back on a `kind:"completion"` line
+carrying the same `receipt`. This report joins on that key, so an MCP session's
+dedup rate is a real number again rather than `n/a`. `_ledger.joined_facts` is
+the one implementation of the join, shared with `duplicates.py`, and it reports
+which of the two sources each call's facts came from — the summary prints the
+split, because "the ledger has no completions" and "these writes were
+synchronous" are different states that used to look identical.
+
 `semantic_merged` is reported separately and NOT counted as a match. A hybrid
 similarity merge adds a decaying `Semantic` edge and does **not** re-upsert the
 target or add a `Derives` edge, so folding it into `matched` would overstate
 re-derivation savings with a weaker relationship. See `DeriveOutcome` in
-`src/graph/derive.rs`.
+`src/graph/derive.rs`. **It is unavailable for joined calls**, and reported as
+unavailable rather than as zero: the completion line carries the created/matched
+pair and no more, so a joined session's `sem.merged` column is a genuine
+absence.
 
 With `--store <path>` the ledger's own arithmetic is checked against the SQLite
 store: created-minus-matched should land near the store's concept count. A large
@@ -67,12 +80,18 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         lambda: {"calls": 0, "created": 0, "matched": 0, "semantic_merged": 0}
     )
     failed = 0
-    # A successful derive line that carries NO created/matched facts at all is not
-    # the same thing as one that created and matched nothing, and folding the two
-    # together is how a schema change becomes a wrong number rather than a
-    # message: a `v:2` that renamed `matched` would leave every line fact-less and
-    # every rate reading 0.000. Counted separately and reported.
+    # A successful derive line that carries NO created/matched facts at all — on
+    # the line OR on a joined completion — is not the same thing as one that
+    # created and matched nothing, and folding the two together is how a schema
+    # change becomes a wrong number rather than a message: a `v:2` that renamed
+    # `matched` would leave every line fact-less and every rate reading 0.000.
+    # Counted separately and reported.
     factless = 0
+    # Provenance of the facts that WERE found, because "no completions in this
+    # file" and "these writes were synchronous" used to look identical (J4).
+    from_line = 0
+    from_completion = 0
+    completions = ledger.completions_by_receipt()
     # `record_action` fans its produces/modifies/depends_on out into concepts too,
     # so the store cross-check below must count them or it will always report a
     # phantom surplus. They are NOT part of the dedup rate: `record_action` has
@@ -80,9 +99,11 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
     action_created = 0
     for call in ledger.sorted_calls():
         if call.get("tool") == "lambo_record_action" and _ledger.succeeded(call):
-            value = call.get("created")
-            if isinstance(value, int):
-                action_created += value
+            # Same join: an MCP-driven record_action's `created` moved to the
+            # completion at J3/J4, and without this the store cross-check below
+            # reports a phantom surplus for every async session.
+            facts, _ = _ledger.joined_facts(call, completions)
+            action_created += facts.get("created", 0)
             continue
         if call.get("tool") != "lambo_derive":
             continue
@@ -94,16 +115,19 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         row["calls"] += 1
         agent_row = per_agent[call.get("agent_id", "?")]
         agent_row["calls"] += 1
-        present = 0
+        facts, source = _ledger.joined_facts(call, completions)
         for name in DERIVE_FACTS:
-            value = call.get(name)
+            value = facts.get(name)
             if isinstance(value, int):
-                present += 1
                 row[name] += value
                 if name in agent_row:
                     agent_row[name] += value
-        if present == 0:
+        if source == "none":
             factless += 1
+        elif source == "completion":
+            from_completion += 1
+        else:
+            from_line += 1
 
     def rate(row: dict[str, int]) -> float | None:
         total = row["created"] + row["matched"]
@@ -127,6 +151,8 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         "totals": {**totals, "dedup_rate": rate(totals)},
         "failed_derive_calls": failed,
         "derive_calls_without_facts": factless,
+        "derive_facts_from_line": from_line,
+        "derive_facts_from_completion": from_completion,
         "record_action_created": action_created,
     }
 
@@ -186,14 +212,26 @@ def render(data: dict[str, Any]) -> list[str]:
         out.append(
             f"   ({data['failed_derive_calls']} derive call(s) failed and are excluded)"
         )
+    joined = data["derive_facts_from_completion"]
+    if joined:
+        out.append(
+            f"   {joined} derive call(s) were acknowledged asynchronously (J3) and their "
+            "facts were JOINED from `completion` lines on the receipt (J4). The rates "
+            "above include them. `sem.merged` is unavailable for those calls — the "
+            "completion carries the created/matched pair and no more — so that column "
+            "is an undercount, not a zero, whenever this number is non-zero."
+        )
     if data["derive_calls_without_facts"]:
         out.append(
             f"   {data['derive_calls_without_facts']} SUCCESSFUL derive call(s) carried NO "
-            "created/matched facts at all — not the same as creating and matching "
-            "nothing. Most likely the writes were acknowledged asynchronously (J3) and "
-            "the facts are on the receipt, not the line: fetch them with "
-            "lambo_stats(receipt=...), and see the observability README's metric-2 note. "
-            "Otherwise the lines predate the facts, or a field was renamed. "
+            "created/matched facts at all — not on the line, and no applied `completion` "
+            "line joined on their receipt. Not the same as creating and matching nothing. "
+            "Most likely the writes were acknowledged asynchronously (J3) by a serve that "
+            "wrote no `completion` lines (a pre-J4 binary), in which case the facts are on "
+            "the receipt and reachable with lambo_stats(receipt=...). Otherwise: the "
+            "completion is in a ledger file this run did not read (pass every file), or the "
+            "write is still owed a replay after a restart, or it failed after its ack, or a "
+            "field was renamed. See the observability README's metric-2 note. "
             "The rates above are computed over the remaining calls only."
         )
 

@@ -292,11 +292,14 @@ lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_cou
 lambo_derive        concepts_requested, admitted, receipt
                     (J3: created / matched / semantic_merged / reinforced are
                     NOT here — the ack is issued before the write, so it does
-                    not know them. They are on the RECEIPT, reachable with
-                    lambo_stats(receipt=...). `receipt` on this line is what
-                    joins the two.)
+                    not know them. J4 put created/matched back on a `completion`
+                    line carrying the same `receipt`, which is the join
+                    dedup_rate.py and duplicates.py perform; semantic_merged and
+                    reinforced remain receipt-only, reachable with
+                    lambo_stats(receipt=...).)
 lambo_record_action admitted, receipt
-                    (J3: created / edges are on the receipt, same reason.)
+                    (J3/J4: created is on the completion, same reason, same
+                    join; edges remain receipt-only.)
 lambo_reserve       op ("reserve"|"release"), granted, ttl_seconds (grants only)
 lambo_inspect       depth, fuzzy
 lambo_saints        canonical_count
@@ -308,7 +311,37 @@ lambo_stats         (no extra facts — the numbers are in the heartbeat)
  ledger_path, ledger_written_lines, ledger_dropped_lines,
  ledger_dropped_channel_full, ledger_dropped_write_failed,
  ledger_queued_lines }}
+
+// kind: "completion" (J4) — one background write's durable lifecycle.
+// `receipt` joins it back to the derive/record_action `call` line that acked
+// it. The two applied states carry the metric-2 fact set; the other two carry
+// no counts, because a failed write created nothing and a deferred one has not
+// created it yet.
+{"v":1,"ts":"…","kind":"completion","agent_id":"…","receipt":"lwr1.…",
+ "state":"applied|applied_after_restart|failed|deferred",
+ "created_count":3,"matched_count":1}          // applied states only
+
+// kind: "startup" (J4) — a serve's intent to acquire the single-writer lease,
+// written BEFORE the acquire, so a serve that LOSES it still leaves an artifact.
+{"v":1,"ts":"…","kind":"startup","session":"…","agent_id":"…",
+ "transport":"stdio|http","state":"acquiring"}
+
+// kind: "lease" (J4) — one side of a lease conflict, or a proxy's degraded
+// state. The other party is named for what it is (JE2E-11): `counterparty` is
+// a lease token, `dialled` is a socket path.
+{"v":1,"ts":"…","kind":"lease","session":"…","agent_id":"…",
+ "event":"refused|refused_takeover","side":"loser|holder",
+ "counterparty":"agent-b@host#123"}
+{"v":1,"ts":"…","kind":"lease","session":"…","agent_id":"…",
+ "event":"proxying|proxying_stopped","side":"loser",
+ "dialled":"/run/user/1000/lambo/….sock","lost":0}   // `lost` on stopped only
 ```
+
+`startup` and `lease` answer operational questions — which serve tried, who
+refused whom, how long a client was left without memory — rather than any of the
+six metrics, so the report scripts count them in the header's "unknown kind"
+figure and read no further. `completion` is the one J4 kind the metric scripts
+**do** read, through the join above.
 
 **The five set-level flags on a recall line are not computed alike.**
 `canonical_marker` counts only hits with `included_in_context: true` — the
@@ -365,20 +398,39 @@ are audited in `canonization_events` in the store, which is where to ask about
 them. What `derive` does distinguish is `semantic_merged` from `matched`, and
 that is the distinction metric 2 turns on.
 
-**Since J3, `derive` lines carry no `created` / `matched` counts either, and
-`dedup_rate.py` and `duplicates.py` see nothing from MCP-driven sessions.** This
-IS a regression and it is stated rather than hidden. `lambo_derive` is now
-acknowledged before the write is applied (writes acknowledged before the
-embedder, `dev-diary/lambo-for-mooshik/J-multi-client.md` §J3), so the call line
-is written at a moment when no outcome exists. The counts are not lost — they
-are on the write **receipt**, together with `semantic_merged`, `reinforced` and
-the true `created_count` / `matched_count`, and the line carries the `receipt`
-id so the two can be joined. What is missing is a ledger line for the
-*completion*, which would restore these two tools without a join; that is a
-ledger schema change and belongs to a later workstream, not to J3.
+**Since J3, `derive` lines carry no `created` / `matched` counts, and since J4
+those counts come back through a join.** `lambo_derive` is acknowledged before
+the write is applied (writes acknowledged before the embedder,
+`dev-diary/lambo-for-mooshik/J-multi-client.md` §J3), so the call line is
+written at a moment when no outcome exists. J4 added a `kind:"completion"` line
+carrying the receipt id, the settle state, and the true `created_count` /
+`matched_count`, and **`dedup_rate.py` and `duplicates.py` join on it** — so an
+MCP-driven session's dedup rate is a real number again, not `n/a`. The join
+lives once, in `_ledger.joined_facts`, so the two reports cannot disagree about
+what a derive created.
 
-Two things still work unchanged, and are the honest fallback until then:
+Three things are worth knowing about what the join does and does not restore:
+
+* **`semantic_merged` and `reinforced` do not come back.** The completion line
+  carries the created/matched pair and no more; those two live only on the
+  receipt, fetchable with `lambo_stats(receipt=...)`. Both reports say so where
+  the number would otherwise read as a zero — `dedup_rate.py` labels the
+  `sem.merged` column an undercount, and `duplicates.py` suppresses its
+  "a zero here means the vector merge never fired" reading, which would
+  otherwise be a conclusion about the write path drawn from a gap in the reader.
+* **Only *applied* completions contribute.** A `failed` write created nothing
+  and a `deferred` one has not created it yet (it is owed to the next serve of
+  that session), so neither adds facts. A derive whose completion is `deferred`
+  is therefore still counted as fact-less, honestly — and the message says the
+  replay may be why.
+* **A missing completion is still not a zero.** If the completion landed in a
+  ledger file the run did not read, the call is reported on its own line rather
+  than folded in as `created=0, matched=0`. Pass every file.
+
 CLI-driven sessions (`lambo derive`, `lambo record-action`) use the synchronous
-write path and still report every fact on the line; and `duplicates.py`'s
-store-side half reads the graph rather than the ledger, so its cross-check
-against the store is unaffected.
+write path and still report every fact on the line, so nothing there changed;
+`dedup_rate.py`'s summary prints the split between line-carried and
+join-recovered facts, because "this ledger has no completion lines" and "these
+writes were synchronous" are different states that used to look identical. And
+`duplicates.py`'s store-side half reads the graph rather than the ledger, so its
+pairwise scan never depended on any of this.

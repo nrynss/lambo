@@ -174,6 +174,93 @@ fi
 out="$("$py" "$here/recall_first.py" "$work/j3-async.jsonl")"
 check "metric 1 still scores an async-acked run" "$out" "100.0%"
 
+step "the J4 completion join restores metric 2 for an async-acked session"
+# **JE2E-5.** J3 moved the derive facts off the call line and J4 put
+# created/matched back on a `kind:"completion"` line joined by `receipt`. Without
+# a fixture, nothing here exercises the join: the step above proves the fact-less
+# case still reports `n/a`, and this one proves the joined case reports a real
+# rate — the two halves of the same claim, and the second one is what "restores
+# the declared metric-2 regression" actually means.
+#
+# **The fixture opposes the shape it exists to check** (the J0-R2 lesson: a
+# fixture that agrees with the thing it tests cannot see it). Three ways:
+#
+#   1. The completion lines are written BEFORE their call lines in the file and
+#      OUT of receipt order, so a join that read file order, or paired the Nth
+#      completion with the Nth call, would produce the wrong numbers rather than
+#      no numbers. The planted counts differ per receipt so a mispairing shows.
+#   2. Receipt `…4` is deferred and then applied_after_restart, in that order,
+#      with DIFFERENT counts — so a join taking the FIRST completion per receipt
+#      reads a deferred line with no counts and drops the call, while one taking
+#      the last reads the real outcome. Terminal-state selection is asserted.
+#   3. Receipt `…5` has a `failed` completion **carrying counts** and `…6` has no
+#      completion at all: both must stay fact-LESS. The counts on the failed line
+#      are deliberately absurd (40/40) and are the only thing that can see the
+#      applied-state guard — nothing lambo emits today puts counts on a failed
+#      line, so without them a join that read ANY state would still pass, because
+#      the key check alone would find nothing to add. A fixture that cannot fail
+#      is not a fixture (J0-R2), and this one failed exactly that way once.
+#
+# Planted arithmetic: created 3+1+5 = 9, matched 1+2+0 = 3 across the three
+# joinable calls, so the rate is 3/12 = 0.250 — a number no zero-fold and no
+# mispairing produces.
+cat >"$work/j4-completion.jsonl" <<'J4DONE'
+{"v":1,"ts":"2026-08-21T10:00:10+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-2","state":"applied","created_count":1,"matched_count":2}
+{"v":1,"ts":"2026-08-21T10:00:09+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-1","state":"applied","created_count":3,"matched_count":1}
+{"v":1,"ts":"2026-08-21T10:00:11+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"deferred","reason":"close_drain_exceeded"}
+{"v":1,"ts":"2026-08-21T10:00:12+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"applied_after_restart","created_count":5,"matched_count":0}
+{"v":1,"ts":"2026-08-21T10:00:13+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-5","state":"failed","error":"embedding error (the detail was logged server-side)","created_count":40,"matched_count":40}
+{"v":1,"ts":"2026-08-21T10:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":900,"query":"what did we decide","top_k":8,"hit_count":0,"hits":[]}
+{"v":1,"ts":"2026-08-21T10:00:01+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":48,"concepts_requested":4,"admitted":true,"receipt":"r-1"}
+{"v":1,"ts":"2026-08-21T10:00:02+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":51,"concepts_requested":3,"admitted":true,"receipt":"r-2"}
+{"v":1,"ts":"2026-08-21T10:00:03+00:00","kind":"call","tool":"lambo_record_action","agent_id":"agent-alpha","outcome":"ok","duration_us":44,"admitted":true,"receipt":"r-3"}
+{"v":1,"ts":"2026-08-21T10:00:04+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":5,"admitted":true,"receipt":"r-4"}
+{"v":1,"ts":"2026-08-21T10:00:05+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":2,"admitted":true,"receipt":"r-5"}
+{"v":1,"ts":"2026-08-21T10:00:06+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":47,"concepts_requested":2,"admitted":true,"receipt":"r-6"}
+{"v":1,"ts":"2026-08-21T10:00:07+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-3","state":"applied","created_count":2,"matched_count":0}
+J4DONE
+out="$("$py" "$here/dedup_rate.py" --bucket all "$work/j4-completion.jsonl")"
+echo "$out"
+check "counts the completion lines in the header" "$out" "6 completion"
+check "reports a real rate for an async-acked session" "$out" "0.250"
+check "says the facts were joined from completion lines" "$out" \
+  "3 derive call(s) were acknowledged asynchronously"
+check "warns that sem.merged is an undercount, not a zero" "$out" \
+  "undercount, not a zero"
+check "the failed and record-less derives stay fact-less" "$out" \
+  "2 SUCCESSFUL derive call(s) carried NO created/matched facts"
+check "and the message names the replay as a cause" "$out" "still owed a replay"
+if "$py" "$here/dedup_rate.py" --json "$work/j4-completion.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+t = d["totals"]
+# 3 + 1 + 5 created, 1 + 2 + 0 matched. Any mispairing or zero-fold moves these.
+assert t["created"] == 9, t
+assert t["matched"] == 3, t
+assert abs(t["dedup_rate"] - 0.25) < 1e-9, t
+# The terminal completion won: r-4 contributed 5/0 (applied_after_restart), not
+# the 0/0 its earlier `deferred` line would have implied.
+assert d["derive_facts_from_completion"] == 3, d["derive_facts_from_completion"]
+assert d["derive_facts_from_line"] == 0, d["derive_facts_from_line"]
+assert d["derive_calls_without_facts"] == 2, d["derive_calls_without_facts"]
+# record_action rides the same join, or the store cross-check reports a phantom
+# surplus for every async session.
+assert d["record_action_created"] == 2, d["record_action_created"]
+assert d["ledger_schema"]["completion_lines"] == 6, d["ledger_schema"]'; then
+  printf '    ok   --json carries the joined totals, the terminal state, and the split\n'
+else
+  printf '    FAIL --json did not carry the completion join correctly\n'
+  fail=1
+fi
+# duplicates.py joins through the same helper, and must NOT print its
+# "a zero means the vector merge never fired" reading over an incomplete figure.
+out="$("$py" "$here/duplicates.py" --store "$work/sample.db" \
+      --ledger "$work/j4-completion.jsonl")"
+check "duplicates.py joins the same counts" "$out" "derives created 9, matched 3"
+check "duplicates.py marks semantic_merged incomplete" "$out" "INCOMPLETE"
+check "duplicates.py suppresses the zero-means-never-fired reading" "$out" \
+  "does NOT apply to this run"
+
 step "chrono's nine-digit fractional seconds parse (no Python floor)"
 cat >"$work/nanos.jsonl" <<'NANOS'
 {"v":1,"ts":"2026-08-18T09:00:00.123456789+00:00","kind":"call","tool":"lambo_recall","agent_id":"a","outcome":"ok","duration_us":10,"query":"q","top_k":8,"hit_count":0,"hits":[]}

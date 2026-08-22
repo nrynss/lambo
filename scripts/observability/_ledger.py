@@ -5,9 +5,19 @@ One module so the five report generators agree on what a "call", a "write", a
 "work session" and a "successful call" are. A metric computed two ways is a
 metric nobody can quote.
 
-Schema (from `src/ledger.rs`; every line carries `v`, currently 1):
+Schema (from `src/ledger.rs`; every line carries `v`, currently 1).
 
-    common      v, ts (RFC3339, server-stamped), kind ("call" | "stats")
+**Five kinds since J4**, not two: `startup` and `lease` record the multi-client
+lease story (which serve tried to acquire, who refused whom, which proxy was
+forwarding where and when it stopped), and `completion` records the durable
+lifecycle of one background write. This reader keeps `call` and `stats`
+separate because every metric is computed over them, collects `completion`
+because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
+`unknown` — they answer operational questions, not the six DOGFOOD metrics, and
+`header()` counts them so a reader is never silently ignoring half a file.
+
+    common      v, ts (RFC3339, server-stamped), kind
+                ("call" | "stats" | "startup" | "lease" | "completion")
     call        tool, agent_id, outcome ("ok"|"error"|"panic"),
                 error_kind (only when outcome != "ok"), duration_us
     + recall    query, top_k, hit_count, hits[], canonical_marker,
@@ -20,17 +30,29 @@ Schema (from `src/ledger.rs`; every line carries `v`, currently 1):
                 object means the hit was not a phase-1 candidate at all: it
                 arrived through phase-2 traversal expansion.
     + derive    concepts_requested, admitted, receipt
-                (J3: created / matched / semantic_merged / reinforced moved to
-                the RECEIPT — the ack precedes the write and cannot know them.
-                `receipt` joins the line to lambo_stats(receipt=...).)
+                (J3: created / matched / semantic_merged / reinforced left the
+                line — the ack precedes the write and cannot know them. J4 put
+                created_count / matched_count back on a `completion` line
+                carrying the same `receipt`, which is the join `completions()`
+                below performs and `dedup_rate.py` / `duplicates.py` use.)
     + record_action  admitted, receipt
-                (J3: created / edges are on the receipt, same reason.)
+                (J3/J4: created is on the completion, same reason, same join.)
     + reserve   op ("reserve"|"release"), granted, ttl_seconds (grants only)
     + inspect   depth, fuzzy
     + saints    canonical_count
     stats       uptime_secs, version, git_sha, stats{...the lambo_stats payload,
                 including ledger_written_lines / ledger_dropped_lines /
                 ledger_queued_lines}
+    completion  agent_id, receipt, state ("applied" | "applied_after_restart" |
+                "failed" | "deferred"); the two applied states also carry
+                created_count and matched_count
+    startup     session, agent_id, transport, state ("acquiring") — written
+                BEFORE the lease acquire, so a serve that loses still leaves one
+    lease       event ("refused" | "refused_takeover" | "proxying" |
+                "proxying_stopped"), side ("loser" | "holder"), session,
+                agent_id, and the other party: `counterparty` (a lease token) on
+                the refusal events, `dialled` (a socket path) on the proxying
+                ones
 
 Forward compatibility: consumers here ignore unknown keys and unknown `kind`s,
 so adding a field to a line does not need a `v` bump. A field that changes
@@ -159,9 +181,17 @@ class Ledger:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
     heartbeats: list[dict[str, Any]] = field(default_factory=list)
+    #: `completion` lines (J4). The durable lifecycle of one background write,
+    #: carrying the `receipt` that joins it back to the `call` line that acked
+    #: it — which is how metric 2 and metric 3 recover the created/matched facts
+    #: J3's async ack took off the call line.
+    completions: list[dict[str, Any]] = field(default_factory=list)
     #: Lines whose `kind` this reader does not know. Reported, never silently
     #: skipped — a consumer that ignores half a file without saying so is how a
-    #: measurement quietly becomes wrong.
+    #: measurement quietly becomes wrong. `startup` and `lease` land here
+    #: deliberately: they are real, documented kinds that answer operational
+    #: questions rather than metric ones, and counting them beats pretending a
+    #: reader that ignores them has read the whole file.
     unknown: list[dict[str, Any]] = field(default_factory=list)
     #: Lines that did not parse as JSON at all, as (line number, text).
     unparseable: list[tuple[int, str]] = field(default_factory=list)
@@ -175,7 +205,30 @@ class Ledger:
 
     @property
     def all_lines(self) -> list[dict[str, Any]]:
-        return self.calls + self.heartbeats + self.unknown
+        return self.calls + self.heartbeats + self.completions + self.unknown
+
+    def completions_by_receipt(self) -> dict[str, dict[str, Any]]:
+        """The **terminal** `completion` line per receipt id (J4).
+
+        One receipt can produce two completion lines, and this is not an
+        anomaly: a write the close could not drain settles `deferred`, and the
+        next serve of the same session applies it and settles
+        `applied_after_restart`. With a shared `--ledger` path across restarts —
+        the documented rig setup — both land in one file.
+
+        Last-by-timestamp is therefore the terminal state, and it is terminal by
+        construction rather than by preference: `deferred` is written by the
+        close and `applied_after_restart` by the process after it, so the
+        settled answer is always the later stamp. (String sort is timestamp
+        sort — see this module's docstring for the shape dependency that rests
+        on.)
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for line in sorted(self.completions, key=lambda r: r.get("ts", "")):
+            receipt = line.get("receipt")
+            if isinstance(receipt, str):
+                out[receipt] = line
+        return out
 
     def sorted_calls(self) -> list[dict[str, Any]]:
         """Calls in server-timestamp order.
@@ -290,6 +343,8 @@ def load(paths: Iterable[str]) -> Ledger:
                     out.calls.append(record)
                 elif kind == "stats":
                     out.heartbeats.append(record)
+                elif kind == "completion":
+                    out.completions.append(record)
                 else:
                     out.unknown.append(record)
     if not out.all_lines and not out.unparseable:
@@ -300,6 +355,66 @@ def load(paths: Iterable[str]) -> Ledger:
 def succeeded(call: dict[str, Any]) -> bool:
     """One definition of "the call worked", used by every script here."""
     return call.get("outcome") == "ok"
+
+
+#: `completion` states that mean the write **landed**. `deferred` has not landed
+#: yet (it is owed to a later serve) and `failed` never will, so neither
+#: contributes facts to metric 2 or metric 3.
+APPLIED_STATES = ("applied", "applied_after_restart")
+
+#: The name each metric-2 fact carries on a `completion` line. The completion
+#: reports true post-write counts, so `created` is `created_count` there.
+#:
+#: **`semantic_merged` and `reinforced` are deliberately absent.** The
+#: completion line carries the created/matched pair and no more, so for an
+#: async-acked write those two are genuinely unavailable rather than zero —
+#: which is why `dedup_rate.py` reports them as a separate, honestly-labelled
+#: figure instead of folding a join-recovered zero into them.
+COMPLETION_FACTS = {"created": "created_count", "matched": "matched_count"}
+
+
+def joined_facts(
+    call: dict[str, Any],
+    completions: dict[str, dict[str, Any]],
+) -> tuple[dict[str, int], str]:
+    """The write facts for one `call` line, and where they came from.
+
+    Three provenances, and telling them apart is the point:
+
+    * ``"line"`` — a CLI-driven (synchronous) write, whose facts were known at
+      call time and ride the call line, exactly as they did before J3.
+    * ``"completion"`` — an MCP-driven (async-acked) write, whose facts moved to
+      the write receipt at J3 and came back on a J4 `completion` line. The join
+      key is `receipt`.
+    * ``"none"`` — neither. **Not a zero**: it is a write whose outcome this
+      file does not contain (the completion is in another file, or the write is
+      still owed a replay, or a field was renamed). A reader that folded this
+      into `created=0, matched=0` would turn a schema change into a confidently
+      wrong number, which is the failure mode the whole kit is built against.
+
+    A `completion` whose state is not applied contributes nothing and reports
+    ``"none"``: a failed write created no concepts, and a deferred one has not
+    created them *yet*.
+    """
+    facts = {
+        name: call[name]
+        for name in ("created", "matched", "semantic_merged", "reinforced")
+        if isinstance(call.get(name), int)
+    }
+    if facts:
+        return facts, "line"
+    receipt = call.get("receipt")
+    if not isinstance(receipt, str):
+        return {}, "none"
+    completion = completions.get(receipt)
+    if not completion or completion.get("state") not in APPLIED_STATES:
+        return {}, "none"
+    joined = {
+        name: completion[key]
+        for name, key in COMPLETION_FACTS.items()
+        if isinstance(completion.get(key), int)
+    }
+    return (joined, "completion") if joined else ({}, "none")
 
 
 def work_sessions(
@@ -362,6 +477,7 @@ def header(title: str, ledger: Ledger) -> list[str]:
         f"== {title} ==",
         f"   ledger:   {', '.join(ledger.paths)}",
         f"   lines:    {len(ledger.calls)} call, {len(ledger.heartbeats)} heartbeat"
+        + (f", {len(ledger.completions)} completion" if ledger.completions else "")
         + (f", {len(ledger.unknown)} of unknown kind" if ledger.unknown else "")
         + (f", {len(ledger.unparseable)} UNPARSEABLE" if ledger.unparseable else ""),
         f"   schema v: {sorted(ledger.versions) or 'unstated'}",
@@ -445,6 +561,7 @@ def emit(
             "queued_lines": ledger.queued_lines(),
             "call_lines": len(ledger.calls),
             "heartbeat_lines": len(ledger.heartbeats),
+            "completion_lines": len(ledger.completions),
             "unknown_kind_lines": len(ledger.unknown),
         }
         json.dump(

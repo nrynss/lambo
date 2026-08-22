@@ -165,14 +165,43 @@ def analyse(
 
 
 def ledger_cross_check(ledger: _ledger.Ledger) -> dict[str, Any]:
+    """Derive counts off the ledger, through the J4 completion join.
+
+    This read used to be `call.get("created")` and nothing else, which meant it
+    saw **zero** for every MCP-driven session after J3 moved the facts to the
+    receipt — and a zero here is not harmless: the report's own reading of a
+    zero `semantic_merged` is "the vector merge never fired at all", which is a
+    conclusion about the write path drawn from a gap in the reader.
+
+    `_ledger.joined_facts` is the shared implementation (also used by
+    `dedup_rate.py`), so the two reports cannot disagree about what a derive
+    created. `semantic_merged` is reported with its own availability, because
+    the completion line carries the created/matched pair and no more: for a
+    joined call it is genuinely unknown, and the render must not let that read
+    as "the merge never fired".
+    """
     created = matched = merged = 0
+    joined = merged_unavailable = 0
+    completions = ledger.completions_by_receipt()
     for call in ledger.sorted_calls():
         if call.get("tool") != "lambo_derive" or not _ledger.succeeded(call):
             continue
-        created += call.get("created") or 0
-        matched += call.get("matched") or 0
-        merged += call.get("semantic_merged") or 0
-    return {"ledger_created": created, "ledger_matched": matched, "ledger_semantic_merged": merged}
+        facts, source = _ledger.joined_facts(call, completions)
+        created += facts.get("created", 0)
+        matched += facts.get("matched", 0)
+        if "semantic_merged" in facts:
+            merged += facts["semantic_merged"]
+        elif source != "none":
+            merged_unavailable += 1
+        if source == "completion":
+            joined += 1
+    return {
+        "ledger_created": created,
+        "ledger_matched": matched,
+        "ledger_semantic_merged": merged,
+        "ledger_calls_joined_from_completion": joined,
+        "ledger_calls_without_semantic_merged": merged_unavailable,
+    }
 
 
 def render(meta: dict[str, Any], data: dict[str, Any], cross: dict[str, Any] | None) -> list[str]:
@@ -235,16 +264,37 @@ def render(meta: dict[str, Any], data: dict[str, Any], cross: dict[str, Any] | N
         out.append(f"   … and {len(band) - 25} more")
 
     if cross:
+        unavailable = cross.get("ledger_calls_without_semantic_merged", 0)
         out += [
             "",
             "Ledger cross-check:",
             f"   derives created {cross['ledger_created']}, matched "
             f"{cross['ledger_matched']}, semantically merged "
-            f"{cross['ledger_semantic_merged']}",
+            f"{cross['ledger_semantic_merged']}"
+            + (" (INCOMPLETE — see below)" if unavailable else ""),
             "   `matched` is exact-key convergence and `semantic_merged` is the",
-            "   similarity path. A high pair count above with a zero",
-            "   `semantic_merged` means the vector merge never fired at all.",
+            "   similarity path.",
         ]
+        if cross.get("ledger_calls_joined_from_completion"):
+            out.append(
+                f"   {cross['ledger_calls_joined_from_completion']} of these derives were "
+                "async-acked (J3) and their counts were joined"
+            )
+            out.append(
+                "   from `completion` lines on the receipt (J4)."
+            )
+        if unavailable:
+            out += [
+                f"   {unavailable} derive(s) report NO semantic_merged count: a completion",
+                "   line carries created/matched and no more. So the figure above is a",
+                "   LOWER BOUND, and the zero-means-the-merge-never-fired reading below",
+                "   does NOT apply to this run — read the store-side pair counts instead.",
+            ]
+        else:
+            out.append(
+                "   A high pair count above with a zero `semantic_merged` means the "
+                "vector merge never fired at all."
+            )
     return out
 
 
