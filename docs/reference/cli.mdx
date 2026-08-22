@@ -263,6 +263,22 @@ lambo serve --config lambo.toml --session demo --agent agent-a
 
 See [MCP tools](/mcp) for the tools it exposes.
 
+### stdio versus HTTP for several clients
+
+`stdio` is the default and fits a single orchestrator plus its subagents — one
+connection, nothing to configure. When a machine runs more than one *independent*
+client (OMP and Claude Code and Pi, say), make HTTP the default instead: run one
+`lambo serve --transport http` and point every client's `mcpServers` at that one URL,
+so one process owns the session rather than each client spawning its own stdio
+`serve`. The reason is single-writer, not subagents. See the Transports section of the
+MCP reference for the full walkthrough.
+
+Pointing a client at the URL touches every config layer that names the server — the
+project `.mcp.json`, the user or global scope, and the per-client files (Pi's
+`~/.pi/agent/mcp.json`, Cursor's `~/.cursor/mcp.json`). A layer still holding `command`
+beside the new `url` is rejected even when the endpoint responds, so migrate by
+copying the registration across all of them, never by editing one file.
+
 The ledger is the input to the report generators in `scripts/observability/`, which answer recall-first compliance, re-derivation savings, score-band drift, duplicate creation, and which blast-radius warnings actually fired. Keep the file outside the repository: it carries recall queries and truncated concept text, so it inherits the store's hygiene rules.
 
 ### Stopping a writer

@@ -60,6 +60,28 @@ unreachable to other clients until it restarts — the holder keeps working for 
 and no data is at risk. Deleting one left behind by a crashed process is always safe; so is
 leaving it, because the next holder clears it under the session lease.
 
+### HTTP for a machine with several independent clients
+
+Stdio is the default transport, and it is the right one for a single orchestrator and
+its subagents — that is one connection to one server and works through the client's
+`mcpServers` entry with nothing else to do. The moment a machine runs more than one
+*independent* client — OMP and Claude Code and Pi, say, each a distinct product — reach
+for HTTP instead. Run one `lambo serve --session <id> --transport http` and point every
+client's `mcpServers` at that one URL, so a single process owns the session as its
+writer rather than each client spawning its own stdio `serve` that then has to proxy to
+the holder. The reason for the switch is single-writer, not subagents: the plurality
+that makes stdio the wrong default is independent clients on one machine, not the
+number of agents under a single orchestrator.
+
+Moving a client from `command` to `url` is a migration across *every* config layer that
+names the server, and a stale entry anywhere rejects it. A client reads the project
+`.mcp.json`, the user or global scope, and the per-client files — Pi's
+`~/.pi/agent/mcp.json`, Cursor's `~/.cursor/mcp.json`, an OMP workspace `.mcp.json`,
+Codex's `~/.codex/config.toml` — and a layer that still holds `command` beside the new
+`url` is rejected even when the endpoint itself responds. Migrate by copying the
+registration into each layer that names the server; never by editing one file and
+assuming the others pick it up.
+
 ## What every tool expects
 
 Every tool takes an `agent_id`, and every tool rejects any argument it does not define, so a typo fails rather than being ignored.
