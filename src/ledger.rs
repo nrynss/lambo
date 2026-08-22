@@ -248,23 +248,49 @@ impl Ledger {
     /// unopenable path (a typo: one WARN, every batch dropped) nor a path whose
     /// `open` *blocks* (a FIFO with no reader, a hung mount: the writer parks)
     /// can delay or wedge the caller. That distinction is the whole reason the
-    /// probe is not here: `serve` calls this **after** the single-writer lease
-    /// is taken and — since I-R2-1 — **after** the SIGTERM handler is armed
-    /// (`shutdown_signal()` is the first statement once `resolve_role` returns a
-    /// `Role::Holder`; this call is the next one. It was `build_memory` before
-    /// J2, which `serve` no longer calls — J2-R1-7). What that ordering would change, were the
-    /// probe ever moved back here, is the hazard *class*: it would be an
-    /// **availability** hazard rather than the durability one it used to be. A
-    /// blocking `open` here would wedge `serve` between the lease and the
-    /// transport, holding the session in a process that never serves, and it
-    /// could not be shut down either — the pinned shutdown future is never
-    /// polled while the main task sits in the blocking syscall, so
-    /// `Memory::close` never runs. Before I-R1-3 the block was real, and — the
-    /// handler then being armed only below this call — it lost the tail instead,
-    /// the signal hitting its default disposition and killing the process
-    /// outright (`I-observability.md` narrates it). Either way it is
+    /// probe is not here, and **where `serve` calls this has now moved twice**,
+    /// so the argument is written against today's ordering rather than a
+    /// remembered one (JE2E-6; the third generation of staleness at this site,
+    /// after I-R2-1 and I-R3-1).
+    ///
+    /// # Where this is called from, at HEAD
+    ///
+    /// `serve` calls it in the **pre-lease** group (J4): after `authorize_bind`
+    /// / `authorize_ledger` / the endpoint derivation, and **before**
+    /// `resolve_role` makes its first acquire attempt — because a serve that
+    /// *loses* the lease exits before it can reach the holder path where this
+    /// used to open, so the acquire could not be where a losing serve's story
+    /// starts. It is therefore also **before** the SIGTERM arming, which sits
+    /// on the far side of `resolve_role`. Neither "after the lease is taken"
+    /// nor "after the handler is armed" is true any more, and this call is not
+    /// "the next one" after anything — the startup line and `serve_builder` sit
+    /// between it and the election.
+    ///
+    /// # What that ordering would cost, were the probe ever moved back here
+    ///
+    /// Still an **availability** hazard rather than a durability one, and the
+    /// premises are different from the ones that used to be written here:
+    ///
+    /// * **No lease is at stake.** A blocking `open` now wedges the process
+    ///   *before* the election, so no lease is taken and none is stranded for a
+    ///   TTL. The blast radius is one client — this one — rather than the
+    ///   session; another client's serve wins the lease and works.
+    /// * **The process is still unkillable**, and for a worse reason than
+    ///   before: the shutdown future is not merely un-polled, it has not been
+    ///   *created* yet, so the signal keeps its default disposition and the
+    ///   wedged serve dies to the kill rather than shutting down. There is
+    ///   nothing to lose by then — no lease, no tail, no graph — so this is
+    ///   noise rather than data loss.
+    /// * **The client sees a server that never answers `initialize`**, which is
+    ///   the outcome J2-L2 spent an election budget to avoid: a client that
+    ///   gives up reports NO TOOLS, not "starting".
+    ///
+    /// Before I-R1-3 the block was real, and — the handler then being armed
+    /// only below this call — it lost the *tail* instead, the signal hitting
+    /// its default disposition and killing the process outright
+    /// (`I-observability.md` narrates it). Every version of this is
     /// observability taking down memory through the flag that turns
-    /// observability on.
+    /// observability on, which is why the probe stays on the writer thread.
     ///
     /// The operator still learns about a typo at startup rather than from an
     /// empty file a day later — the writer thread probes as its first act, with
@@ -926,19 +952,22 @@ mod tests {
     /// **I-R1-3.** `Ledger::open` must not perform the ledger's first `open`.
     ///
     /// A FIFO with no reader is the cheapest real path whose `open(2)` blocks
-    /// forever, and it stands in for the hung mount that motivates the rule:
-    /// `serve` calls `Ledger::open` after the single-writer lease is taken, so an
-    /// `open` on that path would hold the lease in a process that never serves.
+    /// forever, and it stands in for the hung mount that motivates the rule.
     ///
-    /// Since I-R2-1 the SIGTERM handler is armed *before* this call, which
-    /// changes what such a process does on a signal without rescuing it: the
-    /// handler is installed, so SIGTERM no longer kills it by the default
-    /// disposition — but the pinned shutdown future is never polled while the
-    /// main task blocks inside the `open`, so `Memory::close` never runs either.
-    /// It simply hangs, lease held, until something kills it harder. The rule
-    /// stands on its own anyway: a `serve` that hangs before it serves is a
-    /// failure however its eventual death arrives, and the guarantee here is
-    /// that `Ledger::open` performs no I/O at all.
+    /// **The property this pins is unchanged; the reason it used to give is
+    /// dead** (JE2E-6). It said `serve` calls `Ledger::open` *after* the
+    /// single-writer lease is taken, "so an `open` on that path would hold the
+    /// lease in a process that never serves". J4 moved the call into the
+    /// pre-lease group, so a blocking `open` there holds **no** lease — see
+    /// [`Ledger::open`]'s own docs for what it does cost instead.
+    ///
+    /// The property matters *more* pre-lease, not less: the wedge now happens
+    /// before the election and before the SIGTERM arming, so the shutdown
+    /// future does not merely go un-polled — it has not been created, and the
+    /// signal keeps its default disposition. A `serve` that hangs before it
+    /// serves is a failure however its eventual death arrives, and the
+    /// guarantee here is the same one it always was: `Ledger::open` performs no
+    /// I/O at all.
     ///
     /// Guarded by a timeout rather than asserted structurally, and skipped
     /// rather than failed where `mkfifo` does not exist.

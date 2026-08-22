@@ -1764,8 +1764,11 @@ shape is almost always an unset variable that expanded to nothing.
 The rule by transport: **stdio** unaffected (process-local — the client owns the process it
 spawned); **HTTP on loopback** keeps today's optional-auth behaviour; **HTTP anywhere else**
 requires a token or `serve` refuses to start. The refusal runs as the *first statement* in
-`serve()`, before `build_memory` — so a misconfigured start takes no single-writer lease and
-the operator's retry is not blocked by their own refused attempt.
+`serve()`, above the lease-taking attach — so a misconfigured start takes no single-writer
+lease and the operator's retry is not blocked by their own refused attempt. (This said
+"before `build_memory`" until JE2E-6's sweep; that attach is `resolve_role` since J2, and
+`serve` does not call `build_memory` at all — the one site J2-R1-7's tree-wide rewrite of
+that noun missed. The claim itself is unchanged and still true.)
 
 Comparison is constant-time: no early exit, and the loop runs over the *presented* input
 indexing the expected token modulo its length, so a wrong-length guess does not disclose the

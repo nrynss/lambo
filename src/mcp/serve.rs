@@ -363,6 +363,25 @@ fn resolve_auth_token_from(
 /// one filesystem access is a read-only `canonicalize` of the store path
 /// (J2-R1-2), which leaves nothing behind and so cannot block an operator's
 /// retry.
+///
+/// ## What J4 changed, found by JE2E-6's sweep
+///
+/// J4 put a **third** member in the pre-lease group: `Ledger::open` and the
+/// `startup` line it appends, moved above `resolve_role` so a serve that is
+/// about to *lose* the lease has already left an artifact recording that it
+/// tried. That member is the first one in this group that does leave something
+/// behind — a ledger file, and a line in it — so the group's shorthand
+/// ("nothing is created before the lease") stops being literally true and the
+/// real claim has to be stated instead.
+///
+/// The real claim is unchanged, and it is about **retries, not about traces**:
+/// refusing here takes no lease, so an operator who fixes the token and starts
+/// again is not blocked by a lease their own refused start is holding. An
+/// append-only observability file blocks nothing, is the artifact J4 exists to
+/// leave, and is written only when the operator asked for it with `--ledger`.
+/// The ordering between the two is also deliberate: `authorize_ledger` runs
+/// *above* the open, so the misconfigured `--ledger-heartbeat`-without-`--ledger`
+/// pairing is still refused before any file is touched.
 fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -1510,13 +1529,24 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // One signal registration for the whole life of the transport, armed HERE —
     // the first statement after the lease-taking attach returns (`resolve_role`,
     // which builds through the same `serve_builder` `MemoryBuilder`), and
-    // before ANY of the startup work below it (`Ledger::open`, `LamboServer::new`
-    // and its `#[tool_router]` JSON-schema build, the heartbeat spawn, the J2
-    // session-endpoint bind and its accept loop, the event pump, and the
-    // serve-level attach log). Registration is eager (see
+    // before ANY of the startup work below it: `LamboServer::new` and its
+    // `#[tool_router]` JSON-schema build, the heartbeat spawn, the J4
+    // refusal-recorder spawn, the J2 session-endpoint bind and its accept loop,
+    // the event pump, and the serve-level attach log. Registration is eager (see
     // `shutdown_signal`), so every one of those runs guarded (R2-a): a SIGTERM
     // arriving during them is taken by this future, `Memory::close` runs, the
     // tail reaches the store, and the single-writer lease is released.
+    //
+    // **`Ledger::open` is NOT in that list any more, and its absence is the
+    // load-bearing correction** (JE2E-6). J4 moved it, and the startup line it
+    // writes, into the pre-lease group above `resolve_role`, so both run
+    // *unguarded*. Harmless, and for a reason rather than by luck: `Ledger::open`
+    // spawns a thread and returns — it performs no I/O of its own, which is the
+    // guarantee `opening_a_ledger_does_not_block_even_when_the_paths_open_blocks`
+    // pins — so there is no window in it for a signal to be deferred across.
+    // What the enumeration is FOR is the R2-a claim, and a stale enumeration
+    // makes that claim wrong in the direction that matters: it credits the
+    // arming with covering work it no longer covers.
     //
     // The precise property, stated where the previous comment overclaimed
     // (I-R2-1): the guard begins the instant `resolve_role` returns. It does NOT
@@ -1537,15 +1567,26 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // this is the sentence the round-1 review found missing (J2-R1-7).** The
     // thing that would be made SIGTERM-immune is no longer `build_memory` —
     // which `serve` does not call at all any more — but `resolve_role`, and
-    // `resolve_role` is a loop that can *legitimately* run for
-    // `LEASE_TTL + ELECTION_SLACK` = **50 seconds**: that is its designed
-    // behaviour when the holder it lost to is not proxyable yet, not a hang.
-    // Arming above it would therefore make every such start unkillable for the
-    // better part of a minute, on purpose, in exchange for closing a ~1.1 ms
-    // durability window in a process that holds no lease and no tail while it
-    // waits. The residual window is real and worth closing, but only by racing
-    // the attach against the shutdown future, which is a design change and is
-    // deferred; see I-R2-1's recommendation.
+    // `resolve_role` is a loop that can *legitimately* run for the whole of
+    // `ELECTION_BUDGET` = **20 seconds**: that is its designed behaviour when
+    // the holder it lost to is not proxyable yet, not a hang.
+    //
+    // (This said 50 seconds — `LEASE_TTL + ELECTION_SLACK` — until JE2E-7. That
+    // WAS the budget; J2-L2 cut it to a client-tolerance number, and
+    // `ELECTION_BUDGET`'s own docstring has said the 50s formula "used to be"
+    // the rule ever since, in this same file. The argument survives the true
+    // number and is re-made at it below, which is the only thing that makes
+    // restating it worthwhile.)
+    //
+    // Twenty seconds of unkillable wait is still the wrong trade, and by a wide
+    // margin: it would be spent to close a ~1.1 ms durability window in a
+    // process that holds no lease and no tail while it waits — four orders of
+    // magnitude of deliberate deafness bought with none of the thing being
+    // protected. And the 20s is not a worst case that rarely fires; the
+    // dead-holder election measured 10.2s live at the two-client probe, so it
+    // is an ordinary start. The residual window is real and worth closing, but
+    // only by racing the attach against the shutdown future, which is a design
+    // change and is deferred; see I-R2-1's recommendation.
     //
     // A fresh registration in `close_bounded` re-arms it for the close phase.
     //
@@ -2181,11 +2222,16 @@ async fn serve_http_bounded(
 /// runtime immediately and buffers a signal that arrives before `recv()` is
 /// polled, so calling this before the attach log closes that window. Eagerness
 /// only makes the arming *point* effective; it does not move it. Everything
-/// before the call site in [`serve`] — `resolve_role`, which takes the lease —
-/// is still unguarded, which is why the call site sits as early as it does
-/// (I-R2-1). It cannot move above `resolve_role`: that loop is allowed to run
-/// for 50 seconds by design, and arming over it would make the wait unkillable
-/// (J2-R1-7).
+/// before the call site in [`serve`] — the pre-lease group (the endpoint
+/// derivation, `Ledger::open` and its startup line, J4) and `resolve_role`,
+/// which takes the lease — is still unguarded, which is why the call site sits
+/// as early as it does (I-R2-1). It cannot move above `resolve_role`: that loop
+/// is allowed to run for the whole of [`ELECTION_BUDGET`], **20 seconds**, by
+/// design, and arming over it would make that wait unkillable (J2-R1-7). The
+/// figure was written here as 50 seconds — the pre-J2-L2 budget — until JE2E-7;
+/// the argument holds at 20s, since the window it would buy is ~1.1 ms in a
+/// process that holds no lease and no tail. See the arming comment in [`serve`]
+/// for the trade written out.
 /// What ends a holder's transport: a signal, **or** losing the single-writer
 /// lease (JE2E-4; operator ruling, 2026-08-22).
 ///

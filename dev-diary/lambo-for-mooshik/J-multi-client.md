@@ -2605,6 +2605,45 @@ metric-2 regression and closes proof obligation 5 of `J3-durability-redesign.md`
 * `verify.sh`/kit untouched; the two DDL-table-count test assertions moved from
   10 to 11 to account for the required `lease_refusals` table.
 
+**Sweep — serve-startup ordering claims (the sweep J4 owed and did not run;
+added by the JE2E-6 remediation, 2026-08-22).** J4 moved `Ledger::open` and its
+startup line above `resolve_role` — a real ordering move, argued at the move
+site — and its as-built shipped with **no sweep at all**, the only J task
+section without one. J0's carried guidance is explicit that this family "lives
+in more prose sites than any one of them signals", and J2 ran it twice; the
+blast radius of J4's move landed in *other tasks'* files, which is exactly what
+a per-task reviewer could not see. The `rg` was over `Ledger::open`, the arming
+family (`handler is armed`, `armed before`, `first statement`), `resolve_role`,
+`build_memory` and `pre-lease`: **85 hits, 5 stale.**
+
+| Site | Claim | Verdict |
+| --- | --- | --- |
+| `ledger.rs` `Ledger::open` docstring | "serve calls this **after** the lease is taken and **after** the SIGTERM handler is armed (`shutdown_signal()` is the first statement once `resolve_role` returns; this call is the next one)" | **STALE, all three clauses — and the third generation at this site** (I-R2-1 corrected it, I-R3-1 corrected it again). Open is now pre-lease, pre-arming, and not "next" to anything. Rewritten with the ordering at HEAD *and* the availability argument re-made on true premises: a blocking open there strands **no** lease (better than the old claim), but the shutdown future has not been *created* yet, so the process keeps the default disposition — and the client sees a server that never answers `initialize`, the J2-L2 outcome |
+| `ledger.rs` `opening_a_ledger_does_not_block…` test doc | "serve calls `Ledger::open` after the lease is taken, so an `open` on that path would hold the lease" | **STALE reason, live property.** The property is pinned unchanged and matters *more* pre-lease; the dead reason is quoted in place and replaced |
+| `serve.rs` arming comment | enumerates "`Ledger::open`" among the startup work **below** the arming that it guards | **STALE, and it is the load-bearing R2-a claim.** `Ledger::open` and the startup append now run *above* `resolve_role`, unguarded. Harmless for a reason rather than by luck — open performs no I/O of its own, which `opening_a_ledger_does_not_block…` pins — but a stale enumeration credits the arming with covering work it does not cover, so the entry is removed and its absence explained |
+| `serve.rs` `authorize_bind`'s "What J2 changed" | the pre-lease group "creates nothing and leaves nothing behind" | **FALSIFIED BY J4, found by this sweep and by no finding.** J4 put a third member in that group, and it is the first that *does* leave something behind: a ledger file and a line in it. A "What J4 changed" section now states the real claim — the group is about **retries, not traces**: refusing there takes no lease, and an append-only observability file the operator asked for blocks no retry. The `authorize_ledger`-above-the-open ordering is stated with it |
+| `PHASE-8-surface.md:1767` | "The refusal runs as the *first statement* in `serve()`, before **`build_memory`**" | **STALE noun** — the one site J2-R1-7's tree-wide rewrite of that noun missed. The claim is true; the attach it names has been `resolve_role` since J2 |
+| `serve_pre_handshake_durability.rs` module doc | the window it probes, and the proxy case's own sync point | re-read: **still true** — it claims the arming is before the transport handoff, which J4 did not move, and it enumerates nothing |
+| `cli/serve_web.rs` `authorize_bind_web` | "mirrors `mcp::serve::authorize_bind`" — the rule, not the section | **still true**; a reader takes no lease, opens no ledger and binds no endpoint |
+| `main.rs` `authorize_ledger` | keeps the CLI's wording verbatim | untouched |
+| `PHASE-8-surface.md:1038, :1067` | `build_memory` in the module inventory and the `ResolvedBackends` note | clean — both are about the surviving library entry point, not about serve's ordering |
+| `I-observability.md:294-319` | the I-R2-1 arming move | left alone, as J2 left it: narrative about I, not a claim about today |
+| `src/mcp/serve.rs` `resolve_role` / `serve_builder` docs | the split's own ordering statements | re-read, **still true** — J4 moved work above them, not between them |
+
+**Sweep — the "50 seconds by design" family (JE2E-7), run with the ordering one
+because the two share a site.** J2-R2's register table asserted this family
+"re-checked and still true"; it was not, which is why an E2E pass caught what
+two J2 rounds did not. `rg` over `50 seconds`, `50s`,
+`LEASE_TTL + ELECTION_SLACK`, `ELECTION_BUDGET`: **27 hits, 2 stale.**
+
+| Site | Claim | Verdict |
+| --- | --- | --- |
+| `serve.rs` arming comment | "`resolve_role` is a loop that can legitimately run for `LEASE_TTL + ELECTION_SLACK` = **50 seconds**" | **STALE** — J2-L2 cut it to `ELECTION_BUDGET` = 20s. Restated at 20s and the argument **re-made** at the true number, which is the only thing that makes restating it worthwhile: 20s of deliberate deafness against a ~1.1 ms window in a process holding no lease and no tail is four orders of magnitude, and the 20s is not a rare worst case (the probe's dead-holder election took 10.2s) |
+| `serve.rs` `shutdown_signal` docstring | "that loop is allowed to run for 50 seconds by design" | **STALE** — same correction, and its unguarded-work list now names the pre-lease group J4 added |
+| `serve.rs` `ELECTION_BUDGET` / `ELECTION_SLACK` / `waiting_fits` docs | 20s, 15s, the [30,45] derivation | clean — these are where the true number was already written, in the same file, which is what made the two stale sites self-contradicting |
+| `proxy.rs:168`, `proxy.rs:2254` | "worst case ≈ 50s" | clean — a **store** timeout (cockroach's 20s statement behind sqlx's 30s pool acquire), a different family that happens to share a number |
+| `tests/serve_proxy_multi_client.rs:1122, :1172` | "the election waited 50s", "the pre-fix behaviour was 50s" | clean — past tense, accurate history of what J2-L2 measured and removed |
+
 ## J5 — Transport defaults and config layering
 
 * Document HTTP as the default for any machine running more than one client. DOGFOOD.md's
