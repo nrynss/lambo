@@ -1744,7 +1744,7 @@ impl LamboServer {
         //
         // J3 removes the shape instead of offloading it: the graph write now
         // happens on a background pipeline worker and this call does validation
-        // plus one brief `begin_interaction_as` lock, neither of which can
+        // plus one brief `begin_interaction_full` lock, neither of which can
         // occupy a worker for long. So the `spawn_blocking` hop is gone, and
         // what it was defending is defended better. The load-bearing anti-hang
         // guarantee is unchanged and still `serve`'s `CLOSE_GRACE` bound

@@ -44,13 +44,13 @@
 //! out below.
 //!
 //! The interaction is opened **synchronously, on the call path**, before the
-//! job is queued. [`crate::Memory::begin_interaction_as`] takes the graph write
+//! job is queued. `begin_interaction_full` takes the graph write
 //! lock only briefly and never awaits, so this is cheap — and for a sequential
 //! caller it makes submission order *be* `Temporal`-chain order by
 //! construction. That is strictly stronger than ordering the drain: the chain
 //! no longer depends on drain order at all, so an out-of-order drain cannot
 //! corrupt it. Since J1 the chain is session-wide (see
-//! `Memory::begin_interaction_as`), so "one agent's writes apply in submission
+//! `Memory::begin_interaction_full`), so "one agent's writes apply in submission
 //! order" is read off the chain by filtering it on `agent_id`.
 //!
 //! Per-agent FIFO is **still** enforced in the drain, for a second reason:
@@ -61,7 +61,8 @@
 //! agents is fine.
 //!
 //! **The scope of both promises, stated once more where the mechanism is**
-//! (J3-R1-10): one agent's *sequential* submissions. The chain position is pinned by `begin_interaction_as` and the
+//! (J3-R1-10): one agent's *sequential* submissions. The chain position is pinned
+//! by `begin_interaction_full` and the
 //! lane position by the `lanes.lock()` inside [`WritePipeline::admit`], and
 //! those are two critical sections with no ordering between them across
 //! threads. So for two `lambo_derive` calls one agent has in flight *at the
@@ -4380,7 +4381,7 @@ mod pipeline_tests {
     /// sends one after another**, which is what this test submits: the
     /// interaction is opened on the call path, so a sequential caller's chain
     /// position is fixed before its lane position is. Two calls the same agent
-    /// has in flight *simultaneously* are not covered — `begin_interaction_as`
+    /// has in flight *simultaneously* are not covered — `begin_interaction_full`
     /// and `admit`'s `lanes.lock()` are two critical sections with no ordering
     /// between them across threads (J3-R1-10). So what this test has to prove
     /// is the other half: the *drain* order within a lane, which is what

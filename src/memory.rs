@@ -1598,10 +1598,9 @@ impl Memory {
     /// D's optional **event time** rides the same seam as on
     /// [`Memory::record_action_async_as`]: the interaction is opened
     /// synchronously at submit (before the job is queued), so the parameter is
-    /// stamped straight into that interaction via
-    /// [`Self::begin_interaction_full`] and every edge the queued derive later
-    /// creates inherits it. `None` is a live fact (fallback rule:
-    /// about-time = created-at).
+    /// stamped straight into that interaction via `begin_interaction_full` and
+    /// every edge the queued derive later creates inherits it. `None` is a live
+    /// fact (fallback rule: about-time = created-at).
     ///
     /// Returns the receipt. **A refused admission is not an `Err`**: the
     /// receipt carries [`crate::writeq::ReceiptAnswer::Dropped`] and the drop
