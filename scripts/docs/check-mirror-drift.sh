@@ -17,6 +17,23 @@
 # prose has drifted and the gate fails. The J5 rule: keep the pairs in sync, and
 # re-run `scripts/docs/check-mirror-drift.sh` after touching any of the four files.
 #
+# ## The normalisation's one asymmetric input (JE2E-10)
+#
+# J5 round 1 argued that the /lambo/ normalisation "is symmetric ... so it cannot
+# mask a real shared-line difference". That is true of the direction it was
+# reasoned about and false of the other one: the strip is applied to BOTH sides,
+# so a site-style `/lambo/config/#http-transport` link pasted into the
+# **reference** copy normalises to the same canonical form as the site copy's
+# correct link — and passes green while being a broken link on the docs site,
+# which serves no /lambo/ prefix. Demonstrated live by the E2E reviewer, and
+# reproduced here before the fix.
+#
+# So the reference copies are checked for that prefix FIRST, as their own gate,
+# before anything is normalised. The site copies are not: /lambo/ is their
+# correct prefix. This is the asymmetry the normalisation has to have and did
+# not: the two copies are not interchangeable inputs, and only one of them may
+# carry the prefix.
+#
 # CI runs this from .github/workflows/ci.yml (the `docs-mirror` job).
 
 set -euo pipefail
@@ -64,8 +81,29 @@ sys.stdout.write(t)
 PY
 }
 
+# A reference copy must carry no site-style `/lambo/` prefix (JE2E-10).
+#
+# Checked BEFORE `canon` runs, because `canon` is exactly what would hide it:
+# the prefix strip is applied to both sides, so a site-style link in the
+# reference copy canonicalises into agreement with the site copy's correct one.
+# Run against the raw file, so nothing has been normalised yet.
+check_no_site_prefix() {
+  name="$1"; ref="$2"
+  if grep -n '/lambo/' "$repo/$ref" >/dev/null 2>&1; then
+    printf '\nFAIL %s: the reference copy %s carries a site-only /lambo/ link prefix\n' \
+      "$name" "$ref"
+    printf '      The docs site serves no /lambo/ prefix, so these are broken links there.\n'
+    printf '      Only the site copy may carry it. Offending lines:\n'
+    grep -n '/lambo/' "$repo/$ref" | sed -n '1,10p' | sed 's/^/        /'
+    fail=1
+    return 1
+  fi
+  printf 'ok    %s: the reference copy carries no site-only link prefix\n' "$name"
+}
+
 check_pair() {
   name="$1"; ref="$2"; site="$3"
+  check_no_site_prefix "$name" "$ref" || true
   if ! diff -u <(canon "$repo/$ref") <(canon "$repo/$site") >/dev/null; then
     printf '\nFAIL %s: shared prose has drifted between %s and %s\n' "$name" "$ref" "$site"
     diff -u <(canon "$repo/$ref") <(canon "$repo/$site") | sed -n '1,40p'
