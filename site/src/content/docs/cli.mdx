@@ -311,7 +311,7 @@ Running it again is safe. For a CockroachDB store it runs the repository's provi
 
 | Flag | Required | Default |
 |---|---|---|
-| `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.2. An unknown value is a usage error. |
+| `--scenario <SCENARIO>` | No | `rest-api`, the only scenario in v0.1. An unknown value is a usage error. |
 | `--session <SESSION>` | No | A fresh session id per run. |
 
 The harness takes and releases the single-writer lease across the two acts, so provision a durable store first if you persist it. See [End to end](/lambo/end-to-end/) for the topology it exercises.

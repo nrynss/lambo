@@ -26,10 +26,18 @@ name: ci
 # Adding a new include_str!/CARGO_MANIFEST_DIR read outside these paths means
 # adding that path here, or CI goes blind to it.
 #
-# Deliberately excluded: dev-diary/**, README.md, AGENTS.md, LICENSE, docs/**,
-# scripts/** (not executed by CI), spikes/** (standalone crates, not workspace
-# members — the root package has no [workspace], so `cargo test --all` never
-# builds them).
+# Deliberately excluded: dev-diary/**, README.md, AGENTS.md, LICENSE, spikes/**
+# (standalone crates, not workspace members — the root package has no
+# [workspace], so `cargo test --all` never builds them).
+#
+# NOT wholly excluded: docs/** and scripts/** are otherwise, but the J5
+# mirror-drift gate makes four of the doc files and one script real CI inputs:
+#   * the four mirror mdx files below (docs/reference/{cli,mcp}.mdx and
+#     site/src/content/docs/{cli,mcp}.mdx) — hand-maintained prose pairs that must
+#     stay in sync, checked by the docs-mirror job
+#   * scripts/docs/check-mirror-drift.sh — the script that job runs
+# Each is listed individually below so a mirror-only push still triggers CI.
+# Everything else under docs/ and scripts/ stays excluded (not executed by CI).
 #
 # The two lists below MUST be kept identical. GitHub Actions does not support
 # YAML anchors/aliases in workflow files, so this cannot be factored out.
@@ -51,6 +59,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'docs/reference/cli.mdx'
+      - 'docs/reference/mcp.mdx'
+      - 'site/src/content/docs/cli.mdx'
+      - 'site/src/content/docs/mcp.mdx'
+      - 'scripts/docs/check-mirror-drift.sh'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
@@ -62,6 +75,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'docs/reference/cli.mdx'
+      - 'docs/reference/mcp.mdx'
+      - 'site/src/content/docs/cli.mdx'
+      - 'site/src/content/docs/mcp.mdx'
+      - 'scripts/docs/check-mirror-drift.sh'
       - '.github/workflows/ci.yml'
 
 env:
@@ -94,6 +112,21 @@ jobs:
         # (canon goldens, recall goldens, GC, stage1-3, daemon loops,
         # tests/rebuild_session.rs) keep running on the default path.
         run: cargo test --all --features fixtures
+
+  # docs-mirror (J5): the `--ledger`/transport prose is hand-maintained in four
+  # copies — docs/reference/{cli,mcp}.mdx and site/src/content/docs/{cli,mcp}.mdx —
+  # that must stay in sync. They are deliberately NOT byte-identical files (the
+  # site copies carry Astro imports, a `/lambo/` link prefix, and a site-only
+  # mcp.mdx section), so this compares each pair's canonical shared-prose form
+  # after normalising those deltas — see scripts/docs/check-mirror-drift.sh.
+  # The four mdx paths and that script are listed in the path filter above so a
+  # mirror-only push still triggers CI. Landed BEFORE the J5 prose edits, per §J5.
+  docs-mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Mirror drift check (cli + mcp prose pairs)
+        run: bash scripts/docs/check-mirror-drift.sh
 
   # Feature-gated adapter tier (TEST-2): the default-features `check` job above
   # never compiles sqlite/cockroach. Every non-default combo that must stay
