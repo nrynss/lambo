@@ -257,6 +257,32 @@ migration story. Coalesce into batched forwards (both GPUs say so); f16 default 
 (already pinned identically on both rigs). Cold-start number for operator docs: ~2–3 s
 warm, ~60 s once for the weight fetch.
 
+### Weight artifact published (operator, 2026-08-22): the f16 safetensors exists
+
+The "weight-file story" decision both legs handed to K2 is half-made: the fp32 → f16
+conversion was done once, verified, and published to
+**`rockus/bge-m3-f16-safetensors`** (public, MIT inherited). Provenance chain, each link
+checked at conversion time and recorded in the repo's model card:
+
+* Source: canonical `BAAI/bge-m3` rev `5617a9f6…b181`, `pytorch_model.bin` sha256
+  re-verified against the K1 pin **before** converting.
+* Cast: 391/391 tensors `fp32 → f16`, nothing else touched; every tensor reloaded and
+  **bitwise-compared** against a fresh cast of the source — 391/391 identical.
+* Output: `model.safetensors`, 1,135,554,344 B, sha256
+  `68440cc1b73b9af8ab85ecdc138b51877493ffbcec92a0a16e5d7e518eb22908` — and the hub's LFS
+  pointer records exactly that oid/size, so the published bytes are the verified bytes.
+* `config.json` and `tokenizer.json` are byte-identical copies from the source revision
+  (tokenizer sha256 unchanged from the K1 pin), so the repo is drop-in loadable.
+
+Conversion script: `scripts/embedder/convert_bgem3_f16.py` (refuses to run on a source
+hash mismatch). What this buys K2: `VarBuilder::from_mmaped_safetensors` instead of the
+pickle path — the 4.7 GB f16 load transient gone by construction, ~half the fetch
+(1.14 GB vs 2.27 GB), no pickle. This is **not** the third-party-mirror shape the
+NVIDIA leg's deviation warned about: the operator owns the repo and the chain above
+anchors it to the canonical artifact. Still open for K2: whether the shipped fetch
+defaults to this repo or converts locally from canonical (both must stamp source
+revision + loaded-artifact hash in the contract identity).
+
 ---
 
 ## K2 — Implement, if K1 clears
