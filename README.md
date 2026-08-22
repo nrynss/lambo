@@ -166,6 +166,8 @@ rather than a build decision. Building your own with a narrower feature list is 
 models are not comparable. Session identity is the `EmbeddingContract` of kind, model, and
 dimension.
 
+The in-crate candle embedder (`kind = "candle"`, built with `--features embed-candle`) runs BGE-M3 locally with no llama-server: ~2-3 s warm load on every start, plus a one-time ~60 s / ~1.1 GB weight fetch from hf-hub on first use (then cached) — plan a stdio client's startup timeout accordingly.
+
 ## Architecture
 
 ```mermaid

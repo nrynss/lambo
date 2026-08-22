@@ -54,6 +54,9 @@ url = "http://127.0.0.1:8080"
 # not the strings below. Migrating an existing session to candle:
 #   stop serve; LAMBO_EMBEDDER=candle lambo re-embed --session <s> --agent <a>
 # kind = "candle"
+# Cold start: ~2-3 s warm load on every start; the very first use additionally
+# fetches ~1.1 GB of weights from hf-hub (~60 s once, then cached). Plan the
+# stdio client's startup timeout accordingly.
 # Device: auto (default) resolves Metal on Apple silicon / CUDA elsewhere and is
 # a HARD ERROR without one — CPU is never a silent default. Pin explicitly:
 # device = "cpu"          # auto | cpu | metal | cuda
