@@ -2050,6 +2050,53 @@ mod tests {
         g.assert_invariants().unwrap();
     }
 
+    /// D-R1-4: the reinforcement arm mutates only weight/reinforcements/
+    /// last_reinforced, so the ORIGINAL edge's event_time survives — but that
+    /// is three assignments away from copying incoming fields. Pin it: an
+    /// edge written under a historical (event-timed) interaction keeps its
+    /// stamp when reinforced from a differently-timed one; only the fields
+    /// reinforcement owns move.
+    #[test]
+    fn reinforcement_preserves_the_original_edge_event_time() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let c1 = concept(1, iid, "user schema");
+        let cid = c1.id;
+        g.insert_concept(c1, iid).unwrap();
+        let c2 = concept(2, iid, "auth middleware");
+        let c2id = c2.id;
+        g.insert_concept(c2, iid).unwrap();
+
+        // Written under a historical turn: about-time long before flush time.
+        let original_about = ts(-100_000);
+        let mut e1 = edge(1, cid, c2id, EdgeType::CoOccurrence, 0.5);
+        e1.event_time = Some(original_about);
+        g.upsert_edge(e1.clone()).unwrap();
+
+        // Reinforced from a DIFFERENTLY-timed turn: incoming edge carries the
+        // new interaction's event_time, which must be ignored.
+        let reinforcer_about = ts(500);
+        assert_ne!(reinforcer_about, original_about);
+        let mut e2 = edge(2, cid, c2id, EdgeType::CoOccurrence, 0.9);
+        e2.event_time = Some(reinforcer_about);
+        e2.last_reinforced = ts(99);
+        g.upsert_edge(e2).unwrap();
+
+        let e = g.edge_between(cid, c2id, EdgeType::CoOccurrence).unwrap();
+        assert_eq!(e.reinforcements, 2, "the duplicate reinforced in place");
+        assert_eq!(
+            e.event_time,
+            Some(original_about),
+            "reinforcement must not re-age the edge onto the incoming turn's clock"
+        );
+        assert_eq!(e.created_at, e1.created_at, "original created_at preserved");
+        assert_eq!(e.last_reinforced, ts(99));
+        assert_eq!(e.weight, 0.5 + REINFORCE_BUMP, "incoming weight ignored");
+        g.assert_invariants().unwrap();
+    }
+
     #[test]
     fn edge_weight_normalization() {
         let (mut g, iid, cid) = small_graph();
