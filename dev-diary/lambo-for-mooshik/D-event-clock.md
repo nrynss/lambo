@@ -82,8 +82,25 @@ mechanism filed as two unrelated things.
 
 ## Done when
 
-- [ ] Event time can be supplied per fact and is honoured by the age, coverage and separation gates
-- [ ] A seeded historical corpus canonizes differently under event time than under ingest time,
-      and the difference is measured rather than asserted
-- [ ] The no-event-time fallback rule is documented and tested
-- [ ] Time-dependent tests can pin the clock
+- [x] Event time can be supplied per fact and is honoured by the age, coverage and separation
+      gates — **landed (`d74efc2`).** Age: `fresh_edges_from_aged_interactions_do_not_pass`,
+      `aged_edges_from_fresh_interactions_do_not_pass`, `fresh_burst_does_not_inflate_at_min_age_60s`
+      (`src/canon/stage2.rs`). Coverage: `coverage_exactly_0_3_passes` (same file). Separation:
+      `separation_counts_clusters_once_and_stragglers_each` (`src/canon/event_time.rs`).
+      Persistence end to end: `event_time_rides_the_upsert_and_select_shape`
+      (`src/store/cockroach.rs`) and `reinforcement_preserves_the_original_edge_event_time`
+      (`src/graph/graph.rs`)
+- [x] A seeded historical corpus canonizes differently under event time than under ingest time,
+      and the difference is measured rather than asserted —
+      `a_seeded_historical_corpus_canonizes_differently_under_event_time`
+      (`src/canon/event_time.rs`): the same six-turn 2015–2020 corpus, ingested back-to-back in
+      one minute, passes Stage 2 on event time and fails it on ingest time at one pinned instant,
+      with both halves' numbers asserted
+- [x] The no-event-time fallback rule is documented and tested — documented as §2 of the
+      `src/canon/event_time.rs` module docs; tested by `mixed_session_ages_each_fact_on_its_own_clock`
+      (a fallback-aged edge stays cut in a session that also holds event-timed facts) plus box 2's
+      ingest-time half (stripping event times collapses onto flush-time measurement)
+- [x] Time-dependent tests can pin the clock — `pinned_now_is_deterministic_and_the_pin_moves_the_answer`
+      (`src/canon/event_time.rs`): repeated evaluations at one pinned `now` agree and moving the pin
+      re-ages the corpus; stage 3's demotion cooldown likewise runs on a mocked clock
+      (`passes_when_mocked_clock_reaches_cooldown`, `src/canon/stage3.rs`)

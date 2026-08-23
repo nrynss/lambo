@@ -31,8 +31,8 @@ has (D).
 | --- | --- |
 | [A — Gemini embedder](A-gemini-embedder.md) | `embed-gemini`, registry wiring, config keys, the adapter, the dim guard. The hosted answer — and the reason J3's transport-failure classification is load-bearing rather than legacy |
 | [B — Postgres-family store](B-postgres-store.md) | `pg` base extracted from the Cockroach adapter, `postgres` + `cockroach` as dialects; clean alias split, templated width, hnsw from init. Redesigned 2026-08-19 from copy-then-edit to extract-then-extend |
-| [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance |
-| [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback |
+| [C — SoloPolicy](C-solopolicy.md) | the `PromotionScorer` seam, the solo formula, eviction resistance. **Landed:** C1 landed upstream earlier (the seam, solo refusal by design); C2 merged `f02cff6` from `c-solopolicy`. Review: round 1 REQUEST_CHANGES (0 P1 / 1 P2 / 1 P3) → round 2 **ACCEPT**, zero residue (`adve-review-mooshik-C-round{1,2}.md`). Deferred surfaces: MCP/CLI `confirm_human` and event-time ingest tooling; the bootstrap-sparsity honest expectation is recorded in the doc |
+| [D — Event-time clock](D-event-clock.md) | event time vs ingest time, the gates it unblocks, the fallback. **Landed:** merged `d74efc2` from `d-event-clock`. Review: round 1 REQUEST_CHANGES (1 P1 / 2 P2 / 2 P3) → round 2 REQUEST_CHANGES (1 new P3, stale doc refs) → round 3 **APPROVE**, zero residue (`adve-review-mooshik-D-round{1,2}.md` — round 3 is appended to round 2's file). Operator leg open: the live-Cockroach parity run |
 | [F — SQLite vectors](F-sqlite-vectors.md) | issue #5, the query path, the fail-closed capability trap |
 | [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run. G3 (exploratory, unscheduled): graph-Laplacian diffusion for phase-2 expansion and effective-resistance blast radius, spiked read-only against the dogfood graph |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
@@ -47,7 +47,7 @@ has (D).
 > To pick it up elsewhere: `git fetch origin && git worktree add .claude/worktrees/j3 wt/j3`.
 
 | [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
-| [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D |
+| [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D. **Landed:** both K1 legs cleared their falsifiers; K2 merged `3fe9061` from `k2-candle`. Review: round 1 REQUEST_CHANGES (1 P1 / 4 P2 / 6 P3) → round 2 **APPROVE**, zero residue (`adve-review-mooshik-K-round{1,2}.md`). Open operator legs: the dogfood migration act and the shipped adapter's MacBook Metal verification leg |
 | [FUTURE](FUTURE.md) | Decided-but-unbuilt direction (first entry: the bootstrap ingest is a bulk verb, not a serve-path workload). Never a source of schedulable work |
 | [J3 durability redesign](J3-durability-redesign.md) | PROPOSAL (paused, not adopted): durable post-validation intents decouple the async-ack invariant from estimator correctness; ACI conformal bounds + an e-process breaker replace chosen constants. Written after three P1-bearing J3 rounds |
 | [DOGFOOD-FINDINGS](DOGFOOD-FINDINGS.md) | Running log of what dogfooding actually returned: metrics 1-5 read from the live ledger, the embedding-coverage gap, canonical=0 as C's motivating evidence, protocol changes the graph forced |
@@ -85,6 +85,10 @@ J5                    (independent: docs plus a client-config emitter)
 (H1, B3) ─→ H3
 (A4, B4, F2) ─→ E1 ─→ E2
 ```
+
+Landed as of 2026-08-23: **K1→K2** (`3fe9061`), **D1→D2** (`d74efc2`), **C1→C2**
+(`f02cff6`) — all three chains closed through C2's join. The graph reads as drawn for
+everything else.
 
 Nothing in A blocks anything in B. C2 is the one real join: SoloPolicy cannot be evaluated
 honestly until event time exists, because its recurrence rule is defined over wall-clock

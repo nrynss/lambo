@@ -175,8 +175,20 @@ precision and no value; that sentence belongs in the measurement, not in a defen
       (mutation 9); the scorer it selects is a deliberate refusal until C2, and
       `Config::validate` refuses the value at startup. Read the C1 status section for why a
       refusal rather than a stub.
-- [ ] The formula and its four thresholds are tested at their boundaries — **C2**
-- [ ] Eviction resistance multipliers apply per concept type — **C2**; reconcile with the
-      existing additive `concept_type_modifier` rather than adding a parallel knob
-- [ ] SoloPolicy is evaluated against a corpus with real event-time spread, not an ingest-time
-      one — **C2, blocked on D2**
+- [x] The formula and its four thresholds are tested at their boundaries — **C2, landed
+      (`f02cff6`).** `band_boundaries_are_inclusive` pins the 3/6/10 bars inclusive from both
+      sides, `integer_evidence_lands_exactly_on_bars` lands integer evidence × type multiplier
+      exactly ON a bar through the full formula, and `solo_admission_climbs_with_the_score_bands`
+      walks admission across the bands (`src/canon/policy.rs`)
+- [x] Eviction resistance multipliers apply per concept type — **C2, landed.**
+      `eviction_resistance_multiplies_before_the_band_comparison` proves the multipliers fold
+      into the score before the band comparison — that IS the reconciliation with the existing
+      additive `concept_type_modifier`: multiplicative resistance replaces any parallel knob,
+      and a mutation applying the daemon's additive +0.15 instead goes red;
+      `eviction_resistance_discriminates_at_the_threshold_boundary` pins the GC side
+      (`src/daemon/gc.rs`)
+- [x] SoloPolicy is evaluated against a corpus with real event-time spread, not an ingest-time
+      one — **C2, landed on D2.** `a_bulk_ingest_recurs_only_under_event_time`
+      (`src/canon/policy.rs`) measures the SAME four-turn corpus (about-times days 0/2/4/6, all
+      flushed inside one minute): four ≥24h-separated sessions under event time → admitted;
+      stripped to flush time → one session → refused

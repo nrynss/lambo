@@ -344,12 +344,30 @@ not inside it.
 **K1:** the three numbers exist with their method stated; each falsifier applied honestly;
 the recommendation recorded here (build / retreat to fastembed / shelve) with the evidence.
 
-**K2 (only if K1 clears):** `kind = "candle"` builds an adapter and embeds locally;
-cosine parity against the K1 gate holds in the shipped adapter, not just the spike; the
-contract stamps a real model identity; `lambo re-embed` migrates a store between contracts
-and repairs NULL-embedding rows, with coverage visible in `lambo_stats`; the dogfood rig
-runs on it with its full history intact; CI carries the compile row; and the cold-start
-number is documented where an operator wiring a stdio client will read it.
+**K2 (only if K1 clears):**
+
+- [x] `kind = "candle"` builds an adapter and embeds locally — `src/embed/candle.rs`, feature
+      `embed-candle`; registry arm and config keys land with it
+- [~] Cosine parity against the K1 gate holds in the shipped adapter, not just the spike —
+      **the spike cleared outright** (median 0.999720 Metal f16 over 82 texts, every item over
+      0.99; NVIDIA leg PASS over 101), but a live parity measurement *of the shipped adapter*
+      is still an open operator leg. `live_weights_load_and_embed_on_cpu` exists as the
+      `#[ignore]`d live test; round 2 lists this item open, not defective
+- [x] The contract stamps a real model identity — canonical repo@revision plus the loaded
+      weight file's sha256 prefix; `identity_stamps_source_revision_and_sha_prefix`
+      (`src/embed/candle.rs`)
+- [x] `lambo re-embed` migrates a store between contracts and repairs NULL-embedding rows,
+      with coverage visible in `lambo_stats` — `src/cli/re_embed.rs` + `Graph::reembed_all`;
+      `embedded_concepts` / `total_concepts` surfaced by `lambo stats`
+- [ ] The dogfood rig runs on candle with its full history intact — **not done: the migration
+      act has NOT been run.** The invocation is documented below ("K2 implemented"). Also
+      unverified on hardware: the shipped adapter under `embed-candle-metal` on the MacBook —
+      the K1 spike ran Metal, the merged feature has not been exercised there
+- [x] CI carries the compile row — the weightless, offline `candle` job in
+      `.github/workflows/ci.yml`
+- [x] The cold-start number is documented where an operator wiring a stdio client will read it —
+      ~2–3 s warm load / ~60 s one-time ~1.1 GB fetch, in `docs/reference/cli.mdx` (+ its site
+      mirror), `lambo.example.toml` and the repo `README.md`
 
 ---
 
