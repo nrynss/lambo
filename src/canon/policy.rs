@@ -316,9 +316,14 @@ pub fn valid_action_count(graph: &Graph, c: &Concept) -> usize {
 }
 
 /// How many times this concept lost standing — every audited transition whose
-/// `to_status` ranks strictly below its `from_status` (a demotion to any lower
-/// rung: budget demotion Canonical → None, conflict demotion Venerable → None,
-/// a partial Canonical → Venerable step-down). Reads the durable
+/// `to_status` ranks strictly below its `from_status`. The write gate
+/// ([`crate::graph::legal_canonization_transition`]) admits exactly one such
+/// rank-*decreasing* transition, Canonical → None: stage skips and downgrades
+/// (`Venerable → None`, `Canonical → Venerable`, …) are rejected there, so
+/// today the filter can only ever count budget demotions. It is written as a
+/// rank comparison on purpose — any future addition to the legal set that
+/// decreases rank lands in this count by the same filter, which is the
+/// behavior an audit of that change must re-examine. Reads the durable
 /// canonization-event log; no new state.
 pub fn revert_count(graph: &Graph, id: NodeId) -> usize {
     graph
