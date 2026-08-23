@@ -14,11 +14,15 @@ skew. B3 then lands a *third* distance pipeline (pgvector `<=>` cosine distance,
 rather than assumed." Without a shared harness, that box gets verified three different
 ad-hoc ways or not at all.
 
-**Cannot run from every machine, by design.** H2/H3 need a live DSN. That is an
-environment fact, not a task defect: the harness (H1) is buildable and testable anywhere;
-the live legs run where credentials exist — the Linux box that ran the C-series capture,
-the desktop, or CI after this branch merges (the `cockroach-live` job is gated off on
-`lambo-for-mooshik` and comes back at merge).
+**Cannot run from every machine, by design — but this is now true of H2 only.** The
+harness (H1) is buildable and testable anywhere. **H2** needs a live Cockroach DSN, so it
+runs where credentials exist: the Linux box that ran the C-series capture, the desktop, or
+CI after this branch merges (`cockroach-live` is gated off on `lambo-for-mooshik` and comes
+back at merge). **H3 does not** — corrected 2026-08-23 by B's container ruling: pgvector
+runs in a pinned container, so H3's environment is `docker run`, not credentials and not
+special hardware. That is the concrete content of B's claim that the service-container
+model is *strictly better* than the Cockroach live model, and it means the Postgres leg of
+this harness is reproducible by anyone who checks out the repo.
 
 ---
 
@@ -90,7 +94,11 @@ names (cosine-distance conversion `1 - d`, silently wrong ranking if fumbled) is
 what the score-agreement measure catches: a conversion error shows as systematic score
 skew at zero candidate divergence.
 
-**Depends on:** H1, B3.
+**Depends on:** H1, B3. **Not** on a DSN-bearing machine: B runs pgvector in a pinned
+container (see [B](B-postgres-store.md), "Where B is developed"), so this leg is
+reproducible anywhere Docker runs — including in CI on every push, which H2 cannot be.
+Read the same doc's caveat before quoting any number from this leg as performance: a
+container on macOS is sound for correctness and misleading for throughput.
 
 ---
 

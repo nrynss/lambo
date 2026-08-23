@@ -54,6 +54,59 @@ diffing two real implementations, not speculated from one.
 
 ---
 
+## Where B is developed, and on what Postgres (operator, 2026-08-23)
+
+**B is developed on the other machine, not this MacBook.** Recorded so that nobody starts
+B0's extraction here and discovers the divergence at parity time.
+
+**Postgres runs in a pinned container — never a host install.** The reason is independence
+from system-specific bundling, not convenience: what a machine calls "Postgres" is a
+packaging decision made by brew or apt, and B's correctness claims must not inherit it.
+Three of B's own Done-when boxes are exposed to that decision directly:
+
+* **pgvector is not part of Postgres.** Whether `CREATE EXTENSION vector` works at all
+  depends on a separate package (`brew install pgvector`, apt's
+  `postgresql-NN-pgvector`, or a source build). "Does the store initialise" would become a
+  question about the host's package manager rather than about lambo.
+* **Collation.** `initdb` defaults differ across distributions — glibc versus ICU — and
+  that moves sort order and index behaviour. For the one workstream whose purpose is
+  *parity measurement*, a cross-machine collation difference surfaces as **adapter skew**,
+  which is precisely what H3 exists to detect. The bug would live in the operating system
+  and be hunted in the adapter.
+* **Planner configuration decides B3's `EXPLAIN` box.** Whether the planner picks the hnsw
+  index depends on `work_mem`, `random_page_cost` and `effective_cache_size`, all of which
+  vary by how a host packaged its defaults. A container pins the configuration beside the
+  binary, so that box tests lambo's query rather than someone's `postgresql.conf`.
+
+**Pin the tag** (`pgvector/pgvector:pgNN`, never `latest`), for the reason J2 wrote out
+FNV-1a instead of using `DefaultHasher`: this is an agreement several machines and CI must
+share, and a version that moves underneath it breaks the agreement silently. A container
+does not *remove* packaging decisions — it moves them into one image that is identical
+everywhere and changes only when someone decides to change it. That is the whole win, and
+it is worth stating precisely rather than claiming containers are neutral.
+
+**Two consequences worth taking:**
+
+1. **It is what makes the dialect family testable at all.** The design above promises that
+   future wire-compatible stores — Yugabyte, Neon, AlloyDB, Timescale — are "a dialect file
+   each". None of those is a host package anywhere; every one is an image. So containers are
+   not a Postgres convenience, they are the mechanism that lets the family be a tested thing
+   rather than a claim.
+2. **It retires the DSN-bearing-machine constraint** that has shaped this branch. H2 waited
+   for the Linux box; `cockroach-live` needs secrets and is gated off on this branch. H3
+   against a container needs neither, which is the concrete content of this doc's claim that
+   the service-container model is *strictly better* than the Cockroach live model — parity
+   testing stops requiring special hardware.
+
+Local development and CI therefore run the **same** image, so "works locally" and "works in
+CI" stop being two claims. **One caveat, stated up front:** do not quote *performance*
+numbers from a container on macOS. F4's `close_ms ≈ 221 + 249.4·K` came from live
+serverless Cockroach and drove a real design decision (the interactive-path K ≤ ~150
+envelope); a virtualised layer would give misleading figures. Correctness tests are fine
+anywhere — throughput claims name their machine or are not made.
+
+---
+
 ## B0 — Extraction
 
 Move-only, then carve:
@@ -230,5 +283,8 @@ the capability).
       stated as a measured envelope
 - [ ] Fencing-token refusal and flush-replay idempotency both proven on the new dialect
 - [ ] `store-postgres` matrix row, plus a `postgres-live` job using a **service container**
-      (`pgvector/pgvector`) rather than a provisioned cluster: no secret, no cost, and it runs
-      on every push instead of being a tier someone remembers to check
+      (`pgvector/pgvector`, **tag pinned — never `latest`**) rather than a provisioned
+      cluster: no secret, no cost, and it runs on every push instead of being a tier someone
+      remembers to check. The **same pinned image** is what local development runs (see
+      "Where B is developed" above), so this job and a developer's machine are not two
+      claims — and the pin is what keeps that true across a version bump

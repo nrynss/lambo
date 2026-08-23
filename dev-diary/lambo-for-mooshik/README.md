@@ -139,7 +139,7 @@ them merge to main cleanly:
 | Workstream | CI it must add |
 | --- | --- |
 | A | `embed-gemini` matrix row (compile + unit, no network). Live Vertex calls stay `#[ignore]`d — no API key in CI. |
-| B | `store-postgres` matrix row, **and** a `postgres-live` job. Use a GitHub Actions **service container** (`pgvector/pgvector`), not a provisioned cloud cluster: no secret, no cost, no cross-account setup, and it runs on every push instead of being a tier you hope someone checks. This is strictly better than the Cockroach live model and worth saying so. |
+| B | `store-postgres` matrix row, **and** a `postgres-live` job. Use a GitHub Actions **service container** (`pgvector/pgvector`), not a provisioned cloud cluster: no secret, no cost, no cross-account setup, and it runs on every push instead of being a tier you hope someone checks. This is strictly better than the Cockroach live model and worth saying so — and since 2026-08-23 that claim has concrete content: **local development runs the same pinned image** (tag pinned, never `latest`), so host packaging cannot decide whether `CREATE EXTENSION vector` works, what collation the index sorts under, or whether the planner picks hnsw in B3's `EXPLAIN` capture. It also means **H3 needs no DSN-bearing machine**, unlike H2. B is developed on the other machine; see B's "Where B is developed". |
 | C | Nothing new — canonization runs in `check`. |
 | D | Nothing new, but the event clock is what finally lets time-dependent tests be deterministic. See issue #2. |
 | F | A row proving the vector leg **fired** on SQLite rather than inferring it from rank, per issue #5's acceptance criteria. |
