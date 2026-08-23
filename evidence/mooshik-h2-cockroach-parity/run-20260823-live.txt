@@ -1,0 +1,57 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/lambo-6fbcb0818c679ecf)
+
+running 1 test
+H2 cluster version(): CockroachDB CCL v26.2.5 (x86_64-pc-linux-gnu, built 2026/07/28 18:56:00, go1.25.5)
+H2 beam size: default 64 (LAMBO_VECTOR_BEAM_SIZE unset)
+H2 SHOW CREATE TABLE concepts:
+CREATE TABLE public.concepts (
+	id UUID NOT NULL,
+	session_id STRING NOT NULL,
+	content STRING NOT NULL,
+	canonical_key STRING NOT NULL,
+	concept_type STRING NOT NULL,
+	origin_interaction UUID NOT NULL,
+	origin_agent STRING NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	access_count INT8 NOT NULL DEFAULT 0:::INT8,
+	last_accessed TIMESTAMPTZ NULL,
+	gc_survived INT8 NOT NULL DEFAULT 0:::INT8,
+	canonization_status STRING NOT NULL DEFAULT 'None':::STRING,
+	blast_radius INT8 NULL,
+	last_demotion_time TIMESTAMPTZ NULL,
+	embedding VECTOR(1024) NULL,
+	chunk_group_id STRING NULL,
+	human_confirmed INT8 NOT NULL DEFAULT 0:::INT8,
+	CONSTRAINT concepts_pkey PRIMARY KEY (id ASC),
+	CONSTRAINT concepts_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.sessions(session_id),
+	CONSTRAINT concepts_origin_interaction_fkey FOREIGN KEY (origin_interaction) REFERENCES public.interactions(id),
+	INDEX concepts_session_id_canonization_status_idx (session_id ASC, canonization_status ASC),
+	UNIQUE INDEX concepts_key_non_obs_idx (session_id ASC, canonical_key ASC) WHERE concept_type != 'Observation':::STRING,
+	VECTOR INDEX concepts_embedding_idx (embedding vector_l2_ops) WHERE embedding IS NOT NULL
+) WITH (schema_locked = true) LOCALITY REGIONAL BY TABLE IN PRIMARY REGION;
+
+H2 EXPLAIN plan:
+distribution: local
+
+• top-k
+│ estimated row count: 5
+│ order: +dist
+│ k: 5
+│
+└── • render
+    │
+    └── • lookup join
+        │ table: concepts@concepts_pkey
+        │ equality: (id) = (id)
+        │ equality cols are key
+        │
+        └── • vector search
+              table: concepts@concepts_embedding_idx (partial index)
+              target count: 5
+H2 quarantine leg: under contract A both answered non-empty (cockroach 5, sqlite 5); after restamping B(dim 4): sqlite quarantined 9/9 concept vectors to NULL and answered EMPTY; cockroach refused via DDL width enforcement. Cross-space recall delivered: 0 candidates on BOTH adapters.
+H2: 120 pairs across fixtures (session-rest-api, session-drift) — adapters ["cockroach", "memory-oracle", "sqlite"]; ANN pairs: min jaccard 1, max score skew 0.000005364418029785156, total displaced ranks 0; fully-agreeing ANN cells: 80/80
+test store::cockroach::h2_cockroach_parity::h2_live_cockroach_recall_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1058 filtered out; finished in 24.16s
+

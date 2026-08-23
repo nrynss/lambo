@@ -121,9 +121,19 @@ skew at zero candidate divergence.
       papered over the drop. Fixed to assert the synthetic leg's own count exactly.
       Report: `evidence/mooshik-h1-cross-store-parity/report.json` (schema documented on
       `ParityReport` in the harness module and in the evidence dir's README).
-- [ ] H2 evidence committed: live Cockroach run, skew zero on the score scale, ANN
-      divergence stated with numbers against the C-SPANN envelope
-- [ ] F's Done-when box 5 flipped from `[~]` to done, citing H2's evidence
+- [x] H2 evidence committed: live Cockroach run, skew zero on the score scale, ANN
+      divergence stated with numbers against the C-SPANN envelope.
+      `store::cockroach::h2_cockroach_parity::h2_live_cockroach_recall_parity`
+      (`src/store/cockroach.rs`) ran the H1 grid live on 2026-08-23: 120 pairs (80
+      `AnnEnvelope`, 40 `ExactMustMatch`), max ANN-vs-exact score diff 5.36e-6 (float32
+      round-trip noise — zero systematic skew; bound 1e-4), candidate jaccard 1.0 and zero
+      rank displacement on every ANN cell at beam 64 (below the 0.99-recall envelope),
+      exact-scan pair bit-for-bit equal on all 40 rows, and the quarantine-history
+      measurement landed: same restamp history yields empty-or-refused recall — zero
+      cross-space candidates — on both Cockroach and SQLite. The production query was
+      camera-proofed (`vector search` on `concepts@concepts_embedding_idx`, no full scan).
+      Evidence: `evidence/mooshik-h2-cockroach-parity/`.
+- [x] F's Done-when box 5 flipped from `[~]` to done, citing H2's evidence
 - [x] B3's parity box references this harness (note added to B doc at H1 landing)
 - [x] The report format is stable enough that H2 and H3 evidence are directly comparable.
       `ParityReport` names adapters by free-text string, never by enum variant tied to a

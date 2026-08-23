@@ -183,7 +183,7 @@ stored) or from config, matching whatever B2 settles on as the authority.
 - [x] A test proves the vector leg **fired**, rather than inferring it from rank — mirroring what
       `VectorSearchStore` does for MemoryStore
 - [x] Contract mismatch is refused on the checked path
-- [~] Recall parity between SQLite and Cockroach on the same seeded graph, with any divergence
+- [x] Recall parity between SQLite and Cockroach on the same seeded graph, with any divergence
       explained by ANN approximation rather than by the adapter.
       **Cluster-free half: done.** `vector_candidates_agree_with_an_exact_cosine_oracle_on_both_fixtures`
       (`src/store/sqlite.rs`) seeds both committed fixture graphs plus a stamped contract and
@@ -196,18 +196,18 @@ stored) or from config, matching whatever B2 settles on as the authority.
       replaced** — it still runs in the `sqlite-vectors` row, and a transcription test is worth
       having as long as it is not mistaken for parity evidence (round 2's wording note: "replaces"
       read as if it had been deleted).
-      **Cockroach half: explicitly awaiting the live tier.** `cockroach-live` is gated off on this
-      branch (`ci.yml`, `if: github.ref != 'refs/heads/lambo-for-mooshik'`), and no live DSN was
-      available for this remediation, so no run compares the two adapters' answers on one graph.
-      Recording this as *not covered* rather than letting the transcription test imply it is.
-      What the identity now rests on instead of an unstated assumption: `cosine` is norm-invariant
-      while Cockroach's `1 − d²/2` is not, so the two agree **only for unit-norm vectors** — now a
-      documented `Embedder::embed` output contract ("vectors MUST be L2-normalized"), which every
-      shipped embedder already satisfies (`bge_m3` normalizes and rejects zero-norm;
-      `FixtureEmbedder` emits unit vectors) and which `A-gemini-embedder.md` instructs the next one
-      to. It is stated as a trait contract rather than a `CON-`numbered one because `CON-1`…`CON-9`
-      are all assigned findings from `adve-review-e2e-p0-p3-fable.md`; that series has no free slot,
-      and minting `CON-10` would imply a registry entry that does not exist.
+      **Cockroach half: done, live.** H2 ran the shared parity harness against a real cluster
+      (2026-08-23): the same seeded graphs and probe × limit grid through `CockroachStore`
+      (ANN via `concepts_embedding_idx`, camera-proofed) vs SQLite and the exact-cosine oracle —
+      candidate jaccard 1.0 and zero rank displacement on every ANN cell at beam 64 (below the
+      C-SPANN envelope), max score diff 5.36e-6 on the shared `1 − d²/2 ≡ cosine` scale
+      (float32 round-trip noise — zero adapter skew; a wrong conversion would sit ≥ ~0.01),
+      and the exact-scan pair bit-for-bit equal on all rows. The same run settled by measurement
+      what this box could only reason about: after an identical contract-restamp history,
+      Cockroach's NULL-only quarantine + DDL width enforcement and SQLite's restamp-quarantine +
+      write-gate deliver the same observable recall behaviour — zero cross-space candidates on
+      both (empty result vs fail-closed refusal; mechanisms differ as documented, behaviour
+      matches). Evidence: `evidence/mooshik-h2-cockroach-parity/` (report.json + run log).
 - [~] `README.md` and the site's End-to-end page describe SQLite as the out-of-the-box store;
       revisit what each tier earns once semantic matching works there.
       **Site/docs End-to-end: done** (and, under F-R1-5, corrected — the walkthrough exercises the
