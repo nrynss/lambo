@@ -156,9 +156,19 @@ evidence pointers.
 
 ## Open questions — answered at standup (2026-08-19)
 
-1. **Pin: `3039b82`** (has F's vector leg and G2's recalibrated floor). Binary at
-   `~/lambo-dogfood/bin/lambo-3039b82`; config at `~/lambo-dogfood/lambo.toml`
-   (sqlite at `~/lambo-dogfood/lambo-dev.db`, bge_m3 @ `127.0.0.1:8080`, dim 1024).
+1. **Pin: `21e4cf8`** (K2 migration, 2026-08-23). Binary at
+   `~/lambo-dogfood/bin/lambo-21e4cf8`, built
+   `--features store-sqlite,embed-candle-metal,embed-bge`; config at
+   `~/lambo-dogfood/lambo.toml` (sqlite at `~/lambo-dogfood/lambo-dev.db`,
+   **`kind = "candle"`, `device = "metal"`**, dim 1024). The user-scope MCP
+   registration in `~/.claude.json` was repointed to the new binary in the same act —
+   it is the thing that actually spawns the serve, so a re-pin that skips it silently
+   keeps serving the old binary.
+   **The rig no longer needs llama-server.** Embedding is in-process; §1 of
+   DOGFOOD-SETUP is now only needed to reproduce K1's parity captures, not to run the
+   rig. The previous config is kept at `~/lambo-dogfood/lambo.toml.bge-backup`
+   (`kind = "bge_m3"`, `127.0.0.1:8080`) so the old path is one copy away.
+   *Superseded pin: `3039b82`, then `19f51d3`.*
 2. **Wiring: option (a)** — a user-scope stdio MCP registration (`claude mcp add --scope
    user lambo-dogfood -- <pinned binary> serve …`), so the orchestrator session holds the
    one connection and no project `.mcp.json` touches the public repo. Brief-injection

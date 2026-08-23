@@ -12,6 +12,14 @@ else changes.
 
 ## 1. The embedder (same artifact everywhere — that is the rule)
 
+> **Since 2026-08-23 this section is OPTIONAL for running the rig.** The dogfood rig
+> embeds in-process via candle (§3), so no llama-server is required. Keep this section
+> for two live uses: reproducing K1's parity captures, which measure candle *against*
+> this llama.cpp reference, and the `kind = "bge_m3"` fallback config. The same-artifact
+> rule is unchanged and now spans both paths — the GGUF here and the f16 safetensors
+> candle loads are both casts of the same canonical `BAAI/bge-m3` revision, which is why
+> they agree to a median cosine of 0.9998.
+
 The space is defined by the model artifact including quantization, so every machine uses
 the **same GGUF**, checksum-verified:
 
@@ -69,9 +77,9 @@ but binds a network service for no real saving; the model is 605 MB.)
 ## 2. The pinned binary (per machine, per arch — binaries do not travel)
 
 ```sh
-cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently 3039b82
+cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently 21e4cf8
 LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \
-  cargo build --release --features store-sqlite,embed-bge
+  cargo build --release --features store-sqlite,embed-candle-metal,embed-bge
 mkdir -p ~/lambo-dogfood/bin
 cp target/release/lambo ~/lambo-dogfood/bin/lambo-<sha>
 ```
@@ -88,6 +96,15 @@ Build with a dirty tree and the sha is still the last commit's, which is a lie a
 binary. Commit (or stash) first, or the heartbeat attributes the run to code that is not
 in it.
 
+**A store provisioned by an older lambo needs `lambo provision` before the new binary
+can write to it** (idempotent; found doing the 2026-08-23 K2 migration, where the store
+was missing `lease_refusals` and `write_intents`). The re-embed refused with exactly that
+diagnosis rather than half-migrating, which is the behaviour to expect:
+
+```sh
+~/lambo-dogfood/bin/lambo-<sha> provision --config ~/lambo-dogfood/lambo.toml
+```
+
 The copy out of `target/` is the isolation rule: rebuilds and `cargo clean` must not be
 able to touch the serving binary. Upgrading = build at a newer sha, copy, re-register,
 note it in the session.
@@ -101,6 +118,22 @@ note it in the session.
 kind = "sqlite"
 path = "/home/or/Users/<you>/lambo-dogfood/lambo-dev.db"
 
+[embedder]
+kind = "candle"
+dim = 1024
+device = "metal"        # Apple silicon; use "cuda" on an NVIDIA box
+```
+
+Since the 2026-08-23 K2 migration the rig embeds **in process** — no llama-server, no
+`llama_url`. `device` is pinned rather than left `auto` so a missing accelerator fails
+loudly instead of resolving to a CPU path measured at ~3% of the llama-server baseline.
+Weights are the published f16 safetensors (`nrynss/bge-m3-f16-safetensors`), fetched once
+(~1.1 GB) into the HF cache and hash-checked at load.
+
+The pre-migration block is kept verbatim for the llama-server path, which still works and
+is what §1 serves:
+
+```toml
 [embedder]
 kind = "bge_m3"
 dim = 1024
