@@ -127,7 +127,7 @@ pub fn separated_session_count(starts: &[DateTime<Utc>], gap: Duration) -> usize
     count
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory"))]
 mod tests {
     use super::*;
     use crate::store::{GraphStore, MemoryStore};

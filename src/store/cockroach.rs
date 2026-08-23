@@ -4129,6 +4129,7 @@ mod conformance {
                 prompt_text: Some("seed".into()),
                 previous_id: None,
                 created_at: ts,
+                event_time: None,
             }),
         }
     }
@@ -4189,6 +4190,7 @@ mod conformance {
                 last_demotion_time: None,
                 embedding,
                 chunk_group_id,
+                human_confirmed: 0,
             }),
         }
     }
@@ -4211,6 +4213,7 @@ mod conformance {
                 reinforcements: 1,
                 created_at: ts,
                 last_reinforced: ts,
+                event_time: None,
             },
         }
     }
