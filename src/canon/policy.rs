@@ -8,11 +8,15 @@
 //! independent peers, nothing converges, and nothing is ever promoted — so the
 //! graph never produces the load-bearing warnings that are its whole point.
 //!
-//! Stages 2 and 3 are **not** part of this seam. They measure evidence
-//! (`interaction_span`, `blast_radius`) rather than agreement, and evidence
-//! means the same thing whether one writer or twenty produced it. What breaks
-//! them at bootstrap is the *clock*, not the peer model, which is workstream D
-//! and not this one.
+//! Stage 1 is not the whole policy, though. Stages 2 and 3 *measure* evidence
+//! (`interaction_span`, `blast_radius`) rather than agreement, and those
+//! predicates are policy-independent by C1's design decision — evidence means
+//! the same thing whether one writer or twenty produced it. What each policy
+//! owns beside Stage 1 is the **admission** of the later hops
+//! ([`PromotionScorer::admits_hop`]): given a stage's evidence verdict, the
+//! policy has the final word. Swarm always defers to the evidence; solo
+//! substitutes its own score bands (spec §3.2), which is what makes the
+//! published Venerable/Canonical bars load-bearing rather than decorative.
 //!
 //! ## What C1 was, and what C2 added
 //!
@@ -131,20 +135,22 @@ impl PromotionPolicy {
     }
 }
 
-/// The Stage-1 promotion decision, as a policy.
+/// The Stage-1 promotion decision and each later hop's admission, as a policy.
 ///
-/// One method, because Stage 1 is the only stage whose predicate encodes *how
-/// agreement is established*. Stages 2 and 3 ask the store for evidence and
-/// are policy-independent (see the module docs).
+/// Stage 1 is the only stage whose predicate encodes *how agreement is
+/// established*. Stages 2 and 3 ask the store for evidence and their
+/// predicates are policy-independent (see the module docs): stage 2's
+/// `interaction_span` and stage 3's blast radius measure the same thing
+/// whether one writer or twenty produced it.
 ///
-/// The upper two bands of that score are published here
-/// ([`classify`], [`VENERABLE_BAR`], [`CANONICAL_BAR`]) and boundary-tested,
-/// but their *pipeline* consumption point stays open: Stages 2 and 3 measure
-/// evidence (`interaction_span`, blast radius), which is policy-independent
-/// by C1's design decision, so a solo session climbs Candidate → Venerable →
-/// Canonical through the same evidence gates after this scorer admits it at
-/// the Candidate bar. If solo ever grows its own Stage-2/3 predicate, the
-/// bars it must compare against already live in exactly one place — here.
+/// What the policy owns beside Stage 1 is the **admission** of the
+/// Candidate → Venerable and Venerable → Canonical hops: [`PromotionScorer::admits_hop`]
+/// receives the stage's evidence verdict and has the final word. Swarm keeps
+/// the evidence as the whole decision — byte-for-byte the pre-seam pipeline.
+/// Solo substitutes its own resistant-score bands (spec §3.2), so the
+/// published [`VENERABLE_BAR`] and [`CANONICAL_BAR`] drive the actual ladder
+/// instead of merely describing it: a concept climbs exactly as high as its
+/// band, and no store verdict can lift it past that.
 pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
     /// Concepts that currently clear the Candidate bar, `NodeId` ascending.
     ///
@@ -157,14 +163,31 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> Vec<NodeId>;
+
+    /// Whether `node` may take the promotion hop to `to` this cycle.
+    ///
+    /// `evidence` is the stage predicate's verdict for this node — stage 2's
+    /// interaction-span pass, or stage 3's blast-radius pass (already
+    /// cooldown-gated in the verdict phase). The stage predicates stay
+    /// policy-independent measures; this method decides what their verdict
+    /// is *worth* under the active policy. A `to` below the node's current
+    /// status is never asked — the ladder only climbs.
+    fn admits_hop(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        evidence: bool,
+    ) -> bool;
 }
 
 /// Spec §3.2 multi-agent convergence — the shipped policy.
 ///
-/// A pure delegation to [`stage1_candidates`]. It holds no state and adds no
+/// A pure delegation to [`stage1_candidates`] at Stage 1, and to the stage's
+/// own evidence verdict on every later hop. It holds no state and adds no
 /// arithmetic: the seam must be able to prove it changed nothing, and the
 /// cheapest proof is that the default arm still calls the same function with
-/// the same argument.
+/// the same argument and keeps the verdict verbatim.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwarmScorer;
 
@@ -178,24 +201,39 @@ impl PromotionScorer for SwarmScorer {
     ) -> Vec<NodeId> {
         stage1_candidates(graph, scores, params.min_peer_count)
     }
-}
-// ---------------------------------------------------------------------------
-// The solo score (spec §3.2) — C2
-// ---------------------------------------------------------------------------
 
-/// Event-time separation that makes two touches of a concept distinct
-/// "sessions" in the recurrence term (spec §3.2's "separated by ≥ 24 hours").
-pub const SESSION_SEPARATION: Duration = Duration::from_secs(86_400);
+    fn admits_hop(
+        &self,
+        _graph: &Graph,
+        _node: NodeId,
+        _to: CanonizationStatus,
+        evidence: bool,
+    ) -> bool {
+        // Swarm has no score of its own — convergence *is* the evidence, so
+        // the stage predicate's verdict is the whole decision.
+        evidence
+    }
+}
 
 /// The four band edges of the solo score, compared **after** the
 /// eviction-resistance multiplier and **inclusive** (`>=`): a resistant score
 /// of exactly 3.0 is a Candidate, exactly 6.0 a Venerable, exactly 10.0 a
 /// Canonical. Anything below [`CANDIDATE_BAR`] is ordinary memory.
+///
+/// All three bars are consumed, not merely published: [`CANDIDATE_BAR`] gates
+/// Stage-1 admission ([`SoloScorer::candidates`]), and the upper two gate the
+/// Candidate → Venerable and Venerable → Canonical hops
+/// ([`SoloScorer::admits_hop`] — the ladder cannot lift a concept past its
+/// band).
 pub const CANDIDATE_BAR: f64 = 3.0;
 /// See [`CANDIDATE_BAR`].
 pub const VENERABLE_BAR: f64 = 6.0;
 /// See [`CANDIDATE_BAR`].
 pub const CANONICAL_BAR: f64 = 10.0;
+
+/// Event-time separation that makes two touches of a concept distinct
+/// "sessions" in the recurrence term (spec §3.2's "separated by ≥ 24 hours").
+pub const SESSION_SEPARATION: Duration = Duration::from_secs(86_400);
 
 /// Spec §3.2 term weights, verbatim.
 pub const SESSION_WEIGHT: f64 = 1.0;
@@ -330,6 +368,11 @@ pub fn solo_score(graph: &Graph, c: &Concept) -> f64 {
 /// (`>=`): the boundary values themselves belong to the higher band, so a
 /// score of exactly [`CANONICAL_BAR`] is Canonical while one epsilon below is
 /// Venerable. Tested at all three boundaries below.
+///
+/// This is the policy's ladder admission predicate: [`SoloScorer::candidates`]
+/// reduces Stage 1 to `classify(score) != None`, and
+/// [`SoloScorer::admits_hop`] admits a hop to `to` exactly when the node's
+/// band ranks at or above `to`.
 pub fn classify(resistant: f64) -> CanonizationStatus {
     if resistant >= CANONICAL_BAR {
         CanonizationStatus::Canonical
@@ -349,6 +392,16 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
 /// order `Evaluator::gather` expects). Still-`None` concepts only reach the
 /// promotion path anyway — `gather` re-filters on current status before the
 /// batch cut — so this predicate needs no state beyond the graph.
+///
+/// The bands above the Candidate bar are consumed by [`SoloScorer::admits_hop`]:
+/// under solo, the Candidate → Venerable and Venerable → Canonical hops are
+/// decided by the resistant score's band, **not** by the stage-2/3 store
+/// evidence. Spec §3.2 defines the formula as solo's promotion rule, so the
+/// graph status a solo session converges to tracks `classify(solo_score(..))`
+/// (bounded by the Canonical budget and the stage-3 re-promotion cooldown,
+/// which apply to every policy). The revert penalty is what cools a demoted
+/// concept's score down; the cooldown gate in `eval` bounds how fast it may
+/// climb back.
 ///
 /// The C1-era shape was a deliberate `unimplemented!()` backstop behind
 /// `Config::validate`'s Solo refusal: an empty-set stub would have been
@@ -374,6 +427,22 @@ impl PromotionScorer for SoloScorer {
             .collect();
         ids.sort_by_key(|id| id.0);
         ids
+    }
+
+    fn admits_hop(
+        &self,
+        graph: &Graph,
+        node: NodeId,
+        to: CanonizationStatus,
+        _evidence: bool,
+    ) -> bool {
+        match graph.node(node) {
+            Some(Node::Concept(c)) => {
+                status_rank(classify(solo_score(graph, c))) >= status_rank(to)
+            }
+            // Not a concept (or gone): nothing to admit.
+            _ => false,
+        }
     }
 }
 
@@ -962,5 +1031,56 @@ mod tests {
             PromotionPolicy::Solo
         );
         assert!(serde_json::from_str::<PromotionPolicy>("\"solo\"").is_err());
+    }
+    // -----------------------------------------------------------------------
+    // C-R1-1 closure — the published bands drive the ladder admission
+    // -----------------------------------------------------------------------
+
+    /// Under solo, hop admission is the node's band. A Resource hub with four
+    /// event-timed sessions sits at resistant 4.0: Candidate only, and the
+    /// band refuses Venerable **even when handed a passing evidence verdict** —
+    /// the score replaces the store evidence, it does not OR with it. One
+    /// human confirmation lifts it to 8.0 (Venerable, not Canonical); one
+    /// valid action lands it on exactly [`CANONICAL_BAR`] (10.0), which the
+    /// inclusive comparison must admit.
+    ///
+    /// Mutations: `SoloScorer::admits_hop` returning `_evidence` → red;
+    /// its rank comparison made exclusive (`>`) → red at exactly 10.0.
+    #[test]
+    fn solo_admission_climbs_with_the_score_bands() {
+        let (mut graph, hub) = spread_support_graph_with(ConceptType::Resource, true);
+        let solo = PromotionPolicy::Solo.scorer();
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Candidate, false));
+        assert!(
+            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, true),
+            "4.0 < 6.0: below the bar even a PASSING stage-2 verdict admits nothing"
+        );
+
+        graph.confirm_human(hub).unwrap();
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, false));
+        assert!(!solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, false));
+
+        let actor = concept(11, 0);
+        let actor_id = actor.id;
+        graph.insert_concept(actor, nid_inter(1)).unwrap();
+        graph
+            .upsert_edge(test_edge(20, actor_id, hub, EdgeType::Causal, ts()))
+            .unwrap();
+        let hub_concept = concept_of(&graph, hub);
+        assert_eq!(solo_score(&graph, &hub_concept), 10.0);
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, false));
+    }
+
+    /// The swarm arm keeps the evidence verdict as the whole decision — the
+    /// pre-seam pipeline byte-for-byte. It has no score to admit with.
+    ///
+    /// Mutation: make `SwarmScorer::admits_hop` ignore `evidence` → red.
+    #[test]
+    fn swarm_admission_is_the_evidence_verdict() {
+        let (graph, hub) = spread_support_graph(ConceptType::Entity);
+        let swarm = PromotionPolicy::Swarm.scorer();
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, true));
+        assert!(!swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, false));
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Canonical, true));
     }
 }

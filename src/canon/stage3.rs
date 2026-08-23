@@ -84,7 +84,7 @@ pub async fn stage3_passes(
 ///
 /// `None` is not a cooldown. An unrepresentable `cooldown` is treated as
 /// still cooling (conservative; config default is 300s).
-fn in_repromotion_cooldown(
+pub(crate) fn in_repromotion_cooldown(
     last_demotion: Option<DateTime<Utc>>,
     cooldown: Duration,
     now: DateTime<Utc>,

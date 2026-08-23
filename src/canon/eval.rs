@@ -584,6 +584,14 @@ fn apply(
 ) -> Result<(), LamboError> {
     outcome.stage3_batch = plan.stage3.iter().map(|p| p.node).collect();
 
+    // Every promotion hop's admission goes through the policy seam: the stage
+    // predicates stay policy-independent measures, and the active policy
+    // decides what their verdict is worth (C-R1-1). Swarm keeps the verdict
+    // as the whole decision — byte-for-byte the pre-seam pipeline. Solo
+    // substitutes its §3.2 score bands, which is what makes the published
+    // Venerable/Canonical bars drive the ladder.
+    let scorer = params.promotion_policy.scorer();
+
     // --- Stage 1: None → Candidate (one hop; no skip to Venerable) ---
     for &id in &plan.stage1 {
         if concept_status(graph, id) != Some(CanonizationStatus::None) {
@@ -603,8 +611,15 @@ fn apply(
     }
 
     // --- Stage 2: Candidate → Venerable ---
-    for &id in &verdicts.stage2_pass {
+    // The window is walked in ring order; a member promotes iff its policy
+    // admits the hop given the span verdict. Under swarm that reduces to the
+    // verdict alone (the pre-seam set), so membership and order are unchanged.
+    for &id in &plan.stage2 {
         if concept_status(graph, id) != Some(CanonizationStatus::Candidate) {
+            continue;
+        }
+        let evidence = verdicts.stage2_pass.contains(&id);
+        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, evidence) {
             continue;
         }
         let event = promotion_event(
@@ -625,23 +640,52 @@ fn apply(
     // window, and the passing nodes are spent against the budget in
     // score-descending order. Recomputed here, under the write guard, because
     // the graph was unlocked while the verdicts ran.
+    //
+    // Admission again goes through the policy seam. A node whose blast-radius
+    // verdict passed keeps the measurement that admitted it — the audit row is
+    // stamped with exactly that value (F9). A node admitted *without* a
+    // passing verdict (solo's score bands) has no measurement to stamp and is
+    // cooldown-gated here instead: its admission bypassed the verdict phase,
+    // where that gate normally runs.
     let mut remaining = params
         .max_canonical_nodes
         .saturating_sub(canonical_count(graph));
-    for &(id, blast) in &verdicts.stage3_pass {
+    for probe in &plan.stage3 {
         if remaining == 0 {
             break;
         }
-        if concept_status(graph, id) != Some(CanonizationStatus::Venerable) {
+        if concept_status(graph, probe.node) != Some(CanonizationStatus::Venerable) {
             continue;
         }
-        let narrowed = narrow_blast_radius(blast)?;
+        let evidence = verdicts
+            .stage3_pass
+            .iter()
+            .find(|&&(id, _)| id == probe.node)
+            .map(|&(_, blast)| blast);
+        if evidence.is_none()
+            && stage3::in_repromotion_cooldown(probe.last_demotion_time, params.cooldown, now)
+        {
+            continue;
+        }
+        if !scorer.admits_hop(
+            graph,
+            probe.node,
+            CanonizationStatus::Canonical,
+            evidence.is_some(),
+        ) {
+            continue;
+        }
+        let narrowed = match evidence {
+            Some(blast) => Some(narrow_blast_radius(blast)?),
+            // Score-admitted: keep the concept's current blast (promotion_event).
+            None => None,
+        };
         let event = promotion_event(
             graph,
-            id,
+            probe.node,
             CanonizationStatus::Venerable,
             CanonizationStatus::Canonical,
-            Some(narrowed),
+            narrowed,
             now,
         );
         outcome
@@ -649,7 +693,6 @@ fn apply(
             .push(commit_transition(graph, events, event)?);
         remaining -= 1;
     }
-
     // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
     let overflow = canonical_count(graph).saturating_sub(params.max_canonical_nodes);
     for &(_, id) in verdicts.demotion_ranked.iter().take(overflow) {
@@ -1218,6 +1261,194 @@ mod tests {
             );
             assert_eq!(g.read().canonization_events().len(), 1);
             assert_eq!(drain_canonized(&mut rx).len(), 1);
+        }
+        // -------------------------------------------------------------------
+        // C-R1-1 closure — the published bands drive the ladder under solo
+        // -------------------------------------------------------------------
+
+        /// A solo Candidate whose resistant score sits exactly on the
+        /// Venerable bar climbs without stage-2 evidence. Fixture: Entity hub
+        /// with one extra Derives support whose about-time clusters with the
+        /// origin turn (one recurrence session), one human confirmation →
+        /// raw (1 + 4) × 1.2 = **6.0**, the inclusive bar. Stage-2 span
+        /// evidence cannot pass — the hub traces to two distinct origin
+        /// interactions, below MIN_DISTINCT — so pre-closure this hop was
+        /// unreachable and the concept sat at Candidate forever while
+        /// `classify` reported Venerable.
+        ///
+        /// Mutations: revert apply's stage-2 loop to `verdicts.stage2_pass`
+        /// (bands unreachable again) → red. `SoloScorer::admits_hop` returning
+        /// `_evidence`, or its comparison made exclusive (`>`) → red.
+        #[tokio::test]
+        async fn solo_band_drives_the_candidate_to_venerable_hop() {
+            let mut g = Graph::new(sid());
+            let mut prev = None;
+            for n in 1..=2u64 {
+                let mut turn = interaction(n, prev, ts());
+                turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
+                g.insert_interaction(turn).unwrap();
+                prev = Some(n);
+            }
+            let mut hub = concept(10, 1, 0, CanonizationStatus::Candidate);
+            hub.concept_type = ConceptType::Entity;
+            hub.human_confirmed = 1;
+            let hub_id = hub.id;
+            g.insert_concept(hub, iid(1)).unwrap();
+            g.upsert_edge(Edge {
+                id: eid(2),
+                session_id: sid(),
+                source: iid(2),
+                target: hub_id,
+                edge_type: EdgeType::Derives,
+                weight: 0.9,
+                reinforcements: 1,
+                created_at: ts(),
+                last_reinforced: ts(),
+                event_time: Some(ts() - chrono::Duration::hours(2)),
+            })
+            .unwrap();
+
+            let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
+            assert!(
+                !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
+                    .await
+                    .unwrap(),
+                "fixture premise: two distinct origins must fail stage 2"
+            );
+
+            let solo_params = EvalParams {
+                promotion_policy: PromotionPolicy::Solo,
+                ..params()
+            };
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+                .await
+                .unwrap();
+            assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+            let hops: Vec<_> = outcome
+                .transitions()
+                .filter(|e| e.node_id == hub_id)
+                .map(|e| (e.from_status, e.to_status))
+                .collect();
+            assert_eq!(
+                hops,
+                vec![(CanonizationStatus::Candidate, CanonizationStatus::Venerable)]
+            );
+        }
+
+        /// The Canonical bar likewise: a solo Venerable at 10.8 (one
+        /// recurrence session + two confirmations on an Entity) reaches
+        /// Canonical on the band alone — blast-radius evidence fails (no
+        /// dependents), so pre-closure this hop was unreachable too.
+        ///
+        /// Mutations: revert apply's stage-3 loop to `verdicts.stage3_pass`
+        /// → red; `admits_hop` returning `_evidence` → red.
+        #[tokio::test]
+        async fn solo_band_drives_the_venerable_to_canonical_hop() {
+            let mut g = Graph::new(sid());
+            let mut prev = None;
+            for n in 1..=2u64 {
+                let mut turn = interaction(n, prev, ts());
+                turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
+                g.insert_interaction(turn).unwrap();
+                prev = Some(n);
+            }
+            let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
+            hub.concept_type = ConceptType::Entity;
+            hub.human_confirmed = 2;
+            let hub_id = hub.id;
+            g.insert_concept(hub, iid(1)).unwrap();
+            g.upsert_edge(Edge {
+                id: eid(2),
+                session_id: sid(),
+                source: iid(2),
+                target: hub_id,
+                edge_type: EdgeType::Derives,
+                weight: 0.9,
+                reinforcements: 1,
+                created_at: ts(),
+                last_reinforced: ts(),
+                event_time: Some(ts() - chrono::Duration::hours(2)),
+            })
+            .unwrap();
+
+            let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
+            let solo_params = EvalParams {
+                promotion_policy: PromotionPolicy::Solo,
+                ..params()
+            };
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+                .await
+                .unwrap();
+            assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
+            let hop = outcome
+                .transitions()
+                .find(|e| e.node_id == hub_id)
+                .expect("the canonical hop must be audited");
+            assert_eq!(
+                (hop.from_status, hop.to_status),
+                (CanonizationStatus::Venerable, CanonizationStatus::Canonical)
+            );
+        }
+
+        /// Score-driven stage-3 admission bypasses the verdict phase — where
+        /// the re-promotion cooldown normally gates — so apply gates it
+        /// itself: a cooling Venerable stays put no matter what its band says.
+        ///
+        /// Mutation: drop the `in_repromotion_cooldown` check on the
+        /// score-admitted path → red.
+        #[tokio::test]
+        async fn solo_score_admission_still_honors_the_repromotion_cooldown() {
+            let mut g = Graph::new(sid());
+            let mut prev = None;
+            for n in 1..=2u64 {
+                let mut turn = interaction(n, prev, ts());
+                turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
+                g.insert_interaction(turn).unwrap();
+                prev = Some(n);
+            }
+            let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
+            hub.concept_type = ConceptType::Entity;
+            hub.human_confirmed = 2;
+            hub.last_demotion_time = Some(ts() - chrono::Duration::seconds(60));
+            let hub_id = hub.id;
+            g.insert_concept(hub, iid(1)).unwrap();
+            g.upsert_edge(Edge {
+                id: eid(2),
+                session_id: sid(),
+                source: iid(2),
+                target: hub_id,
+                edge_type: EdgeType::Derives,
+                weight: 0.9,
+                reinforcements: 1,
+                created_at: ts(),
+                last_reinforced: ts(),
+                event_time: Some(ts() - chrono::Duration::hours(2)),
+            })
+            .unwrap();
+
+            let store = store_from_graph(&g).await;
+            let g = RwLock::new(g);
+            let solo_params = EvalParams {
+                promotion_policy: PromotionPolicy::Solo,
+                ..params()
+            };
+            let (tx, _rx) = channel();
+            let mut ev = Evaluator::new();
+            let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+                .await
+                .unwrap();
+            assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Venerable);
+            assert!(
+                outcome.promotions.is_empty(),
+                "cooling node must not climb on the band alone: {:?}",
+                outcome.promotions
+            );
         }
 
         #[tokio::test]
