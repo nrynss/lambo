@@ -232,6 +232,36 @@ jobs:
       - name: ${{ matrix.name }}
         run: ${{ matrix.command }}
 
+  # K2 accelerator tier: the `candle` row in feature-matrix above builds the
+  # BASE `embed-candle` feature only, and feature-matrix runs on ubuntu, so
+  # NEITHER accelerator feature is compiled anywhere in CI by that row.
+  # `embed-candle-metal` cannot be: it needs macOS. That is not a theoretical
+  # gap — Metal is the ONLY configuration K1 measured as viable on Apple
+  # silicon (CPU landed at ~3% of the llama-server baseline), so the feature a
+  # Mac operator actually ships was the one nothing compiled. `cargo check`,
+  # not `cargo test`: the adapter's Metal behaviour needs real weights and a
+  # reference server (see `live_metal_parity_against_the_llama_reference`,
+  # `#[ignore]`d), so this row guards COMPILATION of the macOS-only cfg arms
+  # and nothing more. It claims no more than it checks.
+  #
+  # KNOWN UNCOVERED, deliberately: `embed-candle-cuda`. Compiling it needs the
+  # CUDA toolkit (cudarc's build script wants nvcc), which no runner here has
+  # and which would mean a third-party toolkit action on every push. It is
+  # built and exercised on the NVIDIA rig instead. The risk this accepts is
+  # named rather than hidden: a change made on a Mac can break the CUDA cfg
+  # arms and CI will stay green until that rig next builds.
+  candle-metal:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: candle metal (compile only, no weights, no network)
+        run: cargo check --all-targets --features embed-candle-metal
+        env:
+          RUSTFLAGS: -D warnings
+
   # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
   # (CRDB conformance suite, canon progression, vector EXPLAIN) against the
   # provisioned Lambo cloud cluster. `LAMBO_REQUIRE_LIVE=1` turns a missing

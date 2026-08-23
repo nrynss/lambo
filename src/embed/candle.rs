@@ -89,7 +89,8 @@ const EMBED_WAIT: Duration = Duration::from_secs(600);
 /// config keys on [`super::EmbedderConfig`]).
 #[derive(Debug, Clone, Default)]
 pub struct CandleOpts {
-    /// `None`/`auto` | `cpu`. See module docs on device resolution.
+    /// `None`/`auto` | `cpu` | `metal` | `cuda`. See module docs on device
+    /// resolution; `resolve_device` is the authority on the accepted set.
     pub device: Option<String>,
     /// hf-hub repo override (default `WEIGHT_REPO`).
     pub repo: Option<String>,

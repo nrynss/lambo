@@ -246,7 +246,7 @@ pub struct EmbedderConfig {
     /// Model id sent to llama.cpp (empty => server default).
     #[serde(default, alias = "model")]
     pub llama_model: Option<String>,
-    /// candle device selection: `auto` | `cpu` (K2).
+    /// candle device selection: `auto` | `cpu` | `metal` | `cuda` (K2).
     ///
     /// `auto` (default) resolves Metal on Apple silicon, CUDA elsewhere, and
     /// refuses to start when neither accelerator exists. `cpu` pins the CPU
