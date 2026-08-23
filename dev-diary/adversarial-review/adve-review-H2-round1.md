@@ -171,3 +171,36 @@ This was not authored prose.
 on real, reproducible, non-vacuous evidence. The two P3 findings are
 hardening items for the harness, not defects in the claim or its capture;
 neither blocks the closure.
+
+## Round 1 closures
+
+### H2-R1-1 (P3) — closed: inline non-empty guard, schema v1 preserved
+
+- **Commit:** `a519b9e`
+- **Change:** `run_fixture_grid` asserts `!got_a.is_empty() && !got_b.is_empty()`
+  on every cell before scoring. **Schema-discipline choice:** report schema v1
+  pins `PairResult`'s shape (twin of H1's committed evidence), so candidate
+  counts are NOT added as fields; the choice and its rationale (jaccard()'s
+  both-empty → 1.0 special case) are documented in-code at the assertion site.
+  The quarantine leg — which legitimately expects empty answers — runs in a
+  separate function and is intentionally not covered by the guard.
+- **Verification:** clippy (`-D warnings`, features `store-cockroach,fixtures`)
+  green; non-ignored suite green (980 passed); live leg re-run ok in 24.03s
+  with summary numbers unchanged in substance (`min jaccard 1`, max score skew
+  bit-identical at 5.364418029785156e-6, `80/80` fully-agreeing ANN cells) —
+  the guard passes on real data without altering any recorded value.
+
+### H2-R1-2 (P3) — closed: measured bit wired into AdapterRun
+
+- **Commit:** `a519b9e`
+- **Change:** `assert_index_backed` now returns `bool` (the conjunction of its
+  three EXPLAIN checks: `vector search` present,
+  `concepts@concepts_embedding_idx` present, no `FULL SCAN`), keeping its
+  detailed per-condition asserts; the test captures the return value into
+  `index_present` at cockroach `Adapter` construction. Recorded bit ==
+  measured bit by data flow, not ordering.
+- **Verification:** clippy green; live leg re-run still prints the genuine
+  planner EXPLAIN (`vector search / concepts@concepts_embedding_idx (partial
+  index)`) before adapter registration and completes green with identical
+  evidence substance; committed evidence dir untouched (no
+  `LAMBO_H2_EMIT_EVIDENCE`).
