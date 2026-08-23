@@ -146,10 +146,13 @@ llama_url = "http://127.0.0.1:8080"
 
 ## 4. Client wiring
 
-Every client registers the **same triple** — the pinned binary, `serve`, the config — and
-differs only in the `--agent` id, so the ledger attributes writes per client:
+Every client points at the **same URL** and holds no lease. Per-client attribution does not
+come from the transport: `origin_agent` is taken from each call's own `agent_id`, above it,
+so one shared writer still attributes every write to the harness that made it (verified
+2026-08-23). The `--agent` on the writer names only the **lease holder**, hence
+`http-shared-writer`.
 
-| Client | agent id |
+| Client | `agent_id` it sends |
 | --- | --- |
 | Claude Code | `claude-orchestrator` |
 | Codex CLI | `codex-agent` |
@@ -158,49 +161,80 @@ differs only in the `--agent` id, so the ledger attributes writes per client:
 | Pi | `pi-agent` |
 | Grok Build | `grok-agent` |
 
-The server command, everywhere:
-
-```
-~/lambo-dogfood/bin/lambo-<sha> serve --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent <agent-id> --ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300
-```
-
-**The two `--ledger` flags belong on every registration below, and are elided from them
-for length — treat the command above as the template each client block instantiates.**
-They are off by default, so a block without them yields a serving rig that measures
-nothing: DOGFOOD metrics 1, 2, 4 and 5 are all computed from the ledger by
+**The `--ledger` flags now live on the supervised unit (§5), not on any registration** —
+which is most of the point. They are off by default, so under the old per-client wiring a
+single block that forgot them yielded a serving rig that measured nothing for that
+harness, and the omission was invisible (Cursor's registration had exactly this defect
+until 2026-08-23). DOGFOOD metrics 1, 2, 4 and 5 are all computed from the ledger by
 [`scripts/observability/`](../../scripts/observability/README.md), and there is no
 after-the-fact way to reconstruct a call that was never recorded. `--ledger-heartbeat 300`
-is what makes the counts quotable — without it the file carries no
-`ledger_dropped_lines`, so every report has to say `dropped: UNKNOWN` and no number in it
-can be trusted as complete. The path is deliberately **outside the repo** (I1 hygiene: the
-ledger carries recall queries and truncated concept text, and reaches `evidence/` only
-through the curated export path).
+is what makes the counts quotable — without it the file carries no `ledger_dropped_lines`,
+so every report has to say `dropped: UNKNOWN` and no number in it can be trusted as
+complete. One unit now carries both flags for every client at once.
 
-Every client writes to the **same** ledger file, which is intended: one file, `agent_id`
-per line, so per-client attribution is a `GROUP BY` rather than a set of files to
-reconcile. Rotation is the operator's (`logrotate`, or just `mv` it — the writer reopens
-the path per batch).
+The path is deliberately **outside the repo** (I1 hygiene: the ledger carries recall
+queries and truncated concept text, and reaches `evidence/` only through the curated
+export path). Every client's calls land in that one file, which is intended: one file,
+`agent_id` per line, so per-client attribution is a `GROUP BY` rather than a set of files
+to reconcile. Rotation is the operator's (`logrotate`, or just `mv` it — the writer
+reopens the path per batch).
+
+**Since the 2026-08-23 HTTP ruling (§5) every block below is a URL, not a command.** No
+harness spawns a `serve`, so none of them owns the writer's lifetime, none takes the lease,
+and the `--ledger` flags live on the supervised unit rather than on six registrations. The
+stdio forms are kept at the end of this section as history — they are what the ruling
+replaced, and reading them explains the shape of the URL blocks.
 
 **Claude Code** — user scope, never project scope (a project `.mcp.json` lands in this
-public repo):
+public repo). In `~/.claude.json` under `mcpServers`:
+
+```json
+{ "lambo-dogfood": { "type": "http", "url": "http://127.0.0.1:7700/mcp" } }
+```
+
+**Codex CLI** — `~/.codex/config.toml`, the same `url` form its `endor-docs` entry uses:
+
+```toml
+[mcp_servers.lambo-dogfood]
+url = "http://127.0.0.1:7700/mcp"
+```
+
+**Cursor** — `~/.cursor/mcp.json` (global, not the project file). The Cursor Agent CLI
+reads the same file; it already drove lambo's seven tools once
+(`evidence/mcp-client-interop/`):
+
+```json
+{ "mcpServers": { "lambo-dogfood": { "url": "http://127.0.0.1:7700/mcp" } } }
+```
+
+All three were migrated on the MacBook on 2026-08-23 and the lease holder was confirmed
+`http-shared-writer` afterwards. Two things that migration found, worth expecting:
+
+* **Cursor was pinned to `lambo-3039b82`** — two generations stale. It predated the K2
+  migration, so it was built without candle and would have failed outright against the
+  current `kind = "candle"` config; it also carried **no `--ledger` flags**, so anything
+  written through Cursor was never measured. A shared writer removes this whole class:
+  there is one binary and one ledger configuration to keep current instead of six.
+* **Codex had no lambo entry at all.** Per-client stdio registration is easy to forget and
+  invisible when forgotten — the harness simply has no memory and says nothing.
+
+<details>
+<summary>The pre-2026-08-23 stdio registrations (history — do not use)</summary>
 
 ```sh
+# Claude Code
 claude mcp add --scope user lambo-dogfood -- ~/lambo-dogfood/bin/lambo-<sha> serve \
   --config ~/lambo-dogfood/lambo.toml --session lambo-dev --agent claude-orchestrator \
   --ledger ~/lambo-dogfood/calls.jsonl --ledger-heartbeat 300
 ```
 
-**Codex CLI** — `codex mcp add lambo-dogfood -- <command…>` with `--agent codex-agent`,
-or declaratively in `~/.codex/config.toml`:
-
 ```toml
+# Codex CLI — ~/.codex/config.toml
 [mcp_servers.lambo-dogfood]
 command = "/absolute/path/to/lambo-dogfood/bin/lambo-<sha>"
 args = ["serve", "--config", "/abs/path/lambo.toml", "--session", "lambo-dev", "--agent", "codex-agent",
         "--ledger", "/abs/path/lambo-dogfood/calls.jsonl", "--ledger-heartbeat", "300"]
 ```
-
-**Cursor** — merge into `~/.cursor/mcp.json` (global, not the project file):
 
 ```json
 { "mcpServers": { "lambo-dogfood": {
@@ -211,8 +245,7 @@ args = ["serve", "--config", "/abs/path/lambo.toml", "--session", "lambo-dev", "
              "--ledger-heartbeat", "300"] } } }
 ```
 
-The Cursor Agent CLI reads the same file; it already drove lambo's seven tools once
-(`evidence/mcp-client-interop/`).
+</details>
 
 **OMP** — reads the **workspace `.mcp.json`** (same JSON shape as Cursor's block). Two
 gotchas, both documented in `evidence/swarm/probes/`: OMP **always loads every
@@ -282,27 +315,81 @@ exits every other session on the machine loses memory until a human starts a new
 Measured live the same day: holder died 06:47:24Z, **no holder for 6m20s**, recovery only
 because a person opened a new session.
 
-The rig therefore runs one long-lived writer owned by **systemd**, not by any client:
+The rig therefore runs one long-lived writer owned by **the machine's supervisor**, not by
+any client — systemd on Linux, launchd on macOS. The supervisor is the point: no client can
+own the writer's lifetime, which is the whole defect being fixed. HTTP alone would not do
+it; a supervised process is what makes a client's exit survivable.
 
 ```sh
+# Linux
 systemctl --user status lambo-dogfood      # unit: ~/.config/systemd/user/lambo-dogfood.service
+# macOS
+launchctl print gui/$(id -u)/dev.lambo.dogfood   # ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+
+# either platform — the check that matters
 sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"
 ```
 
 Every harness points at `http://127.0.0.1:7700/mcp` and holds no lease. Two properties the
 unit depends on, both verified 2026-08-23 by SIGKILLing the writer:
 
-- `RestartSec` must exceed `lease::LEASE_TTL` (45s) and `StartLimitIntervalSec` must be
-  **0**. An abrupt death does not release the lease, so every restart inside the TTL exits
-  1 on a refused acquire; with systemd's default limit (5 starts / 10s) the unit burns its
-  budget in the first ten seconds and is left FAILED permanently, which is the very
-  never-recovers outage this ruling exists to prevent. Measured unattended recovery with
-  the fix: **36s**.
+- **The restart interval must exceed `lease::LEASE_TTL` (45s).** An abrupt death does not
+  release the lease, so any retry inside the TTL exits 1 on a refused acquire. The knob and
+  the hazard differ by platform:
+  - **systemd:** `RestartSec` > 45s, and `StartLimitIntervalSec` **0**. With the default
+    limit (5 starts / 10s) the unit burns its budget in the first ten seconds and is left
+    FAILED permanently — the very never-recovers outage this ruling exists to prevent.
+    Measured unattended recovery with the fix: **36s**.
+  - **launchd:** `ThrottleInterval` **60** (default is 10s, squarely inside the TTL) with
+    `KeepAlive`. There is deliberately **no `StartLimitIntervalSec` analogue and none is
+    needed**: launchd has no permanent-FAILED state, so the catastrophic half of the
+    systemd hazard cannot occur — it retries indefinitely. Measured unattended recovery on
+    the MacBook, 2026-08-23, by `kill -9` on the writer: **64s** (60s throttle, then ~4s to
+    acquire the lapsed lease). Slower than systemd's 36s because `ThrottleInterval` is a
+    floor rather than a target; that is the right trade against an outage with no bound.
 - The HTTP holder still binds the unix session endpoint, so a stray stdio registration
   degrades to a J2 proxy rather than breaking. That is what makes a partial migration safe,
   but a stdio client that starts while the writer is restarting can still WIN the lease and
   re-couple the holder to a client — so `select holder from session_leases` naming anything
   other than `http-shared-writer` means a harness is still on stdio and should be moved.
+
+### The macOS unit, in full
+
+`~/Library/LaunchAgents/dev.lambo.dogfood.plist`, then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.lambo.dogfood</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/&lt;you&gt;/lambo-dogfood/bin/lambo-&lt;sha&gt;</string>
+    <string>serve</string>
+    <string>--config</string><string>/Users/&lt;you&gt;/lambo-dogfood/lambo.toml</string>
+    <string>--session</string><string>lambo-dev</string>
+    <string>--agent</string><string>http-shared-writer</string>
+    <string>--transport</string><string>http</string>
+    <string>--port</string><string>7700</string>
+    <string>--ledger</string><string>/Users/&lt;you&gt;/lambo-dogfood/calls.jsonl</string>
+    <string>--ledger-heartbeat</string><string>300</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
+  <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/lambo-dogfood</string>
+</dict>
+</plist>
+```
+
+`plutil -lint` the file before loading it — launchd reports a malformed plist as a
+generic load failure, which is a poor way to spend ten minutes. Loopback binding means no
+`--auth-token` is required; binding anywhere else makes it mandatory and `serve` refuses
+to start without it, because this process is a session **writer**.
 
 Per-harness `--agent` ids are not lost to the shared writer: `origin_agent` comes from each
 call's `agent_id`, above the transport (verified 2026-08-23). The serve's own `--agent` now
