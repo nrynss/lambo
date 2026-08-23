@@ -367,13 +367,17 @@ the recommendation recorded here (build / retreat to fastembed / shelve) with th
 - [x] `lambo re-embed` migrates a store between contracts and repairs NULL-embedding rows,
       with coverage visible in `lambo_stats` — `src/cli/re_embed.rs` + `Graph::reembed_all`;
       `embedded_concepts` / `total_concepts` surfaced by `lambo stats`
-- [ ] The dogfood rig runs on candle with its full history intact — **still not done: the
-      migration act has NOT been run.** The invocation is documented below ("K2
-      implemented"). The *hardware* half of this box is now closed: the shipped adapter was
-      built and exercised under `embed-candle-metal` on the MacBook on 2026-08-23 (parity
-      box above, `dd1fc40`), and `embed-candle-metal` gained a macOS compile row in CI
-      (`61dc434`) because no ubuntu runner can build it. What remains is purely the
-      migration act on the live store
+- [x] The dogfood rig runs on candle with its full history intact — **done 2026-08-23.**
+      Rig re-pinned to `lambo-21e4cf8` (built `store-sqlite,embed-candle-metal,embed-bge`),
+      config switched to `kind = "candle", device = "metal"`, and the user-scope MCP
+      registration repointed in the same act. Migration: **coverage 36/513 → 513/513 in
+      ~40 s**, history intact (137 interactions, 1361 edges, 1 session), contract now
+      stamping `kind=candle model=BAAI/bge-m3@5617a9f6… model.safetensors sha256:68440cc1b73b
+      dim=1024`. Verified afterwards by a semantic query sharing no keywords with its top
+      hit. One prerequisite worth recording: the store predated `lease_refusals` /
+      `write_intents`, and re-embed **refused with that exact diagnosis** rather than
+      half-migrating — `lambo provision` (idempotent) first, then retry. The hardware half
+      closed the same day (parity box above, `dd1fc40`; macOS CI row `61dc434`)
 - [x] CI carries the compile row — the weightless, offline `candle` job in
       `.github/workflows/ci.yml`
 - [x] The cold-start number is documented where an operator wiring a stdio client will read it —
