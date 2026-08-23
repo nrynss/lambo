@@ -449,6 +449,22 @@ mod tests {
         assert_eq!(C::distance_to_score(2.0), -1.0);
         assert_eq!(C::distance_to_score(3.0), -1.0, "clamped");
         assert!((C::distance_to_score(0.5) - 0.875).abs() < 1e-12);
+        // B3 vice-versa pin: copying Postgres `1 - d` onto Cockroach goes red.
+        // Postgres at d=1 is 0.0 and at d=0.5 is 0.5.
+        assert_ne!(
+            C::distance_to_score(1.0),
+            0.0,
+            "copied Postgres 1 - d onto Cockroach L2"
+        );
+        assert_ne!(
+            C::distance_to_score(0.5),
+            0.5,
+            "copied Postgres 1 - d onto Cockroach L2"
+        );
+        assert!(
+            C::forced_exact_scan_sql().is_none(),
+            "Cockroach has no H3 forced-exact GUC"
+        );
     }
 
     #[test]

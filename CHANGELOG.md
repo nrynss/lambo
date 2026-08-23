@@ -24,6 +24,9 @@
   the filesystem or the lease row.
 - `store_is_shareable(Postgres) = true`: a networked store another process can
   open, ruled in the exhaustive match, not defaulted.
+- Postgres ranking: pgvector `<=>` (cosine distance) converts with `1 - d`.
+  Cockroach stays `<->` L2 and `1 - d^2/2`. Copying either formula onto the
+  other dialect is pinned to fail.
 
 ### Notes
 

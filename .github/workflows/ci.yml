@@ -307,6 +307,24 @@ jobs:
             -- --ignored --nocapture --exact \
             2>&1 | tee postgres-live.log
           grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
+      - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            store::pg::postgres::tests::explain_recall_uses_hnsw \
+            store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
+            -- --ignored --nocapture --exact \
+            2>&1 | tee postgres-b3.log
+          grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
+          grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
+      - name: Live Postgres H3 recall parity
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
+            store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity \
+            -- --ignored --nocapture --exact \
+            2>&1 | tee postgres-h3.log
+          grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity ... ok' postgres-h3.log
 
   # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
   # (CRDB conformance suite, canon progression, vector EXPLAIN) against the

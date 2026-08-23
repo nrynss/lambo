@@ -14,7 +14,8 @@
 //! over-merged `init_schema` / `connect_options` rows (Cockroach-only
 //! `endpoint STRING` DDL and `vector_search_beam_size`). Those extra rows
 //! were discovered by diffing two real implementations, not guessed from
-//! one. B3 still owns the ranking conversion (`distance_to_score`).
+//! one. B3 fills the ranking conversion (`distance_to_score`): Cockroach
+//! keeps L2 `1 - d^2/2`, Postgres is cosine distance `1 - d`.
 //!
 //! **The over-merging trap, restated where it bites.** A statement belongs in
 //! [`super::PgStore`] only when its SQL is byte-identical for every dialect.
@@ -110,5 +111,18 @@ pub trait Dialect: Send + Sync + 'static {
         options: sqlx::postgres::PgConnectOptions,
     ) -> Result<sqlx::postgres::PgConnectOptions, StoreError> {
         Ok(options)
+    }
+
+    /// SQL issued after the contract read and before the vector query, inside
+    /// the same search transaction, when `PgStore::with_forced_exact_scan` is
+    /// set. Default: none.
+    ///
+    /// Not a B3 ranking row: it does not change [`Dialect::DISTANCE_OP`] or
+    /// [`Dialect::distance_to_score`]. H3's forced-exact lane uses it so
+    /// approximation can only come from the index, never from the dialect SQL.
+    /// Postgres returns `SET LOCAL enable_indexscan = off`. Cockroach has no
+    /// forced-exact lane (H2 measures C-SPANN against an exact oracle instead).
+    fn forced_exact_scan_sql() -> Option<&'static str> {
+        None
     }
 }

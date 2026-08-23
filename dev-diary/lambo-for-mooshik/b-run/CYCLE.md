@@ -4,11 +4,9 @@
 > all closed**. One merge to `lambo-for-mooshik` at the end of B, not after
 > each phase. `main` does not move before 2026-09-15. Branched off `bd3e9ac`.
 >
-> **Status, 2026-08-23:** **B0 closed.** Round 1 REQUEST_CHANGES (0 P1 / 1 P2 /
-> 5 P3); round 2 **APPROVE**. **B1 closed.** Round 1 REQUEST_CHANGES (0 P1 /
-> 1 P2 / 4 P3); round 2 **APPROVE**. **B2 closed.** Round 1 REQUEST_CHANGES
-> (0 P1 / 1 P2 / 0 P3); round 2 **APPROVE**, zero residue
-> (`adve-review-mooshik-B-B{0,1,2}-round{1,2}.md`). B3 is next. B4 unstarted.
+> **Status, 2026-08-23:** **B0–B3 closed.** Each went REQUEST_CHANGES then
+> round 2 **APPROVE**, zero residue
+> (`adve-review-mooshik-B-B{0,1,2,3}-round{1,2}.md`). B4 is next.
 >
 > **B0-R1-1 (P2) landed:** the composed-SQL byte-identity proof is
 > `store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants`.

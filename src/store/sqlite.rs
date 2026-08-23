@@ -5358,11 +5358,11 @@ mod tests {
     // `vector_candidates_checked` surface — agree with EACH OTHER on the same
     // seeded graph? That is "cross-store" rather than "adapter-vs-formula".
     //
-    // H2 (live Cockroach, needs `LAMBO_COCKROACH_DSN`) and H3 (pgvector, needs
-    // B3) are OUT OF SCOPE here. The harness is written so both slot in by
-    // appending to `build_adapters` below — the pairwise loop, the measures,
-    // and the report schema need no changes; see the doc comment on
-    // `ParityReport` for why.
+    // H2 (live Cockroach, needs `LAMBO_COCKROACH_DSN`) stays a twin in
+    // cockroach.rs. H3 (pgvector) slots in here by appending to
+    // `build_adapters` when a DSN is offered: the pairwise loop, the
+    // measures, and the report schema need no second harness. See the
+    // doc comment on `ParityReport` for why.
     #[cfg(feature = "fixtures")]
     mod h1_cross_store_parity {
         use super::*;
@@ -5392,12 +5392,10 @@ mod tests {
         /// `concepts_embedding_idx` probe (H2) and pgvector's `SET LOCAL
         /// enable_indexscan = off` forced-exact lane (H3) both just set
         /// `index_present` the same way. And every score in `pairs` is
-        /// already on the shared `1 − d²/2 ≡ cosine` scale BEFORE it reaches
-        /// this report — that conversion happens inside each adapter's own
-        /// `vector_candidates_checked` (SQLite/memory-oracle return `cosine`
-        /// directly; Cockroach's `distance_to_score` is `1 − d²/2` on the same
-        /// output type) — so the report never needs a per-adapter conversion
-        /// field either.
+        /// already on the shared cosine scale BEFORE it reaches this report:
+        /// SQLite/memory-oracle return cosine directly, Cockroach converts L2
+        /// with `1 - d^2/2`, Postgres converts cosine distance with `1 - d`.
+        /// The report never needs a per-adapter conversion field.
         #[derive(Debug, Clone, Serialize, Deserialize)]
         struct ParityReport {
             /// Bump only for a breaking change (a field removed, retyped, or
@@ -5711,14 +5709,20 @@ mod tests {
             ]
         }
 
-        /// Adapters reachable from this process, at this `dim`. H1 always has
-        /// both entries: neither needs a DSN. H2/H3 extend this list — push
-        /// `("cockroach", ScanKind::Ann, <from an EXPLAIN probe>, Box::new(
-        /// CockroachStore::new(cfg)?))` once `LAMBO_COCKROACH_DSN` is set, and
-        /// the same for pgvector once B3 lands — with no change to the
-        /// pairwise loop below or to the report schema.
-        fn build_adapters(dim: usize) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
-            vec![
+        /// Float32 round-trip noise bound for H3 score agreement on the
+        /// shared cosine scale. Matches H2: a conversion mix-up (`1 - d`
+        /// vs `1 - d^2/2`) lands orders of magnitude above this.
+        const H3_SCORE_SKEW_EPSILON: f64 = 1e-4;
+
+        /// Adapters reachable from this process, at this `dim`. H1 always
+        /// has sqlite + memory-oracle (neither needs a DSN). H3 appends
+        /// postgres-hnsw and postgres-exact when `postgres_dsn` is `Some`.
+        fn build_adapters(
+            dim: usize,
+            postgres_dsn: Option<&str>,
+        ) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
+            #[cfg_attr(not(feature = "store-postgres"), allow(unused_mut))]
+            let mut adapters = vec![
                 (
                     "sqlite",
                     ScanKind::Exact,
@@ -5730,6 +5734,47 @@ mod tests {
                     ScanKind::Exact,
                     false,
                     Box::new(MemoryOracleStore::new()) as Box<dyn GraphStore>,
+                ),
+            ];
+            #[cfg(feature = "store-postgres")]
+            if let Some(dsn) = postgres_dsn {
+                adapters.extend(postgres_h3_adapters(dim, dsn));
+            }
+            #[cfg(not(feature = "store-postgres"))]
+            let _ = postgres_dsn;
+            adapters
+        }
+
+        #[cfg(feature = "store-postgres")]
+        fn postgres_h3_adapters(
+            dim: usize,
+            dsn: &str,
+        ) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
+            use crate::store::pg::postgres::PostgresStore;
+            use crate::store::{StoreConfig, StoreKind};
+            let cfg = StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some(dsn.to_string()),
+                path: None,
+                vector_dim: Some(dim),
+            };
+            let hnsw = PostgresStore::new(cfg.clone())
+                .unwrap_or_else(|e| panic!("H3: PostgresStore (hnsw lane) construct failed: {e}"));
+            let exact = PostgresStore::new(cfg)
+                .unwrap_or_else(|e| panic!("H3: PostgresStore (exact lane) construct failed: {e}"))
+                .with_forced_exact_scan();
+            vec![
+                (
+                    "postgres-hnsw",
+                    ScanKind::Ann,
+                    true,
+                    Box::new(hnsw) as Box<dyn GraphStore>,
+                ),
+                (
+                    "postgres-exact",
+                    ScanKind::Exact,
+                    false,
+                    Box::new(exact) as Box<dyn GraphStore>,
                 ),
             ]
         }
@@ -5746,9 +5791,10 @@ mod tests {
             batch: &MutationBatch,
             pool: &[(NodeId, Vec<f32>)],
             dim: usize,
+            postgres_dsn: Option<&str>,
             report: &mut ParityReport,
         ) {
-            let adapters = build_adapters(dim);
+            let adapters = build_adapters(dim, postgres_dsn);
             for (_, _, _, adapter) in &adapters {
                 adapter.init_schema().await.unwrap();
                 adapter.flush(batch, None).await.unwrap();
@@ -5802,16 +5848,80 @@ mod tests {
                                 exact_match: got_a == got_b,
                             };
                             if attribution == Attribution::ExactMustMatch {
+                                let postgres_exact =
+                                    *a_name == "postgres-exact" || *b_name == "postgres-exact";
+                                if postgres_exact {
+                                    // Same ids and order as the other exact
+                                    // adapter; scores may differ by f32
+                                    // round-trip through pgvector. A copied
+                                    // Cockroach formula shows up as ~0.375
+                                    // skew at cosine=0.5, well above the bound.
+                                    assert_eq!(
+                                        got_a.len(),
+                                        got_b.len(),
+                                        "H3: postgres-exact candidate count drifted on \
+                                         fixture {fixture_label:?} probe {probe_label:?} \
+                                         limit {limit}"
+                                    );
+                                    assert!(
+                                        (pair.candidate_jaccard - 1.0).abs() < f64::EPSILON,
+                                        "H3: postgres-exact adapter skew (jaccard {}) on \
+                                         fixture {fixture_label:?} probe {probe_label:?} \
+                                         limit {limit}: displacement={:?}",
+                                        pair.candidate_jaccard,
+                                        pair.displacement,
+                                    );
+                                    assert!(
+                                        pair.displacement.is_empty(),
+                                        "H3: postgres-exact rank displacement on \
+                                         fixture {fixture_label:?} probe {probe_label:?} \
+                                         limit {limit}: {:?}",
+                                        pair.displacement,
+                                    );
+                                    assert_eq!(
+                                        pair.rank_prefix_match,
+                                        got_a.len(),
+                                        "H3: postgres-exact rank prefix {} != {} on \
+                                         fixture {fixture_label:?} probe {probe_label:?} \
+                                         limit {limit}",
+                                        pair.rank_prefix_match,
+                                        got_a.len(),
+                                    );
+                                    assert!(
+                                        pair.max_score_diff <= H3_SCORE_SKEW_EPSILON,
+                                        "H3: postgres-exact conversion skew {} > \
+                                         {H3_SCORE_SKEW_EPSILON} on fixture \
+                                         {fixture_label:?} probe {probe_label:?} limit \
+                                         {limit}",
+                                        pair.max_score_diff,
+                                    );
+                                } else {
+                                    assert!(
+                                        pair.exact_match,
+                                        "H1: exact-scan adapters {a_name} and {b_name} disagree on \
+                                         fixture {fixture_label:?} probe {probe_label:?} limit \
+                                         {limit}: jaccard={} prefix={} score_diff={} \
+                                         displacement={:?}",
+                                        pair.candidate_jaccard,
+                                        pair.rank_prefix_match,
+                                        pair.max_score_diff,
+                                        pair.displacement,
+                                    );
+                                }
+                            } else {
                                 assert!(
-                                    pair.exact_match,
-                                    "H1: exact-scan adapters {a_name} and {b_name} disagree on \
+                                    !got_a.is_empty() && !got_b.is_empty(),
+                                    "H3: empty candidate set from {a_name} or {b_name} on \
                                      fixture {fixture_label:?} probe {probe_label:?} limit \
-                                     {limit}: jaccard={} prefix={} score_diff={} \
-                                     displacement={:?}",
-                                    pair.candidate_jaccard,
-                                    pair.rank_prefix_match,
+                                     {limit}: refusing to score a possibly-vacuous cell"
+                                );
+                                assert!(
+                                    pair.max_score_diff <= H3_SCORE_SKEW_EPSILON,
+                                    "H3: systematic score skew on the shared cosine scale \
+                                     ({a_name} vs {b_name}, {fixture_label:?} probe \
+                                     {probe_label:?} limit {limit}): max diff {} > \
+                                     {H3_SCORE_SKEW_EPSILON}",
                                     pair.max_score_diff,
-                                    pair.displacement,
                                 );
                             }
                             report.pairs.push(pair);
@@ -5826,7 +5936,7 @@ mod tests {
         /// The required half of H1: both committed fixture graphs, a stamped
         /// contract, and `synthetic_unit_vector` — same construction as the F
         /// matrix above, run cross-adapter instead of adapter-vs-oracle.
-        async fn run_synthetic_leg(report: &mut ParityReport) {
+        async fn run_synthetic_leg(report: &mut ParityReport, postgres_dsn: Option<&str>) {
             const DIM: usize = 8;
             for fixture in ["session-rest-api", "session-drift"] {
                 let snap: GraphSnapshot = crate::fixtures::load_snapshot(fixture).unwrap();
@@ -5857,7 +5967,17 @@ mod tests {
                 }
                 let batch = MutationBatch { mutations };
 
-                run_fixture_grid(fixture, &sid, &contract, &batch, &pool, DIM, report).await;
+                run_fixture_grid(
+                    fixture,
+                    &sid,
+                    &contract,
+                    &batch,
+                    &pool,
+                    DIM,
+                    postgres_dsn,
+                    report,
+                )
+                .await;
             }
         }
 
@@ -5957,6 +6077,7 @@ mod tests {
                 &batch,
                 &pool,
                 dim,
+                None,
                 report,
             )
             .await;
@@ -5969,6 +6090,7 @@ mod tests {
                 (cfg!(feature = "store-sqlite"), "store-sqlite"),
                 (cfg!(feature = "store-memory"), "store-memory"),
                 (cfg!(feature = "store-cockroach"), "store-cockroach"),
+                (cfg!(feature = "store-postgres"), "store-postgres"),
                 (cfg!(feature = "embed-fixture"), "embed-fixture"),
                 (cfg!(feature = "embed-bge"), "embed-bge"),
             ] {
@@ -6000,7 +6122,7 @@ mod tests {
                 pairs: Vec::new(),
             };
 
-            run_synthetic_leg(&mut report).await;
+            run_synthetic_leg(&mut report, None).await;
             // Pinned exactly, not `>=`: the optional leg below adds more pairs
             // when it runs, which would mask a drop in the synthetic leg's
             // own count under a loose bound. 2 fixtures × 4 probes × 5 limits
@@ -6033,6 +6155,204 @@ mod tests {
                 let dir = concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/evidence/mooshik-h1-cross-store-parity"
+                );
+                std::fs::create_dir_all(dir).unwrap();
+                let json = serde_json::to_string_pretty(&report).unwrap();
+                std::fs::write(format!("{dir}/report.json"), json).unwrap();
+            }
+        }
+
+        /// **Acceptance: H3**: the same harness against pgvector.
+        /// Forced-exact lane (`postgres-exact`) must show zero adapter skew
+        /// vs sqlite/memory-oracle (same ids and order, score within
+        /// [`H3_SCORE_SKEW_EPSILON`]). The hnsw lane's divergence is an
+        /// envelope, printed with numbers.
+        ///
+        /// `#[ignore]`d: needs `LAMBO_POSTGRES_DSN` against the pinned
+        /// `pgvector/pgvector:pg17` digest. Run:
+        /// `LAMBO_REQUIRE_LIVE=1 cargo test --features store-postgres,store-sqlite,fixtures \
+        ///  --lib h3_postgres_recall_parity -- --ignored --nocapture`
+        #[cfg(feature = "store-postgres")]
+        #[tokio::test]
+        #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+        async fn h3_postgres_recall_parity() {
+            use crate::store::pg::postgres::PostgresStore;
+            use crate::store::pg::postgres::{dsn_for_database, postgres_dsn_or_skip};
+            use crate::store::vector::encode_vector;
+            use crate::store::{StoreConfig, StoreKind};
+            use sqlx::Row;
+
+            let Some(admin_dsn) = postgres_dsn_or_skip("h3_postgres_recall_parity") else {
+                return;
+            };
+            let admin = sqlx::PgPool::connect(&admin_dsn)
+                .await
+                .unwrap_or_else(|e| panic!("H3: connect admin DSN: {e}"));
+            let db = format!("lambo_h3_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE {db}"))
+                .execute(&admin)
+                .await
+                .unwrap_or_else(|e| panic!("H3: create {db}: {e}"));
+            let dsn = dsn_for_database(&admin_dsn, &db);
+
+            // Camera-proof the production SQL (not a lookalike) before the grid.
+            const DIM: usize = 8;
+            let probe_store = PostgresStore::new(StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some(dsn.clone()),
+                path: None,
+                vector_dim: Some(DIM),
+            })
+            .expect("H3 probe store");
+            probe_store.init_schema().await.expect("H3 init_schema");
+            let pool = probe_store.pool().await.expect("H3 pool");
+            let probe = encode_vector(&vec![0.0; DIM]).expect("H3 encode");
+            let sql = probe_store.vector_candidates_sql();
+            let natural: String = {
+                let rows = sqlx::query(&format!("EXPLAIN {sql}"))
+                    .bind(&probe)
+                    .bind(5i64)
+                    .fetch_all(pool)
+                    .await
+                    .expect("H3 EXPLAIN");
+                rows.iter()
+                    .map(|r| r.try_get::<String, usize>(0).expect("col"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            eprintln!("H3 EXPLAIN (planner's choice):\n{natural}");
+            let mut tx = pool.begin().await.expect("H3 begin");
+            sqlx::query("SET LOCAL enable_seqscan = off")
+                .execute(&mut *tx)
+                .await
+                .expect("H3 enable_seqscan off");
+            let forced_rows = sqlx::query(&format!("EXPLAIN {sql}"))
+                .bind(&probe)
+                .bind(5i64)
+                .fetch_all(&mut *tx)
+                .await
+                .expect("H3 EXPLAIN forced hnsw");
+            tx.commit().await.ok();
+            let forced: String = forced_rows
+                .iter()
+                .map(|r| r.try_get::<String, usize>(0).expect("col"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            eprintln!("H3 EXPLAIN (enable_seqscan = off):\n{forced}");
+            assert!(
+                forced.contains("concepts_embedding_idx"),
+                "H3: production recall must be able to use concepts_embedding_idx, got:\n{forced}"
+            );
+
+            let mut report = ParityReport {
+                schema_version: 1,
+                harness: HarnessInfo {
+                    git_rev: None,
+                    features: active_features(),
+                    fixtures: Vec::new(),
+                },
+                adapters: Vec::new(),
+                pairs: Vec::new(),
+            };
+            run_synthetic_leg(&mut report, Some(&dsn)).await;
+
+            // 2 fixtures × 4 probes × 5 limits × C(4,2)=6 adapter pairs.
+            assert_eq!(
+                report.pairs.len(),
+                2 * 4 * 5 * 6,
+                "H3: synthetic-leg matrix dimensions drifted"
+            );
+            assert!(
+                report
+                    .adapters
+                    .iter()
+                    .any(|a| a.name == "postgres-hnsw" && a.scan == ScanKind::Ann),
+                "H3: postgres-hnsw adapter missing"
+            );
+            assert!(
+                report.adapters.iter().any(|a| a.name == "postgres-exact"
+                    && a.scan == ScanKind::Exact
+                    && !a.index_present),
+                "H3: postgres-exact adapter missing or still claiming an index"
+            );
+
+            let exact_pairs: Vec<&PairResult> = report
+                .pairs
+                .iter()
+                .filter(|p| {
+                    p.attribution == Attribution::ExactMustMatch
+                        && (p.adapter_a == "postgres-exact" || p.adapter_b == "postgres-exact")
+                })
+                .collect();
+            assert!(
+                !exact_pairs.is_empty(),
+                "H3: no postgres-exact ExactMustMatch pairs"
+            );
+            for p in &exact_pairs {
+                assert!(
+                    (p.candidate_jaccard - 1.0).abs() < f64::EPSILON,
+                    "H3 forced-exact adapter skew: {p:?}"
+                );
+                assert!(
+                    p.displacement.is_empty(),
+                    "H3 forced-exact rank displacement: {p:?}"
+                );
+                assert!(
+                    p.max_score_diff <= H3_SCORE_SKEW_EPSILON,
+                    "H3 forced-exact conversion skew {}: {p:?}",
+                    p.max_score_diff
+                );
+            }
+
+            let hnsw_vs_exact: Vec<&PairResult> = report
+                .pairs
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        (p.adapter_a.as_str(), p.adapter_b.as_str()),
+                        ("postgres-hnsw", "postgres-exact") | ("postgres-exact", "postgres-hnsw")
+                    )
+                })
+                .collect();
+            assert_eq!(
+                hnsw_vs_exact.len(),
+                2 * 4 * 5,
+                "H3: hnsw-vs-exact envelope cells drifted"
+            );
+            let min_jaccard = hnsw_vs_exact
+                .iter()
+                .map(|p| p.candidate_jaccard)
+                .fold(1.0_f64, f64::min);
+            let max_score = hnsw_vs_exact
+                .iter()
+                .map(|p| p.max_score_diff)
+                .fold(0.0_f64, f64::max);
+            let max_disp = hnsw_vs_exact
+                .iter()
+                .map(|p| p.displacement.len())
+                .max()
+                .unwrap_or(0);
+            eprintln!(
+                "H3 hnsw envelope vs forced-exact: cells={}, min_jaccard={min_jaccard}, \
+                 max_score_diff={max_score}, max_displacement_ids={max_disp}",
+                hnsw_vs_exact.len()
+            );
+
+            println!(
+                "H3: {} pairs across {} fixture(s) ({}), {} adapters; \
+                 forced-exact skew cells={}, hnsw envelope min_jaccard={min_jaccard} \
+                 max_score_diff={max_score}",
+                report.pairs.len(),
+                report.harness.fixtures.len(),
+                report.harness.fixtures.join(", "),
+                report.adapters.len(),
+                exact_pairs.len(),
+            );
+
+            if std::env::var_os("LAMBO_H3_EMIT_EVIDENCE").is_some() {
+                let dir = concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/evidence/mooshik-h3-postgres-parity"
                 );
                 std::fs::create_dir_all(dir).unwrap();
                 let json = serde_json::to_string_pretty(&report).unwrap();

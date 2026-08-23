@@ -35,8 +35,8 @@
 //! record of why it is shaped this way.
 //!
 //! In `postgres` (feature `store-postgres`): `PostgresDialect`, templated
-//! width + hnsw from init (B2). Ranking conversion (`distance_to_score`)
-//! remains B3. It does not copy Cockroach SQL.
+//! width + hnsw from init (B2), cosine-distance ranking (B3: `<=>` and
+//! score `1 - d`). It does not copy Cockroach SQL.
 //!
 //! # Dialect-aware as of B2, still recorded where B3 owns the rest
 //!
@@ -1204,6 +1204,12 @@ pub struct PgStore<D: Dialect> {
     /// The cast-bearing statements, composed once (see [`DialectSql`]).
     sql: DialectSql,
     pool: tokio::sync::OnceCell<PgPool>,
+    /// H3 forced-exact lane. Production construction is always false.
+    /// When true, the vector-search transaction runs
+    /// [`Dialect::forced_exact_scan_sql`] after the contract read so the
+    /// planner cannot use the hnsw index. Shared flag, dialect SQL: the
+    /// base does not name PostgreSQL GUCs.
+    force_exact_scan: bool,
     /// `D` is a compile-time selector, never a value.
     dialect: PhantomData<D>,
 }
@@ -1232,12 +1238,57 @@ impl<D: Dialect> PgStore<D> {
             ddl,
             sql: DialectSql::for_dialect::<D>(),
             pool: tokio::sync::OnceCell::new(),
+            force_exact_scan: false,
             dialect: PhantomData,
         })
     }
 
-    /// The lazily-created pool (Tokio context required — call from an async method).
-    async fn pool(&self) -> Result<&PgPool, StoreError> {
+    /// H3 forced-exact lane: the vector-search transaction will run
+    /// [`Dialect::forced_exact_scan_sql`] after the contract read.
+    /// Production construction leaves this off. Approximation must come
+    /// from the index, never from the dialect SQL.
+    #[cfg(all(test, feature = "store-postgres"))]
+    pub fn with_forced_exact_scan(mut self) -> Self {
+        self.force_exact_scan = true;
+        self
+    }
+
+    /// Whether [`Self::with_forced_exact_scan`] was set. Test/harness use.
+    #[cfg(all(test, feature = "store-postgres"))]
+    pub(crate) fn forced_exact_scan(&self) -> bool {
+        self.force_exact_scan
+    }
+
+    /// Issue [`Dialect::forced_exact_scan_sql`] on `tx` when the H3
+    /// forced-exact flag is set. Shared by production search and the
+    /// camera-proof EXPLAIN helper so the GUC is not a lookalike extra_set.
+    pub(crate) async fn issue_forced_exact_scan(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), StoreError> {
+        if self.force_exact_scan {
+            if let Some(sql) = D::forced_exact_scan_sql() {
+                sqlx::query(sql).execute(&mut **tx).await.map_err(backend)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The production vector-candidates statement this store issues.
+    /// Camera-proofs EXPLAIN this string, not a hand-copied lookalike.
+    #[cfg(all(test, feature = "store-postgres"))]
+    pub(crate) fn vector_candidates_sql(&self) -> &str {
+        &self.sql.vector_candidates
+    }
+
+    /// Session-scoped fallback of [`Self::vector_candidates_sql`].
+    #[cfg(all(test, feature = "store-postgres"))]
+    pub(crate) fn session_vector_candidates_sql(&self) -> &str {
+        &self.sql.session_vector_candidates
+    }
+
+    /// The lazily-created pool (Tokio context required: call from an async method).
+    pub(crate) async fn pool(&self) -> Result<&PgPool, StoreError> {
         self.pool
             .get_or_try_init(|| async {
                 Ok(PgPoolOptions::new()
@@ -2695,6 +2746,12 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                     "vector candidate lookup refused after embedding contract changed: {err}"
                 ))
             })?;
+
+            // H3 forced-exact: after the contract/PK read so that lookup still
+            // uses its index, before the vector query so hnsw cannot serve it.
+            // Shared with the camera-proof EXPLAIN helper: do not re-issue the
+            // GUC as extra_set (B3-R1-1).
+            self.issue_forced_exact_scan(&mut tx).await?;
 
             // DECISION D1: GLOBAL index-backed top-k (`concepts@concepts_embedding_idx`),
             // then Rust-side session filter. `k` starts generous (limit × multiplier) and
