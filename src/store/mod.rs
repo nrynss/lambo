@@ -10,9 +10,15 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
-// T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4). Feature: store-cockroach.
+// B0: the Postgres-wire-protocol store family (`pg`), of which the T3.2
+// CockroachDB durable adapter (spec §3.2/§3.3, §4) is the first dialect.
+// Feature: store-cockroach.
 #[cfg(feature = "store-cockroach")]
-pub mod cockroach;
+pub mod pg;
+// The adapter's public path is unchanged by the move: `crate::store::cockroach`
+// still names the Cockroach dialect's module, now re-exported from `pg`.
+#[cfg(feature = "store-cockroach")]
+pub use pg::cockroach;
 // T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). VECTOR_SEARCH since F1/F2.
 #[cfg(feature = "store-sqlite")]
 mod sqlite;
