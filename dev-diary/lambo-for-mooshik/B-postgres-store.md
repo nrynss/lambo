@@ -163,36 +163,39 @@ chooses (default port, default database, host case, ignored parameters) belongs 
 derive one endpoint. Note also J2's second reason for hashing at all: it keeps a DSN's
 password out of both the filesystem and the lease row.
 
-**4. The open design question: one shared store, several machines, one single-writer lease.**
-This doc's goal is "the unified cross-machine store", and DOGFOOD-SETUP still promises that
-when B lands "the `[store]` block flips to a shared Postgres and **nothing else changes**".
-That promise is doubtful and B should settle it deliberately.
+**4. Several machines, one shared store, one single-writer lease — ruled 2026-08-23
+(operator): park and fail over.** This doc's goal is "the unified cross-machine store", and
+the lease admits exactly one writer per session. Point two machines at one shared Postgres
+and the same session and one wins; the loser cannot proxy, because `proxyable` refuses with
+`HolderIsOnAnotherHost` — J2 checks the holder's host precisely so a loser never dials a
+unix socket path that exists only on the holder's machine. That refusal is correct. With a
+machine-local store it was nearly unreachable; with a shared store it becomes the normal
+case, so B has to say what the loser does instead.
 
-Since the 2026-08-23 HTTP ruling each machine runs one supervised writer. Point two machines
-at one shared Postgres **and the same session** and the lease admits exactly one: the other
-machine's writer loses, and cannot proxy, because `proxyable` refuses with
-`HolderIsOnAnotherHost` — J2 checks the holder's host precisely so a loser never dials a unix
-socket path that exists only on the holder's machine. That refusal is correct and it is what
-keeps the current design safe; but with a machine-local store it was nearly unreachable,
-while with a shared store it becomes the **normal** case. Machine two's harnesses would get
-no memory at all, which is workstream J's founding outage recreated at machine scale.
+**The ruling: the losing machine's writer parks rather than refusing.** It keeps serving
+**reads**, retries, and takes the lease if the holder's lapses — so whichever machine is
+being worked on is the one that writes.
 
-Three options, and B must pick one rather than inherit it:
+What makes this cheap rather than a compromise: **reads already work everywhere.** `recall`
+takes no lease and reads the durable store, and `backend_flush_interval` defaults to **1
+second**, so a non-holding machine trails the holder by about a second. J2 rejected
+read-only attach as "strictly worse", but that judgement was about the *same-machine* case,
+where proxying delivered true read-your-writes for free; across machines the alternative
+costs a new transport and a shared secret, and the penalty being priced is one second.
 
-* **One writing machine per session.** The others read the durable store and hold no lease.
-  Honest and cheap; costs read-your-writes on every other machine.
-* **A session per machine against the shared store.** Keeps every machine writable and gives
-  up the shared-memory property that motivated B.
-* **Cross-host proxying over HTTP.** The natural extension, and newly cheap: the writer is
-  already an HTTP server on a port, so a loser on another host could forward to
-  `http://holder-host:7700/mcp` where a unix socket cannot reach. This is a smaller change
-  than the in-process promotion J2 rejected as too large, and it is the only one of the three
-  under which "unified cross-machine store" means unified *memory* rather than unified
-  storage. It also inherits J2's own requirement that the caller's `agent_id` cross
-  **verbatim**, which the byte-level pipe already guarantees and a rebuilt request would not.
+What it gives up, stated rather than glossed: **no simultaneous writes from two machines.**
+A write on one is visible on the other in ~1s, but the second machine cannot write while the
+first holds. That fits one human at one machine at a time, which is Mooshik's shape.
 
-Whichever is chosen, DOGFOOD-SETUP's "nothing else changes" sentence is falsified by B and
-must move with it.
+The work is small, because the lease already does the hard part: the loser needs a
+park-and-retry loop instead of a refusal, plus honest text saying writes are held elsewhere
+and naming the holder. **Cross-host proxying is the declared future, not this phase** — see
+[FUTURE.md](FUTURE.md), "Cross-host proxying". A parked writer is exactly the process that
+would later learn to proxy, so this does not have to be undone to get there.
+
+DOGFOOD-SETUP's promise that when B lands "the `[store]` block flips to a shared Postgres and
+**nothing else changes**" is falsified by this ruling and moves with it: what else changes is
+that one machine writes at a time.
 
 ---
 
