@@ -1,9 +1,8 @@
 # Adversarial review: mooshik B, whole workstream E2E, round 2 (verification of the round-1 remediation)
 
-> **STATUS: IN PROGRESS.** This file is an append-as-you-go log, committed after each
-> settled finding, because both prior agents on this workstream lost work to mid-run
-> deaths. Sections marked PENDING are not yet measured. The verdict line below is
-> provisional until the gate battery at the end.
+> Written as an append-as-you-go log, committed after each settled finding, because
+> both prior agents on this workstream lost work to mid-run deaths. This is the final
+> state; nothing below is pending.
 
 **Reviewer**: independent E2E round-2 reviewer (Fable), worktree branch
 `worktree-agent-a5ce01ade532a3145` at
@@ -29,12 +28,15 @@ cleanliness section at the end records the final `git status`.
    host port 55433. All gate numbers in this file were measured after the disk was
    cleared; nothing from before the incident is quoted.
 
-**Verdict (provisional): REQUEST_CHANGES**: no P1, one P2, several P3, counts final at
-the end of this file. The remediation is genuine: every falsifier I have run so far
-fired exactly where the closure table said it would, and one closure (F3) is stronger
-than its own description. The findings below are residuals in the remediation's own
-material, plus one hole in F2's `provision.sh` leg that the closure's marker test
-cannot see because it pins the wrong end of the pipe.
+**Verdict: REQUEST_CHANGES**: no P1, **1 P2, 5 P3**. The remediation is genuine: all
+ten closures verified at the artifact, every falsifier fired exactly where the closure
+table said it would (nine mutations, fourteen distinct red gate outcomes, all at their
+intended pins), the declined F11 is ruled a legitimate decline, and one closure (F3)
+is stronger than its own description. The findings below are residuals in the
+remediation's own material, plus one hole in F2's `provision.sh` leg that the closure's
+marker test cannot see because it pins the wrong end of the pipe: the config layer now
+refuses correctly on every verb, and the script then un-resolves the DSN for the one
+verb E2E-1 was originally filed about.
 
 ---
 
@@ -42,7 +44,7 @@ cannot see because it pins the wrong end of the pipe.
 
 | # | Status | Falsifier run, result |
 |---|---|---|
-| F1 (P1) CI red on merged tree | **closed-verified** (mechanism read; lint-probe and full clippy rows PENDING battery) | `run_fixture_grid` now takes the `FixtureGrid` struct (`sqlite.rs:5868`), call sites named. Clippy rows measured in the gate table below. |
+| F1 (P1) CI red on merged tree | **closed-verified** | `run_fixture_grid` now takes the `FixtureGrid` struct (`sqlite.rs:5868`) rather than 8 positional parameters. All seven clippy rows green in my battery, including the two that were red at `d3bea88`. M-LINT (below) proves the lint class still fires in exactly those rows if an 8-arg function returns. |
 | F2 (P1) env DSN outranks `store.dsn` | **closed at the config layer, defective at the `provision.sh` leg** | Refusal disabled (`if false &&` at `mod.rs:960`) → `env_dsn_naming_a_different_database_is_refused_not_preferred` RED at `mod.rs:1611`; reverted, green. Cross-kind leak restored (`Postgres => Some(COCKROACH_DSN_ENV)`) → `each_kind_reads_its_own_dsn_env_var` RED (`mod.rs:1663`, left `crdb-dsn` right `pg-dsn`) AND the dialect's own drift pin `dsn_env_named_in_errors_is_the_one_config_reads` RED (`postgres.rs:648`); reverted, green. Live CLI probes (six, section below): all behaved as claimed. **But see B-E2E-R2-1: the script leg re-opens E2E-1.** |
 | F3 (P2) H3 not self-verifying | **closed-verified, stronger than claimed** | M3 (`forced_exact_scan_sql() -> None`) → THREE live tests red, not the claimed two: `explain_recall_uses_hnsw` (forced-exact lane planned `Index Scan using concepts_embedding_idx`), `h3_postgres_hnsw_envelope_at_scale` (red at `sqlite.rs:6583`, same plan text), and `h3_postgres_recall_parity` (red at `sqlite.rs:6360`, "the forced-exact lane must never plan through concepts_embedding_idx"). Each died at its intended assertion, reached through a real `EXPLAIN` probe: no compile error, no panic on `None` (`issue_forced_exact_scan` no-ops). Round 1 measured this same mutation leaving the parity test GREEN; it is now red at the probe, which is exactly E2E-F3a's fix working. Offline: `distance_to_score_is_one_minus_d` RED (pins `forced_exact_scan_sql()` at `postgres.rs:488`). All reverted, all green after (7/0 live). Residual prose defect → B-E2E-R2-2. |
 | F4 (P2) EXPLAIN on empty table | **closed-verified** | Corpus shrunk to 100 rows (below the measured 500-row crossover) → `explain_recall_uses_hnsw` RED at `postgres.rs:1008`, "the planner must CHOOSE concepts_embedding_idx … with no GUC helping it". Reverted, green. The test now also asserts 5 finite distances from a corpus-drawn probe, so the round-1 NaN-probe vacuity is closed too. |
@@ -51,7 +53,7 @@ cannot see because it pins the wrong end of the pipe.
 | F7 (P3) private-item doc link | **closed-verified, and the same class reintroduced one module over** | Measured: `cargo doc --no-deps --document-private-items` at `store-cockroach,fixtures` = 55 warnings, at the full `store-postgres,store-cockroach,store-sqlite,fixtures` set = 55: the `pg/postgres.rs:103` warning is gone and the pg module adds zero. But the round-1 baseline was 54, and the +1 is the remediation's own F2 doc text → B-E2E-R2-6. |
 | F8 (P3) no CI row lints `store-postgres` test code | **closed-verified** | Both clippy invocations present in the `postgres` matrix row of `.github/workflows/ci.yml`; the `index_present` dead-code allow is scoped `cfg_attr(not(feature = "store-sqlite"), allow(dead_code))` at `postgres.rs:353`, not blanket. Lint probe M-LINT: an 8-argument fn planted inside the H3 harness module turned BOTH rows red (`too_many_arguments`, the E2E-F1 class), so the rows genuinely lint the module that was invisible to every round-1 CI row. Reverted, both green. |
 | F9 (P3) unit-norm contract unenforced | **closed-verified, coverage claim overstated** | Guard disabled (`if false &&` around the zero-norm branch in `vector.rs`) → `encode_refuses_a_zero_norm_embedding` RED at `vector.rs:119`. Reverted, green. The guard sits in the shared codec and covers every WRITE path on all three sqlx adapters, and the QUERY path on the pg family (`pg/mod.rs:2775` encodes the probe). It does not cover SQLite's query path → B-E2E-R2-3. |
-| F10 (P3) CYCLE.md counts stale | PENDING (battery at the end) | Gate table below, claimed vs measured. |
+| F10 (P3) CYCLE.md counts stale | **closed-verified** | Every suite count in the replaced `CYCLE.md` table reconciles exactly with my measured runs as the sum across the suite's test binaries (lib + bins + integration + doctests): 947/0/4, 1007/0/12, 934/0/7, 991/0/7, 1072/0/3, 610/0/0, live 7/0. Zero drift. Note for the next round: the numbers are per-invocation sums, not lib-only counts; the round-1 review quoted lib-only "listed" numbers, so the two tables are consistent but not directly comparable. |
 | F11 (P3) park-and-fail-over unimplemented | **declined; decline ruled legitimate, record inconsistent** | See "Judging the declined finding" and B-E2E-R2-4. |
 | E2E-1 / E2E-2 | merged into F2 per round 1's ruling | The `overlay_env` half is verified above. The `provision.sh` half is B-E2E-R2-1. |
 
@@ -102,8 +104,6 @@ Between them, park-and-fail-over now has no owner: B's spec says declined, FUTUR
 *What closes it*: on parse failure, strip `://user:…@` userinfo with a regex-free splice before returning, or return a placeholder (`<unparseable dsn>`) in `to_identity`-failure position; either way the refusal keeps its promise on every input.
 *Live transcript*: `store.dsn = postgres://app:S3cretHunter@127.0.0.1:70000/lambo` (port past u16), `LAMBO_POSTGRES_DSN` at the container → rc 1 with: "the config file says postgres://app:S3cretHunter@127.0.0.1:70000/lambo and LAMBO_POSTGRES_DSN says postgres://lambo@127.0.0.1:55433/livetest (passwords stripped)". The password is on the line that promises it is not.
 
----
-
 **B-E2E-R2-6 (P3): the remediation introduced two doc warnings of the class F7 closed, and dropped the doc gate from its own gate table.**
 *Evidence*: `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` measures **55** warnings where round 1 measured 54. Both new sites are in the F2 doc text the remediation wrote: `src/store/mod.rs:888` carries an unresolved link (`crate::store::pg::dialect::Dialect::DSN_ENV`: "no item named `dialect` in module `pg`", the module is private and the path wrong), and `src/store/mod.rs:943` has public `overlay_env` documentation linking the private item `crate::store::dsn::canonical_store_dsn`, which is byte-for-byte the class E2E-F7 was filed about. The full-feature count is also 55 (the `pg/postgres.rs:103` warning is genuinely gone; the pg module itself is clean).
 *Why it happened*: the remediation's gate table (`B-e2e-remediation-round1.md`) has no doc row. B0-R1-2 added that gate precisely because it is the only one that sees private-item doc rot, and the round that closed a doc-rot finding did not run the doc gate over its own edits.
@@ -152,7 +152,7 @@ built. State changed by this round: none (documentation finding).
 
 ---
 
-## Mutations run (running log)
+## Mutations run
 
 | # | Mutation | Expected red | Observed | Reverted |
 |---|---|---|---|---|
@@ -195,7 +195,64 @@ The B-E2E-R2-1 demonstration also ran here: the `.env`-override behaviour is pla
 bash semantics (`set -a; source .env` after inheriting the variable), identical on
 both platforms; nothing about it is macOS-specific.
 
-## Gate table (claimed vs measured): PENDING full battery at the end
+## Gate table: claimed vs measured
 
-## Cleanliness: PENDING final check
+Claimed = the remediation report / post-remediation `CYCLE.md` table. Measured = this
+worktree at `51419fe`, after every probe mutation was reverted, all on this machine
+after the disk incident. Suite numbers are the sum across each invocation's test
+binaries, which is what the claimed table records.
+
+| Gate | Claimed | Measured |
+|---|---|---|
+| `cargo fmt --all -- --check` | pass | **pass** |
+| `cargo clippy --all-targets -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-cockroach,fixtures -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-postgres -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass (was red) | **pass** |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass (was red) | **pass** |
+| `cargo test --features store-cockroach` | 947 / 0 / 4 | **947 / 0 / 4** (lib 934/0/2) |
+| `cargo test --features store-cockroach,fixtures` | 1007 / 0 / 12 | **1007 / 0 / 12** (lib 993/0/10) |
+| `cargo test --features store-postgres` | 934 / 0 / 7 | **934 / 0 / 7** (lib 921/0/5) |
+| `cargo test --features store-postgres,fixtures` | 991 / 0 / 7 | **991 / 0 / 7** (lib 977/0/5) |
+| `cargo test --features store-sqlite,fixtures` | 1072 / 0 / 3 | **1072 / 0 / 3** (lib 1032/0/1) |
+| `cargo test --no-default-features --features store-cockroach` | 610 / 0 / 0 | **610 / 0 / 0** (lib 600/0/0) |
+| live Postgres `-- --ignored` (pinned container) | 7 / 0 | **7 / 0**, 19.0 s (run three times across the review: baseline, post-M3-revert, battery; 7/0 each time) |
+| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | **absent from the remediation's table** (round 1: 54) | **55 warnings** → B-E2E-R2-6 |
+| `cargo doc … --features store-postgres,store-cockroach,store-sqlite,fixtures` | absent (round 1: 55, one in `pg/postgres.rs:103`) | **55 warnings**, the pg warning gone, the two new ones in `store/mod.rs` |
+| 15 `#[ignore]`d live Cockroach tests | not run (no safe DSN) | **not run**: no DSN on this machine, production forbidden. Still on the orchestrator. |
+
+## Summary
+
+| Grade | Count | Findings |
+|---|---:|---|
+| P1 | 0 | |
+| P2 | 1 | B-E2E-R2-1 (`provision.sh` sources `.env` over the pushed resolved DSN: E2E-1's verb re-opened on `.env`-bearing machines) |
+| P3 | 5 | B-E2E-R2-2 (H3 diagnostic contradicts its own probe), B-E2E-R2-3 (zero-norm guard misses SQLite's query path), B-E2E-R2-4 (F11 decline recorded, FUTURE.md and spec item 4 still claim parking), B-E2E-R2-5 (unparseable DSN prints its password under "passwords stripped"), B-E2E-R2-6 (two new doc warnings of the F7 class; doc gate dropped from the gate table) |
+
+Under the operator's standing rule that a remediation round closes the P3s too, these
+gate the next pass, not the design. The load-bearing verdicts of round 1 all hold at
+HEAD: the distance conversion is pinned four ways and survives no mutation I ran, the
+fencing token has live evidence that runs on every push, the hnsw envelope is now
+measured where hnsw actually approximates (and honestly does not bound it), the
+`EXPLAIN` box now tests the planner's judgement, the config file selects the database
+on every in-process verb, and an operator pointing `lambo.toml` at a stock pgvector
+container gets a working store whose identity, width, and index are all checked
+against the live schema. What is still not true is that the Cockroach `provision`
+script obeys the resolved config on a machine with a `.env`, and that is the one
+place the original P1's failure mode can still occur.
+
+## Cleanliness
+
+Nine probe mutations applied, every one reverted; `git status --porcelain` empty
+(besides this file's own commits) verified after each revert and at review end. Final
+live suite re-run green (7/0) on the reverted tree via the battery. The probe `.env`
+created for the B-E2E-R2-1 demonstration was deleted the same minute (it is also
+gitignored) and `git status` verified clean after. The stub `docker`, probe configs,
+and battery scripts live in the session scratchpad outside the repo. The
+`lambo-b-e2e-r2` container and the `colima-b-r2` profile were removed at review end;
+`docs-telemetry` on the default profile was never touched (verified up before and
+after). The main checkout at `/Users/narayan/Documents/work/lambo` was never written.
+
+
 
