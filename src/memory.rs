@@ -1374,6 +1374,31 @@ impl Memory {
         Ok(())
     }
 
+    /// Record one explicit human confirmation of a concept (C2, spec §3.2's
+    /// "Human Confirmed" term — the solo score's `Human Confirmed × 4.0`).
+    ///
+    /// ## What "human confirmed" means operationally
+    ///
+    /// A **deliberate human verdict on one concept**, carried by a dedicated
+    /// verb rather than inferred: no agent write path (`derive`,
+    /// `record_action`, recall) reaches this counter, so agent activity cannot
+    /// inflate the heaviest term in the solo formula. Each call bumps the
+    /// concept's `human_confirmed` count by one and appends an `UpsertNode`
+    /// mutation, so the value is durable on every store adapter. Surfacing the
+    /// verb on MCP/CLI is deliberately deferred, exactly as workstream D
+    /// deferred `event_time`'s surfaces: the in-process API is the contract the
+    /// future ingest/confirm tooling will call, and a wire form wants a
+    /// consumer to design it against.
+    ///
+    /// A missing id or a non-concept node is an error — a confirmation that
+    /// cannot be applied must fail loudly, never silently vanish.
+    pub fn confirm_human(&self, node: NodeId) -> Result<i32, LamboError> {
+        let _writing = self.begin_write_sync()?;
+        let confirmed = self.graph.write().confirm_human(node)?;
+        self.daemon.wake();
+        Ok(confirmed)
+    }
+
     // -----------------------------------------------------------------------
     // Write path
     // -----------------------------------------------------------------------

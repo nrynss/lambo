@@ -677,6 +677,34 @@ impl Graph {
         bumped
     }
 
+    /// Record one explicit human confirmation of a concept (C2, spec §3.2's
+    /// "Human Confirmed" term).
+    ///
+    /// The counter is **saturating** (`i32` is the schema column type) and the
+    /// bump is emitted as an `UpsertNode` mutation so the durable store mirrors
+    /// it, exactly like [`Self::bump_gc_survived`]. Returns the new count; a
+    /// missing id or a non-concept node is [`StoreError::NotFound`] — there is
+    /// no silent skip here, because a confirmation the graph cannot apply must
+    /// fail loudly rather than be lost.
+    ///
+    /// No agent write path reaches this method: it is called only through
+    /// [`crate::Memory::confirm_human`], the human-in-the-loop surface the
+    /// solo score's second term reads.
+    pub fn confirm_human(&mut self, node: NodeId) -> Result<i32, LamboError> {
+        let Some(Node::Concept(c)) = self.nodes.get_mut(&node) else {
+            return Err(LamboError::Store(StoreError::NotFound(format!(
+                "confirm_human: no concept {node}"
+            ))));
+        };
+        c.human_confirmed = c.human_confirmed.saturating_add(1);
+        let confirmed = c.human_confirmed;
+        let updated = c.clone();
+        self.append_mutation(Mutation::UpsertNode {
+            node: Node::Concept(updated),
+        });
+        Ok(confirmed)
+    }
+
     // -----------------------------------------------------------------------
     // Write path — session metadata, synonyms, reservations
     // -----------------------------------------------------------------------
@@ -1806,6 +1834,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }

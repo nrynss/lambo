@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS concepts (
     blast_radius        INTEGER,
     last_demotion_time  TEXT,
     embedding           BLOB,   -- shared text form (CON-8); width-agnostic, scanned by vector_candidates_checked
-    chunk_group_id      TEXT    -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
+    chunk_group_id      TEXT,   -- T2.5 demote sibling co-retrieval key (spec §7/§8, read by T5.2)
+    human_confirmed     INTEGER NOT NULL DEFAULT 0 -- C2: explicit human confirmations (solo score)
 );
 
 -- Partial unique index on canonical keys (spec §4 errata): non-Observation only.

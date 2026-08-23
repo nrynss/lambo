@@ -863,6 +863,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }
@@ -909,30 +910,65 @@ mod tests {
 
     /// **The seam is load-bearing in the pipeline, not merely present.**
     ///
-    /// `canon::policy`'s own tests prove the dispatch table maps `Solo` to a
-    /// scorer that refuses. They do *not* prove `gather` ever asks. Reverting
-    /// `gather` to call `stage1_candidates` directly leaves swarm behaviour
-    /// identical, so every other test in this crate stays green while
-    /// `promotion_policy` silently becomes decorative — the exact "config
-    /// selection falls back to swarm" defect C1 has to rule out.
+    /// `canon::policy`'s own tests prove the scorers compute different
+    /// verdicts on the same corpus. They do *not* prove `gather` ever asks.
+    /// Reverting `gather` to call `stage1_candidates` directly leaves swarm
+    /// behaviour identical, so every other test in this crate stays green
+    /// while `promotion_policy` silently becomes decorative — the exact
+    /// "config selection falls back to swarm" defect C1 had to rule out, and
+    /// C2 must still rule out now that solo resolves to a real scorer.
     ///
-    /// Driving a non-default policy through `gather` is what makes that
-    /// revert observable: the refusal can only be reached if the cycle
-    /// actually consulted `params.promotion_policy`.
+    /// The corpus is one a solo session legitimately promotes and swarm never
+    /// could: four event-timed turns ≥24h apart (flushed inside one minute —
+    /// the bulk bootstrap), one Entity re-derived by each. Solo's recurrence
+    /// term counts four sessions → 4.8 ≥ 3.0; Stage 1's swarm gate needs
+    /// twenty peers and `gc_survived >= 3`, neither of which exists here.
     ///
     /// Mutation: replace the dispatch in `gather` with the original
-    /// `stage1_candidates(graph, scores, params.min_peer_count)` → no panic,
-    /// and `should_panic` fails the test. Verified red.
+    /// `stage1_candidates(graph, scores, params.min_peer_count)` → the solo
+    /// half goes empty and the assertion fails. Verified red.
     #[cfg(feature = "store-memory")]
     #[test]
-    #[should_panic(expected = "not implemented")]
     fn gather_dispatches_on_the_configured_promotion_policy() {
-        let (g, scores) = twenty_peer_graph();
-        let params = EvalParams {
+        let mut g = Graph::new(sid());
+        let mut prev = None;
+        for n in 1..=4u64 {
+            let mut turn = interaction(n, prev, ts());
+            turn.event_time = Some(ts() - chrono::Duration::hours(48 * (4 - n) as i64));
+            g.insert_interaction(turn).unwrap();
+            prev = Some(n);
+        }
+        let hub = concept(10, 1, 0, CanonizationStatus::None);
+        let hub_id = hub.id;
+        g.insert_concept(hub, iid(1)).unwrap();
+        for n in 2..=4u64 {
+            g.upsert_edge(Edge {
+                id: eid(n),
+                session_id: sid(),
+                source: iid(n),
+                target: hub_id,
+                edge_type: EdgeType::Derives,
+                weight: 0.9,
+                reinforcements: 1,
+                created_at: ts(),
+                last_reinforced: ts(),
+                event_time: Some(ts() - chrono::Duration::hours(48 * (4 - n) as i64)),
+            })
+            .unwrap();
+        }
+        let scores = table(&[]);
+
+        // Solo: the recurrence term admits the hub at the Candidate bar.
+        let solo_params = EvalParams {
             promotion_policy: PromotionPolicy::Solo,
             ..params()
         };
-        let _ = Evaluator::new().gather(&g, &scores, &params, ts());
+        let plan = Evaluator::new().gather(&g, &scores, &solo_params, ts());
+        assert_eq!(plan.stage1, vec![hub_id]);
+
+        // Swarm: the same rows clear nothing — no peers, no gc survival.
+        let plan = Evaluator::new().gather(&g, &scores, &params(), ts());
+        assert!(plan.stage1.is_empty(), "swarm must refuse this corpus");
     }
 
     /// The complement: under the **default** policy the same fixture goes

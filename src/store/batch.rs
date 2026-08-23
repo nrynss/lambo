@@ -72,8 +72,9 @@ use crate::types::{
 /// column lists they are meant to bound. `cockroach::upsert_placeholder_shapes_match_structs`
 /// pins them against the real generated SQL.
 pub const INTERACTION_COLUMNS: usize = 7;
-/// See [`INTERACTION_COLUMNS`]. Includes `embedding` and `chunk_group_id`.
-pub const CONCEPT_COLUMNS: usize = 16;
+/// See [`INTERACTION_COLUMNS`]. Includes `embedding`, `chunk_group_id` and
+/// `human_confirmed` (C2).
+pub const CONCEPT_COLUMNS: usize = 17;
 /// See [`INTERACTION_COLUMNS`].
 pub const EDGE_COLUMNS: usize = 10;
 ///
@@ -93,7 +94,7 @@ pub const INTENT_BATCH: usize = 1024;
 pub struct BulkLimits {
     /// Rows per `interactions` statement.
     pub interactions: usize,
-    /// Rows per `concepts` statement (16 columns).
+    /// Rows per `concepts` statement (17 columns).
     pub concepts: usize,
     /// Rows per `edges` statement (10 columns).
     pub edges: usize,
@@ -515,6 +516,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }

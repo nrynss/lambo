@@ -296,8 +296,9 @@ ON CONFLICT (id) DO UPDATE SET
     event_time = EXCLUDED.event_time
 "#;
 
-/// 16 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
-/// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable.
+/// 17 columns; `embedding` is bound as text and cast server-side (`$15::VECTOR`);
+/// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable;
+/// `human_confirmed` (C2 solo-score input) is the 17th, bound as an INT count.
 ///
 /// **R2-1 — canonization columns are insert-only here.**
 /// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
@@ -314,7 +315,7 @@ INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
     gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
-    chunk_group_id
+    chunk_group_id, human_confirmed
 ) "#;
 
 const ON_CONFLICT_CONCEPT_SQL: &str = r#"
@@ -330,7 +331,8 @@ ON CONFLICT (id) DO UPDATE SET
     last_accessed = EXCLUDED.last_accessed,
     gc_survived = EXCLUDED.gc_survived,
     embedding = EXCLUDED.embedding,
-    chunk_group_id = EXCLUDED.chunk_group_id
+    chunk_group_id = EXCLUDED.chunk_group_id,
+    human_confirmed = EXCLUDED.human_confirmed
 "#;
 
 /// Natural-key conflict target `(source, target, edge_type)` matches the graph tier's
@@ -470,7 +472,7 @@ const SELECT_CONCEPTS_SQL: &str = r#"
 SELECT id::STRING AS id, session_id, content, canonical_key, concept_type,
        origin_interaction::STRING AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding::STRING AS embedding, chunk_group_id
+       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -1061,6 +1063,7 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
     let access_count: i64 = row.try_get("access_count").map_err(backend)?;
     let gc_survived: i64 = row.try_get("gc_survived").map_err(backend)?;
     let blast_radius: Option<i64> = row.try_get("blast_radius").map_err(backend)?;
+    let human_confirmed: i64 = row.try_get("human_confirmed").map_err(backend)?;
     Ok(Concept {
         id: parse_node_id(&id)?,
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
@@ -1082,6 +1085,7 @@ fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         embedding: embedding.as_deref().map(decode_vector).transpose()?,
+        human_confirmed: human_confirmed as i32,
         chunk_group_id: row.try_get("chunk_group_id").map_err(backend)?,
     })
 }
@@ -1531,7 +1535,8 @@ fn concept_upsert_query<'a>(
                 // literal, so the cast is part of the value expression — it must
                 // ride with this placeholder, not with the separator.
                 .push_unseparated("::VECTOR")
-                .push_bind(c.chunk_group_id.as_deref());
+                .push_bind(c.chunk_group_id.as_deref())
+                .push_bind(c.human_confirmed);
         },
     );
     qb.push(ON_CONFLICT_CONCEPT_SQL);
@@ -2879,6 +2884,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             embedding: None,
+            human_confirmed: 0,
             chunk_group_id: None,
         }
     }
@@ -3275,12 +3281,17 @@ mod tests {
         // COH-3: the canonization surface carries last_demotion_time end to end.
         assert!(UPDATE_CONCEPT_STATUS_SQL.contains("COALESCE($5, last_demotion_time)"));
         assert!(INSERT_CANONIZATION_EVENT_SQL.contains("last_demotion_time"));
-        // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is the
-        // 16th, nullable, and included in the conflict UPDATE.
+        // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is
+        // the 16th, nullable; human_confirmed (C2) closes the list as the 17th
+        // — all included in the conflict UPDATE.
         let concept_sql = concept_sql_for(1);
         assert!(concept_sql.contains("$15::VECTOR"), "{concept_sql}");
         assert!(concept_sql.contains("embedding = EXCLUDED.embedding"));
         assert!(concept_sql.contains("chunk_group_id = EXCLUDED.chunk_group_id"));
+        assert!(
+            concept_sql.contains("human_confirmed"),
+            "the C2 count rides the upsert: {concept_sql}"
+        );
         // Edge conflict targets the natural key; id is replaceable on conflict.
         assert!(edge_upsert_query(&[&e])
             .sql()
@@ -3300,10 +3311,10 @@ mod tests {
         let sql = concept_sql_for(3);
         assert_eq!(
             placeholder_max(&sql),
-            48,
-            "3 rows x 16 columns, numbered across the whole statement: {sql}"
+            51,
+            "3 rows x 17 columns, numbered across the whole statement: {sql}"
         );
-        for n in [15, 31, 47] {
+        for n in [15, 32, 49] {
             assert!(
                 sql.contains(&format!("${n}::VECTOR")),
                 "every row's embedding placeholder needs its own cast, missing ${n}: {sql}"
@@ -3379,6 +3390,39 @@ mod tests {
                 "load must read event_time back by name: {sql}"
             );
         }
+    }
+
+    /// C2 (no live cluster: SQL text is the contract). `human_confirmed` —
+    /// the solo score's persisted input — must ride the whole statement path:
+    /// bound as the LAST concept column (a bind drifting onto
+    /// `chunk_group_id`'s slot changes the placeholder count), carried by
+    /// `DO UPDATE SET` so a whole-record replace cannot reset a confirmed
+    /// concept to never-confirmed, and read back by name in the SELECT. The
+    /// sqlite adapter reads this column positionally (`try_get(16)`) — that is
+    /// where an order regression shows.
+    #[test]
+    fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
+        let mut c = test_concept(NodeId::new(), "load-bearing warning");
+        c.human_confirmed = 7;
+        let sql = concept_upsert_query(&[crate::store::batch::ConceptRow::new(&c)], &[None])
+            .sql()
+            .to_string();
+        assert_eq!(placeholder_max(&sql), 17, "1 row x 17 columns: {sql}");
+        assert!(
+            sql.contains("chunk_group_id, human_confirmed"),
+            "human_confirmed closes the INSERT column list: {sql}"
+        );
+        let (_, on_conflict) = sql
+            .split_once("ON CONFLICT")
+            .expect("the upsert has a conflict clause");
+        assert!(
+            on_conflict.contains("human_confirmed = EXCLUDED.human_confirmed"),
+            "conflict update must carry the count from the incoming row: {sql}"
+        );
+        assert!(
+            SELECT_CONCEPTS_SQL.contains("human_confirmed"),
+            "load must read human_confirmed back by name"
+        );
     }
 
     /// R2-1 (no live cluster: SQL text is the contract). The three
