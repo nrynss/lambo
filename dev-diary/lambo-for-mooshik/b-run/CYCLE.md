@@ -4,19 +4,16 @@
 > `lambo-for-mooshik`**, not to `main`. `main` does not move before 2026-09-15;
 > `lambo-for-mooshik` is what it merges from. Branched off `bd3e9ac`.
 >
-> **Status, 2026-08-23:** B0 implemented and reviewed to round 1
-> (**REQUEST_CHANGES**, 0 P1 / 1 P2 / 5 P3). Remediation was **not** run, by
-> operator decision to stop after the review, so **B0 is not closed** and the
-> cycle below is suspended at step 3. B1 through B4 are unstarted. The open
-> findings live in `dev-diary/adversarial-review/adve-review-mooshik-B-B0-round1.md`.
+> **Status, 2026-08-23:** **B0 closed.** Round 1 REQUEST_CHANGES (0 P1 / 1 P2 /
+> 5 P3); round-1 remediation; round 2 **APPROVE**, zero residue
+> (`adve-review-mooshik-B-B0-round{1,2}.md`). B1 is next. B2 through B4
+> unstarted.
 >
-> **The one that has teeth is B0-R1-1 (P2):** the byte-identity proof for the
-> composed SQL was written, run green, and then deleted, so `STRING_CAST` and
-> `DISTANCE_OP` now have no regression pin at all. Both can be mutated with all
-> 994 offline tests still passing. `DISTANCE_OP` is the row B-postgres-store.md
-> calls "the dangerous one" because a wrong distance conversion mis-ranks
-> silently instead of failing, and B2 adds the dialect where the correct pairing
-> genuinely differs. Close this before B2, not after.
+> **B0-R1-1 (P2) landed:** the composed-SQL byte-identity proof is
+> `store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants`.
+> Listed counts after that pin: **939 / 598 / 1007** (one above the pre-B0
+> baseline). `DISTANCE_OP` is still B3's dangerous row; the pin is what makes a
+> mutation of it fail offline.
 
 > **Carried into the cycle, 2026-08-23 (orchestrator, not a review finding):** four
 > interactions between workstream J and B are recorded in
@@ -73,12 +70,38 @@ missing from this table until B0-R1-5. `mod conformance` (~1,850 lines) and
 rows above never compiled roughly 2,750 of `cockroach.rs`'s 6,566 lines. A baseline
 that does not compile the code under refactor is not a baseline. Numbers measured
 independently, twice, from a `git archive 7937de7` extraction. **B0-R1-5 is closed
-by this edit**; the other five findings stay open.
+by this edit** (verified at round-1 remediation: the row, the note, and both
+listing files are present; no third fixtures listing was promised, none invented).
 
 Baseline test-name listings live outside the repo at
 `$SCRATCH/b-baseline/tests-cockroach.txt` and
 `tests-nodefault-cockroach.txt`, where `$SCRATCH` is
 `/tmp/claude-1000/-home-nryn-work-lambo/ac914df5-36d6-4129-a5b3-1952f3b20fc0/scratchpad`.
+Both files exist at that path.
+
+## Expected counts after B0-R1-1
+
+The standing pin
+`store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants`
+moves listed counts by one from the pre-B0 baseline:
+
+| Gate | Listed | Passed / ignored |
+| --- | ---: | --- |
+| `cargo test --features store-cockroach` | 939 | 935 / 4 |
+| `cargo test --no-default-features --features store-cockroach` | 598 | 598 / 0 |
+| `cargo test --features store-cockroach,fixtures` | 1007 | 995 / 12 |
+
+## Phase gates (every B0+ agent re-runs)
+
+* `cargo fmt --all -- --check`
+* `cargo clippy --all-targets -- -D warnings`
+* `cargo clippy --all-targets --features store-cockroach -- -D warnings`
+* `cargo test --features store-cockroach` (expect 939 listed)
+* `cargo test --no-default-features --features store-cockroach` (expect 598 listed)
+* `cargo test --features store-cockroach,fixtures` (expect 1007 listed)
+* H1 lock: `h1_cross_store_parity` still green; `git diff src/store/sqlite.rs` empty
+* `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures`
+  (the only gate that sees private-item doc rot; B0-R1-2)
 
 ## Standing rules for every agent in this run
 

@@ -450,3 +450,26 @@ values match the table in the header, and `git status --short` is identical to s
 start. Nothing was committed or pushed. The only file I wrote is this one.
 
 B0Review1, 2026-08-23
+
+---
+
+## Closures (round-1 remediation, 2026-08-23)
+
+Remediator: `b0-remediator`. Work on `b0-pg-extraction`, tree left dirty, not
+committed. This section records what closed; it does **not** change the
+**REQUEST_CHANGES** verdict or Part E text above.
+
+| ID | Grade | Status | What |
+| --- | --- | --- | --- |
+| B0-R1-1 | P2 | **closed** | Standing pin `store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants` (`src/store/pg/cockroach.rs:662`). `PRE_*` parser-generated from `7937de7`. CYCLE.md listed counts 939 / 598 / 1007. M5 (`::STRING` → `::TEXT`) and M7 (`<->` → `<=>`) go red at `cockroach.rs:751` (`vector_candidates`); a one-space `ORDER BY  dist` change also goes red. Reverted. |
+| B0-R1-2 | P3 | **closed** | `cockroach.rs:114` now links `[crate::store::GraphStore::init_schema]`; `pg/mod.rs:940` now links `[PgStore::normalize_tokens]`. `--document-private-items` added to CYCLE.md phase gates. Doc run: 54 warnings, the two new broken links gone. |
+| B0-R1-3 | P3 | **closed** | Description only. `init_schema` and `connect_options` not split. `B0-implementation.md` §3.4 / §4.1 name them as known over-merged debt for B2/B3 (executed DDL / session setting), not five error strings. |
+| B0-R1-4 | P3 | **closed** | B0-N2 row names `PgStore::new` (`pg/mod.rs:1201`) **and** `connect_options` (`pg/mod.rs:1234`). |
+| B0-R1-5 | P3 | **already-closed** | CYCLE.md already had the fixtures baseline row (1006 listed / 994 passed / 12 ignored) and the conformance/H2 note. Both listing files exist at `$SCRATCH/b-baseline/`. No third fixtures listing was promised; none invented. |
+| B0-R1-6 | P3 | **closed** | `B0-implementation.md` §2.2: 26 of 938 (26 of 597, 36 of 1006). Conclusion unchanged. |
+
+Gates re-run by the remediator: fmt, both clippy `-D warnings` rows, the three
+test commands (939 / 598 / 1007 listed), H1 lock green with `sqlite.rs` diff
+empty, and `cargo doc --document-private-items` at 54 warnings. Detail in
+`dev-diary/lambo-for-mooshik/b-run/B0-remediation.md`.
+

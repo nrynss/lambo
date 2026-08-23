@@ -102,7 +102,7 @@ the single module rename, and nothing else:
 (empty)      # --no-default-features + store-cockroach (597 entries)
 ```
 
-52 of the 938 entries carry the renamed prefix; the other 886 are untouched.
+26 of the 938 entries carry the renamed prefix (26 of 597, 36 of 1006); the other 912 are untouched.
 
 ---
 
@@ -168,18 +168,16 @@ conversion or a cast token at build time: `filter_session_rows::<D>`,
 `keyword_candidates_sql::<D>`. No dynamic dispatch and no function pointers are
 introduced anywhere.
 
-**Byte-identity of the composed SQL was proved, not assumed.** A temporary test asserted
-each of the 11 composed statements plus the `vector_cast` token against the exact
-pre-carve literal, copied from the baseline file:
-
-```
-test store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants ... ok
-```
-
-The test was then removed (it would have changed the pinned test count, and it is a
-one-shot migration assertion, not a standing invariant). A reviewer can reconstruct it
-from `git show 7937de7:src/store/cockroach.rs` in about five minutes; the source
-literals are unchanged in that commit.
+**Byte-identity of the composed SQL was proved, not assumed.** The standing test
+`store::pg::cockroach::tests::b0_composed_sql_is_byte_identical_to_the_pre_carve_constants`
+asserts each of the 10 composed statements, the `vector_cast` token, and
+`keyword_candidates_sql::<CockroachDialect>` for n = 1..5 against parser-generated
+`PRE_*` literals from `git show 7937de7:src/store/cockroach.rs`. It fails on a
+single whitespace change to any composed statement, and on a change to
+`STRING_CAST`, `VECTOR_CAST`, or `DISTANCE_OP`. Round-1 review (B0-R1-1) required
+this pin to live in the tree: `DISTANCE_OP` is B3's dangerous row, and without the
+test both `STRING_CAST` and `DISTANCE_OP` had zero regression pins in the offline
+suite. Listed counts move by one from the pre-B0 baseline (939 / 598 / 1007).
 
 ### 3.4 The over-merging trap: what was checked
 
@@ -187,9 +185,14 @@ After the carve, `src/store/pg/mod.rs` contains **zero** literal `::STRING`, `::
 or `<->` in any SQL. The three remaining textual occurrences are `D::STRING_CAST` /
 `D::VECTOR_CAST` / `D::DISTANCE_OP` references and one design-log comment that quotes
 Cockroach's spelling as an example. There is **no** `bool is_cockroach` parameter and
-**no** `if cockroach` branch anywhere in the shared base. Where a Cockroach-ism could not
-be removed without widening the trait beyond B3's table, it was left inline and marked
-(§4).
+**no** `if cockroach` branch anywhere in the shared base.
+
+That check is narrower than B3's rule. B3's rule is SQL identity, not three literals:
+a function moves into `PgStore` only when its SQL is byte-identical for both dialects.
+Two functions in the shared base fail it: `init_schema` (executed DDL using Cockroach
+`STRING`) and `connect_options` (session setting `vector_search_beam_size`). They are
+**not split in B0**. They are known over-merged debt, owed a split at B2/B3, and named
+as such in §4.1 rather than as five error strings. B2 inherits the debt.
 
 ### 3.5 Invariants preserved, and how that is visible
 
@@ -249,12 +252,30 @@ two real implementations rather than guessed from one. Each item below is a plac
 am confident PostgreSQL differs, and each was left inline in the shared base with a
 `B2/B3:` comment at its site rather than turned into a trait method.
 
+### 4.1 Known over-merged functions, owed a split at B2/B3
+
+B3's hard rule: a function moves into `PgStore` only when its SQL is **byte-identical**
+for both dialects. Two functions in the shared base fail that rule. They are **not
+split in B0**: splitting them would change behaviour (or turn `init_schema` from three
+statements into one `raw_sql`), and the spec's own reasoning is to leave them until a
+second dialect exists. They are not five error strings. They are executed DDL /
+session setting that is not byte-identical for Postgres. B2 inherits this debt.
+
+| # | Site (`src/store/pg/mod.rs`) | Why over-merged | What B2/B3 must decide |
+| --- | --- | --- | --- |
+| B0-N4 | `init_schema` (~2171), the second convergence `ALTER` | Executes `ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS endpoint STRING`. `STRING` is a Cockroach type name PostgreSQL does not have. This is executed DDL, not a message. The two post-DDL convergence ALTERs are deliberately **not** part of `init_sql`: folding them in would turn `init_schema` from `raw_sql(DDL)` + two `query()` calls into one `raw_sql`, which is a behaviour change B0 must not make. | Where the convergence ALTERs live for a dialect whose schema is generated rather than shipped |
+| B0-N3 | `connect_options` (~1257) | Sends `("vector_search_beam_size", …)` on every connection, plus `DEFAULT_VECTOR_BEAM_SIZE`, `LAMBO_VECTOR_BEAM_SIZE` and its `1..=2048` bound. CockroachDB's C-SPANN accuracy dial. PostgreSQL + pgvector has no such setting; its hnsw analogue is `hnsw.ef_search` with different bounds and a different measured default. An ANN-tuning row is not in B3's table. | Interacts with B2's hnsw decision and with H3's forced-exact lane, so it should be decided together with them, not bolted on |
+
+### 4.2 Operator-facing strings left inline
+
+These three are messages, not SQL. They stay inline for the same reason as before B0-R1-3:
+B0 changes no observable behaviour, and inventing a `Dialect::NAME` row from one
+implementation is the speculative widening B3 warns against.
+
 | # | Site (`src/store/pg/mod.rs`) | What is Cockroach-specific | Why it is not a trait row, and what B2 must decide |
 | --- | --- | --- | --- |
-| B0-N1 | `preflight_schema`, both arms | `unprovisioned_store_err("cockroach", …)` and `unprovisioned_column_err("cockroach", …)` | This is a `Dialect::NAME` row, and B3's table has none. It is **operator-facing**: a misprovisioned Postgres deployment would today be told "cockroach". B2 should add the row or pass the name through from `StoreKind`. Highest-value of the five |
-| B0-N2 | `PgStore::new` | `"CockroachStore requires a DSN (store.dsn or LAMBO_COCKROACH_DSN)"` and `"invalid Cockroach DSN: {e}"` | Same shape as B0-N1. Left byte-identical on purpose: two tests assert this exact text, so changing it in B0 would have been a behaviour change |
-| B0-N3 | `connect_options` | `("vector_search_beam_size", …)`, plus `DEFAULT_VECTOR_BEAM_SIZE`, `LAMBO_VECTOR_BEAM_SIZE` and its `1..=2048` bound | CockroachDB's C-SPANN accuracy dial. PostgreSQL + pgvector has no such setting; its hnsw analogue is `hnsw.ef_search` with different bounds and a different measured default. An ANN-tuning row is not in B3's table. **This one interacts with B2's hnsw decision and with H3's forced-exact lane**, so it should be decided together with them, not bolted on |
-| B0-N4 | `init_schema`, the second convergence `ALTER` | `ADD COLUMN IF NOT EXISTS endpoint STRING`, where `STRING` is a Cockroach type name PostgreSQL does not have | These two post-DDL convergence ALTERs are deliberately **not** part of `init_sql`: folding them in would turn `init_schema` from `raw_sql(DDL)` + two `query()` calls into one `raw_sql`, which is a behaviour change B0 must not make. B2 must decide where the convergence ALTERs live for a dialect whose schema is generated rather than shipped |
+| B0-N1 | `preflight_schema`, both arms | `unprovisioned_store_err("cockroach", …)` and `unprovisioned_column_err("cockroach", …)` | This is a `Dialect::NAME` row, and B3's table has none. It is **operator-facing**: a misprovisioned Postgres deployment would today be told "cockroach". B2 should add the row or pass the name through from `StoreKind`. Highest-value of the three strings; not of the five items. The over-merged functions in §4.1 outrank it |
+| B0-N2 | `PgStore::new` (~1201) **and** `connect_options` (~1234) | `"CockroachStore requires a DSN (store.dsn or LAMBO_COCKROACH_DSN)"` (construction only) and `"invalid Cockroach DSN: {e}"` (**both sites**: parse-validate in `new`, and the per-connection option builder). Same string, two paths | Same shape as B0-N1. Left byte-identical on purpose: two tests assert this exact text, so changing it in B0 would have been a behaviour change. B2 acting on a one-site row would fix `new` and leave `connect_options` |
 | B0-N5 | `tx_retry`'s exhaustion error | `"transaction retry exhausted (Cockroach serializable conflict)"` | Cosmetic only: PostgreSQL aborts with the same SQLSTATE 40001 under `SERIALIZABLE`, so the retry *mechanism* is genuinely shared and only the wording is wrong |
 
 Two more, recorded as observations rather than defects:
@@ -329,12 +350,12 @@ run's pinned baseline, not as a criticism of it.
   untested.** `vector_dim` and `init_sql` both read the same DDL, so `dim != ddl_dim`
   cannot fire today. It becomes meaningful in B2, where the width is configurable, and it
   is where a wrong resolution should die.
-* **No test was added for the `Dialect` trait itself.** That is deliberate: adding one
-  would have moved the pinned test counts, and B0's central claim is that the counts and
-  leaf names did not move. Every one of the 938 tests now runs through
-  `PgStore<CockroachDialect>`, so the dialect is exercised, but there is no test that would
-  catch a *second* dialect being wired wrong. That test belongs in B2, where a second
-  dialect exists to compare against.
+* **The byte-identity proof is now a standing test (B0-R1-1).** Round-1 review
+  showed that deleting it left `STRING_CAST` and `DISTANCE_OP` with zero offline
+  pins. The test lives in `pg/cockroach.rs` `mod tests` and listed counts are
+  939 / 598 / 1007. There is still no test that would catch a *second* dialect
+  being wired wrong: that belongs in B2, where a second dialect exists to compare
+  against.
 * Performance is not measured. `PgStore::new` now composes ten strings at construction
   (once per process); the per-query paths allocate no more than before, and
   `keyword_candidates_sql` allocates exactly as much as before. No benchmark was run to

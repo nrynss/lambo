@@ -937,7 +937,7 @@ fn cutoff(now: DateTime<Utc>, age: Duration) -> Result<DateTime<Utc>, StoreError
 /// score must apply the same folding to the raw row text — a mixed-case row ("Register
 /// User") matched by token "register" would otherwise be selected yet score 0.0
 /// (P3 review R1). Tokens arrive pre-normalized (lowercased) from
-/// [`CockroachStore::normalize_tokens`].
+/// [`PgStore::normalize_tokens`].
 fn score_keyword_hits(content: &str, canonical_key: &str, tokens: &[String]) -> usize {
     let content = content.to_lowercase();
     let key = canonical_key.to_lowercase();
