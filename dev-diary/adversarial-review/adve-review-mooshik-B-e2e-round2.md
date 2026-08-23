@@ -43,13 +43,13 @@ cannot see because it pins the wrong end of the pipe.
 | # | Status | Falsifier run, result |
 |---|---|---|
 | F1 (P1) CI red on merged tree | **closed-verified** (mechanism read; lint-probe and full clippy rows PENDING battery) | `run_fixture_grid` now takes the `FixtureGrid` struct (`sqlite.rs:5868`), call sites named. Clippy rows measured in the gate table below. |
-| F2 (P1) env DSN outranks `store.dsn` | **closed at the config layer, defective at the `provision.sh` leg** | Refusal disabled (`if false &&` at `mod.rs:960`) → `env_dsn_naming_a_different_database_is_refused_not_preferred` RED at `mod.rs:1611`; reverted, green. Cross-kind leak restored (`Postgres => Some(COCKROACH_DSN_ENV)`) → `each_kind_reads_its_own_dsn_env_var` RED (`mod.rs:1663`, left `crdb-dsn` right `pg-dsn`) AND the dialect's own drift pin `dsn_env_named_in_errors_is_the_one_config_reads` RED (`postgres.rs:648`); reverted, green. Live 4-way CLI probes PENDING. **But see B-E2E-R2-1: the script leg re-opens E2E-1.** |
+| F2 (P1) env DSN outranks `store.dsn` | **closed at the config layer, defective at the `provision.sh` leg** | Refusal disabled (`if false &&` at `mod.rs:960`) → `env_dsn_naming_a_different_database_is_refused_not_preferred` RED at `mod.rs:1611`; reverted, green. Cross-kind leak restored (`Postgres => Some(COCKROACH_DSN_ENV)`) → `each_kind_reads_its_own_dsn_env_var` RED (`mod.rs:1663`, left `crdb-dsn` right `pg-dsn`) AND the dialect's own drift pin `dsn_env_named_in_errors_is_the_one_config_reads` RED (`postgres.rs:648`); reverted, green. Live CLI probes (six, section below): all behaved as claimed. **But see B-E2E-R2-1: the script leg re-opens E2E-1.** |
 | F3 (P2) H3 not self-verifying | **closed-verified, stronger than claimed** | M3 (`forced_exact_scan_sql() -> None`) → THREE live tests red, not the claimed two: `explain_recall_uses_hnsw` (forced-exact lane planned `Index Scan using concepts_embedding_idx`), `h3_postgres_hnsw_envelope_at_scale` (red at `sqlite.rs:6583`, same plan text), and `h3_postgres_recall_parity` (red at `sqlite.rs:6360`, "the forced-exact lane must never plan through concepts_embedding_idx"). Each died at its intended assertion, reached through a real `EXPLAIN` probe: no compile error, no panic on `None` (`issue_forced_exact_scan` no-ops). Round 1 measured this same mutation leaving the parity test GREEN; it is now red at the probe, which is exactly E2E-F3a's fix working. Offline: `distance_to_score_is_one_minus_d` RED (pins `forced_exact_scan_sql()` at `postgres.rs:488`). All reverted, all green after (7/0 live). Residual prose defect → B-E2E-R2-2. |
 | F4 (P2) EXPLAIN on empty table | **closed-verified** | Corpus shrunk to 100 rows (below the measured 500-row crossover) → `explain_recall_uses_hnsw` RED at `postgres.rs:1008`, "the planner must CHOOSE concepts_embedding_idx … with no GUC helping it". Reverted, green. The test now also asserts 5 finite distances from a corpus-drawn probe, so the round-1 NaN-probe vacuity is closed too. |
 | F5 (P3) width check skips reader attach | **closed-verified** | `preflight_schema()` call severed in `load_reader_graph_with_contract` (`cli/mod.rs`) → `reader_verbs_refuse_an_unprovisioned_store_by_name` RED at `cli/mod.rs:187`, failing with the exact raw-error shape the fix replaced ("no such table: sessions" instead of the actionable `lambo provision` refusal). Reverted, green. Live leg: `preflight_schema` is exercised live in `live_schema_width_refuses_a_config_that_disagrees` and `init_schema_at_two_widths_creates_hnsw` (both green on my container); the funnel-to-preflight composition is pinned offline. |
-| F6 (P3) `provision --help` omits Postgres | PENDING (mutation queued) | `main.rs:195` names all four kinds; `provision_help_names_every_store_kind_it_provisions` (`main.rs:916`) reads the clap command. Mutation next. |
-| F7 (P3) private-item doc link | PENDING (doc builds queued) | Fix read at `postgres.rs:102-105`: the link is demoted to a plain name with the reason written beside it. Warning counts to be measured. |
-| F8 (P3) no CI row lints `store-postgres` test code | PENDING (lint probe queued) | Both clippy invocations present in the `postgres` matrix row of `.github/workflows/ci.yml`; the `index_present` dead-code allow is scoped `cfg_attr(not(feature = "store-sqlite"), allow(dead_code))` at `postgres.rs:353`, not blanket. |
+| F6 (P3) `provision --help` omits Postgres | **closed-verified** | "Postgres" deleted from the about string at `main.rs:195` → `provision_help_names_every_store_kind_it_provisions` RED at `main.rs:932` ("provision --help must name Postgres"). Reverted, green. |
+| F7 (P3) private-item doc link | **closed-verified, and the same class reintroduced one module over** | Measured: `cargo doc --no-deps --document-private-items` at `store-cockroach,fixtures` = 55 warnings, at the full `store-postgres,store-cockroach,store-sqlite,fixtures` set = 55: the `pg/postgres.rs:103` warning is gone and the pg module adds zero. But the round-1 baseline was 54, and the +1 is the remediation's own F2 doc text → B-E2E-R2-6. |
+| F8 (P3) no CI row lints `store-postgres` test code | **closed-verified** | Both clippy invocations present in the `postgres` matrix row of `.github/workflows/ci.yml`; the `index_present` dead-code allow is scoped `cfg_attr(not(feature = "store-sqlite"), allow(dead_code))` at `postgres.rs:353`, not blanket. Lint probe M-LINT: an 8-argument fn planted inside the H3 harness module turned BOTH rows red (`too_many_arguments`, the E2E-F1 class), so the rows genuinely lint the module that was invisible to every round-1 CI row. Reverted, both green. |
 | F9 (P3) unit-norm contract unenforced | **closed-verified, coverage claim overstated** | Guard disabled (`if false &&` around the zero-norm branch in `vector.rs`) → `encode_refuses_a_zero_norm_embedding` RED at `vector.rs:119`. Reverted, green. The guard sits in the shared codec and covers every WRITE path on all three sqlx adapters, and the QUERY path on the pg family (`pg/mod.rs:2775` encodes the probe). It does not cover SQLite's query path → B-E2E-R2-3. |
 | F10 (P3) CYCLE.md counts stale | PENDING (battery at the end) | Gate table below, claimed vs measured. |
 | F11 (P3) park-and-fail-over unimplemented | **declined; decline ruled legitimate, record inconsistent** | See "Judging the declined finding" and B-E2E-R2-4. |
@@ -97,11 +97,28 @@ Between them, park-and-fail-over now has no owner: B's spec says declined, FUTUR
 *What closes it*: annotate item 4 in place pointing at the decline (the J-workstream's in-place-correction pattern), fix FUTURE.md's "B ships" clause to "B records the ruling and defers the implementation", and give park-and-fail-over an owner: its own FUTURE entry or a named phase.
 
 **B-E2E-R2-5 (P3): a DSN the canonicaliser cannot parse is returned with its password intact, and the refusal message then prints it while asserting "passwords stripped".**
-*Evidence (static, live demo PENDING)*: `canonical_store_dsn` (`src/store/dsn.rs:49-61`) falls through to `strip_libpq_password_token(trimmed)` when `parse_postgres_url` fails. That fallback strips only whitespace-separated `password=` tokens, so a URL-shaped DSN survives verbatim, embedded `user:secret@` included. `parse_postgres_url` fails on inputs an operator can plausibly produce: a port above 65535 or a non-numeric bracketed port (`split_host_port` returns `None` at `dsn.rs:159-166`), or a typo'd scheme (`postgre://`). `overlay_env`'s refusal then interpolates both canonical forms into an error that says "(passwords stripped)" (`mod.rs:961-970`).
+*Evidence (static, then demonstrated live below)*: `canonical_store_dsn` (`src/store/dsn.rs:49-61`) falls through to `strip_libpq_password_token(trimmed)` when `parse_postgres_url` fails. That fallback strips only whitespace-separated `password=` tokens, so a URL-shaped DSN survives verbatim, embedded `user:secret@` included. `parse_postgres_url` fails on inputs an operator can plausibly produce: a port above 65535 or a non-numeric bracketed port (`split_host_port` returns `None` at `dsn.rs:159-166`), or a typo'd scheme (`postgre://`). `overlay_env`'s refusal then interpolates both canonical forms into an error that says "(passwords stripped)" (`mod.rs:961-970`).
 *Failure scenario*: `store.dsn = postgres://app:S3cret@db:70000/lambo` (fat-fingered port) plus any different `DATABASE_URL` → the refusal prints `S3cret` to stderr, in a message that claims it did not, and error text is the one place J2's hashing was built to keep passwords out of.
 *What closes it*: on parse failure, strip `://user:…@` userinfo with a regex-free splice before returning, or return a placeholder (`<unparseable dsn>`) in `to_identity`-failure position; either way the refusal keeps its promise on every input.
+*Live transcript*: `store.dsn = postgres://app:S3cretHunter@127.0.0.1:70000/lambo` (port past u16), `LAMBO_POSTGRES_DSN` at the container → rc 1 with: "the config file says postgres://app:S3cretHunter@127.0.0.1:70000/lambo and LAMBO_POSTGRES_DSN says postgres://lambo@127.0.0.1:55433/livetest (passwords stripped)". The password is on the line that promises it is not.
 
 ---
+
+**B-E2E-R2-6 (P3): the remediation introduced two doc warnings of the class F7 closed, and dropped the doc gate from its own gate table.**
+*Evidence*: `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` measures **55** warnings where round 1 measured 54. Both new sites are in the F2 doc text the remediation wrote: `src/store/mod.rs:888` carries an unresolved link (`crate::store::pg::dialect::Dialect::DSN_ENV`: "no item named `dialect` in module `pg`", the module is private and the path wrong), and `src/store/mod.rs:943` has public `overlay_env` documentation linking the private item `crate::store::dsn::canonical_store_dsn`, which is byte-for-byte the class E2E-F7 was filed about. The full-feature count is also 55 (the `pg/postgres.rs:103` warning is genuinely gone; the pg module itself is clean).
+*Why it happened*: the remediation's gate table (`B-e2e-remediation-round1.md`) has no doc row. B0-R1-2 added that gate precisely because it is the only one that sees private-item doc rot, and the round that closed a doc-rot finding did not run the doc gate over its own edits.
+*What closes it*: fix the two links (name them plainly, as the F7 fix itself did at `postgres.rs:102-105`), and restore the doc gate to the standing table in `CYCLE.md` so the next round cannot drop it silently.
+
+## F2 verified live, six ways (this reviewer's own runs, debug binary, container on 55433)
+
+1. **Conflict refuses**: file `…55433/lambo`, `LAMBO_POSTGRES_DSN=…55433/decoy` → rc 1, both canonical forms printed, `lambo:lambo` credentials stripped to `lambo@`, variable named, remedy stated. (Also note: the refusal fires in config resolution BEFORE the compiled-feature check, so even a binary without `store-postgres` refuses rather than resolving.)
+2. **Cross-kind leak closed** (the exact round-1 P1 reproduction): `kind = "postgres"`, file DSN at `livetest`, `LAMBO_COCKROACH_DSN` at `decoy` → provision rc 0 against `livetest`; `decoy` measured after: **0 tables**.
+3. **Identity, not spelling**: file `postgresql://…?sslmode=disable` vs env `postgres://…?connect_timeout=10&application_name=alt&sslmode=disable` (same database) → no refusal, provision rc 0.
+4. **Secret path intact**: no `store.dsn`, `LAMBO_POSTGRES_DSN` supplies it → provision rc 0.
+5. **Cross-form identity**: file DSN in libpq `key=value` form (`host=… port=55433 dbname=livetest user=lambo password=…`) vs env URL form of the same database → no refusal, provision rc 0. The canonicaliser folds both syntaxes to one identity.
+6. **Malformed DSN**: see B-E2E-R2-5's live transcript: parse failure falls back to the raw string, password included, printed under "(passwords stripped)".
+
+F5 verified live through the CLI as well: `stats --session` with `vector_dim = 1536` against the initialized `vector(768)` database → **rc 1**, "live schema width is vector(768) but this process constructed at dim 1536". Round 1 measured rc 0 with a normal snapshot on this exact shape.
 
 ## Judging the declined finding (F11)
 
@@ -145,17 +162,40 @@ built. State changed by this round: none (documentation finding).
 | M-F2b | `StoreKind::Postgres.dsn_env()` → `COCKROACH_DSN_ENV` | kind-ownership pins | `each_kind_reads_its_own_dsn_env_var` RED (`mod.rs:1663`) and `dsn_env_named_in_errors_is_the_one_config_reads` RED (`postgres.rs:648`) | yes |
 | M-F5 | reader `preflight_schema()` severed | reader-refusal pin | `reader_verbs_refuse_an_unprovisioned_store_by_name` RED at `cli/mod.rs:187`, raw sqlite error shape visible | yes |
 | M-F9 | zero-norm branch disabled | codec pin | `encode_refuses_a_zero_norm_embedding` RED at `vector.rs:119` | yes |
-| M-F6 | PENDING: drop "Postgres" from provision about | help pin | | |
-| M-F2c | PENDING: revert `cmd.env` push | marker test | | |
-| M-LINT | PENDING: 8-arg fn probe in the H3 module | both F1/F8 clippy rows | | |
+| M-F6 | "Postgres" dropped from the provision about string | help pin | `provision_help_names_every_store_kind_it_provisions` RED at `main.rs:932` | yes |
+| M-F2c | `cmd.env` push severed in `provision_command` | marker test | `cockroach_provision_hands_the_resolved_dsn_to_the_script` RED at `provision.rs:298` ("the resolved DSN must be pushed into the child: []") | yes |
+| M-LINT | 8-arg fn planted in `h1_cross_store_parity` | both new clippy rows | `clippy --features store-sqlite,fixtures` RED and `clippy --no-default-features --features store-postgres,store-sqlite,fixtures` RED, both `too_many_arguments (8/7)` | yes |
 
 Live baseline before any mutation: `cargo test --features
 store-postgres,store-sqlite,store-memory,fixtures --lib -- --ignored` with
 `LAMBO_POSTGRES_DSN` at the container: **7 passed / 0 failed in 19.1 s** (6 Postgres
 live tests + the bge smoke), matching the claimed 7/0.
 
+## Platform notes (macOS leg, exercised here for the first time)
+
+This is the first time any of B has run on macOS: B was developed on the Linux box and
+CI is ubuntu. What was exercised here and held: the full offline suites (battery table
+below), all 7 live tests against the pinned container (the digest is identical to the
+Linux/CI pin, so the "same pinned image, one claim" property really does extend to this
+machine), the CLI probes above, and both doc gates. Two portability observations, one
+of them load-bearing:
+
+1. **`scripts/provision.sh` requires bash 4+** (`${var,,}` at lines 120 and 180). macOS
+   ships bash 3.2 at `/bin/bash`; the script is reached via `Command::new("bash")`,
+   which resolves from PATH, so on this machine (Homebrew bash 5.3 first in PATH) it
+   works. On a stock Mac without Homebrew bash, the Cockroach provision arm dies with
+   "bad substitution" at the first `route_statement` call: AFTER `SET CLUSTER SETTING`
+   has already been issued to the cluster, but loudly (non-zero exit propagated by
+   `cli::provision::run`). Fails loud, not wrong, so a note rather than a finding; worth
+   a `(( BASH_VERSINFO[0] >= 4 ))` guard at the top if Macs ever run that arm in anger.
+2. The `--check` arm of the script and everything else it uses (`tr`, `mktemp`,
+   `grep -E`) is BSD-clean.
+
+The B-E2E-R2-1 demonstration also ran here: the `.env`-override behaviour is plain
+bash semantics (`set -a; source .env` after inheriting the variable), identical on
+both platforms; nothing about it is macOS-specific.
+
 ## Gate table (claimed vs measured): PENDING full battery at the end
 
 ## Cleanliness: PENDING final check
 
-## Platform notes (macOS leg, run here for the first time): PENDING consolidation
