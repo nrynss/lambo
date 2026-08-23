@@ -272,8 +272,41 @@ the holder) lands:
   `url` produced a client that rejected the server outright (J5's second finding).
 
 After J2, the per-client stdio wiring in §4 simply works — the first serve becomes the
-hub, later ones proxy — with no client config change. That is the target state; this
-section shrinks to a pointer when it ships.
+hub, later ones proxy — with no client config change.
+
+**That is no longer the rig's wiring. Operator ruling, 2026-08-23: HTTP, always.**
+J2 fixed the *silent* half of the stdio problem, not the *lifetime* half. Under stdio the
+lease holder is a child of whichever client spawned it first, and there is still no
+in-process promotion (J-multi-client.md, "Not done, deliberately"), so when that client
+exits every other session on the machine loses memory until a human starts a new one.
+Measured live the same day: holder died 06:47:24Z, **no holder for 6m20s**, recovery only
+because a person opened a new session.
+
+The rig therefore runs one long-lived writer owned by **systemd**, not by any client:
+
+```sh
+systemctl --user status lambo-dogfood      # unit: ~/.config/systemd/user/lambo-dogfood.service
+sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"
+```
+
+Every harness points at `http://127.0.0.1:7700/mcp` and holds no lease. Two properties the
+unit depends on, both verified 2026-08-23 by SIGKILLing the writer:
+
+- `RestartSec` must exceed `lease::LEASE_TTL` (45s) and `StartLimitIntervalSec` must be
+  **0**. An abrupt death does not release the lease, so every restart inside the TTL exits
+  1 on a refused acquire; with systemd's default limit (5 starts / 10s) the unit burns its
+  budget in the first ten seconds and is left FAILED permanently, which is the very
+  never-recovers outage this ruling exists to prevent. Measured unattended recovery with
+  the fix: **36s**.
+- The HTTP holder still binds the unix session endpoint, so a stray stdio registration
+  degrades to a J2 proxy rather than breaking. That is what makes a partial migration safe,
+  but a stdio client that starts while the writer is restarting can still WIN the lease and
+  re-couple the holder to a client — so `select holder from session_leases` naming anything
+  other than `http-shared-writer` means a harness is still on stdio and should be moved.
+
+Per-harness `--agent` ids are not lost to the shared writer: `origin_agent` comes from each
+call's `agent_id`, above the transport (verified 2026-08-23). The serve's own `--agent` now
+names only the lease holder, hence `http-shared-writer`.
 
 ## 6. Smoke test (any client)
 
