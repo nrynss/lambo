@@ -1,8 +1,8 @@
 //! GraphStore trait, Level B factory, and optional adapters (P1 / P3).
 //!
 //! Packaging: Cargo features gate adapters (`store-memory`, `store-cockroach`,
-//! `store-sqlite`); `lambo.toml` / env select among compiled kinds. See
-//! `dev-diary/notes/level-b-pluggability.md`.
+//! `store-postgres`, `store-sqlite`); `lambo.toml` / env select among compiled
+//! kinds. See `dev-diary/notes/level-b-pluggability.md`.
 
 #[cfg(feature = "store-memory")]
 mod memory;
@@ -10,9 +10,18 @@ mod memory;
 #[cfg(feature = "store-memory")]
 pub use memory::MemoryStore;
 
-// T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4). Feature: store-cockroach.
+// B0: the Postgres-wire-protocol store family (`pg`), of which the T3.2
+// CockroachDB durable adapter (spec §3.2/§3.3, §4) is the first dialect and
+// B2's PostgreSQL adapter is the second (templated width, hnsw from init).
+// Features: store-cockroach, store-postgres.
+#[cfg(any(feature = "store-cockroach", feature = "store-postgres"))]
+pub mod pg;
+// The adapter's public path is unchanged by the move: `crate::store::cockroach`
+// still names the Cockroach dialect's module, now re-exported from `pg`.
 #[cfg(feature = "store-cockroach")]
-pub mod cockroach;
+pub use pg::cockroach;
+#[cfg(feature = "store-postgres")]
+pub use pg::postgres;
 // T3.3 — SQLite offline / test tier (spec §3.2–§3.3, §4). VECTOR_SEARCH since F1/F2.
 #[cfg(feature = "store-sqlite")]
 mod sqlite;
@@ -21,16 +30,28 @@ mod sqlite;
 pub use sqlite::SqliteStore;
 
 // STORE-4 — shared backend-error classification (sqlx-backed adapters only;
-// both `store-cockroach` and `store-sqlite` pull `sqlx`).
-#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+// `store-cockroach` / `store-postgres` / `store-sqlite` pull `sqlx`).
+#[cfg(any(
+    feature = "store-cockroach",
+    feature = "store-postgres",
+    feature = "store-sqlite"
+))]
 mod error;
 
-#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+#[cfg(any(
+    feature = "store-cockroach",
+    feature = "store-postgres",
+    feature = "store-sqlite"
+))]
 pub(crate) use error::map_write_err;
 
 // STORE-1/CON-8 — shared vector codec for the sqlx-backed adapters (Cockroach
 // VECTOR text literal; SQLite stores the same text as a BLOB).
-#[cfg(any(feature = "store-cockroach", feature = "store-sqlite"))]
+#[cfg(any(
+    feature = "store-cockroach",
+    feature = "store-postgres",
+    feature = "store-sqlite"
+))]
 pub(crate) mod vector;
 
 // L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
@@ -616,10 +637,23 @@ pub trait GraphStore: Send + Sync {
     }
 }
 
+/// Operator-facing list of kinds, kept in one place so the empty-kind and
+/// unknown-kind errors cannot drift apart.
+const STORE_KIND_EXPECTED: &str = "memory | cockroach | postgres | sqlite";
+
 /// Durable store selector (TOML `store.kind` / `LAMBO_STORE`).
 ///
 /// Deserialize accepts the same aliases as [`FromStr`] (trimmed, case-insensitive):
-/// `memory|mem|ram`, `cockroach|crdb|postgres|pg`, `sqlite|sqlite3`.
+/// `memory|mem|ram`, `cockroach|crdb`, `postgres|pg`, `sqlite|sqlite3`.
+///
+/// **Alias split (B1).** Until 0.3.0, `"postgres"` and `"pg"` mapped onto
+/// [`StoreKind::Cockroach`]. That was a choice: both engines speak the Postgres
+/// wire protocol through the same sqlx driver, and there was no PostgreSQL
+/// dialect yet. It is also a lie the Cockroach adapter's `VECTOR(n)`,
+/// `CREATE VECTOR INDEX`, and `::STRING` never meant on PostgreSQL. B1 splits
+/// the aliases so no string maps across the boundary; a leftover
+/// `kind = "postgres"` pointed at Cockroach fails loud at construction (B2
+/// has not landed DDL) rather than silently ranking with Cockroach SQL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
@@ -627,7 +661,11 @@ pub enum StoreKind {
     #[default]
     Memory,
     /// CockroachDB primary (P3 / T3.2). Feature: `store-cockroach`.
+    /// Config strings: `"cockroach"`, `"crdb"`. Not `"postgres"` / `"pg"`.
     Cockroach,
+    /// PostgreSQL + pgvector (workstream B). Feature: `store-postgres`.
+    /// Config strings: `"postgres"`, `"pg"`. Fail-closed until B2 lands DDL.
+    Postgres,
     /// SQLite offline / test tier (P3 / T3.3). Feature: `store-sqlite`.
     Sqlite,
 }
@@ -645,6 +683,7 @@ impl StoreKind {
         match self {
             Self::Memory => "store-memory",
             Self::Cockroach => "store-cockroach",
+            Self::Postgres => "store-postgres",
             Self::Sqlite => "store-sqlite",
         }
     }
@@ -656,6 +695,7 @@ impl StoreKind {
         match self {
             Self::Memory => cfg!(feature = "store-memory"),
             Self::Cockroach => cfg!(feature = "store-cockroach"),
+            Self::Postgres => cfg!(feature = "store-postgres"),
             Self::Sqlite => cfg!(feature = "store-sqlite"),
         }
     }
@@ -666,6 +706,8 @@ impl StoreKind {
             Self::Memory => cfg!(feature = "store-memory"),
             // T3.2: CockroachStore landed.
             Self::Cockroach => cfg!(feature = "store-cockroach"),
+            // B2: templated width + hnsw from init. Compiled is ready.
+            Self::Postgres => cfg!(feature = "store-postgres"),
             // T3.3: SqliteStore lands with feature store-sqlite.
             Self::Sqlite => cfg!(feature = "store-sqlite"),
         }
@@ -685,16 +727,17 @@ impl FromStr for StoreKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = s.trim();
         if t.is_empty() {
-            return Err(StoreError::Backend(
-                "empty store kind (expected memory | cockroach | sqlite)".into(),
-            ));
+            return Err(StoreError::Backend(format!(
+                "empty store kind (expected {STORE_KIND_EXPECTED})"
+            )));
         }
         match t.to_ascii_lowercase().as_str() {
             "memory" | "mem" | "ram" => Ok(Self::Memory),
-            "cockroach" | "crdb" | "postgres" | "pg" => Ok(Self::Cockroach),
+            "cockroach" | "crdb" => Ok(Self::Cockroach),
+            "postgres" | "pg" => Ok(Self::Postgres),
             "sqlite" | "sqlite3" => Ok(Self::Sqlite),
             other => Err(StoreError::Backend(format!(
-                "unknown store kind {other:?} (expected memory | cockroach | sqlite)"
+                "unknown store kind {other:?} (expected {STORE_KIND_EXPECTED})"
             ))),
         }
     }
@@ -705,6 +748,7 @@ impl std::fmt::Display for StoreKind {
         match self {
             Self::Memory => write!(f, "memory"),
             Self::Cockroach => write!(f, "cockroach"),
+            Self::Postgres => write!(f, "postgres"),
             Self::Sqlite => write!(f, "sqlite"),
         }
     }
@@ -839,9 +883,10 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
 
 /// [`build_store`], plus the process's configured dense-vector width.
 ///
-/// Only adapters whose vector column carries **no** width of its own consume it —
-/// today that is SQLite, whose `concepts.embedding` is a `BLOB` (Cockroach parses
-/// `VECTOR(n)` out of its own DDL and ignores this).
+/// SQLite consumes it: `concepts.embedding` is a `BLOB` with no width of its
+/// own. Postgres consumes it too: B2 templates the width into `vector(n)` at
+/// init, so this function copies the argument into the pin slot when the pin
+/// is absent. Cockroach parses `VECTOR(n)` out of its own DDL and ignores this.
 ///
 /// # Precedence
 ///
@@ -876,8 +921,9 @@ pub fn build_store_with_vector_dim(
         return Err(missing_feature(cfg.kind));
     }
     // Precedence: the operator's pin outranks the resolved embedder width (see the
-    // doc comment). Consumed only by the width-agnostic adapters below; the binding
-    // stays used under feature rows that compile none of them.
+    // doc comment). SQLite and Postgres consume it (Postgres copies into the pin
+    // slot below when the pin is absent). Cockroach ignores it. The binding stays
+    // used under feature rows that compile none of them.
     let vector_dim = cfg.vector_dim.or(vector_dim);
     let _ = vector_dim;
     match cfg.kind {
@@ -902,6 +948,24 @@ pub fn build_store_with_vector_dim(
             #[cfg(not(feature = "store-cockroach"))]
             {
                 Err(missing_feature(StoreKind::Cockroach))
+            }
+        }
+        StoreKind::Postgres => {
+            #[cfg(feature = "store-postgres")]
+            {
+                // Copy the resolved embedder width into the pin slot when the
+                // operator did not set one, so init_sql substitutes the width
+                // this process actually embeds. The pin still wins when set
+                // (precedence is already `cfg.vector_dim.or(param)` above).
+                let mut cfg = cfg;
+                if cfg.vector_dim.is_none() {
+                    cfg.vector_dim = vector_dim;
+                }
+                Ok(Box::new(postgres::PostgresStore::new(cfg)?))
+            }
+            #[cfg(not(feature = "store-postgres"))]
+            {
+                Err(missing_feature(StoreKind::Postgres))
             }
         }
         StoreKind::Sqlite => {
@@ -984,6 +1048,15 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             );
             assert_eq!(crdb.len(), 11, "cockroach DDL table count: {crdb:?}");
         }
+        #[cfg(feature = "store-postgres")]
+        {
+            let pg = tables_in_ddl(include_str!("../../migrations/postgres/001_init.sql"));
+            assert!(
+                pg.contains(&"write_intents") && pg.contains(&"sessions"),
+                "{pg:?}"
+            );
+            assert_eq!(pg.len(), 11, "postgres DDL table count: {pg:?}");
+        }
     }
 
     /// The refusal an operator reads must name the missing table AND the command
@@ -1018,15 +1091,35 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             StoreKind::Cockroach
         );
         assert_eq!("crdb".parse::<StoreKind>().unwrap(), StoreKind::Cockroach);
-        assert_eq!("pg".parse::<StoreKind>().unwrap(), StoreKind::Cockroach);
+        assert_eq!("pg".parse::<StoreKind>().unwrap(), StoreKind::Postgres);
         assert_eq!("sqlite".parse::<StoreKind>().unwrap(), StoreKind::Sqlite);
         assert_eq!("sqlite3".parse::<StoreKind>().unwrap(), StoreKind::Sqlite);
         assert_eq!(
             "  postgres  ".parse::<StoreKind>().unwrap(),
+            StoreKind::Postgres
+        );
+        // B1 alias split: no string maps across. A leftover kind = "postgres"
+        // must not silently become Cockroach.
+        assert_ne!(
+            "postgres".parse::<StoreKind>().unwrap(),
             StoreKind::Cockroach
         );
-        assert!("oracle".parse::<StoreKind>().is_err());
-        assert!("".parse::<StoreKind>().is_err());
+        assert_ne!("pg".parse::<StoreKind>().unwrap(), StoreKind::Cockroach);
+        assert_ne!(
+            "cockroach".parse::<StoreKind>().unwrap(),
+            StoreKind::Postgres
+        );
+        assert_ne!("crdb".parse::<StoreKind>().unwrap(), StoreKind::Postgres);
+        let unknown = "oracle".parse::<StoreKind>().unwrap_err().to_string();
+        assert!(
+            unknown.contains(STORE_KIND_EXPECTED),
+            "unknown-kind error must list postgres: {unknown}"
+        );
+        let empty = "".parse::<StoreKind>().unwrap_err().to_string();
+        assert!(
+            empty.contains(STORE_KIND_EXPECTED),
+            "empty-kind error must list postgres: {empty}"
+        );
         assert!("   ".parse::<StoreKind>().is_err());
     }
 
@@ -1041,7 +1134,9 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         let w: Wrap = toml::from_str(r#"kind = "crdb""#).unwrap();
         assert_eq!(w.kind, StoreKind::Cockroach);
         let w: Wrap = toml::from_str(r#"kind = "  pg  ""#).unwrap();
-        assert_eq!(w.kind, StoreKind::Cockroach);
+        assert_eq!(w.kind, StoreKind::Postgres);
+        let w: Wrap = toml::from_str(r#"kind = "postgres""#).unwrap();
+        assert_eq!(w.kind, StoreKind::Postgres);
         let w: Wrap = toml::from_str(r#"kind = "sqlite3""#).unwrap();
         assert_eq!(w.kind, StoreKind::Sqlite);
     }
@@ -1094,6 +1189,90 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             assert!(!msg.to_ascii_lowercase().contains("memory store"));
             assert!(!StoreKind::Cockroach.is_ready());
         }
+    }
+
+    #[test]
+    fn postgres_build_behavior() {
+        // B2: with the feature compiled, build_store returns a working adapter
+        // (constructed lazily: no connection at build time); without it, fail
+        // closed with a rebuild hint and never fall back to memory.
+        let cfg = StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some("postgresql://localhost/lambo".into()),
+            path: None,
+            vector_dim: None,
+        };
+        if StoreKind::Postgres.is_compiled() {
+            let s = build_store(cfg).expect("postgres store must build under store-postgres");
+            assert!(s.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(s.vector_dimensions(), Some(1024));
+            assert!(StoreKind::Postgres.is_ready());
+        } else {
+            let Err(err) = build_store(cfg) else {
+                panic!("expected err: silent fallback forbidden");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not compiled") && msg.contains("store-postgres"),
+                "{msg}"
+            );
+            assert!(!msg.to_ascii_lowercase().contains("memory store"));
+            assert!(!StoreKind::Postgres.is_ready());
+        }
+    }
+
+    /// B2-R1-1: production is `resolve_backends` passing `Some(embedder_cfg.dim)`.
+    /// Deleting the Postgres-arm copy of that argument into the pin slot must
+    /// make this go red (silent init at 1024 against a 768 embedder).
+    #[test]
+    fn postgres_copies_embedder_width_when_pin_is_absent() {
+        if !StoreKind::Postgres.is_compiled() {
+            let cfg = StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: None,
+            };
+            let Err(err) = build_store_with_vector_dim(cfg, Some(768)) else {
+                panic!("expected err: silent fallback forbidden");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not compiled") && msg.contains("store-postgres"),
+                "{msg}"
+            );
+            return;
+        }
+        let s = build_store_with_vector_dim(
+            StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: None,
+            },
+            Some(768),
+        )
+        .expect("pin-absent copy must construct");
+        assert_eq!(
+            s.vector_dimensions(),
+            Some(768),
+            "absent pin must take the embedder width, not default 1024"
+        );
+        let s = build_store_with_vector_dim(
+            StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: Some(1536),
+            },
+            Some(768),
+        )
+        .expect("pin must construct");
+        assert_eq!(
+            s.vector_dimensions(),
+            Some(1536),
+            "pin still outranks the embedder-width param"
+        );
     }
 
     #[test]
@@ -1171,6 +1350,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     fn feature_names() {
         assert_eq!(StoreKind::Memory.feature_name(), "store-memory");
         assert_eq!(StoreKind::Cockroach.feature_name(), "store-cockroach");
+        assert_eq!(StoreKind::Postgres.feature_name(), "store-postgres");
         assert_eq!(StoreKind::Sqlite.feature_name(), "store-sqlite");
     }
 

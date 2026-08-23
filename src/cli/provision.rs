@@ -2,6 +2,8 @@
 //!
 //! * `store.kind = sqlite` → [`GraphStore::init_schema`] on the resolved store
 //!   (idempotent).
+//! * `store.kind = postgres` → [`GraphStore::init_schema`] (pgvector + hnsw
+//!   from init). Never `scripts/provision.sh` (that file is Cockroach SQL).
 //! * `store.kind = cockroach` → wrap `scripts/provision.sh` (vector-index
 //!   reconciliation lives there, not in `init_schema`'s timeout path).
 //! * `store.kind = memory` → success; the memory store needs no schema.
@@ -30,6 +32,14 @@ pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, 
                 .await
                 .map_err(|e| CliError::Runtime(format!("init_schema: {e}")))?;
             Ok("sqlite schema provisioned (init_schema, idempotent)".into())
+        }
+        StoreKind::Postgres => {
+            // init_schema, not scripts/provision.sh (that file is Cockroach SQL).
+            store
+                .init_schema()
+                .await
+                .map_err(|e| CliError::Runtime(format!("init_schema: {e}")))?;
+            Ok("postgres schema provisioned (init_schema, idempotent, hnsw from init)".into())
         }
         StoreKind::Cockroach => {
             let script = find_provision_script().ok_or_else(|| {
@@ -125,6 +135,105 @@ mod tests {
         assert!(
             out.contains("needs no schema"),
             "memory provision must say no schema is needed: {out}"
+        );
+    }
+}
+
+/// B2: the Postgres arm of `run` calls `init_schema` and must not run
+/// `scripts/provision.sh`. A dummy store is enough; no live adapter.
+#[cfg(test)]
+mod postgres_arm_tests {
+    use super::*;
+    use crate::store::Capabilities;
+    use crate::types::StoreError;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct RecordingStore {
+        init_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl GraphStore for RecordingStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.init_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn capabilities(&self) -> Capabilities {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn flush(
+            &self,
+            _batch: &crate::types::MutationBatch,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn load_session(
+            &self,
+            _session: &crate::types::SessionId,
+        ) -> Result<crate::types::GraphSnapshot, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn keyword_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _tokens: &[String],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn vector_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn blast_radius(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn interaction_span(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn record_canonization(
+            &self,
+            _event: &crate::types::CanonizationEvent,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_postgres_calls_init_schema_not_provision_sh() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store: Box<dyn GraphStore> = Box::new(RecordingStore {
+            init_calls: calls.clone(),
+        });
+        let out = run(store, StoreKind::Postgres)
+            .await
+            .expect("postgres provision must init_schema in B2");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "init_schema must run once");
+        assert!(out.contains("postgres"), "{out}");
+        assert!(out.contains("init_schema"), "{out}");
+        assert!(
+            !out.contains("provision.sh"),
+            "postgres must not run Cockroach provision.sh: {out}"
         );
     }
 }

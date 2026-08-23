@@ -7,7 +7,7 @@
 # - Unknown or uncompiled `kind` => hard startup error.
 
 [store]
-# memory | cockroach | sqlite
+# memory | cockroach | postgres | sqlite
 kind = "memory"
 # Cockroach / Postgres-compatible DSN (prefer env LAMBO_COCKROACH_DSN for secrets):
 # dsn = "postgresql://USER:PASSWORD@HOST:26257/lambo?sslmode=verify-full&sslrootcert=system"

@@ -41,13 +41,13 @@ unknown field `default_top_k`, expected `store` or `embedder`
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `memory` | `memory`, `sqlite`, or `cockroach`. |
+| `kind` | string | `memory` | `memory`, `sqlite`, `cockroach`, or `postgres`. |
 | `path` | string | none | The SQLite file, used when `kind` is `sqlite`. |
-| `dsn` | string | none | The CockroachDB connection string, used when `kind` is `cockroach`. Prefer the environment variable so the secret stays out of the file. |
+| `dsn` | string | none | The CockroachDB or PostgreSQL connection string, used when `kind` is `cockroach` or `postgres`. Prefer the environment variable so the secret stays out of the file. |
 
-`kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb`, `postgres`, and `pg` for `cockroach`, and `sqlite3` for `sqlite`.
+`kind` also accepts a few spellings: `mem` and `ram` for `memory`, `crdb` for `cockroach`, `pg` for `postgres`, and `sqlite3` for `sqlite`. `"postgres"` and `"pg"` are PostgreSQL, not CockroachDB.
 
-The in-memory store is scoped to one process. Many agents can share it through a single `lambo serve`, because they all talk to that one process. Nothing outside that process can read it, and it does not survive a restart. Use `sqlite` or `cockroach` when a separate command line process has to see the same session.
+The in-memory store is scoped to one process. Many agents can share it through a single `lambo serve`, because they all talk to that one process. Nothing outside that process can read it, and it does not survive a restart. Use `sqlite`, `cockroach`, or `postgres` when a separate command line process has to see the same session.
 
 The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
 
@@ -96,6 +96,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `store-memory` | The in-memory store. |
 | `store-sqlite` | The SQLite store. |
 | `store-cockroach` | The CockroachDB store. |
+| `store-postgres` | The PostgreSQL + pgvector store. Fail-closed until B2 lands schema init. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |

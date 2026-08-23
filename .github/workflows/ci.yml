@@ -18,7 +18,7 @@ name: ci
 #
 # NOT just `src/**/*.rs` — three non-Rust trees are real compile/test inputs and
 # MUST stay in this list:
-#   * migrations/**       `include_str!` into store/cockroach.rs + store/sqlite.rs
+#   * migrations/**       `include_str!` into store/pg/{cockroach,postgres}.rs + store/sqlite.rs
 #   * fixtures/**         `include_str!` (mutations-batch.json) and golden files
 #                         read via CARGO_MANIFEST_DIR at test time
 #   * lambo.example.toml  `include_str!` in config.rs — it is a tested contract,
@@ -191,6 +191,11 @@ jobs:
           # (dead-code-clean under -D warnings); live tests are #[ignore]d.
           - name: cockroach
             command: cargo test --no-default-features --features store-cockroach
+          # B2: postgres compile + unit. Live init is the postgres-live job
+          # below (pinned pgvector service container). Same driver as
+          # store-cockroach.
+          - name: postgres
+            command: cargo test --no-default-features --features store-postgres
           # K2 — the in-crate candle BGE-M3 embedder compiles and its
           # weightless unit tests pass on the default runner. The base feature
           # is CPU-capable candle only: no accelerator Cargo features, no
@@ -261,6 +266,67 @@ jobs:
         run: cargo check --all-targets --features embed-candle-metal
         env:
           RUSTFLAGS: -D warnings
+
+  # B2 live Postgres + pgvector tier: service container, no secret, no
+  # provisioned cluster. The image is digest-pinned (never `:latest`) and is
+  # the same image local development runs. See B-postgres-store.md "Where B
+  # is developed".
+  postgres-live:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        env:
+          POSTGRES_USER: lambo
+          POSTGRES_PASSWORD: lambo
+          POSTGRES_DB: lambo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lambo -d lambo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RUSTFLAGS: "-D warnings"
+      LAMBO_POSTGRES_DSN: postgres://lambo:lambo@localhost:5432/lambo?sslmode=disable
+      LAMBO_REQUIRE_LIVE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Live Postgres init (hnsw from init, two widths)
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
+            store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees \
+            2>&1 | tee postgres-live.log
+          grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
+          grep -q 'test store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees ... ok' postgres-live.log
+      - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::postgres::tests::explain_recall_uses_hnsw \
+            store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
+            2>&1 | tee postgres-b3.log
+          grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
+          grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
+      - name: Live Postgres H3 recall parity
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
+            store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity \
+            -- --ignored --nocapture --exact \
+            2>&1 | tee postgres-h3.log
+          grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity ... ok' postgres-h3.log
 
   # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
   # (CRDB conformance suite, canon progression, vector EXPLAIN) against the

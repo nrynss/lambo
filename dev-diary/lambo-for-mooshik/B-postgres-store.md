@@ -126,6 +126,79 @@ the existing conformance suite. Soft edge: H1 → B0.
 
 ---
 
+## What workstream J left in B's path (2026-08-23)
+
+B was scoped 2026-08-19. J2, J3, J4, D and C all landed afterwards and all of them wrote to
+the adapter B0 extracts from, so four things now sit in B's path that its original sections
+do not mention. Recorded here rather than in B0's round-1 review, because **none of these is
+a B0 defect** — B0's artifact is correct on all four. They are B1-and-later work, and the
+cheapest time to read them is before B1 starts.
+
+**1. The extraction surface grew, and mostly in B's favour.** The Cockroach adapter picked up
+J2's `endpoint` column on `session_leases`, J4's `lease_refusals` (with its retention `DELETE`
+and `(session_id, refused_at)` index), J3's `write_intents`, and D/C's `event_time` and
+`human_confirmed`. B0 moved that SQL into `pg/mod.rs`, which is right: it is plain SQL both
+dialects share — the `session_leases` upsert uses `ON CONFLICT … DO UPDATE` with `excluded.`,
+standard on both — so it is genuine base material rather than dialect surface. The
+over-merging trap this doc warns about applies to less of the new code than its volume
+suggests.
+
+**2. B1 gets a forced decision from the type system.** `store_is_shareable`
+(`src/mcp/endpoint.rs`) matches **exhaustively** on `StoreKind`, so adding `Postgres` will not
+compile until someone rules on whether a Postgres-backed session publishes a session
+endpoint. The answer is yes, on the same reasoning that makes Cockroach `true` — it is a
+networked store another process can open — but the compiler makes it an explicit ruling
+rather than a default, which is the right shape for it.
+
+**3. A real hazard: the endpoint hash includes store *identity*, and for Postgres that is a
+DSN.** This is J2-R1-2's defect wearing Postgres clothes. There, `path = "./lambo.db"` named
+a different file from every cwd, so hashing it verbatim gave two graphs one socket; the fix
+was canonicalising the path before hashing. A DSN is harder: `postgres://u@host/db` and
+`postgres://u@host:5432/db` are the **same database and different strings**, so they hash
+differently — two serves on one machine against one database would derive *different* socket
+paths, fail to find each other, and each believe it was alone. The J2 rule to carry forward
+is its own: hash the store's **identity, not its spelling**. Whatever normalisation B1
+chooses (default port, default database, host case, ignored parameters) belongs beside
+`store_identity` with its reasoning, and needs a test that two spellings of one database
+derive one endpoint. Note also J2's second reason for hashing at all: it keeps a DSN's
+password out of both the filesystem and the lease row.
+
+**4. Several machines, one shared store, one single-writer lease — ruled 2026-08-23
+(operator): park and fail over.** This doc's goal is "the unified cross-machine store", and
+the lease admits exactly one writer per session. Point two machines at one shared Postgres
+and the same session and one wins; the loser cannot proxy, because `proxyable` refuses with
+`HolderIsOnAnotherHost` — J2 checks the holder's host precisely so a loser never dials a
+unix socket path that exists only on the holder's machine. That refusal is correct. With a
+machine-local store it was nearly unreachable; with a shared store it becomes the normal
+case, so B has to say what the loser does instead.
+
+**The ruling: the losing machine's writer parks rather than refusing.** It keeps serving
+**reads**, retries, and takes the lease if the holder's lapses — so whichever machine is
+being worked on is the one that writes.
+
+What makes this cheap rather than a compromise: **reads already work everywhere.** `recall`
+takes no lease and reads the durable store, and `backend_flush_interval` defaults to **1
+second**, so a non-holding machine trails the holder by about a second. J2 rejected
+read-only attach as "strictly worse", but that judgement was about the *same-machine* case,
+where proxying delivered true read-your-writes for free; across machines the alternative
+costs a new transport and a shared secret, and the penalty being priced is one second.
+
+What it gives up, stated rather than glossed: **no simultaneous writes from two machines.**
+A write on one is visible on the other in ~1s, but the second machine cannot write while the
+first holds. That fits one human at one machine at a time, which is Mooshik's shape.
+
+The work is small, because the lease already does the hard part: the loser needs a
+park-and-retry loop instead of a refusal, plus honest text saying writes are held elsewhere
+and naming the holder. **Cross-host proxying is the declared future, not this phase** — see
+[FUTURE.md](FUTURE.md), "Cross-host proxying". A parked writer is exactly the process that
+would later learn to proxy, so this does not have to be undone to get there.
+
+DOGFOOD-SETUP's promise that when B lands "the `[store]` block flips to a shared Postgres and
+**nothing else changes**" is falsified by this ruling and moves with it: what else changes is
+that one machine writes at a time.
+
+---
+
 ## B1 — `StoreKind::Postgres` and the alias split
 
 New variant, feature `store-postgres`, and the clean separation:
@@ -189,6 +262,31 @@ parse-out authority):
 
 Whichever is chosen, `vector_dimensions()` keeps a single authority (B4), and the choice gets
 recorded here.
+
+**Recorded at B2 implementation (2026-08-23):**
+
+* **Template at init.** `migrations/postgres/001_init.sql` carries the
+  placeholder `__LAMBO_VECTOR_DIM__`. `PostgresDialect::init_sql(dim)`
+  substitutes it. The file on disk is not valid SQL (applying it with psql
+  fails loudly). Generate-in-code was rejected: a 300-line schema built with
+  `format!` is worse to review than a file with one placeholder, and the
+  inverted data flow is still honest (width goes *into* the SQL).
+* **dim > 2000: refuse, naming the ceiling and the `halfvec` hatch.**
+  halfvec is not implemented in B2 (it would change the stored type, the
+  operator class, and B3's cast/distance rows). 768 and 1536 pass; 2000
+  passes; 2001 and Gemini 3072 are refused at `init_sql` / `vector_dim`,
+  never at `CREATE INDEX`.
+* **Over-merge split.** `init_schema` still runs `raw_sql(ddl)` then N
+  `query()` calls; the statements come from `Dialect::post_init_statements`
+  (Cockroach: `endpoint STRING` + `current_token INT`; Postgres:
+  `endpoint TEXT` + `current_token BIGINT`). `connect_options` applies
+  shared `statement_timeout` then `Dialect::apply_connect_options`
+  (Cockroach: `vector_search_beam_size`; Postgres: identity, pgvector
+  `hnsw.ef_search` stays at default 40). No ANN knobs on Postgres.
+* **Width source for substitution, not B4.** `Dialect::vector_dim` reads
+  `[store] vector_dim`, else the embedder width copied in by
+  `build_store_with_vector_dim`, else 1024. `GraphStore::vector_dimensions`
+  still echoes the construction dim. Live-schema reporting is B4.
 
 **Depends on:** B0, B1.
 

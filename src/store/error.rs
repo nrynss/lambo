@@ -21,7 +21,7 @@
 //! on error text.
 //!
 //! This module compiles only when a sqlx-backed adapter is enabled
-//! (`store-cockroach` / `store-sqlite`), which is when the
+//! (`store-cockroach` / `store-postgres` / `store-sqlite`), which is when the
 //! [`sqlx::Error::Database`] payload exists.
 
 use std::borrow::Cow;
