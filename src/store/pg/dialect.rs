@@ -12,8 +12,10 @@
 //! authority. Nothing else belongs here yet. The shared subset of two SQL
 //! adapters is *discovered* by diffing two real implementations, not guessed
 //! from one, so a method added because PostgreSQL "might need it" would be a
-//! guess with a trait's authority. B0 ships one dialect; B2 adds the second and
-//! the diff between them is what may widen this trait.
+//! guess with a trait's authority. B0 shipped one working dialect. B1 adds
+//! `PostgresDialect` as a named, fail-closed stub (no Cockroach SQL). B2 fills
+//! its DDL; the diff between the two working dialects is what may widen this
+//! trait.
 //!
 //! **The over-merging trap, restated where it bites.** A statement belongs in
 //! [`super::PgStore`] only when its SQL is byte-identical for every dialect.

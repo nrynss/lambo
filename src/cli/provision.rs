@@ -31,6 +31,13 @@ pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, 
                 .map_err(|e| CliError::Runtime(format!("init_schema: {e}")))?;
             Ok("sqlite schema provisioned (init_schema, idempotent)".into())
         }
+        StoreKind::Postgres => {
+            // B1: fail closed naming B2. scripts/provision.sh is Cockroach SQL
+            // and must not run under kind = "postgres".
+            Err(CliError::Runtime(crate::store::postgres_not_ready_msg(
+                "provision",
+            )))
+        }
         StoreKind::Cockroach => {
             let script = find_provision_script().ok_or_else(|| {
                 CliError::Runtime(format!(
@@ -125,6 +132,97 @@ mod tests {
         assert!(
             out.contains("needs no schema"),
             "memory provision must say no schema is needed: {out}"
+        );
+    }
+}
+
+/// B1-R1-3: the Postgres arm of `run` must refuse `scripts/provision.sh`
+/// and name B2. The store is unused; a dummy is enough, no real adapter.
+#[cfg(test)]
+mod postgres_arm_tests {
+    use super::*;
+    use crate::store::Capabilities;
+    use crate::types::StoreError;
+    use async_trait::async_trait;
+
+    struct UnusedStore;
+
+    #[async_trait]
+    impl GraphStore for UnusedStore {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        fn capabilities(&self) -> Capabilities {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn flush(
+            &self,
+            _batch: &crate::types::MutationBatch,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn load_session(
+            &self,
+            _session: &crate::types::SessionId,
+        ) -> Result<crate::types::GraphSnapshot, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn keyword_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _tokens: &[String],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn vector_candidates(
+            &self,
+            _session: &crate::types::SessionId,
+            _embedding: &[f32],
+            _limit: usize,
+        ) -> Result<Vec<crate::types::Scored<crate::types::NodeId>>, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn blast_radius(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_edge_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn interaction_span(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+        async fn record_canonization(
+            &self,
+            _event: &crate::types::CanonizationEvent,
+            _token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_postgres_fails_closed_naming_b2() {
+        let store: Box<dyn GraphStore> = Box::new(UnusedStore);
+        let err = run(store, StoreKind::Postgres)
+            .await
+            .expect_err("postgres provision must fail closed in B1");
+        let msg = err.to_string();
+        assert!(msg.contains("B2"), "{msg}");
+        assert!(msg.contains("postgres"), "{msg}");
+        assert!(
+            !msg.contains("provision.sh"),
+            "postgres must not run Cockroach provision.sh: {msg}"
         );
     }
 }

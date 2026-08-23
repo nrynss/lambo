@@ -191,6 +191,10 @@ jobs:
           # (dead-code-clean under -D warnings); live tests are #[ignore]d.
           - name: cockroach
             command: cargo test --no-default-features --features store-cockroach
+          # B1: postgres compile + unit. No live database; postgres-live
+          # (service container) is B2/B3. Same driver as store-cockroach.
+          - name: postgres
+            command: cargo test --no-default-features --features store-postgres
           # K2 — the in-crate candle BGE-M3 embedder compiles and its
           # weightless unit tests pass on the default runner. The base feature
           # is CPU-capable candle only: no accelerator Cargo features, no

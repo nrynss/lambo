@@ -34,6 +34,7 @@ demo with `store-cockroach` + `embed-bge`, and leaves Bedrock optional until aut
 |---------|----------|---------|
 | `store-memory` | `MemoryStore` | **yes** |
 | `store-cockroach` | `CockroachStore` (P3) + `sqlx` postgres | no until T3.2 |
+| `store-postgres` | `PostgresStore` (B1) + same `sqlx` postgres driver; fail-closed until B2 | no until B2 |
 | `store-sqlite` | `SqliteStore` (P3) + `sqlx` sqlite | no until T3.3 |
 | `embed-fixture` | `FixtureEmbedder` | **yes** |
 | `embed-bge` | `BgeM3LlamaCppEmbedder` + `reqwest` | **yes** |
@@ -69,7 +70,7 @@ Example: [`../../lambo.example.toml`](../../lambo.example.toml).
 
 ```toml
 [store]
-kind = "memory"          # memory | cockroach | sqlite
+kind = "memory"          # memory | cockroach | postgres | sqlite
 # dsn = "postgresql://..."   # secrets: prefer env LAMBO_COCKROACH_DSN
 # path = "./lambo.db"        # sqlite
 

@@ -47,7 +47,10 @@
 //! graphs **one** socket, at which point the second holder's stale-socket unlink
 //! removes the first holder's live socket and a proxy of graph A forwards writes
 //! into graph B — verbatim the outcome this discriminator exists to prevent. So
-//! the file half of the identity is canonicalized before it is hashed.
+//! the file half of the identity is canonicalized before it is hashed. The DSN
+//! half is normalised the same way (B1): omitted port is 5432, host is
+//! lowercased, connection parameters that do not name the database are dropped,
+//! and the password is stripped so it is not even in the pre-hash string.
 //!
 //! The published value is still read from the row rather than assumed, because
 //! the row is the authority on where *this* holder listens: a proxy compares the
@@ -654,17 +657,283 @@ fn sanitize_prefix(session: &str) -> String {
 /// point of hashing is that neither the filesystem nor the lease row ever holds
 /// one.
 ///
-/// The DSN half is taken verbatim — it is already an absolute, host-qualified
-/// address. The path half is **canonicalized** first, because a path is a
-/// spelling and this function must produce an identity; see
-/// [`canonical_store_path`] and J2-R1-2.
+/// The DSN half is **normalised**, not taken verbatim: a DSN is a spelling and
+/// this function must produce an identity; see [`canonical_store_dsn`]. The
+/// path half is **canonicalized** first for the same reason; see
+/// [`canonical_store_path`] and J2-R1-2. The password never appears in the
+/// string that is hashed, so it cannot reach the filesystem or the lease row
+/// even if hashing were skipped.
 fn store_identity(store: &StoreConfig) -> String {
     format!(
         "{:?}\u{1f}{}\u{1f}{}",
         store.kind,
-        store.dsn.as_deref().unwrap_or(""),
+        canonical_store_dsn(store.dsn.as_deref().unwrap_or("")),
         canonical_store_path(store.path.as_deref().unwrap_or(""))
     )
+}
+
+/// Turn a Postgres-wire DSN *spelling* into a store *identity* (B1, J2-R1-2
+/// wearing Postgres clothes).
+///
+/// `postgres://u@host/db` and `postgres://u@host:5432/db` are the same database
+/// and different strings. Hashing them verbatim gave two serves on one machine
+/// against one database two socket paths, so each believed it was alone.
+///
+/// # The rule
+///
+/// * **Scheme** `postgres` and `postgresql` are the same (emitted as
+///   `postgres`).
+/// * **Host** is lowercased. DNS is case-insensitive; two casings of one name
+///   are one store.
+/// * **Omitted port is 5432**, the libpq/sqlx default the driver will actually
+///   dial. Cockroach's conventional 26257 is *not* the implicit port: sqlx
+///   still dials 5432 when the DSN omits one, so identity follows the driver.
+/// * **Omitted database defaults to the explicit username**, matching libpq
+///   ("dbname defaults to the user name"). The OS user is never substituted:
+///   identity must not depend on who launched the process (the DSN equivalent
+///   of J2-R1-2's cwd trap).
+/// * **Password is stripped.** Hashing already keeps it out of the filesystem
+///   and the lease row; stripping means the pre-hash string is not a secret
+///   either, and two credentials for one database still derive one endpoint.
+/// * **Query parameters that do not name the database are dropped.**
+///   `sslmode` / `sslrootcert` / `sslcert` / `sslkey` / `connect_timeout` /
+///   `application_name` / `options` change how you connect, not which
+///   database you open. `host` / `port` / `dbname` / `user` in the query
+///   overlay the authority, matching sqlx.
+/// * **Username is kept.** Two roles on one cluster can be two deployments;
+///   the motivating example keeps `u`.
+/// * **A non-URL DSN** (libpq `key=value`) is parsed for the same fields when
+///   it contains `=`. Anything else is returned with a `password=` token
+///   stripped, otherwise verbatim.
+fn canonical_store_dsn(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(parts) = parse_postgres_url(trimmed) {
+        return parts.to_identity();
+    }
+    if let Some(parts) = parse_libpq_kv(trimmed) {
+        return parts.to_identity();
+    }
+    strip_libpq_password_token(trimmed)
+}
+
+struct DsnParts {
+    user: String,
+    host: String,
+    port: u16,
+    database: String,
+}
+
+impl DsnParts {
+    fn to_identity(&self) -> String {
+        let db = if self.database.is_empty() && !self.user.is_empty() {
+            self.user.as_str()
+        } else {
+            self.database.as_str()
+        };
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        if self.user.is_empty() {
+            format!("postgres://{host}:{}/{}", self.port, db)
+        } else {
+            format!("postgres://{}@{host}:{}/{}", self.user, self.port, db)
+        }
+    }
+}
+
+const PG_DEFAULT_PORT: u16 = 5432;
+
+fn parse_postgres_url(raw: &str) -> Option<DsnParts> {
+    let lower = raw.to_ascii_lowercase();
+    let rest = if lower.starts_with("postgres://") {
+        &raw["postgres://".len()..]
+    } else if lower.starts_with("postgresql://") {
+        &raw["postgresql://".len()..]
+    } else {
+        return None;
+    };
+    let (authority, after) = split_authority(rest);
+    let (userinfo, hostport) = match authority.rfind('@') {
+        Some(i) => (Some(&authority[..i]), &authority[i + 1..]),
+        None => (None, authority),
+    };
+    let user = match userinfo {
+        Some(info) => {
+            let u = info.split_once(':').map(|(u, _)| u).unwrap_or(info);
+            percent_decode(u)
+        }
+        None => String::new(),
+    };
+    let (host, port) = split_host_port(hostport)?;
+    let (path, query) = match after.strip_prefix('?') {
+        Some(q) => ("", q),
+        None => match after.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (after, ""),
+        },
+    };
+    let mut database = path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string();
+    if !database.is_empty() {
+        database = percent_decode(&database);
+    }
+    let mut parts = DsnParts {
+        user,
+        host: host.to_ascii_lowercase(),
+        port: port.unwrap_or(PG_DEFAULT_PORT),
+        database,
+    };
+    apply_query_overlays(&mut parts, query);
+    Some(parts)
+}
+
+fn split_authority(s: &str) -> (&str, &str) {
+    let mut bracket = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => bracket = true,
+            ']' => bracket = false,
+            '/' | '?' if !bracket => return (&s[..i], &s[i..]),
+            _ => {}
+        }
+    }
+    (s, "")
+}
+
+fn split_host_port(hostport: &str) -> Option<(String, Option<u16>)> {
+    if hostport.is_empty() {
+        return Some((String::new(), None));
+    }
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = rest[..end].to_string();
+        let after = &rest[end + 1..];
+        let port = if let Some(p) = after.strip_prefix(':') {
+            Some(p.parse().ok()?)
+        } else if after.is_empty() {
+            None
+        } else {
+            return None;
+        };
+        return Some((host, port));
+    }
+    match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            Some((percent_decode(h), Some(p.parse().ok()?)))
+        }
+        _ => Some((percent_decode(hostport), None)),
+    }
+}
+
+fn apply_query_overlays(parts: &mut DsnParts, query: &str) {
+    if query.is_empty() {
+        return;
+    }
+    for pair in query.split('&') {
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => continue,
+        };
+        let key = percent_decode(k).to_ascii_lowercase();
+        let value = percent_decode(v);
+        match key.as_str() {
+            "host" | "hostaddr" => parts.host = value.to_ascii_lowercase(),
+            "port" => {
+                if let Ok(p) = value.parse() {
+                    parts.port = p;
+                }
+            }
+            "dbname" | "database" => parts.database = value,
+            "user" => parts.user = value,
+            "password" => {} // stripped
+            _ => {}          // ssl*, timeout, application_name, options, ...
+        }
+    }
+}
+
+fn parse_libpq_kv(raw: &str) -> Option<DsnParts> {
+    if raw.contains("://") || !raw.contains('=') {
+        return None;
+    }
+    let mut parts = DsnParts {
+        user: String::new(),
+        host: String::new(),
+        port: PG_DEFAULT_PORT,
+        database: String::new(),
+    };
+    let mut saw_identity_key = false;
+    for token in raw.split_whitespace() {
+        let (k, v) = match token.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => continue,
+        };
+        let key = k.to_ascii_lowercase();
+        match key.as_str() {
+            "host" | "hostaddr" => {
+                parts.host = v.to_ascii_lowercase();
+                saw_identity_key = true;
+            }
+            "port" => {
+                parts.port = v.parse().ok()?;
+                saw_identity_key = true;
+            }
+            "dbname" | "database" => {
+                parts.database = v.to_string();
+                saw_identity_key = true;
+            }
+            "user" => {
+                parts.user = v.to_string();
+                saw_identity_key = true;
+            }
+            "password" => {}
+            _ => {}
+        }
+    }
+    saw_identity_key.then_some(parts)
+}
+
+fn strip_libpq_password_token(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter(|tok| {
+            let key = tok.split('=').next().unwrap_or("").to_ascii_lowercase();
+            key != "password"
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Turn a store path *spelling* into a store *identity* (J2-R1-2).
@@ -769,6 +1038,10 @@ fn store_is_shareable(store: &StoreConfig) -> bool {
     match store.kind {
         StoreKind::Memory => false,
         StoreKind::Cockroach => true,
+        // Networked store another process can open: the same ruling as
+        // Cockroach. Ruled here, not defaulted, because the match is
+        // exhaustive (J2, B1-forced).
+        StoreKind::Postgres => true,
         // The in-memory spellings SQLite accepts: the bare `:memory:`, the
         // `sqlite::memory:` URL this crate uses, and the `mode=memory` URI
         // parameter. Anything else is a file another process can open.
@@ -1207,6 +1480,189 @@ mod tests {
             &cfg(StoreKind::Cockroach, None, Some("postgres://h/db"))
         )
         .is_some());
+        assert!(SessionEndpoint::for_store(
+            "s",
+            &cfg(StoreKind::Postgres, None, Some("postgres://h/db"))
+        )
+        .is_some());
+    }
+
+    /// B1 / J2-R1-2: a DSN is a spelling. Two spellings of one database must
+    /// derive one session endpoint, or two serves on one machine each believe
+    /// they are alone. Password is not in the identity string (so it cannot
+    /// reach the filesystem or the lease row).
+    #[test]
+    fn two_spellings_of_one_database_derive_one_endpoint() {
+        let a = at(
+            "s",
+            &cfg(StoreKind::Postgres, None, Some("postgres://u@host/db")),
+        );
+        let b = at(
+            "s",
+            &cfg(StoreKind::Postgres, None, Some("postgres://u@host:5432/db")),
+        );
+        assert_eq!(
+            a, b,
+            "omitting the default port must not mint a second endpoint"
+        );
+        assert_eq!(
+            a,
+            at(
+                "s",
+                &cfg(
+                    StoreKind::Postgres,
+                    None,
+                    Some("postgresql://u@HOST/db?sslmode=require")
+                )
+            ),
+            "postgresql://, host case, and sslmode are spelling, not identity"
+        );
+        let with_password = cfg(
+            StoreKind::Postgres,
+            None,
+            Some("postgres://u:s3cret@host/db"),
+        );
+        assert_eq!(
+            a,
+            at("s", &with_password),
+            "password is a credential, not the database"
+        );
+        assert_eq!(
+            a,
+            at(
+                "s",
+                &cfg(
+                    StoreKind::Postgres,
+                    None,
+                    Some("postgres://u:other@host:5432/db")
+                )
+            )
+        );
+        let ident = store_identity(&with_password);
+        assert!(
+            !ident.contains("s3cret"),
+            "password must not appear in the pre-hash identity: {ident}"
+        );
+        assert!(
+            !a.published().contains("s3cret"),
+            "password must not appear in the lease-published path"
+        );
+        // Omitted database defaults to the explicit username (libpq). A DSN
+        // without `/db` and the same DSN with `/u` are one database.
+        let omitted_db = at(
+            "s",
+            &cfg(StoreKind::Postgres, None, Some("postgres://u@host")),
+        );
+        assert_eq!(
+            omitted_db,
+            at(
+                "s",
+                &cfg(StoreKind::Postgres, None, Some("postgres://u@host/u"))
+            ),
+            "omitting the database must not mint a second endpoint"
+        );
+        assert_ne!(
+            omitted_db, a,
+            "username-as-database is not the same store as an explicit /db"
+        );
+        // Libpq key=value is a spelling of the same database as the URL form.
+        assert_eq!(
+            a,
+            at(
+                "s",
+                &cfg(
+                    StoreKind::Postgres,
+                    None,
+                    Some("host=host user=u dbname=db")
+                )
+            ),
+            "libpq key=value must derive the same endpoint as the URL form"
+        );
+        // Different database, different endpoint.
+        assert_ne!(
+            a,
+            at(
+                "s",
+                &cfg(StoreKind::Postgres, None, Some("postgres://u@host/other"))
+            )
+        );
+        // Kind is part of identity: the same DSN on Cockroach is a different store.
+        assert_ne!(
+            a,
+            at(
+                "s",
+                &cfg(StoreKind::Cockroach, None, Some("postgres://u@host/db"))
+            )
+        );
+        // The same two spellings on Cockroach also collapse: the hazard is the
+        // DSN, not the kind.
+        assert_eq!(
+            at(
+                "s",
+                &cfg(StoreKind::Cockroach, None, Some("postgres://u@host/db"))
+            ),
+            at(
+                "s",
+                &cfg(
+                    StoreKind::Cockroach,
+                    None,
+                    Some("postgres://u@host:5432/db")
+                )
+            )
+        );
+        assert_eq!(
+            canonical_store_dsn("postgres://u@host/db"),
+            "postgres://u@host:5432/db"
+        );
+        assert_eq!(
+            canonical_store_dsn("postgres://u:s3cret@host/db"),
+            "postgres://u@host:5432/db"
+        );
+        assert_eq!(
+            canonical_store_dsn("postgres://u@host"),
+            "postgres://u@host:5432/u"
+        );
+        assert_eq!(
+            canonical_store_dsn("host=host user=u dbname=db"),
+            "postgres://u@host:5432/db"
+        );
+    }
+
+    /// B1-R1-2: shareable is ruled per kind, not defaulted. Collapsing
+    /// Cockroach and Postgres to `_ => true` (Sqlite still special-cased)
+    /// left the value pin green. This test names every variant and forbids
+    /// `_ =>` in the function body, so that mutation goes red.
+    #[test]
+    fn store_is_shareable_is_ruled_not_defaulted() {
+        fn arm(kind: StoreKind) -> &'static str {
+            match kind {
+                StoreKind::Memory => "StoreKind::Memory =>",
+                StoreKind::Cockroach => "StoreKind::Cockroach =>",
+                StoreKind::Postgres => "StoreKind::Postgres =>",
+                StoreKind::Sqlite => "StoreKind::Sqlite =>",
+            }
+        }
+        let body = include_str!("endpoint.rs")
+            .split("fn store_is_shareable(store: &StoreConfig) -> bool {")
+            .nth(1)
+            .and_then(|s| s.split("\nfn ").next())
+            .expect("store_is_shareable body");
+        for kind in [
+            StoreKind::Memory,
+            StoreKind::Cockroach,
+            StoreKind::Postgres,
+            StoreKind::Sqlite,
+        ] {
+            let needle = arm(kind);
+            assert!(
+                body.contains(needle),
+                "store_is_shareable must name {needle} (ruled, not defaulted)"
+            );
+        }
+        assert!(
+            !body.contains("_ =>"),
+            "store_is_shareable must not default via `_ =>`; a future kind would inherit a ruling"
+        );
     }
 
     /// **JE2E-2, the reviewer's own test shape.** Bind a holder, bind a second

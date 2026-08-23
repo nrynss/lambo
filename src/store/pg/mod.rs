@@ -25,21 +25,28 @@
 //! branches recreates the drift problem inside the shared code, where it is
 //! harder to see.
 //!
-//! In [`cockroach`]: `CockroachDialect`, the embedded `001_init.sql`, and the
-//! width-from-DDL authority. **The T3.2 design log** for everything in this
-//! file, including the batch replay order, the `ON CONFLICT` targets, the
-//! §4.1 query semantics and the vector encode/decode contract, is the module
-//! doc on [`cockroach`]: it was written and reviewed against this code and B0
-//! moves the code without rewriting the record of why it is shaped this way.
+//! In `cockroach` (feature `store-cockroach`): `CockroachDialect`, the embedded
+//! `001_init.sql`, and the width-from-DDL authority. **The T3.2 design log**
+//! for everything in this file, including the batch replay order, the
+//! `ON CONFLICT` targets, the §4.1 query semantics and the vector
+//! encode/decode contract, is the module doc on that dialect: it was written
+//! and reviewed against this code and B0 moves the code without rewriting the
+//! record of why it is shaped this way.
+//!
+//! In `postgres` (feature `store-postgres`): `PostgresDialect`, a named
+//! dialect that **fails closed** at init/provision naming B2. It does not
+//! copy Cockroach SQL. B2 owns templated width, hnsw-from-init, and the
+//! distance conversion.
 //!
 //! # Not yet dialect-aware (B2/B3 inputs, recorded not hidden)
 //!
-//! B0 ships **one** dialect, and the shared subset of two adapters is
+//! B0 shipped **one** working dialect. The shared subset of two adapters is
 //! discovered by diffing two real implementations rather than guessed from one.
 //! So a handful of Cockroach-isms are still inline below, deliberately left
 //! rather than speculatively abstracted. They are enumerated in
 //! `dev-diary/lambo-for-mooshik/b-run/B0-implementation.md` §4, and each one is
-//! marked `B2/B3:` at its site.
+//! marked `B2/B3:` at its site. B1 does not split `init_schema` /
+//! `connect_options`.
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -52,7 +59,13 @@ pub use dialect::Dialect;
 
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.
+#[cfg(feature = "store-cockroach")]
 pub mod cockroach;
+
+// B1: PostgreSQL + pgvector dialect. Feature: store-postgres. Fail-closed
+// until B2 lands DDL; do not copy Cockroach SQL (see postgres.rs).
+#[cfg(feature = "store-postgres")]
+pub mod postgres;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -342,7 +355,10 @@ INSERT INTO canonization_events (
 ON CONFLICT (id) DO NOTHING
 "#;
 
-#[cfg(any(test, feature = "fixtures"))]
+// Fixtures `seed` and the Cockroach SQL-shape tests. Not part of the B1
+// postgres stub's surface: compiling them under store-postgres-only would
+// be dead_code (no reader).
+#[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
 const UPSERT_SYNONYM_SQL: &str = r#"
 INSERT INTO synonyms (session_id, source_key, canonical_key)
 VALUES ($1, $2, $3)
@@ -350,7 +366,7 @@ ON CONFLICT (session_id, source_key) DO UPDATE SET
     canonical_key = EXCLUDED.canonical_key
 "#;
 
-#[cfg(any(test, feature = "fixtures"))]
+#[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
 const UPSERT_RESERVATION_SQL: &str = r#"
 INSERT INTO reservations (session_id, node_id, agent_id, expires_at)
 VALUES ($1, $2, $3, $4)
@@ -480,7 +496,7 @@ struct DialectSql {
     /// Full-snapshot sessions upsert (fixtures `seed` path): root_goal JSONB, created_at,
     /// closed_at, and the `EmbeddingContract` columns (STORE-1). `COALESCE($3, now())`
     /// keeps the NOT NULL default when a snapshot omits it.
-    #[cfg(any(test, feature = "fixtures"))]
+    #[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
     upsert_session: String,
 
     /// `Mutation::SetEmbedding`'s session-column write.
@@ -521,7 +537,7 @@ ORDER BY dist ASC, id ASC
 LIMIT $3
 "#
             ),
-            #[cfg(any(test, feature = "fixtures"))]
+            #[cfg(any(feature = "fixtures", all(test, feature = "store-cockroach")))]
             upsert_session: format!(
                 r#"
 INSERT INTO sessions (

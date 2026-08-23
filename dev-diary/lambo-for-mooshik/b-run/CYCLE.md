@@ -1,12 +1,13 @@
 # Workstream B run protocol (2026-08-23)
 
-> **Branch:** this run lives on `b0-pg-extraction`, which **merges to
-> `lambo-for-mooshik`**, not to `main`. `main` does not move before 2026-09-15;
-> `lambo-for-mooshik` is what it merges from. Branched off `bd3e9ac`.
+> **Branch:** this run lives on `b0-pg-extraction` until **B0 through B4 are
+> all closed**. One merge to `lambo-for-mooshik` at the end of B, not after
+> each phase. `main` does not move before 2026-09-15. Branched off `bd3e9ac`.
 >
 > **Status, 2026-08-23:** **B0 closed.** Round 1 REQUEST_CHANGES (0 P1 / 1 P2 /
-> 5 P3); round-1 remediation; round 2 **APPROVE**, zero residue
-> (`adve-review-mooshik-B-B0-round{1,2}.md`). B1 is next. B2 through B4
+> 5 P3); round 2 **APPROVE**, zero residue. **B1 closed.** Round 1
+> REQUEST_CHANGES (0 P1 / 1 P2 / 4 P3); round 2 **APPROVE**, zero residue
+> (`adve-review-mooshik-B-B{0,1}-round{1,2}.md`). B2 is next. B3 and B4
 > unstarted.
 >
 > **B0-R1-1 (P2) landed:** the composed-SQL byte-identity proof is

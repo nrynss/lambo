@@ -109,6 +109,9 @@ embed-candle-cuda = ["embed-candle", "candle-core/cuda", "candle-nn/cuda", "cand
 store-memory = []
 # P3: enable when CockroachStore lands (pulls sqlx + postgres).
 store-cockroach = ["dep:sqlx", "sqlx/postgres"]
+# B1: PostgreSQL + pgvector dialect. Same sqlx postgres driver as
+# store-cockroach; do not add a second driver. Fail-closed until B2.
+store-postgres = ["dep:sqlx", "sqlx/postgres"]
 # P3: enable when SqliteStore lands (pulls sqlx + sqlite).
 store-sqlite = ["dep:sqlx", "sqlx/sqlite"]
 
