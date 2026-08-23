@@ -188,3 +188,36 @@ mutation classes I applied were killed by the existing suite; the DDL ships corr
 both dialects. Residue: the decorative upper bands (P2) and the revert-count docstring
 (P3). Per the binding operator rule, remediation must close both severities before this
 workstream is clean.
+
+## Round 1 closures
+
+| Finding | Closure (commit + evidence) |
+| --- | --- |
+| C-R1-1 | `ad8e065` — the published Venerable/Canonical bands now drive the promotion
+  ladder's admission under the solo policy, via fix direction (a) from this review:
+  `PromotionScorer` grows `admits_hop(graph, node, to, evidence)`, giving the active
+  policy the final word on each hop given a stage's evidence verdict. Swarm keeps the
+  evidence verdict verbatim (the pre-seam pipeline byte-for-byte); solo substitutes its
+  §3.2 bands — `status_rank(classify(solo_score)) >= status_rank(to)` — so the ladder
+  cannot lift a concept past its band, and a band at or above the target admits without
+  store evidence (`src/canon/policy.rs`, `eval.rs`; stage predicates themselves stay
+  policy-independent per C1). Stage 3's re-promotion cooldown is re-checked in `apply`
+  for score-admitted hops, since those bypass the verdict phase where the gate normally
+  runs; the Canonical budget cut is unchanged; both api.mdx mirrors updated. Tests:
+  unit-level `solo_admission_climbs_with_the_score_bands` /
+  `swarm_admission_is_the_evidence_verdict`; end-to-end through `eval_cycle`,
+  `solo_band_drives_the_candidate_to_venerable_hop` (resistant exactly 6.0 with stage-2
+  evidence failing), `solo_band_drives_the_venerable_to_canonical_hop` (10.8 without
+  blast evidence), and `solo_score_admission_still_honors_the_repromotion_cooldown`.
+  Per the remediator's report, five mutation classes were applied-observed-red-reverted
+  during development: `admits_hop` returning `_evidence` → red ×3; exclusive band
+  comparison (`>=` → `>`) → red ×3; swarm arm ignoring evidence → red ×5; apply reverted
+  to evidence-only → red ×1; cooldown gate dropped → red ×1. |
+| C-R1-2 | `6152443` — `revert_count`'s docstring now names Canonical→None as the only
+  legal rank-decreasing transition, replacing the two impossible examples this finding
+  cited (conflict demotion Venerable→None; partial Canonical→Venerable step-down), both
+  rejected by `legal_canonization_transition`. The doc additionally records that the
+  rank-comparison filter is deliberate: any future addition to the legal set that
+  decreases rank lands in this count and must be audited against it — matching this
+  finding's second fix direction. Counting logic untouched (it was correct);
+  `src/canon/policy.rs` only. |
