@@ -303,17 +303,19 @@ jobs:
         run: |
           set -o pipefail
           cargo test --no-default-features --features store-postgres --lib \
-            store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
             -- --ignored --nocapture --exact \
+            store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw \
+            store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees \
             2>&1 | tee postgres-live.log
           grep -q 'test store::pg::postgres::tests::init_schema_at_two_widths_creates_hnsw ... ok' postgres-live.log
+          grep -q 'test store::pg::postgres::tests::live_schema_width_refuses_a_config_that_disagrees ... ok' postgres-live.log
       - name: Live Postgres B3 (EXPLAIN hnsw, fencing, NULL quarantine)
         run: |
           set -o pipefail
           cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
             store::pg::postgres::tests::explain_recall_uses_hnsw \
             store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
-            -- --ignored --nocapture --exact \
             2>&1 | tee postgres-b3.log
           grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
           grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log

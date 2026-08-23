@@ -623,6 +623,14 @@ WHERE session_id = $1
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Parse pgvector `format_type` output (`vector(768)`). Rejects Cockroach
+/// `VECTOR(n)` so a live probe cannot silently accept the wrong dialect.
+pub(crate) fn parse_pgvector_format_type(formatted: &str) -> Option<usize> {
+    let rest = formatted.trim().strip_prefix("vector(")?;
+    let inner = rest.strip_suffix(')')?;
+    inner.trim().parse().ok()
+}
+
 fn backend<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Backend(e.to_string())
 }
@@ -1257,6 +1265,49 @@ impl<D: Dialect> PgStore<D> {
     #[cfg(all(test, feature = "store-postgres"))]
     pub(crate) fn forced_exact_scan(&self) -> bool {
         self.force_exact_scan
+    }
+
+    /// Test helper: the rustls-rewritten DSN this store will open.
+    #[cfg(all(test, feature = "store-postgres"))]
+    pub(crate) fn dsn(&self) -> &str {
+        &self.dsn
+    }
+
+    /// B4: dialects that substitute width into DDL must prove the live
+    /// column matches construction dim. Cockroach skips this: its authority
+    /// is the static file parsed at construction.
+    async fn assert_live_schema_width(&self, pool: &PgPool) -> Result<(), StoreError> {
+        let Some(sql) = D::live_schema_vector_width_sql() else {
+            return Ok(());
+        };
+        let formatted: Option<String> = sqlx::query_scalar(sql)
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?;
+        let Some(formatted) = formatted else {
+            return Err(StoreError::Backend(format!(
+                "{}: concepts.embedding is missing; store is unprovisioned \
+                 or not a vector schema",
+                D::NAME
+            )));
+        };
+        let live = parse_pgvector_format_type(&formatted).ok_or_else(|| {
+            StoreError::Backend(format!(
+                "{}: concepts.embedding type {formatted:?} is not vector(n)",
+                D::NAME
+            ))
+        })?;
+        if live != self.vector_dim {
+            return Err(StoreError::Backend(format!(
+                "{}: live schema width is vector({live}) but this process \
+                 constructed at dim {}. DDL outranks the pin for reporting; \
+                 they must match on an initialized store. Re-init at the \
+                 schema width, or migrate.",
+                D::NAME,
+                self.vector_dim
+            )));
+        }
+        Ok(())
     }
 
     /// Issue [`Dialect::forced_exact_scan_sql`] on `tx` when the H3
@@ -2220,6 +2271,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         for stmt in D::post_init_statements() {
             sqlx::query(stmt).execute(pool).await.map_err(backend)?;
         }
+        self.assert_live_schema_width(pool).await?;
         Ok(())
     }
 
@@ -2271,6 +2323,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 return Err(unprovisioned_column_err(D::NAME, table, &missing));
             }
         }
+        self.assert_live_schema_width(pool).await?;
         Ok(())
     }
 
@@ -2279,6 +2332,9 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     }
 
     fn vector_dimensions(&self) -> Option<usize> {
+        // Construction width. For Postgres, [`Self::assert_live_schema_width`]
+        // has checked this against live `vector(n)` on init and attach, so
+        // the number is the schema's, not an unchecked echo of config.
         Some(self.vector_dim)
     }
 

@@ -20,8 +20,8 @@
 //! row's live parity box.
 //!
 //! [`Dialect::vector_dim`] reads the width that `init_sql` will substitute
-//! (config pin, else 1024). [`GraphStore::vector_dimensions`] reporting from
-//! the live schema is B4; this file does not close B4.
+//! (config pin, else 1024). B4 probes live `vector(n)` at init and
+//! preflight so reporting is not an echo of the same config value.
 
 use std::borrow::Cow;
 
@@ -103,11 +103,21 @@ impl Dialect for PostgresDialect {
     /// [`DEFAULT_POSTGRES_VECTOR_DIM`]. `build_store_with_vector_dim` copies
     /// the resolved embedder width into the pin slot when the pin is absent,
     /// so a process that configured `[embedder] dim = 768` inits at 768.
-    /// Live-schema reporting is B4.
+    /// B4 then checks this number against live `vector(n)` at init and attach.
     fn vector_dim(cfg: &StoreConfig) -> Result<usize, StoreError> {
         let dim = cfg.vector_dim.unwrap_or(DEFAULT_POSTGRES_VECTOR_DIM);
         refuse_over_hnsw_ceiling(dim)?;
         Ok(dim)
+    }
+
+    fn live_schema_vector_width_sql() -> Option<&'static str> {
+        Some(
+            "SELECT format_type(atttypid, atttypmod) \
+             FROM pg_attribute \
+             WHERE attrelid = 'concepts'::regclass \
+               AND attname = 'embedding' \
+               AND NOT attisdropped",
+        )
     }
 
     const NAME: &'static str = "postgres";
@@ -543,6 +553,16 @@ mod tests {
                 format!("vector({dim})"),
                 "live width at dim {dim}"
             );
+            assert_eq!(
+                crate::store::pg::parse_pgvector_format_type(&formatted),
+                Some(dim),
+                "parser must agree with live format_type at dim {dim}"
+            );
+            assert_eq!(
+                store.vector_dimensions(),
+                Some(dim),
+                "reporting must match live schema at dim {dim}"
+            );
 
             let endpoint_type: String = sqlx::query_scalar(
                 "SELECT data_type FROM information_schema.columns \
@@ -558,6 +578,54 @@ mod tests {
                 "endpoint must be TEXT not STRING at dim {dim}"
             );
         }
+    }
+
+    #[test]
+    fn parse_pgvector_format_type_reads_vector_n() {
+        use crate::store::pg::parse_pgvector_format_type as parse;
+        assert_eq!(parse("vector(768)"), Some(768));
+        assert_eq!(parse("vector(1536)"), Some(1536));
+        assert_eq!(parse("  vector(8)  "), Some(8));
+        assert_eq!(
+            parse("VECTOR(768)"),
+            None,
+            "Cockroach spelling is not pgvector"
+        );
+        assert_eq!(parse("vector"), None);
+        assert_eq!(parse("text"), None);
+        assert_eq!(parse("vector(x)"), None);
+        assert!(PostgresDialect::live_schema_vector_width_sql().is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn live_schema_width_refuses_a_config_that_disagrees() {
+        let Some(store768) =
+            unique_live_store("live_schema_width_refuses_a_config_that_disagrees", 768).await
+        else {
+            return;
+        };
+        assert_eq!(store768.vector_dimensions(), Some(768));
+        let dsn = store768.dsn().to_string();
+        let wrong = PostgresStore::new(StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some(dsn),
+            path: None,
+            vector_dim: Some(1536),
+        })
+        .expect("construction is I/O-free; mismatch is on attach");
+        assert_eq!(wrong.vector_dimensions(), Some(1536));
+        let err = wrong
+            .preflight_schema()
+            .await
+            .expect_err("1536 process against vector(768) must fail")
+            .to_string();
+        assert!(err.contains("768"), "{err}");
+        assert!(err.contains("1536"), "{err}");
+        assert!(
+            err.to_ascii_lowercase().contains("live schema") || err.contains("vector(768)"),
+            "must name the live schema, not only the pin: {err}"
+        );
     }
 
     async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {

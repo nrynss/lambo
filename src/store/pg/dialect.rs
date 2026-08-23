@@ -77,6 +77,18 @@ pub trait Dialect: Send + Sync + 'static {
     /// carries the width ignores it, and says so in its own doc.
     fn vector_dim(cfg: &StoreConfig) -> Result<usize, StoreError>;
 
+    /// Optional live-database probe of the dense-vector column width.
+    ///
+    /// Default: none. Cockroach's authority is the static `001_init.sql` file
+    /// parsed at construction; a live read would echo that file. Postgres
+    /// substitutes width *into* the template, so the initialized
+    /// `vector(n)` must be read from the database (B4). The statement, if
+    /// present, returns one text column in `format_type` form
+    /// (`vector(768)`).
+    fn live_schema_vector_width_sql() -> Option<&'static str> {
+        None
+    }
+
     /// Operator-facing dialect name in preflight errors (`"cockroach"` /
     /// `"postgres"`). Discovered by splitting B0-N1: the shared
     /// `preflight_schema` had hard-coded `"cockroach"`.
