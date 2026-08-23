@@ -37,16 +37,12 @@ has (D).
 | [G — Recall calibration](G-recall-calibration.md) | `RECENT_SCORE` floor and `semantic_match_threshold` vs real-embedder score bands; found by F's BGE-M3 evidence run. G3 (exploratory, unscheduled): graph-Laplacian diffusion for phase-2 expansion and effective-resistance blast radius, spiked read-only against the dogfood graph |
 | [H — Cross-store parity](H-cross-store-parity.md) | one live parity harness: closes F's deferred Cockroach box, becomes B3's parity criterion for pgvector. Live legs need a DSN-bearing machine or post-merge CI |
 | [I — Observability](I-observability.md) | serve call ledger, heartbeats, analysis kit — makes DOGFOOD's metrics measurable from artifacts. **Runs before further implementation cycles** (decided 2026-08-19): every cycle before I is dogfood data lost |
-> **J3 is landed but unmerged, on branch `wt/j3` (pushed to origin).** Six redesign
-> commits, two adversarial reviews and five remediation commits live there; this branch's
-> §J3 still describes the pre-redesign state. Round 2's verdict is REQUEST_CHANGES
-> (1 P1 / 3 P2 / 5 P3) and the zero-residue rule gates integration: close every finding,
-> re-gate, round 3, then merge. The prescribed fix for the P1, the integration procedure and
-> the items wanting a Cockroach-capable machine are all in
-> [J3-durability-redesign.md](J3-durability-redesign.md) **on `wt/j3`** — not on this branch.
-> To pick it up elsewhere: `git fetch origin && git worktree add .claude/worktrees/j3 wt/j3`.
+> **J3 is landed and integrated on this branch**, through three review rounds whose
+> third remediation was the durable post-validation intents redesign — adopted.
+> `wt/j3` no longer exists, local or remote; current truth lives in
+> [J-multi-client.md](J-multi-client.md) §"J3 Status — landed".
 
-| [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage |
+| [J — Multi-client survivability](J-multi-client.md) | per-call agent identity, then a losing `lambo serve` proxies to the holder instead of exiting, then writes acked before the embedder. Every client on one machine gets full read, write and a usable lock. Found by the first live dogfood session, 2026-08-19: two clients, one lease, one silent outage. **Landed:** J0–J5 all closed — J0 clean-carryover; J1, J2 and J4 landed each through review rounds to zero residue; J3 landed via `wt/j3` through three remediation rounds ending in the adopted durable-intent redesign (branch since deleted, work integrated here); J5 as-built with the mirror-drift gate landed first and `--print-client-config` deliberately ruled not built. The whole-workstream E2E composition review closed across two rounds, nothing carried (`adve-review-mooshik-J*.md`) |
 | [K — Local-native embedder](K-candle-embedder.md) | candle in-crate BGE-M3, bypassing llama.cpp. **Two tracks:** K1 spikes three numbers with falsifiers (cosine parity ≥0.99, throughput vs the 110–141 items/s baseline, cold start under the ~30s client spawn gate); K2 implements only if K1 clears, bundled with the `re-embed` verb because switching embedder and repairing the 92/100 unembedded damage are one pass. Runs after J and the E2E cycle, before D. **Landed:** both K1 legs cleared their falsifiers; K2 merged `3fe9061` from `k2-candle`. Review: round 1 REQUEST_CHANGES (1 P1 / 4 P2 / 6 P3) → round 2 **APPROVE**, zero residue (`adve-review-mooshik-K-round{1,2}.md`). Open operator legs: the dogfood migration act and the shipped adapter's MacBook Metal verification leg |
 | [FUTURE](FUTURE.md) | Decided-but-unbuilt direction (first entry: the bootstrap ingest is a bulk verb, not a serve-path workload). Never a source of schedulable work |
 | [J3 durability redesign](J3-durability-redesign.md) | PROPOSAL (paused, not adopted): durable post-validation intents decouple the async-ack invariant from estimator correctness; ACI conformal bounds + an e-process breaker replace chosen constants. Written after three P1-bearing J3 rounds |
@@ -87,8 +83,10 @@ J5                    (independent: docs plus a client-config emitter)
 ```
 
 Landed as of 2026-08-23: **K1→K2** (`3fe9061`), **D1→D2** (`d74efc2`), **C1→C2**
-(`f02cff6`) — all three chains closed through C2's join. The graph reads as drawn for
-everything else.
+(`f02cff6`) — all three chains closed through C2's join — and every J edge: **J0**
+done, **J1→J2** and **J1→J3** landed, **I1→J4** landed, **J5** landed (the
+client-config emitter ruled out, documented rather than built). The graph reads as
+drawn for everything else.
 
 Nothing in A blocks anything in B. C2 is the one real join: SoloPolicy cannot be evaluated
 honestly until event time exists, because its recurrence rule is defined over wall-clock
