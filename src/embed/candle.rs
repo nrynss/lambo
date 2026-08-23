@@ -857,6 +857,15 @@ impl Embedder for CandleEmbedder {
         self.dim
     }
 
+    /// K2 task 3 / K2-R1-1: expose the concrete type so `resolve.rs` can
+    /// downcast through [`crate::embed::candle_identity`] and stamp the loaded
+    /// artifact's identity into the session's `EmbeddingContract`. Without this
+    /// override the trait default returns `None`, the downcast always fails,
+    /// and every candle session silently stamps `model = None`.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         reject_empty(text)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1002,6 +1011,77 @@ mod tests {
         assert!(
             local.contains("model.safetensors sha256:68440cc1b73b"),
             "{local}"
+        );
+    }
+
+    /// A `CandleEmbedder` whose model is a tiny zero-weighted XLM-RoBERTa and
+    /// whose tokenizer is an empty WordPiece — never touching the network or
+    /// the real artifact. `embed()` is never called on it; it exists solely so
+    /// the identity plumbing can be exercised through a real trait object.
+    #[cfg(test)]
+    fn weightless_embedder() -> CandleEmbedder {
+        let device = Device::Cpu;
+        let cfg = Config {
+            hidden_size: 8,
+            layer_norm_eps: 1e-12,
+            attention_probs_dropout_prob: 0.0,
+            hidden_dropout_prob: 0.0,
+            num_attention_heads: 1,
+            position_embedding_type: "absolute".to_string(),
+            intermediate_size: 8,
+            hidden_act: candle_nn::Activation::Gelu,
+            num_hidden_layers: 1,
+            vocab_size: 16,
+            max_position_embeddings: 32,
+            type_vocab_size: 1,
+            pad_token_id: 1,
+        };
+        let model =
+            XLMRobertaModel::new(&cfg, VarBuilder::zeros(DType::F32, &device)).expect("tiny model");
+        let tokenizer = Tokenizer::new(
+            tokenizers::models::wordpiece::WordPiece::builder()
+                .build()
+                .unwrap(),
+        );
+        let core = BgeM3Core {
+            model,
+            tokenizer,
+            device,
+        };
+        let shared = Arc::new(Shared {
+            queue: BatchQueue::new(),
+            core,
+            dim: BGE_M3_DIM,
+        });
+        CandleEmbedder {
+            dim: BGE_M3_DIM,
+            identity: stamp_identity(
+                SOURCE_REPO,
+                SOURCE_REVISION,
+                DEFAULT_WEIGHT_FILE,
+                None,
+                WEIGHT_SHA256,
+            ),
+            handle: Arc::new(Handle { shared }),
+        }
+    }
+
+    #[test]
+    fn identity_reaches_resolve_through_the_trait_object() {
+        // K2 task 3 / K2-R1-1 dogfood regression: `resolve.rs` only ever sees
+        // a `&dyn Embedder`, and `candle_identity` recovers the stamp via the
+        // `as_any` downcast. The existing identity tests call the concrete
+        // `model_identity()` and could not catch a missing override (the trait
+        // default returns `None`, so every session stamped `model = None`
+        // silently). Pin the exact property resolve.rs relies on, through the
+        // trait object.
+        let e = weightless_embedder();
+        let expected = e.model_identity().to_string();
+        let dyn_ref: &dyn Embedder = &e;
+        assert_eq!(
+            crate::embed::candle_identity(dyn_ref),
+            Some(expected),
+            "candle_identity must recover the artifact identity through the trait object"
         );
     }
 
