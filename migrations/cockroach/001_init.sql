@@ -165,6 +165,17 @@ CREATE TABLE IF NOT EXISTS edges (
     INDEX (session_id, source, edge_type)
 );
 
+-- D (about-time): interactions/edges persist `event_time` — the nullable
+-- about-time of the fact (NULL = live fact, fallback created_at; an edge
+-- inherits it from the writing interaction). Existing clusters provisioned
+-- before D predate the columns, so the idempotent ALTERs cover them; fresh
+-- installs get them from the CREATE TABLEs above and the ALTERs are no-ops.
+-- (Same CREATE + ALTER `ADD COLUMN IF NOT EXISTS` pattern as chunk_group_id /
+-- human_confirmed above. D shipped the columns inline-only, which left pre-D
+-- clusters failing the column preflight with no convergence path.)
+ALTER TABLE interactions ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ;
+ALTER TABLE edges ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS synonyms (
     session_id      STRING NOT NULL REFERENCES sessions(session_id),
     source_key      STRING NOT NULL,

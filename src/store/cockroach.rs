@@ -2970,6 +2970,34 @@ mod tests {
         assert_eq!(schema_vector_dim(INIT_SQL).unwrap(), 1024);
     }
 
+    /// D/C upgrade path: the served migration must carry idempotent ALTERs for
+    /// every column a later wave shipped inline-only in the CREATE TABLEs.
+    /// `init_schema` executes INIT_SQL verbatim on every provision, so these
+    /// ALTER statements ARE the convergence path for a cluster provisioned by
+    /// an older build; without them the column preflight refuses the store with
+    /// no self-repair ("table edges is missing a column ... event_time").
+    /// Text-level contract — needs no live cluster (live convergence is the
+    /// ignored suite's job).
+    #[test]
+    fn served_migration_converges_event_time_and_human_confirmed() {
+        assert!(
+            INIT_SQL.contains(
+                "ALTER TABLE interactions ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ",
+            ),
+            "pre-D interactions rows have no convergence path"
+        );
+        assert!(
+            INIT_SQL.contains("ALTER TABLE edges ADD COLUMN IF NOT EXISTS event_time TIMESTAMPTZ"),
+            "pre-D edges rows have no convergence path"
+        );
+        assert!(
+            INIT_SQL.contains(
+                "ALTER TABLE concepts ADD COLUMN IF NOT EXISTS human_confirmed INT NOT NULL DEFAULT 0",
+            ),
+            "pre-C concepts rows have no convergence path"
+        );
+    }
+
     #[test]
     fn dsn_for_rustls_rewrites_sslrootcert_system() {
         let out =

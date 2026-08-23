@@ -666,6 +666,24 @@ impl GraphStore for SqliteStore {
             "ALTER TABLE concepts ADD COLUMN human_confirmed INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // D (about-time): the nullable about-time of interactions and edges
+        // (NULL = live fact, fallback created_at; an edge inherits it from the
+        // writing interaction). Existing pre-D databases converge here; fresh
+        // ones carry the columns inline from the DDL and these are no-ops.
+        ensure_column(
+            self.pool(),
+            "interactions",
+            "event_time",
+            "ALTER TABLE interactions ADD COLUMN event_time TEXT",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "edges",
+            "event_time",
+            "ALTER TABLE edges ADD COLUMN event_time TEXT",
+        )
+        .await?;
         ensure_column(
             self.pool(),
             "sessions",
@@ -4819,6 +4837,175 @@ mod tests {
             .find(|c| c.concept_type == ConceptType::Observation)
             .expect("observation loaded from converged database");
         assert_eq!(obs.chunk_group_id.as_deref(), Some("legacy-chunk"));
+    }
+    /// D/C upgrade path (the dogfood-rig gap): a store provisioned by a pre-D/C
+    /// build carries interactions/edges WITHOUT event_time and concepts WITHOUT
+    /// human_confirmed — the exact shape that failed the column preflight with
+    /// "table edges is missing a column ... event_time" and no self-repair.
+    /// `init_schema` must converge it: the guarded ALTERs add all three columns,
+    /// a second init is a no-op, and a flush→load round-trip then preserves
+    /// Some(event_time) and a nonzero human_confirmed. Companion to
+    /// `init_schema_converges_preexisting_database` (the earlier waves' columns).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn init_schema_converges_pre_d_event_time_and_human_confirmed() {
+        let store = test_store();
+        // The pre-D/C shapes: every column the flush/load paths write EXCEPT
+        // the three this build converges (concepts is created by init_schema's
+        // CREATE TABLE IF NOT EXISTS — but as an EXISTING table it keeps its
+        // old shape, so build it here without human_confirmed).
+        let old = r#"
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                root_goal TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE concepts (
+                id                  TEXT PRIMARY KEY,
+                session_id          TEXT NOT NULL REFERENCES sessions(session_id),
+                content             TEXT NOT NULL,
+                canonical_key       TEXT NOT NULL,
+                concept_type        TEXT NOT NULL,
+                origin_interaction  TEXT NOT NULL REFERENCES interactions(id),
+                origin_agent        TEXT NOT NULL,
+                created_at          TEXT NOT NULL,
+                access_count        INTEGER NOT NULL DEFAULT 0,
+                last_accessed       TEXT,
+                gc_survived         INTEGER NOT NULL DEFAULT 0,
+                canonization_status TEXT NOT NULL DEFAULT 'None',
+                blast_radius        INTEGER,
+                last_demotion_time  TEXT,
+                embedding           BLOB,
+                chunk_group_id      TEXT
+            );
+            CREATE TABLE interactions (
+                id          TEXT PRIMARY KEY,
+                session_id  TEXT NOT NULL REFERENCES sessions(session_id),
+                agent_id    TEXT NOT NULL,
+                prompt_text TEXT,
+                previous_id TEXT REFERENCES interactions(id),
+                created_at  TEXT NOT NULL
+            );
+            CREATE TABLE edges (
+                id              TEXT PRIMARY KEY,
+                session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+                source          TEXT NOT NULL,
+                target          TEXT NOT NULL,
+                edge_type       TEXT NOT NULL,
+                weight          REAL NOT NULL,
+                reinforcements INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                last_reinforced TEXT NOT NULL,
+                UNIQUE (source, target, edge_type)
+            );
+        "#;
+        sqlx::query(old).execute(store.pool()).await.unwrap();
+
+        // Convergence + idempotency: columns appear, second init is a no-op.
+        store.init_schema().await.unwrap();
+        store.init_schema().await.unwrap();
+        for (table, want) in [
+            ("interactions", "event_time"),
+            ("edges", "event_time"),
+            ("concepts", "human_confirmed"),
+        ] {
+            let cols: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .fetch_all(store.pool())
+                    .await
+                    .unwrap();
+            assert!(
+                cols.iter().any(|c| c == want),
+                "{want} must be added to a pre-existing {table} table"
+            );
+        }
+
+        // And the converged columns actually round-trip D/C payloads.
+        let sid = SessionId::from("pre-d-upgrade");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
+        let batch = MutationBatch {
+            mutations: vec![
+                Mutation::UpsertNode {
+                    node: NodeKind::Interaction(Interaction {
+                        event_time: Some(ts),
+                        id: i1,
+                        session_id: sid.clone(),
+                        agent_id: AgentId::from("a"),
+                        prompt_text: Some("prompt".into()),
+                        previous_id: None,
+                        created_at: ts,
+                    }),
+                },
+                Mutation::UpsertNode {
+                    node: NodeKind::Concept(Concept {
+                        id: c1,
+                        session_id: sid.clone(),
+                        content: "confirmed fact".into(),
+                        canonical_key: "confirmed fact".into(),
+                        concept_type: ConceptType::Entity,
+                        origin_interaction: i1,
+                        origin_agent: AgentId::from("a"),
+                        created_at: ts,
+                        access_count: 0,
+                        last_accessed: None,
+                        gc_survived: 0,
+                        canonization_status: CanonizationStatus::None,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        embedding: None,
+                        human_confirmed: 3,
+                        chunk_group_id: None,
+                    }),
+                },
+                Mutation::UpsertEdge {
+                    edge: Edge {
+                        event_time: Some(ts),
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        source: i1,
+                        target: c1,
+                        edge_type: EdgeType::Derives,
+                        weight: 1.0,
+                        reinforcements: 1,
+                        created_at: ts,
+                        last_reinforced: ts,
+                    },
+                },
+            ],
+        };
+        store.flush(&batch, None).await.unwrap();
+        let loaded = load_session(&store, &sid).unwrap();
+        assert_eq!(
+            loaded
+                .graph
+                .interactions()
+                .find(|i| i.id == i1)
+                .unwrap()
+                .event_time,
+            Some(ts),
+            "converged interactions.event_time must round-trip"
+        );
+        assert_eq!(
+            loaded
+                .graph
+                .edges()
+                .find(|e| e.source == i1)
+                .unwrap()
+                .event_time,
+            Some(ts),
+            "converged edges.event_time must round-trip"
+        );
+        assert_eq!(
+            loaded
+                .graph
+                .concepts()
+                .find(|c| c.id == c1)
+                .unwrap()
+                .human_confirmed,
+            3,
+            "converged concepts.human_confirmed must round-trip"
+        );
     }
 
     #[cfg(feature = "store-memory")]
