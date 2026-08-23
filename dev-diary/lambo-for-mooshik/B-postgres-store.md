@@ -126,6 +126,76 @@ the existing conformance suite. Soft edge: H1 → B0.
 
 ---
 
+## What workstream J left in B's path (2026-08-23)
+
+B was scoped 2026-08-19. J2, J3, J4, D and C all landed afterwards and all of them wrote to
+the adapter B0 extracts from, so four things now sit in B's path that its original sections
+do not mention. Recorded here rather than in B0's round-1 review, because **none of these is
+a B0 defect** — B0's artifact is correct on all four. They are B1-and-later work, and the
+cheapest time to read them is before B1 starts.
+
+**1. The extraction surface grew, and mostly in B's favour.** The Cockroach adapter picked up
+J2's `endpoint` column on `session_leases`, J4's `lease_refusals` (with its retention `DELETE`
+and `(session_id, refused_at)` index), J3's `write_intents`, and D/C's `event_time` and
+`human_confirmed`. B0 moved that SQL into `pg/mod.rs`, which is right: it is plain SQL both
+dialects share — the `session_leases` upsert uses `ON CONFLICT … DO UPDATE` with `excluded.`,
+standard on both — so it is genuine base material rather than dialect surface. The
+over-merging trap this doc warns about applies to less of the new code than its volume
+suggests.
+
+**2. B1 gets a forced decision from the type system.** `store_is_shareable`
+(`src/mcp/endpoint.rs`) matches **exhaustively** on `StoreKind`, so adding `Postgres` will not
+compile until someone rules on whether a Postgres-backed session publishes a session
+endpoint. The answer is yes, on the same reasoning that makes Cockroach `true` — it is a
+networked store another process can open — but the compiler makes it an explicit ruling
+rather than a default, which is the right shape for it.
+
+**3. A real hazard: the endpoint hash includes store *identity*, and for Postgres that is a
+DSN.** This is J2-R1-2's defect wearing Postgres clothes. There, `path = "./lambo.db"` named
+a different file from every cwd, so hashing it verbatim gave two graphs one socket; the fix
+was canonicalising the path before hashing. A DSN is harder: `postgres://u@host/db` and
+`postgres://u@host:5432/db` are the **same database and different strings**, so they hash
+differently — two serves on one machine against one database would derive *different* socket
+paths, fail to find each other, and each believe it was alone. The J2 rule to carry forward
+is its own: hash the store's **identity, not its spelling**. Whatever normalisation B1
+chooses (default port, default database, host case, ignored parameters) belongs beside
+`store_identity` with its reasoning, and needs a test that two spellings of one database
+derive one endpoint. Note also J2's second reason for hashing at all: it keeps a DSN's
+password out of both the filesystem and the lease row.
+
+**4. The open design question: one shared store, several machines, one single-writer lease.**
+This doc's goal is "the unified cross-machine store", and DOGFOOD-SETUP still promises that
+when B lands "the `[store]` block flips to a shared Postgres and **nothing else changes**".
+That promise is doubtful and B should settle it deliberately.
+
+Since the 2026-08-23 HTTP ruling each machine runs one supervised writer. Point two machines
+at one shared Postgres **and the same session** and the lease admits exactly one: the other
+machine's writer loses, and cannot proxy, because `proxyable` refuses with
+`HolderIsOnAnotherHost` — J2 checks the holder's host precisely so a loser never dials a unix
+socket path that exists only on the holder's machine. That refusal is correct and it is what
+keeps the current design safe; but with a machine-local store it was nearly unreachable,
+while with a shared store it becomes the **normal** case. Machine two's harnesses would get
+no memory at all, which is workstream J's founding outage recreated at machine scale.
+
+Three options, and B must pick one rather than inherit it:
+
+* **One writing machine per session.** The others read the durable store and hold no lease.
+  Honest and cheap; costs read-your-writes on every other machine.
+* **A session per machine against the shared store.** Keeps every machine writable and gives
+  up the shared-memory property that motivated B.
+* **Cross-host proxying over HTTP.** The natural extension, and newly cheap: the writer is
+  already an HTTP server on a port, so a loser on another host could forward to
+  `http://holder-host:7700/mcp` where a unix socket cannot reach. This is a smaller change
+  than the in-process promotion J2 rejected as too large, and it is the only one of the three
+  under which "unified cross-machine store" means unified *memory* rather than unified
+  storage. It also inherits J2's own requirement that the caller's `agent_id` cross
+  **verbatim**, which the byte-level pipe already guarantees and a rebuilt request would not.
+
+Whichever is chosen, DOGFOOD-SETUP's "nothing else changes" sentence is falsified by B and
+must move with it.
+
+---
+
 ## B1 — `StoreKind::Postgres` and the alias split
 
 New variant, feature `store-postgres`, and the clean separation:

@@ -18,6 +18,24 @@
 > silently instead of failing, and B2 adds the dialect where the correct pairing
 > genuinely differs. Close this before B2, not after.
 
+> **Carried into the cycle, 2026-08-23 (orchestrator, not a review finding):** four
+> interactions between workstream J and B are recorded in
+> [B-postgres-store.md](../B-postgres-store.md), "What workstream J left in B's path".
+> They are **not** B0 defects and are deliberately absent from round 1's findings — B0's
+> artifact is correct on all four, and back-filling a completed review would misrepresent
+> what that round found. Two want action before or during B1:
+>
+> * **DSN identity vs DSN spelling** — J2-R1-2's defect in Postgres clothes. Two spellings
+>   of one database must derive one session endpoint, or two serves on a machine each
+>   believe they are alone. Needs a normalisation rule beside `store_identity` and a test.
+> * **`store_is_shareable` matches `StoreKind` exhaustively**, so B1 cannot compile without
+>   ruling on Postgres. Expected answer `true`; the point is that it is ruled, not defaulted.
+>
+> The other two are context (the extraction surface grew, mostly into genuine base material)
+> and one **open design decision for B as a whole**: one shared store across several machines
+> versus a single-writer lease. DOGFOOD-SETUP's "nothing else changes" promise is falsified
+> by B either way, and moves with whichever option is chosen.
+
 Agentic cycle, no worktree: every agent works directly in `/home/nryn/work/lambo`,
 on `b0-pg-extraction` for this phase. Agents run strictly one at a time.
 
