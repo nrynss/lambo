@@ -985,6 +985,130 @@ mod tests {
             .contains(&hub));
     }
 
+    /// C2 discrimination: on a MIXED corpus, does SoloPolicy admit the fact
+    /// that genuinely recurs and refuse the two shapes that only look busy?
+    ///
+    /// The existing `a_bulk_ingest_recurs_only_under_event_time` proves the
+    /// mechanism — one hub, admitted with event time, refused without. It
+    /// cannot answer the question an operator actually has, because a corpus
+    /// containing only a passing concept cannot show a failing one being
+    /// turned away. This builds all three shapes into ONE graph and asserts
+    /// the candidate set exactly, so a policy that admitted everything would
+    /// be as red as one that admitted nothing.
+    ///
+    /// The three shapes, and why these three:
+    ///
+    /// * `recurring` — re-derived on days 0/2/4/6. Four sessions ≥24h apart:
+    ///   the signal SoloPolicy exists to read, and the only one of the three
+    ///   a human would call load-bearing.
+    /// * `burst` — re-derived the SAME number of times (four), all inside one
+    ///   afternoon. Identical support count, no separation. This is the
+    ///   "wrote a bunch about what we just did" shape, and separating it from
+    ///   `recurring` is the whole reason the recurrence term is defined over
+    ///   time rather than over count.
+    /// * `once` — derived a single time and never revisited.
+    ///
+    /// Mutations: define recurrence over support COUNT instead of separated
+    /// sessions (admits `burst`, red); drop the separation floor to 0 (admits
+    /// both, red); require separation of the origin interaction only rather
+    /// than of the supporting set (admits `once`, red).
+    #[test]
+    fn solo_admits_the_recurring_fact_and_refuses_the_burst_and_the_one_off() {
+        let mut g = Graph::new(sid());
+
+        // Interactions 1..=4: spread across days 0/2/4/6 (real event time),
+        // all flushed within minutes of each other (the bootstrap shape).
+        let mut prev = None;
+        for n in 1..=4u64 {
+            let et = if n == 1 {
+                day(0)
+            } else {
+                day(n - 1) + chrono::Duration::hours(48)
+            };
+            let mut turn = interaction_at(n, (n as i64 - 1) * 15, Some(et));
+            turn.previous_id = prev;
+            prev = Some(turn.id);
+            g.insert_interaction(turn).unwrap();
+        }
+        // Interactions 5..=7: all on day 0, one afternoon — the burst.
+        for n in 5..=7u64 {
+            let et = day(0) + chrono::Duration::minutes(20 * (n as i64 - 4));
+            let mut turn = interaction_at(n, (n as i64 - 1) * 15, Some(et));
+            turn.previous_id = prev;
+            prev = Some(turn.id);
+            g.insert_interaction(turn).unwrap();
+        }
+
+        // The three concepts, each anchored on interaction 1.
+        let mut recurring = concept(10, 0);
+        recurring.concept_type = ConceptType::Constraint;
+        g.insert_concept(recurring.clone(), nid_inter(1)).unwrap();
+
+        let mut burst = concept(11, 0);
+        burst.concept_type = ConceptType::Constraint;
+        g.insert_concept(burst.clone(), nid_inter(1)).unwrap();
+
+        let mut once = concept(12, 0);
+        once.concept_type = ConceptType::Constraint;
+        g.insert_concept(once.clone(), nid_inter(1)).unwrap();
+
+        // `recurring` is re-derived by the day-spread turns 2,3,4.
+        for n in 2..=4u64 {
+            g.upsert_edge(test_edge(
+                n,
+                nid_inter(n),
+                recurring.id,
+                EdgeType::Derives,
+                ts_at((n as i64 - 1) * 15),
+            ))
+            .unwrap();
+        }
+        // `burst` is re-derived exactly as often — by the same-day turns 5,6,7.
+        for n in 5..=7u64 {
+            g.upsert_edge(test_edge(
+                n + 10,
+                nid_inter(n),
+                burst.id,
+                EdgeType::Derives,
+                ts_at((n as i64 - 1) * 15),
+            ))
+            .unwrap();
+        }
+        // `once` gets nothing further.
+
+        // Support counts are deliberately equal, so a count-based rule cannot
+        // tell these two apart and only a time-based one can.
+        let rec_times = supporting_interaction_times(&g, &concept_of(&g, recurring.id));
+        let burst_times = supporting_interaction_times(&g, &concept_of(&g, burst.id));
+        assert_eq!(
+            rec_times.len(),
+            burst_times.len(),
+            "the two must be indistinguishable by support COUNT, or this test proves nothing"
+        );
+        assert_eq!(separated_session_count(&rec_times, SESSION_SEPARATION), 4);
+        assert_eq!(separated_session_count(&burst_times, SESSION_SEPARATION), 1);
+
+        let got = PromotionPolicy::Solo.scorer().candidates(
+            &g,
+            &ScoreTable::default(),
+            &params(),
+            ts_at(60),
+        );
+
+        assert!(
+            got.contains(&recurring.id),
+            "the genuinely recurring fact must be admitted; got {got:?}"
+        );
+        assert!(
+            !got.contains(&burst.id),
+            "a same-day burst has no recurrence however many times it was re-derived"
+        );
+        assert!(
+            !got.contains(&once.id),
+            "a fact derived once is not recurrence"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // C2 helpers continued — small accessors over test graphs
     // -----------------------------------------------------------------------
