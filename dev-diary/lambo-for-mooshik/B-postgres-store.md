@@ -366,6 +366,62 @@ the capability).
 
 ---
 
+## DSN precedence: the config file wins, or nothing runs (E2E-F2, 2026-08-24)
+
+Found by the whole-workstream end-to-end review, and it was live, not theoretical.
+With `store.dsn` naming one database, setting `LAMBO_COCKROACH_DSN` to another made
+`provision` write the schema to the second and report success. On the machine where
+B is developed, `.env` carries that variable for the production Cockroach cluster,
+and since B1 the Postgres `provision` issues DDL in process.
+
+Three separate defects were tangled together:
+
+1. `StoreConfig::dsn_from_env` read only `LAMBO_COCKROACH_DSN` and `DATABASE_URL`,
+   and `overlay_env` applied the result **kind-agnostically** after the TOML. So the
+   Cockroach variable silently steered a `kind = "postgres"` deployment.
+2. `LAMBO_POSTGRES_DSN` existed as `PostgresDialect::DSN_ENV` and was named in error
+   messages, but nothing in the config layer ever read it. An operator following the
+   error text got no effect. A variable the errors tell you to set and the config
+   ignores is worse than one that does not exist.
+3. `scripts/provision.sh` reads `DSN="${LAMBO_COCKROACH_DSN:-}"` and was never handed
+   `store.dsn`, so the Cockroach `provision` arm could act on a cluster the config
+   never named.
+
+**The ruling.** The config file is the single construction site, per Level B. The
+environment may **supply** a DSN the file omits, and may **not** silently replace one
+the file states. When both are present and name different databases, `overlay_env`
+refuses and prints both, passwords stripped. Each kind reads its own variable:
+`postgres` reads `LAMBO_POSTGRES_DSN`, `cockroach` reads `LAMBO_COCKROACH_DSN`, and
+`DATABASE_URL` remains the shared fallback.
+
+**Why refuse rather than let the file win.** Precedent, and it is the one already in
+this document: B4's `vector_dim` pin refuses to resolve when the pin disagrees with
+the embedder width rather than picking a winner. Same shape of mistake, same answer.
+Picking the file silently would fix the data-loss direction and leave the operator
+holding a wrong belief about their own deployment, which is how the bug survived in
+the first place.
+
+**Comparison is on identity, not spelling.** `postgres://` and `postgresql://`, an
+omitted port against an explicit `5432`, and host casing are all the same database, so
+the DSN canonicaliser that J2 built for session socket identity moved out of
+`mcp/endpoint.rs` into `store/dsn.rs` and now serves both callers. Password stripping
+is what makes the canonical form safe to put in an error message.
+
+**The `provision.sh` leg.** The Cockroach arm now pushes the resolved DSN into the
+child's environment rather than letting it inherit the ambient one, so the config
+names the cluster the DDL lands on. The "no `store.dsn`, environment supplies it"
+path that CI depends on is untouched.
+
+## Deliberately not built: park and fail over (E2E-F11, 2026-08-24)
+
+The end-to-end review filed the unimplemented "park and fail over" ruling as P3.
+Remediation declined it, and the declination is recorded here rather than left as a
+silently open box: it is a writer-availability feature of real size, not a defect in
+anything B built, and implementing it inside a remediation round would have shipped a
+substantial new behaviour with none of the review that every other part of B received.
+It belongs in its own phase or in [FUTURE](FUTURE.md), scoped deliberately. Nothing in
+B depends on it, and no Done-when box below claims it.
+
 ## Done when
 
 - [ ] B0: Cockroach behaviour byte-identical after extraction — no-default suite, conformance

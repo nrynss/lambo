@@ -1,0 +1,16 @@
+### --no-default-features --features store-postgres
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.94s
+### --no-default-features --features store-postgres,store-cockroach
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.65s
+### --no-default-features --features store-postgres,store-sqlite
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.90s
+### --no-default-features --features store-postgres,store-cockroach,store-sqlite,fixtures
+error: this function has too many arguments (8/7)
+error: useless use of `vec!`
+error: could not compile `lambo` (lib test) due to 2 previous errors
+### --no-default-features --features store-postgres,fixtures
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.44s
+### --no-default-features (alone)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.65s
+### default + store-postgres
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.25s

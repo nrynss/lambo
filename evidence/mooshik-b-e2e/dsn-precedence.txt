@@ -1,0 +1,17 @@
+# DSN precedence: LAMBO_COCKROACH_DSN silently outranks store.dsn for kind = "postgres"
+# All targets are the LOCAL pgvector container. The live cluster was never contacted.
+
+## config store.dsn -> widthtest (1 concept). Control, no env var:
+session 's1' (reader snapshot)
+nodes=2 edges=1 concepts=1 canonical=0
+embedded=1/1
+
+## same config, LAMBO_COCKROACH_DSN=<local container>/scale768 (20000 raw rows):
+lambo stats: invariant violated: concept 80d8c750-d6d5-4908-bdd6-e4653150f800 has no Derives edge; concept daf5648c-f311-4ae6-983d-83789afdff73 has no Derives edge; concept 615f7b49-0578-4340-926f-b19cad82c892 has no Derives edge; concept 61a0ab39-89bf-4716-9804-c16bc87aa203 has no Derives edge; con
+   ^ answered from scale768, not from the DSN the config names.
+
+## LAMBO_POSTGRES_DSN, the variable the missing-DSN error tells the operator to set, is inert:
+lambo provision: failed to resolve store: config: backend: PostgresStore requires a DSN (store.dsn or LAMBO_POSTGRES_DSN)
+
+## LAMBO_COCKROACH_DSN configures a kind=postgres store instead:
+postgres schema provisioned (init_schema, idempotent, hnsw from init)

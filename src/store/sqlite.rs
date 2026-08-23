@@ -5714,25 +5714,96 @@ mod tests {
         /// vs `1 - d^2/2`) lands orders of magnitude above this.
         const H3_SCORE_SKEW_EPSILON: f64 = 1e-4;
 
+        /// How an adapter's `index_present` is established.
+        ///
+        /// # Why this is not a `bool` any more (E2E-F3a)
+        ///
+        /// It was, and the `postgres-exact` lane's `false` was a literal in the
+        /// adapter tuple. Replacing `PostgresDialect::forced_exact_scan_sql()`
+        /// with `None` therefore left H3 **green with two identical lanes**:
+        /// the "exact" lane forced nothing, the harness reported zero adapter
+        /// skew and a zero hnsw envelope from a comparison of a lane against
+        /// itself, and the one field that could have noticed was a constant.
+        /// A claim about which plan served an answer has to be read off the
+        /// plan.
+        #[derive(Clone, Debug)]
+        #[cfg_attr(not(feature = "store-postgres"), allow(dead_code))]
+        enum IndexEvidence {
+            /// Linear scan by construction: SQLite and the memory oracle have
+            /// no vector index to use, so there is no plan to read (see
+            /// F-sqlite-vectors.md, "Exact scan, not an index"). This is the
+            /// one honest constant here.
+            LinearByConstruction,
+            /// A live Postgres lane: EXPLAIN the production recall SQL, after
+            /// the corpus is seeded, through the same forced-exact path
+            /// production search uses, and read the plan.
+            ProbeLivePlan {
+                dsn: String,
+                dim: usize,
+                forced_exact: bool,
+            },
+        }
+
+        /// Resolve [`IndexEvidence`] into the `bool` the report carries.
+        ///
+        /// Runs **after** seeding on purpose: on an empty or tiny table the
+        /// planner picks a sequential scan for every lane, so a probe taken
+        /// before the corpus exists would report `false` for the hnsw lane and
+        /// call it evidence.
+        async fn resolve_index_present(evidence: &IndexEvidence, probe: &[f32]) -> bool {
+            match evidence {
+                IndexEvidence::LinearByConstruction => false,
+                IndexEvidence::ProbeLivePlan {
+                    dsn,
+                    dim,
+                    forced_exact,
+                } => {
+                    #[cfg(feature = "store-postgres")]
+                    {
+                        use crate::store::pg::postgres::{corpus, PostgresStore};
+                        use crate::store::{StoreConfig, StoreKind};
+                        let store = PostgresStore::new(StoreConfig {
+                            kind: StoreKind::Postgres,
+                            dsn: Some(dsn.clone()),
+                            path: None,
+                            vector_dim: Some(*dim),
+                        })
+                        .expect("H3: index probe store");
+                        let store = if *forced_exact {
+                            store.with_forced_exact_scan()
+                        } else {
+                            store
+                        };
+                        corpus::index_present(&store, probe, 5).await
+                    }
+                    #[cfg(not(feature = "store-postgres"))]
+                    {
+                        let _ = (dsn, dim, forced_exact, probe);
+                        false
+                    }
+                }
+            }
+        }
+
         /// Adapters reachable from this process, at this `dim`. H1 always
         /// has sqlite + memory-oracle (neither needs a DSN). H3 appends
         /// postgres-hnsw and postgres-exact when `postgres_dsn` is `Some`.
         fn build_adapters(
             dim: usize,
             postgres_dsn: Option<&str>,
-        ) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
+        ) -> Vec<(&'static str, ScanKind, IndexEvidence, Box<dyn GraphStore>)> {
             #[cfg_attr(not(feature = "store-postgres"), allow(unused_mut))]
             let mut adapters = vec![
                 (
                     "sqlite",
                     ScanKind::Exact,
-                    false,
+                    IndexEvidence::LinearByConstruction,
                     Box::new(vec_test_store(dim)) as Box<dyn GraphStore>,
                 ),
                 (
                     "memory-oracle",
                     ScanKind::Exact,
-                    false,
+                    IndexEvidence::LinearByConstruction,
                     Box::new(MemoryOracleStore::new()) as Box<dyn GraphStore>,
                 ),
             ];
@@ -5749,7 +5820,7 @@ mod tests {
         fn postgres_h3_adapters(
             dim: usize,
             dsn: &str,
-        ) -> Vec<(&'static str, ScanKind, bool, Box<dyn GraphStore>)> {
+        ) -> Vec<(&'static str, ScanKind, IndexEvidence, Box<dyn GraphStore>)> {
             use crate::store::pg::postgres::PostgresStore;
             use crate::store::{StoreConfig, StoreKind};
             let cfg = StoreConfig {
@@ -5767,16 +5838,41 @@ mod tests {
                 (
                     "postgres-hnsw",
                     ScanKind::Ann,
-                    true,
+                    IndexEvidence::ProbeLivePlan {
+                        dsn: dsn.to_string(),
+                        dim,
+                        forced_exact: false,
+                    },
                     Box::new(hnsw) as Box<dyn GraphStore>,
                 ),
                 (
                     "postgres-exact",
                     ScanKind::Exact,
-                    false,
+                    IndexEvidence::ProbeLivePlan {
+                        dsn: dsn.to_string(),
+                        dim,
+                        forced_exact: true,
+                    },
                     Box::new(exact) as Box<dyn GraphStore>,
                 ),
             ]
+        }
+
+        /// One grid run's corpus, bundled into a single parameter.
+        ///
+        /// Bundled rather than passed positionally because B3's eighth
+        /// parameter (`postgres_dsn`) tripped `clippy::too_many_arguments`
+        /// and turned two CI rows red on the merged tree (E2E-F1). A struct
+        /// keeps the next leg from doing it again, and names each input at
+        /// every call site.
+        struct FixtureGrid<'a> {
+            fixture_label: &'a str,
+            sid: &'a SessionId,
+            contract: &'a EmbeddingContract,
+            batch: &'a MutationBatch,
+            pool: &'a [(NodeId, Vec<f32>)],
+            dim: usize,
+            postgres_dsn: Option<&'a str>,
         }
 
         /// Seed one fixture's batch into every reachable adapter and run the
@@ -5784,27 +5880,32 @@ mod tests {
         /// agreement for every `ExactMustMatch` pair (H1's whole point: any
         /// disagreement between two exact-scan adapters is adapter skew, a
         /// bug, not something to merely record).
-        async fn run_fixture_grid(
-            fixture_label: &str,
-            sid: &SessionId,
-            contract: &EmbeddingContract,
-            batch: &MutationBatch,
-            pool: &[(NodeId, Vec<f32>)],
-            dim: usize,
-            postgres_dsn: Option<&str>,
-            report: &mut ParityReport,
-        ) {
+        async fn run_fixture_grid(grid: FixtureGrid<'_>, report: &mut ParityReport) {
+            let FixtureGrid {
+                fixture_label,
+                sid,
+                contract,
+                batch,
+                pool,
+                dim,
+                postgres_dsn,
+            } = grid;
             let adapters = build_adapters(dim, postgres_dsn);
             for (_, _, _, adapter) in &adapters {
                 adapter.init_schema().await.unwrap();
                 adapter.flush(batch, None).await.unwrap();
             }
-            for (name, scan, index_present, _) in &adapters {
+            let probes = probe_set(pool, dim);
+
+            // Probed after seeding, never before: see `resolve_index_present`.
+            // The probe used is the grid's first, so the plan read here is the
+            // plan the grid's own queries get.
+            for (name, scan, evidence, _) in &adapters {
                 if !report.adapters.iter().any(|a| a.name == *name) {
                     report.adapters.push(AdapterRun {
                         name: (*name).to_string(),
                         scan: *scan,
-                        index_present: *index_present,
+                        index_present: resolve_index_present(evidence, &probes[0].1).await,
                     });
                 }
             }
@@ -5812,7 +5913,6 @@ mod tests {
                 report.harness.fixtures.push(fixture_label.to_string());
             }
 
-            let probes = probe_set(pool, dim);
             let limits = [1usize, 3, 5, pool.len(), pool.len() + 7];
 
             for i in 0..adapters.len() {
@@ -5968,13 +6068,15 @@ mod tests {
                 let batch = MutationBatch { mutations };
 
                 run_fixture_grid(
-                    fixture,
-                    &sid,
-                    &contract,
-                    &batch,
-                    &pool,
-                    DIM,
-                    postgres_dsn,
+                    FixtureGrid {
+                        fixture_label: fixture,
+                        sid: &sid,
+                        contract: &contract,
+                        batch: &batch,
+                        pool: &pool,
+                        dim: DIM,
+                        postgres_dsn,
+                    },
                     report,
                 )
                 .await;
@@ -6071,13 +6173,15 @@ mod tests {
             let batch = MutationBatch { mutations };
 
             run_fixture_grid(
-                "mooshik-f-sqlite-bge (real bge_m3 embedder)",
-                &snap.session_id,
-                &contract,
-                &batch,
-                &pool,
-                dim,
-                None,
+                FixtureGrid {
+                    fixture_label: "mooshik-f-sqlite-bge (real bge_m3 embedder)",
+                    sid: &snap.session_id,
+                    contract: &contract,
+                    batch: &batch,
+                    pool: &pool,
+                    dim,
+                    postgres_dsn: None,
+                },
                 report,
             )
             .await;
@@ -6176,11 +6280,7 @@ mod tests {
         #[tokio::test]
         #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
         async fn h3_postgres_recall_parity() {
-            use crate::store::pg::postgres::PostgresStore;
             use crate::store::pg::postgres::{dsn_for_database, postgres_dsn_or_skip};
-            use crate::store::vector::encode_vector;
-            use crate::store::{StoreConfig, StoreKind};
-            use sqlx::Row;
 
             let Some(admin_dsn) = postgres_dsn_or_skip("h3_postgres_recall_parity") else {
                 return;
@@ -6195,54 +6295,19 @@ mod tests {
                 .unwrap_or_else(|e| panic!("H3: create {db}: {e}"));
             let dsn = dsn_for_database(&admin_dsn, &db);
 
-            // Camera-proof the production SQL (not a lookalike) before the grid.
-            const DIM: usize = 8;
-            let probe_store = PostgresStore::new(StoreConfig {
-                kind: StoreKind::Postgres,
-                dsn: Some(dsn.clone()),
-                path: None,
-                vector_dim: Some(DIM),
-            })
-            .expect("H3 probe store");
-            probe_store.init_schema().await.expect("H3 init_schema");
-            let pool = probe_store.pool().await.expect("H3 pool");
-            let probe = encode_vector(&vec![0.0; DIM]).expect("H3 encode");
-            let sql = probe_store.vector_candidates_sql();
-            let natural: String = {
-                let rows = sqlx::query(&format!("EXPLAIN {sql}"))
-                    .bind(&probe)
-                    .bind(5i64)
-                    .fetch_all(pool)
-                    .await
-                    .expect("H3 EXPLAIN");
-                rows.iter()
-                    .map(|r| r.try_get::<String, usize>(0).expect("col"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            eprintln!("H3 EXPLAIN (planner's choice):\n{natural}");
-            let mut tx = pool.begin().await.expect("H3 begin");
-            sqlx::query("SET LOCAL enable_seqscan = off")
-                .execute(&mut *tx)
-                .await
-                .expect("H3 enable_seqscan off");
-            let forced_rows = sqlx::query(&format!("EXPLAIN {sql}"))
-                .bind(&probe)
-                .bind(5i64)
-                .fetch_all(&mut *tx)
-                .await
-                .expect("H3 EXPLAIN forced hnsw");
-            tx.commit().await.ok();
-            let forced: String = forced_rows
-                .iter()
-                .map(|r| r.try_get::<String, usize>(0).expect("col"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            eprintln!("H3 EXPLAIN (enable_seqscan = off):\n{forced}");
-            assert!(
-                forced.contains("concepts_embedding_idx"),
-                "H3: production recall must be able to use concepts_embedding_idx, got:\n{forced}"
-            );
+            // E2E-F4: the camera-proof EXPLAIN that used to sit here has been
+            // removed rather than repaired. It ran on the table `init_schema`
+            // had just created (**zero rows**), with a probe of
+            // `vec![0.0; 8]` (which gives `NaN` for `<=>` against every row),
+            // and asserted only under `SET LOCAL enable_seqscan = off`, a GUC
+            // that penalises the alternative rather than testing the planner's
+            // judgement. It could not fail. The plan is now proved twice, both
+            // times on a corpus above the planner's crossover with a real
+            // probe: `store::pg::postgres::tests::explain_recall_uses_hnsw` for
+            // the production query, and `h3_postgres_hnsw_envelope_at_scale`
+            // for the two H3 lanes. The grid below reads `index_present` off
+            // the live plan instead of a literal, which is what M3 (return
+            // `None` from `forced_exact_scan_sql`) now dies on.
 
             let mut report = ParityReport {
                 schema_version: 1,
@@ -6269,11 +6334,41 @@ mod tests {
                     .any(|a| a.name == "postgres-hnsw" && a.scan == ScanKind::Ann),
                 "H3: postgres-hnsw adapter missing"
             );
+            // `index_present` is now read off the plan for both Postgres
+            // lanes (E2E-F3a). At THIS corpus size the honest answer is
+            // `false` for both: 9 and 22 rows are far below the planner's
+            // crossover, so the hnsw lane is not using hnsw either. That is
+            // the finding, not a failure of this leg. The fixture grid's job
+            // is exact cross-adapter agreement, which does not need an index;
+            // the hnsw envelope is measured where hnsw actually engages, in
+            // `h3_postgres_hnsw_envelope_at_scale`.
+            let indexed = |name: &str| {
+                report
+                    .adapters
+                    .iter()
+                    .find(|a| a.name == name)
+                    .unwrap_or_else(|| panic!("H3: {name} adapter missing"))
+                    .index_present
+            };
             assert!(
-                report.adapters.iter().any(|a| a.name == "postgres-exact"
-                    && a.scan == ScanKind::Exact
-                    && !a.index_present),
-                "H3: postgres-exact adapter missing or still claiming an index"
+                report
+                    .adapters
+                    .iter()
+                    .any(|a| a.name == "postgres-exact" && a.scan == ScanKind::Exact),
+                "H3: postgres-exact adapter missing"
+            );
+            assert!(
+                !indexed("postgres-exact"),
+                "H3: the forced-exact lane must never plan through concepts_embedding_idx"
+            );
+            eprintln!(
+                "H3 fixture-grid plan probe: postgres-hnsw index_present={}, \
+                 postgres-exact index_present={}. The fixture corpora are 9 and 22 rows, \
+                 below the planner's crossover, so NEITHER lane uses the index here and \
+                 the envelope below is structurally zero. The envelope that means \
+                 something is h3_postgres_hnsw_envelope_at_scale.",
+                indexed("postgres-hnsw"),
+                indexed("postgres-exact"),
             );
 
             let exact_pairs: Vec<&PairResult> = report
@@ -6333,8 +6428,12 @@ mod tests {
                 .max()
                 .unwrap_or(0);
             eprintln!(
-                "H3 hnsw envelope vs forced-exact: cells={}, min_jaccard={min_jaccard}, \
-                 max_score_diff={max_score}, max_displacement_ids={max_disp}",
+                "H3 hnsw envelope vs forced-exact AT THE FIXTURE CORPUS SIZE (9 and 22 \
+                 vectors, dim 8): cells={}, min_jaccard={min_jaccard}, \
+                 max_score_diff={max_score}, max_displacement_ids={max_disp}. This is not \
+                 an hnsw measurement: at this n the planner scans sequentially in both \
+                 lanes, so zero divergence is arithmetic, not evidence. See \
+                 h3_postgres_hnsw_envelope_at_scale for the measured envelope.",
                 hnsw_vs_exact.len()
             );
 
@@ -6357,6 +6456,282 @@ mod tests {
                 std::fs::create_dir_all(dir).unwrap();
                 let json = serde_json::to_string_pretty(&report).unwrap();
                 std::fs::write(format!("{dir}/report.json"), json).unwrap();
+            }
+        }
+
+        /// Corpus size for the scale leg: ten times the measured planner
+        /// crossover, so the hnsw lane is genuinely served by the index and
+        /// the forced-exact lane is genuinely a sequential scan.
+        #[cfg(feature = "store-postgres")]
+        const H3_SCALE_ROWS: usize = 5_000;
+
+        /// Width for the scale leg. The fixture grid runs at dim 8, where
+        /// vectors are nearly collinear and hnsw has almost nothing to
+        /// approximate. 768 is a width a real deployment uses and the width
+        /// the envelope was independently re-measured at.
+        #[cfg(feature = "store-postgres")]
+        const H3_SCALE_DIM: usize = 768;
+
+        /// **Acceptance: H3's second half** — "the hnsw lane's divergence
+        /// stated as a measured envelope".
+        ///
+        /// # What was wrong with measuring it in the fixture grid (E2E-F3b)
+        ///
+        /// The grid's corpora are the two committed fixture graphs: **9 and 22
+        /// vectors at dim 8**. hnsw visits every one of them at that size, and
+        /// the planner does not use the index at all, so the lane labelled
+        /// "hnsw" returns the exact answer by construction. The envelope came
+        /// out zero, was published as zero, and could not have come out any
+        /// other way. B chose hnsw from day one on the reasoning that "if hnsw
+        /// disappoints, that is discovered early, on unimportant data"; the
+        /// only instrument that could discover it was pointed at a corpus where
+        /// it structurally cannot fire.
+        ///
+        /// # What this measures
+        ///
+        /// [`H3_SCALE_ROWS`] deterministic unit vectors at [`H3_SCALE_DIM`],
+        /// probes drawn from the corpus so each probe's own row is the exact
+        /// rank-1 answer, through the production `vector_candidates_checked`
+        /// entry point on both lanes.
+        ///
+        /// Three things are asserted; the envelope itself is **reported**, not
+        /// bounded, because the box asks for a number and a bound would be an
+        /// invented policy:
+        ///
+        /// 1. The hnsw lane's plan names `concepts_embedding_idx` and the
+        ///    forced-exact lane's does not. Both read off `EXPLAIN`. Replace
+        ///    `forced_exact_scan_sql()` with `None` and this fails, which is
+        ///    the mutation H3 used to survive.
+        /// 2. The forced-exact lane really is exact: its score sequence matches
+        ///    a cosine ranking computed here in Rust over the seeded vectors,
+        ///    and its top hit is the probe's own row at score 1. Compared as a
+        ///    score sequence rather than an id sequence so exact ties cannot
+        ///    make it flaky.
+        /// 3. The envelope cells are non-vacuous (both lanes answered).
+        ///
+        /// # A note on the number this prints
+        ///
+        /// A uniformly random high-dimensional corpus is close to the worst
+        /// case for hnsw: all pairwise cosines cluster near zero, so everything
+        /// past the self-match is a near-tie and recall past rank 1 is
+        /// meaningless to the index. A clustered corpus from a real embedder
+        /// does considerably better. The number is not the finding. The finding
+        /// is that the envelope is now measured somewhere it can move.
+        ///
+        /// `#[ignore]`d and DSN-gated exactly like the other live tests, and
+        /// wired into the `postgres-live` CI job beside them, rather than
+        /// shrunk to a size that fits a default `cargo test`.
+        #[cfg(feature = "store-postgres")]
+        #[tokio::test]
+        #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+        async fn h3_postgres_hnsw_envelope_at_scale() {
+            use crate::store::pg::postgres::corpus;
+            use crate::store::pg::postgres::PostgresStore;
+            use crate::store::pg::postgres::{dsn_for_database, postgres_dsn_or_skip};
+            use crate::store::{StoreConfig, StoreKind};
+
+            let Some(admin_dsn) = postgres_dsn_or_skip("h3_postgres_hnsw_envelope_at_scale") else {
+                return;
+            };
+            let admin = sqlx::PgPool::connect(&admin_dsn)
+                .await
+                .unwrap_or_else(|e| panic!("H3 scale: connect admin DSN: {e}"));
+            let db = format!("lambo_h3s_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE {db}"))
+                .execute(&admin)
+                .await
+                .unwrap_or_else(|e| panic!("H3 scale: create {db}: {e}"));
+            let dsn = dsn_for_database(&admin_dsn, &db);
+
+            let cfg = StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some(dsn.clone()),
+                path: None,
+                vector_dim: Some(H3_SCALE_DIM),
+            };
+            let hnsw = PostgresStore::new(cfg.clone()).expect("H3 scale: hnsw lane");
+            let exact = PostgresStore::new(cfg)
+                .expect("H3 scale: exact lane")
+                .with_forced_exact_scan();
+            hnsw.init_schema().await.expect("H3 scale: init_schema");
+
+            let sid = SessionId::from("h3-scale");
+            let contract = vec_contract(H3_SCALE_DIM);
+            let seeded = corpus::seed(&hnsw, sid.as_str(), &contract, H3_SCALE_ROWS).await;
+            assert_eq!(seeded.len(), H3_SCALE_ROWS);
+
+            let probe_rows = [0usize, 1, H3_SCALE_ROWS / 2, H3_SCALE_ROWS - 1];
+            let limits = [5usize, 10, 20, 40];
+
+            // (1) The lanes really are two different plans, at this size.
+            let sample = &seeded[probe_rows[0]].1;
+            let hnsw_plan = corpus::plan(&hnsw, sample, 20).await;
+            let exact_plan = corpus::plan(&exact, sample, 20).await;
+            eprintln!(
+                "H3 scale plan (hnsw lane):\n{}",
+                corpus::elide_vector_literals(&hnsw_plan)
+            );
+            eprintln!(
+                "H3 scale plan (forced-exact lane):\n{}",
+                corpus::elide_vector_literals(&exact_plan)
+            );
+            assert!(
+                hnsw_plan.contains("concepts_embedding_idx"),
+                "H3 scale: the hnsw lane must be served by the index at {H3_SCALE_ROWS} rows, \
+                 or this is not an hnsw measurement. Got:\n{hnsw_plan}"
+            );
+            assert!(
+                !exact_plan.contains("concepts_embedding_idx"),
+                "H3 scale: the forced-exact lane must not use the index. A lane that does \
+                 is the hnsw lane wearing a different name, and every 'zero skew' number \
+                 below is a comparison of a lane against itself. Got:\n{exact_plan}"
+            );
+            assert!(
+                exact_plan.contains("Seq Scan on concepts"),
+                "H3 scale: the forced-exact lane must actually scan sequentially. \
+                 Got:\n{exact_plan}"
+            );
+
+            let mut report = ParityReport {
+                schema_version: 1,
+                harness: HarnessInfo {
+                    git_rev: None,
+                    features: active_features(),
+                    fixtures: vec![format!(
+                        "synthetic-scale ({H3_SCALE_ROWS} unit vectors, dim {H3_SCALE_DIM})"
+                    )],
+                },
+                adapters: vec![
+                    AdapterRun {
+                        name: "postgres-hnsw".into(),
+                        scan: ScanKind::Ann,
+                        index_present: corpus::index_present(&hnsw, sample, 20).await,
+                    },
+                    AdapterRun {
+                        name: "postgres-exact".into(),
+                        scan: ScanKind::Exact,
+                        index_present: corpus::index_present(&exact, sample, 20).await,
+                    },
+                ],
+                pairs: Vec::new(),
+            };
+            assert!(
+                report.adapters[0].index_present && !report.adapters[1].index_present,
+                "H3 scale: index_present must be probed and must separate the lanes: {:?}",
+                report.adapters
+            );
+
+            for &row in &probe_rows {
+                let (probe_id, probe) = &seeded[row];
+                // The exact answer, computed here rather than asked of the
+                // database: this is what makes "the forced-exact lane is exact"
+                // a proof instead of a label.
+                let mut oracle: Vec<(uuid::Uuid, f64)> = seeded
+                    .iter()
+                    .map(|(id, v)| (*id, f64::from(crate::embed::cosine(probe, v))))
+                    .collect();
+                oracle.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+                for &limit in &limits {
+                    let got_hnsw = hnsw
+                        .vector_candidates_checked(&sid, probe, &contract, limit)
+                        .await
+                        .expect("H3 scale: hnsw lane");
+                    let got_exact = exact
+                        .vector_candidates_checked(&sid, probe, &contract, limit)
+                        .await
+                        .expect("H3 scale: exact lane");
+                    assert_eq!(got_hnsw.len(), limit, "H3 scale: hnsw under-returned");
+                    assert_eq!(got_exact.len(), limit, "H3 scale: exact under-returned");
+
+                    // (2) The forced-exact lane matches the oracle. Compared as
+                    // a score sequence: two rows at an identical distance may
+                    // come back in either order without either answer being
+                    // wrong, but their scores are the same either way.
+                    assert_eq!(
+                        got_exact[0].item.0, *probe_id,
+                        "H3 scale: the exact lane's rank-1 for a probe drawn from the corpus \
+                         must be the probe's own row (limit {limit})"
+                    );
+                    assert!(
+                        (got_exact[0].score - 1.0).abs() < H3_SCORE_SKEW_EPSILON,
+                        "H3 scale: a unit vector against itself must score 1, got {}",
+                        got_exact[0].score
+                    );
+                    for (rank, hit) in got_exact.iter().enumerate() {
+                        assert!(
+                            (hit.score - oracle[rank].1).abs() < H3_SCORE_SKEW_EPSILON,
+                            "H3 scale: the forced-exact lane is not exact at rank {rank} \
+                             (limit {limit}): store {} vs oracle {}",
+                            hit.score,
+                            oracle[rank].1,
+                        );
+                    }
+
+                    report.pairs.push(PairResult {
+                        fixture: report.harness.fixtures[0].clone(),
+                        probe: format!("corpus-row-{row}"),
+                        limit,
+                        adapter_a: "postgres-hnsw".into(),
+                        adapter_b: "postgres-exact".into(),
+                        attribution: Attribution::AnnEnvelope,
+                        candidate_jaccard: jaccard(&got_hnsw, &got_exact),
+                        rank_prefix_match: rank_prefix_match(&got_hnsw, &got_exact),
+                        displacement: displacements(&got_hnsw, &got_exact),
+                        max_score_diff: max_score_diff(&got_hnsw, &got_exact),
+                        exact_match: got_hnsw == got_exact,
+                    });
+                }
+            }
+
+            // (3) The envelope, reported per limit as a real range.
+            assert_eq!(
+                report.pairs.len(),
+                probe_rows.len() * limits.len(),
+                "H3 scale: envelope matrix dimensions drifted"
+            );
+            eprintln!(
+                "H3 hnsw envelope at {H3_SCALE_ROWS} vectors, dim {H3_SCALE_DIM}, \
+                 pgvector defaults, probes drawn from the corpus:"
+            );
+            for &limit in &limits {
+                let cells: Vec<&PairResult> =
+                    report.pairs.iter().filter(|p| p.limit == limit).collect();
+                let min_jaccard = cells
+                    .iter()
+                    .map(|p| p.candidate_jaccard)
+                    .fold(1.0_f64, f64::min);
+                let max_jaccard = cells
+                    .iter()
+                    .map(|p| p.candidate_jaccard)
+                    .fold(0.0_f64, f64::max);
+                let max_score = cells
+                    .iter()
+                    .map(|p| p.max_score_diff)
+                    .fold(0.0_f64, f64::max);
+                let max_disp = cells
+                    .iter()
+                    .map(|p| p.displacement.len())
+                    .max()
+                    .unwrap_or(0);
+                let self_hit = cells.iter().filter(|p| p.rank_prefix_match >= 1).count();
+                eprintln!(
+                    "  k={limit:>3}: jaccard(hnsw, exact) in [{min_jaccard:.3}, \
+                     {max_jaccard:.3}], max_score_diff={max_score:.6}, \
+                     max_displaced_ids={max_disp}, probes whose rank-1 agrees: \
+                     {self_hit}/{}",
+                    cells.len()
+                );
+            }
+
+            if std::env::var_os("LAMBO_H3_EMIT_EVIDENCE").is_some() {
+                let dir = concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/evidence/mooshik-h3-postgres-parity"
+                );
+                std::fs::create_dir_all(dir).unwrap();
+                let json = serde_json::to_string_pretty(&report).unwrap();
+                std::fs::write(format!("{dir}/report-scale.json"), json).unwrap();
             }
         }
     }

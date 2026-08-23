@@ -54,6 +54,11 @@ pub(crate) use error::map_write_err;
 ))]
 pub(crate) mod vector;
 
+// DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
+// session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
+// and neither is feature-gated.
+pub(crate) mod dsn;
+
 // L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
 // (it only reads `Mutation`), so it compiles and is tested under every feature
 // row, including the `--no-default-features` minimal ones.
@@ -641,6 +646,26 @@ pub trait GraphStore: Send + Sync {
 /// unknown-kind errors cannot drift apart.
 const STORE_KIND_EXPECTED: &str = "memory | cockroach | postgres | sqlite";
 
+/// Environment variable carrying the Cockroach DSN.
+///
+/// Must equal `CockroachDialect::DSN_ENV`; `store::pg::cockroach`'s test module
+/// asserts it, so the operator-facing error and the variable configuration
+/// actually reads cannot drift apart.
+pub const COCKROACH_DSN_ENV: &str = "LAMBO_COCKROACH_DSN";
+
+/// Environment variable carrying the PostgreSQL DSN.
+///
+/// Must equal `PostgresDialect::DSN_ENV`; `store::pg::postgres`'s test module
+/// asserts it. Before E2E-F2 this name was printed in the missing-DSN error and
+/// read by nothing in configuration resolution.
+pub const POSTGRES_DSN_ENV: &str = "LAMBO_POSTGRES_DSN";
+
+/// Shared fallback DSN variable, honoured by both wire-Postgres kinds.
+///
+/// Deliberately not narrowed to one kind: this is how CI and existing
+/// deployments hand a DSN to a process without putting it in the file.
+pub const FALLBACK_DSN_ENV: &str = "DATABASE_URL";
+
 /// Durable store selector (TOML `store.kind` / `LAMBO_STORE`).
 ///
 /// Deserialize accepts the same aliases as [`FromStr`] (trimmed, case-insensitive):
@@ -679,6 +704,18 @@ impl<'de> Deserialize<'de> for StoreKind {
 }
 
 impl StoreKind {
+    /// The environment variable this kind reads its DSN from, if it has one.
+    ///
+    /// `None` for `memory` and `sqlite`: they have no DSN, so no environment
+    /// variable can select their storage (SQLite uses `LAMBO_SQLITE_PATH`).
+    pub const fn dsn_env(self) -> Option<&'static str> {
+        match self {
+            Self::Cockroach => Some(COCKROACH_DSN_ENV),
+            Self::Postgres => Some(POSTGRES_DSN_ENV),
+            Self::Memory | Self::Sqlite => None,
+        }
+    }
+
     pub const fn feature_name(self) -> &'static str {
         match self {
             Self::Memory => "store-memory",
@@ -763,7 +800,14 @@ impl std::fmt::Display for StoreKind {
 pub struct StoreConfig {
     #[serde(default)]
     pub kind: StoreKind,
-    /// Cockroach / Postgres DSN (`LAMBO_COCKROACH_DSN`, then `DATABASE_URL`).
+    /// Cockroach / Postgres DSN.
+    ///
+    /// Each DSN-bearing kind reads its **own** environment variable when this is
+    /// absent: `LAMBO_COCKROACH_DSN` for `cockroach`, `LAMBO_POSTGRES_DSN` for
+    /// `postgres`, with `DATABASE_URL` as a shared fallback for both. When this
+    /// **is** set and the environment names a different database,
+    /// [`StoreConfig::overlay_env`] refuses rather than picking a winner
+    /// (E2E-F2).
     #[serde(default)]
     pub dsn: Option<String>,
     /// SQLite file path or `sqlite::memory:`.
@@ -821,15 +865,52 @@ impl Default for StoreConfig {
 }
 
 impl StoreConfig {
-    /// Resolve a non-empty DSN from env only.
+    /// Resolve a non-empty DSN from env only, for the Cockroach kind.
     ///
-    /// Prefer non-empty `LAMBO_COCKROACH_DSN`; else non-empty `DATABASE_URL`.
-    /// Empty strings are treated as **unset** (same as other env knobs).
+    /// Kept as the Cockroach-shaped accessor the live Cockroach tests use.
+    /// Configuration resolution goes through [`Self::dsn_from_env_for_kind`],
+    /// which is kind-aware; this one is not, and must not be used to decide
+    /// which database a process opens.
     pub fn dsn_from_env() -> Option<String> {
-        env::var("LAMBO_COCKROACH_DSN")
+        Self::dsn_from_env_for_kind(StoreKind::Cockroach).map(|(_, dsn)| dsn)
+    }
+
+    /// Resolve a non-empty DSN from env for one store kind, with the name of
+    /// the variable it came from.
+    ///
+    /// # Why this is kind-aware (E2E-F2)
+    ///
+    /// It used to read `LAMBO_COCKROACH_DSN` then `DATABASE_URL` for every
+    /// kind. B1 then added `postgres`, so a `kind = "postgres"` deployment took
+    /// its DSN from a variable named after the other engine: on a machine whose
+    /// `.env` carries a production Cockroach DSN, every verb of a Postgres
+    /// config pointed at that cluster. Meanwhile `LAMBO_POSTGRES_DSN` existed
+    /// as [`crate::store::pg::dialect::Dialect::DSN_ENV`], was named in the
+    /// missing-DSN error an operator is told to act on, and was read by nothing
+    /// in configuration resolution.
+    ///
+    /// So each DSN-bearing kind now reads its own variable, and the error
+    /// message names a variable that works.
+    ///
+    /// `DATABASE_URL` stays a fallback for **both** wire-Postgres kinds: it is
+    /// how CI and existing deployments pass a DSN they do not want in the file,
+    /// and narrowing it would break the secret path while fixing the precedence
+    /// path. It is not consulted for `memory` or `sqlite`, which have no DSN:
+    /// a `DATABASE_URL` in the environment of a SQLite deployment described
+    /// some other program's database, never this one's.
+    ///
+    /// Empty strings are treated as **unset** (same as other env knobs), so an
+    /// empty `LAMBO_COCKROACH_DSN=` placeholder in `.env` neither selects a
+    /// database nor triggers the disagreement refusal.
+    pub fn dsn_from_env_for_kind(kind: StoreKind) -> Option<(&'static str, String)> {
+        let primary = kind.dsn_env()?;
+        if let Some(v) = env::var(primary).ok().filter(|s| !s.is_empty()) {
+            return Some((primary, v));
+        }
+        env::var(FALLBACK_DSN_ENV)
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| env::var("DATABASE_URL").ok().filter(|s| !s.is_empty()))
+            .map(|v| (FALLBACK_DSN_ENV, v))
     }
 
     fn env_kind() -> Result<Option<StoreKind>, StoreError> {
@@ -848,12 +929,48 @@ impl StoreConfig {
     ///
     /// Non-empty env values win over file. Empty env values are treated as unset and leave
     /// the file value intact (including empty `LAMBO_COCKROACH_DSN=` placeholders in `.env`).
+    ///
+    /// # The one exception: a DSN the file already chose (E2E-F2)
+    ///
+    /// An explicitly configured `store.dsn` is **not** silently replaced by the
+    /// environment. If the two name different databases this refuses and names
+    /// both, in the same spirit as `resolve::resolve_backends`' `vector_dim`
+    /// pin refusal: two authorities disagree about something load-bearing, and
+    /// guessing which one the operator meant is how `lambo provision` came to
+    /// issue DDL against a production cluster the config never mentioned.
+    ///
+    /// "Different databases" is measured by
+    /// [`crate::store::dsn::canonical_store_dsn`], not by string equality, so
+    /// the common secret-handling shape keeps working: a file DSN that names
+    /// the database and an environment DSN that adds the password are the same
+    /// database, the environment's spelling wins, and nothing is refused. Two
+    /// spellings that differ in host, port, database or user are two databases
+    /// and are refused.
+    ///
+    /// The canonical form has the password stripped, which is why it is safe to
+    /// put both sides in the message.
     pub fn overlay_env(mut self) -> Result<Self, StoreError> {
         if let Some(k) = Self::env_kind()? {
             self.kind = k;
         }
-        if let Some(dsn) = Self::dsn_from_env() {
-            self.dsn = Some(dsn);
+        if let Some((var, env_dsn)) = Self::dsn_from_env_for_kind(self.kind) {
+            if let Some(file_dsn) = self.dsn.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let from_file = crate::store::dsn::canonical_store_dsn(file_dsn);
+                let from_env = crate::store::dsn::canonical_store_dsn(&env_dsn);
+                if from_file != from_env {
+                    return Err(StoreError::Backend(format!(
+                        "store.dsn and {var} name different databases: the config file says \
+                         {from_file} and {var} says {from_env} (passwords stripped). Refusing \
+                         to guess which one you meant: the file is the single construction \
+                         site for `store.kind = {kind}`, and letting the environment outrank \
+                         it in silence means every verb, including `provision`, acts on a \
+                         database the config never names. Unset {var}, drop store.dsn, or \
+                         make them the same database.",
+                        kind = self.kind,
+                    )));
+                }
+            }
+            self.dsn = Some(env_dsn);
         }
         if let Ok(v) = env::var("LAMBO_SQLITE_PATH") {
             if !v.is_empty() {
@@ -1369,61 +1486,200 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         env::remove_var("LAMBO_STORE");
         env::remove_var("LAMBO_SQLITE_PATH");
 
+        // E2E-F2: the base kind used to be `Memory`, a kind with no DSN at all,
+        // and the overlay handed it one anyway. The overlay is kind-aware now,
+        // so this half has to run on a kind that really reads a DSN. `dsn: None`
+        // is the shape CI and existing deployments use (secret in the
+        // environment, not in the file), and it is the behaviour that must not
+        // change.
         let base = StoreConfig {
-            kind: StoreKind::Memory,
-            dsn: Some("toml-dsn".into()),
+            kind: StoreKind::Cockroach,
+            dsn: None,
             path: None,
             vector_dim: None,
         };
 
-        // No DSN env → keep TOML; from_env has no file → None.
-        let o = base.clone().overlay_env().unwrap();
-        assert_eq!(o.dsn.as_deref(), Some("toml-dsn"));
-        assert_eq!(StoreConfig::from_env().unwrap().dsn, None);
+        // No DSN env, no file DSN.
+        assert_eq!(base.clone().overlay_env().unwrap().dsn, None);
+        assert_eq!(StoreConfig::dsn_from_env(), None);
 
-        // Empty primary (placeholder in .env) does NOT wipe TOML; secondary still applies.
+        // Empty primary (placeholder in .env) is unset, not a selection.
         env::set_var("LAMBO_COCKROACH_DSN", "");
         env::remove_var("DATABASE_URL");
         assert_eq!(StoreConfig::dsn_from_env(), None);
-        let o = base.clone().overlay_env().unwrap();
-        assert_eq!(
-            o.dsn.as_deref(),
-            Some("toml-dsn"),
-            "empty primary env must leave file dsn intact"
-        );
+        assert_eq!(base.clone().overlay_env().unwrap().dsn, None);
 
-        // Empty primary, secondary set → both paths use secondary.
+        // Empty primary, secondary set: DATABASE_URL still works, which is the
+        // secret path E2E-F2's fix must not break.
         env::set_var("DATABASE_URL", "from-database-url");
         assert_eq!(
             StoreConfig::dsn_from_env().as_deref(),
             Some("from-database-url")
         );
-        let o = base.clone().overlay_env().unwrap();
-        assert_eq!(o.dsn.as_deref(), Some("from-database-url"));
         assert_eq!(
-            StoreConfig::from_env().unwrap().dsn.as_deref(),
+            base.clone().overlay_env().unwrap().dsn.as_deref(),
             Some("from-database-url")
         );
 
         // Primary non-empty beats secondary.
         env::set_var("LAMBO_COCKROACH_DSN", "from-primary");
         assert_eq!(StoreConfig::dsn_from_env().as_deref(), Some("from-primary"));
-        let o = base.clone().overlay_env().unwrap();
-        assert_eq!(o.dsn.as_deref(), Some("from-primary"));
         assert_eq!(
-            StoreConfig::from_env().unwrap().dsn.as_deref(),
+            base.clone().overlay_env().unwrap().dsn.as_deref(),
             Some("from-primary")
         );
 
-        // Both empty (vars present) → leave file value (empty == unset).
+        // Both empty (vars present) is unset.
         env::set_var("LAMBO_COCKROACH_DSN", "");
         env::set_var("DATABASE_URL", "");
         assert_eq!(StoreConfig::dsn_from_env(), None);
-        let o = base.overlay_env().unwrap();
-        assert_eq!(o.dsn.as_deref(), Some("toml-dsn"));
-        assert_eq!(StoreConfig::from_env().unwrap().dsn, None);
+        assert_eq!(base.overlay_env().unwrap().dsn, None);
 
         env::remove_var("LAMBO_COCKROACH_DSN");
+        env::remove_var("DATABASE_URL");
+    }
+
+    /// E2E-F2, the secret path: a file DSN that names the database and an
+    /// environment DSN that adds the password are the **same** database. That
+    /// must not be refused, and the environment's spelling (the one with the
+    /// credentials) is what the process opens.
+    #[test]
+    fn env_dsn_that_only_adds_credentials_overlays_the_file_dsn() {
+        let _g = env_lock();
+        env::remove_var("LAMBO_COCKROACH_DSN");
+        env::remove_var("DATABASE_URL");
+        env::remove_var("LAMBO_STORE");
+
+        let file = StoreConfig {
+            kind: StoreKind::Cockroach,
+            dsn: Some("postgresql://u@db.example:26257/lambo?sslmode=verify-full".into()),
+            path: None,
+            vector_dim: None,
+        };
+        env::set_var(
+            "LAMBO_COCKROACH_DSN",
+            "postgres://u:s3cret@db.example:26257/lambo",
+        );
+        let o = file
+            .clone()
+            .overlay_env()
+            .expect("same database, no refusal");
+        assert_eq!(
+            o.dsn.as_deref(),
+            Some("postgres://u:s3cret@db.example:26257/lambo"),
+            "the environment's spelling wins when both name one database"
+        );
+
+        // Same story through DATABASE_URL.
+        env::remove_var("LAMBO_COCKROACH_DSN");
+        env::set_var("DATABASE_URL", "postgres://u:s3cret@db.example:26257/lambo");
+        assert!(file.overlay_env().is_ok(), "DATABASE_URL must stay usable");
+
+        env::remove_var("DATABASE_URL");
+    }
+
+    /// E2E-F2, the precedence path: an explicitly configured `store.dsn` is
+    /// never silently replaced by an environment DSN naming a **different**
+    /// database. The refusal names both sides and the variable.
+    ///
+    /// This is the regression that let `lambo provision` issue DDL against a
+    /// production Cockroach cluster from `.env` while the operator read a local
+    /// container's DSN in their `lambo.toml`.
+    #[test]
+    fn env_dsn_naming_a_different_database_is_refused_not_preferred() {
+        let _g = env_lock();
+        env::remove_var("LAMBO_COCKROACH_DSN");
+        env::remove_var("LAMBO_POSTGRES_DSN");
+        env::remove_var("DATABASE_URL");
+        env::remove_var("LAMBO_STORE");
+
+        for (kind, var) in [
+            (StoreKind::Cockroach, "LAMBO_COCKROACH_DSN"),
+            (StoreKind::Postgres, "LAMBO_POSTGRES_DSN"),
+            (StoreKind::Cockroach, "DATABASE_URL"),
+            (StoreKind::Postgres, "DATABASE_URL"),
+        ] {
+            let cfg = StoreConfig {
+                kind,
+                dsn: Some("postgresql://lambo:lambo@127.0.0.1:55432/lambo?sslmode=disable".into()),
+                path: None,
+                vector_dim: None,
+            };
+            env::set_var(var, "postgresql://prod:hunter2@cluster.example:26257/decoy");
+            let err = cfg
+                .overlay_env()
+                .expect_err("a different database must be refused, not silently preferred")
+                .to_string();
+            env::remove_var(var);
+
+            assert!(
+                err.contains(var),
+                "the refusal must name the variable: {err}"
+            );
+            assert!(err.contains("store.dsn"), "{err}");
+            assert!(
+                err.contains("127.0.0.1:55432/lambo"),
+                "must name the file's database: {err}"
+            );
+            assert!(
+                err.contains("cluster.example:26257/decoy"),
+                "must name the environment's database: {err}"
+            );
+            assert!(
+                !err.contains("hunter2"),
+                "the refusal must not leak a password: {err}"
+            );
+            assert!(
+                !err.contains("lambo:lambo"),
+                "the refusal must not leak a password: {err}"
+            );
+        }
+    }
+
+    /// E2E-F2: `LAMBO_POSTGRES_DSN` is the Postgres kind's variable and
+    /// `LAMBO_COCKROACH_DSN` is the Cockroach kind's. Neither reaches across,
+    /// which is what stopped a `kind = "postgres"` config on a machine with a
+    /// production `LAMBO_COCKROACH_DSN` in `.env` from opening that cluster.
+    #[test]
+    fn each_kind_reads_its_own_dsn_env_var() {
+        let _g = env_lock();
+        env::remove_var("DATABASE_URL");
+        env::remove_var("LAMBO_STORE");
+        env::set_var("LAMBO_COCKROACH_DSN", "crdb-dsn");
+        env::set_var("LAMBO_POSTGRES_DSN", "pg-dsn");
+
+        let of = |kind| {
+            StoreConfig {
+                kind,
+                dsn: None,
+                path: None,
+                vector_dim: None,
+            }
+            .overlay_env()
+            .unwrap()
+            .dsn
+        };
+        assert_eq!(of(StoreKind::Cockroach).as_deref(), Some("crdb-dsn"));
+        assert_eq!(of(StoreKind::Postgres).as_deref(), Some("pg-dsn"));
+        // Kinds with no DSN take none, from any variable.
+        assert_eq!(of(StoreKind::Sqlite), None);
+        assert_eq!(of(StoreKind::Memory), None);
+        env::set_var("DATABASE_URL", "shared-dsn");
+        assert_eq!(of(StoreKind::Sqlite), None);
+        assert_eq!(of(StoreKind::Memory), None);
+
+        assert_eq!(
+            StoreConfig::dsn_from_env_for_kind(StoreKind::Postgres),
+            Some(("LAMBO_POSTGRES_DSN", "pg-dsn".to_string()))
+        );
+        assert_eq!(
+            StoreConfig::dsn_from_env_for_kind(StoreKind::Cockroach),
+            Some(("LAMBO_COCKROACH_DSN", "crdb-dsn".to_string()))
+        );
+        assert_eq!(StoreConfig::dsn_from_env_for_kind(StoreKind::Sqlite), None);
+
+        env::remove_var("LAMBO_COCKROACH_DSN");
+        env::remove_var("LAMBO_POSTGRES_DSN");
         env::remove_var("DATABASE_URL");
     }
 

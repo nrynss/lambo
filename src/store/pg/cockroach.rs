@@ -292,6 +292,17 @@ mod tests {
         }
     }
 
+    /// E2E-F2: the Cockroach dialect's DSN variable and the one configuration
+    /// resolution reads for `kind = "cockroach"` must be one string.
+    #[test]
+    fn dsn_env_named_in_errors_is_the_one_config_reads() {
+        assert_eq!(CockroachDialect::DSN_ENV, crate::store::COCKROACH_DSN_ENV,);
+        assert_eq!(
+            crate::store::StoreKind::Cockroach.dsn_env(),
+            Some(CockroachDialect::DSN_ENV),
+        );
+    }
+
     /// T7.4: the ANN accuracy dial parses and fails closed. A tuning knob that
     /// is silently ignored on a typo is worse than no knob — the operator
     /// believes accuracy was raised when it was not.

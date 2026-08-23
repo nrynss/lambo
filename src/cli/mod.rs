@@ -65,6 +65,21 @@ pub(crate) async fn load_reader_graph_with_contract(
     contract: Option<&EmbeddingContract>,
 ) -> Result<LoadedReader, CliError> {
     let session = SessionId::new(session);
+    // E2E-F5: readers preflight too. The writer attach has done this since J3
+    // F5, but `stats` / `saints` / `inspect` opened a store and read from it
+    // with no schema check at all, so B4's live vector-width guarantee was
+    // "on attach, on some verbs". Measured before this line existed: a config
+    // at `vector_dim = 1536` against an initialized `vector(768)` Postgres
+    // schema had `provision` and `derive` refuse by name and `stats` print a
+    // normal snapshot at rc 0. No vector is misread on that path (`stats`
+    // reads no vectors), so this closes a completeness gap rather than a
+    // correctness bug: the point is that the guarantee is now "on attach",
+    // full stop. `provision` is deliberately NOT routed through here, since
+    // its whole job is to reach a store that has no schema yet.
+    store
+        .preflight_schema()
+        .await
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
     let loaded = crate::store::load::load_session_async(store, &session)
         .await
         .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -153,6 +168,38 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use std::time::Duration;
+
+    /// E2E-F5: every reader verb preflights the schema, so an un-provisioned
+    /// or un-migrated store is refused by name instead of failing somewhere
+    /// downstream (or, on Postgres, quietly serving a snapshot from a schema
+    /// whose vector width disagrees with this process).
+    ///
+    /// Delete the `store.preflight_schema()` call in
+    /// `load_reader_graph_with_contract` and this fails: the load still errors
+    /// on a store with no tables, but with the adapter's raw complaint rather
+    /// than the actionable `lambo provision` refusal, and on the Postgres width
+    /// mismatch (which has real tables) it would not error at all.
+    #[cfg(feature = "store-sqlite")]
+    #[tokio::test]
+    async fn reader_verbs_refuse_an_unprovisioned_store_by_name() {
+        let store = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
+        let err = match load_reader_graph(&store, "s1").await {
+            Ok(_) => panic!("a reader must refuse a store with no schema"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("lambo provision"),
+            "the reader refusal must be the actionable preflight one: {err}"
+        );
+
+        // And the same reader is happy once the store is provisioned, so the
+        // preflight is a gate rather than a blanket refusal.
+        store.init_schema().await.unwrap();
+        assert!(
+            load_reader_graph(&store, "s1").await.is_ok(),
+            "a provisioned store must read normally"
+        );
+    }
 
     /// `Arc<MemoryStore>` as a `GraphStore` so sequential CLI commands can
     /// share one in-RAM store the way two process invocations share a file.
@@ -859,7 +906,7 @@ mod sqlite_tests {
             assert_eq!(file.store.kind, StoreKind::Sqlite);
             crate::resolve_store_only(Some(&cfg)).expect("store")
         };
-        let out = crate::cli::provision::run(store, StoreKind::Sqlite)
+        let out = crate::cli::provision::run(store, StoreKind::Sqlite, None)
             .await
             .expect("provision");
         assert!(out.contains("sqlite"), "{out}");
@@ -988,7 +1035,7 @@ mod sqlite_tests {
     async fn h1_sqlite_reopen_checks_models_allows_explicit_rename_and_accepts_legacy() {
         let (dir, cfg) = scratch();
         let store = resolve_clean(&cfg).store;
-        crate::cli::provision::run(store, StoreKind::Sqlite)
+        crate::cli::provision::run(store, StoreKind::Sqlite, None)
             .await
             .expect("provision");
 

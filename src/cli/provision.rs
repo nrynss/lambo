@@ -8,7 +8,14 @@
 //!   reconciliation lives there, not in `init_schema`'s timeout path).
 //! * `store.kind = memory` → success; the memory store needs no schema.
 //!
-//! DSN is never a CLI flag; it comes from env / config as today.
+//! DSN is never a CLI flag; it comes from env / config as today. The Cockroach
+//! arm **hands the resolved DSN to the script** rather than letting it inherit
+//! whatever `LAMBO_COCKROACH_DSN` happens to be in the environment: before
+//! E2E-1/E2E-F2, `store.dsn` was not passed to `scripts/provision.sh` and not
+//! consulted by it, so `lambo provision` could report success against a cluster
+//! the config never named. `StoreConfig::overlay_env` refuses when the two
+//! disagree; this makes the file's value the one that reaches the script when
+//! they do not.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,7 +28,16 @@ use super::caps::CliError;
 use crate::store::{GraphStore, StoreKind};
 
 /// Provision / migrate the durable store schema.
-pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, CliError> {
+///
+/// `dsn` is the resolved `store.dsn` (file overlaid with the kind's environment
+/// variable, refusing on disagreement). Only the Cockroach arm uses it: the
+/// other kinds provision through the store that was already constructed from
+/// the same value.
+pub async fn run(
+    store: Box<dyn GraphStore>,
+    kind: StoreKind,
+    dsn: Option<&str>,
+) -> Result<String, CliError> {
     match kind {
         StoreKind::Memory => {
             Ok("memory store needs no schema (in-RAM; nothing to provision)".into())
@@ -50,7 +66,7 @@ pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, 
                 ))
             })?;
             eprintln!("lambo provision: executing {}", script.display());
-            let status = Command::new("bash").arg(&script).status().map_err(|e| {
+            let status = provision_command(&script, dsn).status().map_err(|e| {
                 CliError::Runtime(format!("failed to spawn {}: {e}", script.display()))
             })?;
             if !status.success() {
@@ -69,6 +85,25 @@ pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, 
             ))
         }
     }
+}
+
+/// The child that runs `scripts/provision.sh`, with the resolved DSN pushed
+/// into the one variable that script reads.
+///
+/// The script's DSN line is `DSN="${LAMBO_COCKROACH_DSN:-}"`: it consults the
+/// environment and nothing else. Inheriting the ambient value is how `lambo
+/// provision` came to report success against a production cluster while the
+/// operator's `lambo.toml` named a local container (E2E-1). Setting it here
+/// makes the resolved config the authority. When the config carries no DSN the
+/// variable is left alone, so the pre-existing "secret lives only in the
+/// environment" path still works.
+fn provision_command(script: &Path, dsn: Option<&str>) -> Command {
+    let mut cmd = Command::new("bash");
+    cmd.arg(script);
+    if let Some(dsn) = dsn {
+        cmd.env(crate::store::COCKROACH_DSN_ENV, dsn);
+    }
+    cmd
 }
 
 fn find_provision_script() -> Option<PathBuf> {
@@ -129,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn provision_memory_store_succeeds_without_sql() {
         let store: Box<dyn GraphStore> = Box::new(MemoryStore::new());
-        let out = run(store, StoreKind::Memory)
+        let out = run(store, StoreKind::Memory, None)
             .await
             .expect("memory provision");
         assert!(
@@ -225,7 +260,7 @@ mod postgres_arm_tests {
         let store: Box<dyn GraphStore> = Box::new(RecordingStore {
             init_calls: calls.clone(),
         });
-        let out = run(store, StoreKind::Postgres)
+        let out = run(store, StoreKind::Postgres, None)
             .await
             .expect("postgres provision must init_schema in B2");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "init_schema must run once");
@@ -242,6 +277,41 @@ mod postgres_arm_tests {
 mod marker_tests {
     use super::*;
     use std::fs;
+
+    /// E2E-1 / E2E-F2: the resolved `store.dsn` reaches the script, so the
+    /// config file names the cluster the DDL lands on. Reverting the `cmd.env`
+    /// line makes this fail: the child would inherit whatever
+    /// `LAMBO_COCKROACH_DSN` the shell (or `.env`) happened to carry.
+    #[test]
+    fn cockroach_provision_hands_the_resolved_dsn_to_the_script() {
+        let script = Path::new("/tmp/does-not-run/scripts/provision.sh");
+        let cmd = provision_command(script, Some("postgresql://u@local:26257/lambo"));
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            envs.contains(&(
+                "LAMBO_COCKROACH_DSN".to_string(),
+                Some("postgresql://u@local:26257/lambo".to_string())
+            )),
+            "the resolved DSN must be pushed into the child: {envs:?}"
+        );
+
+        // No configured DSN: the environment is left exactly as inherited, so
+        // the long-standing secret-in-the-environment path still works.
+        let bare = provision_command(script, None);
+        assert_eq!(
+            bare.get_envs().count(),
+            0,
+            "with no store.dsn the child's environment must not be rewritten"
+        );
+    }
 
     #[test]
     fn cargo_toml_marker_requires_package_name_lambo() {

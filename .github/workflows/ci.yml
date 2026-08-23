@@ -194,8 +194,19 @@ jobs:
           # B2: postgres compile + unit. Live init is the postgres-live job
           # below (pinned pgvector service container). Same driver as
           # store-cockroach.
+          # E2E-F8: `cargo test` alone left `store-postgres` with test coverage
+          # and ZERO lint coverage. `check` lints default features (no
+          # postgres), `ship` does not include `store-postgres`, and this row
+          # was a test row. The clippy line here is what would have caught the
+          # `useless_vec` inside `h3_postgres_recall_parity` that no CI row
+          # could see. The `store-sqlite,fixtures` combination is included
+          # because that is where the H3 harness lives.
           - name: postgres
-            command: cargo test --no-default-features --features store-postgres
+            command: |
+              set -o pipefail
+              cargo clippy --all-targets --no-default-features --features store-postgres -- -D warnings
+              cargo clippy --all-targets --no-default-features --features store-postgres,store-sqlite,fixtures -- -D warnings
+              cargo test --no-default-features --features store-postgres
           # K2 — the in-crate candle BGE-M3 embedder compiles and its
           # weightless unit tests pass on the default runner. The base feature
           # is CPU-capable candle only: no accelerator Cargo features, no
@@ -327,6 +338,20 @@ jobs:
             -- --ignored --nocapture --exact \
             2>&1 | tee postgres-h3.log
           grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_recall_parity ... ok' postgres-h3.log
+      # E2E-F3: the hnsw envelope, measured where hnsw actually engages (5,000
+      # vectors at dim 768) rather than on the 9- and 22-row fixture graphs,
+      # where the planner never uses the index and the two lanes are the same
+      # answer. Its own step so a shrink back to a size that cannot fail is a
+      # named red row. ~20s on the runner; that is why it is here and not in a
+      # default `cargo test`.
+      - name: Live Postgres H3 hnsw envelope at scale
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib \
+            store::sqlite::tests::h1_cross_store_parity::h3_postgres_hnsw_envelope_at_scale \
+            -- --ignored --nocapture --exact \
+            2>&1 | tee postgres-h3-scale.log
+          grep -q 'test store::sqlite::tests::h1_cross_store_parity::h3_postgres_hnsw_envelope_at_scale ... ok' postgres-h3-scale.log
 
   # Live CockroachDB tier (secret-gated): runs the `#[ignore]`d live tests
   # (CRDB conformance suite, canon progression, vector EXPLAIN) against the

@@ -192,7 +192,7 @@ enum Commands {
         )]
         session: String,
     },
-    /// Provision / migrate the durable store schema (SQLite init_schema, Cockroach via scripts/provision.sh).
+    /// Provision / migrate the durable store schema (SQLite and Postgres via init_schema, Cockroach via scripts/provision.sh).
     ///
     /// Does **not** construct the embedder (ops-only path). Still validates Level B
     /// store selection so a misconfigured `kind` fails closed early.
@@ -402,6 +402,11 @@ enum Resolved {
     StoreOnly {
         store: Box<dyn GraphStore>,
         kind: StoreKind,
+        /// The resolved `store.dsn` (file overlaid with the kind's DSN
+        /// environment variable). `provision`'s Cockroach arm hands it to
+        /// `scripts/provision.sh` so the config file, not the ambient
+        /// environment, names the cluster that receives the DDL (E2E-1).
+        dsn: Option<String>,
     },
 }
 
@@ -417,8 +422,9 @@ fn resolve_for_command(
         // still constructed exactly once.
         let file = LamboFile::load_resolved(config).map_err(|e| e.to_string())?;
         let kind = file.store.kind;
+        let dsn = file.store.dsn.clone();
         let store = resolve_store_only(config).map_err(|e| e.to_string())?;
-        Ok(Resolved::StoreOnly { store, kind })
+        Ok(Resolved::StoreOnly { store, kind, dsn })
     }
 }
 
@@ -646,9 +652,10 @@ fn main() -> ExitCode {
         (Commands::Stats { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("stats", lambo::cli::stats::run(store.as_ref(), &session))
         }
-        (Commands::Provision, Resolved::StoreOnly { store, kind }) => {
-            run_async("provision", lambo::cli::provision::run(store, kind))
-        }
+        (Commands::Provision, Resolved::StoreOnly { store, kind, dsn }) => run_async(
+            "provision",
+            lambo::cli::provision::run(store, kind, dsn.as_deref()),
+        ),
         (
             Commands::Derive {
                 session,
@@ -904,6 +911,29 @@ mod tests {
             }
         }
         walk(&Cli::command());
+    }
+
+    /// E2E-F6: `provision --help` names every kind it provisions. `postgres`
+    /// has been a shipped, tested provision path since B1/B2, and it is exactly
+    /// the verb the DSN-precedence findings are about, so the operator most in
+    /// need of the sentence is the one reading this line.
+    #[test]
+    fn provision_help_names_every_store_kind_it_provisions() {
+        let provision = Cli::command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "provision")
+            .expect("provision subcommand")
+            .clone();
+        let about = provision
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        for kind in ["SQLite", "Postgres", "Cockroach"] {
+            assert!(
+                about.contains(kind),
+                "provision --help must name {kind}: {about}"
+            );
+        }
     }
 
     #[test]

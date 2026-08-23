@@ -1,0 +1,57 @@
+hnsw vs forced-exact top-k agreement, 20000 rows, dim 768, uniformly random unit vectors
+pgvector defaults m=16 ef_construction=64 ef_search=40. Probe = a stored vector (its own exact match is rank 1).
+hnsw lane: planner default. exact lane: PGOPTIONS='-c enable_indexscan=off'.
+
+mean |hnsw_topk INTERSECT exact_topk| / k over 5 probes:
+  k=5   1.000  (planner chose Seq Scan for BOTH lanes at this k: not an hnsw measurement)
+  k=10  1.000  (same: Seq Scan both lanes)
+  k=20  0.000  <- planner switched to the hnsw Index Scan here. Its top-20 shares NOTHING
+                 with the exact top-20 and omits the probe's own stored row (cosine distance 0).
+  k=40  0.000
+  k=60  0.333
+
+== plan at k=5 (hnsw lane) ==
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Limit  (cost=965.50..965.51 rows=5 width=24)
+   InitPlan 1
+     ->  Index Scan using concepts_pkey on concepts concepts_1  (cost=0.29..8.30 rows=1 width=18)
+           Index Cond: (id = '41bd7364-d59c-4161-b7d2-e53cb77d5ed8'::uuid)
+   ->  Sort  (cost=957.19..1007.19 rows=20000 width=24)
+         Sort Key: ((concepts.embedding <=> (InitPlan 1).col1))
+         ->  Seq Scan on concepts  (cost=0.00..625.00 rows=20000 width=24)
+               Filter: (embedding IS NOT NULL)
+(8 rows)
+
+== plan at k=20 (hnsw lane) ==
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Limit  (cost=1074.59..1111.77 rows=20 width=24)
+   InitPlan 1
+     ->  Index Scan using concepts_pkey on concepts concepts_1  (cost=0.29..8.30 rows=1 width=18)
+           Index Cond: (id = '41bd7364-d59c-4161-b7d2-e53cb77d5ed8'::uuid)
+   ->  Index Scan using concepts_embedding_idx on concepts  (cost=1066.29..38248.00 rows=20000 width=24)
+         Order By: (embedding <=> (InitPlan 1).col1)
+(6 rows)
+
+== plan at k=20 (forced-exact lane) ==
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Limit  (cost=1165.50..1165.55 rows=20 width=24)
+   InitPlan 1
+     ->  Bitmap Heap Scan on concepts concepts_1  (cost=4.30..8.31 rows=1 width=18)
+           Recheck Cond: (id = '41bd7364-d59c-4161-b7d2-e53cb77d5ed8'::uuid)
+           ->  Bitmap Index Scan on concepts_pkey  (cost=0.00..4.29 rows=1 width=0)
+                 Index Cond: (id = '41bd7364-d59c-4161-b7d2-e53cb77d5ed8'::uuid)
+   ->  Sort  (cost=1157.19..1207.19 rows=20000 width=24)
+         Sort Key: ((concepts.embedding <=> (InitPlan 1).col1))
+         ->  Seq Scan on concepts  (cost=0.00..625.00 rows=20000 width=24)
+               Filter: (embedding IS NOT NULL)
+(10 rows)
+
+
+Caveat: a uniformly random high-dimensional corpus is the worst case for hnsw (all pairwise
+cosines cluster near 0, so ranks beyond the self-match are near-ties). A real embedding corpus
+is clustered and will do better. The point is not this number: it is that H3 ships an envelope
+measured at 9 and 22 vectors, where hnsw cannot diverge at all, and no measurement exists at
+any corpus size where the approximation is real.

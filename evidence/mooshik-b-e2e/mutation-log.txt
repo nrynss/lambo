@@ -1,0 +1,38 @@
+# Mutation tests, B end-to-end review, tree d3bea88
+# Each mutation applied to src/store/pg/postgres.rs, gates re-run, then reverted.
+
+## M1  distance_to_score: 1 - d  ->  1 - d^2/2 (Cockroach's L2 formula on pgvector cosine)
+   offline  cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib
+            FAILED  store::pg::postgres::tests::distance_to_score_is_one_minus_d (left 0.5, right 0.0)
+   live H3  FAILED  "systematic score skew ... max diff 0.009432170552267527 > 0.0001"
+   VERDICT  caught twice. The conversion pin is live, not vacuous.
+
+## M2  DISTANCE_OP: <=> -> <-> (Cockroach L2 operator on pgvector), conversion left at 1 - d
+   offline  FAILED  dialect_tokens_are_not_cockroach_sql, distance_to_score_is_one_minus_d,
+                    recall_sql_pairs_cosine_operator_with_text_and_vector_casts
+   live H3  FAILED  at the EXPLAIN assertion: the plan degraded to Seq Scan because
+                    concepts_embedding_idx is vector_cosine_ops and cannot serve <->.
+   VERDICT  caught. Note the live catch comes from the index opclass, not from score skew.
+
+## M3  forced_exact_scan_sql() -> None (the H3 forced-exact lane stops forcing anything)
+   offline  FAILED  distance_to_score_is_one_minus_d (asserts the literal string)
+   live     FAILED  store::pg::postgres::tests::explain_recall_uses_hnsw
+                    "forced-exact lane must not use the hnsw index"
+   live H3  PASSED  <-- h3_postgres_recall_parity is GREEN under this mutation.
+   VERDICT  H3's own forced-exact lane is not self-verifying. With both lanes unforced it
+            still reports zero adapter skew and a zero hnsw envelope, and its
+            index_present=false claim for postgres-exact is a hardcoded literal in the
+            adapter tuple, not a probe. See finding E2E-F3.
+
+## M4  fencing gate disabled: `if !lease_permits_write(cur, token)` -> `if false && !...`
+   offline  cargo test --no-default-features --features store-postgres,store-sqlite,fixtures --lib
+            PASSED  794 passed / 0 failed
+   offline  cargo test --features store-cockroach,fixtures --lib
+            PASSED  987 passed / 0 failed
+   live     FAILED  store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay
+                    "stale token must be StaleWrite, got Ok(())"
+   VERDICT  B0's round-1 observation still holds offline: the fencing token has NO offline
+            evidence on either dialect. The Postgres leg is strictly better than Cockroach's:
+            its live proof runs in the postgres-live CI job on every push against a pinned
+            service container, where Cockroach's equivalent is secret-gated and off on this
+            branch. Done-when box "fencing-token refusal proven on the new dialect": MET.

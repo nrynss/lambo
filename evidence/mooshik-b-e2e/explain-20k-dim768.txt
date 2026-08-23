@@ -1,0 +1,73 @@
+Pager usage is off.
+ rows  | embedded 
+-------+----------
+ 20000 |    20000
+(1 row)
+
+                                                           indexdef                                                            
+-------------------------------------------------------------------------------------------------------------------------------
+ CREATE INDEX concepts_embedding_idx ON public.concepts USING hnsw (embedding vector_cosine_ops) WHERE (embedding IS NOT NULL)
+(1 row)
+
+ format_type 
+-------------
+ vector(768)
+(1 row)
+
+=== LANE A: natural planner choice, production vector_candidates SQL ===
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1066.31..1140.88 rows=40 width=43) (actual time=0.285..0.513 rows=40 loops=1)
+   Buffers: shared hit=389
+   InitPlan 1
+     ->  Limit  (cost=0.00..0.03 rows=1 width=18) (actual time=0.005..0.005 rows=1 loops=1)
+           Buffers: shared hit=2
+           ->  Seq Scan on concepts concepts_1  (cost=0.00..575.00 rows=20000 width=18) (actual time=0.004..0.005 rows=1 loops=1)
+                 Buffers: shared hit=2
+   ->  Index Scan using concepts_embedding_idx on concepts  (cost=1066.29..38348.00 rows=20000 width=43) (actual time=0.285..0.509 rows=40 loops=1)
+         Order By: (embedding <=> ((InitPlan 1).col1)::vector)
+         Buffers: shared hit=389
+ Planning:
+   Buffers: shared hit=49
+ Planning Time: 0.117 ms
+ Execution Time: 0.553 ms
+(14 rows)
+
+=== LANE B: forced-exact (SET LOCAL enable_indexscan = off) ===
+BEGIN
+SET
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1357.22..1357.32 rows=40 width=43) (actual time=131.589..131.597 rows=40 loops=1)
+   InitPlan 1
+     ->  Limit  (cost=0.00..0.03 rows=1 width=18) (actual time=0.001..0.003 rows=1 loops=1)
+           ->  Seq Scan on concepts concepts_1  (cost=0.00..575.00 rows=20000 width=18) (actual time=0.001..0.002 rows=1 loops=1)
+   ->  Sort  (cost=1357.19..1407.19 rows=20000 width=43) (actual time=131.588..131.591 rows=40 loops=1)
+         Sort Key: ((concepts.embedding <=> ((InitPlan 1).col1)::vector))
+         Sort Method: top-N heapsort  Memory: 27kB
+         ->  Seq Scan on concepts  (cost=0.00..725.00 rows=20000 width=43) (actual time=0.015..127.506 rows=20000 loops=1)
+               Filter: (embedding IS NOT NULL)
+ Planning Time: 0.047 ms
+ Execution Time: 131.613 ms
+(11 rows)
+
+COMMIT
+=== LANE C: session_vector_candidates (session-scoped fallback) ===
+                                                                        QUERY PLAN                                                                         
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1068.19..1144.65 rows=40 width=40) (actual time=2.637..2.642 rows=40 loops=1)
+   InitPlan 1
+     ->  Limit  (cost=0.00..0.03 rows=1 width=18) (actual time=0.007..0.007 rows=1 loops=1)
+           ->  Seq Scan on concepts concepts_1  (cost=0.00..575.00 rows=20000 width=18) (actual time=0.007..0.007 rows=1 loops=1)
+   ->  Incremental Sort  (cost=1068.16..39298.00 rows=20000 width=40) (actual time=2.637..2.638 rows=40 loops=1)
+         Sort Key: ((concepts.embedding <=> ((InitPlan 1).col1)::vector)), ((concepts.id)::text)
+         Presorted Key: ((concepts.embedding <=> ((InitPlan 1).col1)::vector))
+         Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 29kB  Peak Memory: 29kB
+         Pre-sorted Groups: 1  Sort Method: top-N heapsort  Average Memory: 28kB  Peak Memory: 28kB
+         ->  Index Scan using concepts_embedding_idx on concepts  (cost=1066.29..38398.00 rows=20000 width=40) (actual time=0.137..2.419 rows=391 loops=1)
+               Order By: (embedding <=> ((InitPlan 1).col1)::vector)
+               Filter: (session_id = 's1'::text)
+ Planning Time: 0.201 ms
+ Execution Time: 2.668 ms
+(14 rows)
+

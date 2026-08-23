@@ -12,13 +12,52 @@ use crate::types::StoreError;
 
 /// Encode an embedding as the `[x,y,z]` text literal. Rejects non-finite
 /// elements (a `NaN`/`Inf` vector is not a legal embedding and Cockroach would
-/// reject the literal).
+/// reject the literal) and zero-norm vectors (E2E-F9).
+///
+/// # Why zero norm is refused here (E2E-F9)
+///
+/// [`crate::embed::Embedder::embed`]'s documented output contract is unit norm,
+/// and nothing enforced it. A zero vector is finite, so the check below passed
+/// it, and the two dialects then disagreed about what it meant: pgvector's
+/// `<=>` is `NaN` against every row, so `distance_to_score` propagated `NaN`
+/// into ranking, while Cockroach's `<->` is a finite `1` and scored a steady
+/// `0.5`. One contract-violating row, two different answers, neither of them a
+/// refusal.
+///
+/// Refused in the shared codec rather than in one adapter because that is the
+/// one place both dialects and SQLite pass through, and because a vector with
+/// no direction has no cosine to any other vector on any of them: it is not a
+/// backend quirk to paper over, it is not an embedding.
+///
+/// The empty slice is not refused: it carries no direction either, but it is a
+/// separate degenerate case (a width-zero embedding), it is rejected earlier by
+/// `check_embedding_dim` on every path that has a configured width, and the
+/// codec's own round-trip pin covers `dim = 0`.
 pub fn encode_vector(v: &[f32]) -> Result<String, StoreError> {
     if let Some(bad) = v.iter().find(|x| !x.is_finite()) {
         return Err(StoreError::Backend(format!(
             "embedding contains non-finite value {bad} (at index {:?})",
             v.iter().position(|x| !x.is_finite())
         )));
+    }
+    if !v.is_empty() {
+        // Accumulated in f32 on purpose: this is the arithmetic pgvector and
+        // Cockroach do, so a vector whose norm underflows to zero for them is
+        // refused here rather than becoming a NaN score there.
+        let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+        // `<= 0.0 || is_nan()` rather than `!(norm_sq > 0.0)`: exactly the same
+        // set of refused values, without the negated partial-ord comparison
+        // clippy refuses under -D warnings.
+        if norm_sq <= 0.0 || norm_sq.is_nan() {
+            return Err(StoreError::Backend(format!(
+                "embedding has zero norm over {} dimensions, which violates the unit-norm \
+                 output contract of Embedder::embed. A vector with no direction has no \
+                 cosine to anything: pgvector scores it NaN against every row and \
+                 CockroachDB scores it a flat 0.5, so the same data would rank differently \
+                 on the two stores. Refusing to write or query it",
+                v.len(),
+            )));
+        }
     }
     let mut s = String::with_capacity(v.len() * 8);
     s.push('[');
@@ -69,6 +108,31 @@ mod tests {
                 "dim {dim}: encode -> decode must be exact (shortest f32 repr)"
             );
         }
+    }
+
+    /// E2E-F9: a zero vector is finite and used to encode cleanly, after which
+    /// pgvector answered `NaN` and Cockroach answered `1` for the same data.
+    /// Delete the zero-norm branch in `encode_vector` and this fails.
+    #[test]
+    fn encode_refuses_a_zero_norm_embedding() {
+        let err = encode_vector(&[0.0; 8])
+            .expect_err("a zero vector is not an embedding")
+            .to_string();
+        assert!(err.contains("zero norm"), "{err}");
+        assert!(err.contains("unit-norm"), "{err}");
+        // Named for both stores, because the whole point is that they disagree.
+        assert!(err.contains("NaN"), "{err}");
+
+        // Underflow: every component is non-zero but the f32 norm is not.
+        assert!(
+            encode_vector(&[1e-30_f32; 8]).is_err(),
+            "a norm that underflows to zero is the same defect one step further away"
+        );
+
+        // A tiny but representable direction is still a direction.
+        assert!(encode_vector(&[1e-6_f32, 0.0, 0.0]).is_ok());
+        // The empty slice keeps its existing meaning (see the doc comment).
+        assert_eq!(encode_vector(&[]).unwrap(), "[]");
     }
 
     #[test]

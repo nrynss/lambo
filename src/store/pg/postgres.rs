@@ -99,8 +99,11 @@ impl Dialect for PostgresDialect {
 
     /// Width substituted *into* the DDL (the inverse of Cockroach's parse-out).
     ///
-    /// Source: `[store] vector_dim` when set, otherwise
-    /// [`DEFAULT_POSTGRES_VECTOR_DIM`]. `build_store_with_vector_dim` copies
+    /// Source: `[store] vector_dim` when set, otherwise the private
+    /// `DEFAULT_POSTGRES_VECTOR_DIM` (1024). Named rather than linked: it is a
+    /// private item, and a public doc comment linking to one is the single new
+    /// warning the private-item doc gate exists to catch (E2E-F7).
+    /// `build_store_with_vector_dim` copies
     /// the resolved embedder width into the pin slot when the pin is absent,
     /// so a process that configured `[embedder] dim = 768` inits at 768.
     /// B4 then checks this number against live `vector(n)` at init and attach.
@@ -190,6 +193,220 @@ pub(crate) fn dsn_for_database(base: &str, database: &str) -> String {
     match query {
         Some(q) => format!("{prefix}/{database}?{q}"),
         None => format!("{prefix}/{database}"),
+    }
+}
+
+/// A deterministic corpus of unit vectors, and the rows to hold them.
+///
+/// # Why the live proofs need this at all (E2E-F3 / E2E-F4)
+///
+/// Both the `EXPLAIN` box and H3's hnsw envelope used to be measured on a
+/// corpus of 0, 9 or 22 rows. On a table that small the planner prefers a
+/// sequential scan whatever the index offers, and hnsw returns the exact
+/// answer because it visits everything, so neither instrument could move: the
+/// `EXPLAIN` capture proved only that the index is *usable* under
+/// `enable_seqscan = off`, and the envelope was a comparison of two identical
+/// answers. A corpus above the planner's crossover is what makes both of them
+/// measurements.
+#[cfg(test)]
+pub(crate) mod corpus {
+    use super::PostgresStore;
+    use sqlx::Row;
+
+    /// Rows above which the planner picks `concepts_embedding_idx` over a
+    /// sequential scan for the production recall query.
+    ///
+    /// Measured on the pinned `pgvector/pgvector:pg17` digest at dim 8: 100
+    /// rows still plans a `Seq Scan`, 500 rows plans an
+    /// `Index Scan using concepts_embedding_idx`. Callers seed a multiple of
+    /// this so the assertion is not a coin flip on a slightly different
+    /// `ANALYZE`.
+    pub(crate) const PLANNER_CROSSOVER_ROWS: usize = 500;
+
+    /// Deterministic unit vectors: a corpus that reproduces run to run, so an
+    /// envelope printed as evidence is a number someone else can obtain again.
+    ///
+    /// `splitmix64` seeded from the row index, not a stateful RNG, so row `i`
+    /// is the same vector regardless of what ran between two calls.
+    pub(crate) fn unit_vector(i: usize, dim: usize) -> Vec<f32> {
+        let mut state = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 52) as f64 * 2.0 - 1.0
+        };
+        let mut v: Vec<f32> = (0..dim).map(|_| next() as f32).collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // A zero vector is a `NaN` distance under `<=>`. The generator cannot
+        // produce one at any realistic dim; fall back rather than divide by it.
+        if norm == 0.0 {
+            v[0] = 1.0;
+        } else {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    /// pgvector's text input form for one vector.
+    fn vector_literal(v: &[f32]) -> String {
+        let mut out = String::with_capacity(v.len() * 12 + 2);
+        out.push('[');
+        for (i, x) in v.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&x.to_string());
+        }
+        out.push(']');
+        out
+    }
+
+    const SESSION_SQL: &str = "INSERT INTO sessions (session_id, root_goal, created_at, embedding_kind, embedding_model, embedding_dim) VALUES ($1, '{}'::jsonb, now(), $3, $4, $2) ON CONFLICT (session_id) DO NOTHING";
+
+    const INTERACTION_SQL: &str = "INSERT INTO interactions (id, session_id, agent_id, prompt_text, created_at) VALUES ($1, $2, 'corpus', 'seed', now())";
+
+    const CONCEPT_BATCH_SQL: &str = "INSERT INTO concepts (id, session_id, content, canonical_key, concept_type, origin_interaction, origin_agent, created_at, embedding) SELECT u.id, $4, 'corpus', u.key, 'Observation', $5, 'corpus', now(), u.emb::vector FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS u(id, key, emb)";
+
+    /// Seed `rows` deterministic unit vectors into a live store's `concepts`
+    /// table under `session`, returning `(id, vector)` so a caller can compute
+    /// the exact answer for itself.
+    ///
+    /// Written with `UNNEST` batches rather than the `flush()` path on purpose:
+    /// the subject of these proofs is the **recall query's plan and answer**,
+    /// and the write path has its own tests. Seeding thousands of rows through
+    /// `flush()` would put minutes of unrelated work in front of a measurement
+    /// that does not depend on it.
+    ///
+    /// The session's embedding contract is written in the shape
+    /// `vector_candidates_checked` reads back, so a caller can measure through
+    /// the production entry point rather than raw SQL.
+    pub(crate) async fn seed(
+        store: &PostgresStore,
+        session: &str,
+        contract: &crate::types::EmbeddingContract,
+        rows: usize,
+    ) -> Vec<(uuid::Uuid, Vec<f32>)> {
+        let dim = contract.dim;
+        let pool = store.pool().await.expect("corpus: pool");
+        sqlx::query(SESSION_SQL)
+            .bind(session)
+            .bind(dim as i64)
+            .bind(&contract.kind)
+            .bind(contract.model.as_deref())
+            .execute(pool)
+            .await
+            .expect("corpus: session row");
+        let origin = uuid::Uuid::new_v4();
+        sqlx::query(INTERACTION_SQL)
+            .bind(origin)
+            .bind(session)
+            .execute(pool)
+            .await
+            .expect("corpus: interaction row");
+
+        let corpus: Vec<(uuid::Uuid, Vec<f32>)> = (0..rows)
+            .map(|i| (uuid::Uuid::new_v4(), unit_vector(i, dim)))
+            .collect();
+        for (chunk_index, chunk) in corpus.chunks(500).enumerate() {
+            let base = chunk_index * 500;
+            let ids: Vec<uuid::Uuid> = chunk.iter().map(|(id, _)| *id).collect();
+            let keys: Vec<String> = (0..chunk.len()).map(|i| format!("k{}", base + i)).collect();
+            let embeddings: Vec<String> = chunk.iter().map(|(_, v)| vector_literal(v)).collect();
+            sqlx::query(CONCEPT_BATCH_SQL)
+                .bind(&ids)
+                .bind(&keys)
+                .bind(&embeddings)
+                .bind(session)
+                .bind(origin)
+                .execute(pool)
+                .await
+                .expect("corpus: concept batch");
+        }
+        // Without this the planner costs against a stale `pg_class` estimate
+        // and keeps choosing a sequential scan however many rows are really
+        // there, which would make the plan assertion a test of autovacuum's
+        // schedule.
+        sqlx::query("ANALYZE concepts")
+            .execute(pool)
+            .await
+            .expect("corpus: ANALYZE");
+        corpus
+    }
+
+    /// EXPLAIN the production recall SQL on `store`, through the same
+    /// forced-exact path production search uses, and report whether the
+    /// planner's **natural** choice named `concepts_embedding_idx`.
+    ///
+    /// This is what turns H3's `index_present` from a hardcoded literal into a
+    /// measurement: with `forced_exact_scan_sql()` returning `None`, the
+    /// "exact" lane's plan names the index and the probe says so.
+    /// Only the H3 parity harness calls this, and that harness lives behind
+    /// `store-sqlite` because it compares the two engines against SQLite and
+    /// the memory oracle. Under `store-postgres` alone it is genuinely
+    /// uncalled, so the allow is scoped to exactly that combination rather
+    /// than blanket-silencing dead code on every build.
+    #[cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
+    pub(crate) async fn index_present(store: &PostgresStore, probe: &[f32], limit: i64) -> bool {
+        plan(store, probe, limit)
+            .await
+            .contains("concepts_embedding_idx")
+    }
+
+    /// A plan with its vector literal elided, for printing.
+    ///
+    /// A dim-768 probe renders as roughly ten kilobytes of floats inside the
+    /// `Order By` line, twice per capture. Useful in none of the cases where
+    /// someone reads this output.
+    pub(crate) fn elide_vector_literals(plan: &str) -> String {
+        let mut out = String::with_capacity(plan.len());
+        let mut rest = plan;
+        while let Some(open) = rest.find("'[") {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + 2..];
+            match after.find("]'") {
+                Some(close) => {
+                    let inner = &after[..close];
+                    let dims = inner.split(',').count();
+                    out.push_str(&format!("'[<{dims} floats>]'"));
+                    rest = &after[close + 2..];
+                }
+                None => {
+                    out.push_str(&rest[open..]);
+                    return out;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The natural plan text for the production recall SQL, with no GUC beyond
+    /// the store's own forced-exact setting.
+    pub(crate) async fn plan(store: &PostgresStore, probe: &[f32], limit: i64) -> String {
+        let pool = store.pool().await.expect("plan: pool");
+        let encoded = crate::store::vector::encode_vector(probe).expect("plan: encode probe");
+        let sql = store.vector_candidates_sql();
+        let mut tx = pool.begin().await.expect("plan: begin");
+        store
+            .issue_forced_exact_scan(&mut tx)
+            .await
+            .expect("plan: forced-exact GUC");
+        let rows = sqlx::query(&format!("EXPLAIN {sql}"))
+            .bind(&encoded)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("plan: EXPLAIN");
+        tx.commit().await.expect("plan: commit");
+        rows.iter()
+            .map(|r| r.try_get::<String, usize>(0).expect("plan: col"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -413,6 +630,25 @@ mod tests {
         assert!(
             !err.contains("CockroachStore"),
             "must not launder the Cockroach DSN miss: {err}"
+        );
+    }
+
+    /// E2E-F2: the variable the missing-DSN error tells an operator to set is
+    /// the variable configuration resolution actually reads for this kind. It
+    /// used to be neither: `LAMBO_POSTGRES_DSN` was printed here and read
+    /// nowhere, while `LAMBO_COCKROACH_DSN` selected the database.
+    #[test]
+    fn dsn_env_named_in_errors_is_the_one_config_reads() {
+        assert_eq!(
+            PostgresDialect::DSN_ENV,
+            crate::store::POSTGRES_DSN_ENV,
+            "the dialect's operator-facing DSN variable and the one \
+             StoreConfig::dsn_from_env_for_kind consults must be one string"
+        );
+        assert_eq!(
+            StoreKind::Postgres.dsn_env(),
+            Some(PostgresDialect::DSN_ENV),
+            "kind -> env var mapping must agree with the dialect"
         );
     }
 
@@ -661,10 +897,13 @@ mod tests {
     /// `Dialect::forced_exact_scan_sql` through the same
     /// `PgStore::issue_forced_exact_scan` production search uses. The
     /// exact-lane caller must pass `extra_set = None` (B3-R1-1).
-    async fn explain_vector_candidates(store: &PostgresStore, extra_set: Option<&str>) -> String {
+    async fn explain_vector_candidates(
+        store: &PostgresStore,
+        probe: &[f32],
+        extra_set: Option<&str>,
+    ) -> String {
         let pool = store.pool().await.expect("pool");
-        let dim = store.vector_dimensions().expect("dim");
-        let probe = encode_vector(&vec![0.0; dim]).expect("encode probe");
+        let probe = encode_vector(probe).expect("encode probe");
         let sql = store.vector_candidates_sql();
         let mut tx = pool.begin().await.expect("begin explain");
         if let Some(set) = extra_set {
@@ -690,29 +929,102 @@ mod tests {
             .join("\n")
     }
 
-    /// Camera-proof: the production recall query can use the hnsw index
-    /// created at init. Small tables may prefer a seq scan, so the proof
-    /// also EXPLAINs with `enable_seqscan = off` (the inverse of H3's
-    /// forced-exact GUC) and asserts `concepts_embedding_idx`.
+    /// **Acceptance (B's Done-when box 4)**: an `EXPLAIN` capture proves the
+    /// hnsw index is actually used by the recall query.
+    ///
+    /// # What this used to prove, and why that was nothing (E2E-F4)
+    ///
+    /// The previous version EXPLAINed on the table `init_schema` had just
+    /// created: **zero rows**, with a probe of `vec![0.0; dim]`. On pgvector a
+    /// zero vector gives `NaN` for `<=>` against every row, and the only
+    /// load-bearing assertion was taken under `SET LOCAL enable_seqscan = off`.
+    /// That GUC penalises the *alternative*, so it establishes that the index
+    /// is **usable**, not that the planner would choose it: a query that had
+    /// degraded to a sequential scan in production passed the test unchanged.
+    /// On an empty table there is nothing for the planner to have an opinion
+    /// about in the first place.
+    ///
+    /// # What it proves now
+    ///
+    /// 1. The corpus is seeded past the measured planner crossover, with real
+    ///    non-zero unit vectors, and `ANALYZE`d.
+    /// 2. The probe is a vector from the corpus, so `<=>` is finite and the
+    ///    query has a real answer. Asserted, not assumed.
+    /// 3. The **natural** plan (no GUC at all) names
+    ///    `concepts_embedding_idx`. Remove the seeding and this fails: at 0 and
+    ///    at 100 rows the same query plans a `Seq Scan`.
+    /// 4. The forced-exact lane, through the production
+    ///    `issue_forced_exact_scan` path, plans a `Seq Scan` and does **not**
+    ///    name the index. Return `None` from `forced_exact_scan_sql()` and this
+    ///    fails, because the planner then picks the index for that lane too.
+    ///
+    /// The `enable_seqscan = off` capture is kept, printed, and no longer
+    /// asserted on: it is a diagnostic for a failure, not the proof.
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn explain_recall_uses_hnsw() {
-        let Some(store) = unique_live_store("explain_recall_uses_hnsw", 8).await else {
+        const DIM: usize = 8;
+        let rows = corpus::PLANNER_CROSSOVER_ROWS * 4;
+        let Some(store) = unique_live_store("explain_recall_uses_hnsw", DIM).await else {
             return;
         };
-        let natural = explain_vector_candidates(&store, None).await;
-        eprintln!("B3 EXPLAIN (planner's choice):\n{natural}");
-        let forced_hnsw =
-            explain_vector_candidates(&store, Some("SET LOCAL enable_seqscan = off")).await;
-        eprintln!("B3 EXPLAIN (enable_seqscan = off):\n{forced_hnsw}");
-        assert!(
-            forced_hnsw.contains("concepts_embedding_idx"),
-            "recall must be able to use concepts_embedding_idx, got:\n{forced_hnsw}"
+        let contract = crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: DIM,
+        };
+        let seeded = corpus::seed(&store, "b3-explain", &contract, rows).await;
+        let probe = seeded[7].1.clone();
+
+        // The probe is answerable: finite distances, a full result set. The old
+        // zero probe produced `NaN` on every row, so nothing downstream of the
+        // plan meant anything either.
+        let pool = store.pool().await.expect("pool");
+        let encoded = encode_vector(&probe).expect("encode probe");
+        let dists: Vec<f64> = sqlx::query(store.vector_candidates_sql())
+            .bind(&encoded)
+            .bind(5i64)
+            .fetch_all(pool)
+            .await
+            .expect("recall rows")
+            .iter()
+            .map(|r| r.try_get::<f64, _>("dist").expect("dist"))
+            .collect();
+        assert_eq!(
+            dists.len(),
+            5,
+            "the corpus must answer the probe: {dists:?}"
         );
         assert!(
-            forced_hnsw.to_ascii_lowercase().contains("hnsw")
-                || forced_hnsw.contains("concepts_embedding_idx"),
-            "forced-index plan must name hnsw or the embedding index, got:\n{forced_hnsw}"
+            dists.iter().all(|d| d.is_finite()),
+            "a NaN distance means the probe was degenerate, not that recall works: {dists:?}"
+        );
+
+        let natural = corpus::plan(&store, &probe, 5).await;
+        eprintln!(
+            "B3 EXPLAIN at {rows} rows (planner's choice):\n{}",
+            corpus::elide_vector_literals(&natural)
+        );
+        assert!(
+            natural.contains("concepts_embedding_idx"),
+            "the planner must CHOOSE concepts_embedding_idx for the production recall \
+             query at {rows} rows, with no GUC helping it. Got:\n{natural}"
+        );
+        assert!(
+            !natural.contains("Seq Scan on concepts"),
+            "a natural plan that still scans concepts sequentially is the failure this \
+             box exists to catch. Got:\n{natural}"
+        );
+
+        // Diagnostic only: what the index can do when the alternative is
+        // penalised. Kept because it separates "the planner declined the index"
+        // from "the index cannot serve this query" when the assertion above
+        // fails.
+        let forced_hnsw =
+            explain_vector_candidates(&store, &probe, Some("SET LOCAL enable_seqscan = off")).await;
+        eprintln!(
+            "B3 EXPLAIN (diagnostic, enable_seqscan = off):\n{}",
+            corpus::elide_vector_literals(&forced_hnsw)
         );
 
         // Must not pass the GUC as extra_set: the helper reads
@@ -720,11 +1032,20 @@ mod tests {
         // through the production helper. Passing extra_set here would
         // leave the flag dead (B3-R1-1).
         let exact = store.with_forced_exact_scan();
-        let forced_exact = explain_vector_candidates(&exact, None).await;
-        eprintln!("B3 EXPLAIN (forced-exact enable_indexscan = off):\n{forced_exact}");
+        let forced_exact = corpus::plan(&exact, &probe, 5).await;
+        eprintln!(
+            "B3 EXPLAIN (forced-exact enable_indexscan = off):\n{}",
+            corpus::elide_vector_literals(&forced_exact)
+        );
         assert!(
             !forced_exact.contains("concepts_embedding_idx"),
             "forced-exact lane must not use the hnsw index, got:\n{forced_exact}"
+        );
+        assert!(
+            forced_exact.contains("Seq Scan on concepts"),
+            "at {rows} rows the forced-exact lane must actually be a sequential scan, not \
+             merely 'not the index': on an empty table both lanes are seq scans and this \
+             assertion is free. Got:\n{forced_exact}"
         );
     }
 

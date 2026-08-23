@@ -52,7 +52,39 @@ Per phase (B0, B1, B2, B3, B4):
 4. Back to 2 with round R+1 until a round returns APPROVE with zero residue.
 5. Orchestrator commits and pushes the phase.
 
-## Baseline, pinned before B0 (commit `7937de7`)
+## Gate set (post-remediation, 2026-08-24)
+
+Every row below was run on the remediated tree. **All green.**
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --all-targets -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-cockroach,fixtures -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-postgres -- -D warnings` | pass (added by F8) |
+| `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass (added by F8) |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
+| `cargo test --features store-cockroach` | 947 passed / 0 failed / 4 ignored |
+| `cargo test --features store-cockroach,fixtures` | 1007 passed / 0 failed / 12 ignored |
+| `cargo test --features store-postgres` | 934 passed / 0 failed / 7 ignored |
+| `cargo test --features store-postgres,fixtures` | 991 passed / 0 failed / 7 ignored |
+| `cargo test --features store-sqlite,fixtures` | 1072 passed / 0 failed / 3 ignored |
+| `cargo test --no-default-features --features store-cockroach` | 610 passed / 0 failed / 0 ignored |
+| live Postgres, `-- --ignored` against the pinned container | 7 passed / 0 failed |
+
+The live row is the one B's container decision bought: `fencing_refuses_stale_write_and_upserts_replay`,
+`live_schema_width_refuses_a_config_that_disagrees`, `explain_recall_uses_hnsw`,
+`init_schema_at_two_widths_creates_hnsw`, `h3_postgres_recall_parity`, and
+`h3_postgres_hnsw_envelope_at_scale`. Run it with the production DSN cleared:
+
+```
+env -u LAMBO_COCKROACH_DSN -u DATABASE_URL \
+  LAMBO_POSTGRES_DSN="postgresql://lambo:lambo@127.0.0.1:55432/livetest?sslmode=disable" \
+  cargo test --features store-postgres,store-sqlite,store-memory,fixtures --lib -- --ignored
+```
+
+## Baseline, pinned before B0 (commit `7937de7`, historical)
 
 | Gate | Result |
 | --- | --- |
