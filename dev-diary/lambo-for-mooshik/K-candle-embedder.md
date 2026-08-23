@@ -348,21 +348,32 @@ the recommendation recorded here (build / retreat to fastembed / shelve) with th
 
 - [x] `kind = "candle"` builds an adapter and embeds locally — `src/embed/candle.rs`, feature
       `embed-candle`; registry arm and config keys land with it
-- [~] Cosine parity against the K1 gate holds in the shipped adapter, not just the spike —
-      **the spike cleared outright** (median 0.999720 Metal f16 over 82 texts, every item over
-      0.99; NVIDIA leg PASS over 101), but a live parity measurement *of the shipped adapter*
-      is still an open operator leg. `live_weights_load_and_embed_on_cpu` exists as the
-      `#[ignore]`d live test; round 2 lists this item open, not defective
+- [x] Cosine parity against the K1 gate holds in the shipped adapter, not just the spike —
+      **closed 2026-08-23 on the MacBook leg** (`dd1fc40`). The spike had cleared outright
+      (median 0.999720 Metal f16 over 82 texts; NVIDIA leg PASS over 101); the *shipped*
+      adapter now has its own measurement:
+      `live_metal_parity_against_the_llama_reference` runs `CandleEmbedder` under
+      `embed-candle-metal` against the rig's q8_0 llama.cpp reference — **median 0.999799,
+      min 0.998445, 7/7 items above the 0.99 gate**, including a 2600-char input that also
+      exercises the DOGFOOD-SETUP capacity flags end to end. The test asserts
+      `device.is_metal()` and `dtype == F16` *before* embedding, so a silent CPU fallback
+      cannot let the parity assertions pass while testing nothing about Metal;
+      mutation-proven by moving CLS pooling from token 0 to token 1 (median collapses to
+      0.691130 and the gate fires). `#[ignore]`d — it needs real weights and a live
+      reference server.
 - [x] The contract stamps a real model identity — canonical repo@revision plus the loaded
       weight file's sha256 prefix; `identity_stamps_source_revision_and_sha_prefix`
       (`src/embed/candle.rs`)
 - [x] `lambo re-embed` migrates a store between contracts and repairs NULL-embedding rows,
       with coverage visible in `lambo_stats` — `src/cli/re_embed.rs` + `Graph::reembed_all`;
       `embedded_concepts` / `total_concepts` surfaced by `lambo stats`
-- [ ] The dogfood rig runs on candle with its full history intact — **not done: the migration
-      act has NOT been run.** The invocation is documented below ("K2 implemented"). Also
-      unverified on hardware: the shipped adapter under `embed-candle-metal` on the MacBook —
-      the K1 spike ran Metal, the merged feature has not been exercised there
+- [ ] The dogfood rig runs on candle with its full history intact — **still not done: the
+      migration act has NOT been run.** The invocation is documented below ("K2
+      implemented"). The *hardware* half of this box is now closed: the shipped adapter was
+      built and exercised under `embed-candle-metal` on the MacBook on 2026-08-23 (parity
+      box above, `dd1fc40`), and `embed-candle-metal` gained a macOS compile row in CI
+      (`61dc434`) because no ubuntu runner can build it. What remains is purely the
+      migration act on the live store
 - [x] CI carries the compile row — the weightless, offline `candle` job in
       `.github/workflows/ci.yml`
 - [x] The cold-start number is documented where an operator wiring a stdio client will read it —
