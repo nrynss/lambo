@@ -1,0 +1,36 @@
+== metric 4 — recall score bands ==
+   ledger:   /Users/narayan/lambo-dogfood/calls.jsonl
+   lines:    158 call, 493 heartbeat, 3 of unknown kind
+   schema v: [1]
+   binaries: 0.2.2 @ 0f672f1 (299 beats); 0.2.2 @ 19f51d3 (191 beats); 0.2.2 @ 21e4cf8 (3 beats)
+             ^ more than one binary: this ledger spans an upgrade, so read trends across the boundary with care
+   dropped:  0 — the ledger is complete
+
+recalls: 32 (19 with a vector leg, 0 returned no hits)
+recency floor observed in the ledger: 0.35 (116 hit(s))   merge threshold: 0.85
+6 hit(s) had no phase-1 legs at all — they entered through traversal expansion and carry no score to band
+
+Vector cosine, observed vs G1's measured bands:
+   observed   n=41    min=0.3045 p10=0.3921 median=0.4851 p90=0.6273 max=0.6876 mean=0.4895
+   G1 true_recall       n=6     min=0.4599 max=0.6577 mean=0.5826
+   G1 paraphrase_merge  n=10    min=0.6889 max=0.8984 mean=0.7992
+   G1 related_distinct  n=10    min=0.6348 max=0.8913 mean=0.7683
+   G1 unrelated         n=8     min=0.4999 max=0.6249 mean=0.5759
+
+Against G1's true_recall band [0.4599, 0.6577]: 21 inside, 18 below, 2 above; mean delta -0.0931
+   ^ the weakest observed cosine (0.3045) is BELOW the recency floor this ledger states (0.35): scores in that band are maskable.
+
+Distribution (0.05 buckets):
+   0.30-0.35     2 ########
+   0.35-0.40     4 ################  <- recency floor
+   0.40-0.45    10 ########################################
+   0.45-0.50    10 ########################################
+   0.50-0.55     7 ############################
+   0.55-0.60     1 ####
+   0.60-0.65     5 ####################
+   0.65-0.70     2 ########
+
+Floor masking (metric 4's recurrence check): 0 occurrence(s)
+   none — no hit had a real cosine discarded by the flat recency score. G2's lowered floor is holding on this traffic.
+
+BM25 leg for reference: n=474 min=1.2980 median=6.0269 max=23.6618 (a different scale from cosine — never banded against it)

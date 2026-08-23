@@ -1,0 +1,33 @@
+== metric 5 — blast-radius warnings fired ==
+   ledger:   /Users/narayan/lambo-dogfood/calls.jsonl
+   lines:    158 call, 493 heartbeat, 3 of unknown kind
+   schema v: [1]
+   binaries: 0.2.2 @ 0f672f1 (299 beats); 0.2.2 @ 19f51d3 (191 beats); 0.2.2 @ 21e4cf8 (3 beats)
+             ^ more than one binary: this ledger spans an upgrade, so read trends across the boundary with care
+   dropped:  0 — the ledger is complete
+
+recalls: 32   with at least one warning: 5
+blast-radius (load_bearing) warnings fired: 0
+
+Canonical hits: 0 recall(s) returned one, 0 rendered the [canonical] marker
+
+By kind:
+   conflict                 6
+   hot                      4
+
+By agent (who was warned):
+   j3-redesign-remediation-r1     6
+   j3-redesign-reviewer-r2        2
+   claude-code-opus5              2
+
+Most-warned-about concepts:
+      2x  J3 redesign round-1 remediation complete and PAUSED per operator instruction: all fourteen findings closed in five commits, wt/j3 at bc28ac8, gates 908/1000/565 + verify.sh 46, nothing pushed or merge…[truncated]
+      2x  FUTURE.md exists (dev-diary/lambo-for-mooshik/FUTURE.md, 9eab99f, operator-directed 2026-08-22): the home for decided-but-deliberately-unbuilt direction. Charter: each entry names its trigger and bloc…[truncated]
+      1x  dev-diary/lambo-for-mooshik/J-multi-client.md
+      1x  src/memory.rs
+      1x  dev-diary/adversarial-review/adve-review-mooshik-J3-redesign-round1.md
+      1x  src/store/sqlite.rs
+      1x  src/store/mod.rs
+      1x  src/store/cockroach.rs
+
+No blast-radius warning fired in this ledger. Either no Canonical concept was recalled, or none has dependents yet — metric 5 has nothing to report, which is a finding rather than a pass.

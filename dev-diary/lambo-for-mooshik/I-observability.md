@@ -104,17 +104,18 @@ upgrade path, with the heartbeat's sha field proving it happened.
 
 ## Done when
 
-- [ ] `--ledger` off by default; on, every tool call appends one line **whose shape
+- [x] `--ledger` off by default; on, every tool call appends one line **whose shape
       `duckdb`'s `read_json` can consume** (one flat JSON object per line, no nesting it
-      cannot flatten) — **the first two thirds are done and tested; the third is
-      reworded.** The original wording was "a full dogfood day parses with `duckdb` end
-      to end", and that is not what any artifact here shows: `duckdb` is never invoked in
-      the kit, and it *refuses* the committed sample outright, because that sample ends
-      in a deliberate torn line. What the suite asserts is the property `read_json`
-      needs, and the kit's README now states the recipes' provenance (hand-verified, not
-      executed against the sample) rather than implying a run. Closing this box needs
-      `duckdb` run over a real day's ledger with the torn tail stripped — which is the
-      re-pinned rig, i.e. the box below.
+      cannot flatten) — **closed 2026-08-23** against the live `lambo-dev` ledger
+      ([`evidence/mooshik-i3-live-ledger/`](../../evidence/mooshik-i3-live-ledger/README.md)).
+      The first two thirds were already done and tested. The third is now *run*, not
+      reasoned: `duckdb` consumed the real 654-line ledger with recipes 1 and 3 from the
+      kit's README, unmodified. **No tail needed stripping** — the sample's torn last line
+      is a property of the fabricated sample, not of a real ledger, which parsed 654/654.
+      Recipe 3 reaches nested fields (`stats.node_count`, `stats.ledger_dropped_lines`),
+      which is the flattening property this box is actually about. Recipe 2 was
+      deliberately not run: it prints recall query text, and I1's hygiene rule governs
+      what reaches `evidence/`.
 - [x] Recall lines carry final + per-leg scores and the warning-rendered flag; derive
       lines carry created/matched counts
 - [x] A ledger-write failure drops lines, logs once, counts in `lambo_stats`, and never
@@ -123,15 +124,20 @@ upgrade path, with the heartbeat's sha field proving it happened.
       which is the other arm of the same guarantee
 - [x] Heartbeat lines carry stats + binary sha; an upgrade shows as a sha change in the
       same file
-- [ ] The five analysis scripts run against a real dogfood ledger and each emits its
+- [x] The five analysis scripts run against a real dogfood ledger and each emits its
       report; their outputs are reproducible from committed inputs when exported —
-      **all five run and are exercised end to end by `verify.sh`, but against the
-      committed fabricated sample, not a real dogfood ledger.** The only ledger in this
-      repo is the disclosed-fabricated one; I1's hygiene rule keeps real ledgers outside
-      the repo and admits them to `evidence/` only through the curated export path. This
-      box was checked on evidence that does not exist and is unchecked rather than
-      backfilled: it waits on the rig re-pin below, and closes with an exported artifact
-      under `evidence/`, not with a claim.
+      **closed 2026-08-23**, and closed the way this box demanded: with an exported
+      artifact, not a claim. All five ran against the live ledger and store
+      (`recall_first`, `dedup_rate`, `score_bands`, `blast_radius`, `duplicates`), each
+      emitted its report, and the reports — never the ledger — are exported under
+      [`evidence/mooshik-i3-live-ledger/`](../../evidence/mooshik-i3-live-ledger/README.md)
+      with their provenance, the exact invocations, and the two hygiene curations made
+      (duckdb recipe 2 skipped; `duplicates.txt` scanned for internal content before
+      export, none found). The capture records what the reports *found*, not just that
+      they ran — including the first real measurement of I2's sha-change property across
+      two upgrades in one file, and **184 concept pairs above the merge threshold with
+      `semantic_merged` = 0**, the deduplication half of the unembedded-period damage,
+      invisible until coverage reached 513/513.
 - [x] The dogfood rig is re-pinned to a ledger-carrying binary and DOGFOOD.md's
       measurement list points here — **re-pin done 2026-08-23** (`lambo-21e4cf8`, the K2
       migration act; DOGFOOD.md's pin block and DOGFOOD-SETUP §§1-3 updated with it). The

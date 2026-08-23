@@ -1,0 +1,62 @@
+== metric 1 — recall-first compliance ==
+   ledger:   /Users/narayan/lambo-dogfood/calls.jsonl
+   lines:    158 call, 493 heartbeat, 3 of unknown kind
+   schema v: [1]
+   binaries: 0.2.2 @ 0f672f1 (299 beats); 0.2.2 @ 19f51d3 (191 beats); 0.2.2 @ 21e4cf8 (3 beats)
+             ^ more than one binary: this ledger spans an upgrade, so read trends across the boundary with care
+   dropped:  0 — the ledger is complete
+
+work-session gap: 30 min (40 serve restart(s) also split sessions)
+
+agent                     calls  sess  wseq  r-first  compliance  derive-no-recall
+----------------------------------------------------------------------------------
+claude-code-opus5             5     1     1        1      100.0%                 0
+claude-orchestrator          50    22    22        0        0.0%                37
+g3-spike                      3     1     1        1      100.0%                 0
+j1-implementor                4     1     1        1      100.0%                 0
+j1-remediation-r1             3     1     1        1      100.0%                 0
+j1-remediation-r2             4     1     1        1      100.0%                 0
+j1-reviewer-r1                3     1     1        1      100.0%                 0
+j1-reviewer-r2                3     1     1        1      100.0%                 0
+j1-reviewer-r3                3     1     1        1      100.0%                 0
+j2-implementor                9     1     1        1      100.0%                 0
+j2-remediation-r1             9     1     1        1      100.0%                 0
+j2-remediation-r2             3     2     1        0        0.0%                 1
+j2-reviewer-r1                3     1     1        1      100.0%                 0
+j2-reviewer-r2                3     2     1        0        0.0%                 1
+j2-reviewer-r3                3     2     1        0        0.0%                 1
+j3-implementor                5     2     2        1       50.0%                 1
+j3-redesign-implementor       8     3     3        1       33.3%                 0
+j3-redesign-remediation-      8     1     2        2      100.0%                 0
+j3-redesign-reviewer-r1       6     1     2        2      100.0%                 0
+j3-redesign-reviewer-r2       4     2     1        0        0.0%                 1
+j3-remediation-r1             6     3     3        1       33.3%                 1
+j3-remediation-r2             5     2     2        1       50.0%                 0
+j3-reviewer-r1                3     2     1        0        0.0%                 1
+j3-reviewer-r2                2     2     1        0        0.0%                 0
+j3-reviewer-r3                3     2     1        0        0.0%                 1
+----------------------------------------------------------------------------------
+ALL                                      54       19       35.2%                45
+
+Per work session (the sessions that broke compliance first):
+   2026-08-20T03:30:02.239853+00:00  claude-orchestrator  0/1 sequences recall-first, 3 derive(s) with no prior recall
+   2026-08-20T04:48:12.684217+00:00  claude-orchestrator  0/2 sequences recall-first, 2 derive(s) with no prior recall
+   2026-08-20T05:37:05.046881+00:00  claude-orchestrator  0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T06:09:33.307368+00:00  claude-orchestrator  0/1 sequences recall-first, 3 derive(s) with no prior recall
+   2026-08-20T08:10:33.106705+00:00  claude-orchestrator  0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T09:01:28.960897+00:00  claude-orchestrator  0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T09:59:42.362519+00:00  j2-reviewer-r2       0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T10:06:19.696543+00:00  claude-orchestrator  0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T12:09:48.769630+00:00  j2-remediation-r2    0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T12:51:16.945305+00:00  j2-reviewer-r3       0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T13:01:37.334065+00:00  claude-orchestrator  0/1 sequences recall-first, 0 derive(s) with no prior recall
+   2026-08-20T15:15:14.098268+00:00  j3-implementor       0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T16:02:04.029408+00:00  j3-reviewer-r1       0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T16:06:35.327698+00:00  claude-orchestrator  0/1 sequences recall-first, 2 derive(s) with no prior recall
+   2026-08-20T17:00:58.869330+00:00  j3-remediation-r1    0/1 sequences recall-first, 0 derive(s) with no prior recall
+   2026-08-20T17:33:19.160927+00:00  j3-remediation-r1    0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T17:40:37.091880+00:00  claude-orchestrator  0/1 sequences recall-first, 1 derive(s) with no prior recall
+   2026-08-20T18:19:47.473884+00:00  j3-reviewer-r2       0/1 sequences recall-first, 0 derive(s) with no prior recall
+   2026-08-20T18:21:24.840764+00:00  claude-orchestrator  0/1 sequences recall-first, 3 derive(s) with no prior recall
+   2026-08-20T19:35:10.136013+00:00  j3-remediation-r2    0/1 sequences recall-first, 0 derive(s) with no prior recall
+   … and 14 more
