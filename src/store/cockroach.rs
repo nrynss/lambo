@@ -6029,10 +6029,12 @@ mod h2_cockroach_parity {
     // ---- Cluster-shape + index capture (read-only) -----------------------
 
     /// Camera-proofs that the production query plans as `vector search` on
-    /// `concepts@concepts_embedding_idx` (DECISION D1, spec §12.1), so the
-    /// report's `index_present` for the cockroach adapter is measured, not
-    /// assumed. The plan is printed so the `--nocapture` log carries it.
-    async fn assert_index_backed(store: &CockroachStore) {
+    /// `concepts@concepts_embedding_idx` (DECISION D1, spec §12.1), and
+    /// RETURNS whether it does, so the caller can stamp the report's
+    /// `index_present` for the cockroach adapter from the measurement itself
+    /// rather than a hardcoded literal (H2-R1-2). The plan is printed so the
+    /// `--nocapture` log carries it.
+    async fn assert_index_backed(store: &CockroachStore) -> bool {
         let pool = store.pool().await.unwrap();
         let probe = encode_vector(&synthetic_unit_vector(usize::from(u8::MAX), DIM)).unwrap();
         let rows = sqlx::query(&format!("EXPLAIN {VECTOR_CANDIDATES_SQL}"))
@@ -6047,18 +6049,22 @@ mod h2_cockroach_parity {
             .collect::<Vec<_>>()
             .join("\n");
         eprintln!("H2 EXPLAIN plan:\n{text}");
+        let vector_search = text.contains("vector search");
+        let index_hit = text.contains("concepts@concepts_embedding_idx");
+        let no_full_scan = !text.contains("FULL SCAN");
         assert!(
-            text.contains("vector search"),
+            vector_search,
             "H2: EXPLAIN must show `vector search`, got:\n{text}"
         );
         assert!(
-            text.contains("concepts@concepts_embedding_idx"),
+            index_hit,
             "H2: EXPLAIN must show concepts@concepts_embedding_idx, got:\n{text}"
         );
         assert!(
-            !text.contains("FULL SCAN"),
+            no_full_scan,
             "H2: EXPLAIN must not fall back to a full scan, got:\n{text}"
         );
+        vector_search && index_hit && no_full_scan
     }
 
     /// Read-only cluster shape for the evidence log: version string and the
@@ -6237,6 +6243,22 @@ mod h2_cockroach_parity {
                             .vector_candidates_checked(&sid, probe, contract, limit)
                             .await
                             .unwrap();
+                        // H2-R1-1 hardening, schema-v1-discipline choice:
+                        // `PairResult` is pinned by report schema v1 (twin of
+                        // H1's committed evidence), so candidate counts are
+                        // NOT added as fields; instead the harness asserts
+                        // non-emptiness inline. Without this, jaccard()'s
+                        // both-empty → 1.0 special case would let an all-empty
+                        // regression pass vacuously with a perfect-looking
+                        // report. The quarantine leg (which legitimately
+                        // expects empty answers) runs separately and is
+                        // intentionally not covered here.
+                        assert!(
+                            !got_a.is_empty() && !got_b.is_empty(),
+                            "H2: empty candidate set from {a_name} or {b_name} on \
+                             fixture {fixture_label:?} probe {probe_label:?} limit \
+                             {limit} — refusing to score a possibly-vacuous cell"
+                        );
                         let pair = PairResult {
                             fixture: fixture_label.to_string(),
                             probe: (*probe_label).to_string(),
@@ -6440,11 +6462,11 @@ mod h2_cockroach_parity {
         let cr = new_store(&dsn);
         cr.init_schema().await.unwrap();
         log_cluster_shape(&cr).await;
-        assert_index_backed(&cr).await;
+        let index_present = assert_index_backed(&cr).await;
         adapters.push(Adapter {
             name: "cockroach",
             scan: ScanKind::Ann,
-            index_present: true,
+            index_present,
             store: Box::new(cr),
         });
         adapters.push(Adapter {
