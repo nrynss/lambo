@@ -1292,6 +1292,81 @@ mod tests {
         );
     }
 
+    /// LIVE Metal test (K2 Done-when: "cosine parity against the K1 gate holds
+    /// in the shipped adapter, not just the spike"). Runs the shipped
+    /// `CandleEmbedder` on **Metal** against the rig's llama.cpp q8_0 reference
+    /// and applies K1's own 0.99 median gate.
+    ///
+    /// Ignored by default: needs real weights AND a llama-server on :8080
+    /// started with the DOGFOOD-SETUP capacity flags. Run with:
+    /// `cargo test --features embed-candle-metal,embed-bge -- --ignored metal_parity`
+    #[ignore]
+    #[tokio::test]
+    async fn live_metal_parity_against_the_llama_reference() {
+        let texts = [
+            "user schema",
+            "the mitochondria is the powerhouse of the cell",
+            "lambo serve binds a session endpoint so other clients can attach",
+            "会話の記憶をグラフとして保存する",
+            "Der schnelle braune Fuchs springt über den faulen Hund am Flussufer",
+            "fn resolve_device(opts: &CandleOpts) -> Result<DeviceChoice, EmbedError>",
+            &"canonization promotes a concept once independent sessions agree. ".repeat(40),
+        ];
+
+        // Prove the leg under test is really Metal: a silent CPU fallback would
+        // let every assertion below pass while testing nothing about Metal.
+        let choice = resolve_device(Some("metal"), has_metal_backend(), false, true)
+            .expect("metal must resolve on this rig");
+        assert!(
+            choice.device.is_metal(),
+            "expected a Metal device, got {:?} — this test would otherwise pass on CPU",
+            choice.device
+        );
+        assert_eq!(choice.dtype, DType::F16, "Metal leg runs f16 (K1)");
+
+        let metal = CandleEmbedder::new(
+            BGE_M3_DIM,
+            CandleOpts {
+                device: Some("metal".into()),
+                ..Default::default()
+            },
+        )
+        .expect("metal device + weights must resolve");
+
+        let reference = crate::embed::bge_m3::BgeM3LlamaCppEmbedder::new(
+            "http://127.0.0.1:8080",
+            "bge-m3",
+            BGE_M3_DIM,
+        )
+        .expect("reference embedder");
+
+        let mut cosines = Vec::new();
+        for t in &texts {
+            let a = metal.embed(t).await.expect("metal embed");
+            let b = reference.embed(t).await.expect("reference embed");
+            assert_eq!(a.len(), BGE_M3_DIM);
+            assert_eq!(b.len(), BGE_M3_DIM);
+            let dot: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let cos = dot / (na * nb);
+            eprintln!("cos={cos:.6}  len={}  {:.50}", t.len(), t);
+            cosines.push(cos);
+        }
+        cosines.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let median = cosines[cosines.len() / 2];
+        let min = cosines[0];
+        eprintln!(
+            "METAL PARITY: median={median:.6} min={min:.6} n={}",
+            cosines.len()
+        );
+        assert!(
+            median >= 0.99,
+            "K1 gate: median {median} < 0.99 — pooling wrong on Metal"
+        );
+        assert!(min >= 0.99, "worst item {min} < 0.99 on Metal");
+    }
+
     // Compile-time sanity (clippy wants const assertions, not runtime tests).
     const _: () = {
         assert!(MAX_BATCH >= 1);
