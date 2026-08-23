@@ -6,16 +6,15 @@
 //! associated const or an associated function, so a dialect call costs nothing
 //! at runtime and a missing dialect is a compile error rather than a panic.
 //!
-//! **The surface is deliberately tiny, and deliberately closed.** It is exactly
-//! the table in `dev-diary/lambo-for-mooshik/B-postgres-store.md` §B3: the DDL,
-//! two casts, the distance operator and its score conversion, and the width
-//! authority. Nothing else belongs here yet. The shared subset of two SQL
-//! adapters is *discovered* by diffing two real implementations, not guessed
-//! from one, so a method added because PostgreSQL "might need it" would be a
-//! guess with a trait's authority. B0 shipped one working dialect. B1 adds
-//! `PostgresDialect` as a named, fail-closed stub (no Cockroach SQL). B2 fills
-//! its DDL; the diff between the two working dialects is what may widen this
-//! trait.
+//! **The surface starts as the §B3 table** in
+//! `dev-diary/lambo-for-mooshik/B-postgres-store.md`: the DDL, two casts, the
+//! distance operator and its score conversion, and the width authority. B0
+//! shipped one working dialect. B1 adds `PostgresDialect` as a named,
+//! fail-closed stub (no Cockroach SQL). B2 fills its DDL and splits the
+//! over-merged `init_schema` / `connect_options` rows (Cockroach-only
+//! `endpoint STRING` DDL and `vector_search_beam_size`). Those extra rows
+//! were discovered by diffing two real implementations, not guessed from
+//! one. B3 still owns the ranking conversion (`distance_to_score`).
 //!
 //! **The over-merging trap, restated where it bites.** A statement belongs in
 //! [`super::PgStore`] only when its SQL is byte-identical for every dialect.
@@ -76,4 +75,40 @@ pub trait Dialect: Send + Sync + 'static {
     /// `cfg` is offered rather than assumed: a dialect whose schema file
     /// carries the width ignores it, and says so in its own doc.
     fn vector_dim(cfg: &StoreConfig) -> Result<usize, StoreError>;
+
+    /// Operator-facing dialect name in preflight errors (`"cockroach"` /
+    /// `"postgres"`). Discovered by splitting B0-N1: the shared
+    /// `preflight_schema` had hard-coded `"cockroach"`.
+    const NAME: &'static str;
+
+    /// Adapter type name in missing-DSN errors (`"CockroachStore"` /
+    /// `"PostgresStore"`). Paired with [`Dialect::DSN_ENV`].
+    const STORE_TYPE_NAME: &'static str;
+
+    /// Env var named in missing-DSN errors (`LAMBO_COCKROACH_DSN` /
+    /// `LAMBO_POSTGRES_DSN`).
+    const DSN_ENV: &'static str;
+
+    /// Label in invalid-DSN errors (`"Cockroach DSN"` / `"Postgres DSN"`).
+    const DSN_LABEL: &'static str;
+
+    /// Extra idempotent statements `PgStore`'s `init_schema` runs after
+    /// [`Dialect::init_sql`]. Discovered by splitting B0-N4: Cockroach
+    /// converges `endpoint STRING` (and `current_token INT`); PostgreSQL
+    /// converges `endpoint TEXT` (and `current_token BIGINT`, because
+    /// Cockroach `INT` is INT8 and the shared decoder reads i64).
+    fn post_init_statements() -> &'static [&'static str];
+
+    /// Dialect-specific session settings applied after the shared
+    /// `statement_timeout`. Default: none.
+    ///
+    /// Discovered by splitting B0-N3: Cockroach sets
+    /// `vector_search_beam_size`. PostgreSQL leaves pgvector's
+    /// `hnsw.ef_search` at its default (40). Not an ANN-tuning knob row;
+    /// B2 ships no knobs.
+    fn apply_connect_options(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<sqlx::postgres::PgConnectOptions, StoreError> {
+        Ok(options)
+    }
 }

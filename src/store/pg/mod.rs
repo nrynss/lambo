@@ -16,8 +16,9 @@
 //! **once**, in this file, either as constants (identical on every engine) or
 //! in `DialectSql` (identical except for a cast token).
 //!
-//! In `dialect.rs`: exactly the five rows of B-postgres-store.md §B3, and
-//! nothing else. **The over-merging trap, named so it is not walked into:** a
+//! In `dialect.rs`: the §B3 table plus the B2-discovered over-merge split
+//! (post-init statements, connect-option session settings, operator-facing
+//! names). **The over-merging trap, named so it is not walked into:** a
 //! function belongs here only when its SQL is byte-identical for both dialects.
 //! If it differs by one cast it is composed from the dialect's tokens; if it
 //! differs by more, it does not belong in the shared base at all, even where a
@@ -33,20 +34,18 @@
 //! and reviewed against this code and B0 moves the code without rewriting the
 //! record of why it is shaped this way.
 //!
-//! In `postgres` (feature `store-postgres`): `PostgresDialect`, a named
-//! dialect that **fails closed** at init/provision naming B2. It does not
-//! copy Cockroach SQL. B2 owns templated width, hnsw-from-init, and the
-//! distance conversion.
+//! In `postgres` (feature `store-postgres`): `PostgresDialect`, templated
+//! width + hnsw from init (B2). Ranking conversion (`distance_to_score`)
+//! remains B3. It does not copy Cockroach SQL.
 //!
-//! # Not yet dialect-aware (B2/B3 inputs, recorded not hidden)
+//! # Dialect-aware as of B2, still recorded where B3 owns the rest
 //!
-//! B0 shipped **one** working dialect. The shared subset of two adapters is
-//! discovered by diffing two real implementations rather than guessed from one.
-//! So a handful of Cockroach-isms are still inline below, deliberately left
-//! rather than speculatively abstracted. They are enumerated in
-//! `dev-diary/lambo-for-mooshik/b-run/B0-implementation.md` §4, and each one is
-//! marked `B2/B3:` at its site. B1 does not split `init_schema` /
-//! `connect_options`.
+//! B0 shipped **one** working dialect. B2 splits the two over-merged
+//! functions (`init_schema` endpoint type, `connect_options` ANN session
+//! setting) now that a second dialect exists. Operator-facing strings that
+//! named Cockroach (DSN errors, preflight `NAME`) moved onto [`Dialect`]
+//! with them. `tx_retry`'s exhaustion wording (B0-N5) is still inline:
+//! the retry mechanism is shared; only the message names Cockroach.
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -62,8 +61,8 @@ pub use dialect::Dialect;
 #[cfg(feature = "store-cockroach")]
 pub mod cockroach;
 
-// B1: PostgreSQL + pgvector dialect. Feature: store-postgres. Fail-closed
-// until B2 lands DDL; do not copy Cockroach SQL (see postgres.rs).
+// B2: PostgreSQL + pgvector dialect. Feature: store-postgres. Templated
+// width and hnsw from init; do not copy Cockroach SQL (see postgres.rs).
 #[cfg(feature = "store-postgres")]
 pub mod postgres;
 
@@ -687,6 +686,9 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// T7.4: accuracy dial for CockroachDB's **approximate** vector search.
 ///
+/// PostgreSQL does not have this GUC; B2 leaves `hnsw.ef_search` at the
+/// pgvector default and does not compile this dial into `store-postgres`.
+///
 /// Once `concepts_embedding_idx` is partial (spec §12.1), `vector_candidates`
 /// is served by an ANN index instead of an exact full scan: the search visits
 /// a bounded number of index neighbourhoods rather than every row, so a true
@@ -741,14 +743,19 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Caveat kept deliberately: both datasets are synthetic. The clustered set
 /// mimics embedding geometry but is not BGE-M3 output, so treat 64 as an
 /// evidence-based default rather than a tuned optimum.
+#[cfg(feature = "store-cockroach")]
 const DEFAULT_VECTOR_BEAM_SIZE: u32 = 64;
+#[cfg(feature = "store-cockroach")]
 const VECTOR_BEAM_SIZE_ENV: &str = "LAMBO_VECTOR_BEAM_SIZE";
+#[cfg(feature = "store-cockroach")]
 const VECTOR_BEAM_SIZE_MIN: u32 = 1;
+#[cfg(feature = "store-cockroach")]
 const VECTOR_BEAM_SIZE_MAX: u32 = 2048;
 
 /// Parse `LAMBO_VECTOR_BEAM_SIZE`. `Ok(None)` = unset, inherit the server
 /// default. Empty is treated as unset so an exported-but-blank var behaves like
 /// absence (same convention as `LAMBO_STORE`).
+#[cfg(feature = "store-cockroach")]
 fn vector_beam_size_from_env() -> Result<Option<u32>, StoreError> {
     let raw = match std::env::var(VECTOR_BEAM_SIZE_ENV) {
         Ok(v) => v,
@@ -1176,7 +1183,8 @@ fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent, StoreErro
 // The store
 // ---------------------------------------------------------------------------
 
-/// Durable `GraphStore` over a CockroachDB cluster (spec §3.3 "hackathon primary").
+/// Durable `GraphStore` over a Postgres-wire-protocol engine (Cockroach or
+/// PostgreSQL), selected by [`Dialect`].
 ///
 /// Constructed by [`crate::store::build_store`] from a [`StoreConfig`]. Pool creation is
 /// deferred to the first query ([`tokio::sync::OnceCell`]): sqlx pools require a Tokio
@@ -1202,19 +1210,18 @@ pub struct PgStore<D: Dialect> {
 
 impl<D: Dialect> PgStore<D> {
     pub fn new(cfg: StoreConfig) -> Result<Self, StoreError> {
-        // B2/B3: both strings below name Cockroach, and the second dialect will
-        // want its own. Left byte-identical here on purpose: B0 changes no
-        // observable behaviour, and two tests assert this exact text.
         let dsn = cfg.dsn.as_deref().ok_or_else(|| {
-            StoreError::Backend(
-                "CockroachStore requires a DSN (store.dsn or LAMBO_COCKROACH_DSN)".into(),
-            )
+            StoreError::Backend(format!(
+                "{} requires a DSN (store.dsn or {})",
+                D::STORE_TYPE_NAME,
+                D::DSN_ENV,
+            ))
         })?;
         // sqlx + rustls cannot open libpq's `sslrootcert=system`; see module doc.
         let dsn = dsn_for_rustls(dsn);
         // Parse-validate without a runtime; the actual pool is built lazily on first use.
         dsn.parse::<sqlx::postgres::PgConnectOptions>()
-            .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?;
+            .map_err(|e| backend(format!("invalid {}: {e}", D::DSN_LABEL)))?;
         // The width authority, then the DDL it implies: same order the static
         // `schema_vector_dim(INIT_SQL)` parse ran in before the carve.
         let vector_dim = D::vector_dim(&cfg)?;
@@ -1247,10 +1254,10 @@ impl<D: Dialect> PgStore<D> {
     fn connect_options(dsn: &str) -> Result<sqlx::postgres::PgConnectOptions, StoreError> {
         let options = dsn
             .parse::<sqlx::postgres::PgConnectOptions>()
-            .map_err(|e| backend(format!("invalid Cockroach DSN: {e}")))?
+            .map_err(|e| backend(format!("invalid {}: {e}", D::DSN_LABEL)))?
             // STORE-2: bound every statement server-side.
             // statement_timeout applies per statement, not per
-            // transaction — a multi-statement flush batch can take
+            // transaction: a multi-statement flush batch can take
             // N x 20s. The whole-batch bound is the client-side
             // flush attempt timeout (FLUSH_ATTEMPT_TIMEOUT); the
             // per-statement bound stays below it so the DB aborts a
@@ -1261,17 +1268,9 @@ impl<D: Dialect> PgStore<D> {
                 "statement_timeout",
                 format!("{}s", STATEMENT_TIMEOUT.as_secs()),
             )]);
-        // T7.4: ANN accuracy dial, applied per connection so it costs no
-        // per-query round trip. Unset => DEFAULT_VECTOR_BEAM_SIZE (measured —
-        // see its doc comment); an invalid value already failed closed above.
-        let beam = vector_beam_size_from_env()?.unwrap_or(DEFAULT_VECTOR_BEAM_SIZE);
-        // B2/B3: `vector_search_beam_size` is CockroachDB's C-SPANN accuracy
-        // dial and does not exist on PostgreSQL, whose hnsw equivalent is
-        // `hnsw.ef_search`. Not abstracted in B0: an ANN-tuning row is not in
-        // the §B3 table, and inventing one from a single implementation is the
-        // guess §B3 warns against. B2 decides the shape once there are two.
-        let options = options.options([("vector_search_beam_size", beam.to_string())]);
-        Ok(options)
+        // Dialect-specific session settings (Cockroach: vector_search_beam_size;
+        // Postgres: none, pgvector hnsw.ef_search stays at its default).
+        D::apply_connect_options(options)
     }
     /// Seed a prebuilt snapshot directly (fixtures track, MemoryStore parity). Writes all
     /// seven tables in one transaction — the full-snapshot path that carries synonyms and
@@ -2162,32 +2161,14 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             .await
             .map_err(backend)?;
 
-        // Post-T3.1 columns (T86 fencing): fresh databases carry `current_token`
-        // inline from the DDL above; an EXISTING cluster provisioned before the
-        // fencing change does not, so converge it here with an idempotent ALTER
-        // (Cockroach supports `IF NOT EXISTS` on `ADD COLUMN` — same pattern the
-        // module documents for the `chunk_group_id` / `embedding_*` upgrades).
-        // Safe to run on every `init_schema` (a fresh DB is a no-op).
-        sqlx::query(
-            "ALTER TABLE session_leases \
-             ADD COLUMN IF NOT EXISTS current_token INT NOT NULL DEFAULT 0",
-        )
-        .execute(pool)
-        .await
-        .map_err(backend)?;
-        // J2. Same idempotent-ALTER convergence, and nullable on purpose: an
-        // existing cluster's rows get NULL, which reads as "this holder
-        // published no endpoint" — what every pre-J2 holder in fact did. No
-        // default: a fabricated address is worse than an honest absence.
-        // B2/B3: `STRING` is Cockroach's spelling; PostgreSQL has no such type.
-        // These two convergence ALTERs are not part of `Dialect::init_sql`
-        // (folding them in would change `init_schema` from three statements to
-        // one `raw_sql`, which is a behaviour change B0 must not make), so the
-        // second dialect needs a decision about where they live.
-        sqlx::query("ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS endpoint STRING")
-            .execute(pool)
-            .await
-            .map_err(backend)?;
+        // Post-DDL convergence ALTERs. Not folded into `init_sql`: that would
+        // turn this from raw_sql + N query() calls into one raw_sql, which is
+        // a Cockroach behaviour change B0 forbade and B2 does not make. The
+        // statements themselves are not byte-identical (STRING vs TEXT, INT
+        // vs BIGINT), so they live on the dialect.
+        for stmt in D::post_init_statements() {
+            sqlx::query(stmt).execute(pool).await.map_err(backend)?;
+        }
         Ok(())
     }
 
@@ -2215,10 +2196,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             .filter(|t| !present.iter().any(|p| p == t))
             .collect();
         if !missing_tables.is_empty() {
-            // B2/B3: the literal names the dialect in an operator-facing error.
-            // A `Dialect::NAME` row is not in the §B3 table, so B0 leaves it
-            // rather than widening the trait on one implementation's evidence.
-            return Err(unprovisioned_store_err("cockroach", &missing_tables));
+            return Err(unprovisioned_store_err(D::NAME, &missing_tables));
         }
         let mut by_table: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
         for (table, col) in columns_in_ddl(self.ddl.as_ref()) {
@@ -2239,8 +2217,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 .filter(|c| !present_cols.iter().any(|p| p == c))
                 .collect();
             if !missing.is_empty() {
-                // B2/B3: same dialect-naming literal as above.
-                return Err(unprovisioned_column_err("cockroach", table, &missing));
+                return Err(unprovisioned_column_err(D::NAME, table, &missing));
             }
         }
         Ok(())

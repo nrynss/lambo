@@ -263,6 +263,31 @@ parse-out authority):
 Whichever is chosen, `vector_dimensions()` keeps a single authority (B4), and the choice gets
 recorded here.
 
+**Recorded at B2 implementation (2026-08-23):**
+
+* **Template at init.** `migrations/postgres/001_init.sql` carries the
+  placeholder `__LAMBO_VECTOR_DIM__`. `PostgresDialect::init_sql(dim)`
+  substitutes it. The file on disk is not valid SQL (applying it with psql
+  fails loudly). Generate-in-code was rejected: a 300-line schema built with
+  `format!` is worse to review than a file with one placeholder, and the
+  inverted data flow is still honest (width goes *into* the SQL).
+* **dim > 2000: refuse, naming the ceiling and the `halfvec` hatch.**
+  halfvec is not implemented in B2 (it would change the stored type, the
+  operator class, and B3's cast/distance rows). 768 and 1536 pass; 2000
+  passes; 2001 and Gemini 3072 are refused at `init_sql` / `vector_dim`,
+  never at `CREATE INDEX`.
+* **Over-merge split.** `init_schema` still runs `raw_sql(ddl)` then N
+  `query()` calls; the statements come from `Dialect::post_init_statements`
+  (Cockroach: `endpoint STRING` + `current_token INT`; Postgres:
+  `endpoint TEXT` + `current_token BIGINT`). `connect_options` applies
+  shared `statement_timeout` then `Dialect::apply_connect_options`
+  (Cockroach: `vector_search_beam_size`; Postgres: identity, pgvector
+  `hnsw.ef_search` stays at default 40). No ANN knobs on Postgres.
+* **Width source for substitution, not B4.** `Dialect::vector_dim` reads
+  `[store] vector_dim`, else the embedder width copied in by
+  `build_store_with_vector_dim`, else 1024. `GraphStore::vector_dimensions`
+  still echoes the construction dim. Live-schema reporting is B4.
+
 **Depends on:** B0, B1.
 
 ---

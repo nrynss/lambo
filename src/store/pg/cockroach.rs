@@ -102,6 +102,8 @@
 
 use std::borrow::Cow;
 
+use sqlx::postgres::PgConnectOptions;
+
 use super::{Dialect, PgStore};
 use crate::store::{StoreConfig, StoreError};
 
@@ -168,6 +170,25 @@ impl Dialect for CockroachDialect {
     /// kind-agnostic, so ignoring it here loses no protection.
     fn vector_dim(_cfg: &StoreConfig) -> Result<usize, StoreError> {
         ddl_vector_dim()
+    }
+
+    const NAME: &'static str = "cockroach";
+    const STORE_TYPE_NAME: &'static str = "CockroachStore";
+    const DSN_ENV: &'static str = "LAMBO_COCKROACH_DSN";
+    const DSN_LABEL: &'static str = "Cockroach DSN";
+
+    fn post_init_statements() -> &'static [&'static str] {
+        // Byte-identical to the two ALTERs B0 ran from PgStore::init_schema.
+        &[
+            "ALTER TABLE session_leases \
+             ADD COLUMN IF NOT EXISTS current_token INT NOT NULL DEFAULT 0",
+            "ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS endpoint STRING",
+        ]
+    }
+
+    fn apply_connect_options(options: PgConnectOptions) -> Result<PgConnectOptions, StoreError> {
+        let beam = super::vector_beam_size_from_env()?.unwrap_or(super::DEFAULT_VECTOR_BEAM_SIZE);
+        Ok(options.options([("vector_search_beam_size", beam.to_string())]))
     }
 }
 
@@ -362,6 +383,14 @@ mod tests {
                 "ALTER TABLE concepts ADD COLUMN IF NOT EXISTS human_confirmed INT NOT NULL DEFAULT 0",
             ),
             "pre-C concepts rows have no convergence path"
+        );
+        assert_eq!(
+            CockroachDialect::post_init_statements(),
+            [
+                "ALTER TABLE session_leases \
+                 ADD COLUMN IF NOT EXISTS current_token INT NOT NULL DEFAULT 0",
+                "ALTER TABLE session_leases ADD COLUMN IF NOT EXISTS endpoint STRING",
+            ]
         );
     }
 

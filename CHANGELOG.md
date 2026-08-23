@@ -6,15 +6,18 @@
 
 - `store.kind = "postgres"` and `"pg"` now select `StoreKind::Postgres`, not
   CockroachDB. `"cockroach"` and `"crdb"` remain Cockroach. A leftover
-  `kind = "postgres"` pointed at a Cockroach cluster fails at construction
-  (B2 has not landed Postgres DDL) rather than silently ranking with Cockroach
-  SQL.
+  `kind = "postgres"` pointed at a Cockroach cluster fails at provision
+  (`CREATE EXTENSION vector`) or first vector query (`<=>`) rather than
+  silently ranking with Cockroach SQL.
 
 ### Added
 
 - `StoreKind::Postgres` and Cargo feature `store-postgres` (same sqlx postgres
-  driver as `store-cockroach`; no second driver). Construction, provision, and
-  dialect init fail closed naming B2.
+  driver as `store-cockroach`; no second driver). B2 lands templated-width
+  pgvector DDL with an hnsw index from init. Dimensions above 2000 are
+  refused at init, naming the pgvector hnsw ceiling and the unimplemented
+  `halfvec` hatch. `lambo provision` for `kind = "postgres"` runs
+  `init_schema` (not `scripts/provision.sh`).
 - DSN identity normalisation beside `store_identity`: two spellings of one
   database (`postgres://u@host/db` and `postgres://u@host:5432/db`) derive one
   session endpoint. Password is stripped from the identity so it never reaches

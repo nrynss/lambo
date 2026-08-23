@@ -12,8 +12,8 @@ pub use memory::MemoryStore;
 
 // B0: the Postgres-wire-protocol store family (`pg`), of which the T3.2
 // CockroachDB durable adapter (spec §3.2/§3.3, §4) is the first dialect and
-// B1's PostgreSQL adapter is the second (fail-closed until B2). Features:
-// store-cockroach, store-postgres.
+// B2's PostgreSQL adapter is the second (templated width, hnsw from init).
+// Features: store-cockroach, store-postgres.
 #[cfg(any(feature = "store-cockroach", feature = "store-postgres"))]
 pub mod pg;
 // The adapter's public path is unchanged by the move: `crate::store::cockroach`
@@ -706,8 +706,8 @@ impl StoreKind {
             Self::Memory => cfg!(feature = "store-memory"),
             // T3.2: CockroachStore landed.
             Self::Cockroach => cfg!(feature = "store-cockroach"),
-            // B1 names the dialect; B2 lands a working one. Compiled is not ready.
-            Self::Postgres => false,
+            // B2: templated width + hnsw from init. Compiled is ready.
+            Self::Postgres => cfg!(feature = "store-postgres"),
             // T3.3: SqliteStore lands with feature store-sqlite.
             Self::Sqlite => cfg!(feature = "store-sqlite"),
         }
@@ -872,18 +872,6 @@ fn missing_feature(kind: StoreKind) -> StoreError {
     ))
 }
 
-/// B1 fail-closed refusal: `kind = "postgres"` names a dialect, but B2 owns
-/// the DDL. Shared by [`build_store`], `PostgresDialect`, and `lambo provision`
-/// so they cannot disagree about why this kind does not yet construct.
-pub(crate) fn postgres_not_ready_msg(what: &str) -> String {
-    format!(
-        "store kind `postgres` cannot {what} yet: PostgresDialect DDL \
-         (templated width, hnsw from init) is B2. A leftover kind = \"postgres\" \
-         pointed at CockroachDB must not emit Cockroach SQL. Set kind = \
-         \"cockroach\" for CockroachDB."
-    )
-}
-
 /// Level B store registry. Fail-closed when the kind's feature is off or the adapter
 /// is not implemented yet.
 ///
@@ -895,9 +883,10 @@ pub fn build_store(cfg: StoreConfig) -> Result<Box<dyn GraphStore>, StoreError> 
 
 /// [`build_store`], plus the process's configured dense-vector width.
 ///
-/// Only adapters whose vector column carries **no** width of its own consume it —
-/// today that is SQLite, whose `concepts.embedding` is a `BLOB` (Cockroach parses
-/// `VECTOR(n)` out of its own DDL and ignores this).
+/// SQLite consumes it: `concepts.embedding` is a `BLOB` with no width of its
+/// own. Postgres consumes it too: B2 templates the width into `vector(n)` at
+/// init, so this function copies the argument into the pin slot when the pin
+/// is absent. Cockroach parses `VECTOR(n)` out of its own DDL and ignores this.
 ///
 /// # Precedence
 ///
@@ -932,8 +921,9 @@ pub fn build_store_with_vector_dim(
         return Err(missing_feature(cfg.kind));
     }
     // Precedence: the operator's pin outranks the resolved embedder width (see the
-    // doc comment). Consumed only by the width-agnostic adapters below; the binding
-    // stays used under feature rows that compile none of them.
+    // doc comment). SQLite and Postgres consume it (Postgres copies into the pin
+    // slot below when the pin is absent). Cockroach ignores it. The binding stays
+    // used under feature rows that compile none of them.
     let vector_dim = cfg.vector_dim.or(vector_dim);
     let _ = vector_dim;
     match cfg.kind {
@@ -961,19 +951,17 @@ pub fn build_store_with_vector_dim(
             }
         }
         StoreKind::Postgres => {
-            // B1: the kind names a dialect. Construction must not emit Cockroach
-            // DDL, so this arm fails closed naming B2 rather than calling
-            // `PostgresStore::new` (whose `PgStore::new` still speaks Cockroach
-            // in its DSN errors; that split is B2/B3 debt, not this arm's to
-            // launder). The dialect's own `init_sql` / `vector_dim` are the
-            // backstop if a caller constructs `PgStore<PostgresDialect>`
-            // directly.
             #[cfg(feature = "store-postgres")]
             {
-                let _ = cfg;
-                Err(StoreError::Backend(postgres_not_ready_msg(
-                    "construct a working adapter",
-                )))
+                // Copy the resolved embedder width into the pin slot when the
+                // operator did not set one, so init_sql substitutes the width
+                // this process actually embeds. The pin still wins when set
+                // (precedence is already `cfg.vector_dim.or(param)` above).
+                let mut cfg = cfg;
+                if cfg.vector_dim.is_none() {
+                    cfg.vector_dim = vector_dim;
+                }
+                Ok(Box::new(postgres::PostgresStore::new(cfg)?))
             }
             #[cfg(not(feature = "store-postgres"))]
             {
@@ -1059,6 +1047,15 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 "{crdb:?}"
             );
             assert_eq!(crdb.len(), 11, "cockroach DDL table count: {crdb:?}");
+        }
+        #[cfg(feature = "store-postgres")]
+        {
+            let pg = tables_in_ddl(include_str!("../../migrations/postgres/001_init.sql"));
+            assert!(
+                pg.contains(&"write_intents") && pg.contains(&"sessions"),
+                "{pg:?}"
+            );
+            assert_eq!(pg.len(), 11, "postgres DDL table count: {pg:?}");
         }
     }
 
@@ -1196,9 +1193,9 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn postgres_build_behavior() {
-        // B1: with the feature compiled, build_store still fails closed naming
-        // B2 rather than constructing a dialect that speaks Cockroach. Without
-        // the feature, fail closed with a rebuild hint and never fall back.
+        // B2: with the feature compiled, build_store returns a working adapter
+        // (constructed lazily: no connection at build time); without it, fail
+        // closed with a rebuild hint and never fall back to memory.
         let cfg = StoreConfig {
             kind: StoreKind::Postgres,
             dsn: Some("postgresql://localhost/lambo".into()),
@@ -1206,13 +1203,10 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             vector_dim: None,
         };
         if StoreKind::Postgres.is_compiled() {
-            let Err(err) = build_store(cfg) else {
-                panic!("postgres must not construct a working adapter in B1");
-            };
-            let msg = err.to_string();
-            assert!(msg.contains("B2") && msg.contains("postgres"), "{msg}");
-            assert!(!msg.to_ascii_lowercase().contains("memory store"));
-            assert!(!StoreKind::Postgres.is_ready());
+            let s = build_store(cfg).expect("postgres store must build under store-postgres");
+            assert!(s.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(s.vector_dimensions(), Some(1024));
+            assert!(StoreKind::Postgres.is_ready());
         } else {
             let Err(err) = build_store(cfg) else {
                 panic!("expected err: silent fallback forbidden");
@@ -1225,6 +1219,60 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             assert!(!msg.to_ascii_lowercase().contains("memory store"));
             assert!(!StoreKind::Postgres.is_ready());
         }
+    }
+
+    /// B2-R1-1: production is `resolve_backends` passing `Some(embedder_cfg.dim)`.
+    /// Deleting the Postgres-arm copy of that argument into the pin slot must
+    /// make this go red (silent init at 1024 against a 768 embedder).
+    #[test]
+    fn postgres_copies_embedder_width_when_pin_is_absent() {
+        if !StoreKind::Postgres.is_compiled() {
+            let cfg = StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: None,
+            };
+            let Err(err) = build_store_with_vector_dim(cfg, Some(768)) else {
+                panic!("expected err: silent fallback forbidden");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not compiled") && msg.contains("store-postgres"),
+                "{msg}"
+            );
+            return;
+        }
+        let s = build_store_with_vector_dim(
+            StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: None,
+            },
+            Some(768),
+        )
+        .expect("pin-absent copy must construct");
+        assert_eq!(
+            s.vector_dimensions(),
+            Some(768),
+            "absent pin must take the embedder width, not default 1024"
+        );
+        let s = build_store_with_vector_dim(
+            StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgresql://localhost/lambo".into()),
+                path: None,
+                vector_dim: Some(1536),
+            },
+            Some(768),
+        )
+        .expect("pin must construct");
+        assert_eq!(
+            s.vector_dimensions(),
+            Some(1536),
+            "pin still outranks the embedder-width param"
+        );
     }
 
     #[test]

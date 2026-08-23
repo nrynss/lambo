@@ -34,7 +34,7 @@ demo with `store-cockroach` + `embed-bge`, and leaves Bedrock optional until aut
 |---------|----------|---------|
 | `store-memory` | `MemoryStore` | **yes** |
 | `store-cockroach` | `CockroachStore` (P3) + `sqlx` postgres | no until T3.2 |
-| `store-postgres` | `PostgresStore` (B1) + same `sqlx` postgres driver; fail-closed until B2 | no until B2 |
+| `store-postgres` | `PostgresStore` (B2: templated width, hnsw from init) + same `sqlx` postgres driver | no until B2 |
 | `store-sqlite` | `SqliteStore` (P3) + `sqlx` sqlite | no until T3.3 |
 | `embed-fixture` | `FixtureEmbedder` | **yes** |
 | `embed-bge` | `BgeM3LlamaCppEmbedder` + `reqwest` | **yes** |

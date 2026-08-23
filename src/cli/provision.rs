@@ -2,6 +2,8 @@
 //!
 //! * `store.kind = sqlite` → [`GraphStore::init_schema`] on the resolved store
 //!   (idempotent).
+//! * `store.kind = postgres` → [`GraphStore::init_schema`] (pgvector + hnsw
+//!   from init). Never `scripts/provision.sh` (that file is Cockroach SQL).
 //! * `store.kind = cockroach` → wrap `scripts/provision.sh` (vector-index
 //!   reconciliation lives there, not in `init_schema`'s timeout path).
 //! * `store.kind = memory` → success; the memory store needs no schema.
@@ -32,11 +34,12 @@ pub async fn run(store: Box<dyn GraphStore>, kind: StoreKind) -> Result<String, 
             Ok("sqlite schema provisioned (init_schema, idempotent)".into())
         }
         StoreKind::Postgres => {
-            // B1: fail closed naming B2. scripts/provision.sh is Cockroach SQL
-            // and must not run under kind = "postgres".
-            Err(CliError::Runtime(crate::store::postgres_not_ready_msg(
-                "provision",
-            )))
+            // init_schema, not scripts/provision.sh (that file is Cockroach SQL).
+            store
+                .init_schema()
+                .await
+                .map_err(|e| CliError::Runtime(format!("init_schema: {e}")))?;
+            Ok("postgres schema provisioned (init_schema, idempotent, hnsw from init)".into())
         }
         StoreKind::Cockroach => {
             let script = find_provision_script().ok_or_else(|| {
@@ -136,21 +139,26 @@ mod tests {
     }
 }
 
-/// B1-R1-3: the Postgres arm of `run` must refuse `scripts/provision.sh`
-/// and name B2. The store is unused; a dummy is enough, no real adapter.
+/// B2: the Postgres arm of `run` calls `init_schema` and must not run
+/// `scripts/provision.sh`. A dummy store is enough; no live adapter.
 #[cfg(test)]
 mod postgres_arm_tests {
     use super::*;
     use crate::store::Capabilities;
     use crate::types::StoreError;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
-    struct UnusedStore;
+    struct RecordingStore {
+        init_calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
-    impl GraphStore for UnusedStore {
+    impl GraphStore for RecordingStore {
         async fn init_schema(&self) -> Result<(), StoreError> {
-            panic!("provision Postgres arm must not touch the store");
+            self.init_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
         fn capabilities(&self) -> Capabilities {
             panic!("provision Postgres arm must not touch the store");
@@ -212,17 +220,20 @@ mod postgres_arm_tests {
     }
 
     #[tokio::test]
-    async fn provision_postgres_fails_closed_naming_b2() {
-        let store: Box<dyn GraphStore> = Box::new(UnusedStore);
-        let err = run(store, StoreKind::Postgres)
+    async fn provision_postgres_calls_init_schema_not_provision_sh() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store: Box<dyn GraphStore> = Box::new(RecordingStore {
+            init_calls: calls.clone(),
+        });
+        let out = run(store, StoreKind::Postgres)
             .await
-            .expect_err("postgres provision must fail closed in B1");
-        let msg = err.to_string();
-        assert!(msg.contains("B2"), "{msg}");
-        assert!(msg.contains("postgres"), "{msg}");
+            .expect("postgres provision must init_schema in B2");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "init_schema must run once");
+        assert!(out.contains("postgres"), "{out}");
+        assert!(out.contains("init_schema"), "{out}");
         assert!(
-            !msg.contains("provision.sh"),
-            "postgres must not run Cockroach provision.sh: {msg}"
+            !out.contains("provision.sh"),
+            "postgres must not run Cockroach provision.sh: {out}"
         );
     }
 }
