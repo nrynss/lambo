@@ -317,3 +317,103 @@ safe. Either way, extend `an_unparseable_dsn_still_has_its_password_stripped` wi
 two shapes above so the promise is pinned at its edge, and re-check the
 `store_identity` sentence while there.
 
+---
+
+## Mutations run
+
+| # | Mutation | Expected red | Observed | Reverted |
+|---|---|---|---|---|
+| M-R3-1a | `scripts/provision.sh` reverted wholesale to the pre-fix file at `c7a822f` | the receiving-end test, pushed half | `provision_script_prefers_the_pushed_dsn_over_dotenv` RED at `provision.rs:427`; captured argv shows the decoy `.env` DSN dialled | yes, green after |
+| M-R3-1b | `source .env` block deleted | the same test's dotfile half | RED at `provision.rs:416`: script exited 1 with "LAMBO_COCKROACH_DSN is not set" | yes, green after |
+| M-R3-2 | `ANALYZE concepts` injected into `index_present` before the plan probe | the new hnsw assertion | `h3_postgres_recall_parity` RED at `sqlite.rs:6447` with the rewrite-the-prose message; 6/1 live, only the intended test red | yes, live 7/0 after |
+| M-R3-3a | `ensure_is_an_embedding` call severed in SQLite's `vector_candidates_checked` | the new probe pin | RED at `sqlite.rs:3472`: `Ok` with a 0.0-scored candidate — the silent ranking verbatim | yes, green after |
+| M-R3-3b | zero-norm branch disabled in the shared guard | codec pin AND the SQLite pin | BOTH RED (`vector.rs:148`, `sqlite.rs:3472`) | yes, green after |
+| M-R3-3c | the guard call moved below the contract-row read | the pin's unknown-session leg | RED: unknown session returned `Ok([])` instead of refusing; seeded leg still refused | yes, green after |
+| M-R3-5 | fallback restored to `strip_libpq_password_token(trimmed)` | the redaction pin | `an_unparseable_dsn_still_has_its_password_stripped` RED at `dsn.rs:347`, printing the password | yes, green after |
+| M-R3-6 | `overlay_env`'s private doc link restored | doc gate | 53 → **54**, naming `canonical_store_dsn` | yes, 53 after |
+| M-R3-6b | the `Dialect::DSN_ENV` doc link restored | doc gate | 53 → **54**, "no item named `dialect` in module `pg`" | yes, 53 after |
+
+Nine mutations, twelve distinct red outcomes, every one at its intended pin. On top of
+them: eleven bash probes against the real script (R2-1 section), a guard over-rejection
+probe and a redaction-edge probe (both temporary tests, run and then reverted), and two
+live CLI probes against the pinned container. The redaction-edge probe is what
+surfaced B-E2E-R3-1.
+
+## Gate table: claimed vs measured
+
+Claimed = the round-2 remediation report / post-remediation `CYCLE.md`. Measured = this
+worktree at `84ad616`, after every probe mutation was reverted. Suite numbers are the
+sum across each invocation's test binaries (16 per suite), the same arithmetic both
+prior tables used.
+
+| Gate | Claimed | Measured |
+|---|---|---|
+| `cargo fmt --all -- --check` | pass | **pass** |
+| `cargo clippy --all-targets -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-cockroach,fixtures -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-postgres -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass | **pass** |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass | **pass** |
+| `cargo test --features store-cockroach` | 950 / 0 / 4 | **950 / 0 / 4** |
+| `cargo test --features store-cockroach,fixtures` | 1010 / 0 / 12 | **1010 / 0 / 12** |
+| `cargo test --features store-postgres` | 937 / 0 / 7 | **937 / 0 / 7** |
+| `cargo test --features store-postgres,fixtures` | 994 / 0 / 7 | **994 / 0 / 7** |
+| `cargo test --features store-sqlite,fixtures` | 1076 / 0 / 3 | **1076 / 0 / 3** |
+| `cargo test --no-default-features --features store-cockroach` | 613 / 0 / 0 | **613 / 0 / 0** |
+| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | 53 warnings | **53** (summary line; the naive `^warning` grep says 54 by counting the summary itself) |
+| `cargo doc … --features store-postgres,store-cockroach,store-sqlite,fixtures` | 53 warnings | **53** |
+| live Postgres `-- --ignored` (pinned container, port 55434) | 7 / 0 in 20.2 s | **7 / 0**, 20.1 s baseline; re-run 7/0 after the M-R3-2 revert (19.1 s) |
+| 15 `#[ignore]`d live Cockroach tests | not run (no safe DSN) | **not run**: no DSN on this machine, production forbidden. Still on the orchestrator. |
+
+Zero drift anywhere: every claimed number reproduced exactly.
+
+## Summary, and the decision line
+
+| Grade | Count | Findings |
+|---|---:|---|
+| P1 | 0 | |
+| P2 | 0 | |
+| P3 | 1 | B-E2E-R3-1 (scheme-less / single-slash DSN leaks its password under "(passwords stripped)": the R2-5 promise fails one keystroke away from the shapes it closed) |
+
+Per-finding disposition of round 2's six: **R2-1 closed-verified** (M-R3-1a/1b,
+eleven live script probes), **R2-2 closed-verified** with the planner pin ruled
+acceptable engineering (M-R3-2, autovacuum risk measured structurally unreachable),
+**R2-3 closed-verified** with no over-rejection (M-R3-3a/3b/3c, boundary probes),
+**R2-4 closed-verified** (repo-wide sweep, ruling unaltered, FUTURE entry is a real
+owner), **R2-5 closed-verified for every filed shape** (M-R3-5, live CLI probe) with
+the residual filed as B-E2E-R3-1, **R2-6 closed-verified** (M-R3-6/6b, both links, both
+feature sets, standing doc row).
+
+**Zero residue: NOT reached.** One P3 remains, so under `b-run/CYCLE.md`'s loop rule
+("until a round returns APPROVE with zero residue") this cycle does not end here: the
+verdict is REQUEST_CHANGES and B-E2E-R3-1 gates the next pass. Stated for the
+operator's decision plainly: the finding is a two-line redaction extension plus two
+test rows — everything else round 2 shipped survived every mutation and probe this
+round could throw at it, and all sixteen gate rows reproduce exactly. If the operator
+prefers to ride the P3 along (the workstream-I pattern) rather than run a remediation
+round 3, that is an operator call this reviewer does not have the authority to make;
+on the standing rule as written, it gates.
+
+Still not verified, carried forward unchanged: the live Cockroach leg (no safe DSN
+from this machine; the 15 `#[ignore]`d tests remain on the orchestrator — though the
+receiving-end script test and the eleven probes above have now exercised the script's
+DSN handling harder than any prior round), `postgres-live` on a real GitHub runner (no
+push has proved it; nothing found locally that would fail only there), and
+park-and-fail-over (unbuilt by design, owned by its FUTURE entry).
+
+## Cleanliness
+
+Nine probe mutations and two temporary probe tests applied, every one reverted;
+`git status --porcelain` verified empty after each revert and at review end (the only
+commits in this worktree are this file's own). Final live suite re-run green (7/0) on
+the reverted tree. The scratch trees for the script probes, the stub `docker`, probe
+configs and battery logs all live in the session scratchpad outside the repo; no
+`.env` was ever created inside the worktree (the script was copied out to scratch
+instead, precisely so the repo root never carried one). The `lambo-b-e2e-r3` container
+and the `b-r3` colima profile were removed at review end (`colima list` shows
+`default` alone); `docs-telemetry` on the default profile was never touched and was
+verified serving (HTTP 200 on 127.0.0.1:7788) before and after. The stale
+`colima-b-r2` disk was left for the operator, as instructed. The main checkout at
+`/Users/narayan/Documents/work/lambo` was never written.
+
