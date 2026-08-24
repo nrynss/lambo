@@ -2650,7 +2650,11 @@ impl EarlyShutdown {
     /// there: a losing attach must leave this `false`, which is the wedge
     /// invariant read through the signal disposition — a process that never
     /// took the lease never changed how it dies.
-    #[cfg(test)]
+    // Gated exactly as their only consumers are: the J6 disposition tests live
+    // in a `store-memory` + `embed-fixture` module, so a bare `#[cfg(test)]`
+    // leaves these dead under `--no-default-features --features store-sqlite`
+    // and CI's RUSTFLAGS `-D warnings` turns that into a build failure.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn is_armed(&self) -> bool {
         self.armed.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -2663,7 +2667,11 @@ impl EarlyShutdown {
     /// [`close_bounded_until`] takes its re-armed signal as an argument. This
     /// sets the watch directly, so the observer side can be driven with no
     /// handler and no real signal.
-    #[cfg(test)]
+    // Gated exactly as their only consumers are: the J6 disposition tests live
+    // in a `store-memory` + `embed-fixture` module, so a bare `#[cfg(test)]`
+    // leaves these dead under `--no-default-features --features store-sqlite`
+    // and CI's RUSTFLAGS `-D warnings` turns that into a build failure.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn simulate_signal(&self) {
         let _ = self.tx.send(true);
     }
