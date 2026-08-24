@@ -442,6 +442,14 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
     use crate::embed::gemini::{
         build_client, load_credentials, GeminiEmbedder, ServiceAccountTokenSource,
     };
+    // A4 dim guard: gemini-embedding-001 truncates to 768, 1536 or 3072 only. Reject any
+    // other configured dim here, before an unsupported `outputDimensionality` could be sent.
+    if ![768, 1536, 3072].contains(&cfg.dim) {
+        return Err(EmbedError::Unavailable(format!(
+            "gemini-embedding-001 supports dim 768, 1536 or 3072, got {}",
+            cfg.dim
+        )));
+    }
     let creds_path = cfg
         .gemini_credentials
         .clone()
@@ -900,7 +908,7 @@ mod tests {
     fn gemini_fail_closed_without_credentials() {
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
-            dim: 1024,
+            dim: 1536,
             llama_url: None,
             llama_model: None,
             ..Default::default()
@@ -940,7 +948,7 @@ mod tests {
         std::fs::write(&creds_path, creds_json.to_string()).unwrap();
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
-            dim: 1024,
+            dim: 1536,
             gemini_project: Some("proj".to_string()),
             gemini_location: Some("us-central1".to_string()),
             gemini_credentials: Some(creds_path.clone()),
@@ -950,6 +958,36 @@ mod tests {
         let identity = crate::embed::gemini_identity(embedder.as_ref());
         assert_eq!(identity.as_deref(), Some("gemini-embedding-001"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A4 dim guard: any configured dim outside {768, 1536, 3072} is rejected at
+    /// construction, naming the three, BEFORE credentials are consulted or a request
+    /// is sent. 1024 is the crate default and here deliberately unsupported.
+    #[test]
+    #[cfg(feature = "embed-gemini")]
+    fn gemini_rejects_unsupported_dim() {
+        for bad in [512usize, 1024, 2048] {
+            let r = build_embedder(EmbedderConfig {
+                kind: EmbedderKind::Gemini,
+                dim: bad,
+                llama_url: None,
+                llama_model: None,
+                ..Default::default()
+            });
+            let Err(err) = r else {
+                panic!("dim {bad} must be rejected at construction, got Ok");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("768") && msg.contains("1536") && msg.contains("3072"),
+                "dim error must name 768, 1536 and 3072, got: {msg}"
+            );
+            // The guard fires before credentials; the message must not be the creds error.
+            assert!(
+                !msg.to_ascii_lowercase().contains("credentials"),
+                "dim error must not be the credentials error, got: {msg}"
+            );
+        }
     }
 
     #[test]
