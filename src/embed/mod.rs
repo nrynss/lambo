@@ -13,7 +13,7 @@ mod candle;
 #[cfg(feature = "embed-fixture")]
 mod fixture;
 #[cfg(feature = "embed-gemini")]
-mod gemini;
+pub(crate) mod gemini;
 
 pub use math::cosine;
 

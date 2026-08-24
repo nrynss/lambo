@@ -217,6 +217,19 @@ jobs:
           # compile cost; a named red row beats one line in an 800-test log.
           - name: candle
             command: cargo test --features embed-candle
+          # A (embed-gemini) — the Vertex Gemini adapter compiles and its offline
+          # unit tests (OAuth mint/exchange, embedContent, CON-7/CON-2, normalize,
+          # dim guard) run on the default runner with no network and no
+          # service-account key. A separate row beats folding into `check` because
+          # the default build must not pay jsonwebtoken's compile cost; the live
+          # OAuth/embedContent round-trip stays `#[ignore]`d (operator-run with a
+          # key). The clippy line lints the new surface, which `check` (default
+          # features) never sees.
+          - name: gemini
+            command: |
+              set -o pipefail
+              cargo clippy --all-targets --features embed-gemini -- -D warnings
+              cargo test --features embed-gemini
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --features demo

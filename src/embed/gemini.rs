@@ -704,4 +704,58 @@ mod tests {
             .and_then(|a| a.downcast_ref::<GeminiEmbedder>())
             .is_some());
     }
+
+    /// A-E2E-2 closure: an operator-runnable live test proving the real OAuth
+    /// exchange and Vertex `embedContent` round-trip. `#[ignore]`d so CI never runs
+    /// it (no service-account key there); run it on a machine with credentials:
+    ///
+    ///     LAMBO_GEMINI_CREDENTIALS=/path/sa.json cargo test \
+    ///       --features embed-gemini --lib embed::gemini::tests::gemini_live_embeds_against_vertex \
+    ///       -- --ignored
+    ///
+    /// Resolves credentials from `LAMBO_GEMINI_CREDENTIALS` else
+    /// `GOOGLE_APPLICATION_CREDENTIALS`; skips cleanly (with a message) when neither
+    /// is set.
+    #[tokio::test]
+    #[ignore]
+    async fn gemini_live_embeds_against_vertex() {
+        let creds_path = std::env::var_os("LAMBO_GEMINI_CREDENTIALS")
+            .or_else(|| std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS"));
+        let Some(creds_path) = creds_path else {
+            eprintln!("skipping: set LAMBO_GEMINI_CREDENTIALS or GOOGLE_APPLICATION_CREDENTIALS");
+            return;
+        };
+        let creds = load_credentials(std::path::Path::new(&creds_path)).unwrap();
+
+        let project = std::env::var("LAMBO_GEMINI_PROJECT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or(creds.project_id.clone())
+            .expect("set LAMBO_GEMINI_PROJECT or rely on the key's project_id");
+        let location = std::env::var("LAMBO_GEMINI_LOCATION")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LOCATION.to_string());
+        let model = std::env::var("LAMBO_GEMINI_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        // gemini supports 768, 1536 or 3072; default the live probe to the recommended
+        // 1536 so the adapter's requested width matches the response width.
+        let dim = std::env::var("LAMBO_GEMINI_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1536);
+        let client = build_client().unwrap();
+        let token_source = Box::new(ServiceAccountTokenSource::new(creds, client.clone()).unwrap());
+        let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
+        let e = GeminiEmbedder::new(model, dim, token_source, embed_url, client).unwrap();
+        let v = e.embed("lambo live vertex round-trip").await.unwrap();
+        assert_eq!(v.len(), dim, "live Vertex returned the configured width");
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "live Vertex vector must be L2-normalized, norm={norm}"
+        );
+    }
 }

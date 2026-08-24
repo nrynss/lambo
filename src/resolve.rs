@@ -329,6 +329,53 @@ mod tests {
         assert_eq!(r.embedding.kind, "fixture");
     }
 
+    /// A-E2E-3 closure: the Gemini model-identity stamping is locked at the
+    /// resolve boundary, not just trace-verified. A gemini config resolves to an
+    /// `EmbeddingContract.model == Some("gemini-embedding-001")`, mirroring how the
+    /// fixture/candle resolve tests lock their own identity paths.
+    #[cfg(all(feature = "store-memory", feature = "embed-gemini"))]
+    #[test]
+    fn resolve_gemini_stamps_embedding_model() {
+        use crate::embed::gemini::TEST_RSA_PRIVATE_KEY_PEM;
+        use crate::embed::EmbedderKind;
+        use crate::store::StoreKind;
+        let dir = std::env::temp_dir().join(format!("lambo-resolve-gemini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds_path = dir.join("sa.json");
+        let creds_json = serde_json::json!({
+            "client_email": "test@example.com",
+            "private_key": TEST_RSA_PRIVATE_KEY_PEM,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "project_id": "proj",
+        });
+        std::fs::write(&creds_path, creds_json.to_string()).unwrap();
+        let file = LamboFile {
+            store: StoreConfig {
+                kind: StoreKind::Memory,
+                dsn: None,
+                path: None,
+                vector_dim: None,
+            },
+            embedder: EmbedderConfig {
+                kind: EmbedderKind::Gemini,
+                dim: 1536,
+                gemini_project: Some("proj".to_string()),
+                gemini_location: Some("us-central1".to_string()),
+                gemini_credentials: Some(creds_path.clone()),
+                ..Default::default()
+            },
+            daemon: Default::default(),
+        };
+        let r = resolve_backends(file).unwrap();
+        assert_eq!(r.embedding.kind, "gemini");
+        assert_eq!(
+            r.embedding.model.as_deref(),
+            Some("gemini-embedding-001"),
+            "the Gemini contract must carry the real model id, not NULL"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// F-R1-2: a width disagreement that is **reachable through
     /// `resolve_backends`**, which is precisely what the pre-remediation tree could
     /// not produce for SQLite. The old test built a `(Some(1536), 768)` pair by hand
