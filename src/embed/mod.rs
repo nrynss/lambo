@@ -277,6 +277,18 @@ pub struct EmbedderConfig {
     /// candle explicit local weights dir; bypasses hf-hub cache entirely.
     #[serde(default)]
     pub weights_dir: Option<std::path::PathBuf>,
+    /// GCP project id (Vertex caller project).
+    #[serde(default)]
+    pub gemini_project: Option<String>,
+    /// Vertex region, e.g. `us-central1`.
+    #[serde(default)]
+    pub gemini_location: Option<String>,
+    /// Vertex model id (default `gemini-embedding-001` applied by the A3 adapter when None).
+    #[serde(default)]
+    pub gemini_model: Option<String>,
+    /// Explicit Google service-account JSON key file path; overrides ADC (A3).
+    #[serde(default)]
+    pub gemini_credentials: Option<std::path::PathBuf>,
 }
 
 impl Default for EmbedderConfig {
@@ -292,6 +304,10 @@ impl Default for EmbedderConfig {
             weights_file: None,
             offline: None,
             weights_dir: None,
+            gemini_project: None,
+            gemini_location: None,
+            gemini_model: None,
+            gemini_credentials: None,
         }
     }
 }
@@ -335,6 +351,26 @@ impl EmbedderConfig {
         if let Ok(v) = env::var("LAMBO_EMBED_DEVICE") {
             if !v.is_empty() {
                 self.device = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("LAMBO_GEMINI_PROJECT") {
+            if !v.is_empty() {
+                self.gemini_project = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("LAMBO_GEMINI_LOCATION") {
+            if !v.is_empty() {
+                self.gemini_location = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("LAMBO_GEMINI_MODEL") {
+            if !v.is_empty() {
+                self.gemini_model = Some(v);
+            }
+        }
+        if let Ok(v) = env::var("LAMBO_GEMINI_CREDENTIALS") {
+            if !v.is_empty() {
+                self.gemini_credentials = Some(v.into());
             }
         }
         Ok(self)
@@ -528,9 +564,17 @@ mod tests {
         env::remove_var("LAMBO_EMBED_DIM");
         env::remove_var("LAMBO_LLAMA_EMBED_URL");
         env::remove_var("LAMBO_LLAMA_MODEL");
+        env::remove_var("LAMBO_GEMINI_PROJECT");
+        env::remove_var("LAMBO_GEMINI_LOCATION");
+        env::remove_var("LAMBO_GEMINI_MODEL");
+        env::remove_var("LAMBO_GEMINI_CREDENTIALS");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.kind, EmbedderKind::BgeM3);
         assert_eq!(cfg.dim, 1024);
+        assert_eq!(cfg.gemini_project, None);
+        assert_eq!(cfg.gemini_location, None);
+        assert_eq!(cfg.gemini_model, None);
+        assert_eq!(cfg.gemini_credentials, None);
 
         // Empty string is unset — still BgeM3 (must not call FromStr("") which errors).
         env::set_var("LAMBO_EMBEDDER", "");
@@ -546,6 +590,99 @@ mod tests {
     #[test]
     fn unknown_toml_field_rejected() {
         assert!(toml::from_str::<EmbedderConfig>(r#"knd = "bge_m3""#).is_err());
+    }
+    #[test]
+    fn gemini_toml_fields_deserialize() {
+        let cfg: EmbedderConfig = toml::from_str(
+            r#"
+            kind = "gemini"
+            gemini_project = "my-project"
+            gemini_location = "us-central1"
+            gemini_model = "gemini-embedding-001"
+            gemini_credentials = "/keys/sa.json"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.kind, EmbedderKind::Gemini);
+        assert_eq!(cfg.gemini_project.as_deref(), Some("my-project"));
+        assert_eq!(cfg.gemini_location.as_deref(), Some("us-central1"));
+        assert_eq!(cfg.gemini_model.as_deref(), Some("gemini-embedding-001"));
+        assert_eq!(
+            cfg.gemini_credentials.as_deref(),
+            Some(std::path::Path::new("/keys/sa.json"))
+        );
+    }
+
+    #[test]
+    fn gemini_toml_misspelled_key_rejected() {
+        // deny_unknown_fields must reject a typo'd gemini key, not silently ignore it.
+        let r = toml::from_str::<EmbedderConfig>(
+            r#"kind = "gemini"
+            gemini_projct = "p""#,
+        );
+        assert!(r.is_err(), "misspelled gemini key must not parse");
+    }
+
+    #[test]
+    fn gemini_overlay_env_picks_up_vars() {
+        let _g = crate::test_util::env_lock();
+
+        env::set_var("LAMBO_GEMINI_PROJECT", "proj-1");
+        env::set_var("LAMBO_GEMINI_LOCATION", "us-west1");
+        env::set_var("LAMBO_GEMINI_MODEL", "gemini-embedding-001");
+        env::set_var("LAMBO_GEMINI_CREDENTIALS", "/tmp/sa.json");
+        let cfg = EmbedderConfig::from_env().unwrap();
+        assert_eq!(cfg.gemini_project.as_deref(), Some("proj-1"));
+        assert_eq!(cfg.gemini_location.as_deref(), Some("us-west1"));
+        assert_eq!(cfg.gemini_model.as_deref(), Some("gemini-embedding-001"));
+        assert_eq!(
+            cfg.gemini_credentials.as_deref(),
+            Some(std::path::Path::new("/tmp/sa.json"))
+        );
+
+        // Empty env value leaves the base intact.
+        env::set_var("LAMBO_GEMINI_PROJECT", "");
+        let cfg = EmbedderConfig::from_env().unwrap();
+        assert_eq!(cfg.gemini_project, None);
+        assert_eq!(cfg.gemini_location.as_deref(), Some("us-west1"));
+    }
+    #[test]
+    fn gemini_overlay_env_base_then_env_precedence() {
+        // A2-R1-1 closure: with a file base set, non-empty env wins and empty env
+        // leaves the base intact. The base simulates a `lambo.toml` value.
+        let _g = crate::test_util::env_lock();
+        env::remove_var("LAMBO_GEMINI_PROJECT");
+        env::remove_var("LAMBO_GEMINI_LOCATION");
+        env::remove_var("LAMBO_GEMINI_MODEL");
+        env::remove_var("LAMBO_GEMINI_CREDENTIALS");
+
+        let base = EmbedderConfig {
+            gemini_project: Some("from-file".to_string()),
+            ..Default::default()
+        };
+
+        // Non-empty env overrides the set base.
+        env::set_var("LAMBO_GEMINI_PROJECT", "from-env");
+        let cfg = base.clone().overlay_env().unwrap();
+        assert_eq!(cfg.gemini_project.as_deref(), Some("from-env"));
+
+        // Empty env leaves the set base intact.
+        env::set_var("LAMBO_GEMINI_PROJECT", "");
+        let cfg = base.overlay_env().unwrap();
+        assert_eq!(cfg.gemini_project.as_deref(), Some("from-file"));
+    }
+
+    #[test]
+    fn gemini_overlay_env_whitespace_is_non_empty() {
+        // A2-R1-2 closure: whitespace is non-empty, so it wins over the base,
+        // consistent with the untrimmed llama pattern. This locks the corner so a
+        // future trim must be a deliberate contract change, not a silent one.
+        let _g = crate::test_util::env_lock();
+        env::remove_var("LAMBO_GEMINI_PROJECT");
+        env::set_var("LAMBO_GEMINI_PROJECT", "   ");
+        let cfg = EmbedderConfig::from_env().unwrap();
+        assert_eq!(cfg.gemini_project.as_deref(), Some("   "));
+        env::remove_var("LAMBO_GEMINI_PROJECT");
     }
 
     /// CON-7 agreement: every compiled embedder rejects empty/whitespace input
