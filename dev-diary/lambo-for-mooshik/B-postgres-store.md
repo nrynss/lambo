@@ -421,7 +421,17 @@ the DSN canonicaliser that J2 built for session socket identity moved out of
 is what makes the canonical form safe to put in an error message. That promise holds on
 inputs the canonicaliser cannot parse as well: B-E2E-R2-5 found that a DSN with a
 fat-fingered port fell through to the raw string and put a live password in a refusal
-that said "(passwords stripped)", so the fallback now drops the userinfo password too.
+that said "(passwords stripped)".
+
+*Corrected after B-E2E-R3-1.* R2-5's fix spliced the userinfo password out of the raw
+string, and that was not enough: a splice has to know where the secret is, and on a
+string neither parser understood it does not. Five shapes went through it intact —
+a dropped scheme and the `postgres:/` typo (no `://` to anchor on), both of libpq's
+`?password=` URI spellings (the `://` is there and the secret is behind it), and
+`password = S3cret` (libpq allows spaces around `=`). The fallback is now an
+**allowlist**: it echoes only what a recognised shape positively accounts for and
+replaces anything else with `<unparseable dsn>`, so the promise is kept by not
+speaking rather than by editing.
 
 **The `provision.sh` leg, both ends.** The Cockroach arm pushes the resolved DSN into
 the child's environment rather than letting it inherit the ambient one, so the config
