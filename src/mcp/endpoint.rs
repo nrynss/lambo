@@ -663,7 +663,10 @@ fn sanitize_prefix(session: &str) -> String {
 /// path half is **canonicalized** first for the same reason; see
 /// [`canonical_store_path`] and J2-R1-2. The password never appears in the
 /// string that is hashed, so it cannot reach the filesystem or the lease row
-/// even if hashing were skipped.
+/// even if hashing were skipped. That holds on the unparseable path too, and
+/// only because of how: a spelling `canonical_store_dsn` cannot account for is
+/// replaced wholesale rather than echoed (B-E2E-R3-1). Between R2-5 and R3-1
+/// this sentence was false for a DSN with userinfo and no `://`.
 fn store_identity(store: &StoreConfig) -> String {
     format!(
         "{:?}\u{1f}{}\u{1f}{}",

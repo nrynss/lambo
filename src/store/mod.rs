@@ -951,7 +951,10 @@ impl StoreConfig {
     /// and are refused.
     ///
     /// The canonical form has the password stripped, which is why it is safe to
-    /// put both sides in the message.
+    /// put both sides in the message. A spelling neither parser recognises is
+    /// not quoted at all — it prints as `<unparseable dsn>`, because the only
+    /// way to promise "(passwords stripped)" about a string we could not parse
+    /// is to not echo it (B-E2E-R3-1).
     pub fn overlay_env(mut self) -> Result<Self, StoreError> {
         if let Some(k) = Self::env_kind()? {
             self.kind = k;
