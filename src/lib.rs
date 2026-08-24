@@ -85,6 +85,8 @@ pub mod daemon;
 pub mod embed;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
+#[cfg(feature = "store-postgres")]
+pub mod gcp_auth;
 pub mod graph;
 pub mod ledger;
 pub mod mcp;

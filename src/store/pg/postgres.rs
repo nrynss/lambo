@@ -864,6 +864,45 @@ mod tests {
         );
     }
 
+    /// Shared-SA live proof: with `LAMBO_POSTGRES_IAM=1`, `GCP_LAMBO_CREDENTIALS` and a
+    /// Cloud SQL IAM DSN (database user = the service account, NO password in the URL),
+    /// the store's `pool()` mints the SA access token and authenticates to Cloud SQL as
+    /// the service account. Run:
+    ///
+    ///   LAMBO_POSTGRES_IAM=1 \
+    ///   GCP_LAMBO_CREDENTIALS=/path/sa.json \
+    ///   LAMBO_POSTGRES_DSN='postgresql://cachy-nryn%40mooshik.iam@HOST:5432/lambo?sslmode=require' \
+    ///   cargo test --features store-postgres,fixtures --lib \
+    ///     store::pg::postgres::tests::iam_auth_connects_as_service_account -- --ignored
+    #[ignore = "live: LAMBO_POSTGRES_IAM + GCP_LAMBO_CREDENTIALS + LAMBO_POSTGRES_DSN (Cloud SQL IAM user)"]
+    #[tokio::test]
+    async fn iam_auth_connects_as_service_account() {
+        let Some(dsn) = postgres_dsn_or_skip("iam_auth_connects_as_service_account") else {
+            return;
+        };
+        if std::env::var_os("LAMBO_POSTGRES_IAM").is_none() {
+            eprintln!("skipped: LAMBO_POSTGRES_IAM must be set");
+            return;
+        }
+        let store = PostgresStore::new(StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some(dsn),
+            path: None,
+            vector_dim: Some(8),
+        })
+        .expect("construct");
+        let pool = store.pool().await.expect("pool");
+        let user: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(pool)
+            .await
+            .expect("query current_user");
+        eprintln!("IAM authenticated to Postgres as: {user}");
+        assert!(
+            user.contains('@') && !user.is_empty(),
+            "expected an IAM service-account login, got {user:?}"
+        );
+    }
+
     async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
         let admin_dsn = postgres_dsn_or_skip(test)?;
         let admin = sqlx::PgPool::connect(&admin_dsn)

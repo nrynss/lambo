@@ -1342,9 +1342,30 @@ impl<D: Dialect> PgStore<D> {
     pub(crate) async fn pool(&self) -> Result<&PgPool, StoreError> {
         self.pool
             .get_or_try_init(|| async {
+                let mut options = Self::connect_options(&self.dsn)?;
+                // Shared-SA path: with `LAMBO_POSTGRES_IAM` set, authenticate to Cloud SQL
+                // IAM database auth as the shared service account instead of a static
+                // password. The token is minted once at pool creation and cached by the
+                // token source; see `gcp_auth` for the lifetime/refresh notes.
+                if std::env::var_os("LAMBO_POSTGRES_IAM").is_some() {
+                    let mut src = crate::gcp_auth::CloudSqlTokenSource::from_env()
+                        .unwrap_or_else(|| {
+                            Err("LAMBO_POSTGRES_IAM is set but GCP_LAMBO_CREDENTIALS / \
+                                 GOOGLE_APPLICATION_CREDENTIALS is unset"
+                                .into())
+                        })
+                        .map_err(|e| {
+                            backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME))
+                        })?;
+                    let token = src
+                        .access_token()
+                        .await
+                        .map_err(|e| backend(format!("{} IAM token: {e}", D::STORE_TYPE_NAME)))?;
+                    options = options.password(&token);
+                }
                 Ok(PgPoolOptions::new()
                     .max_connections(MAX_POOL_CONNECTIONS)
-                    .connect_lazy_with(Self::connect_options(&self.dsn)?))
+                    .connect_lazy_with(options))
             })
             .await
     }

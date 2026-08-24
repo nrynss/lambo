@@ -112,7 +112,7 @@ store-memory = []
 store-cockroach = ["dep:sqlx", "sqlx/postgres"]
 # B2: PostgreSQL + pgvector dialect. Same sqlx postgres driver as
 # store-cockroach; do not add a second driver.
-store-postgres = ["dep:sqlx", "sqlx/postgres"]
+store-postgres = ["dep:sqlx", "sqlx/postgres", "dep:reqwest", "dep:jsonwebtoken"]
 # P3: enable when SqliteStore lands (pulls sqlx + sqlite).
 store-sqlite = ["dep:sqlx", "sqlx/sqlite"]
 
