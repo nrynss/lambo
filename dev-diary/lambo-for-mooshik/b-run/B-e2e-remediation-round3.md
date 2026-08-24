@@ -132,6 +132,27 @@ the same rule R2-5 wrote down and the same one this round kept.
 
 ### What this costs, stated rather than buried
 
+> **SUPERSEDED, 2026-08-24, by B-E2E-R4-2 and remediation round 4.** The paragraph
+> below is kept verbatim because it is the reasoning a later round falsified, and
+> deleting it would hide that. **Its central claim is false.** "Both are strings no
+> driver will dial — anything sqlx can actually connect to parses through
+> `parse_postgres_url` and never reaches this function" was asserted, not measured.
+> Round 4 measured it against `sqlx::postgres::PgConnectOptions::from_str`, which is
+> the crate's real dial path (`store::pg::connect_options`), and sqlx validates **no
+> scheme at all**: it hands the string to the `url` crate and reads components off
+> whatever comes back. The example pinned two paragraphs down as undialable,
+> `app:one@host-a:26257/db-a`, resolves to `host="localhost"` with the rest as a
+> database name; `postgre://app@h:26257/db` resolves to `h:26257`; and the empty-port
+> shape `postgres://app@host-a:/db_password_a` resolves to **`host-a` / `db_password_a`**
+> while its host-b twin resolves to `host-b` / `db_password_b` — two different real
+> hosts, both collapsing onto one identity here, which reopened E2E-F2 by construction.
+>
+> The accepted residue is therefore **withdrawn**, not re-argued. Remediation round 4
+> split the printer from the identity: `store_dsn_echo` may collapse (it is only shown
+> to a human), `store_dsn_identity` never does (it answers a SHA-256 digest of the
+> input). The trade this paragraph describes no longer has to be made.
+> See `B-e2e-remediation-round4.md`.
+
 Two *unrecognised* spellings now collapse onto one identity, where before the splice kept
 them apart. `overlay_env` cannot distinguish `app:one@host-a/db-a` from
 `app:two@host-b/db-b`; it will take the environment's DSN instead of refusing. Both are
@@ -240,6 +261,16 @@ sets, as that rule requires.
   argument, and arguments are what the last two rounds have been about. The `password`
   substring check is the thing standing behind it, and it is a keyword check, not
   understanding.
+
+  > **SUPERSEDED, 2026-08-24, by B-E2E-R4-1 and remediation round 4.** The self-report
+  > above was right that this was a residue and wrong about how narrow it was, and the
+  > defence offered for it does not hold. `passwrod=`, `pwd=`, `pass=` and libpq's own
+  > `sslpassword=` all leaked, not only exotic keys; and "it would never dial" is
+  > irrelevant on a **refusal** path, which fires precisely because the config is
+  > broken — R2-5's own filed shapes (`port=70000`, `notaport`) never dial either and
+  > were remediated anyway. Applied consistently, that defence would have dismissed
+  > R2-5. The key set is positive now: `is_echoable_libpq_key`. See
+  > `B-e2e-remediation-round4.md`.
 * **`store_identity`'s doc sentence is now true, and was false in between.** The sentence
   "the password never appears in the string that is hashed" held before R2-5, was false
   from R2-5 until this commit for a DSN with userinfo and no `://`, and is true again. The

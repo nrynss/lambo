@@ -52,17 +52,17 @@ Per phase (B0, B1, B2, B3, B4):
 4. Back to 2 with round R+1 until a round returns APPROVE with zero residue.
 5. Orchestrator commits and pushes the phase.
 
-## Gate set (post-remediation round 3, 2026-08-24)
+## Gate set (post-remediation round 4, 2026-08-24)
 
-Every offline row below was run on the round-3 remediated tree, on the MacBook.
+Every offline row below was run on the round-4 remediated tree, on the MacBook.
 **All green.** Suite numbers are the sum across each invocation's test binaries
 (lib + bins + integration + doctests), which is how the round-1 table counted and how
 the round-2 review reconciled it.
 
-**The live Postgres row is the exception and is marked as such**: remediation round 3
-changed only string handling in `store/dsn.rs`, no SQL and no adapter, so it did not
-re-run the container leg. That row still carries the round-3 *review's* measurement, not
-the remediated tree's.
+**The live Postgres row is the exception and is marked as such**: remediation rounds 3
+and 4 changed only string handling in `store/dsn.rs` and its two call sites, no SQL and
+no adapter, so neither re-ran the container leg. That row still carries the round-3
+*review's* measurement, not the remediated tree's.
 
 **The doc row is standing and may not be dropped.** B0-R1-2 added it because it is the
 only gate that sees private-item doc rot; the round-1 remediation table omitted it and
@@ -78,15 +78,15 @@ B-E2E-R2-6). Every future round reproduces this table in full, doc row included.
 | `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass (added by F8) |
 | `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
 | `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
-| `cargo test --features store-cockroach` | 952 passed / 0 failed / 4 ignored (was 950) |
-| `cargo test --features store-cockroach,fixtures` | 1012 passed / 0 failed / 12 ignored (was 1010) |
-| `cargo test --features store-postgres` | 939 passed / 0 failed / 7 ignored (was 937) |
-| `cargo test --features store-postgres,fixtures` | 996 passed / 0 failed / 7 ignored (was 994) |
-| `cargo test --features store-sqlite,fixtures` | 1078 passed / 0 failed / 3 ignored (was 1076) |
-| `cargo test --no-default-features --features store-cockroach` | 615 passed / 0 failed / 0 ignored (was 613) |
-| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | **53 warnings** (round 1: 54, round 2 review measured 55; held through round 3) |
-| `cargo doc --no-deps --document-private-items --features store-postgres,store-cockroach,store-sqlite,fixtures` | **53 warnings** (round 2 review measured 55; held through round 3) |
-| live Postgres, `-- --ignored` against the pinned container | 7 passed / 0 failed, 20.2 s (last measured by the round-3 review; not re-run in remediation round 3) |
+| `cargo test --features store-cockroach` | 959 passed / 0 failed / 4 ignored (was 952) |
+| `cargo test --features store-cockroach,fixtures` | 1019 passed / 0 failed / 12 ignored (was 1012) |
+| `cargo test --features store-postgres` | 946 passed / 0 failed / 7 ignored (was 939) |
+| `cargo test --features store-postgres,fixtures` | 1003 passed / 0 failed / 7 ignored (was 996) |
+| `cargo test --features store-sqlite,fixtures` | 1084 passed / 0 failed / 3 ignored (was 1078; +6 not +7, see below) |
+| `cargo test --no-default-features --features store-cockroach` | 622 passed / 0 failed / 0 ignored (was 615) |
+| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | **53 warnings** (round 1: 54, round 2 review measured 55; held through round 4) |
+| `cargo doc --no-deps --document-private-items --features store-postgres,store-cockroach,store-sqlite,fixtures` | **53 warnings** (round 2 review measured 55; held through round 4) |
+| live Postgres, `-- --ignored` against the pinned container | 7 passed / 0 failed, 20.2 s (last measured by the round-3 review; not re-run in remediation rounds 3 or 4) |
 
 The +3 across every suite is round 2's own three always-compiled tests
 (`provision_script_prefers_the_pushed_dsn_over_dotenv`,
@@ -100,6 +100,23 @@ tests (`a_recognised_shape_still_shows_the_operator_the_typo`,
 "(passwords stripped)" promise apart so each can fail on its own. Nothing there is
 feature-gated, so every suite moves by the same +2. See
 `B-e2e-remediation-round3.md`.
+
+The further **+7, except `store-sqlite,fixtures` at +6**, is remediation round 4's
+seven tests: six in `store::dsn` (`a_libpq_key_is_echoed_only_if_it_is_on_the_list`,
+`an_unencoded_slash_in_a_password_does_not_reach_the_identity`,
+`two_unparseable_spellings_are_two_identities`,
+`the_echo_and_the_identity_do_not_borrow_each_others_answers`,
+`a_parsed_echo_still_may_not_carry_a_control_character`,
+`sqlx_dials_what_this_module_cannot_parse`) and
+`store::tests::two_unquotable_dsns_still_reach_the_disagreement_refusal`, which drives
+E2E-F2's refusal end to end on two DSNs neither parser can quote.
+
+**This is the first round whose delta is not uniform, and the reason is deliberate.**
+`sqlx_dials_what_this_module_cannot_parse` executes the claim round 3 asserted — that
+no driver dials the shapes we cannot parse — against `PgConnectOptions::from_str`. A
+measurement of sqlx cannot be made without sqlx, so it is
+`#[cfg(any(feature = "store-postgres", feature = "store-cockroach"))]` and does not
+compile under `store-sqlite,fixtures`. See `B-e2e-remediation-round4.md`.
 
 The live row is the one B's container decision bought: `fencing_refuses_stale_write_and_upserts_replay`,
 `live_schema_width_refuses_a_config_that_disagrees`, `explain_recall_uses_hnsw`,

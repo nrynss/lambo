@@ -433,6 +433,43 @@ a dropped scheme and the `postgres:/` typo (no `://` to anchor on), both of libp
 replaces anything else with `<unparseable dsn>`, so the promise is kept by not
 speaking rather than by editing.
 
+*Corrected again after B-E2E-R4-1/2/3.* The paragraph above is right about the
+echo and wrong about two things it did not say out loud, both of which round 4
+measured rather than argued.
+
+**One function was doing two jobs.** `canonical_store_dsn` was the printer *and*
+the identity, and those want opposite things from a spelling neither parser
+understands: the printer must say nothing, the identity must say something
+different about each. Round 3 resolved that by collapsing unrecognised spellings
+onto `<unparseable dsn>` and defending the collapse with "no driver will dial
+them". Measured against `sqlx::postgres::PgConnectOptions::from_str` — which *is*
+the dial path, `store::pg::connect_options` — that is false; sqlx validates no
+scheme at all. `postgres://app@host-a:/db_password_a` and its `host-b` twin both
+collapsed here and resolve to two different real hosts there, so `overlay_env`
+found the two sides equal, skipped E2E-F2's refusal, and let the environment take
+a database the file never named. The two jobs are two functions now:
+**`store_dsn_echo`** may withhold, **`store_dsn_identity`** never collapses (a
+SHA-256 digest of the input for anything it cannot parse) and is never printed.
+The price, taken deliberately: two malformed spellings differing only by a
+password are now two identities, so `overlay_env` refuses where it used to
+overlay — loud and one edit to fix, against silent and unfixable.
+
+**"Allowlist" was true of one branch of two.** The libpq `key=value` branch kept
+every token whose key merely lacked the substring "password", so `passwrod=`,
+`pwd=`, `pass=`, `secret_pw=` and libpq's own `sslpassword=` printed verbatim
+under "(passwords stripped)". It is a positive key set now
+(`is_echoable_libpq_key`); everything else is dropped, unknown keys included.
+
+**And the parse path was half of the same promise.** `split_authority` stops at
+the first `/` or `?` per RFC 3986, so an unencoded delimiter inside a userinfo
+cut the authority short and put the password in the *database* or *host*
+component of a **parsed** identity — `postgres://ap/p:S3cret@h:70000/db` and
+`postgres://app:S3cret/Hunter@h/db` both echoed their credential. Two guards
+close it: a path may not carry an unencoded `:`, and a `:` in a hostport that is
+not a port separator is not part of a host. sqlx answers "invalid port number" to
+the same shapes. `%2F` and `%3A` are the spellings that parse, and always did.
+See `b-run/B-e2e-remediation-round4.md`.
+
 **The `provision.sh` leg, both ends.** The Cockroach arm pushes the resolved DSN into
 the child's environment rather than letting it inherit the ambient one, so the config
 names the cluster the DDL lands on. The "no `store.dsn`, environment supplies it" path
