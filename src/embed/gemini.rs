@@ -1,13 +1,14 @@
 //! Vertex Gemini embeddings (`gemini-embedding-001`) over Google's REST `embedContent`.
 //!
-//! This adapter authenticates as a Google service account. It mints an RS256 JSON Web
-//! Token (`jsonwebtoken::EncodingKey::from_rsa_pem` on the service account private key PEM)
-//! whose claims are `{ iss: client_email, scope, aud: token_uri, iat, exp }`, exchanges it for
-//! an OAuth `access_token` at the service account's `token_uri` (an urlencoded
-//! `jwt-bearer` grant), caches that token until roughly a minute before `expires_in`, then
+//! This adapter authenticates as a Google principal. With a service-account key it mints an
+//! RS256 JSON Web Token (`jsonwebtoken::EncodingKey::from_rsa_pem` on the private key PEM)
+//! whose claims are `{ iss: client_email, scope, aud, iat, exp }` and exchanges it for an
+//! OAuth `access_token` (a `jwt-bearer` grant); with an authorized-user ADC file it uses the
+//! `refresh_token` grant. It caches the token until roughly a minute before `expires_in`, then
 //! calls Vertex
 //! `{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:embedContent`
-//! with `Authorization: Bearer <token>` and body `{"content": {"content": "<text>"}}`.
+//! with `Authorization: Bearer <token>` and body
+//! `{"content": {"parts": [{"text": "<text>"}]}, "outputDimensionality": <dim>}`.
 //!
 //! **outputDimensionality IS sent from the configured `dim`.** `gemini-embedding-001`
 //! truncates to 768, 1536, or 3072 via that parameter, so the returned width is the
@@ -22,7 +23,7 @@
 //!   so the caller can degrade to canonical matching.
 //! * any non-2xx HTTP status from the token endpoint or Vertex -> [`EmbedError::Backend`]
 //!   (auth, quota, or a wrong model/URL; permanent, the operator fixes it).
-//! * unparseable response body, missing prediction/values, dimension mismatch, non-finite or
+//! * unparseable response body, missing embedding/values, dimension mismatch, non-finite or
 //!   zero-norm vector -> [`EmbedError::Backend`].
 //!
 //! **CON-2:** there is deliberately no retry that could change the request. A non-success
@@ -53,30 +54,136 @@ const TOKEN_CACHE_MARGIN: Duration = Duration::from_secs(60);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Parsed Google service-account key file (the subset this adapter needs).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServiceAccountCredentials {
-    pub client_email: String,
-    pub private_key: String,
-    pub token_uri: Option<String>,
-    #[serde(default)]
-    pub project_id: Option<String>,
+/// Parsed Google credentials: a service-account key or an authorized-user ADC file.
+#[derive(Debug, Clone)]
+pub enum GoogleCredentials {
+    ServiceAccount {
+        client_email: String,
+        private_key: String,
+        project_id: Option<String>,
+        token_uri: String,
+    },
+    AuthorizedUser {
+        client_id: String,
+        client_secret: String,
+        refresh_token: String,
+        quota_project_id: Option<String>,
+        token_uri: String,
+    },
 }
 
-/// Read and parse a Google service-account JSON key file.
-pub fn load_credentials(path: &Path) -> Result<ServiceAccountCredentials, EmbedError> {
+impl GoogleCredentials {
+    /// The GCP project to call Vertex on: the service-account's project or the
+    /// authorized-user's quota project. Config `gemini_project` overrides this in
+    /// `build_gemini_embedder`.
+    pub fn project_id(&self) -> Option<String> {
+        match self {
+            GoogleCredentials::ServiceAccount { project_id, .. } => project_id.clone(),
+            GoogleCredentials::AuthorizedUser {
+                quota_project_id, ..
+            } => quota_project_id.clone(),
+        }
+    }
+
+    /// The OAuth token endpoint (defaults to Google's).
+    pub fn token_uri(&self) -> &str {
+        match self {
+            GoogleCredentials::ServiceAccount { token_uri, .. } => token_uri,
+            GoogleCredentials::AuthorizedUser { token_uri, .. } => token_uri,
+        }
+    }
+}
+
+/// Raw service-account key JSON.
+#[derive(Deserialize)]
+struct ServiceAccountJson {
+    client_email: String,
+    private_key: String,
+    project_id: Option<String>,
+    #[serde(default)]
+    token_uri: Option<String>,
+}
+
+/// Raw authorized-user ADC JSON.
+#[derive(Deserialize)]
+struct AuthorizedUserJson {
+    client_id: String,
+    client_secret: String,
+    refresh_token: String,
+    quota_project_id: Option<String>,
+    #[serde(default)]
+    token_uri: Option<String>,
+}
+
+/// Read and parse a Google credentials file (service-account key or ADC).
+pub fn load_credentials(path: &Path) -> Result<GoogleCredentials, EmbedError> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         EmbedError::Unavailable(format!(
-            "cannot read service-account credentials {}: {e}",
+            "cannot read Google credentials {}: {e}",
             path.display()
         ))
     })?;
-    serde_json::from_str(&raw).map_err(|e| {
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         EmbedError::Unavailable(format!(
-            "malformed service-account credentials {}: {e}",
+            "malformed Google credentials {}: {e}",
             path.display()
         ))
-    })
+    })?;
+    let cred_type = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("service_account");
+    match cred_type {
+        "service_account" => {
+            let sa: ServiceAccountJson = serde_json::from_value(v).map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "malformed service-account credentials {}: {e}",
+                    path.display()
+                ))
+            })?;
+            if sa.client_email.is_empty() || sa.private_key.is_empty() {
+                return Err(EmbedError::Unavailable(
+                    "service-account credentials missing client_email or private_key".into(),
+                ));
+            }
+            Ok(GoogleCredentials::ServiceAccount {
+                client_email: sa.client_email,
+                private_key: sa.private_key,
+                project_id: sa.project_id,
+                token_uri: sa
+                    .token_uri
+                    .unwrap_or_else(|| DEFAULT_TOKEN_URI.to_string()),
+            })
+        }
+        "authorized_user" => {
+            let au: AuthorizedUserJson = serde_json::from_value(v).map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "malformed authorized-user credentials {}: {e}",
+                    path.display()
+                ))
+            })?;
+            if au.client_id.is_empty() || au.client_secret.is_empty() || au.refresh_token.is_empty()
+            {
+                return Err(EmbedError::Unavailable(
+                    "authorized-user credentials missing client_id, client_secret or refresh_token"
+                        .into(),
+                ));
+            }
+            Ok(GoogleCredentials::AuthorizedUser {
+                client_id: au.client_id,
+                client_secret: au.client_secret,
+                refresh_token: au.refresh_token,
+                quota_project_id: au.quota_project_id,
+                token_uri: au
+                    .token_uri
+                    .unwrap_or_else(|| DEFAULT_TOKEN_URI.to_string()),
+            })
+        }
+        other => Err(EmbedError::Unavailable(format!(
+            "unsupported Google credentials type {other:?} in {}",
+            path.display()
+        ))),
+    }
 }
 
 /// JWT claims carried by the service-account assertion.
@@ -105,89 +212,96 @@ pub trait GeminiTokenSource: Send + Sync + std::fmt::Debug {
     async fn access_token(&mut self) -> Result<String, EmbedError>;
 }
 
-/// Production token source: mint an RS256 JWT from the service-account private key,
-/// exchange it for an OAuth `access_token`, and cache the token until `expires_in - 60s`.
+/// Production token source: for a service account it mints an RS256 JWT and exchanges it
+/// for an OAuth access_token (jwt-bearer grant); for an authorized-user ADC it uses the
+/// refresh-token grant. Both cache until `expires_in - 60s`.
 #[derive(Debug)]
-pub struct ServiceAccountTokenSource {
-    client_email: String,
-    private_key: String,
-    token_uri: String,
-    scope: String,
+pub struct GoogleOAuthTokenSource {
+    creds: GoogleCredentials,
     client: reqwest::Client,
     cached: Option<(String, Instant)>,
 }
 
-impl ServiceAccountTokenSource {
-    /// Build a token source from parsed service-account credentials.
-    pub fn new(
-        creds: ServiceAccountCredentials,
-        client: reqwest::Client,
-    ) -> Result<Self, EmbedError> {
-        if creds.client_email.is_empty() {
-            return Err(EmbedError::Unavailable(
-                "service-account credentials missing client_email".into(),
-            ));
-        }
-        if creds.private_key.is_empty() {
-            return Err(EmbedError::Unavailable(
-                "service-account credentials missing private_key".into(),
-            ));
-        }
-        let token_uri = creds
-            .token_uri
-            .unwrap_or_else(|| DEFAULT_TOKEN_URI.to_string());
+impl GoogleOAuthTokenSource {
+    /// Build a token source from parsed Google credentials.
+    pub fn new(creds: GoogleCredentials, client: reqwest::Client) -> Result<Self, EmbedError> {
         Ok(Self {
-            client_email: creds.client_email,
-            private_key: creds.private_key,
-            token_uri,
-            scope: OAUTH_SCOPE.to_string(),
+            creds,
             client,
             cached: None,
         })
     }
 
-    /// Mint the RS256 JWT assertion (exposed for tests). Signs the service-account
-    /// private key (a malformed/unusable key is a permanent, operator-fixing `Backend`).
+    /// Mint the RS256 JWT assertion (service-account only; exposed for tests). Signs the
+    /// service-account private key (a malformed/unusable key is a permanent,
+    /// operator-fixing `Backend`).
     pub fn mint_jwt(&self) -> Result<String, EmbedError> {
+        let GoogleCredentials::ServiceAccount {
+            client_email,
+            private_key,
+            ..
+        } = &self.creds
+        else {
+            return Err(EmbedError::Unavailable(
+                "JWT minting requires service-account credentials".into(),
+            ));
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| EmbedError::Unavailable(format!("system clock before epoch: {e}")))?
             .as_secs();
         let claims = Claims {
-            iss: self.client_email.clone(),
-            scope: self.scope.clone(),
-            aud: self.token_uri.clone(),
+            iss: client_email.clone(),
+            scope: OAUTH_SCOPE.to_string(),
+            aud: self.creds.token_uri().to_string(),
             iat: now,
             exp: now + JWT_LIFETIME_SECS,
         };
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-        let key =
-            jsonwebtoken::EncodingKey::from_rsa_pem(self.private_key.as_bytes()).map_err(|e| {
-                EmbedError::Backend(format!(
-                    "failed to parse service-account private key PEM: {e}"
-                ))
-            })?;
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|e| {
+            EmbedError::Backend(format!(
+                "failed to parse service-account private key PEM: {e}"
+            ))
+        })?;
         jsonwebtoken::encode(&header, &claims, &key)
             .map_err(|e| EmbedError::Backend(format!("failed to sign service-account JWT: {e}")))
     }
 }
 
 #[async_trait]
-impl GeminiTokenSource for ServiceAccountTokenSource {
+impl GeminiTokenSource for GoogleOAuthTokenSource {
     async fn access_token(&mut self) -> Result<String, EmbedError> {
         if let Some((token, expires_at)) = &self.cached {
             if Instant::now() < *expires_at {
                 return Ok(token.clone());
             }
         }
-        let jwt = self.mint_jwt()?;
-        let params = [
-            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("assertion", jwt.as_str()),
-        ];
+        let params: Vec<(&'static str, String)> = match &self.creds {
+            GoogleCredentials::ServiceAccount { .. } => {
+                let jwt = self.mint_jwt()?;
+                vec![
+                    (
+                        "grant_type",
+                        "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
+                    ),
+                    ("assertion", jwt),
+                ]
+            }
+            GoogleCredentials::AuthorizedUser {
+                client_id,
+                client_secret,
+                refresh_token,
+                ..
+            } => vec![
+                ("grant_type", "refresh_token".to_string()),
+                ("client_id", client_id.clone()),
+                ("client_secret", client_secret.clone()),
+                ("refresh_token", refresh_token.clone()),
+            ],
+        };
         let resp = self
             .client
-            .post(&self.token_uri)
+            .post(self.creds.token_uri())
             .form(&params)
             .send()
             .await
@@ -223,19 +337,16 @@ impl GeminiTokenSource for ServiceAccountTokenSource {
     }
 }
 
-/// Vertex `embedContent` response envelope.
+/// Vertex `:embedContent` response envelope: `{"embedding": {"values": [...]}}`.
+/// (The old draft assumed `predictions[].embeddings.values`; the real API returns a
+/// top-level `embedding` object. Caught by the live Vertex probe, 2026-08-24.)
 #[derive(Debug, Deserialize)]
 struct EmbedResponse {
-    predictions: Vec<Prediction>,
+    embedding: Embed,
 }
 
 #[derive(Debug, Deserialize)]
-struct Prediction {
-    embeddings: Embeddings,
-}
-
-#[derive(Debug, Deserialize)]
-struct Embeddings {
+struct Embed {
     values: Vec<f32>,
 }
 
@@ -291,7 +402,7 @@ impl GeminiEmbedder {
         &self.model
     }
 
-    /// POST an embedContent request and parse a single prediction's values.
+    /// POST an embedContent request and parse the `embedding.values`.
     ///
     /// CON-2: no retry. A rejected or malformed answer is returned as-is; the caller's
     /// degradation contract decides whether the write stays durable.
@@ -301,7 +412,10 @@ impl GeminiEmbedder {
             guard.access_token().await?
         };
         let body = serde_json::json!({
-            "content": { "content": text },
+            // Real Vertex `:embedContent` shape: `content` holds parts with text. The
+            // earlier `{"content": {"content": text}}` draft was rejected by Vertex
+            // (unknown field `content` at `content`), caught by the live probe.
+            "content": { "parts": [ { "text": text } ] },
             // A3-R1-1: send the configured width so a non-native dim is actually
             // requested. A4 owns the construction guard that rejects a dim outside
             // {768, 1536, 3072} before this unsupported-value path is ever reached.
@@ -373,13 +487,7 @@ impl Embedder for GeminiEmbedder {
             ));
         }
         let response = self.request_embedding(text).await?;
-        let mut vec = response
-            .predictions
-            .into_iter()
-            .next()
-            .ok_or_else(|| EmbedError::Backend("Vertex returned no predictions".into()))?
-            .embeddings
-            .values;
+        let mut vec = response.embedding.values;
         if vec.len() != self.dim {
             return Err(EmbedError::Backend(format!(
                 "Vertex returned {} dims, expected {}",
@@ -442,12 +550,22 @@ mod tests {
     use super::*;
     use httpmock::prelude::*;
 
-    fn sample_credentials(token_uri: &str) -> ServiceAccountCredentials {
-        ServiceAccountCredentials {
+    fn sample_credentials(token_uri: &str) -> GoogleCredentials {
+        GoogleCredentials::ServiceAccount {
             client_email: "sa@example.com".to_string(),
             private_key: TEST_RSA_PRIVATE_KEY_PEM.to_string(),
-            token_uri: Some(token_uri.to_string()),
             project_id: Some("proj".to_string()),
+            token_uri: token_uri.to_string(),
+        }
+    }
+
+    fn sample_authorized_user(token_uri: &str) -> GoogleCredentials {
+        GoogleCredentials::AuthorizedUser {
+            client_id: "client-1".to_string(),
+            client_secret: "secret-1".to_string(),
+            refresh_token: "refresh-1".to_string(),
+            quota_project_id: Some("quota-proj".to_string()),
+            token_uri: token_uri.to_string(),
         }
     }
 
@@ -487,7 +605,7 @@ mod tests {
 
     #[test]
     fn mints_and_verifies_service_account_jwt() {
-        let src = ServiceAccountTokenSource::new(
+        let src = GoogleOAuthTokenSource::new(
             sample_credentials(DEFAULT_TOKEN_URI),
             reqwest::Client::new(),
         )
@@ -518,7 +636,7 @@ mod tests {
                 .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 3600 }));
         });
         let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src = ServiceAccountTokenSource::new(creds, reqwest::Client::new()).unwrap();
+        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
         let t1 = src.access_token().await.unwrap();
         assert_eq!(t1, "tok-1");
         // Second call hits the cache: the endpoint mock must have seen exactly one request.
@@ -530,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn token_endpoint_transport_failure_is_unavailable() {
         let creds = sample_credentials("http://127.0.0.1:9/token");
-        let mut src = ServiceAccountTokenSource::new(creds, reqwest::Client::new()).unwrap();
+        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
         let err = src.access_token().await.unwrap_err();
         assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
     }
@@ -544,11 +662,30 @@ mod tests {
                 .json_body(serde_json::json!({ "error": "invalid_grant" }));
         });
         let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src = ServiceAccountTokenSource::new(creds, reqwest::Client::new()).unwrap();
+        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
         let err = src.access_token().await.unwrap_err();
         assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
     }
 
+    #[tokio::test]
+    async fn authorized_user_uses_refresh_token_grant_and_caches() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/token")
+                .body_contains("grant_type=refresh_token")
+                .body_contains("client_id=client-1")
+                .body_contains("client_secret=secret-1")
+                .body_contains("refresh_token=refresh-1");
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok-au", "expires_in": 3600 }));
+        });
+        let creds = sample_authorized_user(&format!("{}/token", server.base_url()));
+        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
+        assert_eq!(src.access_token().await.unwrap(), "tok-au");
+        assert_eq!(src.access_token().await.unwrap(), "tok-au");
+        mock.assert_hits(1); // second call hits the cache
+    }
     #[tokio::test]
     async fn embeds_and_normalizes() {
         let server = MockServer::start();
@@ -556,11 +693,14 @@ mod tests {
             when.method(POST)
                 .path("/embedContent")
                 .header("Authorization", "Bearer tok")
-                // A3-R1-3: pin the request body so the outputDimensionality omission
-                // (A3-R1-1) cannot silently regress.
-                .body_contains("\"outputDimensionality\":768");
+                // A3-R1-3 + live probe: pin the real schema (parts.text) and the width so
+                // neither the outputDimensionality omission nor the request-body regression
+                // can silently return.
+                .body_contains("\"outputDimensionality\":768")
+                .body_contains("\"parts\"")
+                .body_contains("\"text\"");
             then.status(200).json_body(serde_json::json!({
-                "predictions": [ { "embeddings": { "statistics": {}, "values": sample_embedding() } } ]
+                "embedding": { "values": sample_embedding() }
             }));
         });
         let e = test_embedder(&server, 768);
@@ -636,12 +776,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_prediction_is_backend() {
+    async fn missing_embedding_is_backend() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/embedContent");
-            then.status(200)
-                .json_body(serde_json::json!({ "predictions": [] }));
+            // Real shape omits the top-level `embedding` field -> deserialize fails.
+            then.status(200).json_body(serde_json::json!({}));
         });
         let e = test_embedder(&server, 768);
         let err = e.embed("hello").await.unwrap_err();
@@ -654,7 +794,7 @@ mod tests {
         server.mock(|when, then| {
             when.method(POST).path("/embedContent");
             then.status(200).json_body(serde_json::json!({
-                "predictions": [ { "embeddings": { "statistics": {}, "values": vec![1.0; 512] } } ]
+                "embedding": { "values": vec![1.0; 512] }
             }));
         });
         let e = test_embedder(&server, 768);
@@ -730,7 +870,7 @@ mod tests {
         let project = std::env::var("LAMBO_GEMINI_PROJECT")
             .ok()
             .filter(|s| !s.is_empty())
-            .or(creds.project_id.clone())
+            .or(creds.project_id())
             .expect("set LAMBO_GEMINI_PROJECT or rely on the key's project_id");
         let location = std::env::var("LAMBO_GEMINI_LOCATION")
             .ok()
@@ -747,7 +887,7 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1536);
         let client = build_client().unwrap();
-        let token_source = Box::new(ServiceAccountTokenSource::new(creds, client.clone()).unwrap());
+        let token_source = Box::new(GoogleOAuthTokenSource::new(creds, client.clone()).unwrap());
         let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
         let e = GeminiEmbedder::new(model, dim, token_source, embed_url, client).unwrap();
         let v = e.embed("lambo live vertex round-trip").await.unwrap();

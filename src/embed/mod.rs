@@ -440,7 +440,7 @@ fn missing_feature(kind: EmbedderKind) -> EmbedError {
 #[cfg(feature = "embed-gemini")]
 fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
     use crate::embed::gemini::{
-        build_client, load_credentials, GeminiEmbedder, ServiceAccountTokenSource,
+        build_client, load_credentials, GeminiEmbedder, GoogleOAuthTokenSource,
     };
     // A4 dim guard: gemini-embedding-001 truncates to 768, 1536 or 3072 only. Reject any
     // other configured dim here, before an unsupported `outputDimensionality` could be sent.
@@ -467,7 +467,7 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
     let project = cfg
         .gemini_project
         .clone()
-        .or(creds.project_id.clone())
+        .or(creds.project_id())
         .ok_or_else(|| {
             EmbedError::Unavailable(
                 "Gemini embedder needs a GCP project: set `gemini_project` or provide \
@@ -484,7 +484,7 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
         .clone()
         .unwrap_or_else(|| gemini::DEFAULT_MODEL.to_string());
     let client = build_client()?;
-    let token_source = Box::new(ServiceAccountTokenSource::new(creds, client.clone())?);
+    let token_source = Box::new(GoogleOAuthTokenSource::new(creds, client.clone())?);
     let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
     let embedder = GeminiEmbedder::new(model, cfg.dim, token_source, embed_url, client)?;
     Ok(Box::new(embedder))

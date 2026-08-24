@@ -47,15 +47,16 @@ The adapter module, gated `#[cfg(feature = "embed-gemini")]`.
   - `model_identity()` (line 288): returns the configured model (`gemini-embedding-001` by
     default), the `EmbeddingContract.model` stamp.
   - `request_embedding(text)`: fetches a Bearer token, POSTs
-    `{"content": {"content": text}, "outputDimensionality": dim}` to `embed_url` with
+    `{"content": {"parts": [{"text": text}]}, "outputDimensionality": dim}` to `embed_url` with
     `Authorization: Bearer <token>`. `outputDimensionality` IS sent from the configured `dim`
     (A3-R1-1, corrects the initial omission): gemini-embedding-001 truncates to 768/1536/3072
     via that parameter; A4 owns the construction guard that rejects any other `dim` before an
     unsupported value is sent. Error classification mirrors bge_m3's structure:
     connect/transport failure -> `Unavailable`; any non-2xx -> `Backend`; unparseable body or
-    missing prediction/values -> `Backend`; width mismatch -> `Backend`.
+    missing values -> `Backend`; width mismatch -> `Backend`.
   - `Embedder::embed`: CON-7 empty/whitespace -> `Unavailable` BEFORE any network; parses
-    `predictions[0].embeddings.values`, checks `len == dim`, L2-normalizes.
+    `embedding.values` (the real `:embedContent` envelope), checks `len == dim`,
+    L2-normalizes.
   - `l2_normalize_in_place`: rejects non-finite and zero-norm with `Backend`, gemini-tailored
     error text (mirrors bge_m3).
   - `as_any` returns `Some(self)` so the registry downcast finds the type.
