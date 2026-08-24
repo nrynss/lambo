@@ -20,9 +20,19 @@ profile (`br2`, 2 CPU / 4 GiB / 20 GiB) carrying one container, `lambo-b-e2e-r2r
 `pgvector/pgvector` at digest `sha256:cf134a76...760f8e6f`, byte-identical to the pin in
 this file and in the `postgres-live` job, PostgreSQL 17.11, host port 55433. The global
 docker context was returned to `colima` immediately after the profile came up and every
-container command was issued with an explicit `--context colima-br2`. `docs-telemetry`
-was verified up before and after and never touched. The profile and the container are
-removed at the end of this round.
+container command was issued with an explicit `--context colima-br2`. The profile and the
+container were removed at the end of this round; `colima list` shows `default` alone
+again.
+
+**One thing to record rather than gloss.** No command in this round was issued against
+the default profile, but the default VM restarted partway through it (guest uptime says
+about 07:45 local, while this round was running its test battery on the host). Cause not
+established here. Two consequences, both checked: `docs-telemetry` came back on its own
+`unless-stopped` policy with exit code 0, no OOM, and is serving (HTTP 200 on 127.0.0.1:7788,
+ingest cycles completing in its log); and the read-only ext4 condition the round-2 review
+worked around is **gone**, with `/var/lib/docker` now mounted `rw`. The second colima
+profile was still the right call at the time it was made, and the next round may not need
+one.
 
 Work happened in the worktree `/Users/narayan/Documents/work/lambo/.claude/worktrees/agent-a23163b4d9e42e181`
 on branch `agent-a23163b4d9e42e181`, reset to `origin/lambo-for-mooshik` @ `c7a822f`
