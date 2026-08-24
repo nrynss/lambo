@@ -551,6 +551,18 @@ pub struct MemoryBuilder {
     /// Set only by [`crate::mcp::serve`]; every ordinary writer keeps the
     /// default.
     ledger: Option<Arc<crate::ledger::Ledger>>,
+    /// J5. The shutdown pre-arm a `serve` process wants installed the instant
+    /// this builder takes the single-writer lease, closing the window between
+    /// the acquire and the arming at `holder_shutdown` in which a SIGTERM had
+    /// the default disposition and killed the process with `close()` un-run.
+    ///
+    /// Handed in already-constructed but **unarmed**: this builder decides
+    /// *when* (the `LeaseOutcome::Acquired` arm below, and nowhere else), and
+    /// `serve` decides *what*. `None` — every CLI writer verb, every library
+    /// caller, every test — installs no handler at all, which is deliberate:
+    /// a library `build()` must not change the calling process's signal
+    /// disposition. See [`crate::mcp::serve::EarlyShutdown`].
+    early_shutdown: Option<crate::mcp::serve::EarlyShutdown>,
 }
 
 impl MemoryBuilder {
@@ -704,6 +716,19 @@ impl MemoryBuilder {
         self
     }
 
+    /// Arm this handle the instant the single-writer lease is acquired (J5).
+    ///
+    /// Crate-private, and set by [`crate::mcp::serve`] alone. The handle
+    /// arrives unarmed and is armed from exactly one place — the
+    /// `LeaseOutcome::Acquired` arm of [`MemoryBuilder::build_attach`] — so a
+    /// build that never takes the lease never installs a signal handler. That
+    /// is what keeps the startup election killable, and what makes "a proxy
+    /// never arms" the same statement as "a proxy never takes the lease".
+    pub(crate) fn early_shutdown(mut self, early: crate::mcp::serve::EarlyShutdown) -> Self {
+        self.early_shutdown = Some(early);
+        self
+    }
+
     /// Base [`Config`] for every knob the named setters do not cover.
     ///
     /// Order-independent: `match_strategy` / `flush_interval` /
@@ -834,7 +859,28 @@ impl MemoryBuilder {
             // minted for this holder. A refresh PRESERVES it, so the value is
             // stable for the handle's life; every durable write (flush + canon)
             // presents it and the store rejects a stale one after a takeover.
-            LeaseOutcome::Acquired(info) => info.token,
+            LeaseOutcome::Acquired(info) => {
+                // J5 — the pre-arm, HERE, the first statement after the lease
+                // is ours. Everything from this point on holds something a
+                // signal must not be allowed to destroy: the lease itself, and
+                // shortly the write-behind tail. Before this, the whole span
+                // down to `holder_shutdown` in `serve` ran under the default
+                // disposition, so a SIGTERM in it killed the process with
+                // `close()` un-run — CI run 32710994512.
+                //
+                // It cannot move above the acquire: the election loop that
+                // calls this may legitimately run for `ELECTION_BUDGET` (20s),
+                // and a registration nothing polls is deafness for exactly as
+                // long as nothing polls it (J2-R1-7). Below the acquire, that
+                // loop is over by construction.
+                //
+                // Synchronous and non-blocking: it installs the handlers and
+                // returns, adding no `await` to the acquire it follows.
+                if let Some(early) = &self.early_shutdown {
+                    early.arm();
+                }
+                info.token
+            }
             LeaseOutcome::Held { current, age } => {
                 // Fail closed, naming the current holder and its age. Reported
                 // as data (J2) so `mcp::serve` can proxy to the holder; the
@@ -882,40 +928,40 @@ impl MemoryBuilder {
             // migration exists to perform (cross-kind + vectors present).
             if !self.reembed_mode {
                 match session_embedding_compatibility(graph.embedding(), &embedding) {
-                SessionEmbeddingCompatibility::Unrecorded => {
-                    graph.stamp_embedding(embedding.clone())?;
-                }
-                SessionEmbeddingCompatibility::Compatible => {}
-                SessionEmbeddingCompatibility::Mismatch { stored, live } => {
-                    if !self.allow_embedding_mismatch || stored.dim != live.dim {
-                        return Err(embedding_mismatch_error(&stored, &live));
+                    SessionEmbeddingCompatibility::Unrecorded => {
+                        graph.stamp_embedding(embedding.clone())?;
                     }
-                    tracing::warn!(
-                        session = %session,
-                        stored_kind = %stored.kind,
-                        stored_model = ?stored.model,
-                        live_kind = %live.kind,
-                        live_model = ?live.model,
-                        dim = live.dim,
-                        "operator allowed an embedding contract mismatch; relabeling the session's \
-                         existing vectors with the configured live contract"
-                    );
-                    graph.replace_embedding_with_operator_override(live)?;
-                    // E2E-1: the override relabel must be durable BEFORE the
-                    // first write — the checked candidate read compares the
-                    // *durable* contract against the expected one, so a
-                    // write-behind relabel (flush at interval / close) would
-                    // refuse the very first hybrid write on a vector-capable
-                    // store (live-reproduced on Cockroach: the documented
-                    // `--allow-embedding-mismatch` workflow failed its first
-                    // run and only succeeded on the second). Flush the queued
-                    // `SetEmbedding` synchronously here, armored exactly like
-                    // the close-time final flush; it stays an ordered durable
-                    // mutation (later writes append after it in the log). A
-                    // failed relabel flush refuses the attach: the writer
-                    // would otherwise hit the same E2E-1 refusal on its first
-                    // write, and the startup-error path below releases the
-                    // freshly acquired lease.
+                    SessionEmbeddingCompatibility::Compatible => {}
+                    SessionEmbeddingCompatibility::Mismatch { stored, live } => {
+                        if !self.allow_embedding_mismatch || stored.dim != live.dim {
+                            return Err(embedding_mismatch_error(&stored, &live));
+                        }
+                        tracing::warn!(
+                            session = %session,
+                            stored_kind = %stored.kind,
+                            stored_model = ?stored.model,
+                            live_kind = %live.kind,
+                            live_model = ?live.model,
+                            dim = live.dim,
+                            "operator allowed an embedding contract mismatch; relabeling the session's \
+                             existing vectors with the configured live contract"
+                        );
+                        graph.replace_embedding_with_operator_override(live)?;
+                        // E2E-1: the override relabel must be durable BEFORE the
+                        // first write — the checked candidate read compares the
+                        // *durable* contract against the expected one, so a
+                        // write-behind relabel (flush at interval / close) would
+                        // refuse the very first hybrid write on a vector-capable
+                        // store (live-reproduced on Cockroach: the documented
+                        // `--allow-embedding-mismatch` workflow failed its first
+                        // run and only succeeded on the second). Flush the queued
+                        // `SetEmbedding` synchronously here, armored exactly like
+                        // the close-time final flush; it stays an ordered durable
+                        // mutation (later writes append after it in the log). A
+                        // failed relabel flush refuses the attach: the writer
+                        // would otherwise hit the same E2E-1 refusal on its first
+                        // write, and the startup-error path below releases the
+                        // freshly acquired lease.
                         let relabel = graph.drain_log();
                         if !relabel.mutations.is_empty() {
                             final_flush(store.as_ref(), &relabel, Some(lease_token))
@@ -931,8 +977,43 @@ impl MemoryBuilder {
                 }
             }
             Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
-        }
-        .await;
+        };
+        // J5 — the one unbounded `await` under the pre-arm, and therefore the
+        // one place the pre-arm could have become the immunity J2-R1-7
+        // rejected. The startup load reads the whole durable session back; on a
+        // large session or a wedged store that is not quick, and a recorded
+        // signal that nobody acts on until it finishes is deafness with no
+        // bound at all — worse than the 20 seconds that ruling refused.
+        //
+        // So the load is RACED against the record. A signal here abandons it
+        // and falls into the startup-error path immediately below, which
+        // already releases the freshly-acquired lease — strictly better than
+        // the bare kill it replaces, which left the row to lapse at
+        // `LEASE_TTL` and wedged the session for that long.
+        //
+        // Everything under the pre-arm after this point is synchronous (the
+        // three task spawns, the attach log, the write pipeline, the `Memory`
+        // construction, the return through `resolve_role`), so this is the last
+        // place a signal can be parked across. The pre-arm covers no unbounded
+        // wait.
+        let startup = match &self.early_shutdown {
+            Some(early) => {
+                tokio::pin!(startup);
+                tokio::select! {
+                    // Bias toward the load: if it is already done, take that
+                    // answer rather than a signal delivered in the same poll.
+                    biased;
+                    loaded = &mut startup => loaded,
+                    () = early.fired() => Err(LamboError::Config(format!(
+                        "session {session}: a shutdown signal arrived while the session was \
+                         still loading, before it was ever attached — the startup load was \
+                         abandoned and the single-writer lease released. Nothing was written \
+                         and nothing was lost; start again when you are ready."
+                    ))),
+                }
+            }
+            None => startup.await,
+        };
         let (existing, graph, index, write_intents) = match startup {
             Ok(startup) => startup,
             Err(startup_error) => {

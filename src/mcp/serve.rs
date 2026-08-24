@@ -744,7 +744,12 @@ pub async fn build_memory(
     // Cadence overrides from `[daemon]` reach the writer here. Without this the
     // daemon always runs at Config::default() and `gc_interval` in lambo.toml
     // would parse, validate, and then do nothing at all.
-    serve_builder(opts, backends, endpoint, None)
+    // J5: no pre-arm. This is the *library* entry point (`serve` has not called
+    // it since J2-R1-7), and installing process-wide signal handlers is a
+    // decision that belongs to a process, not to a builder — the same reason
+    // `close_bounded_until` takes its re-armed signal as an argument. An
+    // unarmed handle registers nothing and never fires.
+    serve_builder(opts, backends, endpoint, None, EarlyShutdown::unarmed())
         .build()
         .await
         .map_err(explain_startup_failure)
@@ -765,6 +770,7 @@ fn serve_builder(
     backends: ResolvedBackends,
     endpoint: Option<&SessionEndpoint>,
     ledger: Option<Arc<Ledger>>,
+    early: EarlyShutdown,
 ) -> crate::memory::MemoryBuilder {
     let config = backends.config.clone();
     let mut builder = Memory::builder()
@@ -783,6 +789,11 @@ fn serve_builder(
     // write-intent completion lines ride it) is handed straight into the
     // Memory it builds.
     builder = builder.ledger(ledger);
+    // J5: armed by the acquire itself, from inside `build_attach`. Handed in
+    // here because this is the one place the serve path configures the builder,
+    // and the acquire is the only point at which arming is both safe (the
+    // election is over) and necessary (a lease and a tail now exist).
+    builder = builder.early_shutdown(early);
     builder.backends(backends)
 }
 
@@ -1498,7 +1509,19 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(ledger) = &ledger {
         ledger.append(&serve_startup_line(&opts, &endpoint));
     }
-    let builder = serve_builder(&opts, backends, endpoint.as_ref(), ledger.clone());
+    // J5 — the pre-arm. Constructing it installs NOTHING; it is armed from
+    // inside `build_attach`, in the `LeaseOutcome::Acquired` arm, so the
+    // election below stays killable and a serve that loses never arms at all.
+    // See `EarlyShutdown` for the window it closes and why the arming point
+    // could not simply move above `resolve_role` (J2-R1-7).
+    let early = EarlyShutdown::unarmed();
+    let builder = serve_builder(
+        &opts,
+        backends,
+        endpoint.as_ref(),
+        ledger.clone(),
+        early.clone(),
+    );
     let role = resolve_role(&opts, &builder, endpoint.as_ref(), &ledger).await;
     let mem: Arc<Memory> = match role {
         // The startup election refused (or otherwise failed): this process's
@@ -1635,7 +1658,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // `wind_down` — used to pass the entire suite (JE2E-R2-2). It is now pinned
     // by `serve_feeds_the_fence_into_the_transports_shutdown`, which drives
     // `run_transport_until_shutdown` the way this call site does.
-    let shutdown = holder_shutdown(mem.clone(), ledger.clone());
+    let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early);
     tokio::pin!(shutdown);
 
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
@@ -2351,17 +2374,34 @@ impl Future for HolderShutdown {
 /// `shutdown_signal()` is evaluated here, as an argument, so its eager handler
 /// registration happens at this call and not at the first poll; see that
 /// function for why that matters and what a lazier spelling would re-open.
-fn holder_shutdown(mem: Arc<Memory>, ledger: Option<Arc<Ledger>>) -> HolderShutdown {
-    HolderShutdown(Box::pin(wind_down(shutdown_signal(), mem, ledger)))
+///
+/// `early` is J5's pre-arm — the registration installed back at the acquire —
+/// and it is passed in **alongside** the fresh `shutdown_signal()`, not in
+/// place of it. A signal that landed in the window between the two arming
+/// points is recorded only by `early`; one that lands after is seen by both.
+/// See [`EarlyShutdown`].
+fn holder_shutdown(
+    mem: Arc<Memory>,
+    ledger: Option<Arc<Ledger>>,
+    early: EarlyShutdown,
+) -> HolderShutdown {
+    HolderShutdown(Box::pin(wind_down(shutdown_signal(), early, mem, ledger)))
 }
 
 async fn wind_down(
     signal: impl std::future::Future<Output = ()>,
+    early: EarlyShutdown,
     mem: Arc<Memory>,
     ledger: Option<Arc<Ledger>>,
 ) {
     tokio::select! {
         () = signal => {}
+        // J5. Ready on the FIRST poll when a signal already arrived in the
+        // pre-handshake window, so the transport is cancelled before it serves
+        // a byte and `close()` still flushes the tail. Nothing downstream
+        // distinguishes the two signal arms — this is the same exit, learned
+        // through the earlier registration.
+        () = early.fired() => {}
         winner = mem.lease_lost_latched() => {
             if let Some(ledger) = &ledger {
                 ledger.append(&crate::ledger::lease_line(
@@ -2381,6 +2421,182 @@ async fn wind_down(
                  reads would go on silently serving a graph another writer now owns. The tail it \
                  could not flush is discarded, exactly as a crash would discard it",
             );
+        }
+    }
+}
+
+/// The signal registration armed the instant the single-writer lease is taken
+/// (J5), which **only records** that a signal arrived.
+///
+/// # The window this closes
+///
+/// [`shutdown_signal`] is armed at [`holder_shutdown`], the first statement
+/// after [`resolve_role`] returns. The lease, though, is taken *inside*
+/// `resolve_role` — inside the `build_attach` call at the top of its election
+/// loop — and everything between the two ran under the **default disposition**:
+/// a SIGTERM landing there killed the process outright, so `Memory::close`
+/// never ran and the write-behind tail (a clean run already has `mutations=1`,
+/// the session-attach record) died with it. That is not a hypothetical: it is
+/// CI run 32710994512 failing
+/// `a_pre_handshake_sigterm_still_flushes_the_session_row` with
+/// `unix_wait_status(15)` — killed by the signal, not exited on it.
+///
+/// The window is the reason that test's `"session attached"` matcher is loose:
+/// it fires on the **memory-level** line, logged from inside the `Memory` build
+/// right after the lease is acquired, precisely so the signal lands here rather
+/// than in the guarded region below the arming (I-R2-2).
+///
+/// # Why the arming could not simply move up
+///
+/// J2-R1-7 rejected arming above `resolve_role`, and that ruling stands: the
+/// election loop is allowed to run for the whole of [`ELECTION_BUDGET`] — 20
+/// seconds — by design, and a registration nothing polls makes the process
+/// **SIGTERM-immune** for exactly as long as nothing polls it. Twenty seconds
+/// of unkillable wait, bought to protect a process that holds no lease and no
+/// tail, is the worse trade; see the arming comment in [`serve`].
+///
+/// This type is armed on the **winning** branch only — from the
+/// `LeaseOutcome::Acquired` arm of `MemoryBuilder::build_attach`, and from
+/// nowhere else. A serve that is still electing has not armed, so the election
+/// stays killable; a serve that loses and becomes a proxy never arms at all,
+/// which is also how the wedge invariant survives: the hook sits behind the
+/// acquire, so "a proxy never arms" is the same statement as "a proxy never
+/// takes the lease".
+///
+/// # Why it does not re-create the immunity one `await` down
+///
+/// Arming at the acquire puts one genuinely unbounded `await` under the guard:
+/// the startup load, which reads the whole durable session back. A passive flag
+/// there would be J2-R1-7's trade again with a worse bound — *unbounded*
+/// deafness instead of 20 seconds. So `build_attach` **races** that load against
+/// [`EarlyShutdown::fired`]: a signal during the load abandons it, releases the
+/// freshly-taken lease through the startup-error path that was already there,
+/// and returns. Every remaining step under the guard — the daemon / flush /
+/// canonization spawns, the attach log, the write pipeline, the `Memory`
+/// construction, the return through `resolve_role` and the match in [`serve`] —
+/// is synchronous, so there is no second place a signal can be parked across.
+/// The guard therefore covers no unbounded wait at all, which is the property
+/// that makes it a durability fix rather than an availability regression.
+///
+/// # What "observe it" means
+///
+/// The record is a `watch<bool>`, set by a task that awaits one
+/// [`shutdown_signal`] and does nothing else — it never blocks, holds no lock
+/// and touches no store. Two places read it, which is why it is a watch rather
+/// than the signal future itself: the startup-load race above, and
+/// [`wind_down`], which selects it alongside the fresh `shutdown_signal()` that
+/// [`holder_shutdown`] still arms exactly as it did before. `wait_for` checks
+/// the current value first, so if the signal already landed in the window,
+/// `wind_down` completes on its **first poll** — the transport is cancelled
+/// before it serves a byte, `close()` runs, and the process exits 0 with the
+/// tail durable.
+///
+/// # It cannot swallow a second signal
+///
+/// `tokio::signal::unix` delivers to *every* live registration for a kind, not
+/// to the first one to ask, so this one consuming a SIGTERM does not consume it
+/// for the others. In particular [`close_bounded`]'s re-arm — the operator's
+/// "press Ctrl-C again to give up on a stalled close" escape — still works, and
+/// still is not tripped by the signal that started the shutdown: a `watch`
+/// receiver created after a value was sent does replay it, but a *fresh*
+/// `signal()` registration does not replay a signal delivered before it
+/// existed, and `close_bounded` builds a fresh one.
+#[derive(Clone)]
+pub(crate) struct EarlyShutdown {
+    fired: tokio::sync::watch::Receiver<bool>,
+    /// The sender, kept beside the receiver so [`EarlyShutdown::arm`] can be a
+    /// `&self` method on the same handle the builder carries.
+    tx: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Latches on the first [`EarlyShutdown::arm`] so a second call cannot
+    /// install a second registration. `build_attach` calls it exactly once per
+    /// acquire and `MemoryBuilder` is `Clone`, so this is belt-and-braces
+    /// rather than load-bearing — but a duplicate registration would be a real
+    /// leak, and the check is one atomic.
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EarlyShutdown {
+    /// A handle that is **not yet armed** — no signal handler is installed
+    /// until [`EarlyShutdown::arm`] is called.
+    ///
+    /// Constructing one is free and installs nothing, which is what lets
+    /// [`serve`] hand it into the builder *before* the election runs while
+    /// still arming only on the winning branch.
+    pub(crate) fn unarmed() -> Self {
+        let (tx, fired) = tokio::sync::watch::channel(false);
+        Self {
+            fired,
+            tx: Arc::new(tx),
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Install the registration. Called from the `LeaseOutcome::Acquired` arm
+    /// of `MemoryBuilder::build_attach` and from nowhere else.
+    ///
+    /// Synchronous and non-blocking on purpose: it must not add an `await` to
+    /// the acquire it follows. [`shutdown_signal`]'s registration is eager, so
+    /// the handlers are installed by the time this returns — a signal that
+    /// arrives one instruction later is already buffered by the registration
+    /// rather than killing the process.
+    pub(crate) fn arm(&self) {
+        use std::sync::atomic::Ordering;
+        if self.armed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // EAGER: `shutdown_signal()` is called HERE, not inside the spawned
+        // task, so the handlers exist before this function returns rather than
+        // whenever the scheduler first polls the task. Moving the call into the
+        // `async move` below would re-open the very window this type closes,
+        // with every gate green — the same trap `shutdown_signal`'s own
+        // docstring records for `wind_down`.
+        let signal = shutdown_signal();
+        let tx = Arc::clone(&self.tx);
+        tokio::spawn(async move {
+            signal.await;
+            // A receiver is always alive (this handle holds one), and a failed
+            // send would mean the shutdown path is already gone.
+            let _ = tx.send(true);
+        });
+    }
+
+    /// Whether [`EarlyShutdown::arm`] has run on this handle.
+    ///
+    /// The J5 pin that `build_attach` arms on the winning branch **and only**
+    /// there: a losing attach must leave this `false`, which is the wedge
+    /// invariant read through the signal disposition — a process that never
+    /// took the lease never changed how it dies.
+    #[cfg(test)]
+    pub(crate) fn is_armed(&self) -> bool {
+        self.armed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Record a signal without sending one.
+    ///
+    /// [`EarlyShutdown::arm`] installs process-wide SIGINT/SIGTERM handlers,
+    /// which a unit test must not do to the whole test binary just to assert
+    /// what happens *after* the record exists — the same reason
+    /// [`close_bounded_until`] takes its re-armed signal as an argument. This
+    /// sets the watch directly, so the observer side can be driven with no
+    /// handler and no real signal.
+    #[cfg(test)]
+    pub(crate) fn simulate_signal(&self) {
+        let _ = self.tx.send(true);
+    }
+
+    /// Resolve once a signal has been recorded — **immediately** if one already
+    /// was.
+    ///
+    /// `wait_for` inspects the current value before it waits, which is the
+    /// whole point: the interesting case is a signal that landed while the
+    /// session was still attaching, long before anything asked.
+    pub(crate) async fn fired(&self) {
+        let mut rx = self.fired.clone();
+        // `Err` means every sender is gone, which cannot happen while `self`
+        // holds one; treat it as "no signal" and park rather than reporting a
+        // shutdown nobody asked for.
+        if rx.wait_for(|fired| *fired).await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 }
@@ -3800,6 +4016,141 @@ mod tests {
             second.close().await.expect("close B");
         }
 
+        /// **J5** — the observer half of the pre-arm, pinned without a signal.
+        ///
+        /// The window: `holder_shutdown` arms at the first statement after
+        /// `resolve_role` returns, but the lease is taken *inside* it, so a
+        /// SIGTERM between the two hit the default disposition and killed the
+        /// process with `close()` un-run (CI run 32710994512,
+        /// `unix_wait_status(15)`). [`EarlyShutdown`] records such a signal at
+        /// the acquire; this pins that [`wind_down`] then completes on its
+        /// **first poll** rather than waiting for a second signal that will
+        /// never come.
+        ///
+        /// The mutation it catches is the one measured on the branch: with the
+        /// `early.fired()` arm deleted, the pre-handshake test does not go back
+        /// to `unix_wait_status(15)` — it fails with *"did not exit within
+        /// 15s"*, because the registration now catches the signal and nothing
+        /// acts on it. That is J2-R1-7's SIGTERM immunity, arrived at from the
+        /// other side, and it is why arming and observing have to land
+        /// together.
+        ///
+        /// `std::future::pending` stands in for the fresh `shutdown_signal()`,
+        /// so the pre-arm is the only thing that can complete this — and
+        /// `simulate_signal` sets the record directly, so the test binary's own
+        /// signal disposition is untouched.
+        #[tokio::test]
+        async fn a_signal_recorded_before_the_arming_winds_the_serve_down_at_once() {
+            let m = mem("serve-j5-prearm-observed").await;
+            let early = EarlyShutdown::unarmed();
+
+            // Nothing recorded yet: a holder that owns its lease and has seen
+            // no signal must not wind down. Without this half, an
+            // always-ready arm would pass the assertion below while exiting
+            // every healthy serve the instant it started.
+            let healthy = tokio::time::timeout(
+                Duration::from_millis(50),
+                wind_down(std::future::pending::<()>(), early.clone(), m.clone(), None),
+            )
+            .await;
+            assert!(
+                healthy.is_err(),
+                "a holder with no recorded signal must not wind down"
+            );
+
+            // A signal that landed in the window, recorded at the acquire and
+            // asked about for the first time here.
+            early.simulate_signal();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                wind_down(std::future::pending::<()>(), early, m, None),
+            )
+            .await
+            .expect(
+                "a signal recorded before the arming must complete the wind-down immediately — \
+                 otherwise the transport serves on and the pre-handshake SIGTERM is swallowed",
+            );
+        }
+
+        /// **J5** — the arming half: `build_attach` arms on the winning branch,
+        /// and **only** there.
+        ///
+        /// Two builds against one store. The first takes the single-writer
+        /// lease and must arm; the second is refused and must not, because a
+        /// serve that loses becomes a proxy and a proxy holds no lease, no tail
+        /// and no graph — there is nothing a handler could save, and arming
+        /// over an election that may legitimately run for `ELECTION_BUDGET`
+        /// (20s) is the immunity J2-R1-7 rejected.
+        ///
+        /// So this is the wedge invariant read through the signal disposition:
+        /// the arm sits behind the acquire, which makes "a proxy never arms"
+        /// the same statement as "a proxy never takes the lease" rather than a
+        /// second thing to keep true.
+        #[tokio::test]
+        async fn only_the_attach_that_takes_the_lease_arms_the_pre_arm() {
+            let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+            let contract = EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            };
+            // Distinct agents: the lease token is `agent@host#pid`, so a second
+            // attach under the SAME agent in this one process is a refresh of
+            // its own lease, not the refusal this test is about.
+            let builder = |agent: &str, early: EarlyShutdown| {
+                Memory::builder()
+                    .session("serve-j5-arm-on-the-winner")
+                    .agent(agent)
+                    .flush_interval(Duration::from_secs(3_600))
+                    .store(Arc::clone(&store))
+                    .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                    .embedding_contract(contract.clone())
+                    .early_shutdown(early)
+            };
+
+            let winner_arm = EarlyShutdown::unarmed();
+            assert!(
+                !winner_arm.is_armed(),
+                "constructing the handle must install nothing — `serve` hands it to the builder \
+                 BEFORE the election, and an election that armed on construction would be deaf \
+                 for the whole of ELECTION_BUDGET"
+            );
+            let held = builder("agent-a", winner_arm.clone())
+                .build_attach()
+                .await
+                .expect("the first attach takes the lease");
+            assert!(
+                matches!(held, crate::memory::Attach::Attached(_)),
+                "the first attach must win the lease"
+            );
+            assert!(
+                winner_arm.is_armed(),
+                "the attach that TOOK the lease must arm at the acquire — this is the window CI \
+                 run 32710994512 died in"
+            );
+
+            let loser_arm = EarlyShutdown::unarmed();
+            let refused = builder("agent-b", loser_arm.clone())
+                .build_attach()
+                .await
+                .expect("a refusal is reported as data, not as an error (J2)");
+            assert!(
+                matches!(refused, crate::memory::Attach::Held(_)),
+                "the second attach must be refused the lease"
+            );
+            assert!(
+                !loser_arm.is_armed(),
+                "an attach that did NOT take the lease must leave the process's signal \
+                 disposition alone: it becomes a proxy, holds nothing a handler could save, and \
+                 arming over the election is what J2-R1-7 rejected"
+            );
+
+            let crate::memory::Attach::Attached(mem) = held else {
+                unreachable!("asserted above");
+            };
+            mem.close().await.expect("close the holder");
+        }
+
         /// **JE2E-4** (operator ruling, 2026-08-22). Losing the lease must end
         /// the transport by the same route SIGTERM does, so the client respawns
         /// the serve and it comes back as a proxy to the real holder.
@@ -3823,7 +4174,12 @@ mod tests {
             // signal, so the ONLY thing that can complete this is the fence.
             let healthy = tokio::time::timeout(
                 Duration::from_millis(50),
-                wind_down(std::future::pending::<()>(), m.clone(), None),
+                wind_down(
+                    std::future::pending::<()>(),
+                    EarlyShutdown::unarmed(),
+                    m.clone(),
+                    None,
+                ),
             )
             .await;
             assert!(
@@ -3835,7 +4191,15 @@ mod tests {
             // fires on its 15s interval).
             let waiting = tokio::spawn({
                 let m = m.clone();
-                async move { wind_down(std::future::pending::<()>(), m, None).await }
+                async move {
+                    wind_down(
+                        std::future::pending::<()>(),
+                        EarlyShutdown::unarmed(),
+                        m,
+                        None,
+                    )
+                    .await
+                }
             });
             tokio::task::yield_now().await;
             m.simulate_lease_loss_to("agent-b@host#7");
@@ -3926,7 +4290,11 @@ mod tests {
                 .expect("bind ephemeral port");
 
             // Built exactly as `serve` builds it, through the one constructor.
-            let shutdown = holder_shutdown(m.clone(), Some(Arc::clone(&ledger)));
+            let shutdown = holder_shutdown(
+                m.clone(),
+                Some(Arc::clone(&ledger)),
+                EarlyShutdown::unarmed(),
+            );
             let server = tokio::spawn(serve_http_bounded(
                 listener,
                 app,
