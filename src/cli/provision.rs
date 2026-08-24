@@ -90,13 +90,23 @@ pub async fn run(
 /// The child that runs `scripts/provision.sh`, with the resolved DSN pushed
 /// into the one variable that script reads.
 ///
-/// The script's DSN line is `DSN="${LAMBO_COCKROACH_DSN:-}"`: it consults the
-/// environment and nothing else. Inheriting the ambient value is how `lambo
-/// provision` came to report success against a production cluster while the
-/// operator's `lambo.toml` named a local container (E2E-1). Setting it here
-/// makes the resolved config the authority. When the config carries no DSN the
-/// variable is left alone, so the pre-existing "secret lives only in the
-/// environment" path still works.
+/// The script's DSN line is `DSN="${LAMBO_COCKROACH_DSN:-}"`. Inheriting the
+/// ambient value is how `lambo provision` came to report success against a
+/// production cluster while the operator's `lambo.toml` named a local
+/// container (E2E-1). Setting it here makes the resolved config the authority.
+/// When the config carries no DSN the variable is left alone, so the
+/// pre-existing "secret lives only in the environment" path still works.
+///
+/// Pushing it is only half the pipe (B-E2E-R2-1). The script also sources
+/// `.env` from the repo root, and a sourced assignment overwrites what was
+/// inherited, so on an `.env`-bearing machine the pushed value used to be
+/// discarded one door down from here. The script now captures the inherited
+/// DSN before sourcing and restores it after: explicit environment beats
+/// ambient dotfile, the same precedence the config layer applies. The two ends
+/// are pinned by two different tests, because
+/// `cockroach_provision_hands_the_resolved_dsn_to_the_script` (this end) could
+/// not see the other one:
+/// `provision_script_prefers_the_pushed_dsn_over_dotenv` executes the script.
 fn provision_command(script: &Path, dsn: Option<&str>) -> Command {
     let mut cmd = Command::new("bash");
     cmd.arg(script);
@@ -311,6 +321,127 @@ mod marker_tests {
             0,
             "with no store.dsn the child's environment must not be rewritten"
         );
+    }
+
+    /// B-E2E-R2-1: the **receiving** end of the pipe the test above pins the
+    /// sending end of.
+    ///
+    /// `cockroach_provision_hands_the_resolved_dsn_to_the_script` asserts on
+    /// `Command::get_envs`, so it cannot see what the script then does with
+    /// the value. `scripts/provision.sh` sourced `.env` *after* inheriting the
+    /// environment and *before* reading `LAMBO_COCKROACH_DSN`, and a sourced
+    /// assignment overwrites what was inherited: on a machine whose `.env`
+    /// carries a production DSN that re-opened E2E-1 one door down from where
+    /// the config layer closed it. A pin on one end of a pipe is not a pin on
+    /// the pipe, so this one runs the real script with a decoy `.env` beside
+    /// it and a stub `docker` first on PATH, and reads the DSN out of the
+    /// command line the script actually dialled.
+    ///
+    /// Both directions are asserted. Delete the `INHERITED_DSN` restore block
+    /// in the script and the pushed-DSN half fails (the decoy is dialled);
+    /// delete the `source .env` block and the dotfile half fails (the
+    /// long-standing "the secret lives in `.env`" path would break).
+    ///
+    /// Unix-only for the stub's exec bit. The `--check` arm is chosen because
+    /// it dials and exits without issuing DDL, and because it stays clear of
+    /// the script's bash-4 gate.
+    #[cfg(unix)]
+    #[test]
+    fn provision_script_prefers_the_pushed_dsn_over_dotenv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const PUSHED: &str = "postgres://pushed-resolved@127.0.0.1:1/resolved";
+        const DECOY: &str = "postgres://dotenv-decoy@127.0.0.1:1/dotenv";
+
+        let root = std::env::temp_dir().join(format!(
+            "lambo-prov-dotenv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("scripts")).expect("scratch scripts");
+        fs::create_dir_all(root.join("migrations").join("cockroach")).expect("scratch migrations");
+        fs::create_dir_all(root.join("stub")).expect("scratch stub");
+
+        // The real script, copied so ROOT resolves to the scratch tree and the
+        // decoy `.env` below is the one it finds. The repo's own `.env` (if the
+        // developer has one) is never read and never written.
+        let script = root.join("scripts").join("provision.sh");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("scripts")
+                .join("provision.sh"),
+            &script,
+        )
+        .expect("copy provision.sh");
+        fs::write(
+            root.join("migrations")
+                .join("cockroach")
+                .join("001_init.sql"),
+            "CREATE TABLE IF NOT EXISTS sessions (session_id STRING PRIMARY KEY);\n",
+        )
+        .expect("scratch migration");
+        fs::write(root.join(".env"), format!("LAMBO_COCKROACH_DSN={DECOY}\n")).expect("decoy .env");
+
+        // Stub `docker`: records its argv and succeeds. `run_sql` prefers
+        // docker when `command -v docker` finds one, so this is what the
+        // script dials with.
+        let stub = root.join("stub").join("docker");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >>\"$LAMBO_R2_DOCKER_LOG\"\nexit 0\n",
+        )
+        .expect("stub docker");
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("stub +x");
+
+        let path = format!(
+            "{}:{}",
+            root.join("stub").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let dial = |dsn: Option<&str>, log_name: &str| -> String {
+            let log = root.join(log_name);
+            let mut cmd = provision_command(&script, dsn);
+            if dsn.is_none() {
+                // A DSN in the test runner's own environment must not stand in
+                // for a pushed one: the dotfile half has to be reached.
+                cmd.env_remove(crate::store::COCKROACH_DSN_ENV);
+            }
+            cmd.arg("--check");
+            cmd.env("PATH", &path);
+            cmd.env("LAMBO_R2_DOCKER_LOG", &log);
+            let out = cmd.output().expect("run scripts/provision.sh --check");
+            assert!(
+                out.status.success(),
+                "provision.sh --check failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            fs::read_to_string(&log).unwrap_or_default()
+        };
+
+        // 1. A pushed DSN outranks the dotfile. This is the E2E-1 shape: the
+        //    config named a container, `.env` names production.
+        let dialled = dial(Some(PUSHED), "pushed.log");
+        assert!(
+            dialled.contains(PUSHED),
+            "the script must dial the DSN `lambo provision` pushed, got: {dialled}"
+        );
+        assert!(
+            !dialled.contains(DECOY),
+            "the .env DSN must not reach psql when a resolved DSN was pushed, got: {dialled}"
+        );
+
+        // 2. With nothing pushed, `.env` still supplies the DSN: the
+        //    secret-lives-in-the-dotfile path is untouched.
+        let dialled = dial(None, "dotenv.log");
+        assert!(
+            dialled.contains(DECOY),
+            "with no pushed DSN the script must still read .env, got: {dialled}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

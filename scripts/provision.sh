@@ -13,11 +13,37 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# DSN precedence (B-E2E-R2-1): an explicitly provided environment beats an
+# ambient dotfile, which is the rule the config layer already follows.
+#
+# `lambo provision` resolves `store.dsn` (file overlaid with the kind's DSN
+# variable, refusing when the two name different databases) and pushes the
+# result into LAMBO_COCKROACH_DSN for this child; see `provision_command` in
+# src/cli/provision.rs. A plain `set -a; source .env; set +a` ahead of the DSN
+# line overwrites that pushed value, because a sourced assignment outranks the
+# inherited environment. On a machine whose .env carries the production DSN
+# that is E2E-1 verbatim: the operator's lambo.toml names a local container,
+# `overlay_env` sees no environment DSN so it has nothing to refuse against,
+# and the DDL lands on production while `lambo provision` reports success.
+#
+# So: capture what we inherited BEFORE sourcing, and put it back after. .env is
+# still sourced (it carries more than this one variable) and still supplies the
+# DSN when nothing was pushed, which is how a bare `./scripts/provision.sh` has
+# always worked.
+INHERITED_DSN="${LAMBO_COCKROACH_DSN:-}"
+
 if [[ -f .env ]]; then
   set -a
   # shellcheck disable=SC1091
   source .env
   set +a
+fi
+
+if [[ -n "$INHERITED_DSN" && "${LAMBO_COCKROACH_DSN:-}" != "$INHERITED_DSN" ]]; then
+  # Deliberately does not print either DSN: this message exists on the path
+  # where one of them is a production credential.
+  echo "note: LAMBO_COCKROACH_DSN was provided in the environment; the value in .env is ignored" >&2
+  export LAMBO_COCKROACH_DSN="$INHERITED_DSN"
 fi
 
 DSN="${LAMBO_COCKROACH_DSN:-}"
@@ -141,6 +167,20 @@ if [[ "${1:-}" == "--check" ]]; then
   echo "== indexes on concepts =="
   run_sql "SHOW INDEXES FROM concepts;" || true
   exit 0
+fi
+
+# Everything past this line needs bash 4: `${var,,}` in `vector_index_state`
+# and `route_statement` is a 4.0 expansion, and macOS ships bash 3.2 at
+# /bin/bash. The script is reached via `Command::new("bash")`, which resolves
+# from PATH, so a Mac without Homebrew bash would otherwise die with "bad
+# substitution" at the first `route_statement` call, AFTER `SET CLUSTER
+# SETTING` has already gone to the cluster. Loud rather than wrong, but the
+# loud failure belongs BEFORE the first statement, not in the middle. The
+# `--check` arm above is BSD- and bash-3.2-clean and exits before this gate, so
+# read-only inspection still works on a stock Mac.
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "error: provisioning needs bash 4 or newer (this is $BASH_VERSION). On macOS: brew install bash, then re-run with that bash on PATH. Nothing has been sent to the cluster." >&2
+  exit 1
 fi
 
 echo "== enabling vector index feature (ignore if unsupported) =="
