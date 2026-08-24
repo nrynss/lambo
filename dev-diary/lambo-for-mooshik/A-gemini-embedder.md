@@ -46,8 +46,10 @@ it, extend it.
 read. Mirror the `llama_url` / `llama_model` pattern:
 
 * project, location, model id
-* credential source — decide between ADC and an explicit key path, and write down which
-
+* credential source — DECIDED 2026-08-24 (operator): Vertex + service-account OAuth. ADC is the
+  fallback (`gemini_credentials` else `GOOGLE_APPLICATION_CREDENTIALS`); an explicit
+  `gemini_credentials` path overrides it. Adds an optional `jsonwebtoken` dep behind
+  `embed-gemini` for RS256 signing. Missing credentials are a hard error at construction.
 Extend `overlay_env` with matching `LAMBO_*` vars. Non-empty env wins over file; empty env leaves
 the base intact. That is the existing contract for every other key, and diverging from it here
 would be a surprise.
