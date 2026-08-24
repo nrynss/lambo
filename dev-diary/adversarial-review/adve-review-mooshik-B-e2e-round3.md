@@ -33,8 +33,8 @@ container were removed at review end. The stale `colima-b-r2` disk was left for 
 operator, as instructed.
 
 **Verdict: REQUEST_CHANGES**: no P1, no P2, **1 P3**. All six round-2 closures are
-genuine: every one verified at the artifact under mutation (eight mutations of my own,
-eleven distinct red outcomes, each at its intended pin), the R2-1 fix verified by
+genuine: every one verified at the artifact under mutation (nine mutations of my own,
+ten distinct red outcomes, each at its intended pin), the R2-1 fix verified by
 running the real script eleven ways including the paths the fix could most plausibly
 have broken, and the R2-2 planner pin ruled acceptable engineering with the flagged
 autovacuum risk measured to be structurally impossible at fixture size. The one
@@ -333,7 +333,7 @@ two shapes above so the promise is pinned at its edge, and re-check the
 | M-R3-6 | `overlay_env`'s private doc link restored | doc gate | 53 → **54**, naming `canonical_store_dsn` | yes, 53 after |
 | M-R3-6b | the `Dialect::DSN_ENV` doc link restored | doc gate | 53 → **54**, "no item named `dialect` in module `pg`" | yes, 53 after |
 
-Nine mutations, twelve distinct red outcomes, every one at its intended pin. On top of
+Nine mutations, ten distinct red outcomes, every one at its intended pin. On top of
 them: eleven bash probes against the real script (R2-1 section), a guard over-rejection
 probe and a redaction-edge probe (both temporary tests, run and then reverted), and two
 live CLI probes against the pinned container. The redaction-edge probe is what
