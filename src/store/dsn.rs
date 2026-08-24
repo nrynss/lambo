@@ -11,7 +11,9 @@
 //!   environment silently names a different database" is refused (E2E-F2).
 //!
 //! Password stripping is what makes the second caller possible: the canonical
-//! form is safe to print in an error message.
+//! form is safe to print in an error message. That has to hold on **every**
+//! input, including the ones neither parser understands, which is what
+//! `redact_unparseable_dsn` is for (B-E2E-R2-5).
 
 /// Turn a Postgres-wire DSN *spelling* into a store *identity* (B1, J2-R1-2
 /// wearing Postgres clothes).
@@ -44,8 +46,8 @@
 /// * **Username is kept.** Two roles on one cluster can be two deployments;
 ///   the motivating example keeps `u`.
 /// * **A non-URL DSN** (libpq `key=value`) is parsed for the same fields when
-///   it contains `=`. Anything else is returned with a `password=` token
-///   stripped, otherwise verbatim.
+///   it contains `=`. Anything else keeps its shape but loses its secret: see
+///   `redact_unparseable_dsn`.
 pub(crate) fn canonical_store_dsn(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -57,7 +59,42 @@ pub(crate) fn canonical_store_dsn(raw: &str) -> String {
     if let Some(parts) = parse_libpq_kv(trimmed) {
         return parts.to_identity();
     }
-    strip_libpq_password_token(trimmed)
+    redact_unparseable_dsn(trimmed)
+}
+
+/// Last-resort redaction for a DSN neither parser understood (B-E2E-R2-5).
+///
+/// Every parsed path drops the password on the way to an identity, and
+/// `StoreConfig::overlay_env` prints both sides of a disagreement under the
+/// promise "(passwords stripped)". The unparseable path used to break that
+/// promise: it fell through to `strip_libpq_password_token`, which only drops
+/// whitespace-separated `password=` tokens, so a URL-shaped DSN survived
+/// verbatim with `user:secret@` in it. The refusal then printed a live
+/// credential on the line that says it did not, which is the one place J2's
+/// hashing was built to keep passwords out of. An operator reaches this path
+/// by ordinary typos: a port above 65535, a non-numeric bracketed port, or a
+/// misspelled scheme (`postgre://`) all defeat `parse_postgres_url`.
+///
+/// The rule is deliberately blunt, because a string we could not parse is a
+/// string we cannot reason about. If there is a `://` and any `@` after it,
+/// everything from the first `:` of the userinfo up to the **last** `@` goes.
+/// Using the last `@` rather than the one that closes the authority
+/// over-redacts a DSN carrying an `@` in its path or query, and over-redacting
+/// is the safe direction to be wrong in. What survives still shows the operator
+/// the typo they need to see (`postgres://app@127.0.0.1:70000/lambo`), which is
+/// the only reason the message quotes the DSN at all.
+fn redact_unparseable_dsn(raw: &str) -> String {
+    let stripped = strip_libpq_password_token(raw);
+    let Some(sep) = stripped.find("://") else {
+        return stripped;
+    };
+    let (scheme, rest) = stripped.split_at(sep + "://".len());
+    let Some(at) = rest.rfind('@') else {
+        return stripped;
+    };
+    let (userinfo, from_at) = rest.split_at(at);
+    let user = userinfo.split(':').next().unwrap_or("");
+    format!("{scheme}{user}{from_at}")
 }
 
 struct DsnParts {
@@ -274,5 +311,84 @@ fn from_hex(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B-E2E-R2-5: the canonical form is printed under "(passwords stripped)",
+    /// so the promise has to hold on inputs the parsers reject too. Before
+    /// this, an unparseable DSN fell through to `strip_libpq_password_token`
+    /// and a URL-shaped one came back verbatim, password included.
+    ///
+    /// Restore the `strip_libpq_password_token(trimmed)` fallback in
+    /// `canonical_store_dsn` and every case below fails.
+    #[test]
+    fn an_unparseable_dsn_still_has_its_password_stripped() {
+        const SECRET: &str = "S3cretHunter";
+        // Each of these defeats `parse_postgres_url` the way an operator's
+        // fingers do: a port past u16, a non-numeric bracketed port, a
+        // misspelled scheme.
+        let unparseable = [
+            "postgres://app:S3cretHunter@127.0.0.1:70000/lambo",
+            "postgres://app:S3cretHunter@[::1]:notaport/lambo",
+            "postgre://app:S3cretHunter@db.internal:26257/lambo",
+            "postgresql://app:S3cretHunter@127.0.0.1:99999/lambo?sslmode=require",
+        ];
+        for raw in unparseable {
+            assert!(
+                parse_postgres_url(raw).is_none() && parse_libpq_kv(raw).is_none(),
+                "{raw} is supposed to be the unparseable case; if it now parses, \
+                 pick another shape rather than deleting the test"
+            );
+            let canon = canonical_store_dsn(raw);
+            assert!(
+                !canon.contains(SECRET),
+                "the canonical form is printed under \"(passwords stripped)\": {canon}"
+            );
+            assert!(
+                canon.contains("app@"),
+                "the user and the rest of the DSN must survive so the operator \
+                 can see the typo: {canon}"
+            );
+        }
+
+        // The exact transcript from the review, now safe.
+        assert_eq!(
+            canonical_store_dsn("postgres://app:S3cretHunter@127.0.0.1:70000/lambo"),
+            "postgres://app@127.0.0.1:70000/lambo"
+        );
+
+        // Two credentials for one unparseable spelling are still one identity,
+        // which is the same rule the parsed paths follow.
+        assert_eq!(
+            canonical_store_dsn("postgres://app:one@127.0.0.1:70000/lambo"),
+            canonical_store_dsn("postgres://app:two@127.0.0.1:70000/lambo")
+        );
+
+        // Non-URL leftovers keep their old behaviour: the `password=` token
+        // goes, nothing else is invented.
+        assert_eq!(
+            canonical_store_dsn("weird-thing password=S3cretHunter"),
+            "weird-thing"
+        );
+    }
+
+    /// The parsed paths were already safe; pinned here so both halves of the
+    /// promise sit in one place.
+    #[test]
+    fn a_parseable_dsn_has_its_password_stripped() {
+        assert_eq!(
+            canonical_store_dsn("postgres://app:S3cretHunter@127.0.0.1:5432/lambo"),
+            "postgres://app@127.0.0.1:5432/lambo"
+        );
+        assert_eq!(
+            canonical_store_dsn(
+                "host=127.0.0.1 port=5432 dbname=lambo user=app password=S3cretHunter"
+            ),
+            "postgres://app@127.0.0.1:5432/lambo"
+        );
     }
 }
