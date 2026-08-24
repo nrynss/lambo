@@ -32,7 +32,16 @@ an explicit `--context colima-b-r3`; the global context stayed on `colima`. Prof
 container were removed at review end. The stale `colima-b-r2` disk was left for the
 operator, as instructed.
 
-**Verdict: (recorded at the end of this file, after the last settled finding)**
+**Verdict: REQUEST_CHANGES**: no P1, no P2, **1 P3**. All six round-2 closures are
+genuine: every one verified at the artifact under mutation (eight mutations of my own,
+eleven distinct red outcomes, each at its intended pin), the R2-1 fix verified by
+running the real script eleven ways including the paths the fix could most plausibly
+have broken, and the R2-2 planner pin ruled acceptable engineering with the flagged
+autovacuum risk measured to be structurally impossible at fixture size. The one
+finding is a residual in the R2-5 closure's own neighbourhood: the `://`-anchored
+redaction leaves two operator-plausible DSN shapes printing their password under
+"(passwords stripped)". **This cycle does not reach zero residue**; the decision line
+is at the end of this file.
 
 ---
 
@@ -136,4 +145,175 @@ Checked all three legs the closure claims, against the tree rather than the repo
 
 Documentation-only; no mutation applies. Checked by reading the corrected tree and by
 sweeping for the claim-family, which is the sweep J's handoff guidance prescribes.
+
+### B-E2E-R2-2 (P3) — H3 diagnostic vs its own probe: **closed-verified, and the planner pin is ruled acceptable engineering**
+
+The rewritten comment (`src/store/sqlite.rs:6401-6424`) and `eprintln!`
+(`sqlite.rs:6456-6470`) now state the measured mechanism — the grid seeds through
+`flush()` and never `ANALYZE`s, `reltuples = -1`, the hnsw lane costed against a
+fabricated estimate and taking the index over 22 real rows — and attribute the zero
+envelope to `ef_search = 40 > n`, not to the plan. The hnsw lane's value is asserted
+(`sqlite.rs:6447`), not narrated.
+
+**Mutation M-R3-2** — `ANALYZE concepts` injected into `index_present` before the plan
+probe: `h3_postgres_recall_parity` **RED at `src/store/sqlite.rs:6447`**, and the
+failure message is the one the closure promised — it names the mechanism ("the fixture
+corpus now carries real statistics … the planner costs 22 rows honestly and picks a Seq
+Scan") and tells the next person to rewrite the prose rather than delete the pin. Only
+the intended test went red (6 passed / 1 failed); the envelope and EXPLAIN tests were
+unaffected. Reverted; live 7/0. The mutation is also the measurement that confirms the
+comment: with fabricated estimates the index is taken, with real statistics it is not —
+the same before/after the remediation's own temporary probe reported.
+
+**The judgment the brief asks for: acceptable engineering, not a latent flake.** Four
+measured reasons. (1) The assertion runs only in the live suite against the
+digest-pinned image (CI's service container and this review's container are
+byte-identical pins), so the cost model that makes the choice is frozen. (2) The one
+nondeterminism the remediation conceded — "an autovacuum that beats the probe" —
+cannot occur at fixture size: measured on the pinned image,
+`autovacuum_analyze_threshold = 50` and `autovacuum_analyze_scale_factor = 0.1`, and a
+22-row table never accumulates 50 changes, so autoanalyze is structurally unreachable
+there, not merely unlikely. (3) `hnsw.ef_search` measured at its default 40 on the
+image, above both corpora, so the envelope-is-zero claim is pinned by configuration,
+not by plan. (4) The only path to red is a deliberate act (a digest bump, or an
+`ANALYZE` added to the seed path), and M-R3-2 proves the failure message correctly
+routes that person to the prose rather than the pin. A planner-dependent assertion
+against an unpinned image would be a latent flake; this one is a checked claim about a
+pinned artifact, the same epistemic shape as the pinned suite counts.
+
+### B-E2E-R2-3 (P3) — zero-norm guard on SQLite's query path: **closed-verified, no over-rejection**
+
+The precondition is extracted as `store::vector::ensure_is_an_embedding`
+(`src/store/vector.rs:75-105`) and called by SQLite's `vector_candidates_checked` at
+`src/store/sqlite.rs:1257` — after the limit checks, before the transaction opens,
+which is where the pg family encodes its probe. The refusal criterion is
+`norm_sq <= 0.0 || is_nan()` accumulated in f32, i.e. exactly the arithmetic pgvector
+and Cockroach would do.
+
+**Mutations (three, all reverted green):**
+
+* **M-R3-3a** — the call severed from `vector_candidates_checked`:
+  `vector_candidates_refuse_a_zero_norm_probe` **RED at `sqlite.rs:3472`** with
+  `called unwrap_err() on an Ok value: [Scored { item: …, score: 0.0 }]` — the silent
+  meaningless ranking, verbatim.
+* **M-R3-3b** — the zero-norm branch disabled in the shared guard (`if false &&`):
+  **both** pins RED (`encode_refuses_a_zero_norm_embedding` at `vector.rs:148` and the
+  SQLite pin at `sqlite.rs:3472`) — one guard, three adapters, demonstrated.
+* **M-R3-3c** — the call moved below the contract-row read: RED on the
+  **unknown-session leg** (`Ok value: []` — an empty list instead of a refusal), the
+  seeded leg still refusing; the pin holds the guard's *position*, exactly as the
+  remediation claimed.
+
+**Over-rejection, attacked directly** (a temporary probe test, reverted after
+measurement): unit vectors at dims 1/4/768/1536 pass; `[1e-6, 0, 0, 0]` passes (also
+pinned in-tree through the legacy entry point); `[1e-20, 0, 0, 0]` passes
+(`norm_sq = 1e-40` is subnormal but nonzero in f32); `[f32::MIN_POSITIVE, 1.0]` passes;
+negative-only components pass; the empty slice is *not* refused here (dim-0 stays
+`check_embedding_dim`'s case, as documented). The only refusal beyond exact zero is a
+norm whose square underflows f32 to 0.0 (`[1e-25, …]`) — which is precisely the vector
+pgvector would score `NaN` and Cockroach `0.5`, so refusing it there is the fix's
+stated point, not over-rejection. Both full fixture suites are green (battery below),
+so nothing legitimate anywhere in H1/H3 trips it.
+
+**Coverage boundary checked**: `rank_by_cosine` has exactly one production caller
+(`sqlite.rs:1311`), now behind the guard; SQLite's legacy `vector_candidates` funnels
+into the checked path (`sqlite.rs:1214`); the pg family's legacy path returns empty for
+an unknown session *before* touching the probe (`pg/mod.rs:2750-2753`), which is the
+same order SQLite has, so the two legacy surfaces agree with each other too. The memory
+store advertises no VECTOR_SEARCH and refuses wholesale (`StoreError::Capability`), so
+no silent adapter path remains.
+
+### B-E2E-R2-5 (P3) — unparseable DSN printed its password: **closed-verified for every filed shape** (a residual neighbour is B-E2E-R3-1 below)
+
+`canonical_store_dsn`'s fallback is now `redact_unparseable_dsn`
+(`src/store/dsn.rs:82-97`): after `strip_libpq_password_token`, anything between the
+first `:` of the userinfo and the **last** `@` after `://` is spliced out. All four
+filed shapes (port past u16, non-numeric bracketed port, `postgre://`, port 99999 with
+query) verified refused-with-redaction by the in-tree pin, and the last-`@` rule's
+deliberate over-redaction confirmed by probe (`postgre://app:pw@h:26257/db?opt=x@y` →
+`postgre://app@y` — ugly, safe direction). A password containing colons redacts
+correctly (first-`:` split).
+
+**Mutation M-R3-5** — fallback restored to `strip_libpq_password_token(trimmed)`:
+`an_unparseable_dsn_still_has_its_password_stripped` **RED at `src/store/dsn.rs:347`**,
+printing `postgres://app:S3cretHunter@127.0.0.1:70000/lambo` — the leak, verbatim.
+Reverted, green.
+
+**Live CLI probe** (debug binary, container on 55434): `store.dsn` with port 70000 +
+`LAMBO_POSTGRES_DSN` at the container → rc 1, "the config file says
+postgres://app@127.0.0.1:70000/lambo and LAMBO_POSTGRES_DSN says
+postgres://lambo@127.0.0.1:55434/livetest (passwords stripped)". Password gone, typo
+visible. The round-2 transcript's defect is closed.
+
+### B-E2E-R2-6 (P3) — doc warnings and the dropped doc gate: **closed-verified**
+
+Both links named in plain text (`src/store/mod.rs:885-891` and `mod.rs:944-946`), the
+F7 pattern. Measured `cargo doc --no-deps --document-private-items` at
+`store-cockroach,fixtures` = **53 warnings**, at the full
+`store-postgres,store-cockroach,store-sqlite,fixtures` set = **53** (counted from the
+"generated 53 warnings" summary; a naive `grep -c '^warning'` says 54 because it counts
+the summary line itself — that is not drift). `CYCLE.md` now carries the doc row at
+**both** feature sets, with the standing sentence "The doc row is standing and may not
+be dropped" and the history of why.
+
+**Mutations** — the remediation claimed "54 with either link restored", so both were
+tried separately: **M-R3-6** (the `overlay_env` → `canonical_store_dsn` link restored)
+→ 54, naming the private item; **M-R3-6b** (the `Dialect::DSN_ENV` link restored) →
+54, "no item named `dialect` in module `pg`". Each reverted; 53 both times after.
+
+### The macOS bash gate (round-2 note, addressed at the site): **verified**
+
+`(( BASH_VERSINFO[0] < 4 ))` at `scripts/provision.sh:172-185`, placed after the
+`--check` exit. Probes P9a/P9b above: under `/bin/bash` 3.2.57, `--check` runs clean
+(rc 0, both read-only statements dialled), and the full arm refuses rc 1 with
+"Nothing has been sent to the cluster" and an **empty dial log** — the refusal lands
+before `SET CLUSTER SETTING`, which is the whole point. Statement order under bash 5
+confirmed: the gate sits before the first `run_sql` of the DDL arm.
+
+---
+
+## New findings
+
+**B-E2E-R3-1 (P3): a DSN with userinfo but no `://` — scheme dropped, or the
+one-keystroke `postgres:/` typo — still prints its password under "(passwords
+stripped)", because the R2-5 redaction is anchored on `://`.**
+
+*Claim tested*: `redact_unparseable_dsn`'s doc says the canonical form must be safe to
+print "on **every** input, including the ones neither parser understands"
+(`src/store/dsn.rs:12-15`), and `overlay_env`'s refusal prints both canonical forms
+under "(passwords stripped)" (`src/store/mod.rs:963-974`).
+
+*Evidence*: `redact_unparseable_dsn` (`dsn.rs:82-97`) returns the input unredacted when
+`find("://")` fails, and both parsers refuse scheme-less input
+(`parse_postgres_url` requires the `postgres://`/`postgresql://` prefix,
+`dsn.rs:129-137`; `parse_libpq_kv` requires `=`). Measured by probe (temporary test,
+reverted) and then demonstrated live through the CLI against the pinned container:
+
+```
+store.dsn = "postgres:/app:S3cretHunter@127.0.0.1:26257/lambo"   # single-slash typo
+LAMBO_POSTGRES_DSN = postgres://lambo:lambo@127.0.0.1:55434/livetest
+→ rc 1: "the config file says postgres:/app:S3cretHunter@127.0.0.1:26257/lambo and
+   LAMBO_POSTGRES_DSN says postgres://lambo@127.0.0.1:55434/livetest (passwords stripped)"
+```
+
+`app:S3cretHunter@127.0.0.1:26257/lambo` (scheme dropped entirely) leaks identically.
+Both are the same one-typo class R2-5 was graded on: `postgre://` is a misspelled
+scheme, `postgres:/` is a missing keystroke in the same token. A secondary consequence,
+no observable leak but a false doc claim: `store_identity` (`src/mcp/endpoint.rs:667`)
+promises "The password never appears in the string that is hashed", and on these two
+shapes it now does (hashed and never published, so consequence-free today — but the
+sentence is load-bearing for anyone auditing what can reach the lease row).
+
+*Failure scenario*: identical to R2-5's — the refusal prints a live credential to
+stderr on the line that promises it did not, and error text is the one place J2's
+hashing was built to keep passwords out of. The input is one dropped keystroke away
+from the shapes the closure handles.
+
+*What closes it*: extend the splice to a scheme-less authority — when there is no
+`://` but the string carries a `:` inside a `userinfo@` prefix before any `/`, drop
+`:…` up to the `@` — or take the round-2 finding's own option B and return a
+placeholder (`<unparseable dsn>`) for any input the redactor cannot positively make
+safe. Either way, extend `an_unparseable_dsn_still_has_its_password_stripped` with the
+two shapes above so the promise is pinned at its edge, and re-check the
+`store_identity` sentence while there.
 
