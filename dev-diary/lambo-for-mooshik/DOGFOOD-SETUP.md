@@ -77,9 +77,12 @@ but binds a network service for no real saving; the model is 605 MB.)
 ## 2. The pinned binary (per machine, per arch — binaries do not travel)
 
 ```sh
-cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently 21e4cf8
+cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently bbef4b3
 LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \
   cargo build --release --features store-sqlite,embed-candle-metal,embed-bge
+# NVIDIA/Linux rig (this machine): --features store-sqlite,embed-candle-cuda,embed-bge;
+# metal is Apple-silicon-only. CUDA must be on the build PATH (the unit's Environment
+# already exports /opt/cuda/bin); on an Apple box keep embed-candle-metal.
 mkdir -p ~/lambo-dogfood/bin
 cp target/release/lambo ~/lambo-dogfood/bin/lambo-<sha>
 ```

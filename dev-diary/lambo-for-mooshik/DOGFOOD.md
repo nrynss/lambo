@@ -169,6 +169,16 @@ evidence pointers.
    rig. The previous config is kept at `~/lambo-dogfood/lambo.toml.bge-backup`
    (`kind = "bge_m3"`, `127.0.0.1:8080`) so the old path is one copy away.
    *Superseded pin: `3039b82`, then `19f51d3`.*
+   **Linux rig (cachyos desktop), 2026-08-24:** re-pinned `fe4d63d → bbef4b3`, built
+   `--features store-sqlite,embed-candle-cuda,embed-bge` with `LAMBO_GIT_SHA=bbef4b3`
+   (CUDA-on-NVIDIA variant of this item's metal build); `lambo provision` was a no-op, and
+   the systemd unit took the new binary automatically via `serve-http.sh`'s newest-bin rule.
+   All-agent audit for the HTTP-only ruling (DOGFOOD-SETUP §4/§5): Claude, Codex, grok were
+   already `url`; **OMP's global `~/.omp/agent/mcp.json` was stdio (`command` ->
+   stale `lambo-fe4d63d serve`) and is now `url`**, and **Cursor (`~/.cursor/mcp.json`) had
+   no lambo entry and got the URL added**. The pre-rewire OMP session's serve had exited 1
+   silently (the J losing-serve outage); the ledger heartbeat flipped to `bbef4b3` at the
+   restart (I2 attested).
 2. **Wiring: option (a)** — a user-scope stdio MCP registration (`claude mcp add --scope
    user lambo-dogfood -- <pinned binary> serve …`), so the orchestrator session holds the
    one connection and no project `.mcp.json` touches the public repo. Brief-injection
