@@ -146,6 +146,8 @@ pub enum EmbedderKind {
     BgeM3,
     /// In-process BGE-M3 via candle (K2). Feature: `embed-candle`.
     Candle,
+    /// Vertex Gemini embeddings. Feature: `embed-gemini`.
+    Gemini,
     /// Amazon Titan Text Embeddings V2 on Bedrock. Feature: `embed-bedrock` (T7.1).
     Bedrock,
     /// Deterministic offline embedder. Feature: `embed-fixture`.
@@ -166,6 +168,7 @@ impl EmbedderKind {
         match self {
             Self::BgeM3 => "embed-bge",
             Self::Candle => "embed-candle",
+            Self::Gemini => "embed-gemini",
             Self::Bedrock => "embed-bedrock",
             Self::Fixture => "embed-fixture",
         }
@@ -178,6 +181,7 @@ impl EmbedderKind {
         match self {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Candle => cfg!(feature = "embed-candle"),
+            Self::Gemini => cfg!(feature = "embed-gemini"),
             Self::Bedrock => cfg!(feature = "embed-bedrock"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
         }
@@ -189,6 +193,8 @@ impl EmbedderKind {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Candle => cfg!(feature = "embed-candle"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
+            // Adapter lands in A3; false until then.
+            Self::Gemini => false,
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
@@ -202,16 +208,18 @@ impl FromStr for EmbedderKind {
         let t = s.trim();
         if t.is_empty() {
             return Err(EmbedError::Unavailable(
-                "empty embedder kind (expected bge_m3 | candle | bedrock | fixture)".into(),
+                "empty embedder kind (expected bge_m3 | candle | gemini | bedrock | fixture)"
+                    .into(),
             ));
         }
         match t.to_ascii_lowercase().as_str() {
             "bge_m3" | "bge-m3" | "bge" => Ok(Self::BgeM3),
             "candle" => Ok(Self::Candle),
+            "gemini" | "vertex" => Ok(Self::Gemini),
             "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
             other => Err(EmbedError::Unavailable(format!(
-                "unknown embedder kind {other:?} (expected bge_m3 | candle | bedrock | fixture)"
+                "unknown embedder kind {other:?} (expected bge_m3 | candle | gemini | bedrock | fixture)"
             ))),
         }
     }
@@ -222,6 +230,7 @@ impl std::fmt::Display for EmbedderKind {
         match self {
             Self::BgeM3 => write!(f, "bge_m3"),
             Self::Candle => write!(f, "candle"),
+            Self::Gemini => write!(f, "gemini"),
             Self::Bedrock => write!(f, "bedrock"),
             Self::Fixture => write!(f, "fixture"),
         }
@@ -432,6 +441,19 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                 Err(missing_feature(EmbedderKind::Fixture))
             }
         }
+        EmbedderKind::Gemini => {
+            #[cfg(feature = "embed-gemini")]
+            {
+                Err(EmbedError::Unavailable(
+                    "embed-gemini is enabled but the Gemini embedder is not implemented yet (A3)"
+                        .into(),
+                ))
+            }
+            #[cfg(not(feature = "embed-gemini"))]
+            {
+                Err(missing_feature(EmbedderKind::Gemini))
+            }
+        }
         EmbedderKind::Bedrock => {
             #[cfg(feature = "embed-bedrock")]
             {
@@ -470,6 +492,14 @@ mod tests {
         assert_eq!(
             "bedrock".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::Bedrock
+        );
+        assert_eq!(
+            "gemini".parse::<EmbedderKind>().unwrap(),
+            EmbedderKind::Gemini
+        );
+        assert_eq!(
+            "  vertex  ".parse::<EmbedderKind>().unwrap(),
+            EmbedderKind::Gemini
         );
         assert_eq!(
             "fixture".parse::<EmbedderKind>().unwrap(),
@@ -553,6 +583,8 @@ mod tests {
         assert_eq!(w.kind, EmbedderKind::Bedrock);
         let w: Wrap = toml::from_str(r#"kind = "fake""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Fixture);
+        let w: Wrap = toml::from_str(r#"kind = "vertex""#).unwrap();
+        assert_eq!(w.kind, EmbedderKind::Gemini);
         let w: Wrap = toml::from_str(r#"kind = "candle""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Candle);
     }
@@ -651,10 +683,40 @@ mod tests {
     }
 
     #[test]
+    fn gemini_is_ready_false_until_a3() {
+        assert!(
+            !EmbedderKind::Gemini.is_ready(),
+            "adapter lands in A3, not yet"
+        );
+    }
+
+    #[test]
+    fn gemini_fail_closed_no_silent_fallback() {
+        let r = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Gemini,
+            dim: 1024,
+            llama_url: None,
+            llama_model: None,
+            ..Default::default()
+        });
+        let Err(err) = r else {
+            panic!("expected Unavailable, got Ok (silent fallback forbidden)");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("embed-gemini") || msg.contains("not compiled"),
+            "msg={msg}"
+        );
+        assert!(!msg.to_ascii_lowercase().contains("fixture"));
+        assert!(!EmbedderKind::Gemini.is_ready());
+    }
+
+    #[test]
     fn kind_feature_names() {
         assert_eq!(EmbedderKind::BgeM3.feature_name(), "embed-bge");
         assert_eq!(EmbedderKind::Candle.feature_name(), "embed-candle");
         assert_eq!(EmbedderKind::Fixture.feature_name(), "embed-fixture");
+        assert_eq!(EmbedderKind::Gemini.feature_name(), "embed-gemini");
         assert_eq!(EmbedderKind::Bedrock.feature_name(), "embed-bedrock");
     }
 

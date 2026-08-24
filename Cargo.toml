@@ -120,6 +120,8 @@ embed-fixture = []
 embed-bge = ["dep:reqwest"]
 # T7.1: Bedrock Titan when account is AUTHORIZED.
 embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+# A1: Vertex Gemini embedder (adapter lands in A3).
+embed-gemini = ["dep:reqwest"]
 
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
 # Test-only: deliberately NOT in `default` (v020-R1-P3-3) — `cargo install
