@@ -24,7 +24,7 @@
 //! window that opens at lease acquisition. See the comment at the matcher
 //! (I-R2-2) — the looseness is load-bearing and must not be tightened.
 //!
-//! ## What the looseness collected, the second time (J5)
+//! ## What the looseness collected, the second time (J6)
 //!
 //! That window was still a real hole when this file was written: I-R2-1 priced
 //! it (~6 µs of process work, widened to ~1.1 ms once and narrowed back) and

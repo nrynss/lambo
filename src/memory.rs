@@ -551,7 +551,7 @@ pub struct MemoryBuilder {
     /// Set only by [`crate::mcp::serve`]; every ordinary writer keeps the
     /// default.
     ledger: Option<Arc<crate::ledger::Ledger>>,
-    /// J5. The shutdown pre-arm a `serve` process wants installed the instant
+    /// J6. The shutdown pre-arm a `serve` process wants installed the instant
     /// this builder takes the single-writer lease, closing the window between
     /// the acquire and the arming at `holder_shutdown` in which a SIGTERM had
     /// the default disposition and killed the process with `close()` un-run.
@@ -716,7 +716,7 @@ impl MemoryBuilder {
         self
     }
 
-    /// Arm this handle the instant the single-writer lease is acquired (J5).
+    /// Arm this handle the instant the single-writer lease is acquired (J6).
     ///
     /// Crate-private, and set by `crate::mcp::serve` alone. The handle
     /// arrives unarmed and is armed from exactly one place — the
@@ -860,7 +860,7 @@ impl MemoryBuilder {
             // stable for the handle's life; every durable write (flush + canon)
             // presents it and the store rejects a stale one after a takeover.
             LeaseOutcome::Acquired(info) => {
-                // J5 — the pre-arm, HERE, the first statement after the lease
+                // J6 — the pre-arm, HERE, the first statement after the lease
                 // is ours. Everything from this point on holds something a
                 // signal must not be allowed to destroy: the lease itself, and
                 // shortly the write-behind tail. Before this, the whole span
@@ -978,7 +978,7 @@ impl MemoryBuilder {
             }
             Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
         };
-        // J5 — the one unbounded `await` under the pre-arm, and therefore the
+        // J6 — the one unbounded `await` under the pre-arm, and therefore the
         // one place the pre-arm could have become the immunity J2-R1-7
         // rejected. The startup load reads the whole durable session back; on a
         // large session or a wedged store that is not quick, and a recorded

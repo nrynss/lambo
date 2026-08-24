@@ -383,9 +383,9 @@ fn resolve_auth_token_from(
 /// *above* the open, so the misconfigured `--ledger-heartbeat`-without-`--ledger`
 /// pairing is still refused before any file is touched.
 ///
-/// ## What J5 changed: nothing here, and that is the claim
+/// ## What J6 changed: nothing here, and that is the claim
 ///
-/// J5 added a signal registration at the **acquire** — see [`EarlyShutdown`] —
+/// J6 added a signal registration at the **acquire** — see [`EarlyShutdown`] —
 /// so "the arming" is no longer one point on the far side of `resolve_role`.
 /// This group is unaffected: it runs above the acquire, so it is now the
 /// **pre-arm** group as well as the pre-lease one, and every member of it still
@@ -393,7 +393,7 @@ fn resolve_auth_token_from(
 /// incidental. A start that is about to refuse here, or that is about to sit in
 /// the election for up to `ELECTION_BUDGET`, must stay killable by a plain
 /// SIGTERM (J2-R1-7), and it holds nothing — no lease, no tail, no graph — that
-/// a handler could save. J5 adds no member to this group and takes none away.
+/// a handler could save. J6 adds no member to this group and takes none away.
 fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -756,7 +756,7 @@ pub async fn build_memory(
     // Cadence overrides from `[daemon]` reach the writer here. Without this the
     // daemon always runs at Config::default() and `gc_interval` in lambo.toml
     // would parse, validate, and then do nothing at all.
-    // J5: no pre-arm. This is the *library* entry point (`serve` has not called
+    // J6: no pre-arm. This is the *library* entry point (`serve` has not called
     // it since J2-R1-7), and installing process-wide signal handlers is a
     // decision that belongs to a process, not to a builder — the same reason
     // `close_bounded_until` takes its re-armed signal as an argument. An
@@ -801,7 +801,7 @@ fn serve_builder(
     // write-intent completion lines ride it) is handed straight into the
     // Memory it builds.
     builder = builder.ledger(ledger);
-    // J5: armed by the acquire itself, from inside `build_attach`. Handed in
+    // J6: armed by the acquire itself, from inside `build_attach`. Handed in
     // here because this is the one place the serve path configures the builder,
     // and the acquire is the only point at which arming is both safe (the
     // election is over) and necessary (a lease and a tail now exist).
@@ -1485,7 +1485,7 @@ impl RefusalCursor {
 /// *any* of those still reaches [`Memory::close`] instead of hitting the default
 /// disposition and killing the process with the tail un-flushed.
 ///
-/// **Two registrations, not one** (J5). It said "a single" until the pre-arm,
+/// **Two registrations, not one** (J6). It said "a single" until the pre-arm,
 /// and the count is the whole point: the arming below happens the first
 /// statement after `resolve_role` returns, but the lease is taken *inside* it,
 /// and the span between the two used to run under the default disposition — a
@@ -1532,7 +1532,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(ledger) = &ledger {
         ledger.append(&serve_startup_line(&opts, &endpoint));
     }
-    // J5 — the pre-arm. Constructing it installs NOTHING; it is armed from
+    // J6 — the pre-arm. Constructing it installs NOTHING; it is armed from
     // inside `build_attach`, in the `LeaseOutcome::Acquired` arm, so the
     // election below stays killable and a serve that loses never arms at all.
     // See `EarlyShutdown` for the window it closes and why the arming point
@@ -1583,7 +1583,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             // SIGTERM-immune the way arming above the lease-taking attach
             // would.
             //
-            // **J5 asked whether this branch has the holder's window too, and
+            // **J6 asked whether this branch has the holder's window too, and
             // it does not.** The holder's window is real because the span from
             // the acquire to the arming contains the whole tail of the `Memory`
             // build — including the "Memory session attached" line the
@@ -1660,7 +1660,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // that residual window from ~6 µs to ~1.1 ms, which is the durability
     // regression I-R2-1 records.
     //
-    // **That residual window is no longer unguarded, and J5 is what closed it.**
+    // **That residual window is no longer unguarded, and J6 is what closed it.**
     // It said "still unguarded ... exactly as it was pre-I" until CI run
     // 32710994512 collected on it: `a_pre_handshake_sigterm_still_flushes_the_
     // session_row` failed with `unix_wait_status(15)` — the process KILLED by
@@ -1695,14 +1695,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // magnitude of deliberate deafness bought with none of the thing being
     // protected. And the 20s is not a worst case that rarely fires; the
     // dead-holder election measured 10.2s live at the two-client probe, so it
-    // is an ordinary start. **That ruling stands, and J5 obeys it rather than
+    // is an ordinary start. **That ruling stands, and J6 obeys it rather than
     // overturning it**: the pre-arm sits BELOW the acquire, so the election is
     // over before anything is registered — a serve still waiting for a lease
     // still dies to a SIGTERM, and a serve that loses and proxies never arms at
     // all. This paragraph used to end "the residual window is real and worth
     // closing, but only by racing the attach against the shutdown future, which
     // is a design change and is deferred; see I-R2-1's recommendation". That is
-    // what J5 did, at the one `await` where it matters: the startup load inside
+    // what J6 did, at the one `await` where it matters: the startup load inside
     // `build_attach` is raced against the record, so the pre-arm covers no
     // unbounded wait and the immunity is not re-created one `await` down.
     //
@@ -1964,7 +1964,7 @@ async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
 /// argument lets `memory`'s tests drive the real body with
 /// `std::future::pending()` — see `an_abandoned_close_releases_the_lease_through_serve`.
 ///
-/// # J5's pre-arm is deliberately NOT wired in here
+/// # J6's pre-arm is deliberately NOT wired in here
 ///
 /// A third registration now exists in a serve process — [`EarlyShutdown`],
 /// armed at the acquire — and the question it raises is whether the escape
@@ -2459,7 +2459,7 @@ impl Future for HolderShutdown {
 /// registration happens at this call and not at the first poll; see that
 /// function for why that matters and what a lazier spelling would re-open.
 ///
-/// `early` is J5's pre-arm — the registration installed back at the acquire —
+/// `early` is J6's pre-arm — the registration installed back at the acquire —
 /// and it is passed in **alongside** the fresh `shutdown_signal()`, not in
 /// place of it. A signal that landed in the window between the two arming
 /// points is recorded only by `early`; one that lands after is seen by both.
@@ -2480,7 +2480,7 @@ async fn wind_down(
 ) {
     tokio::select! {
         () = signal => {}
-        // J5. Ready on the FIRST poll when a signal already arrived in the
+        // J6. Ready on the FIRST poll when a signal already arrived in the
         // pre-handshake window, so the transport is cancelled before it serves
         // a byte and `close()` still flushes the tail. Nothing downstream
         // distinguishes the two signal arms — this is the same exit, learned
@@ -2510,7 +2510,7 @@ async fn wind_down(
 }
 
 /// The signal registration armed the instant the single-writer lease is taken
-/// (J5), which **only records** that a signal arrived.
+/// (J6), which **only records** that a signal arrived.
 ///
 /// # The window this closes
 ///
@@ -2646,7 +2646,7 @@ impl EarlyShutdown {
 
     /// Whether [`EarlyShutdown::arm`] has run on this handle.
     ///
-    /// The J5 pin that `build_attach` arms on the winning branch **and only**
+    /// The J6 pin that `build_attach` arms on the winning branch **and only**
     /// there: a losing attach must leave this `false`, which is the wedge
     /// invariant read through the signal disposition — a process that never
     /// took the lease never changed how it dies.
@@ -2704,7 +2704,7 @@ impl EarlyShutdown {
 /// seconds — the pre-J2-L2 budget — until JE2E-7; the argument holds at 20s.
 /// See the arming comment in [`serve`] for the trade written out.
 ///
-/// # It is not the *only* registration any more (J5)
+/// # It is not the *only* registration any more (J6)
 ///
 /// This paragraph said "everything before the call site in [`serve`] — the
 /// pre-lease group (the endpoint derivation, `Ledger::open` and its startup
@@ -2720,7 +2720,7 @@ impl EarlyShutdown {
 ///
 /// * the **pre-lease group** and the **election** above the acquire are
 ///   unguarded, deliberately, and stay killable — that is J2-R1-7's ruling and
-///   J5 does not touch it;
+///   J6 does not touch it;
 /// * from the **acquire** onward the process is covered, first by the pre-arm
 ///   and then by this call site, with no gap between them.
 ///
@@ -4121,7 +4121,7 @@ mod tests {
             second.close().await.expect("close B");
         }
 
-        /// **J5** — the observer half of the pre-arm, pinned without a signal.
+        /// **J6** — the observer half of the pre-arm, pinned without a signal.
         ///
         /// The window: `holder_shutdown` arms at the first statement after
         /// `resolve_role` returns, but the lease is taken *inside* it, so a
@@ -4177,7 +4177,7 @@ mod tests {
             );
         }
 
-        /// **J5** — the arming half: `build_attach` arms on the winning branch,
+        /// **J6** — the arming half: `build_attach` arms on the winning branch,
         /// and **only** there.
         ///
         /// Two builds against one store. The first takes the single-writer

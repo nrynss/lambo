@@ -266,10 +266,10 @@ impl Ledger {
     /// anything — the startup line and `serve_builder` sit between it and the
     /// election.
     ///
-    /// "The arming" is two points since J5, and this call is above both: the
+    /// "The arming" is two points since J6, and this call is above both: the
     /// pre-arm at the acquire *inside* `resolve_role`
     /// (`crate::mcp::serve::EarlyShutdown`), and the older one on the far side
-    /// of it. Written as one point until J5, which is the same staleness this
+    /// of it. Written as one point until J6, which is the same staleness this
     /// docstring already carries a scar for — the claim stayed true here only
     /// because the arming moved *earlier*, and a reader checking "is this still
     /// pre-arm?" against the old wording would have been checking a point that
@@ -971,7 +971,7 @@ mod tests {
     /// [`Ledger::open`]'s own docs for what it does cost instead.
     ///
     /// The property matters *more* pre-lease, not less: the wedge now happens
-    /// before the election and before **any** SIGTERM arming — J5's pre-arm at
+    /// before the election and before **any** SIGTERM arming — J6's pre-arm at
     /// the acquire included, since that sits below the election this call is
     /// above — so the shutdown future does not merely go un-polled: it has not
     /// been created, and the signal keeps its default disposition. A `serve` that hangs before it

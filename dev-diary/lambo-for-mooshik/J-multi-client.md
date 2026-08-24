@@ -29,6 +29,7 @@ caller's identity, and `lambo_reserve` is already broken without it. Renumbered.
 | J3 | Writes acknowledged before the embedder — **DONE (`wt/j3`, awaiting review)** | J1 (receipt scoping) |
 | J4 | Lease conflicts leave an artifact | I1 |
 | J5 | Transport defaults and config layering | nothing |
+| J6 | The pre-arm: the lease-to-arming SIGTERM window — **unplanned, found by CI run 32710994512** | J2 (the election it must not deafen) |
 
 J2 and J3 were previously one item. Splitting them ships the outage fix without waiting on
 the write-path change.
@@ -2706,6 +2707,231 @@ drift.
   that are DOGFOOD-rig configuration rather than lambo invariants, and the binary does not
   carry the resolved config path. A placeholder-template emit would be a half-verb, so it
   is documented here instead of scaffolded.
+
+## J6 — The pre-arm: the lease-to-arming SIGTERM window, closed (2026-08-24)
+
+Not a planned task. CI run 32710994512 failed
+`a_pre_handshake_sigterm_still_flushes_the_session_row`
+(`tests/serve_pre_handshake_durability.rs:205`) with
+`ExitStatus(unix_wait_status(15))`. Status 15 is the signal, not an exit code:
+the serve process was **killed by SIGTERM**, so `close()` never ran and the
+write-behind tail — a clean run has `mutations=1` at that point, the
+session-attach record — died with it.
+
+Numbered J6 because J5 is taken (transport defaults and the docs-mirror gate).
+
+### The window, and why it was there
+
+`shutdown_signal()` is armed at `holder_shutdown`, the first statement after
+`resolve_role` returns. The lease, though, is taken *inside* `resolve_role` —
+inside `build_attach`, at the top of the election loop — and the span between the
+two ran under the **default signal disposition**. A SIGTERM landing in it killed
+the process outright.
+
+The span is not empty and it is not only the return path: from the acquire it
+covers the startup load, the daemon / flush / canonization spawns, the
+memory-level `"Memory session attached (daemon + flush + canonization running)"`
+line, the write pipeline, the `Memory` construction, and the two returns. On an
+idle machine that is microseconds of process time. On a loaded runner the process
+can be descheduled anywhere inside it, and CI's `kill -TERM` — itself a
+subprocess spawn, milliseconds of wall clock — lands while it is parked.
+
+**Not a flake and not a workstream-B regression.** B touched `dsn.rs`, `mod.rs`
+and `endpoint.rs` and never `serve.rs`, and the same code passed on the next
+push. This is timing variance against a real hole that three review rounds had
+priced and deliberately accepted:
+
+* **I-R2-1** measured it and narrowed it — it had briefly widened from ~6 µs to
+  ~1.1 ms when `LamboServer::new` moved above the arming — and recorded the
+  residual as accepted, with the recommendation "close it by racing the attach
+  against the shutdown future" deferred as a design change.
+* **J2-R1-7** ruled out the obvious fix, and that ruling is the reason the hole
+  survived: arming above `resolve_role` would cover an election loop that may
+  legitimately run for the whole of `ELECTION_BUDGET` (20 s, and the dead-holder
+  election measured **10.2 s** live at the two-client probe, so it is an ordinary
+  start rather than a worst case). A registration nothing polls is deafness for
+  exactly as long as nothing polls it, so that would buy a ~1 ms durability
+  window with 20 s of unkillable process — four orders of magnitude, spent in a
+  process that holds no lease and no tail while it waits.
+
+The test that caught it caught it **because its matcher is loose on purpose**
+(I-R2-2): two stderr lines contain `"session attached"`, and substring-matching
+fires on the earlier memory-level one, which is emitted from inside the `Memory`
+build right after the acquire. Anchoring on the later serve-level line would
+green CI and un-test the window entirely. The matcher is untouched by this work.
+
+### What changed
+
+`EarlyShutdown` (`src/mcp/serve.rs`), armed from exactly one place: the
+`LeaseOutcome::Acquired` arm of `MemoryBuilder::build_attach`. It calls
+`shutdown_signal()` — eagerly, at the call, which is that function's documented
+contract — and spawns one task that awaits it and sets a `watch<bool>`. That is
+all it does: it **records**. `wind_down` selects the record alongside the fresh
+`shutdown_signal()` that `holder_shutdown` still arms exactly as before, so a
+signal that landed in the window makes the transport's **first poll** of the
+shutdown future ready: transport cancelled before it serves a byte, `close()`
+runs, tail durable, exit 0.
+
+Three properties, and each is why this is not J2-R1-7's trade wearing a hat:
+
+1. **It arms below the acquire, so the election is never covered.** A serve still
+   waiting for a lease has installed nothing and dies to a plain SIGTERM, exactly
+   as J2-R1-7 requires.
+2. **A losing serve never arms at all**, and that falls out of the wedge
+   invariant rather than being a second rule to keep: the hook sits in the
+   `Acquired` arm, so "a proxy never arms" *is* "a proxy never takes the lease".
+   Pinned by `only_the_attach_that_takes_the_lease_arms_the_pre_arm`.
+3. **It covers no unbounded wait.** Arming at the acquire puts one genuinely
+   unbounded `await` under the guard — the startup load, which reads the whole
+   durable session back. A passive flag there would be the same immunity with a
+   *worse* bound (unbounded, not 20 s), so `build_attach` **races** the load
+   against the record and falls into the startup-error path that was already
+   there, which releases the freshly-taken lease. That is strictly better than
+   the bare kill it replaces: a kill left the lease row to lapse at `LEASE_TTL`
+   and wedged the session for that long. Everything under the guard after the
+   load is synchronous, so there is no second place a signal can be parked
+   across.
+
+**The proxy branch was checked and deliberately left alone.** Its equivalent span
+— `resolve_role` returning `Role::Proxy`, the match, and the evaluation of
+`shutdown_signal()` as the argument to `proxy.run(..)` — contains **no `await`**,
+and its own sync line (`"proxying to the session holder"`) is logged from inside
+`run`, already under the registration, so there is no window a test could even
+aim at. Even granting one: a proxy holds no lease, no tail and no graph, so a
+pre-arm would have nothing to save. The one thing a kill there costs is the
+pre-lease ledger lines, and those are already forfeit to any signal during the
+election above, which must stay killable.
+
+### Reproduction — deliberate, not waited for
+
+The race needs a slow runner. Rather than wait for CI to lose it again, the
+window was widened by hand: a temporary probe after the attach log in
+`build_attach`, sleeping `LAMBO_REPRO_ARMING_WINDOW_MS` so the SIGTERM lands
+inside the window on a fast machine. The probe is *after* the test's sync point
+and *before* the arming — the window itself, made visible.
+
+| Run | Probe | Result |
+| --- | --- | --- |
+| `dcc86f6`, no probe | — | green (the race is simply not lost on this machine) |
+| `dcc86f6` + probe | 1500 ms | **10 / 10 RED**, every one `ExitStatus(unix_wait_status(15))` at `serve_pre_handshake_durability.rs:205` — CI's exact line and exact status |
+| fix + probe | 1500 ms | **10 / 10 GREEN** (both tests in the file) |
+| fix + probe | 5000 ms | **5 / 5 GREEN** |
+| fix, probe removed | — | green |
+
+Green with the sleep still injected is the point: the fix **closes** the window
+rather than shrinking it back under the runner's timing.
+
+### Mutation — both halves, separately
+
+| Mutation (probe kept at 1500 ms) | Result |
+| --- | --- |
+| `early.arm()` in the `Acquired` arm made unreachable | **5 / 5 RED**, `unix_wait_status(15)` — the original defect, exactly |
+| the `early.fired()` arm deleted from `wind_down` | **5 / 5 RED**, but *"lambo serve did not exit within 15s of a pre-handshake SIGTERM"* |
+
+The second failure mode is worth recording on its own: with the registration
+installed and nothing observing it, the process **did not die at all**. That is
+J2-R1-7's SIGTERM immunity, reproduced live and arrived at from the other side —
+and it is the argument for why arming and observing have to land together, and
+why the pre-arm records instead of merely registering.
+
+Both reverted.
+
+### Claim-family sweep
+
+`rg 'armed|arming|default disposition|SIGTERM-immune|unkillable|unguarded|pre-handshake'`
+over `src/ tests/ docs/ site/ scripts/ dev-diary/lambo-for-mooshik/`: **209 raw
+hits, 12 in the arming/ordering claim family.** Five were falsified by this
+change, three needed the new fact added, four were checked and left alone. The
+rest are unrelated senses of the word (`daemon/mod.rs`'s armed condition pairs,
+`store/flush.rs`'s retry holds, `graph/derive.rs`, `recall/assemble.rs`), and
+`docs/` and `site/` carry no claim in this family at all.
+
+**Falsified — fixed:**
+
+| Site | What it said |
+| --- | --- |
+| `serve`'s docstring | "a **single**, continuously-live registration". There are two now, and the count is the defect |
+| the arming comment in `serve` | the memory-level attach line "is still followed by a residual **unguarded** window until this arming, exactly as it was pre-I" — that is the window CI died in |
+| the same comment's closing sentence | deferred the fix to "racing the attach against the shutdown future, which is a design change and is deferred" — done, at the startup load |
+| `shutdown_signal`'s docstring | "everything before the call site … and `resolve_role`, **which takes the lease** — is still unguarded". Half false, and the false half is the half that lost data |
+| `Ledger::open` + the `mkfifo` test | both located the arming "on the far side of `resolve_role`". Still above every arming, but stated as a point that no longer exists — the **third** generation of staleness at that exact docstring, after I-R2-1, I-R3-1 and JE2E-6 |
+
+**Added:** the proxy branch now states its own J6 conclusion (no window, no
+pre-arm, and why the wedge invariant is what licenses saying so); `authorize_bind`
+gains a "What J6 changed: nothing here" section, because the pre-lease group is
+now the **pre-arm** group too and stays killable on purpose; `close_bounded_until`
+records why the pre-arm is deliberately *not* wired into the close-phase re-arm
+(the record is latched, so it would abandon the very close it exists to protect —
+the fresh registration is correct precisely because `tokio::signal` does not
+replay to a registration created after delivery, and does not let one
+registration consume a signal from another); and the pre-handshake test's module
+doc records what its loose matcher collected the second time.
+
+**Checked and correct, untouched:** `proxy.rs`'s two arming claims (its own
+`tokio::pin!` at the first dial, unmoved by this), and `memory.rs`'s
+`close_bounded_until` test note.
+
+JE2E-6 found J4 had skipped this sweep and left three sites false, one stale for
+a third generation. The `Ledger::open` row above is that same site, caught by
+running the sweep rather than by the next reviewer.
+
+### Tests
+
+Two unit pins, both of which the mutations above showed to be severable by
+deletion today:
+
+* `a_signal_recorded_before_the_arming_winds_the_serve_down_at_once` — the
+  observe half. Drives the real `wind_down` with `std::future::pending` for the
+  fresh signal, so only the record can complete it, and asserts *both*
+  directions: a holder with no record must **not** wind down (an always-ready arm
+  would exit every healthy serve at startup), and a record set before anything
+  asked completes it at once. Uses a `#[cfg(test)]` `simulate_signal`, so the
+  test binary's own signal disposition is untouched — the same reason
+  `close_bounded_until` takes its re-armed signal as an argument.
+* `only_the_attach_that_takes_the_lease_arms_the_pre_arm` — the arm half, and
+  the wedge invariant read through the signal disposition. Two attaches on one
+  store under distinct agents (the lease token is `agent@host#pid`, so a second
+  attach under the same agent is a refresh, not a refusal): the winner must be
+  armed, the loser must **not** be, and constructing the handle must install
+  nothing.
+
+The subprocess test is unchanged apart from its module doc, and its matcher block
+is byte-identical.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --all-targets -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-cockroach,fixtures -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-postgres -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass |
+| `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass |
+| `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass |
+| `cargo test --features store-cockroach` | **961** passed / 0 failed / 4 ignored (959 at `dcc86f6`) |
+| `cargo test --features store-cockroach,fixtures` | **1021** / 0 / 12 (1019) |
+| `cargo test --features store-postgres` | **948** / 0 / 7 (946) |
+| `cargo test --features store-postgres,fixtures` | **1005** / 0 / 7 (1003) |
+| `cargo test --features store-sqlite,fixtures` | **1086** / 0 / 3 (1084) |
+| `cargo test --no-default-features --features store-cockroach` | **622** / 0 / 0 (622, unchanged — both new tests sit in a `store-memory` + `embed-fixture` module this row does not compile) |
+| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | **53 warnings**, the identical warning *set* as `dcc86f6` — diffed line by line, not just counted |
+
++2 on every row that compiles the two new tests, and both are named above. The
+`--no-default-features` row is flat at 622 for the same reason it always is:
+they live in the `store-memory` + `embed-fixture` module that row excludes.
+
+Three intra-doc links added by this work were de-linked back to plain backticks
+to hold the doc count at 53: two would have been `serve` (public) linking to
+private `EarlyShutdown` / `wind_down`, and one a fifth copy of the pre-existing
+`crate::mcp::serve` function-vs-module ambiguity.
+
+**Repeat runs**, to show no new race was introduced:
+
+| Suite | Result |
+| --- | --- |
+| `tests/serve_pre_handshake_durability.rs` | **20 / 20 green** |
+| `tests/serve_j4_lease_conflicts.rs` | **20 / 20 green** |
 
 ## J E2E round-1 remediation
 
