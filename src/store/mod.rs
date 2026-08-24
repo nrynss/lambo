@@ -885,9 +885,11 @@ impl StoreConfig {
     /// its DSN from a variable named after the other engine: on a machine whose
     /// `.env` carries a production Cockroach DSN, every verb of a Postgres
     /// config pointed at that cluster. Meanwhile `LAMBO_POSTGRES_DSN` existed
-    /// as [`crate::store::pg::dialect::Dialect::DSN_ENV`], was named in the
-    /// missing-DSN error an operator is told to act on, and was read by nothing
-    /// in configuration resolution.
+    /// as the Postgres dialect's `DSN_ENV` associated constant (named rather
+    /// than linked: `store::pg::dialect` is a private module, and a doc link
+    /// into one is the warning class E2E-F7 closed and B-E2E-R2-6 re-closed),
+    /// was named in the missing-DSN error an operator is told to act on, and
+    /// was read by nothing in configuration resolution.
     ///
     /// So each DSN-bearing kind now reads its own variable, and the error
     /// message names a variable that works.
@@ -939,8 +941,9 @@ impl StoreConfig {
     /// guessing which one the operator meant is how `lambo provision` came to
     /// issue DDL against a production cluster the config never mentioned.
     ///
-    /// "Different databases" is measured by
-    /// [`crate::store::dsn::canonical_store_dsn`], not by string equality, so
+    /// "Different databases" is measured by `canonical_store_dsn` in
+    /// `src/store/dsn.rs` (private, so named rather than linked from this
+    /// public item: E2E-F7's class again), not by string equality, so
     /// the common secret-handling shape keeps working: a file DSN that names
     /// the database and an environment DSN that adds the password are the same
     /// database, the environment's spelling wins, and nothing is refused. Two
