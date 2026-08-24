@@ -52,9 +52,17 @@ Per phase (B0, B1, B2, B3, B4):
 4. Back to 2 with round R+1 until a round returns APPROVE with zero residue.
 5. Orchestrator commits and pushes the phase.
 
-## Gate set (post-remediation, 2026-08-24)
+## Gate set (post-remediation round 2, 2026-08-24)
 
-Every row below was run on the remediated tree. **All green.**
+Every row below was run on the round-2 remediated tree, on the MacBook, against the
+pinned container. **All green.** Suite numbers are the sum across each invocation's
+test binaries (lib + bins + integration + doctests), which is how the round-1 table
+counted and how the round-2 review reconciled it.
+
+**The doc row is standing and may not be dropped.** B0-R1-2 added it because it is the
+only gate that sees private-item doc rot; the round-1 remediation table omitted it and
+shipped two new warnings of the exact class it had just closed (E2E-F7, then
+B-E2E-R2-6). Every future round reproduces this table in full, doc row included.
 
 | Gate | Result |
 | --- | --- |
@@ -65,13 +73,21 @@ Every row below was run on the remediated tree. **All green.**
 | `cargo clippy --all-targets --features store-postgres,fixtures -- -D warnings` | pass (added by F8) |
 | `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
 | `cargo clippy --all-targets --features ship,fixtures -- -D warnings` | pass (was RED, E2E-F1) |
-| `cargo test --features store-cockroach` | 947 passed / 0 failed / 4 ignored |
-| `cargo test --features store-cockroach,fixtures` | 1007 passed / 0 failed / 12 ignored |
-| `cargo test --features store-postgres` | 934 passed / 0 failed / 7 ignored |
-| `cargo test --features store-postgres,fixtures` | 991 passed / 0 failed / 7 ignored |
-| `cargo test --features store-sqlite,fixtures` | 1072 passed / 0 failed / 3 ignored |
-| `cargo test --no-default-features --features store-cockroach` | 610 passed / 0 failed / 0 ignored |
-| live Postgres, `-- --ignored` against the pinned container | 7 passed / 0 failed |
+| `cargo test --features store-cockroach` | 950 passed / 0 failed / 4 ignored (was 947) |
+| `cargo test --features store-cockroach,fixtures` | 1010 passed / 0 failed / 12 ignored (was 1007) |
+| `cargo test --features store-postgres` | 937 passed / 0 failed / 7 ignored (was 934) |
+| `cargo test --features store-postgres,fixtures` | 994 passed / 0 failed / 7 ignored (was 991) |
+| `cargo test --features store-sqlite,fixtures` | 1076 passed / 0 failed / 3 ignored (was 1072) |
+| `cargo test --no-default-features --features store-cockroach` | 613 passed / 0 failed / 0 ignored (was 610) |
+| `cargo doc --no-deps --document-private-items --features store-cockroach,fixtures` | **53 warnings** (round 1: 54, round 2 review measured 55) |
+| `cargo doc --no-deps --document-private-items --features store-postgres,store-cockroach,store-sqlite,fixtures` | **53 warnings** (round 2 review measured 55) |
+| live Postgres, `-- --ignored` against the pinned container | 7 passed / 0 failed, 20.2 s |
+
+The +3 across every suite is round 2's own three always-compiled tests
+(`provision_script_prefers_the_pushed_dsn_over_dotenv`,
+`an_unparseable_dsn_still_has_its_password_stripped`,
+`a_parseable_dsn_has_its_password_stripped`); `store-sqlite,fixtures` is +4 because
+`vector_candidates_refuse_a_zero_norm_probe` needs that adapter.
 
 The live row is the one B's container decision bought: `fencing_refuses_stale_write_and_upserts_replay`,
 `live_schema_width_refuses_a_config_that_disagrees`, `explain_recall_uses_hnsw`,
