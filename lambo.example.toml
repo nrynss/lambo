@@ -28,7 +28,7 @@ kind = "memory"
 # vector_dim = 1024
 
 [embedder]
-# bge_m3 | bedrock | fixture
+# bge_m3 | gemini | candle | bedrock | fixture
 kind = "bge_m3"
 # Expected embedder output width (default for BGE demos). Not a global product law:
 # stores that persist vectors expose GraphStore::vector_dimensions(); process resolve

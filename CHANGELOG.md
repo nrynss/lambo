@@ -33,13 +33,22 @@
 - `src/gcp_auth.rs`: one Google OAuth path for every adapter that authenticates
   as a Google principal, gated `embed-gemini` OR `store-postgres`. Handles both
   credential kinds (service-account key by `jwt-bearer`, authorized-user ADC by
-  `refresh_token`) and mints for the caller's own scope, so a Cloud SQL login and
-  a Vertex call share an identity without sharing authority.
+  `refresh_token`) and asks for the caller's own scope on both grants (the signed
+  `scope` claim on one, the `scope` form field on the other), so a Cloud SQL login
+  and a Vertex call share an identity without sharing authority. On an ADC the ask
+  can only narrow what `gcloud auth application-default login` granted; asking for
+  more is refused as `invalid_scope` by the token endpoint rather than later by the
+  database.
+- The Gemini embedder resolves credentials from `GCP_LAMBO_CREDENTIALS` before
+  `GOOGLE_APPLICATION_CREDENTIALS`, the chain the Postgres store already used, so
+  one exported variable names one identity for both.
 - Cloud SQL IAM database authentication for `store-postgres`, opted into with
-  `LAMBO_POSTGRES_IAM`: the connection password is an OAuth token minted from the
-  shared credential file, and the pool is rebuilt when that token expires. The
-  opt-in is PostgreSQL only (`Dialect::SUPPORTS_CLOUD_SQL_IAM_AUTH`), so a build
-  carrying both adapters never hands a Cloud SQL token to a Cockroach cluster.
+  `LAMBO_POSTGRES_IAM` set to a **non-empty** value (empty is the ordinary password
+  path, as everywhere else lambo overlays the environment): the connection password
+  is an OAuth token minted from the shared credential file, and the pool is rebuilt
+  when that token expires. The opt-in is PostgreSQL only
+  (`Dialect::SUPPORTS_CLOUD_SQL_IAM_AUTH`), so a build carrying both adapters never
+  hands a Cloud SQL token to a Cockroach cluster.
 - `scripts/cloudsql-allowlist.sh`: add the running host's egress IP to a Cloud SQL
   instance's authorized networks, idempotently, preserving entries it did not add.
 - Released binaries (`ship`) now carry `store-postgres` and `embed-gemini`, so a

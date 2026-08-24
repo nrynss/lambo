@@ -1447,12 +1447,8 @@ impl<D: Dialect> PgStore<D> {
                 .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
             let client = crate::gcp_auth::build_client()
                 .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
-            let source = crate::gcp_auth::GoogleOAuthTokenSource::new(
-                creds,
-                client,
-                crate::gcp_auth::SCOPES_CLOUD_SQL_LOGIN,
-            )
-            .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
+            let source = crate::gcp_auth::GoogleOAuthTokenSource::for_cloud_sql(creds, client)
+                .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
             *guard = Some(IamAuth { source, live: None });
         }
         let state = guard.as_mut().expect("initialised directly above");

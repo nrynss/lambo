@@ -912,13 +912,6 @@ mod tests {
     /// mock OAuth endpoint's hit count is the pin. One mint for the first pool, still one
     /// while the token is live, and a second the moment it lapses. Before this, the token
     /// was minted once at pool creation and a `serve` outlived it.
-    /// The IAM token is a password with an expiry, so the pool that carries it has one too.
-    ///
-    /// Offline, and it never connects: `connect_lazy_with` opens nothing, so a DSN pointing
-    /// at a host that does not exist still exercises the whole mint-and-rotate path. The
-    /// mock OAuth endpoint's hit count is the pin. One mint for the first pool, still one
-    /// while the token is live, and a second the moment it lapses. Before this, the token
-    /// was minted once at pool creation and a `serve` outlived it.
     ///
     /// The env lock is held only across the **synchronous** construction (spec §6.4: no
     /// lock across an await), which is exactly the window in which the opt-in is read.
@@ -969,6 +962,199 @@ mod tests {
         std::fs::remove_file(&creds).ok();
     }
 
+    /// The minted token is what the connection presents as its password, and a rotated
+    /// pool presents the NEW one.
+    ///
+    /// `the_iam_pool_is_rebuilt_when_its_token_expires` counts mints at the OAuth endpoint
+    /// and never observes what the pool does with the result: deleting `.password(&token)`
+    /// from `iam_pool`'s connect options left the entire offline suite green. That is the
+    /// one line the hosted tier rests on, so it is pinned here against a server that
+    /// speaks just enough PostgreSQL v3 to answer "what password did the client send?".
+    ///
+    /// Offline and cheap: a `TcpListener` on an ephemeral port, `sslmode=disable` so no TLS
+    /// handshake is involved, and `AuthenticationCleartextPassword` so the password arrives
+    /// verbatim rather than hashed. The login is then refused with SQLSTATE 28P01, which
+    /// sqlx does NOT classify transient-in-connect (`sqlx-postgres` 0.8.6 lists only 53300
+    /// and 57P03), so `acquire()` returns at once instead of retrying to its 30s deadline.
+    ///
+    /// Both halves are asserted from one run because they are one property: the OAuth mock
+    /// hands out `tok-1`, the first connection must present `tok-1`, and after the token
+    /// lapses the replacement pool's connection must present `tok-2`. A rotation that
+    /// rebuilt the pool but kept the old password would pass the cadence pin and fail here.
+    #[tokio::test]
+    async fn the_minted_token_is_the_connection_password_across_a_rotation() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        // 62s leaves a 2s TTL after the token source's 60s refresh margin.
+        let mut mint1 = server.mock(|when, then| {
+            // L1-R2-1: the store's mint must carry the DATABASE LOGIN scope, which on the
+            // service-account grant lives inside the signed assertion rather than in a form
+            // field, so matching needs the JWT opened. A store that asked for Vertex's
+            // narrower scope matches no mock here and fails on the 404.
+            when.method(POST)
+                .path("/token")
+                .matches(assertion_asks_for_the_sql_login_scope);
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 62 }));
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the pin server");
+        let addr = listener.local_addr().expect("pin server address");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let pin_server = tokio::spawn(async move {
+            loop {
+                match capture_startup_password(&listener).await {
+                    Ok(password) => {
+                        if tx.send(password).is_err() {
+                            return; // the test finished
+                        }
+                    }
+                    Err(e) => eprintln!("pin server: {e}"),
+                }
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("lambo-iam-pw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let creds = dir.join("sa.json");
+        std::fs::write(
+            &creds,
+            serde_json::json!({
+                "type": "service_account",
+                "client_email": "sa@example.com",
+                "private_key": crate::gcp_auth::TEST_RSA_PRIVATE_KEY_PEM,
+                "project_id": "mooshik",
+                "token_uri": format!("{}/token", server.base_url()),
+            })
+            .to_string(),
+        )
+        .expect("write credentials");
+
+        // No password in the DSN: the token is the only thing that can become one, so a
+        // captured `tok-*` cannot have come from anywhere else.
+        let dsn = format!("postgres://cachy-nryn%40mooshik.iam@{addr}/lambo?sslmode=disable");
+        let store = with_iam_env(Some(&creds), || {
+            PostgresStore::new(StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some(dsn),
+                path: None,
+                vector_dim: Some(8),
+            })
+            .expect("construct")
+        });
+
+        let pool = store.pool().await.expect("first pool");
+        let _ = pool.acquire().await; // always refused; the pin is what was presented
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the pool must actually open a connection")
+            .expect("pin server channel closed");
+        assert_eq!(
+            first, "tok-1",
+            "the minted token must be the connection password"
+        );
+
+        mint1.delete();
+        let mint2 = server.mock(|when, then| {
+            when.method(POST)
+                .path("/token")
+                .matches(assertion_asks_for_the_sql_login_scope);
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok-2", "expires_in": 3600 }));
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+        let rotated = store.pool().await.expect("rotated pool");
+        mint2.assert_hits(1);
+        let _ = rotated.acquire().await;
+        let second = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the rotated pool must open a connection")
+            .expect("pin server channel closed");
+        assert_eq!(
+            second, "tok-2",
+            "the rotated pool must present the freshly minted token, not the lapsed one"
+        );
+
+        pin_server.abort();
+        std::fs::remove_file(&creds).ok();
+    }
+
+    /// Speak just enough of the PostgreSQL v3 startup protocol to learn what the client
+    /// presents as its password, then refuse the login.
+    ///
+    /// Frame by frame, per the protocol's message formats:
+    ///   * the first frame is unprefixed (`Int32` length, then the body). Length 8 with
+    ///     body `Int32(80877103)` is an SSLRequest; `sslmode=disable` means sqlx does not
+    ///     send one (`sqlx-postgres` 0.8.6 `connection/tls.rs:25` returns the plain socket
+    ///     for `Disable`), but answering `N` and reading again is two lines of insurance
+    ///     against this pin turning into a hang if a default ever changes;
+    ///   * the StartupMessage's contents do not matter here, only that it arrives;
+    ///   * `R` + `Int32(8)` + `Int32(3)` is AuthenticationCleartextPassword, chosen because
+    ///     md5 or SCRAM would hash the very thing being asserted;
+    ///   * the client answers `p` + `Int32` length + the NUL-terminated password;
+    ///   * `E` (ErrorResponse, SQLSTATE 28P01) ends it deterministically. Closing the
+    ///     socket would also work, but sqlx would report it as a broken pipe rather than a
+    ///     refusal, and 28P01 is what a real Cloud SQL refusal looks like.
+    async fn capture_startup_password(
+        listener: &tokio::net::TcpListener,
+    ) -> std::io::Result<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut sock, _) = listener.accept().await?;
+        let mut len_buf = [0u8; 4];
+        sock.read_exact(&mut len_buf).await?;
+        let mut body = vec![0u8; (i32::from_be_bytes(len_buf) as usize).saturating_sub(4)];
+        sock.read_exact(&mut body).await?;
+        let is_ssl_request = body.len() == 4
+            && i32::from_be_bytes([body[0], body[1], body[2], body[3]]) == 80_877_103;
+        if is_ssl_request {
+            sock.write_all(b"N").await?;
+            sock.read_exact(&mut len_buf).await?;
+            body = vec![0u8; (i32::from_be_bytes(len_buf) as usize).saturating_sub(4)];
+            sock.read_exact(&mut body).await?;
+        }
+
+        sock.write_all(b"R").await?;
+        sock.write_all(&8i32.to_be_bytes()).await?;
+        sock.write_all(&3i32.to_be_bytes()).await?;
+        sock.flush().await?;
+
+        let mut tag = [0u8; 1];
+        sock.read_exact(&mut tag).await?;
+        if tag[0] != b'p' {
+            return Err(std::io::Error::other(format!(
+                "expected a PasswordMessage, got frame tag {:?}",
+                tag[0] as char
+            )));
+        }
+        sock.read_exact(&mut len_buf).await?;
+        let mut secret = vec![0u8; (i32::from_be_bytes(len_buf) as usize).saturating_sub(4)];
+        sock.read_exact(&mut secret).await?;
+        let password =
+            String::from_utf8_lossy(secret.strip_suffix(&[0u8]).unwrap_or(&secret)).into_owned();
+
+        let mut fields = Vec::new();
+        for (tag, value) in [
+            (b'S', "FATAL"),
+            (b'V', "FATAL"),
+            (b'C', "28P01"),
+            (b'M', "pin server: password captured, login refused"),
+        ] {
+            fields.push(tag);
+            fields.extend_from_slice(value.as_bytes());
+            fields.push(0);
+        }
+        fields.push(0);
+        sock.write_all(b"E").await?;
+        sock.write_all(&((fields.len() + 4) as i32).to_be_bytes())
+            .await?;
+        sock.write_all(&fields).await?;
+        sock.flush().await?;
+        Ok(password)
+    }
+
     /// Opting in without a credential file is named, not a panic and not a silent
     /// password-path fallback: a deployment that thinks it is authenticating as the shared
     /// service account must never quietly authenticate as something else.
@@ -988,16 +1174,97 @@ mod tests {
         assert!(err.contains("GCP_LAMBO_CREDENTIALS"), "{err}");
     }
 
+    /// `LAMBO_POSTGRES_IAM=` (set, but empty) is the ordinary password path, deliberately.
+    ///
+    /// The pre-change gate was `var_os(..).is_some()`, under which any value at all,
+    /// empty included, selected IAM. `iam_auth_requested` now requires a non-empty value,
+    /// which is this repo's env-overlay convention throughout (`overlay_env` treats an
+    /// empty value as "not set" rather than as a value), so `LAMBO_POSTGRES_IAM=` in a
+    /// profile or a `.env` placeholder no longer turns a password deployment into a
+    /// fail-closed IAM refusal.
+    ///
+    /// A security-relevant opt-in that can turn itself off is worth pinning rather than
+    /// leaving to a reader of `is_some_and`, so both halves are asserted here: empty gets
+    /// a working lazy pool with no credential demand, non-empty gets the named refusal.
+    #[tokio::test]
+    async fn an_empty_iam_opt_in_means_the_password_path() {
+        let dsn = "postgres://u:pw@127.0.0.1:1/lambo";
+        let cfg = || StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some(dsn.to_string()),
+            path: None,
+            vector_dim: Some(8),
+        };
+        let empty = with_iam_env_value("", None, || PostgresStore::new(cfg()).expect("construct"));
+        empty
+            .pool()
+            .await
+            .expect("an empty opt-in must take the password path, not demand a credential");
+
+        let set = with_iam_env_value("1", None, || PostgresStore::new(cfg()).expect("construct"));
+        let err = set
+            .pool()
+            .await
+            .expect_err("a non-empty opt-in must still engage IAM")
+            .to_string();
+        assert!(err.contains("LAMBO_POSTGRES_IAM"), "{err}");
+    }
+
+    /// True when the token request's signed assertion asks for `sqlservice.login`.
+    ///
+    /// The service-account grant carries its scope inside the JWT, so a substring match on
+    /// the form body would pass on anything. This opens the assertion with the test key pair
+    /// and reads the claim, which is the only way to see what the store actually asked for.
+    fn assertion_asks_for_the_sql_login_scope(req: &httpmock::prelude::HttpMockRequest) -> bool {
+        let Some(body) = req.body.as_ref() else {
+            return false;
+        };
+        let body = String::from_utf8_lossy(body);
+        let Some(assertion) = body.split('&').find_map(|kv| kv.strip_prefix("assertion=")) else {
+            return false;
+        };
+        // Form encoding turns the JWT's dots and base64url payload into escapes.
+        let assertion = assertion
+            .replace("%2E", ".")
+            .replace("%2F", "/")
+            .replace("%2B", "+");
+        let key = jsonwebtoken::DecodingKey::from_rsa_pem(
+            crate::gcp_auth::TEST_RSA_PUBLIC_KEY_PEM.as_bytes(),
+        )
+        .expect("test public key");
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.validate_aud = false;
+        validation.set_required_spec_claims(&["iss", "exp"]);
+        match jsonwebtoken::decode::<serde_json::Value>(&assertion, &key, &validation) {
+            Ok(data) => data
+                .claims
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("sqlservice.login")),
+            Err(_) => false,
+        }
+    }
+
     /// Run `build` with the IAM opt-in set (and `credentials` pointing where the caller
     /// says, or nowhere), restoring the environment before returning. Synchronous by
     /// design: the store reads the opt-in during construction, so the lock never has to
     /// span an await.
     fn with_iam_env<T>(credentials: Option<&std::path::Path>, build: impl FnOnce() -> T) -> T {
+        with_iam_env_value("1", credentials, build)
+    }
+
+    /// [`with_iam_env`] with the opt-in's **value** under the caller's control, for the
+    /// tests that pin what an empty value means.
+    fn with_iam_env_value<T>(
+        opt_in: &str,
+        credentials: Option<&std::path::Path>,
+        build: impl FnOnce() -> T,
+    ) -> T {
         let _g = crate::test_util::env_lock();
         let prev_iam = std::env::var_os("LAMBO_POSTGRES_IAM");
         let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
         let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-        std::env::set_var("LAMBO_POSTGRES_IAM", "1");
+        std::env::set_var("LAMBO_POSTGRES_IAM", opt_in);
         match credentials {
             Some(path) => std::env::set_var("GCP_LAMBO_CREDENTIALS", path),
             None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),

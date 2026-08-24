@@ -19,9 +19,23 @@
 //! authorized-user ADC file uses the `refresh_token` grant. Either way the caller gets a
 //! Bearer token cached until roughly a minute before `expires_in`.
 //!
-//! **Scopes are the caller's.** Vertex wants `cloud-platform`; a Cloud SQL IAM login wants
-//! `cloud-platform` plus `sqlservice.login`. The token source takes the scope string rather
-//! than assuming one, so neither consumer silently borrows the other's authority.
+//! **Scopes are the caller's, on both grants.** Vertex wants `cloud-platform`; a Cloud SQL
+//! IAM login wants `cloud-platform` plus `sqlservice.login`. The token source takes the
+//! scope string rather than assuming one, and sends it on the wire either way: as the
+//! signed `scope` claim in the JWT assertion, and as a `scope` form field on the
+//! `refresh_token` grant (RFC 6749 section 6, where it is a **narrowing** request). So
+//! neither consumer silently borrows the other's authority.
+//!
+//! The two grants differ in what a scope can reach, and the difference is the operator's
+//! to know. A service-account key can ask for any scope the SA's IAM roles allow. An
+//! authorized-user ADC can only ask for a subset of what it was granted at
+//! `gcloud auth application-default login` time; asking for more is answered
+//! `invalid_scope` by the token endpoint, which this module classifies
+//! [`GoogleAuthError::Backend`]. That is the loud failure worth having: an ADC minted
+//! without `sqlservice.login` fails at the token endpoint, naming the scope, instead of
+//! being refused later by Postgres as opaque authentication noise. Mint one with
+//! `gcloud auth application-default login --scopes=<cloud-platform>,<sqlservice.login>`
+//! when the default set does not carry it.
 //!
 //! **Error classification is preserved across both consumers.** Transport failures are
 //! [`GoogleAuthError::Unavailable`] (the caller may degrade); a non-2xx from the token
@@ -142,10 +156,19 @@ struct AuthorizedUserJson {
 ///
 /// `GCP_LAMBO_CREDENTIALS` first so a deployment can point lambo at one identity without
 /// disturbing whatever `GOOGLE_APPLICATION_CREDENTIALS` means to the rest of the machine.
+///
+/// **An empty value is an absent value**, the same rule `Config::overlay_env` applies
+/// everywhere else: `GCP_LAMBO_CREDENTIALS=` in a shell profile must not shadow a working
+/// `GOOGLE_APPLICATION_CREDENTIALS` and leave the caller refusing with a nameless path.
 pub fn credentials_path_from_env() -> Option<PathBuf> {
-    std::env::var_os("GCP_LAMBO_CREDENTIALS")
-        .or_else(|| std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS"))
+    non_empty_env("GCP_LAMBO_CREDENTIALS")
+        .or_else(|| non_empty_env("GOOGLE_APPLICATION_CREDENTIALS"))
         .map(PathBuf::from)
+}
+
+/// An environment variable's value, treating empty as unset.
+fn non_empty_env(var: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(var).filter(|v| !v.is_empty())
 }
 
 /// Read and parse a Google credentials file (service-account key or authorized-user ADC).
@@ -253,9 +276,39 @@ pub struct GoogleOAuthTokenSource {
 }
 
 impl GoogleOAuthTokenSource {
-    /// Build a token source for `scope` (see [`SCOPE_CLOUD_PLATFORM`],
-    /// [`SCOPES_CLOUD_SQL_LOGIN`]). No network is touched until the first token is asked
-    /// for.
+    /// A token source for **Vertex**: the cloud-platform scope and nothing wider.
+    ///
+    /// Callers name the consumer rather than the scope so a scope cannot be got wrong at a
+    /// call site: getting it wrong now means editing this function, which
+    /// `vertex_asks_for_cloud_platform_only` pins.
+    pub fn for_vertex(
+        creds: GoogleCredentials,
+        client: reqwest::Client,
+    ) -> Result<Self, GoogleAuthError> {
+        Self::new(creds, client, SCOPE_CLOUD_PLATFORM)
+    }
+
+    /// A token source for a **Cloud SQL IAM database login**: cloud-platform plus
+    /// `sqlservice.login`, which is the scope the login itself requires. See
+    /// [`Self::for_vertex`] for why this is a named constructor.
+    pub fn for_cloud_sql(
+        creds: GoogleCredentials,
+        client: reqwest::Client,
+    ) -> Result<Self, GoogleAuthError> {
+        Self::new(creds, client, SCOPES_CLOUD_SQL_LOGIN)
+    }
+
+    /// The scope this source asks for. Since the refresh grant sends it as a **narrowing**
+    /// request, a source that asks for more than its credential was granted fails at the
+    /// token endpoint with `invalid_scope`, which is why the value is worth asserting.
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// Build a token source for an explicit `scope` (see [`SCOPE_CLOUD_PLATFORM`],
+    /// [`SCOPES_CLOUD_SQL_LOGIN`]). Prefer [`Self::for_vertex`] or [`Self::for_cloud_sql`];
+    /// this stays for tests and for a consumer neither of those describes. No network is
+    /// touched until the first token is asked for.
     pub fn new(
         creds: GoogleCredentials,
         client: reqwest::Client,
@@ -342,6 +395,15 @@ impl GoogleOAuthTokenSource {
                 ("client_id", client_id.clone()),
                 ("client_secret", client_secret.clone()),
                 ("refresh_token", refresh_token.clone()),
+                // RFC 6749 section 6: `scope` on a refresh grant is a **narrowing**
+                // request, and must be a subset of what the refresh token was granted.
+                // Sending it is what makes the caller's scope real on this grant rather
+                // than merely documented: ask for more than was granted and Google
+                // answers `invalid_scope` at the token endpoint, which this module
+                // classifies `Backend` and the operator sees immediately. Omit it and an
+                // ADC minted without `sqlservice.login` would sail past here and be
+                // refused later, at the database, as opaque authentication noise.
+                ("scope", self.scope.clone()),
             ],
         };
         let resp = self
@@ -500,6 +562,91 @@ mod tests {
         assert!(data.claims.scope.contains(SCOPE_CLOUD_PLATFORM));
     }
 
+    /// L1-R2-1. The scope each consumer asks for is a property of the named constructor,
+    /// not of a string typed at a call site. Both call sites go through these, so swapping
+    /// the two scopes is a one-line change these two tests catch.
+    #[test]
+    fn vertex_asks_for_cloud_platform_only() {
+        let src = GoogleOAuthTokenSource::for_vertex(
+            sample_credentials(DEFAULT_TOKEN_URI),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        assert_eq!(src.scope(), SCOPE_CLOUD_PLATFORM);
+        assert!(
+            !src.scope().contains("sqlservice.login"),
+            "Vertex must not carry the database login scope: {:?}",
+            src.scope()
+        );
+    }
+
+    #[test]
+    fn a_cloud_sql_login_asks_for_the_database_login_scope() {
+        let src = GoogleOAuthTokenSource::for_cloud_sql(
+            sample_credentials(DEFAULT_TOKEN_URI),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        assert!(
+            src.scope().contains(SCOPE_SQL_LOGIN),
+            "a Cloud SQL IAM login without sqlservice.login is refused by the database: {:?}",
+            src.scope()
+        );
+        assert!(
+            src.scope().contains(SCOPE_CLOUD_PLATFORM),
+            "{:?}",
+            src.scope()
+        );
+    }
+
+    /// L1-R2-2 and L1-R2-3. Precedence is only meaningful when both variables are set, and
+    /// an empty value is an absent value: `GCP_LAMBO_CREDENTIALS=` left in a shell profile
+    /// must not shadow a working `GOOGLE_APPLICATION_CREDENTIALS`.
+    #[test]
+    fn the_shared_variable_wins_but_an_empty_one_does_not_shadow() {
+        let _g = crate::test_util::env_lock();
+        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
+        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
+
+        std::env::set_var("GCP_LAMBO_CREDENTIALS", "/shared/creds.json");
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/adc/creds.json");
+        let both = credentials_path_from_env();
+
+        std::env::set_var("GCP_LAMBO_CREDENTIALS", "");
+        let shared_empty = credentials_path_from_env();
+
+        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+        let shared_unset = credentials_path_from_env();
+
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "");
+        let both_empty = credentials_path_from_env();
+
+        match prev_gcp {
+            Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
+            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
+        }
+        match prev_adc {
+            Some(v) => std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v),
+            None => std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS"),
+        }
+
+        assert_eq!(
+            both.as_deref(),
+            Some(std::path::Path::new("/shared/creds.json")),
+            "the shared variable outranks the Google-standard one when both are set"
+        );
+        assert_eq!(
+            shared_empty.as_deref(),
+            Some(std::path::Path::new("/adc/creds.json")),
+            "an empty shared variable must not shadow a working one"
+        );
+        assert_eq!(
+            shared_unset.as_deref(),
+            Some(std::path::Path::new("/adc/creds.json"))
+        );
+        assert_eq!(both_empty, None, "two empty values name no credential file");
+    }
+
     #[tokio::test]
     async fn exchanges_jwt_for_access_token_and_caches() {
         let server = MockServer::start();
@@ -603,6 +750,65 @@ mod tests {
         assert_eq!(src.access_token().await.unwrap(), "tok-au");
         assert_eq!(src.access_token().await.unwrap(), "tok-au");
         mock.assert_hits(1); // second call hits the cache
+    }
+
+    /// Form-encoded scope values, as `reqwest`'s `.form()` writes them: `:` and `/` are
+    /// percent-encoded and the separating space becomes `+`. Spelled out rather than
+    /// computed so the test states what is on the wire instead of restating the code.
+    const CLOUD_PLATFORM_FORM: &str = "https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform";
+    const SQL_LOGIN_FORM: &str = "https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fsqlservice.login";
+
+    /// The scope reaches the wire on the **refresh-token** grant too, not only in the
+    /// service-account JWT's signed claim.
+    ///
+    /// Without this, `GoogleOAuthTokenSource`'s per-caller scope was true of one grant
+    /// and inert on the other, so an authorized-user ADC handed both consumers the same
+    /// token carrying whatever the ADC happened to be granted. Sending it makes the ask
+    /// explicit: RFC 6749 section 6 treats `scope` on a refresh grant as a narrowing
+    /// request, and Google answers `invalid_scope` when the scope was never granted, so
+    /// a Cloud SQL login fails at the token endpoint naming the scope rather than at the
+    /// database as opaque authentication noise.
+    ///
+    /// The whole body is asserted, not a fragment, and both callers are exercised: a
+    /// `scope` hardcoded to one consumer's constant would pass one half and fail the
+    /// other. The body is deterministic because the parameter vector is built in order.
+    #[tokio::test]
+    async fn the_callers_scope_is_sent_on_the_refresh_grant() {
+        let server = MockServer::start();
+        let grant = "grant_type=refresh_token&client_id=client-1&client_secret=secret-1\
+                     &refresh_token=refresh-1";
+        let sql = server.mock(|when, then| {
+            when.method(POST).path("/sql").body(format!(
+                "{grant}&scope={CLOUD_PLATFORM_FORM}+{SQL_LOGIN_FORM}"
+            ));
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok-sql", "expires_in": 3600 }));
+        });
+        let vertex = server.mock(|when, then| {
+            when.method(POST)
+                .path("/vertex")
+                .body(format!("{grant}&scope={CLOUD_PLATFORM_FORM}"));
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok-vertex", "expires_in": 3600 }));
+        });
+
+        let mut store_side = GoogleOAuthTokenSource::new(
+            sample_authorized_user(&format!("{}/sql", server.base_url())),
+            reqwest::Client::new(),
+            SCOPES_CLOUD_SQL_LOGIN,
+        )
+        .unwrap();
+        assert_eq!(store_side.access_token().await.unwrap(), "tok-sql");
+        sql.assert_hits(1);
+
+        let mut embedder_side = GoogleOAuthTokenSource::new(
+            sample_authorized_user(&format!("{}/vertex", server.base_url())),
+            reqwest::Client::new(),
+            SCOPE_CLOUD_PLATFORM,
+        )
+        .unwrap();
+        assert_eq!(embedder_side.access_token().await.unwrap(), "tok-vertex");
+        vertex.assert_hits(1);
     }
 
     /// The regression this consolidation exists for: an authorized-user ADC file is a

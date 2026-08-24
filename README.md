@@ -134,10 +134,10 @@ To run it for real, write a `lambo.toml` that picks a store and an embedder.
 ```toml
 # lambo.toml
 [store]
-kind = "memory"     # memory | sqlite | cockroach
+kind = "memory"     # memory | sqlite | postgres | cockroach
 
 [embedder]
-kind = "fixture"    # fixture | bge_m3
+kind = "fixture"    # fixture | bge_m3 | gemini
 dim = 1024
 ```
 

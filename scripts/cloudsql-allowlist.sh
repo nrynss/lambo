@@ -36,15 +36,23 @@ MODE="add"
 DRY_RUN=0
 IP=""
 
+# A value-taking flag at the end of the line used to set the variable empty, shift twice,
+# and die from the second shift with no message. Say what is missing instead.
+need_value() { # $1 = flag, $2 = remaining argument count
+    [ "$2" -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --list) MODE="list" ;;
         --remove) MODE="remove" ;;
         --dry-run) DRY_RUN=1 ;;
-        --ip) IP="${2:-}"; shift ;;
-        --instance) INSTANCE="${2:-}"; shift ;;
-        --project) PROJECT="${2:-}"; shift ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        --ip) need_value --ip $#; IP="$2"; shift ;;
+        --instance) need_value --instance $#; INSTANCE="$2"; shift ;;
+        --project) need_value --project $#; PROJECT="$2"; shift ;;
+        # The header block, however long it grows: a hardcoded line range goes stale
+        # silently and this one had, printing `set -euo pipefail` as help text.
+        -h|--help) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -57,7 +65,11 @@ current="$(gcloud sql instances describe "$INSTANCE" --project "$PROJECT" \
 
 if [ "$MODE" = "list" ]; then
     echo "authorized networks on ${PROJECT}/${INSTANCE}:"
-    echo "$current" | sed 's/^/  /'
+    if [ -z "$current" ]; then
+        echo "  (none: the allowlist is empty, so no machine can reach the instance)"
+    else
+        echo "$current" | sed 's/^/  /'
+    fi
     exit 0
 fi
 
@@ -87,17 +99,17 @@ echo "current:  $(echo "$current" | paste -sd, -)"
 echo "target:   ${CIDR} (${MODE})"
 
 if [ "$MODE" = "add" ]; then
-    if echo "$current" | grep -qx "$CIDR"; then
+    if echo "$current" | grep -qxF "$CIDR"; then
         echo "already allowlisted; nothing to do"
         exit 0
     fi
     desired="$(printf '%s\n%s\n' "$current" "$CIDR" | sed '/^$/d' | sort -u | paste -sd, -)"
 else
-    if ! echo "$current" | grep -qx "$CIDR"; then
+    if ! echo "$current" | grep -qxF "$CIDR"; then
         echo "not on the list; nothing to do"
         exit 0
     fi
-    desired="$(echo "$current" | grep -vx "$CIDR" | sed '/^$/d' | sort -u | paste -sd, -)"
+    desired="$(echo "$current" | grep -vxF "$CIDR" | sed '/^$/d' | sort -u | paste -sd, - || true)"
     if [ -z "$desired" ]; then
         echo "refusing to empty the allowlist: that locks every machine out of the store" >&2
         exit 1

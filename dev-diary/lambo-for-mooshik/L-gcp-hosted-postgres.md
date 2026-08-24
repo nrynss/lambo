@@ -67,19 +67,39 @@ opted in:
 
 - `src/gcp_auth.rs` (gated `embed-gemini` OR `store-postgres`): the **one** Google auth
   path in the crate. It reads the shared credential file (`GCP_LAMBO_CREDENTIALS`, else
-  `GOOGLE_APPLICATION_CREDENTIALS`), handles both credential kinds (service-account key by
-  the `jwt-bearer` grant, authorized-user ADC by the `refresh_token` grant), and mints an
-  access token for the **caller's** scope, caching until `expires_in - 60s`.
-- `src/store/pg/mod.rs` `PgStore::pool()`: when `LAMBO_POSTGRES_IAM` is set it returns the
-  IAM pool, whose connection password is that token, so the DSN carries the IAM user with
-  NO password. The pool is **rotated at the token's expiry** (see the follow-ups closed
-  below), not built once.
+  `GOOGLE_APPLICATION_CREDENTIALS`) - the same chain `build_gemini_embedder` resolves, so
+  one exported variable names one identity for both consumers - handles both credential
+  kinds (service-account key by the `jwt-bearer` grant, authorized-user ADC by the
+  `refresh_token` grant), and asks for the **caller's** scope on both grants, caching until
+  `expires_in - 60s`.
+- **What "the caller's scope" means on each grant.** On the `jwt-bearer` grant the scope is
+  the signed `scope` claim, and a service-account key can ask for anything its IAM roles
+  allow. On the `refresh_token` grant it is a `scope` form field, which RFC 6749 section 6
+  makes a **narrowing** request: an ADC can only ask for a subset of what
+  `gcloud auth application-default login` granted it. That is a real limit, and it fails in
+  the right place - a token endpoint answering `invalid_scope` names the scope, where an
+  omitted ask would have been refused later by Postgres as opaque authentication noise.
+  This host's ADC was measured (`oauth2.googleapis.com/tokeninfo`) to carry
+  `email cloud-platform sqlservice.login userinfo.email openid`, so it can serve the Cloud
+  SQL login; an ADC without `sqlservice.login` needs
+  `gcloud auth application-default login --scopes=<cloud-platform>,<sqlservice.login>`.
+- `src/store/pg/mod.rs` `PgStore::pool()`: when `LAMBO_POSTGRES_IAM` is set to a **non-empty**
+  value it returns the IAM pool, whose connection password is that token, so the DSN carries
+  the IAM user with NO password. `LAMBO_POSTGRES_IAM=` (empty) is deliberately NOT the
+  opt-in: it is the ordinary password path, which is how lambo reads an empty environment
+  value everywhere else (`overlay_env` treats empty as absent), and it means a placeholder
+  in a profile or `.env` cannot turn a password deployment into a fail-closed IAM refusal.
+  Pinned by `an_empty_iam_opt_in_means_the_password_path`. The pool is **rotated at the
+  token's expiry** (see the follow-ups closed below), not built once.
 - Cargo: `store-postgres` also enables `dep:reqwest` and `dep:jsonwebtoken` (the token
   mint needs them); neither is in the default feature set.
-- Tests: `iam_auth_connects_as_service_account` (live, ignored) plus two offline pins in
-  `store/pg/postgres.rs`, `the_iam_pool_is_rebuilt_when_its_token_expires` and
-  `iam_without_credentials_fails_closed_naming_the_variables`, and the auth module's own
-  suite in `gcp_auth.rs`.
+- Tests: `iam_auth_connects_as_service_account` (live, ignored) plus four offline pins in
+  `store/pg/postgres.rs` - `the_iam_pool_is_rebuilt_when_its_token_expires`,
+  `the_minted_token_is_the_connection_password_across_a_rotation` (a `TcpListener` speaking
+  enough PostgreSQL v3 to capture what the client presents as its password),
+  `iam_without_credentials_fails_closed_naming_the_variables` and
+  `an_empty_iam_opt_in_means_the_password_path` - and the auth module's own suite in
+  `gcp_auth.rs`.
 
 ### Running the shared-SA store path
 ```
@@ -89,7 +109,9 @@ export LAMBO_POSTGRES_DSN='postgresql://cachy-nryn%40mooshik.iam@136.64.220.174:
 ```
 (the `%40` is the literal `@` in the IAM DB username, URL-encoded). Lambo mints the SA
 token and authenticates as `cachy-nryn@mooshik.iam` to Postgres - the same SA that calls
-Vertex via `LAMBO_GEMINI_*` / the config.
+Vertex via `LAMBO_GEMINI_*` / the config. `GCP_LAMBO_CREDENTIALS` alone is enough for both:
+the embedder reads that chain too, so this export block starts the store and the embedder
+off one identity.
 
 Live proof (via the store's own pool):
 ```
@@ -135,7 +157,9 @@ below them, and named honestly.
   outage rather than an allowlist miss. `scripts/cloudsql-allowlist.sh` adds the running
   host's egress IP idempotently (`--list`, `--dry-run`, `--ip`, `--remove`), preserves the
   entries it did not add, and refuses to empty the list. Each machine runs it once, and
-  again whenever its address changes.
+  again whenever its address changes. (The refusal was unreachable as first written: under
+  `set -euo pipefail` the `grep -v` that filters the last entry away exits 1 and killed the
+  script before the guard ran. Fixed and exercised against a stub `gcloud`.)
 - **Released binaries could not run this tier: closed.** `ship` (the feature set behind
   every prebuilt binary) carried neither `store-postgres` nor `embed-gemini`, so a
   `lambo.toml` naming `postgres` or `gemini` failed on a released binary with a

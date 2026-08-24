@@ -434,9 +434,12 @@ fn missing_feature(kind: EmbedderKind) -> EmbedError {
 
 /// Build the Gemini embedder from resolved config (feature `embed-gemini`).
 ///
-/// Resolves service-account credentials from `gemini_credentials` (explicit path) else
-/// `GOOGLE_APPLICATION_CREDENTIALS`. Missing credentials are a clear `Unavailable` naming
-/// the variable. No network is touched here: token minting / OAuth happen on first `embed`.
+/// Resolves credentials from `gemini_credentials` (explicit path) else the shared chain
+/// [`crate::gcp_auth::credentials_path_from_env`] (`GCP_LAMBO_CREDENTIALS`, falling back to
+/// `GOOGLE_APPLICATION_CREDENTIALS`), which is the same chain the Postgres store's Cloud SQL
+/// IAM login resolves, so one export names one identity for both. Missing credentials are a
+/// clear `Unavailable` naming both variables and the config key. No network is touched here:
+/// token minting / OAuth happen on first `embed`.
 #[cfg(feature = "embed-gemini")]
 fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
     use crate::embed::gemini::{
@@ -450,16 +453,19 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
             cfg.dim
         )));
     }
+    // One credential variable, one identity. The store resolves its Cloud SQL credential
+    // through `gcp_auth::credentials_path_from_env` (GCP_LAMBO_CREDENTIALS, falling back
+    // to GOOGLE_APPLICATION_CREDENTIALS); the embedder resolving it any other way is how
+    // the shared-service-account design breaks in the operator's hands, with the store
+    // authenticating and the embedder refusing to build off the same export block.
     let creds_path = cfg
         .gemini_credentials
         .clone()
-        .or_else(|| {
-            std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").map(std::path::PathBuf::from)
-        })
+        .or_else(crate::gcp_auth::credentials_path_from_env)
         .ok_or_else(|| {
             EmbedError::Unavailable(
                 "Gemini embedder needs service-account credentials: set `gemini_credentials` \
-                 or GOOGLE_APPLICATION_CREDENTIALS"
+                 or GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS"
                     .into(),
             )
         })?;
@@ -484,12 +490,9 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
         .clone()
         .unwrap_or_else(|| gemini::DEFAULT_MODEL.to_string());
     let client = build_client()?;
-    // Vertex's scope only: the store's Cloud SQL scope set is its own (`gcp_auth`).
-    let token_source = Box::new(GoogleOAuthTokenSource::new(
-        creds,
-        client.clone(),
-        gemini::OAUTH_SCOPE,
-    )?);
+    // Vertex's scope only, named by the consumer rather than spelled at the call site: the
+    // store's Cloud SQL scope set is its own (`gcp_auth`).
+    let token_source = Box::new(GoogleOAuthTokenSource::for_vertex(creds, client.clone())?);
     let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
     let embedder = GeminiEmbedder::new(model, cfg.dim, token_source, embed_url, client)?;
     Ok(Box::new(embedder))
@@ -911,6 +914,15 @@ mod tests {
 
     #[test]
     fn gemini_fail_closed_without_credentials() {
+        // Both credential variables are cleared under the env lock rather than assumed
+        // absent: the embedder now reads GCP_LAMBO_CREDENTIALS too, so a developer with
+        // either exported would otherwise see this test build an embedder instead of
+        // refusing, and a sibling test setting one would race it.
+        let _g = crate::test_util::env_lock();
+        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
+        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
+        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
             dim: 1536,
@@ -918,6 +930,12 @@ mod tests {
             llama_model: None,
             ..Default::default()
         });
+        if let Some(v) = prev_gcp {
+            std::env::set_var("GCP_LAMBO_CREDENTIALS", v);
+        }
+        if let Some(v) = prev_adc {
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
+        }
         let Err(err) = r else {
             panic!("expected Unavailable, got Ok (silent fallback forbidden)");
         };
@@ -963,6 +981,110 @@ mod tests {
         let identity = crate::embed::gemini_identity(embedder.as_ref());
         assert_eq!(identity.as_deref(), Some("gemini-embedding-001"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One credential variable means one identity: the embedder resolves
+    /// `GCP_LAMBO_CREDENTIALS` exactly as the Postgres store does.
+    ///
+    /// Before this pin the store read `GCP_LAMBO_CREDENTIALS` then
+    /// `GOOGLE_APPLICATION_CREDENTIALS` while the embedder read only the second, so the
+    /// export block in `L-gcp-hosted-postgres.md` started the store and refused the
+    /// embedder. Both arms are asserted, because a fix that swapped one hardcoded
+    /// variable for another would pass half of this.
+    #[test]
+    #[cfg(feature = "embed-gemini")]
+    fn gemini_resolves_the_shared_credential_variable() {
+        use super::gemini::TEST_RSA_PRIVATE_KEY_PEM;
+        let _g = crate::test_util::env_lock();
+        let dir = std::env::temp_dir().join(format!("lambo-l1-shared-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds_path = dir.join("sa.json");
+        std::fs::write(
+            &creds_path,
+            serde_json::json!({
+                "client_email": "test@example.com",
+                "private_key": TEST_RSA_PRIVATE_KEY_PEM,
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "project_id": "proj",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let cfg = || EmbedderConfig {
+            kind: EmbedderKind::Gemini,
+            dim: 1536,
+            gemini_project: Some("proj".to_string()),
+            gemini_location: Some("us-central1".to_string()),
+            gemini_credentials: None,
+            ..Default::default()
+        };
+
+        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
+        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
+
+        // Arm 1: the shared variable alone. This is the arm that used to refuse.
+        std::env::set_var("GCP_LAMBO_CREDENTIALS", &creds_path);
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let built = build_embedder(cfg());
+        let arm1 = built.map(|e| crate::embed::gemini_identity(e.as_ref()));
+
+        // Arm 2: the Google-standard variable alone, which must keep working.
+        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &creds_path);
+        let built = build_embedder(cfg());
+        let arm2 = built.map(|e| crate::embed::gemini_identity(e.as_ref()));
+
+        // Arm 3: neither. The refusal must name both variables and the config key, so an
+        // operator reading it knows every way to answer it.
+        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let arm3 = build_embedder(cfg()).err().map(|e| e.to_string());
+
+        // Arm 4 (L1-R2-2): the config key outranks BOTH variables. Both point at a file
+        // that does not exist, so an embedder that consulted the environment first cannot
+        // build, and one that honours the config key can.
+        std::env::set_var("GCP_LAMBO_CREDENTIALS", dir.join("absent-shared.json"));
+        std::env::set_var(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            dir.join("absent-adc.json"),
+        );
+        let arm4 = build_embedder(EmbedderConfig {
+            gemini_credentials: Some(creds_path.clone()),
+            ..cfg()
+        })
+        .map(|e| crate::embed::gemini_identity(e.as_ref()));
+
+        match prev_gcp {
+            Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
+            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
+        }
+        match prev_adc {
+            Some(v) => std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v),
+            None => std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        let id1 = arm1.unwrap_or_else(|e| {
+            panic!(
+                "GCP_LAMBO_CREDENTIALS alone must build the embedder, as it builds the store: {e}"
+            )
+        });
+        assert_eq!(id1.as_deref(), Some("gemini-embedding-001"));
+        let id2 = arm2
+            .unwrap_or_else(|e| panic!("GOOGLE_APPLICATION_CREDENTIALS must keep working: {e}"));
+        assert_eq!(id2.as_deref(), Some("gemini-embedding-001"));
+        let msg = arm3.expect("neither variable set must refuse, not build");
+        let id4 = arm4.unwrap_or_else(|e| {
+            panic!("`gemini_credentials` must outrank both environment variables: {e}")
+        });
+        assert_eq!(id4.as_deref(), Some("gemini-embedding-001"));
+        for named in [
+            "gemini_credentials",
+            "GCP_LAMBO_CREDENTIALS",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ] {
+            assert!(msg.contains(named), "refusal must name {named}, got: {msg}");
+        }
     }
 
     /// A4 dim guard: any configured dim outside {768, 1536, 3072} is rejected at

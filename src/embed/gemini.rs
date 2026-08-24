@@ -51,8 +51,6 @@ pub(crate) const DEFAULT_LOCATION: &str = "us-central1";
 pub use crate::gcp_auth::{
     build_client, load_credentials, GoogleAuthError, GoogleOAuthTokenSource,
 };
-/// Cloud-platform scope requested on the OAuth token for Vertex.
-pub(crate) const OAUTH_SCOPE: &str = crate::gcp_auth::SCOPE_CLOUD_PLATFORM;
 
 #[cfg(test)]
 pub(crate) use crate::gcp_auth::TEST_RSA_PRIVATE_KEY_PEM;
@@ -304,13 +302,6 @@ mod tests {
         assert!(matches!(backend, EmbedError::Backend(ref m) if m == "401 invalid_grant"));
     }
 
-    /// The Vertex adapter asks for the cloud-platform scope, not the store's wider set.
-    #[test]
-    fn vertex_asks_for_the_cloud_platform_scope_only() {
-        assert_eq!(OAUTH_SCOPE, crate::gcp_auth::SCOPE_CLOUD_PLATFORM);
-        assert!(!OAUTH_SCOPE.contains("sqlservice.login"));
-    }
-
     #[tokio::test]
     async fn embeds_and_normalizes() {
         let server = MockServer::start();
@@ -513,7 +504,7 @@ mod tests {
             .unwrap_or(1536);
         let client = build_client().unwrap();
         let token_source =
-            Box::new(GoogleOAuthTokenSource::new(creds, client.clone(), OAUTH_SCOPE).unwrap());
+            Box::new(GoogleOAuthTokenSource::for_vertex(creds, client.clone()).unwrap());
         let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
         let e = GeminiEmbedder::new(model, dim, token_source, embed_url, client).unwrap();
         let v = e.embed("lambo live vertex round-trip").await.unwrap();
