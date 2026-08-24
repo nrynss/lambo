@@ -1,5 +1,26 @@
 # Workstream B run protocol (2026-08-23)
 
+> **CYCLE CLOSED, 2026-08-24.** B0–B4 closed individually, merged to
+> `lambo-for-mooshik`, and the end-to-end cycle ran **five rounds**
+> (`adve-review-mooshik-B-e2e-round{1..5}.md`, remediations in
+> `B-e2e-remediation-round{1..5}.md`). Findings per round: 11 → 6 → 1 → 3 → 1.
+>
+> The cycle ended on an **operator ruling** rather than on an APPROVE: round 5
+> returned one P3 that it classified a *local fix* with no design implication, and
+> the ruling was to close it, commit, and stop. That closure is
+> [B-e2e-remediation-round5.md](B-e2e-remediation-round5.md); it changed one
+> predicate and added seven test rows, and every gate reproduces round 4's numbers
+> with zero drift.
+>
+> **Residue carried out of the cycle, deliberately** — round 5 ruled these bounded
+> and not findings: the username position is echoed on every path (narrowing it is a
+> design change, since `user@server` cannot be told from a mistyped password);
+> `?host=`/`?dbname=`/`?user=` overlays are identity components; the 128-bit
+> identity floor; and the deliberate over-split price in `overlay_env`. Still
+> unverified for environmental reasons, not by choice: the **live Cockroach leg**
+> (no safe DSN), and **`postgres-live` on a real GitHub runner**.
+> **Park-and-fail-over remains unimplemented**, owned in [FUTURE.md](../FUTURE.md).
+
 > **Branch:** this run lives on `b0-pg-extraction` until **B0 through B4 are
 > all closed**. One merge to `lambo-for-mooshik` at the end of B, not after
 > each phase. `main` does not move before 2026-09-15. Branched off `bd3e9ac`.

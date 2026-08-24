@@ -337,12 +337,39 @@ fn redact_url_shaped(raw: &str) -> Option<String> {
         None => ("", rest),
     };
     let tail = match tail.split_once('?') {
-        Some((before, query)) if mentions_password(query) => {
+        Some((before, query)) if !query_is_all_echoable(query) => {
             format!("{before}{REDACTED_QUERY}")
         }
         _ => tail.to_string(),
     };
     Some(format!("{scheme}://{user}{tail}"))
+}
+
+/// Is every parameter in a URL query on [`is_echoable_libpq_key`]'s list?
+///
+/// # B-E2E-R5-1: the sibling branch's defect, one branch over
+///
+/// Round 4 rebuilt [`redact_kv_shaped`] as a positive allowlist to close
+/// B-E2E-R4-1, and left this branch on the `mentions_password` **blacklist** it
+/// had always used. The two branches redact the same secrets reached by two
+/// spellings, so the hole survived in the one nobody was looking at: a
+/// credential under `?pwd=`, `?pass=`, `?passwrod=`, `?secret=` or `?passfile=`
+/// printed verbatim under "(passwords stripped)".
+///
+/// A Postgres URL's query parameters *are* libpq keywords — that is what the
+/// `?key=value` form means — so this shares
+/// [`is_echoable_libpq_key`] rather than growing a second list that could
+/// disagree with it. One list, two spellings; adding a key admits it on both
+/// paths at once, which is the property the split lacked.
+///
+/// Whole-query redaction, not per-parameter: a query is one field to a reader,
+/// and `?sslmode=require&<query redacted>` invites the belief that what is
+/// shown is all there was.
+fn query_is_all_echoable(query: &str) -> bool {
+    query
+        .split(['&', ';'])
+        .filter(|p| !p.is_empty())
+        .all(|p| is_echoable_libpq_key(p.split_once('=').map_or(p, |(k, _)| k)))
 }
 
 /// libpq `key=value key=value` — echo the tokens whose key is on the list.
@@ -702,6 +729,23 @@ mod tests {
         // --- the secret in the *username* position, where truncating the
         // userinfo at its first `:` leaves it whole.
         "postgres://password=S3cretHunter@127.0.0.1:70000/lambo",
+        // B-E2E-R5-1: the query branch was a `mentions_password` blacklist
+        // while its libpq sibling had already become an allowlist, so a
+        // credential one transposition or one abbreviation away from
+        // "password" was echoed verbatim under "(passwords stripped)". The
+        // trigger is R2-5's own typo class — `:70000` is what forces these
+        // down the unparseable path at all.
+        "postgres://app@127.0.0.1:70000/lambo?pwd=S3cretHunter",
+        "postgres://app@127.0.0.1:70000/lambo?pass=S3cretHunter",
+        "postgres://app@127.0.0.1:70000/lambo?passwrod=S3cretHunter",
+        "postgres://app@127.0.0.1:70000/lambo?secret=S3cretHunter",
+        "postgres://app@127.0.0.1:70000/lambo?passfile=S3cretHunter",
+        // Derived rather than filed: a key the allowlist does not name, hidden
+        // behind one it does. Per-parameter redaction would have shown the
+        // sslmode and dropped only the tail, reading as though that were all.
+        "postgres://app@127.0.0.1:70000/lambo?sslmode=require&pwd=S3cretHunter",
+        // Semicolon separator, which the URL form also accepts.
+        "postgres://app@127.0.0.1:70000/lambo?sslmode=require;pwd=S3cretHunter",
         // --- an `@` after the authority, which is what the last-`@` rule
         // over-redacts rather than mis-splits.
         "postgres://app:S3cretHunter@127.0.0.1:70000/lam@bo",
