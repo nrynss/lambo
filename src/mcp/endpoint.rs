@@ -60,7 +60,7 @@
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::store::dsn::canonical_store_dsn;
+use crate::store::dsn::store_dsn_identity;
 use crate::store::{StoreConfig, StoreKind};
 use crate::types::LamboError;
 
@@ -659,19 +659,25 @@ fn sanitize_prefix(session: &str) -> String {
 /// one.
 ///
 /// The DSN half is **normalised**, not taken verbatim: a DSN is a spelling and
-/// this function must produce an identity; see [`canonical_store_dsn`]. The
+/// this function must produce an identity; see [`store_dsn_identity`]. The
 /// path half is **canonicalized** first for the same reason; see
 /// [`canonical_store_path`] and J2-R1-2. The password never appears in the
 /// string that is hashed, so it cannot reach the filesystem or the lease row
 /// even if hashing were skipped. That holds on the unparseable path too, and
-/// only because of how: a spelling `canonical_store_dsn` cannot account for is
-/// replaced wholesale rather than echoed (B-E2E-R3-1). Between R2-5 and R3-1
+/// only because of how: a spelling `store_dsn_identity` cannot account for is
+/// replaced by a SHA-256 digest of itself rather than echoed (B-E2E-R3-1, and
+/// B-E2E-R4-2 for why the digest and not a constant). Between R2-5 and R3-1
 /// this sentence was false for a DSN with userinfo and no `://`.
+///
+/// The digest also means two malformed spellings are two identities, so two
+/// serves whose DSNs this module cannot parse do not share a socket path unless
+/// they wrote the same string. Round 3's constant made every one of them share
+/// one, which is the J2-R1-2 collision in a different costume.
 fn store_identity(store: &StoreConfig) -> String {
     format!(
         "{:?}\u{1f}{}\u{1f}{}",
         store.kind,
-        canonical_store_dsn(store.dsn.as_deref().unwrap_or("")),
+        store_dsn_identity(store.dsn.as_deref().unwrap_or("")),
         canonical_store_path(store.path.as_deref().unwrap_or(""))
     )
 }
@@ -1351,19 +1357,19 @@ mod tests {
             )
         );
         assert_eq!(
-            canonical_store_dsn("postgres://u@host/db"),
+            store_dsn_identity("postgres://u@host/db"),
             "postgres://u@host:5432/db"
         );
         assert_eq!(
-            canonical_store_dsn("postgres://u:s3cret@host/db"),
+            store_dsn_identity("postgres://u:s3cret@host/db"),
             "postgres://u@host:5432/db"
         );
         assert_eq!(
-            canonical_store_dsn("postgres://u@host"),
+            store_dsn_identity("postgres://u@host"),
             "postgres://u@host:5432/u"
         );
         assert_eq!(
-            canonical_store_dsn("host=host user=u dbname=db"),
+            store_dsn_identity("host=host user=u dbname=db"),
             "postgres://u@host:5432/db"
         );
     }

@@ -15,6 +15,35 @@
 //! input, including the ones neither parser understands, which is what
 //! `redact_unparseable_dsn` is for (B-E2E-R2-5, rebuilt as an allowlist for
 //! B-E2E-R3-1: a shape this module cannot account for is not echoed at all).
+//!
+//! # Two jobs, two functions (B-E2E-R4-2)
+//!
+//! Rounds 2 and 3 fused those two callers into one function, and that fusion is
+//! what R4-2 broke open. **Printing** wants an answer that cannot leak, which
+//! for a shape we cannot parse means saying nothing about it. **Identity** wants
+//! an answer that never makes two different databases look like one, which for
+//! the same shape means saying something *different* about each. Those are
+//! opposite requirements on one return value, and round 3 resolved them by
+//! trading: it collapsed unrecognised spellings onto one constant and defended
+//! the collapse with "no driver will dial them". Round 4 measured that against
+//! `sqlx::postgres::PgConnectOptions::from_str` — the crate's actual dial path,
+//! `store::pg::PgStore::connect_options` — and it is false. sqlx validates no
+//! scheme at all, so `app:one@host-a:26257/db-a` dials, and
+//! `postgres://app@host-a:/db_password_a` dials *host-a* while its host-b twin
+//! dials *host-b*, with both collapsing onto the same constant here.
+//!
+//! So the two jobs are two functions now, and neither pays for the other:
+//!
+//! * [`store_dsn_echo`] is what a human is shown. It never widens beyond what a
+//!   recognised shape accounts for, and answers [`UNPARSEABLE_DSN`] otherwise.
+//! * [`store_dsn_identity`] is what is compared and hashed, and is never
+//!   printed. It answers a digest of the input for a shape it cannot parse, so
+//!   two spellings collapse only if they are the same string.
+//!
+//! `overlay_env` compares the identities and prints the echoes, which is how a
+//! refusal can both fire and stay quotable.
+
+use sha2::{Digest, Sha256};
 
 /// Turn a Postgres-wire DSN *spelling* into a store *identity* (B1, J2-R1-2
 /// wearing Postgres clothes).
@@ -47,27 +76,141 @@
 /// * **Username is kept.** Two roles on one cluster can be two deployments;
 ///   the motivating example keeps `u`.
 /// * **A non-URL DSN** (libpq `key=value`) is parsed for the same fields when
-///   it contains `=`. Anything else is echoed only as far as a recognised
-///   shape accounts for it, and is otherwise replaced wholesale: see
-///   `redact_unparseable_dsn`.
-pub(crate) fn canonical_store_dsn(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::new();
+///   it contains `=`. Anything else gets a digest of itself, so that two
+///   spellings are one identity only when they are one string: see
+///   `unaccounted_identity`.
+///
+/// # Not for printing
+///
+/// This is the *comparison* half of the module. It is hashed by
+/// `store_identity` and compared by `overlay_env`, and neither prints it; the
+/// unparseable answer is a digest, which is meaningless to an operator.
+/// [`store_dsn_echo`] is the half that gets shown (B-E2E-R4-2).
+pub(crate) fn store_dsn_identity(raw: &str) -> String {
+    match canonicalize(raw) {
+        Canonical::Absent => String::new(),
+        Canonical::Parsed(identity) => identity,
+        Canonical::Unaccounted(trimmed) => unaccounted_identity(trimmed),
     }
-    if let Some(parts) = parse_postgres_url(trimmed) {
-        return parts.to_identity();
-    }
-    if let Some(parts) = parse_libpq_kv(trimmed) {
-        return parts.to_identity();
-    }
-    redact_unparseable_dsn(trimmed)
 }
 
-/// What replaces a DSN whose shape this module cannot account for.
+/// What an operator is shown when a message has to quote a DSN.
 ///
-/// Deliberately a constant with no input in it: it cannot leak.
+/// The counterpart to [`store_dsn_identity`] and the reason the two are not one
+/// function (B-E2E-R4-2). Every string this returns is safe to put after
+/// "(passwords stripped)": either a canonical form assembled from four fields
+/// none of which is the password, or an echo built only from pieces a
+/// recognised shape accounts for, or [`UNPARSEABLE_DSN`], which contains no
+/// input at all.
+///
+/// Two different DSNs may well produce the same answer here. That is the whole
+/// point of the split: withholding is safe for a *printer* and catastrophic for
+/// an *identity*, so only this half is allowed to withhold.
+pub(crate) fn store_dsn_echo(raw: &str) -> String {
+    match canonicalize(raw) {
+        Canonical::Absent => String::new(),
+        // A parsed identity carries no password by construction — it is built
+        // from user/host/port/database and `password` is dropped in both
+        // parsers — so it needs no keyword gate. It does still reach a
+        // terminal, and a percent-encoded escape in a database name would
+        // arrive intact, so the control-character clause applies here too.
+        Canonical::Parsed(identity) if is_terminal_safe(&identity) => identity,
+        Canonical::Parsed(_) => UNPARSEABLE_DSN.to_string(),
+        Canonical::Unaccounted(trimmed) => redact_unparseable_dsn(trimmed),
+    }
+}
+
+/// What the two parsers made of an input, before either caller decides what to
+/// do about it. Borrows the trimmed input so the identity half can digest the
+/// exact bytes the operator wrote.
+enum Canonical<'a> {
+    /// No DSN at all (a `path`-shaped store, or an empty `store.dsn`).
+    Absent,
+    /// A shape one of the two parsers accounts for, as its identity.
+    Parsed(String),
+    /// A shape neither parser accounts for, as the trimmed input.
+    Unaccounted(&'a str),
+}
+
+fn canonicalize(raw: &str) -> Canonical<'_> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Canonical::Absent;
+    }
+    if let Some(parts) = parse_postgres_url(trimmed) {
+        return Canonical::Parsed(parts.to_identity());
+    }
+    if let Some(parts) = parse_libpq_kv(trimmed) {
+        return Canonical::Parsed(parts.to_identity());
+    }
+    Canonical::Unaccounted(trimmed)
+}
+
+/// The identity of a spelling neither parser accounts for (B-E2E-R4-2).
+///
+/// # Why a digest and not the placeholder
+///
+/// Round 3 gave every such spelling the constant [`UNPARSEABLE_DSN`], which
+/// made two malformed DSNs compare equal in `overlay_env`: it then found
+/// `from_file == from_env`, skipped the disagreement refusal, and let the
+/// environment's DSN outrank the file's in silence — E2E-F2, the P1 that
+/// refusal exists to prevent. The concession was defended on the grounds that
+/// such strings never dial. Measured against sqlx, they do:
+/// `postgres://app@host-a:/db_password_a` and its host-b twin collapsed onto
+/// one constant here while `PgConnectOptions::from_str` resolved them to
+/// `host-a`/`db_password_a` and `host-b`/`db_password_b`.
+///
+/// A digest cannot collapse two different strings (SHA-256, truncated to 128
+/// bits, so a collision is not something a typo finds and not something an
+/// operator who already owns the config file would need). It also carries no
+/// substring of its input, which is why it is safe to hand to `store_identity`
+/// and hash into a socket path: the sentence "the password never appears in the
+/// string that is hashed" survives the change.
+///
+/// # Why it is not printed
+///
+/// It would be useless to an operator and it is derived from a credential.
+/// `overlay_env` prints [`store_dsn_echo`] instead, which is why that function
+/// exists. Nothing in this crate renders this value to a terminal, a log, or a
+/// filesystem path except as the input to a further hash.
+fn unaccounted_identity(trimmed: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(trimmed.as_bytes()));
+    format!("{UNACCOUNTED_IDENTITY_PREFIX}{}>", &digest[..32])
+}
+
+/// What replaces a DSN this module will not quote.
+///
+/// Deliberately a constant with no input in it: it cannot leak. Two things
+/// reach it — a shape neither parser accounts for and no branch of
+/// `redact_unparseable_dsn` can rebuild, and (rarely) a parsed identity that is
+/// not safe to hand a terminal. It is an *echo*, never an identity.
 const UNPARSEABLE_DSN: &str = "<unparseable dsn>";
+
+/// Prefix of [`unaccounted_identity`]'s answer. Shaped like the placeholder so
+/// that a stray one showing up in a message is recognisable as this module's
+/// doing, but distinct so the two can never be confused for each other.
+const UNACCOUNTED_IDENTITY_PREFIX: &str = "<unparseable dsn#";
+
+/// The sentence a refusal needs when one of its two quotes is the placeholder.
+///
+/// Without it, a disagreement between two spellings this module could not parse
+/// reads "the config file says `<unparseable dsn>` and LAMBO_POSTGRES_DSN says
+/// `<unparseable dsn>`" — two identical quotes under a claim that they differ,
+/// which invites the operator to conclude the refusal is a bug. It is not: the
+/// comparison ran on [`store_dsn_identity`], which does not collapse, and only
+/// the *quoting* withheld. Empty when both sides were quotable, so the ordinary
+/// message is unchanged.
+pub(crate) fn withheld_note(from_file: &str, from_env: &str) -> &'static str {
+    if from_file == UNPARSEABLE_DSN || from_env == UNPARSEABLE_DSN {
+        " `<unparseable dsn>` is not a quotation: it stands for a spelling this \
+         cannot parse, which is withheld rather than echoed so that \"(passwords \
+         stripped)\" stays true of it. Two of them are still two different \
+         spellings — the comparison ran on the strings themselves, not on this \
+         placeholder."
+    } else {
+        ""
+    }
+}
 
 /// What replaces a URL query string that mentions a password.
 const REDACTED_QUERY: &str = "?<query redacted>";
@@ -106,17 +249,19 @@ const REDACTED_QUERY: &str = "?<query redacted>";
 /// recognised shape positively accounts for, and anything it does not recognise
 /// becomes [`UNPARSEABLE_DSN`], which cannot leak because no input reaches it.
 ///
-/// # Why not a placeholder for everything
+/// # Why a placeholder for everything is fine *here* (corrected, B-E2E-R4-2)
 ///
-/// `canonical_store_dsn` is not only a printer, it is the identity function:
-/// `store_identity` hashes it and `overlay_env` compares it. Collapsing every
-/// unparseable spelling onto one constant would make two *different* malformed
-/// DSNs compare equal, and E2E-F2's disagreement refusal would then let the
-/// environment's DSN outrank the file's in silence. Echoing the shapes we do
-/// recognise keeps the ordinary typo — which is both where the diagnostic value
-/// is and where the identity distinction matters — safe *and* distinguishing.
-/// The residue is real and accepted: two unrecognised spellings do collapse
-/// onto one identity, and both are strings no driver will dial.
+/// Round 3 kept the recognised-shape echoes partly for diagnostics and partly
+/// because this function was also the identity function, so collapsing
+/// everything onto one constant would have made two *different* malformed DSNs
+/// compare equal and let E2E-F2's refusal fall silent. It defended the residual
+/// collapse with "both are strings no driver will dial", **which is false** —
+/// see [`unaccounted_identity`] for the sqlx measurement that falsifies it.
+///
+/// The identity concern is gone from this function: [`store_dsn_identity`] no
+/// longer routes through it, so collapsing here costs diagnostics and nothing
+/// else. The recognised-shape echoes are kept for the diagnostics alone, which
+/// is the honest reason and the only one that survives.
 ///
 /// # The rule
 ///
@@ -132,9 +277,10 @@ const REDACTED_QUERY: &str = "?<query redacted>";
 ///   [`REDACTED_QUERY`], so the operator still sees the host and port they
 ///   mistyped.
 /// * **libpq `key=value`-shaped**: *every* whitespace-separated token is
-///   `key=value` with an identifier key; tokens whose key mentions a password
-///   are dropped. One token that is not `key=value` disqualifies the whole
-///   string — that is what `password = S3cret` trips on.
+///   `key=value` with an identifier key, and only tokens whose key is on
+///   [`is_echoable_libpq_key`]'s list are echoed. One token that is not
+///   `key=value` disqualifies the whole string — that is what
+///   `password = S3cret` trips on.
 /// * **The gate**: whatever a branch built is echoed only if it is non-empty,
 ///   mentions no password, and carries no control characters (an error message
 ///   goes to a terminal). Otherwise the placeholder ships. The keyword check is
@@ -147,10 +293,23 @@ fn redact_unparseable_dsn(raw: &str) -> String {
     }
 }
 
-/// The one gate every echo passes through. Nothing leaves this module for an
-/// error message without satisfying it.
+/// The gate on an echo rebuilt from a string neither parser understood.
+///
+/// Nothing leaves `redact_unparseable_dsn` without satisfying it. The keyword
+/// clause is here and not on the parsed path because it stands in for a proof
+/// we do not have: on a string we could not parse we cannot say where the
+/// secret is, so we refuse anything that so much as mentions one. On the parsed
+/// path we *can* say — the identity is four fields and none of them is the
+/// password — so only [`is_terminal_safe`] applies there.
 fn is_safe_to_echo(echo: &str) -> bool {
-    !echo.is_empty() && !echo.chars().any(char::is_control) && !mentions_password(echo)
+    is_terminal_safe(echo) && !mentions_password(echo)
+}
+
+/// The clause that holds on **every** echo, parsed or not: an error message is
+/// handed to a terminal, and an ANSI escape smuggled through a percent-encoded
+/// database name has no business being replayed there.
+fn is_terminal_safe(echo: &str) -> bool {
+    !echo.is_empty() && !echo.chars().any(char::is_control)
 }
 
 fn mentions_password(s: &str) -> bool {
@@ -186,7 +345,22 @@ fn redact_url_shaped(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{user}{tail}"))
 }
 
-/// libpq `key=value key=value` — echo every token whose key is not a password.
+/// libpq `key=value key=value` — echo the tokens whose key is on the list.
+///
+/// # B-E2E-R4-1: this used to be a blacklist wearing an allowlist's name
+///
+/// It kept every token whose key merely *lacked* the substring "password", so a
+/// secret parked under `passwrod=` (one transposition), `pwd=`, `pass=` or
+/// `secret_pw=` printed verbatim under "(passwords stripped)". The trigger is
+/// R2-5's own typo class: `port=70000` makes `parse_libpq_kv` fail, which is
+/// what forces an otherwise-fine libpq string down here in the first place.
+///
+/// The round-3 defence — such a string is not a DSN, libpq rejects unknown
+/// options, it would never dial — does not apply, because the leak is on the
+/// *refusal* path, which fires precisely because the config is broken. R2-5's
+/// own filed shapes never dial either. So the key set is now positive:
+/// everything not on it is dropped, including keys this module has never heard
+/// of, which is the only version of "allowlist" that means anything.
 fn redact_kv_shaped(raw: &str) -> Option<String> {
     let mut kept = Vec::new();
     let mut saw_token = false;
@@ -196,11 +370,46 @@ fn redact_kv_shaped(raw: &str) -> Option<String> {
         if !is_libpq_key(key) {
             return None;
         }
-        if !mentions_password(key) {
+        if is_echoable_libpq_key(key) {
             kept.push(token);
         }
     }
     saw_token.then(|| kept.join(" "))
+}
+
+/// The libpq connection keywords whose *value* is a place, a mode or a name —
+/// never a credential.
+///
+/// Membership is the whole safety argument of the kv branch, so the list is
+/// deliberately short and deliberately positive. Dropping a key that belongs
+/// here costs an operator some diagnostic detail; admitting one that does not
+/// costs them their password, which is the asymmetry that decides every
+/// borderline case below.
+///
+/// Off the list on purpose: `password` and `sslpassword` (secrets, the reason
+/// this exists), `passfile` (a path to secrets), `options` (free-form text
+/// libpq forwards to the backend, so it can hold anything), and every keyword
+/// not enumerated — which is the point, because R4-1 was exactly the case of an
+/// unenumerated key being kept.
+fn is_echoable_libpq_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "host"
+            | "hostaddr"
+            | "port"
+            | "dbname"
+            | "database"
+            | "user"
+            | "sslmode"
+            | "sslrootcert"
+            | "sslcert"
+            | "sslkey"
+            | "connect_timeout"
+            | "application_name"
+            | "fallback_application_name"
+            | "target_session_attrs"
+            | "client_encoding"
+    )
 }
 
 fn is_libpq_key(s: &str) -> bool {
@@ -267,6 +476,17 @@ fn parse_postgres_url(raw: &str) -> Option<DsnParts> {
             None => (after, ""),
         },
     };
+    // B-E2E-R4-3: an unencoded `:` in the path means an authority was cut in
+    // half. `split_authority` stops at the first `/` or `?`, per RFC 3986 — so
+    // `postgres://ap/p:S3cret@h:70000/db` has authority `ap` and everything
+    // after it, password included, becomes the *database* component and is
+    // echoed verbatim under "(passwords stripped)". A database name really
+    // containing a colon is spelled `%3A` and still parses; sqlx rejects the
+    // unencoded form outright ("invalid port number") for the sibling shapes,
+    // so refusing here is the driver's answer, not a new opinion.
+    if path.contains(':') {
+        return None;
+    }
     let mut database = path
         .trim_start_matches('/')
         .trim_end_matches('/')
@@ -315,10 +535,18 @@ fn split_host_port(hostport: &str) -> Option<(String, Option<u16>)> {
         return Some((host, port));
     }
     match hostport.rsplit_once(':') {
-        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+        Some((h, p)) if !h.is_empty() && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
             Some((percent_decode(h), Some(p.parse().ok()?)))
         }
-        _ => Some((percent_decode(hostport), None)),
+        // B-E2E-R4-3: a `:` that is not a port separator is not part of a host.
+        // The old fallback swallowed the whole thing as a hostname, so
+        // `postgres://app:S3cret/Hunter@h/db` — where an unencoded `/` cut the
+        // userinfo off before its `@` — canonicalised to
+        // `postgres://[app:s3cret]:5432/…`, printing the password's first half
+        // as a host. sqlx answers "invalid port number" to exactly these; this
+        // arm is that answer.
+        Some(_) => None,
+        None => Some((percent_decode(hostport), None)),
     }
 }
 
@@ -420,16 +648,37 @@ fn from_hex(b: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
-    const SECRET: &str = "S3cretHunter";
+    /// `S3cretHunter`, the password every shape below carries, plus its two
+    /// halves — folded to lowercase, because an identity lowercases its host.
+    ///
+    /// B-E2E-R4-3 is why this list exists: `postgres://app:S3cret/Hunter@h/db`
+    /// leaked as `postgres://[app:s3cret]:5432/Hunter@h/db`, which contains
+    /// neither `S3cretHunter` (the password is split across two components)
+    /// **nor** `s3cret` under a case-sensitive test (the host is lowercased on
+    /// the way to an identity). Round 3's `!canon.contains(SECRET)` was true of
+    /// that string. Half a password in a refusal message is a leaked password,
+    /// so the check is fragments, folded to lowercase.
+    const SECRET_FRAGMENTS: &[&str] = &["s3crethunter", "s3cret", "hunter"];
+
+    /// Every string this module hands out, on every path, must survive this.
+    fn assert_no_secret(what: &str, raw: &str, produced: &str) {
+        let folded = produced.to_ascii_lowercase();
+        for fragment in SECRET_FRAGMENTS {
+            assert!(
+                !folded.contains(fragment),
+                "{what} carries {fragment:?} of the password: {raw} -> {produced}"
+            );
+        }
+    }
 
     /// Every shape below defeats both parsers, so every one of them reaches
-    /// `redact_unparseable_dsn` and gets printed under "(passwords stripped)".
-    /// The first four are B-E2E-R2-5's filed shapes; the rest are
-    /// B-E2E-R3-1's, and the label on each says which anchor it walks past.
+    /// `redact_unparseable_dsn` (for the echo) and `unaccounted_identity` (for
+    /// the identity). The first four are B-E2E-R2-5's filed shapes; the next
+    /// batch is B-E2E-R3-1's, and the last two batches are round 4's.
     ///
     /// Kept in one place because the *universal* promise is tested over the
     /// whole list ([`an_unparseable_dsn_still_has_its_password_stripped`]) and
-    /// the per-shape outcome is tested by the two tests after it.
+    /// the per-shape outcome is tested by the tests after it.
     const UNPARSEABLE_SHAPES: &[&str] = &[
         // --- B-E2E-R2-5: a port past u16, a non-numeric bracketed port, a
         // misspelled scheme, a port past u16 with a query. All URL-shaped.
@@ -460,12 +709,27 @@ mod tests {
         "postgres://app:pa://S3cretHunter@127.0.0.1:70000/lambo",
         // --- an ANSI escape, which an error message hands to a terminal.
         "postgres://app:S3cretHunter@127.0.0.1:70000/lam\u{1b}[2Jbo",
+        // --- B-E2E-R4-1: a bad port forces a libpq string down here, and the
+        // secret then sits under a key that does not spell "password". Every
+        // one of these printed verbatim under the round-3 blacklist.
+        "host=127.0.0.1 port=70000 user=app passwrod=S3cretHunter",
+        "host=127.0.0.1 port=70000 user=app pwd=S3cretHunter",
+        "host=127.0.0.1 port=70000 user=app pass=S3cretHunter",
+        "host=127.0.0.1 port=70000 user=app secret_pw=S3cretHunter",
+        "host=127.0.0.1 port=70000 user=app sslpassword=S3cretHunter",
+        // --- B-E2E-R4-3: an unencoded `/` or `?` in the userinfo cut the
+        // authority short, and the password landed in the *database* or *host*
+        // component of a supposedly-parsed identity. These parsed before this
+        // round; the two guards in `parse_postgres_url` send them here.
+        "postgres://ap/p:S3cretHunter@h:70000/db",
+        "postgres://app:S3cret/Hunter@h/db",
+        "postgres://app:S3cret?Hunter@h/db",
     ];
 
-    /// B-E2E-R2-5 and B-E2E-R3-1: the canonical form is printed under
-    /// "(passwords stripped)", so the promise has to hold on inputs the
-    /// parsers reject too — on **every** one of them, not on the ones we
-    /// happened to think of.
+    /// B-E2E-R2-5, R3-1 and R4-3: the echo is printed under "(passwords
+    /// stripped)", so the promise has to hold on inputs the parsers reject too
+    /// — on **every** one of them, not on the ones we happened to think of.
+    /// The identity is hashed into a socket path, so it has to hold there too.
     ///
     /// To watch this go red, make `redact_unparseable_dsn` splice again
     /// instead of allowlisting:
@@ -487,16 +751,24 @@ mod tests {
                 "{raw} is supposed to be the unparseable case; if it now parses, \
                  pick another shape rather than deleting the test"
             );
-            let canon = canonical_store_dsn(raw);
+
+            let echo = store_dsn_echo(raw);
+            assert_no_secret("the echo", raw, &echo);
             assert!(
-                !canon.contains(SECRET),
-                "the canonical form is printed under \"(passwords stripped)\", \
-                 and this one still carries the password: {raw} -> {canon}"
-            );
-            assert!(
-                is_safe_to_echo(&canon) || canon == UNPARSEABLE_DSN,
+                is_safe_to_echo(&echo) || echo == UNPARSEABLE_DSN,
                 "an echo that fails its own gate must have been replaced by the \
-                 placeholder: {raw} -> {canon}"
+                 placeholder: {raw} -> {echo}"
+            );
+
+            // The identity is hashed into a socket path (`store_identity`), so
+            // "the password never appears in the string that is hashed" has to
+            // hold of it as well as of the echo.
+            let identity = store_dsn_identity(raw);
+            assert_no_secret("the identity", raw, &identity);
+            assert!(
+                identity.starts_with(UNACCOUNTED_IDENTITY_PREFIX),
+                "a shape no parser accounts for gets a digest, not a quotation: \
+                 {raw} -> {identity}"
             );
         }
     }
@@ -506,58 +778,151 @@ mod tests {
     /// there was never any reason to quote the DSN in the message at all.
     #[test]
     fn a_recognised_shape_still_shows_the_operator_the_typo() {
-        // The exact transcript from the round-2 review, unchanged by round 3.
+        // The exact transcript from the round-2 review, unchanged by rounds 3
+        // and 4.
         assert_eq!(
-            canonical_store_dsn("postgres://app:S3cretHunter@127.0.0.1:70000/lambo"),
+            store_dsn_echo("postgres://app:S3cretHunter@127.0.0.1:70000/lambo"),
             "postgres://app@127.0.0.1:70000/lambo"
         );
         assert_eq!(
-            canonical_store_dsn("postgres://app:S3cretHunter@[::1]:notaport/lambo"),
+            store_dsn_echo("postgres://app:S3cretHunter@[::1]:notaport/lambo"),
             "postgres://app@[::1]:notaport/lambo"
         );
         assert_eq!(
-            canonical_store_dsn("postgre://app:S3cretHunter@db.internal:26257/lambo"),
+            store_dsn_echo("postgre://app:S3cretHunter@db.internal:26257/lambo"),
             "postgre://app@db.internal:26257/lambo"
         );
         assert_eq!(
-            canonical_store_dsn(
-                "postgresql://app:S3cretHunter@127.0.0.1:99999/lambo?sslmode=require"
-            ),
+            store_dsn_echo("postgresql://app:S3cretHunter@127.0.0.1:99999/lambo?sslmode=require"),
             "postgresql://app@127.0.0.1:99999/lambo?sslmode=require"
         );
 
         // A query that mentions a password loses the query, not the authority:
         // the mistyped port is still legible.
         assert_eq!(
-            canonical_store_dsn("postgres://app@127.0.0.1:70000/lambo?password=S3cretHunter"),
+            store_dsn_echo("postgres://app@127.0.0.1:70000/lambo?password=S3cretHunter"),
             "postgres://app@127.0.0.1:70000/lambo?<query redacted>"
         );
         assert_eq!(
-            canonical_store_dsn("postgres://127.0.0.1:70000/lambo?password=S3cretHunter"),
+            store_dsn_echo("postgres://127.0.0.1:70000/lambo?password=S3cretHunter"),
             "postgres://127.0.0.1:70000/lambo?<query redacted>"
         );
 
-        // A clean libpq keyword string keeps every token but the secret, even
-        // when a bad port stopped it parsing.
+        // A clean libpq keyword string keeps every allowlisted token but the
+        // secret, even when a bad port stopped it parsing.
         assert_eq!(
-            canonical_store_dsn(
-                "host=127.0.0.1 port=70000 dbname=lambo user=app password=S3cretHunter"
-            ),
+            store_dsn_echo("host=127.0.0.1 port=70000 dbname=lambo user=app password=S3cretHunter"),
             "host=127.0.0.1 port=70000 dbname=lambo user=app"
         );
 
         // The last-`@` rule the round-3 review verified: an `@` in the path
         // over-redacts rather than mis-splitting, which is the safe direction.
         assert_eq!(
-            canonical_store_dsn("postgres://app:S3cretHunter@127.0.0.1:70000/lam@bo"),
+            store_dsn_echo("postgres://app:S3cretHunter@127.0.0.1:70000/lam@bo"),
             "postgres://app@bo"
         );
 
-        // Two credentials for one unparseable spelling are still one identity,
-        // which is the same rule the parsed paths follow.
+        // Two credentials for one unparseable spelling are one *echo* — the
+        // operator sees the same thing either way, which is the point of
+        // stripping. They are no longer one *identity*: see
+        // `two_unparseable_spellings_are_two_identities` for why that changed
+        // and what it costs.
         assert_eq!(
-            canonical_store_dsn("postgres://app:one@127.0.0.1:70000/lambo"),
-            canonical_store_dsn("postgres://app:two@127.0.0.1:70000/lambo")
+            store_dsn_echo("postgres://app:one@127.0.0.1:70000/lambo"),
+            store_dsn_echo("postgres://app:two@127.0.0.1:70000/lambo")
+        );
+    }
+
+    /// B-E2E-R4-1: the kv branch is an allowlist over *keys*, not a blacklist
+    /// over the substring "password".
+    ///
+    /// Round 3 kept every token whose key merely lacked that substring, so a
+    /// letter-transposition (`passwrod`), either of the two abbreviations an
+    /// operator types by reflex (`pwd`, `pass`), a non-libpq key (`secret_pw`)
+    /// and libpq's own second secret keyword (`sslpassword`) all printed
+    /// verbatim on the line that says "(passwords stripped)".
+    ///
+    /// To watch this go red, put the blacklist back:
+    ///
+    /// ```ignore
+    /// fn is_echoable_libpq_key(key: &str) -> bool { !mentions_password(key) }
+    /// ```
+    #[test]
+    fn a_libpq_key_is_echoed_only_if_it_is_on_the_list() {
+        for key in [
+            "passwrod",
+            "pwd",
+            "pass",
+            "secret_pw",
+            "sslpassword",
+            "passfile",
+        ] {
+            let raw = format!("host=127.0.0.1 port=70000 user=app {key}=S3cretHunter");
+            let echo = store_dsn_echo(&raw);
+            assert_no_secret("the kv echo", &raw, &echo);
+            // The mistyped port survives, which is the only reason to quote it.
+            assert_eq!(echo, "host=127.0.0.1 port=70000 user=app", "key {key}");
+        }
+
+        // The allowlisted keys are all still echoed, so the diagnostic value
+        // the whole branch exists for is not quietly gone.
+        assert_eq!(
+            store_dsn_echo(
+                "host=h port=70000 dbname=d user=u sslmode=require connect_timeout=3 \
+                 application_name=lambo"
+            ),
+            "host=h port=70000 dbname=d user=u sslmode=require connect_timeout=3 \
+             application_name=lambo"
+        );
+
+        // `options` is off the list deliberately: libpq forwards it to the
+        // backend verbatim, so it can hold anything an operator put there.
+        assert_eq!(
+            store_dsn_echo("host=h port=70000 options=-csearch_path=x"),
+            "host=h port=70000"
+        );
+    }
+
+    /// B-E2E-R4-3: a password with an unencoded `/` or `?` in it does not reach
+    /// the identity, the echo, or the socket-path hash.
+    ///
+    /// `split_authority` stops at the first `/` or `?` (RFC 3986 says the
+    /// authority ends there), so an operator who typed their password raw
+    /// instead of percent-encoding it had it re-read as a host or a database
+    /// name and printed verbatim. sqlx rejects two of these three outright, so
+    /// the guards agree with the driver rather than inventing a rule.
+    ///
+    /// To watch this go red, drop either guard: the `path.contains(':')` check
+    /// in `parse_postgres_url`, or `split_host_port`'s `Some(_) => None` arm.
+    #[test]
+    fn an_unencoded_slash_in_a_password_does_not_reach_the_identity() {
+        for raw in [
+            "postgres://ap/p:S3cretHunter@h:70000/db",
+            "postgres://app:S3cret/Hunter@h/db",
+            "postgres://app:S3cret?Hunter@h/db",
+        ] {
+            assert!(
+                parse_postgres_url(raw).is_none(),
+                "a userinfo cut in half by an unencoded delimiter must not parse: {raw}"
+            );
+            assert_no_secret("the echo", raw, &store_dsn_echo(raw));
+            assert_no_secret("the identity", raw, &store_dsn_identity(raw));
+        }
+
+        // The correct spelling is unaffected, which is what makes the guards a
+        // guard and not a ban: `%2F` is a slash in a password and parses.
+        assert_eq!(
+            store_dsn_identity("postgres://app:S3cret%2FHunter@h/db"),
+            "postgres://app@h:5432/db"
+        );
+        assert_eq!(
+            store_dsn_echo("postgres://app:S3cret%2FHunter@h/db"),
+            "postgres://app@h:5432/db"
+        );
+        // And so is `%3A` for a colon in a database name.
+        assert_eq!(
+            store_dsn_identity("postgres://app@h/lam%3Abo"),
+            "postgres://app@h:5432/lam:bo"
         );
     }
 
@@ -585,25 +950,132 @@ mod tests {
             // because this particular spacing put the secret in a token it
             // recognised
             "weird-thing password=S3cretHunter",
-            // nothing survives the password filter, so there is nothing to say
+            // nothing survives the key allowlist, so there is nothing to say
             "password=S3cretHunter",
+            "sslpassword=S3cretHunter",
         ] {
             assert_eq!(
-                canonical_store_dsn(raw),
+                store_dsn_echo(raw),
                 UNPARSEABLE_DSN,
                 "no branch accounts for {raw}, so nothing from it may be echoed"
             );
         }
+    }
 
-        // The price of the choice, pinned so that paying it stays deliberate:
-        // two unrecognised spellings collapse onto one identity, so
-        // `overlay_env` cannot tell them apart. Both are strings no driver
-        // will dial. If a future change makes the placeholder distinguishing,
-        // this assertion is the one to rewrite.
-        assert_eq!(
-            canonical_store_dsn("app:one@host-a:26257/db-a"),
-            canonical_store_dsn("app:two@host-b:26257/db-b")
+    /// B-E2E-R4-2: two spellings this module cannot parse are two identities.
+    ///
+    /// Round 3 gave them all the constant `<unparseable dsn>` and defended the
+    /// collapse with "both are strings no driver will dial". They dial. The
+    /// pair below is the one round 4 constructed: both sides collapse onto the
+    /// placeholder (the literal "password" in the database name fails
+    /// `is_safe_to_echo`, and the empty port defeats `split_host_port`), and
+    /// `sqlx::postgres::PgConnectOptions::from_str` resolves them to two
+    /// different real hosts holding two different real databases. Under round 3
+    /// `overlay_env` found the two sides equal, skipped its refusal, and took
+    /// the environment's — E2E-F2, the workstream's original P1, reopened.
+    ///
+    /// [`sqlx_dials_what_this_module_cannot_parse`] is the measurement; this is
+    /// the consequence. To watch it go red, make `unaccounted_identity` return
+    /// `UNPARSEABLE_DSN.to_string()`.
+    #[test]
+    fn two_unparseable_spellings_are_two_identities() {
+        let pairs = [
+            // Round 4's constructed E2E-F2 reopening, dialable both sides.
+            (
+                "postgres://app@host-a:/db_password_a",
+                "postgres://app@host-b:/db_password_b",
+            ),
+            // Round 3's own pinned collapse example, which it asserted was
+            // undialable. sqlx dials it.
+            ("app:one@host-a:26257/db-a", "app:two@host-b:26257/db-b"),
+            // The scheme-less class generally.
+            (
+                "app:S3cretHunter@host-a:26257/lambo",
+                "app:S3cretHunter@host-b:26257/lambo",
+            ),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(
+                store_dsn_echo(a),
+                UNPARSEABLE_DSN,
+                "this pair is only interesting while both sides are withheld"
+            );
+            assert_eq!(store_dsn_echo(b), UNPARSEABLE_DSN);
+            assert_ne!(
+                store_dsn_identity(a),
+                store_dsn_identity(b),
+                "two spellings that dial different databases must not be one \
+                 identity just because neither could be quoted: {a} vs {b}"
+            );
+        }
+
+        // The price, pinned so that paying it stays deliberate. Two spellings
+        // that differ *only* by a password are one database and were one
+        // identity before this round; a digest of the raw input cannot know
+        // that, so they are now two. The consequence is a refusal naming both
+        // sides — loud, and fixed by one edit — where the alternative was the
+        // environment silently outranking the file. Over-splitting is the safe
+        // direction to be wrong in, the same way over-redacting is.
+        assert_ne!(
+            store_dsn_identity("postgre://app@h:26257/db"),
+            store_dsn_identity("postgre://app:S3cretHunter@h:26257/db"),
         );
+        // It costs nothing on the parsed path, which is where the documented
+        // "the file names the database, the environment supplies the password"
+        // pattern actually lives.
+        assert_eq!(
+            store_dsn_identity("postgres://app@h:26257/db"),
+            store_dsn_identity("postgres://app:S3cretHunter@h:26257/db"),
+        );
+    }
+
+    /// The digest is never handed to a terminal, and the placeholder is never
+    /// handed to a comparison. Two constants, two jobs, no overlap.
+    #[test]
+    fn the_echo_and_the_identity_do_not_borrow_each_others_answers() {
+        let unparseable = "app:S3cretHunter@host-a:26257/lambo";
+        assert_eq!(store_dsn_echo(unparseable), UNPARSEABLE_DSN);
+        assert!(!store_dsn_echo(unparseable).contains(UNACCOUNTED_IDENTITY_PREFIX));
+        assert_ne!(store_dsn_identity(unparseable), UNPARSEABLE_DSN);
+
+        // Absent stays absent on both halves: a `path`-shaped store has no DSN
+        // and must not acquire a digest of the empty string as an identity.
+        assert_eq!(store_dsn_identity(""), "");
+        assert_eq!(store_dsn_echo(""), "");
+        assert_eq!(store_dsn_identity("   "), "");
+        assert_eq!(store_dsn_echo("   "), "");
+
+        // The identity is stable: the same spelling twice is the same digest,
+        // or `overlay_env` would refuse a config that agrees with itself.
+        assert_eq!(
+            store_dsn_identity(unparseable),
+            store_dsn_identity(unparseable)
+        );
+        // And whitespace around it is not part of the spelling.
+        assert_eq!(
+            store_dsn_identity(unparseable),
+            store_dsn_identity(&format!("  {unparseable}  "))
+        );
+
+        // The note that keeps two withheld quotes from reading as a bug fires
+        // exactly when one of them is withheld.
+        assert!(withheld_note("postgres://a@h:5432/d", "postgres://b@h:5432/d").is_empty());
+        assert!(!withheld_note(UNPARSEABLE_DSN, "postgres://b@h:5432/d").is_empty());
+        assert!(!withheld_note(UNPARSEABLE_DSN, UNPARSEABLE_DSN).is_empty());
+    }
+
+    /// A parsed identity is safe to print without a keyword gate, because it is
+    /// four fields and none of them is the password — but it still reaches a
+    /// terminal, and a percent-encoded escape in a database name arrives
+    /// intact. That clause holds on every path.
+    #[test]
+    fn a_parsed_echo_still_may_not_carry_a_control_character() {
+        let raw = "postgres://app@h:5432/lam%1b%5b2Jbo";
+        // It parses, and the identity keeps the operator's database name.
+        assert!(parse_postgres_url(raw).is_some());
+        assert!(store_dsn_identity(raw).contains('\u{1b}'));
+        // The echo does not.
+        assert_eq!(store_dsn_echo(raw), UNPARSEABLE_DSN);
     }
 
     /// The parsed paths were already safe; pinned here so both halves of the
@@ -611,14 +1083,78 @@ mod tests {
     #[test]
     fn a_parseable_dsn_has_its_password_stripped() {
         assert_eq!(
-            canonical_store_dsn("postgres://app:S3cretHunter@127.0.0.1:5432/lambo"),
+            store_dsn_identity("postgres://app:S3cretHunter@127.0.0.1:5432/lambo"),
             "postgres://app@127.0.0.1:5432/lambo"
         );
         assert_eq!(
-            canonical_store_dsn(
+            store_dsn_identity(
                 "host=127.0.0.1 port=5432 dbname=lambo user=app password=S3cretHunter"
             ),
             "postgres://app@127.0.0.1:5432/lambo"
         );
+        assert_eq!(
+            store_dsn_echo("postgres://app:S3cretHunter@127.0.0.1:5432/lambo"),
+            "postgres://app@127.0.0.1:5432/lambo"
+        );
+    }
+
+    /// B-E2E-R4-2, the measurement round 3 asserted instead of running.
+    ///
+    /// Round 3's report, commit message and doc comment all justified collapsing
+    /// unrecognised spellings onto one identity with "both are strings no driver
+    /// will dial — anything sqlx can actually connect to parses through
+    /// `parse_postgres_url` and never reaches this function". This test is that
+    /// claim, executed. It fails, which is why the collapse is gone.
+    ///
+    /// `PgConnectOptions::from_str` is the real dial path, not a stand-in:
+    /// `store::pg` reaches the network through `dsn.parse::<PgConnectOptions>()`
+    /// (`connect_options`, `src/store/pg/mod.rs`). sqlx validates no scheme at
+    /// all — it hands the string to the `url` crate and reads components off
+    /// whatever comes back — which is the mechanism behind every row here.
+    ///
+    /// Feature-gated because it needs the driver, so it compiles under
+    /// `store-postgres` and `store-cockroach` and not under `store-sqlite`
+    /// alone.
+    #[cfg(any(feature = "store-postgres", feature = "store-cockroach"))]
+    #[test]
+    fn sqlx_dials_what_this_module_cannot_parse() {
+        use std::str::FromStr;
+        let dial = |raw: &str| sqlx::postgres::PgConnectOptions::from_str(raw);
+
+        // Round 4's constructed pair: two different real hosts, two different
+        // real databases, and round 3 gave both the same identity.
+        let a = dial("postgres://app@host-a:/db_password_a").expect("sqlx accepts an empty port");
+        let b = dial("postgres://app@host-b:/db_password_b").expect("sqlx accepts an empty port");
+        assert_eq!(
+            (a.get_host(), a.get_database()),
+            ("host-a", Some("db_password_a"))
+        );
+        assert_eq!(
+            (b.get_host(), b.get_database()),
+            ("host-b", Some("db_password_b"))
+        );
+        assert!(parse_postgres_url("postgres://app@host-a:/db_password_a").is_none());
+        assert_ne!(
+            store_dsn_identity("postgres://app@host-a:/db_password_a"),
+            store_dsn_identity("postgres://app@host-b:/db_password_b"),
+        );
+
+        // Round 3's own pinned collapse example. It claimed no driver would
+        // dial it; sqlx reads `app` as the scheme, defaults the host, and takes
+        // the rest as a database name.
+        let c = dial("app:one@host-a:26257/db-a").expect("sqlx validates no scheme");
+        assert_eq!(c.get_database(), Some("one@host-a:26257/db-a"));
+
+        // A misspelled scheme is dialed at the host and port it names.
+        let d = dial("postgre://app@h:26257/db").expect("sqlx validates no scheme");
+        assert_eq!((d.get_host(), d.get_port()), ("h", 26257));
+
+        // The two guards added for B-E2E-R4-3 agree with the driver: sqlx
+        // refuses these for the same reason we now do.
+        assert!(dial("postgres://app:S3cret/Hunter@h/db").is_err());
+        assert!(dial("postgres://app:S3cret?Hunter@h/db").is_err());
+        // And the shapes R2-5 filed are refused by sqlx too, which is why
+        // "would it dial" was never the right question on a refusal path.
+        assert!(dial("postgres://app:S3cretHunter@h:70000/db").is_err());
     }
 }

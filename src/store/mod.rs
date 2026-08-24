@@ -941,7 +941,7 @@ impl StoreConfig {
     /// guessing which one the operator meant is how `lambo provision` came to
     /// issue DDL against a production cluster the config never mentioned.
     ///
-    /// "Different databases" is measured by `canonical_store_dsn` in
+    /// "Different databases" is measured by `store_dsn_identity` in
     /// `src/store/dsn.rs` (private, so named rather than linked from this
     /// public item: E2E-F7's class again), not by string equality, so
     /// the common secret-handling shape keeps working: a file DSN that names
@@ -950,29 +950,44 @@ impl StoreConfig {
     /// spellings that differ in host, port, database or user are two databases
     /// and are refused.
     ///
-    /// The canonical form has the password stripped, which is why it is safe to
-    /// put both sides in the message. A spelling neither parser recognises is
-    /// not quoted at all — it prints as `<unparseable dsn>`, because the only
-    /// way to promise "(passwords stripped)" about a string we could not parse
-    /// is to not echo it (B-E2E-R3-1).
+    /// # What is compared is not what is printed (B-E2E-R4-2)
+    ///
+    /// The message quotes `store_dsn_echo`, not the identity. A spelling
+    /// neither parser recognises is not quotable — it prints as
+    /// `<unparseable dsn>`, because the only way to promise "(passwords
+    /// stripped)" about a string we could not parse is to not echo it
+    /// (B-E2E-R3-1) — but it is still *comparable*, and comparing it is this
+    /// refusal's entire job. Round 3 used one function for both and so compared
+    /// the placeholder: two malformed DSNs then looked identical here, the
+    /// refusal fell silent, and the environment took a different real host than
+    /// the file named. That is E2E-F2 reopened, and it is why the two halves are
+    /// two functions. When a quote is withheld the message says so, so that two
+    /// identical-looking placeholders do not read as a spurious refusal.
     pub fn overlay_env(mut self) -> Result<Self, StoreError> {
         if let Some(k) = Self::env_kind()? {
             self.kind = k;
         }
         if let Some((var, env_dsn)) = Self::dsn_from_env_for_kind(self.kind) {
             if let Some(file_dsn) = self.dsn.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                let from_file = crate::store::dsn::canonical_store_dsn(file_dsn);
-                let from_env = crate::store::dsn::canonical_store_dsn(&env_dsn);
-                if from_file != from_env {
+                // Compared on identity, printed on echo: two different jobs and
+                // two different functions since B-E2E-R4-2. Collapsing them was
+                // what let two malformed-but-dialable DSNs naming different
+                // hosts compare equal here and reopen E2E-F2.
+                let id_file = crate::store::dsn::store_dsn_identity(file_dsn);
+                let id_env = crate::store::dsn::store_dsn_identity(&env_dsn);
+                if id_file != id_env {
+                    let from_file = crate::store::dsn::store_dsn_echo(file_dsn);
+                    let from_env = crate::store::dsn::store_dsn_echo(&env_dsn);
                     return Err(StoreError::Backend(format!(
                         "store.dsn and {var} name different databases: the config file says \
-                         {from_file} and {var} says {from_env} (passwords stripped). Refusing \
-                         to guess which one you meant: the file is the single construction \
-                         site for `store.kind = {kind}`, and letting the environment outrank \
-                         it in silence means every verb, including `provision`, acts on a \
-                         database the config never names. Unset {var}, drop store.dsn, or \
-                         make them the same database.",
+                         {from_file} and {var} says {from_env} (passwords stripped).{withheld} \
+                         Refusing to guess which one you meant: the file is the single \
+                         construction site for `store.kind = {kind}`, and letting the \
+                         environment outrank it in silence means every verb, including \
+                         `provision`, acts on a database the config never names. Unset {var}, \
+                         drop store.dsn, or make them the same database.",
                         kind = self.kind,
+                        withheld = crate::store::dsn::withheld_note(&from_file, &from_env),
                     )));
                 }
             }
@@ -1640,6 +1655,66 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 "the refusal must not leak a password: {err}"
             );
         }
+    }
+
+    /// B-E2E-R4-2: E2E-F2's refusal fires even when neither side can be quoted.
+    ///
+    /// This is the round-4 review's constructed reopening, run end to end. Both
+    /// DSNs defeat `parse_postgres_url` (the empty port) and both fail the echo
+    /// gate (the literal "password" in the database name), so under round 3 —
+    /// where one function served as both the printer and the identity — the two
+    /// sides canonicalised to the same `<unparseable dsn>`, `overlay_env` found
+    /// them equal, skipped this refusal, and set `self.dsn` to the
+    /// environment's. `sqlx::postgres::PgConnectOptions::from_str` resolves them
+    /// to `host-a`/`db_password_a` and `host-b`/`db_password_b`, so that silence
+    /// handed every verb, `provision` included, a different real database than
+    /// the config file named. That is the P1 this whole refusal exists for.
+    ///
+    /// To watch this go red, make `store::dsn::unaccounted_identity` return the
+    /// placeholder — which is exactly what round 3 shipped.
+    #[test]
+    fn two_unquotable_dsns_still_reach_the_disagreement_refusal() {
+        let _g = env_lock();
+        env::remove_var("LAMBO_COCKROACH_DSN");
+        env::remove_var("DATABASE_URL");
+        env::remove_var("LAMBO_STORE");
+
+        let cfg = StoreConfig {
+            kind: StoreKind::Postgres,
+            dsn: Some("postgres://app@host-a:/db_password_a".into()),
+            path: None,
+            vector_dim: None,
+        };
+        env::set_var("LAMBO_POSTGRES_DSN", "postgres://app@host-b:/db_password_b");
+        let err = cfg
+            .clone()
+            .overlay_env()
+            .expect_err("two unquotable spellings are still two databases")
+            .to_string();
+
+        assert!(err.contains("LAMBO_POSTGRES_DSN"), "{err}");
+        assert!(err.contains("store.dsn"), "{err}");
+        // Neither side is quoted, and the message says why rather than
+        // presenting two identical placeholders as a disagreement.
+        assert!(err.contains("<unparseable dsn>"), "{err}");
+        assert!(
+            err.contains("is not a quotation"),
+            "a refusal whose two quotes read the same must explain itself: {err}"
+        );
+        assert!(
+            !err.contains("host-a") && !err.contains("host-b"),
+            "the withheld spelling must stay withheld: {err}"
+        );
+
+        // The same spelling on both sides is not a disagreement, and still is
+        // not one when it is a spelling we cannot parse. This is the half of
+        // round 3's behaviour that the digest deliberately keeps.
+        env::set_var("LAMBO_POSTGRES_DSN", "postgres://app@host-a:/db_password_a");
+        assert_eq!(
+            cfg.overlay_env().unwrap().dsn.as_deref(),
+            Some("postgres://app@host-a:/db_password_a"),
+        );
+        env::remove_var("LAMBO_POSTGRES_DSN");
     }
 
     /// E2E-F2: `LAMBO_POSTGRES_DSN` is the Postgres kind's variable and
