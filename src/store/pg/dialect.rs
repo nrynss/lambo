@@ -105,6 +105,15 @@ pub trait Dialect: Send + Sync + 'static {
     /// Label in invalid-DSN errors (`"Cockroach DSN"` / `"Postgres DSN"`).
     const DSN_LABEL: &'static str;
 
+    /// Whether this dialect can log in with a Google OAuth token as the password, which
+    /// is Cloud SQL IAM database authentication and therefore PostgreSQL only.
+    ///
+    /// It gates the `LAMBO_POSTGRES_IAM` opt-in. The variable names Postgres, and a build
+    /// carrying both adapters (`ship` does) must not quietly hand a Cloud SQL token to a
+    /// Cockroach cluster because one environment variable was exported for the other
+    /// store. Defaulted to `false` so a new dialect opts in deliberately.
+    const SUPPORTS_CLOUD_SQL_IAM_AUTH: bool = false;
+
     /// Extra idempotent statements `PgStore`'s `init_schema` runs after
     /// [`Dialect::init_sql`]. Discovered by splitting B0-N4: Cockroach
     /// converges `endpoint STRING` (and `current_token INT`); PostgreSQL

@@ -62,20 +62,24 @@ are audited to the same service account.
   password for this path.
 
 ### Lambo integration (code)
-`store-postgres` now mints the shared SA token and injects it as the connection
-password when opted in:
+`store-postgres` mints the shared SA token and injects it as the connection password when
+opted in:
 
-- `src/gcp_auth.rs` (new, gated `store-postgres`): `CloudSqlTokenSource` reads the same
-  credential file the embedder uses (`GCP_LAMBO_CREDENTIALS`, else
-  `GOOGLE_APPLICATION_CREDENTIALS`), mints an RS256 JWT and exchanges it for an OAuth
-  access token scoped `cloud-platform sqlservice.login`, caching until `expires_in - 60s`.
-- `src/store/pg/mod.rs` `PgStore::pool()`: when `LAMBO_POSTGRES_IAM` is set, it mints the
-  token and sets it as the `PgConnectOptions` password (`options.password(&token)`), so
-  the DSN carries the IAM user with NO password.
-- Cargo: `store-postgres` now also enables `dep:reqwest` and `dep:jsonwebtoken` (the
-  token mint needs them); neither leaks into default builds (store-postgres is not
-  default).
-- Live test `iam_auth_connects_as_service_account` (ignored) in `store/pg/postgres.rs`.
+- `src/gcp_auth.rs` (gated `embed-gemini` OR `store-postgres`): the **one** Google auth
+  path in the crate. It reads the shared credential file (`GCP_LAMBO_CREDENTIALS`, else
+  `GOOGLE_APPLICATION_CREDENTIALS`), handles both credential kinds (service-account key by
+  the `jwt-bearer` grant, authorized-user ADC by the `refresh_token` grant), and mints an
+  access token for the **caller's** scope, caching until `expires_in - 60s`.
+- `src/store/pg/mod.rs` `PgStore::pool()`: when `LAMBO_POSTGRES_IAM` is set it returns the
+  IAM pool, whose connection password is that token, so the DSN carries the IAM user with
+  NO password. The pool is **rotated at the token's expiry** (see the follow-ups closed
+  below), not built once.
+- Cargo: `store-postgres` also enables `dep:reqwest` and `dep:jsonwebtoken` (the token
+  mint needs them); neither is in the default feature set.
+- Tests: `iam_auth_connects_as_service_account` (live, ignored) plus two offline pins in
+  `store/pg/postgres.rs`, `the_iam_pool_is_rebuilt_when_its_token_expires` and
+  `iam_without_credentials_fails_closed_naming_the_variables`, and the auth module's own
+  suite in `gcp_auth.rs`.
 
 ### Running the shared-SA store path
 ```
@@ -96,21 +100,60 @@ IAM authenticated to Postgres as: cachy-nryn@mooshik.iam
 asserts is that the login IS an IAM user (`current_user` contains a domain `@`), not this
 exact string, so a differently-named SA still works.
 
+### Follow-ups, closed 2026-08-24
+The three that the first cut named and deferred are now done. What remains open is named
+below them, and named honestly.
+
+- **Token lifetime: closed.** The IAM token lives about an hour, and Postgres checks the
+  password only at connect time, so a pool built with an expired token keeps working on its
+  open connections and fails on the next one it opens. A `serve` would have met that as an
+  authentication error two hours in, looking nothing like an expiry. `PgStore::iam_pool()`
+  now holds the token source, the live pool, and the instant the token stops being handed
+  out, and builds a replacement lazy pool at that instant. The superseded pool is dropped
+  rather than closed: an in-flight query holds its connection until it finishes, and
+  nothing new is handed out from it. `pool()` returns an owned `PgPool` (an `Arc` clone) for
+  this reason; a `&PgPool` into a slot that can be swapped is not a reference that can be
+  handed out. Pinned by `the_iam_pool_is_rebuilt_when_its_token_expires`, which mints
+  against a mock OAuth endpoint with `expires_in: 61` and asserts the second mint.
+- **The opt-in is PostgreSQL only.** `LAMBO_POSTGRES_IAM` names Postgres, and `ship`
+  carries both adapters, so a variable exported for the hosted store could have reached a
+  Cockroach cluster in the same binary. The dialect decides
+  (`Dialect::SUPPORTS_CLOUD_SQL_IAM_AUTH`, false by default, true for Postgres only), and
+  `cockroach_ignores_the_cloud_sql_iam_opt_in` fails when that gate is removed.
+- **Two auth implementations: closed.** They are one module now (`src/gcp_auth.rs`), shared
+  by the embedder and the store, with the scope supplied per caller. This was not
+  cosmetic. The store's copy parsed service-account keys ONLY, so on the machine whose
+  credential is an authorized-user ADC file (which is what the live Vertex verification
+  actually ran with) the embedder worked and the store could not authenticate at all.
+  `an_authorized_user_adc_file_loads_for_the_cloud_sql_path` is that regression's pin.
+  The error classification the embedder depends on survives the move one for one
+  (`GoogleAuthError` maps onto `EmbedError`), pinned by
+  `auth_error_classification_is_preserved`.
+- **One machine on the allowlist: closed.** The instance admitted exactly one /32, the
+  cachyos box's egress address at provisioning time. Mooshik spans two machines, and a
+  home address rotates; either way every hosted call fails to connect and reads as an
+  outage rather than an allowlist miss. `scripts/cloudsql-allowlist.sh` adds the running
+  host's egress IP idempotently (`--list`, `--dry-run`, `--ip`, `--remove`), preserves the
+  entries it did not add, and refuses to empty the list. Each machine runs it once, and
+  again whenever its address changes.
+- **Released binaries could not run this tier: closed.** `ship` (the feature set behind
+  every prebuilt binary) carried neither `store-postgres` nor `embed-gemini`, so a
+  `lambo.toml` naming `postgres` or `gemini` failed on a released binary with a
+  rebuild-the-binary error, against a README that promises the full adapter set. Both are
+  in `ship` now. Neither adds a native toolchain dependency.
+
 ### Constraints (honest limits)
-- **Token lifetime.** The IAM token is minted once when the SQLx pool is first created
-  and cached by `CloudSqlTokenSource`; it is valid ~1h. A long-running `serve` should
-  re-establish the pool before expiry, or use the Cloud SQL Auth Proxy which handles
-  rollover. For a smoke run and intermittent use this is fine; flagged as the production
-  follow-up.
+- **Rotation is at the pool, not the connection.** sqlx 0.8 has no per-connection connect
+  hook (`PoolConnector` is 0.9), so the unit of rotation is the pool. That is sufficient
+  here (a new pool is lazy and costs one token mint) and it is why the fix reads the way it
+  does rather than as a password callback.
 - **IAM DB user privileges.** The SA is a `CLOUD_IAM_SERVICE_ACCOUNT` login, not a
   superuser. Run lambo's schema DDL (which needs `CREATE EXTENSION`/`CREATE DATABASE`)
   as the postgres root once, then operate with the SA. The `lambo` built-in user remains
   the simple password path.
-- **Public IP + allowlist** is dev-grade. Production should use a private IP + the Cloud
-  SQL Auth Proxy (which also resolves the 1h-token rollover).
-- The embedder's own token logic lives in `embed/gemini.rs` and this store module in
-  `gcp_auth.rs`; consolidating both behind one shared Google-auth module is a noted
-  follow-up (the shared identity, via `GCP_LAMBO_CREDENTIALS`, is already one file).
+- **Public IP plus allowlist is dev-grade.** Production should use a private IP and the
+  Cloud SQL Auth Proxy. The allowlist script makes the dev-grade path survivable across two
+  machines and a rotating address; it does not make it production.
 
 ## Cost
 `db-f1-micro` ~ $7-9/mo plus small storage/backup. Stop it when idle if you want to drop it.

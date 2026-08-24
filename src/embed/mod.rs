@@ -484,7 +484,12 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
         .clone()
         .unwrap_or_else(|| gemini::DEFAULT_MODEL.to_string());
     let client = build_client()?;
-    let token_source = Box::new(GoogleOAuthTokenSource::new(creds, client.clone())?);
+    // Vertex's scope only: the store's Cloud SQL scope set is its own (`gcp_auth`).
+    let token_source = Box::new(GoogleOAuthTokenSource::new(
+        creds,
+        client.clone(),
+        gemini::OAUTH_SCOPE,
+    )?);
     let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
     let embedder = GeminiEmbedder::new(model, cfg.dim, token_source, embed_url, client)?;
     Ok(Box::new(embedder))

@@ -85,7 +85,9 @@ pub mod daemon;
 pub mod embed;
 #[cfg(feature = "fixtures")]
 pub mod fixtures;
-#[cfg(feature = "store-postgres")]
+// Shared Google OAuth: the Gemini embedder's Vertex calls and the Postgres store's
+// Cloud SQL IAM login are one identity and one code path (2026-08-24).
+#[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]
 pub mod gcp_auth;
 pub mod graph;
 pub mod ledger;

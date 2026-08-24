@@ -333,9 +333,31 @@ hardcoding. SQLite's width must come from the persisted session contract
 `lambo = { path = "../lambo", default-features = false, features = [...] }`.
 `default-features = false` matters: the default set pulls `embed-bge`, which pulls reqwest and
 assumes a local llama.cpp server. Mooshik also needs `rust-toolchain.toml` at 1.97.1 to match.
-**Depends on:** A4, B4, F2.
+**Depends on:** A4, B4, F2 (all three landed 2026-08-24, so E1 is unblocked).
+
+**Probed out of tree, 2026-08-24.** A scratch crate outside this repo took the path dep with
+`default-features = false, features = ["store-sqlite", "embed-fixture"]` and drove M2's shape
+to a live `Memory`. It builds and runs. Three things the Cargo line alone does not tell you,
+found by doing it rather than by reading:
+
+1. **The embedding contract is mandatory at build time.** `MemoryBuilder` refuses without
+   `.embedding_contract(..)` or `.backends(..)`: *"a session without a stamped embedding
+   space cannot refuse a model swap"*. So M2 stamps `EmbeddingContract { kind, model, dim }`
+   from whatever it resolved, and switching Mooshik from fixture to Gemini later is a
+   re-embed, not a config flip. That is the same late-binding rule A records about `dim`.
+2. **Provisioning is a library call, not a shell-out.** A fresh store fails the first
+   `build()` with a message telling a human to run `lambo provision`. Mooshik will not shell
+   out to a binary it does not ship, and it does not have to: `GraphStore::init_schema()` is
+   on the public trait and idempotent, which is exactly what `lambo provision` calls for the
+   sqlite and postgres arms. M1 creates `~/.mooshik`, M2 calls `init_schema()` once.
+3. **The surface Mooshik needs is exported.** `MemoryBuilder`, `build_store`, `StoreConfig`,
+   `StoreKind`, `EmbeddingContract`, `Embedder`, `FixtureEmbedder`, `GraphStore` all come off
+   the crate root. M2b's endpoint is `mcp::endpoint::SessionEndpoint::resolve(session,
+   &StoreConfig)` (it takes the store config, not the session alone) and
+   `LeaseHolder::reachable_at`.
 
 ### E2 — Rev-pinned git dep before submitting
+
 `{ git = "https://github.com/nrynss/lambo", rev = "<sha>" }`. **Pin `rev`, never `branch`** — a
 branch that moves after submission means a judge builds a different Lambo than the one in the
 video. **Depends on:** E1.

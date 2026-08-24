@@ -33,9 +33,7 @@
 //! BEFORE any network (no token minted, no request sent).
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use serde::Deserialize;
 
 use super::{EmbedError, Embedder};
 
@@ -43,166 +41,33 @@ use super::{EmbedError, Embedder};
 pub(crate) const DEFAULT_MODEL: &str = "gemini-embedding-001";
 /// Default Vertex region when `location` is not configured.
 pub(crate) const DEFAULT_LOCATION: &str = "us-central1";
-/// Fallback OAuth token endpoint when the service-account JSON omits `token_uri`.
-pub(crate) const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
-/// Cloud-platform scope requested on the OAuth token.
-pub(crate) const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-/// JWT lifetime: Google accepts up to 3600s.
-const JWT_LIFETIME_SECS: u64 = 3600;
-/// Cache the OAuth access token until this margin before `expires_in`.
-const TOKEN_CACHE_MARGIN: Duration = Duration::from_secs(60);
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Parsed Google credentials: a service-account key or an authorized-user ADC file.
-#[derive(Debug, Clone)]
-pub enum GoogleCredentials {
-    ServiceAccount {
-        client_email: String,
-        private_key: String,
-        project_id: Option<String>,
-        token_uri: String,
-    },
-    AuthorizedUser {
-        client_id: String,
-        client_secret: String,
-        refresh_token: String,
-        quota_project_id: Option<String>,
-        token_uri: String,
-    },
-}
+// ---------------------------------------------------------------------------
+// Google auth lives in `crate::gcp_auth`, shared with the Postgres store's Cloud
+// SQL IAM login (2026-08-24). Only Vertex-specific pieces stay here. Re-exported
+// under the names this module has always used so call sites and tests are
+// unchanged by the move.
+// ---------------------------------------------------------------------------
+pub use crate::gcp_auth::{
+    build_client, load_credentials, GoogleAuthError, GoogleOAuthTokenSource,
+};
+/// Cloud-platform scope requested on the OAuth token for Vertex.
+pub(crate) const OAUTH_SCOPE: &str = crate::gcp_auth::SCOPE_CLOUD_PLATFORM;
 
-impl GoogleCredentials {
-    /// The GCP project to call Vertex on: the service-account's project or the
-    /// authorized-user's quota project. Config `gemini_project` overrides this in
-    /// `build_gemini_embedder`.
-    pub fn project_id(&self) -> Option<String> {
-        match self {
-            GoogleCredentials::ServiceAccount { project_id, .. } => project_id.clone(),
-            GoogleCredentials::AuthorizedUser {
-                quota_project_id, ..
-            } => quota_project_id.clone(),
+#[cfg(test)]
+pub(crate) use crate::gcp_auth::TEST_RSA_PRIVATE_KEY_PEM;
+
+/// The auth module's classification maps ONE-FOR-ONE onto this adapter's, which is what
+/// keeps A3's degradation contract true after the consolidation: a token endpoint that is
+/// unreachable still degrades the caller to canonical matching, and a rejected grant still
+/// stops it. Pinned by `auth_error_classification_is_preserved`.
+impl From<GoogleAuthError> for EmbedError {
+    fn from(e: GoogleAuthError) -> Self {
+        match e {
+            GoogleAuthError::Unavailable(m) => EmbedError::Unavailable(m),
+            GoogleAuthError::Backend(m) => EmbedError::Backend(m),
         }
     }
-
-    /// The OAuth token endpoint (defaults to Google's).
-    pub fn token_uri(&self) -> &str {
-        match self {
-            GoogleCredentials::ServiceAccount { token_uri, .. } => token_uri,
-            GoogleCredentials::AuthorizedUser { token_uri, .. } => token_uri,
-        }
-    }
-}
-
-/// Raw service-account key JSON.
-#[derive(Deserialize)]
-struct ServiceAccountJson {
-    client_email: String,
-    private_key: String,
-    project_id: Option<String>,
-    #[serde(default)]
-    token_uri: Option<String>,
-}
-
-/// Raw authorized-user ADC JSON.
-#[derive(Deserialize)]
-struct AuthorizedUserJson {
-    client_id: String,
-    client_secret: String,
-    refresh_token: String,
-    quota_project_id: Option<String>,
-    #[serde(default)]
-    token_uri: Option<String>,
-}
-
-/// Read and parse a Google credentials file (service-account key or ADC).
-pub fn load_credentials(path: &Path) -> Result<GoogleCredentials, EmbedError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        EmbedError::Unavailable(format!(
-            "cannot read Google credentials {}: {e}",
-            path.display()
-        ))
-    })?;
-    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        EmbedError::Unavailable(format!(
-            "malformed Google credentials {}: {e}",
-            path.display()
-        ))
-    })?;
-    let cred_type = v
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("service_account");
-    match cred_type {
-        "service_account" => {
-            let sa: ServiceAccountJson = serde_json::from_value(v).map_err(|e| {
-                EmbedError::Unavailable(format!(
-                    "malformed service-account credentials {}: {e}",
-                    path.display()
-                ))
-            })?;
-            if sa.client_email.is_empty() || sa.private_key.is_empty() {
-                return Err(EmbedError::Unavailable(
-                    "service-account credentials missing client_email or private_key".into(),
-                ));
-            }
-            Ok(GoogleCredentials::ServiceAccount {
-                client_email: sa.client_email,
-                private_key: sa.private_key,
-                project_id: sa.project_id,
-                token_uri: sa
-                    .token_uri
-                    .unwrap_or_else(|| DEFAULT_TOKEN_URI.to_string()),
-            })
-        }
-        "authorized_user" => {
-            let au: AuthorizedUserJson = serde_json::from_value(v).map_err(|e| {
-                EmbedError::Unavailable(format!(
-                    "malformed authorized-user credentials {}: {e}",
-                    path.display()
-                ))
-            })?;
-            if au.client_id.is_empty() || au.client_secret.is_empty() || au.refresh_token.is_empty()
-            {
-                return Err(EmbedError::Unavailable(
-                    "authorized-user credentials missing client_id, client_secret or refresh_token"
-                        .into(),
-                ));
-            }
-            Ok(GoogleCredentials::AuthorizedUser {
-                client_id: au.client_id,
-                client_secret: au.client_secret,
-                refresh_token: au.refresh_token,
-                quota_project_id: au.quota_project_id,
-                token_uri: au
-                    .token_uri
-                    .unwrap_or_else(|| DEFAULT_TOKEN_URI.to_string()),
-            })
-        }
-        other => Err(EmbedError::Unavailable(format!(
-            "unsupported Google credentials type {other:?} in {}",
-            path.display()
-        ))),
-    }
-}
-
-/// JWT claims carried by the service-account assertion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Claims {
-    iss: String,
-    scope: String,
-    aud: String,
-    iat: u64,
-    exp: u64,
-}
-
-/// Build a `reqwest::Client` with sensible timeouts.
-pub(crate) fn build_client() -> Result<reqwest::Client, EmbedError> {
-    reqwest::Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .timeout(DEFAULT_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| EmbedError::Unavailable(format!("failed to build HTTP client: {e}")))
 }
 
 /// Supplies the Bearer token for Vertex calls. Production uses mint + OAuth exchange;
@@ -212,128 +77,11 @@ pub trait GeminiTokenSource: Send + Sync + std::fmt::Debug {
     async fn access_token(&mut self) -> Result<String, EmbedError>;
 }
 
-/// Production token source: for a service account it mints an RS256 JWT and exchanges it
-/// for an OAuth access_token (jwt-bearer grant); for an authorized-user ADC it uses the
-/// refresh-token grant. Both cache until `expires_in - 60s`.
-#[derive(Debug)]
-pub struct GoogleOAuthTokenSource {
-    creds: GoogleCredentials,
-    client: reqwest::Client,
-    cached: Option<(String, Instant)>,
-}
-
-impl GoogleOAuthTokenSource {
-    /// Build a token source from parsed Google credentials.
-    pub fn new(creds: GoogleCredentials, client: reqwest::Client) -> Result<Self, EmbedError> {
-        Ok(Self {
-            creds,
-            client,
-            cached: None,
-        })
-    }
-
-    /// Mint the RS256 JWT assertion (service-account only; exposed for tests). Signs the
-    /// service-account private key (a malformed/unusable key is a permanent,
-    /// operator-fixing `Backend`).
-    pub fn mint_jwt(&self) -> Result<String, EmbedError> {
-        let GoogleCredentials::ServiceAccount {
-            client_email,
-            private_key,
-            ..
-        } = &self.creds
-        else {
-            return Err(EmbedError::Unavailable(
-                "JWT minting requires service-account credentials".into(),
-            ));
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| EmbedError::Unavailable(format!("system clock before epoch: {e}")))?
-            .as_secs();
-        let claims = Claims {
-            iss: client_email.clone(),
-            scope: OAUTH_SCOPE.to_string(),
-            aud: self.creds.token_uri().to_string(),
-            iat: now,
-            exp: now + JWT_LIFETIME_SECS,
-        };
-        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-        let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|e| {
-            EmbedError::Backend(format!(
-                "failed to parse service-account private key PEM: {e}"
-            ))
-        })?;
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| EmbedError::Backend(format!("failed to sign service-account JWT: {e}")))
-    }
-}
-
 #[async_trait]
 impl GeminiTokenSource for GoogleOAuthTokenSource {
     async fn access_token(&mut self) -> Result<String, EmbedError> {
-        if let Some((token, expires_at)) = &self.cached {
-            if Instant::now() < *expires_at {
-                return Ok(token.clone());
-            }
-        }
-        let params: Vec<(&'static str, String)> = match &self.creds {
-            GoogleCredentials::ServiceAccount { .. } => {
-                let jwt = self.mint_jwt()?;
-                vec![
-                    (
-                        "grant_type",
-                        "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
-                    ),
-                    ("assertion", jwt),
-                ]
-            }
-            GoogleCredentials::AuthorizedUser {
-                client_id,
-                client_secret,
-                refresh_token,
-                ..
-            } => vec![
-                ("grant_type", "refresh_token".to_string()),
-                ("client_id", client_id.clone()),
-                ("client_secret", client_secret.clone()),
-                ("refresh_token", refresh_token.clone()),
-            ],
-        };
-        let resp = self
-            .client
-            .post(self.creds.token_uri())
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| {
-                EmbedError::Unavailable(format!("OAuth token endpoint unreachable: {e}"))
-            })?;
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| {
-            EmbedError::Backend(format!(
-                "OAuth token endpoint returned unparseable JSON: {e}"
-            ))
-        })?;
-        if !status.is_success() {
-            return Err(EmbedError::Backend(format!(
-                "OAuth token endpoint returned {status}: {body}"
-            )));
-        }
-        let token = body
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| EmbedError::Backend("OAuth token response missing access_token".into()))?
-            .to_string();
-        // TTL default 3600 when `expires_in` is absent; never cache for longer than it.
-        let expires_in = body
-            .get("expires_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3600);
-        let ttl = expires_in
-            .saturating_sub(TOKEN_CACHE_MARGIN.as_secs())
-            .max(1);
-        self.cached = Some((token.clone(), Instant::now() + Duration::from_secs(ttl)));
-        Ok(token)
+        // Inherent method on the shared source; the `From` above preserves the split.
+        Ok(GoogleOAuthTokenSource::access_token(self).await?)
     }
 }
 
@@ -505,69 +253,9 @@ impl Embedder for GeminiEmbedder {
 }
 
 #[cfg(test)]
-pub(crate) const TEST_RSA_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDgTiqLX+Re051H
-YBfWTwHojXANv7kFLmXZZtY6c+p5qO+TfIOWaocCH08zqzkMuEFf4wJ+HU2Zz7rt
-EyNrsWuqIVGi8rDqQ9h//0w1pcbBrxH5qZzA4VGKMtwUowVsI7K31xsYq+4V0btq
-BUn41iuC9DyTuguC9V/6a2GwfmqRGT80bOd+6HIINGFXpgm5n7D2jaHqx2MhLnle
-WnZGIerDK2dmRQkMJY/HxhnzM+n2Q9FXEhPk0qJHb2Hzd0OCgMOZBE5x2zw0+HWI
-WbAj3BK+N6IIJQQ31uNZF8PxyoLGw8v5+dez+9E1+63MVv3jEqvDyXLcttg6JH5P
-sETfhndbAgMBAAECggEADpv4uGgv+x8kTMxM8SfnM2rW5AZbOiOp/Y1toZQALxla
-NUx0U50vmutIINDjn9j2ZRTniihFcCGwBpXrBi4hmYyfARJ2hGOT285Ye9wGxIGv
-FYg/De7+/RXP8MYnacIvdzra6HH2SVSGNOMQTNVCMz7OHT8OVeK+dBR/Ydvx++4+
-Q4pkdzIbWNSTVlnGCEnWIJcYoW2Xlu55vy0VqBriZJjYJ7SHCFf5916mEHzhUk1d
-NODePUX5IK5JW2W+4CaTDGV5djUZXr8CXZW5vVS2HkiYh0Xho3Lti1XajpHR7w0W
-tZwFyOJBVhtSuOtt43O1SEnQpQ64r0+gi481SzsAxQKBgQD9+UfOiPlyBNqp8fmL
-8DBSiWjJ/mFlPJptj5k2RGT5qD7fjnwZ/OrD+xfjWlA04U1FVsjYT4ldncHPkViu
-qr/1taorMQpurAkBp23H9MUF4S8ieROA4ybke7GjcnimiysgzTIjVYbT1Hk7+2Td
-KUDJHYUtNYjKPCEp/Hp77AkETQKBgQDiGEpfAVq2EZGpjCuseRt//H+4nYyGLtKO
-/f6kyDhmHbLR/4HCmKj66yP6A9taNcICSSZ4en62EJlUB26pHsuteUlLIAk75ZKi
-xdZyXHam963MbHf7+qmEzS6Y5nPs6dH1WeWT/Q5zW8W+9V7+GQ2bClubJ2mvOyNV
-ksSAoDpeRwKBgQCMiWmTvzYRQuBhFBYbupByy7ihtdLdO1jU8ZY9ckFR6SjJekXv
-94VNZ1+DnlEtwdKJYQmIsRJ5LDe4DVy+YpwQcjM07VExhp8BPE3CTQ7NPxte/xKs
-yoWV/2B/6nMa7X2zC/kHlmciRrvDVkwtGYvQ/jXYm3wTNIzBeAWrFySyLQKBgBC2
-EukqxHWonseVYLUCzpGLLDWND5HrbAy9oVC0q9aAY3M6G3Eyr2q8bpBQMKpeRtS8
-a2eERlFWsL6RPhCqAgv0ZwJyf7w5n7kAPnV9eBenPuVZLxUk1drG/6a1geQE9Eva
-NSnXDnZgViFjKX5Gg8bt4Q96vkkBaf8tNfD75tSJAoGBAPnbWbn/2JGSoDBBpbxF
-QIunSRniqPIDbWbI2npY3DS7/2MnpyADY6GByjvZ19Lk1yhtO0/WEMNMKl+rsaNO
-QDEwl2KdTKA4jCDdjj6tLKZ88NpSvYY/iJQVT8RM0ciJ76wbtYudZTBfEt7OosA6
-mDN1kibH7c0cAYkeC2hN6nAG
------END PRIVATE KEY-----";
-
-#[cfg(test)]
-pub(crate) const TEST_RSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4E4qi1/kXtOdR2AX1k8B
-6I1wDb+5BS5l2WbWOnPqeajvk3yDlmqHAh9PM6s5DLhBX+MCfh1Nmc+67RMja7Fr
-qiFRovKw6kPYf/9MNaXGwa8R+amcwOFRijLcFKMFbCOyt9cbGKvuFdG7agVJ+NYr
-gvQ8k7oLgvVf+mthsH5qkRk/NGznfuhyCDRhV6YJuZ+w9o2h6sdjIS55Xlp2RiHq
-wytnZkUJDCWPx8YZ8zPp9kPRVxIT5NKiR29h83dDgoDDmQROcds8NPh1iFmwI9wS
-vjeiCCUEN9bjWRfD8cqCxsPL+fnXs/vRNfutzFb94xKrw8ly3LbYOiR+T7BE34Z3
-WwIDAQAB
------END PUBLIC KEY-----";
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use httpmock::prelude::*;
-
-    fn sample_credentials(token_uri: &str) -> GoogleCredentials {
-        GoogleCredentials::ServiceAccount {
-            client_email: "sa@example.com".to_string(),
-            private_key: TEST_RSA_PRIVATE_KEY_PEM.to_string(),
-            project_id: Some("proj".to_string()),
-            token_uri: token_uri.to_string(),
-        }
-    }
-
-    fn sample_authorized_user(token_uri: &str) -> GoogleCredentials {
-        GoogleCredentials::AuthorizedUser {
-            client_id: "client-1".to_string(),
-            client_secret: "secret-1".to_string(),
-            refresh_token: "refresh-1".to_string(),
-            quota_project_id: Some("quota-proj".to_string()),
-            token_uri: token_uri.to_string(),
-        }
-    }
 
     fn unit_magnitude(v: &[f32]) -> f32 {
         v.iter().map(|x| x * x).sum::<f32>().sqrt()
@@ -603,89 +291,26 @@ mod tests {
         .unwrap()
     }
 
+    /// The consolidation's contract: `gcp_auth`'s two-way classification arrives here
+    /// unchanged, so an unreachable token endpoint still degrades the caller to canonical
+    /// matching (A3/CON-2) and a refused grant still stops it. The mint/exchange/cache
+    /// behaviour itself is pinned in `crate::gcp_auth`'s tests, which is where the code
+    /// now lives.
     #[test]
-    fn mints_and_verifies_service_account_jwt() {
-        let src = GoogleOAuthTokenSource::new(
-            sample_credentials(DEFAULT_TOKEN_URI),
-            reqwest::Client::new(),
-        )
-        .unwrap();
-        let jwt = src.mint_jwt().unwrap();
-        let header = jsonwebtoken::decode_header(&jwt).unwrap();
-        assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-        validation.validate_aud = false; // aud is a URI; strict aud matching is not needed
-        validation.set_required_spec_claims(&["iss", "exp"]);
-        let key =
-            jsonwebtoken::DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM.as_bytes()).unwrap();
-        let data = jsonwebtoken::decode::<Claims>(&jwt, &key, &validation).unwrap();
-        assert_eq!(data.claims.iss, "sa@example.com");
-        assert_eq!(data.claims.aud, DEFAULT_TOKEN_URI);
-        assert_eq!(data.claims.exp - data.claims.iat, JWT_LIFETIME_SECS);
+    fn auth_error_classification_is_preserved() {
+        let unavailable: EmbedError = GoogleAuthError::Unavailable("no route".into()).into();
+        assert!(matches!(unavailable, EmbedError::Unavailable(ref m) if m == "no route"));
+        let backend: EmbedError = GoogleAuthError::Backend("401 invalid_grant".into()).into();
+        assert!(matches!(backend, EmbedError::Backend(ref m) if m == "401 invalid_grant"));
     }
 
-    #[tokio::test]
-    async fn exchanges_jwt_for_access_token_and_caches() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/token")
-                .body_contains("grant_type=")
-                .body_contains("assertion=");
-            then.status(200)
-                .json_body(serde_json::json!({ "access_token": "tok-1", "expires_in": 3600 }));
-        });
-        let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
-        let t1 = src.access_token().await.unwrap();
-        assert_eq!(t1, "tok-1");
-        // Second call hits the cache: the endpoint mock must have seen exactly one request.
-        let t2 = src.access_token().await.unwrap();
-        assert_eq!(t2, "tok-1");
-        mock.assert_hits(1);
+    /// The Vertex adapter asks for the cloud-platform scope, not the store's wider set.
+    #[test]
+    fn vertex_asks_for_the_cloud_platform_scope_only() {
+        assert_eq!(OAUTH_SCOPE, crate::gcp_auth::SCOPE_CLOUD_PLATFORM);
+        assert!(!OAUTH_SCOPE.contains("sqlservice.login"));
     }
 
-    #[tokio::test]
-    async fn token_endpoint_transport_failure_is_unavailable() {
-        let creds = sample_credentials("http://127.0.0.1:9/token");
-        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
-        let err = src.access_token().await.unwrap_err();
-        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn token_endpoint_http_error_is_backend() {
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/token");
-            then.status(401)
-                .json_body(serde_json::json!({ "error": "invalid_grant" }));
-        });
-        let creds = sample_credentials(&format!("{}/token", server.base_url()));
-        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
-        let err = src.access_token().await.unwrap_err();
-        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn authorized_user_uses_refresh_token_grant_and_caches() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/token")
-                .body_contains("grant_type=refresh_token")
-                .body_contains("client_id=client-1")
-                .body_contains("client_secret=secret-1")
-                .body_contains("refresh_token=refresh-1");
-            then.status(200)
-                .json_body(serde_json::json!({ "access_token": "tok-au", "expires_in": 3600 }));
-        });
-        let creds = sample_authorized_user(&format!("{}/token", server.base_url()));
-        let mut src = GoogleOAuthTokenSource::new(creds, reqwest::Client::new()).unwrap();
-        assert_eq!(src.access_token().await.unwrap(), "tok-au");
-        assert_eq!(src.access_token().await.unwrap(), "tok-au");
-        mock.assert_hits(1); // second call hits the cache
-    }
     #[tokio::test]
     async fn embeds_and_normalizes() {
         let server = MockServer::start();
@@ -887,7 +512,8 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1536);
         let client = build_client().unwrap();
-        let token_source = Box::new(GoogleOAuthTokenSource::new(creds, client.clone()).unwrap());
+        let token_source =
+            Box::new(GoogleOAuthTokenSource::new(creds, client.clone(), OAUTH_SCOPE).unwrap());
         let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
         let e = GeminiEmbedder::new(model, dim, token_source, embed_url, client).unwrap();
         let v = e.embed("lambo live vertex round-trip").await.unwrap();

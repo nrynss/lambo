@@ -28,6 +28,23 @@
   Cockroach stays `<->` L2 and `1 - d^2/2`. Copying either formula onto the
   other dialect is pinned to fail.
 
+- Cargo feature `embed-gemini`: Vertex `gemini-embedding-001` embeddings, with a
+  dim guard for the 768 / 1536 / 3072 the model truncates to.
+- `src/gcp_auth.rs`: one Google OAuth path for every adapter that authenticates
+  as a Google principal, gated `embed-gemini` OR `store-postgres`. Handles both
+  credential kinds (service-account key by `jwt-bearer`, authorized-user ADC by
+  `refresh_token`) and mints for the caller's own scope, so a Cloud SQL login and
+  a Vertex call share an identity without sharing authority.
+- Cloud SQL IAM database authentication for `store-postgres`, opted into with
+  `LAMBO_POSTGRES_IAM`: the connection password is an OAuth token minted from the
+  shared credential file, and the pool is rebuilt when that token expires. The
+  opt-in is PostgreSQL only (`Dialect::SUPPORTS_CLOUD_SQL_IAM_AUTH`), so a build
+  carrying both adapters never hands a Cloud SQL token to a Cockroach cluster.
+- `scripts/cloudsql-allowlist.sh`: add the running host's egress IP to a Cloud SQL
+  instance's authorized networks, idempotently, preserving entries it did not add.
+- Released binaries (`ship`) now carry `store-postgres` and `embed-gemini`, so a
+  `lambo.toml` naming `postgres` or `gemini` runs on a prebuilt binary.
+
 ### Notes
 
 - B0's extraction already made `crate::store::pg::{PgStore, Dialect}` and

@@ -127,6 +127,8 @@ impl Dialect for PostgresDialect {
     const STORE_TYPE_NAME: &'static str = "PostgresStore";
     const DSN_ENV: &'static str = "LAMBO_POSTGRES_DSN";
     const DSN_LABEL: &'static str = "Postgres DSN";
+    // Cloud SQL IAM database auth: the shared-service-account path (`LAMBO_POSTGRES_IAM`).
+    const SUPPORTS_CLOUD_SQL_IAM_AUTH: bool = true;
 
     fn post_init_statements() -> &'static [&'static str] {
         &[
@@ -292,7 +294,7 @@ pub(crate) mod corpus {
         rows: usize,
     ) -> Vec<(uuid::Uuid, Vec<f32>)> {
         let dim = contract.dim;
-        let pool = store.pool().await.expect("corpus: pool");
+        let pool = &store.pool().await.expect("corpus: pool");
         sqlx::query(SESSION_SQL)
             .bind(session)
             .bind(dim as i64)
@@ -388,7 +390,7 @@ pub(crate) mod corpus {
     /// The natural plan text for the production recall SQL, with no GUC beyond
     /// the store's own forced-exact setting.
     pub(crate) async fn plan(store: &PostgresStore, probe: &[f32], limit: i64) -> String {
-        let pool = store.pool().await.expect("plan: pool");
+        let pool = &store.pool().await.expect("plan: pool");
         let encoded = crate::store::vector::encode_vector(probe).expect("plan: encode probe");
         let sql = store.vector_candidates_sql();
         let mut tx = pool.begin().await.expect("plan: begin");
@@ -891,7 +893,7 @@ mod tests {
             vector_dim: Some(8),
         })
         .expect("construct");
-        let pool = store.pool().await.expect("pool");
+        let pool = &store.pool().await.expect("pool");
         let user: String = sqlx::query_scalar("SELECT current_user")
             .fetch_one(pool)
             .await
@@ -901,6 +903,119 @@ mod tests {
             user.contains('@') && !user.is_empty(),
             "expected an IAM service-account login, got {user:?}"
         );
+    }
+
+    /// The IAM token is a password with an expiry, so the pool that carries it has one too.
+    ///
+    /// Offline, and it never connects: `connect_lazy_with` opens nothing, so a DSN pointing
+    /// at a host that does not exist still exercises the whole mint-and-rotate path. The
+    /// mock OAuth endpoint's hit count is the pin. One mint for the first pool, still one
+    /// while the token is live, and a second the moment it lapses. Before this, the token
+    /// was minted once at pool creation and a `serve` outlived it.
+    /// The IAM token is a password with an expiry, so the pool that carries it has one too.
+    ///
+    /// Offline, and it never connects: `connect_lazy_with` opens nothing, so a DSN pointing
+    /// at a host that does not exist still exercises the whole mint-and-rotate path. The
+    /// mock OAuth endpoint's hit count is the pin. One mint for the first pool, still one
+    /// while the token is live, and a second the moment it lapses. Before this, the token
+    /// was minted once at pool creation and a `serve` outlived it.
+    ///
+    /// The env lock is held only across the **synchronous** construction (spec §6.4: no
+    /// lock across an await), which is exactly the window in which the opt-in is read.
+    #[tokio::test]
+    async fn the_iam_pool_is_rebuilt_when_its_token_expires() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        // `expires_in` 61s leaves a 1s TTL after the token source's 60s refresh margin.
+        let mint = server.mock(|when, then| {
+            when.method(POST).path("/token");
+            then.status(200)
+                .json_body(serde_json::json!({ "access_token": "tok", "expires_in": 61 }));
+        });
+        let dir = std::env::temp_dir().join(format!("lambo-iam-rotate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let creds = dir.join("sa.json");
+        std::fs::write(
+            &creds,
+            serde_json::json!({
+                "type": "service_account",
+                "client_email": "sa@example.com",
+                "private_key": crate::gcp_auth::TEST_RSA_PRIVATE_KEY_PEM,
+                "project_id": "mooshik",
+                "token_uri": format!("{}/token", server.base_url()),
+            })
+            .to_string(),
+        )
+        .expect("write credentials");
+
+        let store = with_iam_env(Some(&creds), || {
+            PostgresStore::new(StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgres://cachy-nryn%40mooshik.iam@127.0.0.1:1/lambo".into()),
+                path: None,
+                vector_dim: Some(8),
+            })
+            .expect("construct")
+        });
+
+        store.pool().await.expect("first pool");
+        store.pool().await.expect("cached pool");
+        mint.assert_hits(1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        store.pool().await.expect("rotated pool");
+        mint.assert_hits(2);
+
+        std::fs::remove_file(&creds).ok();
+    }
+
+    /// Opting in without a credential file is named, not a panic and not a silent
+    /// password-path fallback: a deployment that thinks it is authenticating as the shared
+    /// service account must never quietly authenticate as something else.
+    #[tokio::test]
+    async fn iam_without_credentials_fails_closed_naming_the_variables() {
+        let store = with_iam_env(None, || {
+            PostgresStore::new(StoreConfig {
+                kind: StoreKind::Postgres,
+                dsn: Some("postgres://u@127.0.0.1:1/lambo".into()),
+                path: None,
+                vector_dim: Some(8),
+            })
+            .expect("construct")
+        });
+        let err = store.pool().await.expect_err("must refuse").to_string();
+        assert!(err.contains("LAMBO_POSTGRES_IAM"), "{err}");
+        assert!(err.contains("GCP_LAMBO_CREDENTIALS"), "{err}");
+    }
+
+    /// Run `build` with the IAM opt-in set (and `credentials` pointing where the caller
+    /// says, or nowhere), restoring the environment before returning. Synchronous by
+    /// design: the store reads the opt-in during construction, so the lock never has to
+    /// span an await.
+    fn with_iam_env<T>(credentials: Option<&std::path::Path>, build: impl FnOnce() -> T) -> T {
+        let _g = crate::test_util::env_lock();
+        let prev_iam = std::env::var_os("LAMBO_POSTGRES_IAM");
+        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
+        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
+        std::env::set_var("LAMBO_POSTGRES_IAM", "1");
+        match credentials {
+            Some(path) => std::env::set_var("GCP_LAMBO_CREDENTIALS", path),
+            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
+        }
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let built = build();
+        match prev_iam {
+            Some(v) => std::env::set_var("LAMBO_POSTGRES_IAM", v),
+            None => std::env::remove_var("LAMBO_POSTGRES_IAM"),
+        }
+        match prev_gcp {
+            Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
+            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
+        }
+        if let Some(v) = prev_adc {
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
+        }
+        built
     }
 
     async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
@@ -941,7 +1056,7 @@ mod tests {
         probe: &[f32],
         extra_set: Option<&str>,
     ) -> String {
-        let pool = store.pool().await.expect("pool");
+        let pool = &store.pool().await.expect("pool");
         let probe = encode_vector(probe).expect("encode probe");
         let sql = store.vector_candidates_sql();
         let mut tx = pool.begin().await.expect("begin explain");
@@ -1018,7 +1133,7 @@ mod tests {
         // The probe is answerable: finite distances, a full result set. The old
         // zero probe produced `NaN` on every row, so nothing downstream of the
         // plan meant anything either.
-        let pool = store.pool().await.expect("pool");
+        let pool = &store.pool().await.expect("pool");
         let encoded = encode_vector(&probe).expect("encode probe");
         let dists: Vec<f64> = sqlx::query(store.vector_candidates_sql())
             .bind(&encoded)

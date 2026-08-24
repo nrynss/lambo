@@ -196,8 +196,10 @@ jobs:
           # store-cockroach.
           # E2E-F8: `cargo test` alone left `store-postgres` with test coverage
           # and ZERO lint coverage. `check` lints default features (no
-          # postgres), `ship` does not include `store-postgres`, and this row
-          # was a test row. The clippy line here is what would have caught the
+          # postgres), and this row was a test row. (`ship` gained
+          # `store-postgres` on 2026-08-24, so the ship rows lint it too; this
+          # row keeps the NO-default-features lint, the one combination `ship`
+          # can never give.) The clippy line here is what would have caught the
           # `useless_vec` inside `h3_postgres_recall_parity` that no CI row
           # could see. The `store-sqlite,fixtures` combination is included
           # because that is where the H3 harness lives.

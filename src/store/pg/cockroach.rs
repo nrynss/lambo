@@ -237,6 +237,49 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    /// `LAMBO_POSTGRES_IAM` is a Cloud SQL opt-in, and a binary carrying both adapters
+    /// (which `ship` does) must not hand a Cloud SQL token to a Cockroach cluster because
+    /// one variable was exported for the other store. Cockroach ignores it: with the
+    /// variable set and NO credentials anywhere, this store still builds its ordinary
+    /// pool, where the Postgres dialect refuses (see
+    /// `iam_without_credentials_fails_closed_naming_the_variables`).
+    #[cfg(feature = "store-postgres")]
+    #[tokio::test]
+    async fn cockroach_ignores_the_cloud_sql_iam_opt_in() {
+        const { assert!(!CockroachDialect::SUPPORTS_CLOUD_SQL_IAM_AUTH) };
+        let store = {
+            let _g = crate::test_util::env_lock();
+            let prev_iam = std::env::var_os("LAMBO_POSTGRES_IAM");
+            let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
+            let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
+            std::env::set_var("LAMBO_POSTGRES_IAM", "1");
+            std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+            std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+            let store = CockroachStore::new(StoreConfig {
+                kind: crate::store::StoreKind::Cockroach,
+                dsn: Some("postgresql://u@127.0.0.1:1/lambo?sslmode=disable".into()),
+                path: None,
+                vector_dim: None,
+            })
+            .expect("construct");
+            match prev_iam {
+                Some(v) => std::env::set_var("LAMBO_POSTGRES_IAM", v),
+                None => std::env::remove_var("LAMBO_POSTGRES_IAM"),
+            }
+            if let Some(v) = prev_gcp {
+                std::env::set_var("GCP_LAMBO_CREDENTIALS", v);
+            }
+            if let Some(v) = prev_adc {
+                std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
+            }
+            store
+        };
+        store
+            .pool()
+            .await
+            .expect("cockroach must not take the Cloud SQL IAM path");
+    }
+
     fn sql_test_ts() -> DateTime<Utc> {
         Utc.timestamp_opt(1_752_000_000, 0).unwrap()
     }
@@ -1709,7 +1752,7 @@ mod conformance {
             .preflight_schema()
             .await
             .expect("a provisioned live cluster must pass the column preflight");
-        let pool = store.pool().await.expect("pool");
+        let pool = &store.pool().await.expect("pool");
         sqlx::query("ALTER TABLE concepts RENAME COLUMN chunk_group_id TO chunk_group_id_x")
             .execute(pool)
             .await
@@ -2071,7 +2114,7 @@ mod conformance {
         // non-negotiable — is that the plan does NOT reference the session-filtered
         // anti-pattern index. This keeps the gate green against planner variance
         // without weakening the no-anti-pattern guarantee.
-        let pool = store.pool().await.unwrap();
+        let pool = &store.pool().await.unwrap();
         let probe = encode_vector(&embed(0.5)).unwrap();
         let rows = sqlx::query(
             "EXPLAIN (OPT, VERBOSE) \
@@ -2907,7 +2950,7 @@ mod conformance {
         // `session_embedding_xor_corruption_errors_not_silent_none` covers the
         // same arms without a cluster; this check proves the end-to-end read path.
         let sid = SessionId::from(format!("conformance-store7-a-{}", Uuid::new_v4()));
-        let pool = store.pool().await.unwrap();
+        let pool = &store.pool().await.unwrap();
         sqlx::query("INSERT INTO sessions (session_id, embedding_dim) VALUES ($1, 1024)")
             .bind(sid.0.as_str())
             .execute(pool)
@@ -3005,7 +3048,7 @@ mod conformance {
         let corrupt = SessionId::from(format!("conformance-vector-corrupt-{}", Uuid::new_v4()));
         sqlx::query("INSERT INTO sessions (session_id, embedding_dim) VALUES ($1, 1024)")
             .bind(corrupt.as_str())
-            .execute(store.pool().await.unwrap())
+            .execute(&store.pool().await.unwrap())
             .await
             .unwrap();
         assert!(store
@@ -3167,7 +3210,7 @@ mod conformance {
             return;
         };
         let store = new_store(&dsn);
-        let pool = store.pool().await.unwrap();
+        let pool = &store.pool().await.unwrap();
         let probe = encode_vector(&embed(0.5)).unwrap();
         // EXPLAIN the production statement ITSELF, not a hand-copied lookalike.
         // adve-review MINOR-4 caught the previous version claiming to be
@@ -3633,7 +3676,7 @@ mod h2_cockroach_parity {
     /// rather than a hardcoded literal (H2-R1-2). The plan is printed so the
     /// `--nocapture` log carries it.
     async fn assert_index_backed(store: &CockroachStore) -> bool {
-        let pool = store.pool().await.unwrap();
+        let pool = &store.pool().await.unwrap();
         let probe = encode_vector(&synthetic_unit_vector(usize::from(u8::MAX), DIM)).unwrap();
         // The store's own composed statement, for the reason
         // `vector_explain_camera_proof` spells out: the plan has to be the plan
@@ -3673,7 +3716,7 @@ mod h2_cockroach_parity {
     /// full `SHOW CREATE TABLE concepts` (which carries the vector index DDL
     /// with its parameters). Never prints connection material.
     async fn log_cluster_shape(store: &CockroachStore) {
-        let pool = store.pool().await.unwrap();
+        let pool = &store.pool().await.unwrap();
         let version: String = sqlx::query_scalar("SELECT version()")
             .fetch_one(pool)
             .await

@@ -133,7 +133,25 @@ fixtures = ["store-memory"]
 # binaries. One `lambo` binary holds every adapter; `[store] kind` /
 # `[embedder] kind` pick one at runtime. `embed-bedrock` is deliberately
 # omitted until the account is AUTHORIZED (notes/bedrock-authorization-blocker.md).
-ship = ["store-memory", "store-cockroach", "store-sqlite", "embed-bge", "embed-fixture"]
+#
+# `store-postgres` and `embed-gemini` joined 2026-08-24, when workstreams A and
+# B landed and were live-verified. Before that a released binary could not run
+# the hosted tier at all: the README promises "released binaries carry the full
+# adapter set, so picking a backend is a config decision", and a `lambo.toml`
+# naming `postgres` or `gemini` would have failed on a shipped binary with a
+# rebuild-the-binary error. Neither adds a native toolchain dependency:
+# `store-postgres` is the same sqlx postgres driver `store-cockroach` already
+# pulls, and `embed-gemini` adds jsonwebtoken (pure Rust + ring, already in the
+# tree via rustls) on top of the reqwest `embed-bge` already carries.
+ship = [
+    "store-memory",
+    "store-cockroach",
+    "store-postgres",
+    "store-sqlite",
+    "embed-bge",
+    "embed-fixture",
+    "embed-gemini",
+]
 
 # Convenience: hackathon / ship profile (store adapters as they land).
 demo = ["store-memory", "store-cockroach", "embed-bge", "embed-fixture", "fixtures"]

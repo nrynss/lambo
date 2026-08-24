@@ -100,6 +100,42 @@ use crate::types::{
 /// the demo runs one process.
 const MAX_POOL_CONNECTIONS: u32 = 4;
 
+/// Opt-in to Cloud SQL IAM database authentication as the shared service account.
+#[cfg(feature = "store-postgres")]
+pub(crate) const LAMBO_POSTGRES_IAM_ENV: &str = "LAMBO_POSTGRES_IAM";
+
+/// Whether this process was told to log in with an IAM token instead of a password.
+#[cfg(feature = "store-postgres")]
+fn iam_auth_requested() -> bool {
+    std::env::var_os(LAMBO_POSTGRES_IAM_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// The IAM opt-in as it stood when the store was constructed.
+///
+/// Read in `PgStore::new`, which is **synchronous on purpose**, for the same reason
+/// [`PgStore::connect_options`] is: a test that pins an env-driven option must be able to
+/// do it without holding a lock across an `.await` (spec §6.4, enforced by
+/// `clippy::await_holding_lock`). It also means the login mode is decided once, at the
+/// same moment the DSN is, rather than re-read on every query.
+#[cfg(feature = "store-postgres")]
+#[derive(Debug, Clone)]
+struct IamSetup {
+    /// Shared credential file, or `None` when neither variable named one (which is an
+    /// error the first pool reports, naming both variables).
+    credentials: Option<std::path::PathBuf>,
+}
+
+/// The shared-service-account login state: the token source, and the pool the current
+/// token authorised together with the instant that token stops being handed out.
+///
+/// Held behind a `tokio::sync::Mutex` because rotating it is an `await` (the token mint),
+/// and because two concurrent callers must not mint two tokens and build two pools.
+#[cfg(feature = "store-postgres")]
+struct IamAuth {
+    source: crate::gcp_auth::GoogleOAuthTokenSource,
+    live: Option<(PgPool, std::time::Instant)>,
+}
+
 /// Rows per multi-row upsert statement (L82-1).
 ///
 /// The hard ceiling is PostgreSQL's wire-protocol limit of 65535 bind
@@ -1212,6 +1248,14 @@ pub struct PgStore<D: Dialect> {
     /// The cast-bearing statements, composed once (see [`DialectSql`]).
     sql: DialectSql,
     pool: tokio::sync::OnceCell<PgPool>,
+    /// The Cloud SQL IAM opt-in (`LAMBO_POSTGRES_IAM`) as it stood at construction.
+    /// `None` is the ordinary password path.
+    #[cfg(feature = "store-postgres")]
+    iam_setup: Option<IamSetup>,
+    /// Live IAM login state: `None` until the first query on that path. See
+    /// [`PgStore::iam_pool`] for why the pool it holds is rotated rather than built once.
+    #[cfg(feature = "store-postgres")]
+    iam: tokio::sync::Mutex<Option<IamAuth>>,
     /// H3 forced-exact lane. Production construction is always false.
     /// When true, the vector-search transaction runs
     /// [`Dialect::forced_exact_scan_sql`] after the contract read so the
@@ -1246,6 +1290,12 @@ impl<D: Dialect> PgStore<D> {
             ddl,
             sql: DialectSql::for_dialect::<D>(),
             pool: tokio::sync::OnceCell::new(),
+            #[cfg(feature = "store-postgres")]
+            iam_setup: (D::SUPPORTS_CLOUD_SQL_IAM_AUTH && iam_auth_requested()).then(|| IamSetup {
+                credentials: crate::gcp_auth::credentials_path_from_env(),
+            }),
+            #[cfg(feature = "store-postgres")]
+            iam: tokio::sync::Mutex::new(None),
             force_exact_scan: false,
             dialect: PhantomData,
         })
@@ -1339,35 +1389,89 @@ impl<D: Dialect> PgStore<D> {
     }
 
     /// The lazily-created pool (Tokio context required: call from an async method).
-    pub(crate) async fn pool(&self) -> Result<&PgPool, StoreError> {
-        self.pool
+    ///
+    /// Returns an owned handle rather than a borrow because the IAM path **replaces** the
+    /// pool when its token expires (see [`Self::iam_pool`]); a `&PgPool` into a slot that
+    /// can be swapped is not a reference the borrow checker can hand out. `PgPool` is an
+    /// `Arc` internally, so the clone costs a refcount and every call site keeps using it
+    /// as `&PgPool`.
+    pub(crate) async fn pool(&self) -> Result<PgPool, StoreError> {
+        #[cfg(feature = "store-postgres")]
+        if self.iam_setup.is_some() {
+            return self.iam_pool().await;
+        }
+        let pool = self
+            .pool
             .get_or_try_init(|| async {
-                let mut options = Self::connect_options(&self.dsn)?;
-                // Shared-SA path: with `LAMBO_POSTGRES_IAM` set, authenticate to Cloud SQL
-                // IAM database auth as the shared service account instead of a static
-                // password. The token is minted once at pool creation and cached by the
-                // token source; see `gcp_auth` for the lifetime/refresh notes.
-                if std::env::var_os("LAMBO_POSTGRES_IAM").is_some() {
-                    let mut src = crate::gcp_auth::CloudSqlTokenSource::from_env()
-                        .unwrap_or_else(|| {
-                            Err("LAMBO_POSTGRES_IAM is set but GCP_LAMBO_CREDENTIALS / \
-                                 GOOGLE_APPLICATION_CREDENTIALS is unset"
-                                .into())
-                        })
-                        .map_err(|e| {
-                            backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME))
-                        })?;
-                    let token = src
-                        .access_token()
-                        .await
-                        .map_err(|e| backend(format!("{} IAM token: {e}", D::STORE_TYPE_NAME)))?;
-                    options = options.password(&token);
-                }
-                Ok(PgPoolOptions::new()
-                    .max_connections(MAX_POOL_CONNECTIONS)
-                    .connect_lazy_with(options))
+                let options = Self::connect_options(&self.dsn)?;
+                Ok::<_, StoreError>(
+                    PgPoolOptions::new()
+                        .max_connections(MAX_POOL_CONNECTIONS)
+                        .connect_lazy_with(options),
+                )
             })
+            .await?;
+        Ok(pool.clone())
+    }
+
+    /// The shared-service-account pool: Cloud SQL IAM database authentication, where the
+    /// "password" is an OAuth access token that **expires in about an hour**.
+    ///
+    /// This is why the pool is rotated rather than created once. Postgres checks the
+    /// password at connect time only, so a pool built with an expired token keeps working
+    /// on its open connections and fails on the next one it has to open: a lease refresh
+    /// two hours into a `serve` fails with an authentication error that looks nothing like
+    /// an expiry. Instead the token source reports the instant it stops handing the token
+    /// out, and this method builds a new lazy pool at that instant.
+    ///
+    /// The superseded pool is dropped, not closed: an in-flight query holds its connection
+    /// (and through it the inner pool) until it finishes, while nothing new is ever handed
+    /// out from it. `connect_lazy_with` means the replacement opens no connection until
+    /// someone queries it, so a rotation costs one token mint and nothing else.
+    #[cfg(feature = "store-postgres")]
+    async fn iam_pool(&self) -> Result<PgPool, StoreError> {
+        let mut guard = self.iam.lock().await;
+        if guard.is_none() {
+            let path = self
+                .iam_setup
+                .as_ref()
+                .and_then(|s| s.credentials.clone())
+                .ok_or_else(|| {
+                    backend(format!(
+                        "{} IAM auth setup: {LAMBO_POSTGRES_IAM_ENV} is set but \
+                         GCP_LAMBO_CREDENTIALS / GOOGLE_APPLICATION_CREDENTIALS is unset",
+                        D::STORE_TYPE_NAME
+                    ))
+                })?;
+            let creds = crate::gcp_auth::load_credentials(&path)
+                .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
+            let client = crate::gcp_auth::build_client()
+                .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
+            let source = crate::gcp_auth::GoogleOAuthTokenSource::new(
+                creds,
+                client,
+                crate::gcp_auth::SCOPES_CLOUD_SQL_LOGIN,
+            )
+            .map_err(|e| backend(format!("{} IAM auth setup: {e}", D::STORE_TYPE_NAME)))?;
+            *guard = Some(IamAuth { source, live: None });
+        }
+        let state = guard.as_mut().expect("initialised directly above");
+        if let Some((pool, expires_at)) = &state.live {
+            if std::time::Instant::now() < *expires_at {
+                return Ok(pool.clone());
+            }
+        }
+        let (token, expires_at) = state
+            .source
+            .access_token_with_expiry()
             .await
+            .map_err(|e| backend(format!("{} IAM token: {e}", D::STORE_TYPE_NAME)))?;
+        let options = Self::connect_options(&self.dsn)?.password(&token);
+        let pool = PgPoolOptions::new()
+            .max_connections(MAX_POOL_CONNECTIONS)
+            .connect_lazy_with(options);
+        state.live = Some((pool.clone(), expires_at));
+        Ok(pool)
     }
 
     /// Build the per-connection options. **Synchronous on purpose:** it reads
@@ -1409,7 +1513,7 @@ impl<D: Dialect> PgStore<D> {
             .map(|contract| i64::try_from(contract.dim))
             .transpose()
             .map_err(|_| StoreError::Invariant("embedding dimension does not fit i64".into()))?;
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let root_goal = snapshot
             .root_goal
             .as_ref()
@@ -1490,7 +1594,7 @@ impl<D: Dialect> PgStore<D> {
     }
 
     async fn session_exists(&self, session: &SessionId) -> Result<bool, StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let row = sqlx::query("SELECT 1 AS one FROM sessions WHERE session_id = $1")
             .bind(&session.0)
             .fetch_optional(pool)
@@ -1536,7 +1640,7 @@ impl<D: Dialect> PgStore<D> {
             WHERE session_leases.expires_at <= now() \
                OR session_leases.holder = excluded.holder \
             RETURNING holder, acquired_at, expires_at, current_token, endpoint";
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let token = holder.token();
         let ttl_secs = ttl.as_secs_f64();
         // T86-3: wrap the acquire in `tx_retry`, exactly like every other
@@ -2278,7 +2382,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     async fn init_schema(&self) -> Result<(), StoreError> {
         // Multi-statement DDL via the simple protocol (raw_sql); every statement is
         // `IF NOT EXISTS`, so this is idempotent by construction (T3.1 acceptance).
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         sqlx::raw_sql(self.ddl.as_ref())
             .execute(pool)
             .await
@@ -2306,7 +2410,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     /// Cockroach-dialect side of J3-R2R-3 (source-correct here; live-cluster
     /// verification is the named follow-up the brief records).
     async fn preflight_schema(&self) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let present: Vec<String> = sqlx::query_scalar(
             "SELECT table_name FROM information_schema.tables \
              WHERE table_schema = current_schema()",
@@ -2378,7 +2482,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     }
 
     async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let row: Option<LeaseRowTs> = sqlx::query_as(LEASE_ROW_SQL)
             .bind(&session.0)
             .fetch_optional(pool)
@@ -2392,7 +2496,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         // Holder-scoped so a stale release cannot evict the writer that took
         // over after our lease lapsed.
         sqlx::query("DELETE FROM session_leases WHERE session_id = $1 AND holder = $2")
@@ -2420,7 +2524,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         refused_by: &str,
         current_holder: &str,
     ) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         sqlx::query(
             "INSERT INTO lease_refusals (session_id, refused_at, refused_by, current_holder) \
              VALUES ($1, now(), $2, $3)",
@@ -2452,7 +2556,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         session: &SessionId,
         since: DateTime<Utc>,
     ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         type Row = (DateTime<Utc>, String, String);
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT refused_at, refused_by, current_holder FROM lease_refusals \
@@ -2480,7 +2584,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         session: &SessionId,
         stats: &SessionFlushStats,
     ) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         // Upsert the whole row so re-publishes converge (idempotency, same
         // contract as `flush`). Only the writer's FlushTask calls this;
         // readers only read. `updated_at` is stamped from the cluster clock
@@ -2506,7 +2610,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         &self,
         session: &SessionId,
     ) -> Result<Option<SessionFlushStats>, StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let row =
             sqlx::query("SELECT flush_lag_ms, log_depth FROM session_stats WHERE session_id = $1")
                 .bind(&session.0)
@@ -2529,7 +2633,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     }
 
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         tx_retry(|| async move {
             let mut tx = pool
                 .begin()
@@ -2595,7 +2699,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     }
 
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let session_id = session.clone();
         // Copy handle (&SessionId): the FnMut body runs once per retry attempt.
         let sid = &session_id;
@@ -2722,7 +2826,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let sql = keyword_candidates_sql::<D>(tokens.len());
         let mut q = sqlx::query(&sql).bind(&session.0);
         for t in &tokens {
@@ -2792,7 +2896,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             return Ok(Vec::new());
         }
         check_embedding_dim(embedding, self.vector_dim)?;
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         let probe = encode_vector(embedding)?;
         // One retried serializable read transaction binds contract validation
         // to every candidate statement. Cockroach may abort this hot read with
@@ -2922,7 +3026,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
         let cutoff = cutoff(now, min_edge_age)?;
         let row = sqlx::query(BLAST_RADIUS_SQL)
@@ -2946,7 +3050,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
         let cutoff = cutoff(now, min_age)?;
         let row = sqlx::query(INTERACTION_SPAN_SQL)
@@ -2969,7 +3073,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         event: &CanonizationEvent,
         token: Option<u64>,
     ) -> Result<(), StoreError> {
-        let pool = self.pool().await?;
+        let pool = &self.pool().await?;
         tx_retry(|| async move {
             let mut tx = pool.begin().await.map_err(|e| {
                 map_write_err(e, |m| format!("begin record_canonization transaction: {m}"))
