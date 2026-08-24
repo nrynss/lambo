@@ -382,6 +382,18 @@ fn resolve_auth_token_from(
 /// The ordering between the two is also deliberate: `authorize_ledger` runs
 /// *above* the open, so the misconfigured `--ledger-heartbeat`-without-`--ledger`
 /// pairing is still refused before any file is touched.
+///
+/// ## What J5 changed: nothing here, and that is the claim
+///
+/// J5 added a signal registration at the **acquire** — see [`EarlyShutdown`] —
+/// so "the arming" is no longer one point on the far side of `resolve_role`.
+/// This group is unaffected: it runs above the acquire, so it is now the
+/// **pre-arm** group as well as the pre-lease one, and every member of it still
+/// runs under the default signal disposition. That is deliberate rather than
+/// incidental. A start that is about to refuse here, or that is about to sit in
+/// the election for up to `ELECTION_BUDGET`, must stay killable by a plain
+/// SIGTERM (J2-R1-7), and it holds nothing — no lease, no tail, no graph — that
+/// a handler could save. J5 adds no member to this group and takes none away.
 fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -1468,10 +1480,21 @@ impl RefusalCursor {
 /// cannot hold the tail hostage.
 ///
 /// The shutdown signal is armed **before** the transport handoff (R2-a): a
-/// single, continuously-live registration threads through the pre-handshake
-/// window (the stdio handshake, the HTTP `bind`) and the transport itself, so a
-/// signal in *any* of those still reaches [`Memory::close`] instead of hitting
-/// the default disposition and killing the process with the tail un-flushed.
+/// continuously-live registration threads through the pre-handshake window (the
+/// stdio handshake, the HTTP `bind`) and the transport itself, so a signal in
+/// *any* of those still reaches [`Memory::close`] instead of hitting the default
+/// disposition and killing the process with the tail un-flushed.
+///
+/// **Two registrations, not one** (J5). It said "a single" until the pre-arm,
+/// and the count is the whole point: the arming below happens the first
+/// statement after `resolve_role` returns, but the lease is taken *inside* it,
+/// and the span between the two used to run under the default disposition — a
+/// SIGTERM there killed the process with `close()` un-run (CI run 32710994512,
+/// `unix_wait_status(15)`). `EarlyShutdown` is armed at the acquire itself and
+/// only records; `wind_down` reads the record alongside the fresh signal, so a
+/// signal in that span cancels the transport on its first poll instead. Neither
+/// registration covers the startup election above the acquire, which is what
+/// keeps a serve waiting out `ELECTION_BUDGET` killable (J2-R1-7).
 pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
     // T8.7, and it runs FIRST — before `resolve_role`, which attaches to the
     // store and takes the single-writer lease. A misconfigured bind must cost
@@ -1560,6 +1583,30 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             // SIGTERM-immune the way arming above the lease-taking attach
             // would.
             //
+            // **J5 asked whether this branch has the holder's window too, and
+            // it does not.** The holder's window is real because the span from
+            // the acquire to the arming contains the whole tail of the `Memory`
+            // build — including the "Memory session attached" line the
+            // pre-handshake test signals on — so a descheduled process can sit
+            // in it for milliseconds. This branch's equivalent span is
+            // `resolve_role` returning `Role::Proxy`, the match above, and the
+            // evaluation of `shutdown_signal()` as the argument on the next
+            // line: **no `await` at all**, and no log line a test could
+            // synchronise on (the proxy's own sync point, "proxying to the
+            // session holder", is logged from inside `run`, already under the
+            // registration). Even granting the span, the durability argument
+            // above still applies unchanged — no lease, no tail, no graph — so
+            // there is nothing for a pre-arm to save. The one thing a kill here
+            // does cost is the pre-lease ledger lines, and those are already
+            // forfeit to any signal during the election above, which must stay
+            // killable. So: no pre-arm on this branch, deliberately.
+            //
+            // The wedge invariant is what makes that safe to state so flatly.
+            // `EarlyShutdown::arm` is called from the `LeaseOutcome::Acquired`
+            // arm of `build_attach` and nowhere else, so "a proxy never arms"
+            // is not a second rule to keep true — it is "a proxy never takes
+            // the lease", read through the signal disposition.
+            //
             // Nothing else on this branch is skipped by accident (J4): the
             // ledger this process opened **pre-lease** IS passed into the proxy
             // (`HubProxy::new`), which now books its own `proxying` /
@@ -1579,7 +1626,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
     };
 
-    // One signal registration for the whole life of the transport, armed HERE —
+    // The signal registration for the whole life of the transport, armed HERE —
     // the first statement after the lease-taking attach returns (`resolve_role`,
     // which builds through the same `serve_builder` `MemoryBuilder`), and
     // before ANY of the startup work below it: `LamboServer::new` and its
@@ -1602,19 +1649,30 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // arming with covering work it no longer covers.
     //
     // The precise property, stated where the previous comment overclaimed
-    // (I-R2-1): the guard begins the instant `resolve_role` returns. It does NOT
-    // cover `resolve_role` itself, so the memory-level "Memory session attached
-    // (daemon + flush + canonization running)" line — emitted from inside the
-    // `Memory` build, after the lease is taken — is still followed by a residual
-    // unguarded window until this arming, exactly as it was pre-I. The
-    // serve-level "lambo serve: session attached" line below is fully guarded.
-    // The earlier wording claimed the stronger property for both lines; it was
-    // false for the memory-level one, and I moving `LamboServer::new` up from
-    // inside `serve_stdio` widened that residual window from ~6 µs to ~1.1 ms,
-    // which is the durability regression I-R2-1 records.
+    // (I-R2-1): *this* guard begins the instant `resolve_role` returns. It does
+    // NOT cover `resolve_role` itself, so the memory-level "Memory session
+    // attached (daemon + flush + canonization running)" line — emitted from
+    // inside the `Memory` build, after the lease is taken — is followed by a
+    // residual window until this arming. The serve-level "lambo serve: session
+    // attached" line below is covered by this one. The earlier wording claimed
+    // the stronger property for both lines; it was false for the memory-level
+    // one, and I moving `LamboServer::new` up from inside `serve_stdio` widened
+    // that residual window from ~6 µs to ~1.1 ms, which is the durability
+    // regression I-R2-1 records.
     //
-    // Arming *before* the attach would shrink the residual window to zero, and
-    // pre-J2 the argument against it was a trade: a durability hazard for an
+    // **That residual window is no longer unguarded, and J5 is what closed it.**
+    // It said "still unguarded ... exactly as it was pre-I" until CI run
+    // 32710994512 collected on it: `a_pre_handshake_sigterm_still_flushes_the_
+    // session_row` failed with `unix_wait_status(15)` — the process KILLED by
+    // the signal, not exited on it, so `close()` never ran and the tail died.
+    // Not a flake; timing variance on a loaded runner against a real window that
+    // three rounds had priced and accepted. [`EarlyShutdown`] now arms at the
+    // acquire, inside `build_attach`, and only RECORDS; `wind_down` reads the
+    // record beside the fresh signal below, so a SIGTERM in the residual window
+    // makes the transport's very first poll of the shutdown future ready.
+    //
+    // Arming *before* the attach would shrink the residual window to zero too,
+    // and pre-J2 the argument against it was a trade: a durability hazard for an
     // availability one, since the signal would be deferred rather than honoured
     // until a hung build finished. **J2 makes that argument much stronger, and
     // this is the sentence the round-1 review found missing (J2-R1-7).** The
@@ -1637,9 +1695,16 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // magnitude of deliberate deafness bought with none of the thing being
     // protected. And the 20s is not a worst case that rarely fires; the
     // dead-holder election measured 10.2s live at the two-client probe, so it
-    // is an ordinary start. The residual window is real and worth closing, but
-    // only by racing the attach against the shutdown future, which is a design
-    // change and is deferred; see I-R2-1's recommendation.
+    // is an ordinary start. **That ruling stands, and J5 obeys it rather than
+    // overturning it**: the pre-arm sits BELOW the acquire, so the election is
+    // over before anything is registered — a serve still waiting for a lease
+    // still dies to a SIGTERM, and a serve that loses and proxies never arms at
+    // all. This paragraph used to end "the residual window is real and worth
+    // closing, but only by racing the attach against the shutdown future, which
+    // is a design change and is deferred; see I-R2-1's recommendation". That is
+    // what J5 did, at the one `await` where it matters: the startup load inside
+    // `build_attach` is raced against the record, so the pre-arm covers no
+    // unbounded wait and the immunity is not re-created one `await` down.
     //
     // A fresh registration in `close_bounded` re-arms it for the close phase.
     //
@@ -1898,6 +1963,25 @@ async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
 /// unit test must not do to the whole test binary. Taking the future as an
 /// argument lets `memory`'s tests drive the real body with
 /// `std::future::pending()` — see `an_abandoned_close_releases_the_lease_through_serve`.
+///
+/// # J5's pre-arm is deliberately NOT wired in here
+///
+/// A third registration now exists in a serve process — [`EarlyShutdown`],
+/// armed at the acquire — and the question it raises is whether the escape
+/// hatch above still works, because that pre-arm's record is *latched*: once a
+/// signal sets it, it stays set for the life of the process. Feeding it into
+/// this `select!` would make the second arm ready on the first poll of every
+/// signal-initiated close, so the close it is meant to rescue would be
+/// abandoned before it had a chance to run — the tail lost by the very
+/// mechanism that exists to save it.
+///
+/// So [`close_bounded`] keeps building a **fresh** `shutdown_signal()`, and the
+/// property that makes that correct is `tokio::signal`'s: a registration
+/// created after a signal was delivered does not replay it, and a signal is
+/// delivered to *every* live registration rather than consumed by the first.
+/// The first Ctrl-C therefore starts the shutdown and does not abandon the
+/// close; a genuine second one reaches this fresh registration and does. The
+/// pre-arm can neither trip this early nor swallow the signal that should.
 pub(crate) async fn close_bounded_until(
     mem: &Memory,
     shutdown: impl Future<Output = ()>,
@@ -2612,17 +2696,38 @@ impl EarlyShutdown {
 /// on a loaded runner). `tokio::signal::unix::signal()` registers with the
 /// runtime immediately and buffers a signal that arrives before `recv()` is
 /// polled, so calling this before the attach log closes that window. Eagerness
-/// only makes the arming *point* effective; it does not move it. Everything
-/// before the call site in [`serve`] — the pre-lease group (the endpoint
-/// derivation, `Ledger::open` and its startup line, J4) and `resolve_role`,
-/// which takes the lease — is still unguarded, which is why the call site sits
-/// as early as it does (I-R2-1). It cannot move above `resolve_role`: that loop
-/// is allowed to run for the whole of [`ELECTION_BUDGET`], **20 seconds**, by
-/// design, and arming over it would make that wait unkillable (J2-R1-7). The
-/// figure was written here as 50 seconds — the pre-J2-L2 budget — until JE2E-7;
-/// the argument holds at 20s, since the window it would buy is ~1.1 ms in a
-/// process that holds no lease and no tail. See the arming comment in [`serve`]
-/// for the trade written out.
+/// only makes the arming *point* effective; it does not move it. The call site
+/// in [`serve`] sits as early as it does for that reason (I-R2-1), and it
+/// cannot move above `resolve_role`: that loop is allowed to run for the whole
+/// of [`ELECTION_BUDGET`], **20 seconds**, by design, and arming over it would
+/// make that wait unkillable (J2-R1-7). The figure was written here as 50
+/// seconds — the pre-J2-L2 budget — until JE2E-7; the argument holds at 20s.
+/// See the arming comment in [`serve`] for the trade written out.
+///
+/// # It is not the *only* registration any more (J5)
+///
+/// This paragraph said "everything before the call site in [`serve`] — the
+/// pre-lease group (the endpoint derivation, `Ledger::open` and its startup
+/// line, J4) and `resolve_role`, which takes the lease — is still unguarded".
+/// Half of that is now false, and the false half is the half that lost data:
+/// CI run 32710994512 killed a serve with `unix_wait_status(15)` inside
+/// `resolve_role`, after the lease was taken, with `close()` un-run.
+///
+/// [`EarlyShutdown`] arms a second registration at the acquire — inside
+/// `build_attach`, in the `LeaseOutcome::Acquired` arm — for the same eager
+/// reason this function documents, and *only* records the arrival for
+/// [`wind_down`] to read. So the accurate statement is now:
+///
+/// * the **pre-lease group** and the **election** above the acquire are
+///   unguarded, deliberately, and stay killable — that is J2-R1-7's ruling and
+///   J5 does not touch it;
+/// * from the **acquire** onward the process is covered, first by the pre-arm
+///   and then by this call site, with no gap between them.
+///
+/// The pre-arm calls *this* function, so its eagerness is this contract, used
+/// twice. A future edit that made `EarlyShutdown::arm` construct the future
+/// lazily instead would re-open the window with every gate green, exactly as
+/// the `wind_down` trap below would.
 ///
 /// **The eagerness survives [`wind_down`]** (JE2E-4), and the reason is which
 /// expression runs when: `serve` writes `wind_down(shutdown_signal(), …)`, so

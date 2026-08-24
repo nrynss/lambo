@@ -24,6 +24,32 @@
 //! window that opens at lease acquisition. See the comment at the matcher
 //! (I-R2-2) — the looseness is load-bearing and must not be tightened.
 //!
+//! ## What the looseness collected, the second time (J5)
+//!
+//! That window was still a real hole when this file was written: I-R2-1 priced
+//! it (~6 µs of process work, widened to ~1.1 ms once and narrowed back) and
+//! three rounds accepted it, because closing it looked like it needed an arming
+//! above `resolve_role` — and that would make a startup election which may
+//! legitimately run for `ELECTION_BUDGET`, 20 seconds, unkillable (J2-R1-7).
+//!
+//! CI run 32710994512 collected on it. This test failed at the exit-status
+//! assertion below with `ExitStatus(unix_wait_status(15))`: on a loaded runner
+//! the serve process was descheduled inside the window, the `SIGTERM` landed
+//! there, and the process was **killed by the signal** rather than exiting on
+//! it — `close()` un-run, session row absent, exactly the pre-R2-a failure.
+//!
+//! It is closed now, and by neither of the two moves that were available then:
+//! `crate::mcp::serve::EarlyShutdown` arms a registration at the **acquire**,
+//! below the election, which only records the arrival for `wind_down` to read.
+//! The election above it stays killable and a losing serve never arms at all.
+//!
+//! What that means for this file: the assertion below is now a real durability
+//! assertion on every run rather than a race this test usually lost by
+//! *arriving late*, and the loose matcher is what makes it so — it is still the
+//! only thing in the tree that puts a signal in the window the pre-arm exists
+//! for. Anchoring it on the serve-level line would green CI and un-test the
+//! pre-arm entirely.
+//!
 //! SQLite (not MemoryStore) is deliberate, and the test is gated on
 //! `store-sqlite` exactly like its sibling: durability across a process boundary
 //! can only be observed through a store that outlives the process.

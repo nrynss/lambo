@@ -561,7 +561,7 @@ pub struct MemoryBuilder {
     /// `serve` decides *what*. `None` — every CLI writer verb, every library
     /// caller, every test — installs no handler at all, which is deliberate:
     /// a library `build()` must not change the calling process's signal
-    /// disposition. See [`crate::mcp::serve::EarlyShutdown`].
+    /// disposition. See `crate::mcp::serve::EarlyShutdown`.
     early_shutdown: Option<crate::mcp::serve::EarlyShutdown>,
 }
 
@@ -718,7 +718,7 @@ impl MemoryBuilder {
 
     /// Arm this handle the instant the single-writer lease is acquired (J5).
     ///
-    /// Crate-private, and set by [`crate::mcp::serve`] alone. The handle
+    /// Crate-private, and set by `crate::mcp::serve` alone. The handle
     /// arrives unarmed and is armed from exactly one place — the
     /// `LeaseOutcome::Acquired` arm of [`MemoryBuilder::build_attach`] — so a
     /// build that never takes the lease never installs a signal handler. That
