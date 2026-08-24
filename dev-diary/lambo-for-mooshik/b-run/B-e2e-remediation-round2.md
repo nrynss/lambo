@@ -35,7 +35,7 @@ profile was still the right call at the time it was made, and the next round may
 one.
 
 Work happened in the worktree `/Users/narayan/Documents/work/lambo/.claude/worktrees/agent-a23163b4d9e42e181`
-on branch `agent-a23163b4d9e42e181`, reset to `origin/lambo-for-mooshik` @ `c7a822f`
+on branch `worktree-agent-a23163b4d9e42e181`, reset to `origin/lambo-for-mooshik` @ `c7a822f`
 before starting. The main checkout was never written. Commits are incremental, one per
 finding, because two agents on this workstream have already died mid-run.
 
