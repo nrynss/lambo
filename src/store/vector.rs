@@ -17,8 +17,8 @@ use crate::types::StoreError;
 /// # Why zero norm is refused here (E2E-F9)
 ///
 /// [`crate::embed::Embedder::embed`]'s documented output contract is unit norm,
-/// and nothing enforced it. A zero vector is finite, so the check below passed
-/// it, and the two dialects then disagreed about what it meant: pgvector's
+/// and nothing enforced it. A zero vector is finite, so the finite-element
+/// check passed it, and the two dialects then disagreed about it: pgvector's
 /// `<=>` is `NaN` against every row, so `distance_to_score` propagated `NaN`
 /// into ranking, while Cockroach's `<->` is a finite `1` and scored a steady
 /// `0.5`. One contract-violating row, two different answers, neither of them a
@@ -34,6 +34,44 @@ use crate::types::StoreError;
 /// `check_embedding_dim` on every path that has a configured width, and the
 /// codec's own round-trip pin covers `dim = 0`.
 pub fn encode_vector(v: &[f32]) -> Result<String, StoreError> {
+    ensure_is_an_embedding(v)?;
+    let mut s = String::with_capacity(v.len() * 8);
+    s.push('[');
+    for (i, x) in v.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{x}"));
+    }
+    s.push(']');
+    Ok(s)
+}
+
+/// The precondition [`encode_vector`] enforces, callable on its own by an
+/// adapter that does **not** encode the vector it is about to use.
+///
+/// # Why this is separate (B-E2E-R2-3)
+///
+/// E2E-F9 put the zero-norm refusal in the codec because that is where all
+/// three sqlx adapters meet. That covers every write path, and it covers the
+/// **query** path on the pg family only because those adapters encode the
+/// probe before binding it. SQLite never encodes its probe: it hands it to
+/// `rank_by_cosine`, and [`crate::embed::cosine`] clamps the denominator with
+/// `.max(1e-12)`, so a zero probe scored every row a plausible `0.0` and
+/// returned candidates in tie-break order. One contract-violating input, a
+/// loud refusal on Postgres and a silent meaningless ranking on SQLite, which
+/// is the exact sentence E2E-F9 was filed under.
+///
+/// So SQLite's `vector_candidates_checked` calls this at the same point in the
+/// sequence where the pg family encodes its probe: after the limit checks,
+/// before the store is read. Same input, same error, same place, all three
+/// adapters.
+///
+/// Non-finite elements are refused here too, not only zero norms: that is the
+/// other half of what encoding the probe was implicitly enforcing on the pg
+/// family, and leaving it out would close half of one divergence and keep the
+/// other.
+pub fn ensure_is_an_embedding(v: &[f32]) -> Result<(), StoreError> {
     if let Some(bad) = v.iter().find(|x| !x.is_finite()) {
         return Err(StoreError::Backend(format!(
             "embedding contains non-finite value {bad} (at index {:?})",
@@ -59,16 +97,7 @@ pub fn encode_vector(v: &[f32]) -> Result<String, StoreError> {
             )));
         }
     }
-    let mut s = String::with_capacity(v.len() * 8);
-    s.push('[');
-    for (i, x) in v.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!("{x}"));
-    }
-    s.push(']');
-    Ok(s)
+    Ok(())
 }
 
 /// Inverse of [`encode_vector`] — parses the text literal read-back form.

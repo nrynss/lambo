@@ -1246,6 +1246,15 @@ impl GraphStore for SqliteStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // B-E2E-R2-3: the probe has to be an embedding on this adapter too.
+        // The pg family gets this for free by encoding the probe before it
+        // binds it; SQLite hands the probe straight to `rank_by_cosine`, whose
+        // `cosine` clamps the denominator, so a zero-norm probe used to score
+        // every row 0.0 and return candidates in tie-break order while the
+        // same call refused loudly on Postgres. Placed here, before the store
+        // is read, because that is where the pg family encodes: same input,
+        // same error, same point in the sequence.
+        crate::store::vector::ensure_is_an_embedding(embedding)?;
         let mut tx = self
             .pool()
             .begin()
@@ -3424,6 +3433,61 @@ mod tests {
                 "{label}: sqlite scored {got}, cockroach's conversion gives {want}"
             );
         }
+    }
+
+    /// B-E2E-R2-3: a probe with no direction is refused here exactly as it is
+    /// on the pg family, which got the refusal for free by encoding its probe.
+    ///
+    /// Before this, `cosine` clamped the denominator to `1e-12` and a zero
+    /// probe scored every row a plausible `0.0`, so the same broken embedder
+    /// E2E-F9 postulated produced a loud refusal on a Postgres deployment and
+    /// a silent meaningless ranking on a SQLite one. Seeded rows and a real
+    /// session, so the answer is a refusal rather than an empty list.
+    ///
+    /// The refusal has to happen before the store is read, which is where the
+    /// pg family does it: with the guard moved below the contract read this
+    /// still passes on the seeded session but the unknown-session leg returns
+    /// an empty list instead.
+    #[tokio::test]
+    async fn vector_candidates_refuse_a_zero_norm_probe() {
+        let store = vec_test_store(4);
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("vec-zero-probe");
+        let contract = vec_contract(4);
+        seed_vectors(
+            &store,
+            &sid,
+            &contract,
+            &[(NodeId::new(), "stored", vec![1.0, 0.0, 0.0, 0.0])],
+        )
+        .await;
+
+        for (label, session) in [
+            ("seeded", sid.clone()),
+            ("unknown", SessionId::from("nope")),
+        ] {
+            let err = store
+                .vector_candidates_checked(&session, &[0.0, 0.0, 0.0, 0.0], &contract, 5)
+                .await
+                .unwrap_err();
+            // Same message the codec gives on every write path and on the pg
+            // family's query path: one input, one behaviour, three adapters.
+            assert!(
+                err.to_string().contains("zero norm"),
+                "{label}: a probe with no direction must be refused, got {err}"
+            );
+        }
+
+        // A direction that is merely tiny is still a direction, and the
+        // legacy unchecked entry point funnels through the same guard.
+        assert_eq!(
+            store
+                .vector_candidates(&sid, &[1e-6, 0.0, 0.0, 0.0], 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// F1: the checked path refuses a durable/expected contract change — kind, model
@@ -8826,8 +8890,13 @@ mod tests {
                 model: Some("model-v2".into()),
                 dim,
             };
+            // A probe with a direction. This test is about the contract, and
+            // since B-E2E-R2-3 a zero-norm probe is refused before the
+            // contract is read (as it always was on the pg family).
+            let mut probe = vec![0.0f32; dim];
+            probe[0] = 1.0;
             let err = store
-                .vector_candidates_checked(&session, &vec![0.0; dim], &renamed, 5)
+                .vector_candidates_checked(&session, &probe, &renamed, 5)
                 .await
                 .unwrap_err();
             assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
