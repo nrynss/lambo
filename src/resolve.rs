@@ -157,10 +157,11 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // (source revision + weight sha256 prefix) rather than a raw model string,
     // so a kind/dim match cannot hide a swap between two quantizations. bge_m3
     // keeps stamping `llama_model` as today (empty => server default).
-    let model = if embedder_cfg.kind == crate::embed::EmbedderKind::Candle {
-        crate::embed::candle_identity(embedder.as_ref())
-    } else {
-        embedder_cfg.llama_model.clone().filter(|s| !s.is_empty())
+    let model = match embedder_cfg.kind {
+        crate::embed::EmbedderKind::Candle => crate::embed::candle_identity(embedder.as_ref()),
+        // A3: the Gemini adapter stamps its real model id (`gemini-embedding-001`).
+        crate::embed::EmbedderKind::Gemini => crate::embed::gemini_identity(embedder.as_ref()),
+        _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
     };
     let embedding = EmbeddingContract {
         kind: embedder_cfg.kind.to_string(),

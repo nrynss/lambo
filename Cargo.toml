@@ -83,6 +83,7 @@ sqlx = { version = "0.8", optional = true, default-features = false, features = 
 ] }
 aws-config = { version = "1", optional = true, features = ["credentials-login"] }
 aws-sdk-bedrockruntime = { version = "1", optional = true }
+jsonwebtoken = { version = "9", optional = true }
 
 [features]
 default = ["store-memory", "embed-bge", "embed-fixture"]
@@ -120,8 +121,8 @@ embed-fixture = []
 embed-bge = ["dep:reqwest"]
 # T7.1: Bedrock Titan when account is AUTHORIZED.
 embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
-# A1: Vertex Gemini embedder (adapter lands in A3).
-embed-gemini = ["dep:reqwest"]
+# A3: Vertex Gemini embedder (gemini-embedding-001) via service-account OAuth.
+embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
 
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
 # Test-only: deliberately NOT in `default` (v020-R1-P3-3) — `cargo install

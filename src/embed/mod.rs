@@ -12,6 +12,8 @@ mod bge_m3;
 mod candle;
 #[cfg(feature = "embed-fixture")]
 mod fixture;
+#[cfg(feature = "embed-gemini")]
+mod gemini;
 
 pub use math::cosine;
 
@@ -21,6 +23,8 @@ pub use bge_m3::BgeM3LlamaCppEmbedder;
 pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-fixture")]
 pub use fixture::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
+#[cfg(feature = "embed-gemini")]
+pub use gemini::GeminiEmbedder;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -193,8 +197,7 @@ impl EmbedderKind {
             Self::BgeM3 => cfg!(feature = "embed-bge"),
             Self::Candle => cfg!(feature = "embed-candle"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
-            // Adapter lands in A3; false until then.
-            Self::Gemini => false,
+            Self::Gemini => cfg!(feature = "embed-gemini"),
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
@@ -403,12 +406,80 @@ pub fn candle_identity(_embedder: &dyn Embedder) -> Option<String> {
     None
 }
 
+/// The served-model identity the Gemini adapter stamps into the session contract
+/// (`EmbeddingContract.model`). Returns `gemini-embedding-001` (the configured model)
+/// when the embedder is the Gemini adapter, else `None` so the caller falls back to
+/// bge_m3's `llama_model`. `build_embedder` returns a `Box<dyn Embedder>`, which erases
+/// the concrete type, so this downcast name is how resolve.rs learns the identity (A3).
+#[cfg(feature = "embed-gemini")]
+pub fn gemini_identity(embedder: &dyn Embedder) -> Option<String> {
+    embedder
+        .as_any()
+        .and_then(|a| a.downcast_ref::<gemini::GeminiEmbedder>())
+        .map(|g| g.model_identity().to_string())
+}
+
+#[cfg(not(feature = "embed-gemini"))]
+pub fn gemini_identity(_embedder: &dyn Embedder) -> Option<String> {
+    None
+}
+
 fn missing_feature(kind: EmbedderKind) -> EmbedError {
     EmbedError::Unavailable(format!(
         "embedder kind `{kind}` is not compiled into this binary; rebuild with \
          `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
         kind.feature_name()
     ))
+}
+
+/// Build the Gemini embedder from resolved config (feature `embed-gemini`).
+///
+/// Resolves service-account credentials from `gemini_credentials` (explicit path) else
+/// `GOOGLE_APPLICATION_CREDENTIALS`. Missing credentials are a clear `Unavailable` naming
+/// the variable. No network is touched here: token minting / OAuth happen on first `embed`.
+#[cfg(feature = "embed-gemini")]
+fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
+    use crate::embed::gemini::{
+        build_client, load_credentials, GeminiEmbedder, ServiceAccountTokenSource,
+    };
+    let creds_path = cfg
+        .gemini_credentials
+        .clone()
+        .or_else(|| {
+            std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").map(std::path::PathBuf::from)
+        })
+        .ok_or_else(|| {
+            EmbedError::Unavailable(
+                "Gemini embedder needs service-account credentials: set `gemini_credentials` \
+                 or GOOGLE_APPLICATION_CREDENTIALS"
+                    .into(),
+            )
+        })?;
+    let creds = load_credentials(&creds_path)?;
+    let project = cfg
+        .gemini_project
+        .clone()
+        .or(creds.project_id.clone())
+        .ok_or_else(|| {
+            EmbedError::Unavailable(
+                "Gemini embedder needs a GCP project: set `gemini_project` or provide \
+                 service-account credentials with a project_id"
+                    .into(),
+            )
+        })?;
+    let location = cfg
+        .gemini_location
+        .clone()
+        .unwrap_or_else(|| gemini::DEFAULT_LOCATION.to_string());
+    let model = cfg
+        .gemini_model
+        .clone()
+        .unwrap_or_else(|| gemini::DEFAULT_MODEL.to_string());
+    let client = build_client()?;
+    let token_source = Box::new(ServiceAccountTokenSource::new(creds, client.clone())?);
+    let embed_url = GeminiEmbedder::vertex_embed_url(&project, &location, &model);
+    let embedder = GeminiEmbedder::new(model, cfg.dim, token_source, embed_url, client)?;
+    Ok(Box::new(embedder))
 }
 
 // Registry design note (do not "simplify" away):
@@ -480,10 +551,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         EmbedderKind::Gemini => {
             #[cfg(feature = "embed-gemini")]
             {
-                Err(EmbedError::Unavailable(
-                    "embed-gemini is enabled but the Gemini embedder is not implemented yet (A3)"
-                        .into(),
-                ))
+                build_gemini_embedder(&cfg)
             }
             #[cfg(not(feature = "embed-gemini"))]
             {
@@ -820,15 +888,16 @@ mod tests {
     }
 
     #[test]
-    fn gemini_is_ready_false_until_a3() {
-        assert!(
-            !EmbedderKind::Gemini.is_ready(),
-            "adapter lands in A3, not yet"
+    fn gemini_is_ready_requires_feature() {
+        assert_eq!(
+            EmbedderKind::Gemini.is_ready(),
+            cfg!(feature = "embed-gemini"),
+            "is_ready must be true exactly when the adapter feature is compiled"
         );
     }
 
     #[test]
-    fn gemini_fail_closed_no_silent_fallback() {
+    fn gemini_fail_closed_without_credentials() {
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
             dim: 1024,
@@ -840,36 +909,47 @@ mod tests {
             panic!("expected Unavailable, got Ok (silent fallback forbidden)");
         };
         let msg = err.to_string();
+        assert!(!msg.to_ascii_lowercase().contains("fixture"));
+        #[cfg(not(feature = "embed-gemini"))]
         assert!(
             msg.contains("embed-gemini") || msg.contains("not compiled"),
-            "msg={msg}"
+            "feature-off must name the missing feature, got: {msg}"
         );
-        assert!(!msg.to_ascii_lowercase().contains("fixture"));
-        assert!(!EmbedderKind::Gemini.is_ready());
+        #[cfg(feature = "embed-gemini")]
+        assert!(
+            msg.contains("GOOGLE_APPLICATION_CREDENTIALS") || msg.contains("credentials"),
+            "feature-on must name the missing credentials, got: {msg}"
+        );
     }
-    /// A1-A1-1 closure: the feature-ON arm's exact fail-closed error is behavior-locked.
-    /// Only compiles and runs when the feature is on, so it never runs in default gates;
-    /// a `cargo test --features embed-gemini` run covers it. Superseded at A3, when the
-    /// arm becomes a real adapter and this test is replaced by adapter behavior tests.
+    /// A1-A1-1 supersession: the feature-ON arm now builds a real `GeminiEmbedder` from
+    /// valid config plus a service-account JSON key file (construction touches no network),
+    /// so the old fail-closed test is replaced by a build + identity assertion.
     #[test]
     #[cfg(feature = "embed-gemini")]
-    fn gemini_feature_on_fail_closed_names_a3() {
+    fn gemini_feature_on_builds_adapter_from_credentials() {
+        use super::gemini::TEST_RSA_PRIVATE_KEY_PEM;
+        let dir = std::env::temp_dir().join(format!("lambo-a3-gemini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let creds_path = dir.join("sa.json");
+        let creds_json = serde_json::json!({
+            "client_email": "test@example.com",
+            "private_key": TEST_RSA_PRIVATE_KEY_PEM,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "project_id": "proj",
+        });
+        std::fs::write(&creds_path, creds_json.to_string()).unwrap();
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
             dim: 1024,
-            llama_url: None,
-            llama_model: None,
+            gemini_project: Some("proj".to_string()),
+            gemini_location: Some("us-central1".to_string()),
+            gemini_credentials: Some(creds_path.clone()),
             ..Default::default()
         });
-        let Err(err) = r else {
-            panic!("feature-on arm must error, got Ok (silent fallback forbidden)");
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not implemented yet (A3)"),
-            "feature-on arm must name A3, got: {msg}"
-        );
-        assert!(msg.contains("embed-gemini"), "must name the feature: {msg}");
+        let embedder = r.unwrap_or_else(|e| panic!("feature-on must build the adapter: {e}"));
+        let identity = crate::embed::gemini_identity(embedder.as_ref());
+        assert_eq!(identity.as_deref(), Some("gemini-embedding-001"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
