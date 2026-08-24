@@ -22,7 +22,7 @@ over almost unchanged.
 | `feature_name()` | `"embed-gemini"` |
 | `is_compiled()` | `cfg!(feature = "embed-gemini")` |
 | `is_ready()` | **`false` until A3 lands**, then `true` |
-| `FromStr` | `"gemini"`, plus whatever aliases; update the three "expected …" error strings |
+| `FromStr` | `"gemini"`, plus whatever aliases; update the two "expected …" error strings (empty-kind and unknown-kind) |
 | `Display` | `"gemini"` |
 
 Cargo feature: `embed-gemini = ["dep:reqwest"]`. Reqwest is already an optional dep behind

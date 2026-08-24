@@ -75,7 +75,7 @@ kind = "memory"          # memory | cockroach | postgres | sqlite
 # path = "./lambo.db"        # sqlite
 
 [embedder]
-kind = "bge_m3"          # bge_m3 | bedrock | fixture
+kind = "bge_m3"          # bge_m3 | candle | gemini | bedrock | fixture
 dim = 1024               # expected embedder width (default for BGE demos — not a global law)
 url = "http://127.0.0.1:8080"
 # model = ""             # llama.cpp model id (optional)

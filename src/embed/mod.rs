@@ -710,6 +710,30 @@ mod tests {
         assert!(!msg.to_ascii_lowercase().contains("fixture"));
         assert!(!EmbedderKind::Gemini.is_ready());
     }
+    /// A1-A1-1 closure: the feature-ON arm's exact fail-closed error is behavior-locked.
+    /// Only compiles and runs when the feature is on, so it never runs in default gates;
+    /// a `cargo test --features embed-gemini` run covers it. Superseded at A3, when the
+    /// arm becomes a real adapter and this test is replaced by adapter behavior tests.
+    #[test]
+    #[cfg(feature = "embed-gemini")]
+    fn gemini_feature_on_fail_closed_names_a3() {
+        let r = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::Gemini,
+            dim: 1024,
+            llama_url: None,
+            llama_model: None,
+            ..Default::default()
+        });
+        let Err(err) = r else {
+            panic!("feature-on arm must error, got Ok (silent fallback forbidden)");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not implemented yet (A3)"),
+            "feature-on arm must name A3, got: {msg}"
+        );
+        assert!(msg.contains("embed-gemini"), "must name the feature: {msg}");
+    }
 
     #[test]
     fn kind_feature_names() {
