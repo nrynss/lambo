@@ -6399,13 +6399,29 @@ mod tests {
                 "H3: postgres-hnsw adapter missing"
             );
             // `index_present` is now read off the plan for both Postgres
-            // lanes (E2E-F3a). At THIS corpus size the honest answer is
-            // `false` for both: 9 and 22 rows are far below the planner's
-            // crossover, so the hnsw lane is not using hnsw either. That is
-            // the finding, not a failure of this leg. The fixture grid's job
-            // is exact cross-adapter agreement, which does not need an index;
-            // the hnsw envelope is measured where hnsw actually engages, in
-            // `h3_postgres_hnsw_envelope_at_scale`.
+            // lanes (E2E-F3a), and what it reads at this corpus size is
+            // `true` for the hnsw lane and `false` for the forced-exact one.
+            //
+            // B-E2E-R2-2: the comment that used to sit here said `false` for
+            // both, "far below the planner's crossover", and the probe printed
+            // `true` two lines under it. The probe was right and the prose was
+            // wrong, for a reason worth writing down: the grid seeds through
+            // `flush()` and never `ANALYZE`s, so `pg_class.reltuples` is still
+            // -1 and the planner costs the hnsw lane against a fabricated
+            // estimate (209 rows against a real 22) rather than against the
+            // corpus that is actually there. Measured on the pinned digest by
+            // EXPLAINing the same lane before and after an `ANALYZE concepts`:
+            // Index Scan using concepts_embedding_idx before, Seq Scan after.
+            // `PLANNER_CROSSOVER_ROWS` was measured on the corpus helper,
+            // which does ANALYZE, so it does not describe this path at all.
+            //
+            // None of that changes what this leg is for. The fixture grid's
+            // job is exact cross-adapter agreement, and the envelope it prints
+            // is structurally zero for a reason that has nothing to do with
+            // which plan ran: `hnsw.ef_search` defaults to 40, above both
+            // fixture corpora, so the index visits the whole corpus and
+            // returns the exact answer whichever way it is reached. The
+            // envelope that can move is `h3_postgres_hnsw_envelope_at_scale`.
             let indexed = |name: &str| {
                 report
                     .adapters
@@ -6425,12 +6441,31 @@ mod tests {
                 !indexed("postgres-exact"),
                 "H3: the forced-exact lane must never plan through concepts_embedding_idx"
             );
+            // The diagnostic below states the hnsw lane's value, so the value
+            // is asserted rather than narrated: a sentence and a measurement
+            // that disagree is precisely what B-E2E-R2-2 filed.
+            assert!(
+                indexed("postgres-hnsw"),
+                "H3: the hnsw lane's plan probe says it did NOT use \
+                 concepts_embedding_idx. That is not a failure of hnsw: it means the \
+                 fixture corpus now carries real statistics (an ANALYZE somewhere in \
+                 the seed path, or an autovacuum that beat the probe), so the planner \
+                 costs 22 rows honestly and picks a Seq Scan. Rewrite the comment and \
+                 the diagnostic here to say so; do not delete this assertion."
+            );
             eprintln!(
                 "H3 fixture-grid plan probe: postgres-hnsw index_present={}, \
-                 postgres-exact index_present={}. The fixture corpora are 9 and 22 rows, \
-                 below the planner's crossover, so NEITHER lane uses the index here and \
-                 the envelope below is structurally zero. The envelope that means \
-                 something is h3_postgres_hnsw_envelope_at_scale.",
+                 postgres-exact index_present={}. That is the plan the planner chose, \
+                 not a statement about corpus size: the grid seeds through flush() and \
+                 never ANALYZEs, so reltuples is -1 and the hnsw lane is costed against \
+                 a fabricated estimate and takes the index over 22 real rows. The \
+                 envelope below is still structurally zero, for the ef_search reason \
+                 rather than the plan reason: ef_search defaults to 40, above both \
+                 fixture corpora (9 and 22 rows), so the index returns the exact answer \
+                 whichever way it is reached. The load-bearing assertion here is the \
+                 forced-exact lane's false, which its GUC settles whatever the \
+                 estimates say. The envelope that can move is \
+                 h3_postgres_hnsw_envelope_at_scale.",
                 indexed("postgres-hnsw"),
                 indexed("postgres-exact"),
             );
