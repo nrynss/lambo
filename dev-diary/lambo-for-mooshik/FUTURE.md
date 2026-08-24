@@ -49,17 +49,52 @@ from this file.
 
 ---
 
+## Park and fail over on a lost lease
+
+**Decided 2026-08-23 (operator). Trigger: two machines pointed at one shared store and one
+session, which a shared Postgres makes the normal case rather than a corner. Built: no, and
+this entry is its owner.**
+
+The ruling, in the operator's words in [B-postgres-store.md](B-postgres-store.md) item 4:
+the losing machine's writer **parks** rather than refusing. It keeps serving reads, retries,
+and takes the lease when the holder's lapses, so whichever machine is being worked on is the
+one that writes. Reads already work everywhere (`recall` takes no lease and
+`backend_flush_interval` defaults to one second), so the price is one second of trail and no
+simultaneous writes from two machines. The ruling stands.
+
+**What B actually ships is the refusal.** The loser gets `HolderIsOnAnotherHost` from
+`proxyable` and stops there; nothing parks and nothing fails over. E2E-F11 filed the gap
+against B, the round-1 remediation **declined** it with reasoning (a writer-availability
+feature of real size, not a defect in anything B built, and shipping a new lease behaviour
+inside a remediation round would have skipped the review every other part of B received),
+and the round-2 review ruled that decline legitimate. What the decline left behind was an
+operator ruling with no implementation anywhere on the map, which is what this entry fixes:
+B-E2E-R2-4 filed exactly that, and the answer is that park-and-fail-over lives here until a
+phase claims it.
+
+**The shape, unchanged from the ruling.** The lease already does the hard part. The loser
+needs a park-and-retry loop instead of a refusal, plus honest text saying writes are held
+elsewhere and naming the holder. Nothing about it has to be undone to reach cross-host
+proxying below: a parked writer is exactly the process that would later learn to dial.
+
+**Sequencing:** its own phase when one is scheduled, on the trigger above. Nothing in this
+file is schedulable work, so no agent may start it from here.
+
+---
+
 ## Cross-host proxying: a loser forwards to the holder over HTTP
 
-**Decided 2026-08-23 (operator) as the direction, alongside the ruling that B ships
-park-and-fail-over instead. Trigger: a requirement for two machines to write one session
-*simultaneously*. Built: no.**
+**Decided 2026-08-23 (operator) as the direction, alongside the ruling that the losing
+writer parks and fails over instead of refusing. That ruling was made for B, and B records
+it rather than implementing it: see the entry above. Trigger: a requirement for two machines
+to write one session *simultaneously*. Built: no.**
 
-B's ruling (see [B-postgres-store.md](B-postgres-store.md), item 4) is that the losing
-machine's writer parks, serves reads, and takes the lease when the holder's lapses. That
-costs simultaneity: a write on one machine is visible on the other in about a second, but
-the second machine cannot write while the first holds the lease. Cross-host proxying is
-what removes that cost, and it is deliberately not in B.
+The ruling (see [B-postgres-store.md](B-postgres-store.md), item 4, and "Park and fail over
+on a lost lease" above) is that the losing machine's writer parks, serves reads, and takes
+the lease when the holder's lapses. That costs simultaneity: a write on one machine is
+visible on the other in about a second, but the second machine cannot write while the first
+holds the lease. Cross-host proxying is what removes that cost, and it is deliberately not
+in B.
 
 **The shape.** Today `proxyable` refuses with `HolderIsOnAnotherHost`, and correctly: the
 lease row's `endpoint` is a **unix socket path**, which names a socket on the holder's own
@@ -89,8 +124,9 @@ therefore exists; what is missing is the addressing and the trust, not the serve
 **What it costs, and why that keeps it out of B.** A non-loopback bind, a shared secret
 between machines, and a network the machines may trust. Those are operational and security
 commitments, not a refactor, and B's goal — a unified cross-machine *store* — is met without
-them. Park-and-fail-over is the smaller correct thing; a parked writer is precisely the
-process that would learn to dial, so nothing here has to be undone first.
+them. Park-and-fail-over is the smaller correct thing (and is itself unbuilt: see the entry
+above); a parked writer is precisely the process that would learn to dial, so nothing here
+has to be undone first.
 
 **Not to be confused with in-process promotion**, which J2 rejected as too large and keeps in
 reserve (`Local(Arc<Memory>) | Remote(hub)` on `LamboServer`). That answers a different

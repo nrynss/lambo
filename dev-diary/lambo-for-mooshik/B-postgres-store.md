@@ -164,7 +164,20 @@ derive one endpoint. Note also J2's second reason for hashing at all: it keeps a
 password out of both the filesystem and the lease row.
 
 **4. Several machines, one shared store, one single-writer lease — ruled 2026-08-23
-(operator): park and fail over.** This doc's goal is "the unified cross-machine store", and
+(operator): park and fail over.**
+
+> **Correction in place, 2026-08-24 (B-E2E-R2-4): ruled, not built.** The ruling below is the
+> operator's and stands as the decided direction; nothing in it is reworded here. What B
+> **ships** is the refusal it describes replacing: the loser gets `HolderIsOnAnotherHost` and
+> stops. E2E-F11 filed the gap, the round-1 remediation declined it with reasoning (see
+> "Deliberately not built: park and fail over" below), and the round-2 review ruled that
+> decline legitimate. Its owner is now [FUTURE.md](FUTURE.md), "Park and fail over on a lost
+> lease". Before that entry existed, an operator ruling sat on the map with no
+> implementation and no owner, which is the defect R2-4 filed. Read the rest of this item in
+> the present tense of the ruling, not of the artifact: "the work is small" is an estimate of
+> unstarted work, not a report of finished work.
+
+This doc's goal is "the unified cross-machine store", and
 the lease admits exactly one writer per session. Point two machines at one shared Postgres
 and the same session and one wins; the loser cannot proxy, because `proxyable` refuses with
 `HolderIsOnAnotherHost` — J2 checks the holder's host precisely so a loser never dials a
@@ -405,12 +418,26 @@ the first place.
 omitted port against an explicit `5432`, and host casing are all the same database, so
 the DSN canonicaliser that J2 built for session socket identity moved out of
 `mcp/endpoint.rs` into `store/dsn.rs` and now serves both callers. Password stripping
-is what makes the canonical form safe to put in an error message.
+is what makes the canonical form safe to put in an error message. That promise holds on
+inputs the canonicaliser cannot parse as well: B-E2E-R2-5 found that a DSN with a
+fat-fingered port fell through to the raw string and put a live password in a refusal
+that said "(passwords stripped)", so the fallback now drops the userinfo password too.
 
-**The `provision.sh` leg.** The Cockroach arm now pushes the resolved DSN into the
-child's environment rather than letting it inherit the ambient one, so the config
-names the cluster the DDL lands on. The "no `store.dsn`, environment supplies it"
-path that CI depends on is untouched.
+**The `provision.sh` leg, both ends.** The Cockroach arm pushes the resolved DSN into
+the child's environment rather than letting it inherit the ambient one, so the config
+names the cluster the DDL lands on. The "no `store.dsn`, environment supplies it" path
+that CI depends on is untouched.
+
+Pushing it is only half the pipe, which is what B-E2E-R2-1 found: the script then ran
+`set -a; source .env; set +a` before reading `LAMBO_COCKROACH_DSN`, and a sourced
+assignment overwrites the inherited environment, so on a machine whose `.env` carries a
+production DSN the pushed value was discarded one door down and the failure this section
+exists to close reappeared intact. The script now captures the inherited DSN before
+sourcing and restores it after: **an explicitly provided environment beats an ambient
+dotfile**, the same precedence the config layer applies to file against environment. The
+lesson recorded with it: the round-1 pin was on `Command::get_envs`, the sending end, and
+a pin on one end of a pipe is not a pin on the pipe. The receiving end now has its own
+test, which executes the script against a decoy `.env`.
 
 ## Deliberately not built: park and fail over (E2E-F11, 2026-08-24)
 
@@ -421,6 +448,13 @@ anything B built, and implementing it inside a remediation round would have ship
 substantial new behaviour with none of the review that every other part of B received.
 It belongs in its own phase or in [FUTURE](FUTURE.md), scoped deliberately. Nothing in
 B depends on it, and no Done-when box below claims it.
+
+**Owner, assigned 2026-08-24 (B-E2E-R2-4).** The round-2 review ruled this decline
+legitimate and then found the bookkeeping around it wrong: FUTURE.md asserted that B
+*ships* park-and-fail-over, item 4 above still stated the ruling in the present tense,
+and between them the feature had no owner anywhere. Both documents are corrected, and the
+owner is [FUTURE.md](FUTURE.md), "Park and fail over on a lost lease". B's behaviour on a
+lost lease is unchanged by this round: the loser refuses.
 
 ## Done when
 
