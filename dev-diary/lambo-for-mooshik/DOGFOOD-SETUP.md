@@ -343,6 +343,24 @@ unit depends on, both verified 2026-08-23 by SIGKILLing the writer:
     limit (5 starts / 10s) the unit burns its budget in the first ten seconds and is left
     FAILED permanently — the very never-recovers outage this ruling exists to prevent.
     Measured unattended recovery with the fix: **36s**.
+
+    **`StartLimitIntervalSec` belongs in `[Unit]`, not `[Service]`.** systemd parses the
+    start-limit keys only in `[Unit]`; under `[Service]` the key is *silently ignored* and
+    the unit keeps the default 5-starts/10s limiter while the file reads as though the
+    limiter is off. The only signal is one `Unknown key 'StartLimitIntervalSec' in section
+    [Service], ignoring.` line per reload, which is easy to never look at. This rig shipped
+    exactly that bug from 2026-08-23 until it was found and fixed on 2026-08-25 — the
+    never-recovers hazard above was live and unguarded the whole time, unnoticed only
+    because nothing had SIGKILLed the writer in that window. **Verify the runtime property,
+    never the file:**
+
+    ```sh
+    systemctl --user show lambo-dogfood -p StartLimitIntervalUSec   # must print 0
+    ```
+
+    `daemon-reload` applies a change to these keys **without restarting the unit**, so the
+    writer keeps running and the single-writer lease is never dropped — confirm with an
+    unchanged `MainPID` and `ActiveEnterTimestamp` after the reload.
   - **launchd:** `ThrottleInterval` **60** (default is 10s, squarely inside the TTL) with
     `KeepAlive`. There is deliberately **no `StartLimitIntervalSec` analogue and none is
     needed**: launchd has no permanent-FAILED state, so the catastrophic half of the
@@ -355,6 +373,62 @@ unit depends on, both verified 2026-08-23 by SIGKILLing the writer:
   but a stdio client that starts while the writer is restarting can still WIN the lease and
   re-couple the holder to a client — so `select holder from session_leases` naming anything
   other than `http-shared-writer` means a harness is still on stdio and should be moved.
+
+### Load-testing the rig: bound the CPU hogs at spawn
+
+Load tests here generate CPU pressure with background spinners. Do **not** clean them up
+with a trailing `kill` in the same command:
+
+```sh
+# WRONG — leaks every hog if the command is interrupted
+for i in $(seq 1 36); do (while :; do :; done) & done
+HOGS=$(jobs -p)
+cargo test --no-default-features --features store-postgres --lib
+kill $HOGS
+```
+
+If the shell is interrupted before the last line — an agent's tool call cancelled, a
+session killed, Ctrl-C — the parent exits, the spinners reparent to `systemd --user`
+and **nothing ever kills them**. Note they reparent to the *user manager*, not to PID 1:
+`systemd --user` is a subreaper, so the orphans' PPID is its pid (1049 on this rig), which
+is what the check below resolves. This happened on 2026-08-24: 36 spinners
+outlived their session by 11 hours, burning 3h34m of CPU each on a 12-core box and pinning
+the machine at load ~56 with CPU pressure `some avg300=91`. The symptom is a desktop that
+feels sluggish and hangs rather than one that is obviously pegged, because the leaked
+shells are niced.
+
+Bound them at spawn instead, so they die on their own no matter how the parent goes:
+
+```sh
+for i in $(seq 1 36); do timeout 300 sh -c 'while :; do :; done' & done
+```
+
+Diagnosing a suspected leak — read pressure first, `top` last:
+
+```sh
+cat /proc/pressure/cpu   # `some avg300` near 100 = real starvation, not a busy build
+
+# the decisive signature: a Claude Code tool shell that outlived its session
+ps -eo pid,ppid,stat,etimes,times,args | grep 'shell-snapshots/snapshot-' | awk '$4 > 3600'
+```
+
+A Claude Code tool shell exists for the duration of one tool call, so **any** process
+carrying a `shell-snapshots/snapshot-*` path with `ELAPSED` in the hours is a leak by
+definition — that is the reliable discriminator, and the `> 3600` filter is what makes it
+one. (Every command run through the Bash tool carries that path, including the one you are
+running, so the elapsed threshold is doing the real work here.) Cross-check that the PPID
+is the user manager — `pgrep -u "$USER" -x systemd`, which is a subreaper and adopts these
+orphans; it is **not** PID 1.
+
+Two heuristics that look appealing and do **not** work, both tried during the 2026-08-25
+cleanup:
+
+- *"Ask systemd which unit owns the pid."* `systemctl --user status <pid>` names an owning
+  scope for leaked shells too — they keep the cgroup of whatever terminal spawned them, so
+  a leak and a real service are indistinguishable this way.
+- *"CPU-time / elapsed near 1.0 means a spinner."* N spinners on C cores each get only
+  `C/N` of a core. The 36 leaked hogs measured **0.32** (≈ 12/36) — *below* a merely busy
+  browser tab at 0.57. The ratio is evidence, never a threshold.
 
 ### The macOS unit, in full
 
