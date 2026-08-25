@@ -58,6 +58,7 @@ pub(crate) mod vector;
 // session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
 // and neither is feature-gated.
 pub(crate) mod dsn;
+pub use dsn::store_dsn_identity;
 
 // L82-1 — statement planning for the SQL adapters' `flush()`. Store-agnostic
 // (it only reads `Mutation`), so it compiles and is tested under every feature

@@ -86,7 +86,7 @@ use sha2::{Digest, Sha256};
 /// `store_identity` and compared by `overlay_env`, and neither prints it; the
 /// unparseable answer is a digest, which is meaningless to an operator.
 /// [`store_dsn_echo`] is the half that gets shown (B-E2E-R4-2).
-pub(crate) fn store_dsn_identity(raw: &str) -> String {
+pub fn store_dsn_identity(raw: &str) -> String {
     match canonicalize(raw) {
         Canonical::Absent => String::new(),
         Canonical::Parsed(identity) => identity,

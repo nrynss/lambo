@@ -125,7 +125,10 @@ pub use resolve::{
 
 #[cfg(feature = "store-memory")]
 pub use store::MemoryStore;
-pub use store::{build_store, store_from_env, Capabilities, GraphStore, StoreConfig, StoreKind};
+pub use store::{
+    build_store, store_dsn_identity, store_from_env, Capabilities, GraphStore, StoreConfig,
+    StoreKind,
+};
 
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{
