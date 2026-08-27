@@ -671,11 +671,22 @@ fn mcp_stdio_publishes_exactly_seven_tools_and_refuses_a_client_timestamp() {
         "the refusal must name the unknown timestamp field (F18); resp=\n{refused}"
     );
 
-    // The session is still healthy: a clean derive (no timestamp) succeeds.
+    // A malformed `event_time` is a contained per-call parameter error. The
+    // process keeps its JSON-RPC connection alive and accepts the next call.
     mcp.send(
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"user schema","concept_type":"entity"}]}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"user schema","concept_type":"entity"}],"event_time":"not-rfc3339"}}}"#,
     );
-    let ok = mcp.read_response(4);
+    let malformed = mcp.read_response(4);
+    assert!(
+        malformed.contains("\"isError\":true"),
+        "a malformed event_time must be a contained tool error; resp=\n{malformed}"
+    );
+
+    // The session is still healthy: a clean derive (no event_time) succeeds.
+    mcp.send(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lambo_derive","arguments":{"agent_id":"agent-a","concepts":[{"content":"user schema","concept_type":"entity"}]}}}"#,
+    );
+    let ok = mcp.read_response(5);
     assert!(
         ok.contains("\"isError\":false"),
         "a clean derive must still succeed after the refusal; resp=\n{ok}"

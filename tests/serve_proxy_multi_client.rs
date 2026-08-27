@@ -290,7 +290,8 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         "lambo_derive",
         serde_json::json!({
             "agent_id": "agent-b",
-            "concepts": [{"content": "a write that crossed the proxy hop", "concept_type": "logic"}]
+            "concepts": [{"content": "a write that crossed the proxy hop", "concept_type": "logic"}],
+            "event_time": "2017-06-07T08:09:10Z"
         }),
     );
     assert!(
@@ -506,6 +507,29 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
     a.sigterm();
     let _ = b.child.wait();
     let _ = a.child.wait();
+
+    // The byte-pipe proxy must not rebuild or drop the arguments. The holder's
+    // final flush makes the persisted interaction observable from a third
+    // process, proving the proxied derive retained its historical about-time.
+    let expected_event_time = "2017-06-07T08:09:10Z".parse().expect("RFC3339");
+    let snapshot = tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            SqliteStore::connect(&db)
+                .expect("connect")
+                .load_session(&SessionId::from(SESSION))
+                .await
+                .expect("load")
+        });
+    let interaction = snapshot
+        .interactions
+        .iter()
+        .find(|interaction| {
+            interaction.prompt_text.as_deref() == Some("a write that crossed the proxy hop")
+        })
+        .expect("proxied derive interaction persisted");
+    assert_eq!(interaction.event_time, Some(expected_event_time));
+    assert_eq!(interaction.about_time(), expected_event_time);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

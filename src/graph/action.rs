@@ -74,7 +74,8 @@ pub struct Action<'a> {
     pub depends_on: &'a [&'a str],
     /// When the action was originally made, when the caller knows it
     /// (`None` = live fact; the fallback rule is then the interaction's own
-    /// flush stamp). In-process only — no serde wire form to version.
+    /// flush stamp). The MCP `lambo_record_action` wire surface accepts the
+    /// same optional RFC3339 about-time.
     pub event_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 

@@ -436,6 +436,7 @@ mod tests {
                     parent: "user schema".into(),
                     child: "auth middleware".into(),
                 }]),
+                event_time: None,
             })
             .await;
         assert_eq!(mcp_derived.is_error, Some(false), "{mcp_derived:?}");
@@ -464,6 +465,7 @@ mod tests {
             .record_action_impl(RecordActionParams {
                 agent_id: "agent-a".into(),
                 action: "create user".into(),
+                event_time: None,
                 produces: Some(vec![WireResource("user schema".into())]),
                 modifies: None,
                 depends_on: Some(vec![WireResource("auth middleware".into())]),

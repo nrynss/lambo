@@ -85,7 +85,7 @@ assuming the others pick it up.
 Every tool takes an `agent_id`, and every tool rejects any argument it does not define, so a typo fails rather than being ignored.
 
 <Note>
-Do not send timestamps. Lambo stamps all times itself, and no tool accepts a timestamp argument. Sending one is refused by name.
+Do not send `created_at` or another client flush timestamp. Lambo stamps flush time itself. Only `lambo_derive` and `lambo_record_action` accept optional `event_time`: an RFC3339 historical about-time, such as a commit or document date. Omit `event_time` for a live fact, which is about now. Other timestamp arguments are refused by name.
 </Note>
 
 You manage ordering. A read sees a write only after that write's tool call has returned. If you want a recall to see something you just derived, call `lambo_derive` first, wait for it to return, and then call `lambo_recall`.
@@ -196,6 +196,7 @@ Writes you send one after another are applied in that order, whatever other agen
 | `concepts` | array of `{content, concept_type}` | Yes | Up to 64 per call. |
 | `concepts[].content` | string | Yes | Up to 16 KB. |
 | `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
+| `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. |
 
 <Warning>
@@ -205,6 +206,7 @@ Writes you send one after another are applied in that order, whatever other agen
 ```json
 {"name": "lambo_derive", "arguments": {"agent_id": "agent-a",
   "concepts": [{"content": "user schema", "concept_type": "entity"}],
+  "event_time": "2024-06-12T14:30:00Z",
   "parent_of": [{"parent": "user schema", "child": "auth middleware"}]}}
 ```
 
@@ -229,11 +231,13 @@ Record something the agent did, along with what it produces, modifies, and depen
 |---|---|---|---|
 | `agent_id` | string | Yes | |
 | `action` | string | Yes | Up to 16 KB. |
+| `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. |
 
 ```json
 {"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",
   "action": "created migrations/003.sql", "produces": ["migrations/003.sql"],
+  "event_time": "2024-06-12T14:30:00Z",
   "depends_on": ["user schema"]}}
 ```
 
@@ -338,13 +342,15 @@ you learned and did, lambo_reserve before editing a shared concept, and lambo_in
 lambo_saints / lambo_stats to look around. Every tool takes your agent_id: it is
 caller-asserted and unverified, so send one stable id of your own — work is recorded under
 it, soft locks are held under it, distinct ids get distinct locks, and callers sharing an
-id share locks. Never send a timestamp: the server stamps them. Ordering is yours to
-manage, and writes are applied in the BACKGROUND: lambo_derive and lambo_record_action
-return once your input is validated and ordered, and their ack carries a receipt id.
-Their outcome arrives on your next tool response. If you need a write visible to the very
-next read, call lambo_stats with that receipt and a wait_ms first; otherwise carry on —
-writes you send one after another are applied in that order (two you fire at once have no
-order to keep).
+id share locks. created_at is server-stamped: do not send a client flush timestamp.
+lambo_derive and lambo_record_action may take optional RFC3339 event_time for historical
+about-time, such as a commit or document date; omit it for a live fact, which is about now.
+Ordering is yours to manage, and writes are applied in the BACKGROUND: lambo_derive and
+lambo_record_action return once your input is validated and ordered, and their ack carries
+a receipt id. Their outcome arrives on your next tool response. If you need a write visible
+to the very next read, call lambo_stats with that receipt and a wait_ms first; otherwise
+carry on — writes you send one after another are applied in that order (two you fire at once
+have no order to keep).
 ```
 
 ## Limits

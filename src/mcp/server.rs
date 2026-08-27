@@ -5,14 +5,13 @@
 //! never a second [`Memory`] (a second one would spawn a rival task trio
 //! against a divergent RAM copy of the same session).
 //!
-//! # F18 — timestamps are server-side, always
+//! # F18 — flush timestamps are server-side
 //!
-//! **No tool in this module accepts a timestamp, and none may ever be added.**
-//! `derive` / `record_action` / `demote` take their logical timestamp from the
-//! interaction node, which `Memory::begin_interaction` stamps with `Utc::now()`
-//! on the server. A client-supplied timestamp would propagate to every concept
-//! and edge below that interaction, and backdating by 61s would turn the whole
-//! `canonization_edge_min_age` inflation guard into a no-op (P6 review F18).
+//! `created_at` remains server-stamped for every tool call. `lambo_derive` and
+//! `lambo_record_action` additionally accept an optional `event_time`: the
+//! historical about-time of a fact, such as its commit or document date. It is
+//! not an observed-at claim and therefore does not weaken the server's flush
+//! timestamp authority. No other client-supplied time surface is accepted.
 //!
 //! # Error convention
 //!
@@ -26,6 +25,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
@@ -165,6 +165,11 @@ pub struct DeriveParams {
     pub agent_id: String,
     /// Concepts to derive from this interaction.
     pub concepts: Vec<WireConcept>,
+    /// Optional RFC3339 historical about-time for this evidence, such as a
+    /// commit or document date. Omit it for a live fact, which is about now.
+    /// No additional date-range bounds are applied.
+    #[schemars(length(max = 16_384))]
+    pub event_time: Option<DateTime<Utc>>,
     /// Optional `(parent, child)` hierarchy pairs. Both ends resolve (and may
     /// be created) as concepts.
     pub parent_of: Option<Vec<WireParentOf>>,
@@ -187,6 +192,11 @@ pub struct RecordActionParams {
     /// The action taken — becomes a `Resource` concept.
     #[schemars(length(max = 16_384))]
     pub action: String,
+    /// Optional RFC3339 historical about-time for this evidence, such as a
+    /// commit or document date. Omit it for a live fact, which is about now.
+    /// No additional date-range bounds are applied.
+    #[schemars(length(max = 16_384))]
+    pub event_time: Option<DateTime<Utc>>,
     /// Resources this action creates (`Causal` edges).
     pub produces: Option<Vec<WireResource>>,
     /// Resources this action mutates (`Causal` edges).
@@ -1326,12 +1336,14 @@ impl LamboServer {
 
     /// Derive concepts from a fresh interaction (spec §7).
     ///
-    /// The interaction's `created_at` is stamped server-side (F18) — this tool
-    /// takes no timestamp.
+    /// The interaction's `created_at` is stamped server-side (F18). Callers may
+    /// optionally supply the evidence's historical `event_time`.
     #[tool(
         name = "lambo_derive",
         description = "Derive concepts from the current interaction into session memory. \
-                       Timestamps are stamped server-side; do not send one. Returns as soon \
+                       created_at is stamped server-side. event_time is optional RFC3339 \
+                       historical about-time, such as a commit or document date; omit it for \
+                       a live fact, which is about now. Returns as soon \
                        as the input is validated and ordered — the write is applied in the \
                        background and the ack carries a receipt id. The outcome is \
                        piggybacked on your next tool response; to wait for it, call \
@@ -1348,7 +1360,9 @@ impl LamboServer {
     #[tool(
         name = "lambo_record_action",
         description = "Record an action the agent took, with what it produces, modifies and \
-                       depends on. Timestamps are stamped server-side; do not send one. \
+                       depends on. created_at is stamped server-side. event_time is optional \
+                       RFC3339 historical about-time, such as a commit or document date; omit \
+                       it for a live fact, which is about now. \
                        Returns as soon as the input is validated and ordered — the write is \
                        applied in the background and the ack carries a receipt id, resolved \
                        the same way as lambo_derive's."
@@ -1552,6 +1566,7 @@ impl LamboServer {
             Ok(a) => a,
             Err(e) => return e,
         };
+        let event_time = p.event_time;
         // J1-R1-3: this path can no longer emit a warning. The attribution
         // warning was the only one it ever had, and J1 deleted it rather than
         // rewording it, so a `Vec` here would be a shape that says otherwise to
@@ -1617,7 +1632,7 @@ impl LamboServer {
         // canonicalize and insert happen in the background.
         let submitted = match self
             .mem
-            .derive_async_as(&acting, &concepts, &parent_of, None)
+            .derive_async_as(&acting, &concepts, &parent_of, event_time)
             .await
         {
             Ok(s) => s,
@@ -1684,6 +1699,7 @@ impl LamboServer {
             Ok(a) => a,
             Err(e) => return e,
         };
+        let event_time = p.event_time;
         // J1-R1-3: no warning is reachable here — see `derive_impl`.
         if p.action.trim().is_empty() {
             return bad_param("action must be a non-empty string");
@@ -1753,7 +1769,7 @@ impl LamboServer {
         let modifies: Vec<&str> = modifies.iter().map(String::as_str).collect();
         let depends_on: Vec<&str> = depends_on.iter().map(String::as_str).collect();
         let action = Action {
-            event_time: None,
+            event_time,
             action: p.action.as_str(),
             produces: &produces,
             modifies: &modifies,
@@ -2207,8 +2223,11 @@ impl ServerHandler for LamboServer {
                  lambo_stats to look around. Every tool takes your agent_id: it is \
                  caller-asserted and unverified, so send one stable id of your own — \
                  work is recorded under it, soft locks are held under it, distinct ids \
-                 get distinct locks, and callers sharing an id share locks. Never send \
-                 a timestamp: the server stamps them. Ordering is yours to manage, and \
+                 get distinct locks, and callers sharing an id share locks. created_at is \
+                 server-stamped: do not send a client flush timestamp. lambo_derive and \
+                 lambo_record_action may take optional RFC3339 event_time for historical \
+                 about-time, such as a commit or document date; omit it for a live fact, \
+                 which is about now. Ordering is yours to manage, and \
                  writes are applied in the BACKGROUND: lambo_derive and \
                  lambo_record_action return once your input is validated and ordered, \
                  and their ack carries a receipt id. Their outcome arrives on your next \
@@ -2307,11 +2326,9 @@ mod tests {
         s.mem.close().await.expect("close");
     }
 
-    /// **F18 (P6 carryover), pinned.** No tool may accept a client timestamp:
-    /// `derive`/`record_action`/`demote` take their logical time from the
-    /// interaction node, so a client-supplied one propagates to every concept
-    /// and edge beneath it and backdating by 61s neuters the whole
-    /// `canonization_edge_min_age` inflation guard.
+    /// **F18 (P6 carryover), pinned.** No tool may accept a client *flush*
+    /// timestamp. `event_time` is the deliberate exception on derive and
+    /// record_action: historical about-time, not observed-at time.
     ///
     /// This asserts on the *published schema*, so it fails for a future agent
     /// who adds a timestamp field to any params struct.
@@ -2336,8 +2353,8 @@ mod tests {
                 let leaf = leaf.trim_end_matches("[]").to_string();
                 assert!(
                     !BANNED.contains(&leaf.as_str()),
-                    "F18: tool {} accepts '{}' — timestamps are stamped server-side and no \
-                     tool may take one from the client",
+                    "F18: tool {} accepts '{}' — created_at and flush timestamps are \
+                     stamped server-side; only explicit historical event_time is client-supplied",
                     t.name,
                     path
                 );
@@ -2428,6 +2445,7 @@ mod tests {
                     "concepts",
                     "concepts[].concept_type",
                     "concepts[].content",
+                    "event_time",
                     "parent_of",
                     "parent_of[].child",
                     "parent_of[].parent",
@@ -2446,7 +2464,14 @@ mod tests {
             ),
             (
                 "lambo_record_action",
-                vec!["action", "agent_id", "depends_on", "modifies", "produces"],
+                vec![
+                    "action",
+                    "agent_id",
+                    "depends_on",
+                    "event_time",
+                    "modifies",
+                    "produces",
+                ],
             ),
             (
                 "lambo_reserve",
@@ -2471,6 +2496,35 @@ mod tests {
                  change is intended, confirm no new field carries client-supplied logical \
                  time (F18) and then update the golden set.",
                 t.name
+            );
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// `event_time` is a deliberately narrow historical-evidence surface:
+    /// optional on the two writes, RFC3339 on the wire, and described as
+    /// about-time rather than a caller-controlled flush clock.
+    #[tokio::test]
+    async fn write_tool_schemas_document_optional_rfc3339_event_time() {
+        let s = server("mcp-event-time-schema").await;
+        for name in ["lambo_derive", "lambo_record_action"] {
+            let tool = tools(&s)
+                .into_iter()
+                .find(|t| t.name == name)
+                .expect("write tool is published");
+            let schema = serde_json::to_value(&*tool.input_schema).expect("schema");
+            let event_time = &schema["properties"]["event_time"];
+            assert_eq!(event_time["format"], json!("date-time"), "{name}");
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .is_none_or(|required| !required.iter().any(|p| p == "event_time")),
+                "event_time must remain optional: {schema}"
+            );
+            let description = event_time["description"].as_str().unwrap_or_default();
+            assert!(
+                description.contains("historical about-time") && description.contains("live fact"),
+                "{name} must explain historical and live semantics: {description}"
             );
         }
         s.mem.close().await.expect("close");
@@ -3007,6 +3061,159 @@ mod tests {
         )
         .await;
         assert_eq!(seen.is_error, Some(false), "{seen:?}");
+        s.mem.close().await.expect("close");
+    }
+
+    /// Historical evidence supplied on the wire must enter the existing async
+    /// Memory path unchanged. Replacing either handler's `p.event_time` with
+    /// `None` makes this red: the interaction and the action edge fall back to
+    /// their flush stamps instead of the caller's about-time.
+    #[tokio::test]
+    async fn wire_event_time_stamps_derive_and_record_action_interactions_and_edges() {
+        let s = server("mcp-event-time-write").await;
+        let derive_time: DateTime<Utc> = "2018-04-05T06:07:08Z".parse().expect("RFC3339");
+        let action_time: DateTime<Utc> = "2019-05-06T07:08:09Z".parse().expect("RFC3339");
+
+        let derived = call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "historical wire derive", "concept_type": "entity"}],
+                "event_time": derive_time.to_rfc3339(),
+            }),
+        )
+        .await;
+        assert_eq!(derived.is_error, Some(false), "{derived:?}");
+
+        let actioned = call(
+            &s,
+            "lambo_record_action",
+            json!({
+                "agent_id": "agent-a",
+                "action": "historical wire action",
+                "produces": ["historical wire artifact"],
+                "event_time": action_time.to_rfc3339(),
+            }),
+        )
+        .await;
+        assert_eq!(actioned.is_error, Some(false), "{actioned:?}");
+
+        {
+            let g = s.mem.graph().read();
+            let derived_interaction = g
+                .interactions()
+                .find(|i| i.prompt_text.as_deref() == Some("historical wire derive"))
+                .expect("derive interaction");
+            assert_eq!(derived_interaction.event_time, Some(derive_time));
+            assert_eq!(derived_interaction.about_time(), derive_time);
+
+            let action_interaction = g
+                .interactions()
+                .find(|i| i.prompt_text.as_deref() == Some("historical wire action"))
+                .expect("action interaction");
+            assert_eq!(action_interaction.event_time, Some(action_time));
+            assert_eq!(action_interaction.about_time(), action_time);
+            assert!(
+                g.edges().any(|edge| {
+                    edge.edge_type == crate::types::EdgeType::Causal
+                        && edge.event_time == Some(action_time)
+                        && edge.about_time() == action_time
+                }),
+                "record_action's structural edge must inherit its interaction event time"
+            );
+        }
+
+        // Omission is byte-for-byte the old live-fact behaviour: no stored
+        // event time and `about_time()` falls back to server-stamped created_at.
+        let live = call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "live wire derive", "concept_type": "entity"}],
+            }),
+        )
+        .await;
+        assert_eq!(live.is_error, Some(false), "{live:?}");
+        {
+            let g = s.mem.graph().read();
+            let live_interaction = g
+                .interactions()
+                .find(|i| i.prompt_text.as_deref() == Some("live wire derive"))
+                .expect("live derive interaction");
+            assert_eq!(live_interaction.event_time, None);
+            assert_eq!(live_interaction.about_time(), live_interaction.created_at);
+        }
+        s.mem.close().await.expect("close");
+    }
+
+    /// A bulk historical corpus supplied over MCP must retain its separated
+    /// sessions. If `derive_impl` regresses to `event_time: None`, all three
+    /// submissions have near-identical flush stamps and this becomes one
+    /// session, so Solo can no longer admit the derived concept.
+    #[tokio::test]
+    async fn wire_derived_history_recurs_under_solo_event_time() {
+        use crate::canon::{separated_session_count, EvalParams, PromotionPolicy};
+        use crate::daemon::ScoreTable;
+
+        let s = server("mcp-event-time-solo").await;
+        let content = "wire-derived recurring historical fact";
+        for event_time in [
+            "2018-01-01T00:00:00Z",
+            "2018-01-03T00:00:00Z",
+            "2018-01-05T00:00:00Z",
+        ] {
+            let out = call(
+                &s,
+                "lambo_derive",
+                json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": content, "concept_type": "entity"}],
+                    "event_time": event_time,
+                }),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(false), "{out:?}");
+        }
+
+        {
+            let g = s.mem.graph().read();
+            let concept = g
+                .concepts()
+                .find(|concept| concept.content == content)
+                .expect("the wire-derived concept exists");
+            let support_times: Vec<_> = g
+                .edges()
+                .filter(|edge| {
+                    edge.edge_type == crate::types::EdgeType::Derives && edge.target == concept.id
+                })
+                .filter_map(|edge| g.node(edge.source))
+                .filter_map(|node| match node {
+                    crate::types::Node::Interaction(interaction) => Some(interaction.about_time()),
+                    crate::types::Node::Concept(_) => None,
+                })
+                .collect();
+            assert_eq!(
+                separated_session_count(&support_times, Duration::from_secs(24 * 60 * 60)),
+                3,
+                "three two-day-separated wire event times are three Solo sessions"
+            );
+            assert!(
+                PromotionPolicy::Solo
+                    .scorer()
+                    .candidates(
+                        &g,
+                        &ScoreTable::default(),
+                        &EvalParams::default(),
+                        "2020-01-01T00:00:00Z"
+                            .parse()
+                            .expect("injected evaluation time"),
+                    )
+                    .contains(&concept.id),
+                "three event-timed entity sessions clear Solo's Candidate bar"
+            );
+        }
         s.mem.close().await.expect("close");
     }
 
@@ -4864,6 +5071,24 @@ mod tests {
             "agent_id": "a", "concepts": [{"content": "x", "concept_type": "entity"}]
         }))
         .is_ok());
+        assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
+            "agent_id": "a",
+            "concepts": [{"content": "x", "concept_type": "entity"}],
+            "event_time": "2020-01-01T00:00:00Z"
+        }))
+        .is_ok());
+        assert!(
+            serde_json::from_value::<RecordActionParams>(serde_json::json!({
+                "agent_id": "a", "action": "x", "event_time": "2020-01-01T00:00:00Z"
+            }))
+            .is_ok()
+        );
+        assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
+            "agent_id": "a",
+            "concepts": [{"content": "x", "concept_type": "entity"}],
+            "event_time": "not-rfc3339"
+        }))
+        .is_err());
     }
 
     /// **R1/T82-14 pinned.** The read tools answer from the RAM graph after
@@ -4920,8 +5145,16 @@ mod tests {
         let instructions = info.instructions.expect("instructions");
         assert!(instructions.contains("mcp-info"));
         assert!(
-            instructions.contains("Never send a timestamp"),
-            "instructions should tell the model not to send timestamps (F18)"
+            instructions.contains("created_at is server-stamped")
+                && instructions.contains("optional RFC3339 event_time")
+                && instructions.contains("historical about-time")
+                && instructions.contains("omit it for a live fact"),
+            "instructions must distinguish server-stamped flush time from optional historical \
+             event time: {instructions}"
+        );
+        assert!(
+            !instructions.contains("Never send a timestamp"),
+            "the obsolete blanket timestamp prohibition must not suppress event_time: {instructions}"
         );
         assert!(
             instructions.contains("Ordering is yours to manage"),

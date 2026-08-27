@@ -1466,10 +1466,10 @@ impl Memory {
     /// inflate the heaviest term in the solo formula. Each call bumps the
     /// concept's `human_confirmed` count by one and appends an `UpsertNode`
     /// mutation, so the value is durable on every store adapter. Surfacing the
-    /// verb on MCP/CLI is deliberately deferred, exactly as workstream D
-    /// deferred `event_time`'s surfaces: the in-process API is the contract the
-    /// future ingest/confirm tooling will call, and a wire form wants a
-    /// consumer to design it against.
+    /// verb on MCP/CLI is deliberately deferred: unlike `event_time`, whose MCP
+    /// wire form now has a historical-ingest consumer, `confirm_human` still
+    /// needs a consumer-designed wire contract. The in-process API remains the
+    /// contract future confirm tooling will call.
     ///
     /// A missing id or a non-concept node is an error — a confirmation that
     /// cannot be applied must fail loudly, never silently vanish.

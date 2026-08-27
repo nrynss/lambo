@@ -31,13 +31,12 @@
 //! `record_action_async_as` take the same `Option<DateTime<Utc>>` parameter
 //! and open their interaction synchronously at submit time (before the job is
 //! queued), so the stamp is on that interaction when the queued write runs and
-//! every edge it later creates inherits it. Surfacing event time on MCP/CLI is deliberately left
-//! to C2's ingest tooling: F18 bans CLI flags whose names look like client
-//! wall-clock timestamps (`timestamp`, `now`, `when`) because flush time is
-//! server-authoritative. Event time is a different concept — about-time, not
-//! observed-at — and if it is ever surfaced it must be named for that concept
-//! (`event_time` / `at`), never with a banned token; this does not weaken F18,
-//! whose rule guards the server's own stamping authority, which is untouched.
+//! every edge it later creates inherits it. MCP exposes this as optional
+//! RFC3339 `event_time` on `lambo_derive` and `lambo_record_action`; CLI flags
+//! remain deliberately absent. F18 bans client wall-clock timestamp names
+//! (`timestamp`, `now`, `when`) because flush time is server-authoritative.
+//! Event time is a different concept — about-time, not observed-at — and this
+//! does not weaken F18, whose rule guards the server's own stamping authority.
 //!
 //! ## 2. The fallback rule, and mixing
 //!
