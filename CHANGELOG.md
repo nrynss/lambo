@@ -84,6 +84,21 @@
   overlays regardless of `embedder.kind`. A harness that cleared the old list,
   wrote `store.kind = "postgres"` with no `dsn`, and ran `lambo provision` took
   its DSN from the ambient shell.
+  "Every variable a resolve reads" also covers what `build_store` and
+  `build_embedder` read after the file overlay, which the first version of this
+  list did not: `GCP_LAMBO_CREDENTIALS`, `GOOGLE_APPLICATION_CREDENTIALS` (both
+  through `gcp_auth::credentials_path_from_env`, called eagerly by the Gemini
+  embedder build and by `PgStore::new` under the IAM opt-in) and
+  `LAMBO_POSTGRES_IAM`. Those three pick an *identity* rather than a database:
+  a harness that cleared the old list and built a Gemini embedder with no
+  `gemini_credentials` authenticated as whatever service account the ambient
+  shell named, and billed Vertex calls to it. `LAMBO_VECTOR_BEAM_SIZE` is
+  excluded on purpose — it is read when the pool is first used, not during the
+  resolve.
+- `lambo::store::POSTGRES_IAM_ENV`, the `LAMBO_POSTGRES_IAM` name as a public
+  const, declared unconditionally so `RESOLVE_ENV_VARS` can name it in every
+  feature row. Pinned equal to the `store-postgres` const `PgStore::new`
+  actually reads.
 
 - `StoreKind::Postgres` and Cargo feature `store-postgres` (same sqlx postgres
   driver as `store-cockroach`; no second driver). B2 lands templated-width

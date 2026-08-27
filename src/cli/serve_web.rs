@@ -3051,11 +3051,18 @@ mod tests {
             APP_JS.contains("nothing to tick off."),
             "the Solo branch must say there is no checklist, not show an empty one"
         );
-        // The fallback is for a policy this file has no copy for — a future
-        // variant, or a pre-C2 server that sends no `policy` at all. It must not
-        // describe that as a transient failure: nothing is missing and nothing
-        // is being retried. A genuinely failed read is the separate
-        // `unavailable` path below.
+        // The named-policy branch is for a policy this file has no copy for — a
+        // variant added after it was written. It must not describe that as a
+        // transient failure: nothing is missing and nothing is being retried. A
+        // genuinely failed read is the separate `unavailable` path below.
+        //
+        // R4-2: the policy-less fallback under it is NOT reachable from any
+        // server this repo ships — a post-C2 one always carries `policy`, and a
+        // pre-C2 one always serializes the four gate keys, so `gateAbsenceCopy`
+        // is never called against it. It is a defensive default for a malformed
+        // payload, kept so a truncated response reads as a sentence rather than
+        // "runs the undefined policy". Asserted for its wording, not as a
+        // behaviour this endpoint can produce.
         assert!(
             APP_JS.contains("policy, which does not use the four "),
             "an unrecognised policy must still get an honest line, not the Solo copy"

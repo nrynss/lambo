@@ -63,6 +63,37 @@ use crate::LamboFile;
 /// The DSN three are spelled by reference to `store`'s own consts rather than
 /// re-quoted, so the list cannot drift from the variables configuration
 /// actually reads.
+///
+/// # A resolve is not only the file overlay (R4-1)
+///
+/// T3-P2-1 completed this list against `LamboFile::load_resolved`, and stopped
+/// there. But [`resolve_backends`] does not stop there: it goes on to call
+/// `build_store` and `build_embedder`, both of which read the environment
+/// again, for things no `LamboFile` field carries. Three more names were
+/// missing, and they are the ones with teeth — they choose an *identity*, which
+/// is worse than choosing a database:
+///
+/// * `GCP_LAMBO_CREDENTIALS` and `GOOGLE_APPLICATION_CREDENTIALS`, through
+///   `gcp_auth::credentials_path_from_env`, which `build_gemini_embedder` calls
+///   eagerly and `PgStore::new` calls when the IAM opt-in is set. A harness that
+///   cleared the old list, wrote `embedder.kind = "gemini"` with no
+///   `gemini_credentials`, and believed itself hermetic authenticated as
+///   whatever service account the developer's shell was pointing at — and
+///   billed real Vertex calls against it.
+/// * `LAMBO_POSTGRES_IAM` (`store::POSTGRES_IAM_ENV`), read in `PgStore::new`
+///   at construction, so an ambient `1` flips the login mode of a store built
+///   from a DSN the harness wrote with a password in it.
+///
+/// `LAMBO_VECTOR_BEAM_SIZE` is deliberately **not** here, and the distinction is
+/// the rule for the next addition: it is read in `PgStore::connect_options`,
+/// which runs on first pool use, not during the resolve. This list is what a
+/// resolve reads, not what the process eventually reads.
+///
+/// Which of these a given build reads varies with the compiled adapters —
+/// `gcp_auth` itself only exists under `embed-gemini` or `store-postgres`. The
+/// list does not vary, for the same reason it already names both DSN variables
+/// in a default build: a harness clears one set of names whatever it was
+/// compiled with.
 pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_STORE",
     "LAMBO_EMBEDDER",
@@ -80,7 +111,27 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_GEMINI_MODEL",
     "LAMBO_GEMINI_CREDENTIALS",
     "LAMBO_PROMOTION_POLICY",
+    // Read past the file, while the backends are built — see "A resolve is not
+    // only the file overlay" above.
+    GCP_CREDENTIALS_ENV,
+    ADC_CREDENTIALS_ENV,
+    crate::store::POSTGRES_IAM_ENV,
 ];
+
+/// Lambo's own service-account credential variable, as
+/// `gcp_auth::credentials_path_from_env` reads it.
+///
+/// Spelled here rather than referenced because `gcp_auth` is compiled only
+/// under `embed-gemini` / `store-postgres` while this list is unconditional.
+/// The drift pin is behavioural instead of structural: the hermeticity test
+/// below observes `credentials_path_from_env()` itself under those features, so
+/// a rename there fails the test rather than silently orphaning a name.
+const GCP_CREDENTIALS_ENV: &str = "GCP_LAMBO_CREDENTIALS";
+
+/// The conventional Google ADC variable `credentials_path_from_env` falls back
+/// to. Kept for the same reason `DATABASE_URL` is: a name shared with unrelated
+/// tooling is an argument for clearing it in a hermetic harness, not against.
+const ADC_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
 
 /// Fully resolved Level B backends ready for `Memory` / CLI.
 ///
@@ -379,7 +430,16 @@ mod tests {
         /// variables are kind-aware since E2E-F2, so each needs its own
         /// `store.kind`.
         file: &'static str,
-        resolved: fn(&std::path::Path) -> String,
+        /// How to watch this variable's effect, or `None` when this feature row
+        /// cannot watch it at all (R4-1).
+        ///
+        /// `None` is a real gap, not a shrug, so it is spelled once and
+        /// explained at its single use: `LAMBO_POSTGRES_IAM` is read by
+        /// `PgStore::new`, which is not compiled without `store-postgres`. The
+        /// name stays in [`RESOLVE_ENV_VARS`] regardless — clearing it is
+        /// unconditional even where reading it is not — and the
+        /// `store-postgres` CI row does observe it.
+        resolved: Option<fn(&std::path::Path) -> String>,
     }
 
     fn load(path: &std::path::Path) -> LamboFile {
@@ -397,13 +457,13 @@ mod tests {
                 var: "LAMBO_STORE",
                 value: "sqlite",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).store.kind),
+                resolved: Some(|p| format!("{:?}", load(p).store.kind)),
             },
             Override {
                 var: "LAMBO_EMBEDDER",
                 value: "bge_m3",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.kind),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.kind)),
             },
             Override {
                 // The only entry whose effect precedes the file: it *chooses*
@@ -412,19 +472,19 @@ mod tests {
                 var: "LAMBO_CONFIG",
                 value: "/nonexistent/sentinel-lambo.toml",
                 file: MEMORY,
-                resolved: |_| format!("{:?}", LamboFile::discover_path(None)),
+                resolved: Some(|_| format!("{:?}", LamboFile::discover_path(None))),
             },
             Override {
                 var: crate::store::COCKROACH_DSN_ENV,
                 value: "postgresql://crdb-host:26257/defaultdb",
                 file: COCKROACH,
-                resolved: |p| format!("{:?}", load(p).store.dsn),
+                resolved: Some(|p| format!("{:?}", load(p).store.dsn)),
             },
             Override {
                 var: crate::store::POSTGRES_DSN_ENV,
                 value: "postgresql://pg-host:5432/lambo",
                 file: POSTGRES,
-                resolved: |p| format!("{:?}", load(p).store.dsn),
+                resolved: Some(|p| format!("{:?}", load(p).store.dsn)),
             },
             Override {
                 // Not a `LAMBO_*` name, and read as the fallback for both
@@ -433,31 +493,31 @@ mod tests {
                 var: crate::store::FALLBACK_DSN_ENV,
                 value: "postgresql://fallback-host:5432/lambo",
                 file: POSTGRES,
-                resolved: |p| format!("{:?}", load(p).store.dsn),
+                resolved: Some(|p| format!("{:?}", load(p).store.dsn)),
             },
             Override {
                 var: "LAMBO_SQLITE_PATH",
                 value: "/tmp/lambo-resolve-env-vars-sentinel.db",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).store.path),
+                resolved: Some(|p| format!("{:?}", load(p).store.path)),
             },
             Override {
                 var: "LAMBO_EMBED_DIM",
                 value: "768",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.dim),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.dim)),
             },
             Override {
                 var: "LAMBO_LLAMA_EMBED_URL",
                 value: "http://127.0.0.1:9999",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.llama_url),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.llama_url)),
             },
             Override {
                 var: "LAMBO_LLAMA_MODEL",
                 value: "sentinel-model",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.llama_model),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.llama_model)),
             },
             // The five below are read unconditionally by
             // `EmbedderConfig::overlay_env`, whatever `embedder.kind` says, so
@@ -467,39 +527,89 @@ mod tests {
                 var: "LAMBO_EMBED_DEVICE",
                 value: "cpu",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.device),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.device)),
             },
             Override {
                 var: "LAMBO_GEMINI_PROJECT",
                 value: "sentinel-project",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.gemini_project),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.gemini_project)),
             },
             Override {
                 var: "LAMBO_GEMINI_LOCATION",
                 value: "us-central1",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.gemini_location),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.gemini_location)),
             },
             Override {
                 var: "LAMBO_GEMINI_MODEL",
                 value: "sentinel-gemini-model",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.gemini_model),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.gemini_model)),
             },
             Override {
                 var: "LAMBO_GEMINI_CREDENTIALS",
                 value: "/nonexistent/sentinel-sa.json",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).embedder.gemini_credentials),
+                resolved: Some(|p| format!("{:?}", load(p).embedder.gemini_credentials)),
             },
             Override {
                 var: "LAMBO_PROMOTION_POLICY",
                 value: "Solo",
                 file: MEMORY,
-                resolved: |p| format!("{:?}", load(p).promotion_policy),
+                resolved: Some(|p| format!("{:?}", load(p).promotion_policy)),
+            },
+            // R4-1: the three below are read *past* the file, while
+            // `resolve_backends` builds the backends, so none of them lands on a
+            // `LamboFile` field and `load(p)` cannot see them. They are observed
+            // at their real read sites instead.
+            Override {
+                var: GCP_CREDENTIALS_ENV,
+                value: "/nonexistent/sentinel-gcp-sa.json",
+                file: MEMORY,
+                resolved: credentials_observation(),
+            },
+            Override {
+                // Observed through the same function, which is the point: it is
+                // the fallback leg of one chain, so setting it with
+                // `GCP_LAMBO_CREDENTIALS` cleared must still move the answer.
+                var: ADC_CREDENTIALS_ENV,
+                value: "/nonexistent/sentinel-adc.json",
+                file: MEMORY,
+                resolved: credentials_observation(),
+            },
+            Override {
+                var: crate::store::POSTGRES_IAM_ENV,
+                value: "1",
+                file: POSTGRES,
+                resolved: iam_observation(),
             },
         ]
+    }
+
+    /// `gcp_auth::credentials_path_from_env` — the function
+    /// `build_gemini_embedder` and `PgStore::new` both call — or `None` where
+    /// the module is not compiled.
+    #[cfg(any(feature = "embed-gemini", feature = "store-postgres"))]
+    fn credentials_observation() -> Option<fn(&std::path::Path) -> String> {
+        Some(|_| format!("{:?}", crate::gcp_auth::credentials_path_from_env()))
+    }
+
+    #[cfg(not(any(feature = "embed-gemini", feature = "store-postgres")))]
+    fn credentials_observation() -> Option<fn(&std::path::Path) -> String> {
+        None
+    }
+
+    /// `store::pg::iam_auth_requested` — what `PgStore::new` reads at
+    /// construction — or `None` without the adapter that reads it.
+    #[cfg(feature = "store-postgres")]
+    fn iam_observation() -> Option<fn(&std::path::Path) -> String> {
+        Some(|_| format!("{:?}", crate::store::pg::iam_auth_requested()))
+    }
+
+    #[cfg(not(feature = "store-postgres"))]
+    fn iam_observation() -> Option<fn(&std::path::Path) -> String> {
+        None
     }
 
     /// The table above and [`RESOLVE_ENV_VARS`] must name the same set.
@@ -572,16 +682,24 @@ mod tests {
         let path = dir.join("lambo.toml");
 
         for o in &table {
+            // R4-1: a name whose read site is not compiled in this feature row
+            // still belongs to the list — clearing it is unconditional — but
+            // there is nothing here that could watch it move, and a fabricated
+            // observation (re-reading the variable) would pin nothing at all.
+            // The `store-postgres` and `embed-gemini` CI rows cover these.
+            let Some(observe) = o.resolved else {
+                continue;
+            };
             std::fs::write(&path, o.file).expect("config");
             // Step 1 — a clean slate established WITHOUT consulting the list.
             for entry in &table {
                 std::env::remove_var(entry.var);
             }
-            let baseline = (o.resolved)(&path);
+            let baseline = observe(&path);
 
             // Step 2 — the resolve must actually read this variable.
             std::env::set_var(o.var, o.value);
-            let overridden = (o.resolved)(&path);
+            let overridden = observe(&path);
             assert_ne!(
                 baseline, overridden,
                 "{} is listed as an override the resolve reads, but setting it to \
@@ -596,7 +714,7 @@ mod tests {
             }
             assert_eq!(
                 baseline,
-                (o.resolved)(&path),
+                observe(&path),
                 "clearing RESOLVE_ENV_VARS left {} in force: a variable missing \
                  from the list resolves the ambient shell instead of the \
                  --config file the harness wrote",

@@ -667,6 +667,22 @@ pub const POSTGRES_DSN_ENV: &str = "LAMBO_POSTGRES_DSN";
 /// deployments hand a DSN to a process without putting it in the file.
 pub const FALLBACK_DSN_ENV: &str = "DATABASE_URL";
 
+/// Opt-in to Cloud SQL IAM database authentication (`LAMBO_POSTGRES_IAM`).
+///
+/// Declared unconditionally, like the DSN names above, because
+/// [`crate::RESOLVE_ENV_VARS`] is one list for every feature row: which
+/// variables a build *reads* varies with the compiled adapters, but what a
+/// hermetic harness must *clear* does not. Must equal
+/// `store::pg::LAMBO_POSTGRES_IAM_ENV`, which is what `PgStore::new` actually
+/// reads; `store::pg`'s test module asserts it under `store-postgres`.
+///
+/// It selects a *login mode*, not a database — which is why leaving it out of
+/// the clean-slate list was not obviously wrong and is: a harness that cleared
+/// the list still handed an ambient `LAMBO_POSTGRES_IAM=1` to the store it
+/// built, so the resolve authenticated as the ambient service account instead
+/// of with the password in the DSN the harness wrote.
+pub const POSTGRES_IAM_ENV: &str = "LAMBO_POSTGRES_IAM";
+
 /// Durable store selector (TOML `store.kind` / `LAMBO_STORE`).
 ///
 /// Deserialize accepts the same aliases as [`FromStr`] (trimmed, case-insensitive):

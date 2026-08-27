@@ -710,16 +710,28 @@
   // differently this line is what makes that visible rather than silently
   // showing the reader's numbers.
   //
-  // T3-P3-6: the non-Solo branch is not dead code, and it is no longer a
-  // transient-failure message either. Any policy this file has no copy for
-  // lands here — a server running a promotion policy added after this file was
-  // written ships `gate_progress` with a `policy` string this page does not
-  // know and no gate keys, and a pre-C2 server ships no `policy` at all.
-  // "Not available right now" was a lie in both cases: nothing is missing and
+  // T3-P3-6: the named-policy branch is not dead code. A server running a
+  // promotion policy added after this file was written ships `gate_progress`
+  // with a `policy` string this page does not know and no gate keys, and lands
+  // there. "Not available right now" was a lie for it: nothing is missing and
   // nothing is being retried, the four checks simply do not apply. A genuinely
   // failed read is a different payload entirely (`gate_progress` absent with
   // `gate_progress_omitted: "unavailable"`) and is handled at the top of
   // renderGates, which is what leaves this branch free to say the honest thing.
+  //
+  // R4-2: the LAST line is different, and the difference was papered over. No
+  // server this repo has shipped can reach it. Post-C2 servers put `policy` on
+  // the block and `promotion_policy` on the response, so the argument is never
+  // empty; pre-C2 servers carry no policy on either — but they also serialize
+  // all four gate keys unconditionally, so `rendered` is 4 and this function is
+  // not called at all. Adding `|| d.promotion_policy` did not change that; it
+  // added a second carrier that is present exactly when the first one is.
+  // It stays anyway, as what it actually is: the default for a payload with a
+  // gate block, no gates in it, and no policy on either carrier — a truncated
+  // or hand-rolled response, not a Lambo release. The alternative is rendering
+  // "runs the undefined policy", and a defensive default in a browser is worth
+  // one line. What is NOT worth keeping is a comment claiming a server produces
+  // it.
   function gateAbsenceCopy(policy) {
     if (policy === "Solo") {
       return "Promotion here runs the Solo policy, which scores how often this keeps " +

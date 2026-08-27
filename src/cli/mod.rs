@@ -883,7 +883,26 @@ mod sqlite_tests {
     }
 
     fn resolve_clean(cfg: &std::path::Path) -> ResolvedBackends {
-        let _g = crate::test_util::env_lock();
+        let g = crate::test_util::env_lock();
+        resolve_clean_locked(cfg, &g)
+    }
+
+    /// The body of [`resolve_clean`], for a caller that already holds the env
+    /// lock.
+    ///
+    /// `env_lock` is a plain non-reentrant `Mutex`, so a test that has to set a
+    /// variable *and* resolve cannot call `resolve_clean` — it would deadlock —
+    /// and the alternative it reaches for instead is to set the variable, drop
+    /// the guard, and resolve unlocked. That leaves the value visible to every
+    /// other test in this binary for the length of the call, which is how a
+    /// suite-wide flake gets built out of two individually correct tests. Taking
+    /// the guard by reference makes "I already hold it" expressible, so the
+    /// whole set → resolve → restore sequence stays inside one critical
+    /// section.
+    fn resolve_clean_locked(
+        cfg: &std::path::Path,
+        _held: &std::sync::MutexGuard<'static, ()>,
+    ) -> ResolvedBackends {
         for k in ENV_KEYS {
             std::env::remove_var(k);
         }
@@ -906,26 +925,23 @@ mod sqlite_tests {
     /// selector genuinely reaches `ResolvedBackends.config` on this path, so
     /// the first assertion is about the environment being cleared and not about
     /// the key being inert here.
+    ///
+    /// **R4-3.** The whole body runs under one `env_lock` guard, and the
+    /// scratch file it needs is written *before* the guard is taken. The first
+    /// version of this test could not hold the guard across `resolve_clean`
+    /// (which takes it), so it set `LAMBO_PROMOTION_POLICY=Solo`, dropped the
+    /// guard, and did its two resolves and a file write with that value live in
+    /// the process environment — where three of this change's own new tests
+    /// (`promotion_policy_env_beats_file_and_unknown_value_fails_closed`,
+    /// `promotion_policy_empty_env_is_unset_and_leaves_the_file_value`,
+    /// `resolve_env_vars_clears_every_override_it_names`) assert on that exact
+    /// variable while holding the lock they had every right to trust. A test
+    /// that pins hermeticity must not itself be the leak.
     #[tokio::test]
     async fn resolve_clean_ignores_an_ambient_promotion_policy() {
         let (dir, cfg) = scratch();
-        let old = {
-            let _g = crate::test_util::env_lock();
-            let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
-            std::env::set_var("LAMBO_PROMOTION_POLICY", "Solo");
-            old
-        };
-
-        assert_eq!(
-            resolve_clean(&cfg).config.promotion_policy,
-            crate::canon::PromotionPolicy::Swarm,
-            "a stray LAMBO_PROMOTION_POLICY in the ambient shell must not reach \
-             a resolve that claims to be clean"
-        );
-
-        // The same file, with the key set: proof that this path carries a
-        // file-set policy through, so the assertion above is about the
-        // environment and not about the selector being inert here.
+        // Written before the guard: file I/O under the env lock would hold it
+        // across a syscall for no reason, and nothing here needs it.
         let with_policy = dir.join("solo.toml");
         std::fs::write(
             &with_policy,
@@ -935,19 +951,34 @@ mod sqlite_tests {
             ),
         )
         .unwrap();
+
+        let g = crate::test_util::env_lock();
+        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
+        std::env::set_var("LAMBO_PROMOTION_POLICY", "Solo");
+
         assert_eq!(
-            resolve_clean(&with_policy).config.promotion_policy,
+            resolve_clean_locked(&cfg, &g).config.promotion_policy,
+            crate::canon::PromotionPolicy::Swarm,
+            "a stray LAMBO_PROMOTION_POLICY in the ambient shell must not reach \
+             a resolve that claims to be clean"
+        );
+
+        // The same file, with the key set: proof that this path carries a
+        // file-set policy through, so the assertion above is about the
+        // environment and not about the selector being inert here.
+        assert_eq!(
+            resolve_clean_locked(&with_policy, &g)
+                .config
+                .promotion_policy,
             crate::canon::PromotionPolicy::Solo,
             "the file's own selector must still reach the resolved Config"
         );
 
-        {
-            let _g = crate::test_util::env_lock();
-            match old {
-                Some(v) => std::env::set_var("LAMBO_PROMOTION_POLICY", v),
-                None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
-            }
+        match old {
+            Some(v) => std::env::set_var("LAMBO_PROMOTION_POLICY", v),
+            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
         }
+        drop(g);
         std::fs::remove_dir_all(dir).ok();
     }
 

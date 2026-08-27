@@ -105,8 +105,11 @@ const MAX_POOL_CONNECTIONS: u32 = 4;
 pub(crate) const LAMBO_POSTGRES_IAM_ENV: &str = "LAMBO_POSTGRES_IAM";
 
 /// Whether this process was told to log in with an IAM token instead of a password.
+///
+/// `pub(crate)` so `resolve`'s hermeticity table can observe the real read site
+/// rather than re-reading the variable itself, which would pin nothing.
 #[cfg(feature = "store-postgres")]
-fn iam_auth_requested() -> bool {
+pub(crate) fn iam_auth_requested() -> bool {
     std::env::var_os(LAMBO_POSTGRES_IAM_ENV).is_some_and(|v| !v.is_empty())
 }
 

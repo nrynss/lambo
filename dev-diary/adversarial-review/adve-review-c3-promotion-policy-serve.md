@@ -2,14 +2,15 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════════╗
-║  STATUS: IN PROGRESS — paused after round 3 remediation              ║
-║  Verdict: NOT YET CLEAN. Rounds 1-3 closed; round 4 was stopped      ║
-║    in its reading phase and produced NO findings. The change has      ║
-║    never been through a review round that returned empty.             ║
-║  Gates at pause: 1008 passed / 0 failed / 3 ignored (fixtures),       ║
-║    1114 (store-sqlite,fixtures), 661 (no-default,store-sqlite);       ║
-║    fmt clean; clippy 0 in all five CI feature rows.                   ║
-║  Findings: R1 13 (+1 self-found) · R2 11 · R3 6 (+4 nits, +3 self)    ║
+║  STATUS: IN PROGRESS — round 4 run and remediated                    ║
+║  Verdict: NOT YET CLEAN. Rounds 1-4 closed. R4 produced 3 findings   ║
+║    (2×P2, 1×P3), so the change still has not been through a round     ║
+║    that returned empty; round 5 is the next step.                     ║
+║  Both R4 open questions were answered: the macro is justified and     ║
+║    costs nothing measurable; the fallback string was NOT made         ║
+║    reachable, and is now labelled for what it is.                     ║
+║  Gates after R4: see "State after round 4".                           ║
+║  Findings: R1 13 (+1 self) · R2 11 · R3 6 (+4 nits, +3 self) · R4 3   ║
 ║  P0/P1 open: none. Last P1 closed in R2. No P0 after R0.              ║
 ║  Live services: none used, none needed.                               ║
 ║  Opened: 2026-08-27                                                    ║
@@ -173,38 +174,150 @@ page advertises `store.kind = "postgres"`.
 
 `src/canon/gate.rs` had no test module at all before this round.
 
-## Round 4 — stopped, no findings
+## Round 4 — 3 findings (2×P2, 1×P3)
 
-Stopped in its reading phase before producing any findings, so it contributes **nothing** to the
-verdict. It was briefed to attack two things specifically, and both remain open questions:
+Run from a clean start against the committed branch, weighted at the two questions the
+stopped round had been briefed on. Both are answered below; neither produced a finding, and
+both produced evidence rather than argument. The three findings came from elsewhere.
 
-1. **The `promotion_policy!` macro was not asked for.** The finding asked only that adding a
-   variant cannot compile-or-pass. A macro-generated public enum is a heavier instrument and may
-   cost rustdoc output, IDE navigation, and readability for every future reader. Its stated
-   justification — that any exhaustive-`match` scheme needs a second, independent count of
-   variants to bound arms against, which stable Rust cannot provide — is plausible but
-   unverified, and worth testing before this lands.
-2. **A fallback string was made "reachable" by adding a payload path.** Changing behaviour to
-   justify keeping a string is backwards. Needs checking that it did not invent a state no
-   server produces, or disturb the `unavailable`/`already_canonical` semantics R3 fixed one
-   finding earlier.
+### The two open questions, settled
 
----
+**1. The `promotion_policy!` macro was not asked for.** Justified, and it costs nothing that
+was feared. Two things were checked rather than argued:
 
-## State at pause
+* *Does it do the job?* Adding a third variant the only way the macro allows fails to compile
+  in four places (`E0004` ×3 in the lib, ×4 counting the lib-test target), and `ALL` grows with
+  it — so the variant is selectable from both surfaces the moment it compiles. The property
+  R3 asked for holds.
+* *Was the "stable Rust cannot count variants" claim real?* Yes. Every hand-written scheme
+  needs a second, independent statement of the variant count to bound match arms against;
+  `std::mem::variant_count` is nightly, and every substitute (an ordinal `match`, a `next()`
+  chain, a discriminant sentinel) can be satisfied by the arm the compiler forces without
+  `ALL` growing — which is exactly the mutation R3 landed. The alternatives are a derive
+  dependency (`strum`) or this. In-tree macro is the smaller instrument.
+* *The feared costs.* Measured against the built rustdoc rather than assumed: the generated
+  page carries `id="variant.Swarm"` / `id="variant.Solo"` anchors, both variants' doc prose,
+  and the `ALL` associated-constant — structurally identical to the hand-written
+  `MatchStrategy` page. The `[src]` link points at `policy.rs#157-185`, the
+  `promotion_policy! { … }` invocation, i.e. the variant list itself, so source navigation
+  lands where an author needs to be. The macro is not `#[macro_export]`ed, so it adds no page
+  of its own. No cost found.
+
+**2. A fallback string was made "reachable" by adding a payload path.** The suspicion was
+right, and it is finding **R4-2** below. The `unavailable` half of the concern was *not*
+borne out: that state is not invented. The base at `71334f0` already degraded a failed gate
+read to `gate_progress: None`; C3 only put a label on an absence that was already being
+shipped, and the `already_canonical` / `unavailable` split is a true partition of it.
+
+### Findings
+
+- **P2 — `RESOLVE_ENV_VARS` is still not exhaustive, and the new test cannot see it.**
+  T3-P2-1 completed the list against `LamboFile::load_resolved` and stopped there.
+  `resolve_backends` does not stop there: it calls `build_store` and `build_embedder`, which
+  read the environment again for things no `LamboFile` field carries. Three names were
+  missing — `GCP_LAMBO_CREDENTIALS` and `GOOGLE_APPLICATION_CREDENTIALS` (via
+  `gcp_auth::credentials_path_from_env`, called eagerly at `src/embed/mod.rs:457` in
+  `build_gemini_embedder` and again at `src/store/pg/mod.rs:1294` in `PgStore::new`), and
+  `LAMBO_POSTGRES_IAM` (same line, at construction). These are worse than the DSN gap R3
+  found: they choose an **identity**. A harness that clears the list, writes
+  `embedder.kind = "gemini"` with no `gemini_credentials`, and believes itself hermetic
+  authenticates as the developer's ambient service account and bills real Vertex calls to it.
+  The docstring says "every variable the resolve reads" and the CHANGELOG says "**every**",
+  in bold — the same overclaim R3 rated P2, one round after it was rated.
+  R3's new test could not catch it: it asserts `RESOLVE_ENV_VARS` and the table name the same
+  set, and both were written from one understanding of what a resolve reads. It catches a
+  shrinking list, never an omission.
+  `LAMBO_VECTOR_BEAM_SIZE` was checked and deliberately excluded — read in
+  `PgStore::connect_options` on first pool use, not during the resolve. That distinction is
+  now written down as the rule for the next addition.
+
+- **P2 — the new `resolve_clean_ignores_an_ambient_promotion_policy` mutates the environment
+  without holding the env lock.** `resolve_clean` takes `test_util::env_lock` itself, and it
+  is a plain non-reentrant `Mutex`, so the test could not hold the guard across the call. It
+  set `LAMBO_PROMOTION_POLICY=Solo`, dropped the guard, and then did two resolves, a file
+  read and a file write with that value live in the process environment. Three of this
+  change's own new tests assert on that exact variable while holding the lock they had every
+  right to trust, in the same lib-test binary and therefore concurrently:
+  `promotion_policy_env_beats_file_and_unknown_value_fails_closed` (sets `Swarm`, asserts
+  `Swarm`) fails outright on the interleaving; `resolve_env_vars_clears_every_override_it_names`
+  fails at step 3. A test that pins hermeticity had become the leak.
+
+- **P3 — the unreachable fallback string was not made reachable, and the comment says it
+  was.** R3 found `gateAbsenceCopy`'s policy-less line unreachable. The remediation added
+  `|| d.promotion_policy` and a comment naming two producers. Neither exists: a post-C2 server
+  always sets `policy` on the block *and* `promotion_policy` on the response, so the argument
+  is never empty; a pre-C2 server carries neither — but serializes all four gate keys
+  unconditionally, so `rendered` is 4 and `gateAbsenceCopy` is never called against it. The
+  added carrier is present exactly when the first one is. The in-file `APP_JS.contains(..)`
+  assertion is string-presence, so it passed either way.
+
+### Remediation
+
+- The three names are in `RESOLVE_ENV_VARS`, and each is pinned at its **real read site**
+  rather than by re-reading the variable: the two credential names observe
+  `gcp_auth::credentials_path_from_env()` under `embed-gemini` / `store-postgres`, and
+  `LAMBO_POSTGRES_IAM` observes `store::pg::iam_auth_requested()` under `store-postgres` —
+  both CI rows. A name whose read site is not compiled in a given row is `resolved: None`,
+  which is a stated gap rather than a fabricated observation. `LAMBO_POSTGRES_IAM` gets an
+  unconditional `store::POSTGRES_IAM_ENV`, asserted equal to the feature-gated const
+  `PgStore::new` reads, so it cannot drift the way the DSN names could not. Proved by
+  mutation: deleting one name from the const fails **both** halves — the set-equality test,
+  and step 3, whose message is the hazard sentence itself.
+- `resolve_clean` split into itself plus `resolve_clean_locked(cfg, &guard)`, so "I already
+  hold the lock" is expressible and the whole set → resolve → restore sequence stays in one
+  critical section. The scratch file is written before the guard is taken.
+- The app.js comment and the serve_web assertion now say what is true: the fallback is a
+  defensive default for a malformed or truncated payload, not a shape any Lambo release
+  produces. Behaviour unchanged — the R4 brief's own principle is that changing behaviour to
+  justify a string is backwards, and that applies to a second attempt as much as the first.
+
+### Checked and cleared, not findings
+
+- The `.config(config)` seam pin is load-bearing: deleting it from `serve_builder` fails
+  `serve_builder_forwards_the_resolved_promotion_policy` (both the policy assertion, on the
+  `Solo` iteration, and the `gc_interval` control).
+- Every documented transcript reproduces byte-for-byte against the built binary: the
+  top-level unknown-key refusal, the misplaced-key-under-`[store]` refusal, and the
+  `LAMBO_PROMOTION_POLICY=Bogus` demo failure.
+- The refusal-scope claim holds on the real binary: a bad `promotion_policy` stops
+  `provision`, `saints`, `inspect` and `stats`, while `gc_interval = 0` passes all four and
+  stops `recall`.
+- `lambo.example.toml` parses.
+- `scripts/docs/check-mirror-drift.sh` passes; the `docs/` and `site/` copies agree.
+- `GateProgress::met_count` still has no production caller — the page counts rendered rows in
+  JS. It is public library surface with tests, which is a defensible answer to R3's finding;
+  not re-raised.
+- `lambo stats` (the CLI verb) does not report the policy while `lambo_stats` (the MCP tool)
+  does. Correct: the CLI verb is a lease-free reader whose own resolution is not the writer's,
+  which is the same trap `serve-web` carries a warning about. Nothing claims otherwise.
+
+## State after round 4
+
+Every row below was run after R4's remediation, not carried over from the pause.
 
 | Gate | Result |
 |---|---|
-| `cargo test --all --features fixtures` | 1008 passed / 0 failed / 3 ignored |
+| `cargo test --all --features fixtures` | 1008 passed / 0 failed |
 | `cargo test --features store-sqlite,fixtures` | 1114 passed / 0 failed |
 | `cargo test --no-default-features --features store-sqlite` | 661 passed / 0 failed |
+| `cargo test --no-default-features --features store-postgres` | 643 passed / 0 failed |
+| `cargo test --features embed-gemini` | 978 passed / 0 failed |
+| `cargo test --no-default-features --features store-cockroach` | 638 passed / 0 failed |
 | `cargo fmt --check` | clean |
-| `cargo clippy` (all five CI feature rows) | 0 warnings |
-| `LAMBO_PROMOTION_POLICY=` / `=Solo` full suite | 1008 / 0 / 3 both |
+| `cargo clippy --all-targets` (7 rows) | 0 warnings |
+| `LAMBO_PROMOTION_POLICY=` / `=Solo` full suite | 1008 / 0 both |
 | `node --check web/app.js` | OK |
+| `scripts/docs/check-mirror-drift.sh` | passed |
 
-Diff growth across rounds: **433 → 965 → 1698 → 2324** insertions, **7 → 16 → 25 → 26** files.
-Tests added: **+28** on the default row.
+The `store-postgres` and `embed-gemini` rows matter more after R4 than before it: they are the
+two that actually execute R4-1's observations (`store::pg::iam_auth_requested` and
+`gcp_auth::credentials_path_from_env`). On every other row those table entries are
+`resolved: None` and the loop skips them, which is stated rather than hidden.
+
+Diff growth across rounds: **433 → 965 → 1698 → 2324 → 2544** insertions, **7 → 16 → 25 → 26
+→ 29** files (excluding this review record).
+Tests added: **+28** on the default row; R4 added one (`store-postgres` row) and re-shaped two
+rather than adding count.
 
 ## Acceptance, against the brief
 
@@ -223,10 +336,25 @@ Tests added: **+28** on the default row.
 
 ## Resuming
 
-The work is committed on `task/promotion-policy-serve`, not merged. Next step is a round-4
-review from a clean start, weighted at the two open questions above rather than re-covering
-rounds 1-3 — every finding from those was confirmed closed by mutation testing, except where
-this doc says otherwise.
+The work is on `task/promotion-policy-serve`, not merged. Next step is a **round 5** from a
+clean start. Round 4's two open questions are closed and should not be re-opened: both were
+settled with evidence (a compile-failure mutation and a built rustdoc page for the macro; a
+payload-shape trace for the fallback string), and both answers are recorded above.
+
+Round 5 should weight itself at:
+
+1. **Whether R4-1's remediation repeated R4-1's own mistake.** The finding was an
+   exhaustiveness claim wider than the pin behind it. The fix adds three names and two
+   feature-gated observations — so ask what a resolve reads that is *still* absent, from the
+   read sites rather than from the list, and check whether `resolved: None` rows have quietly
+   become the place omissions hide.
+2. **The `resolve_clean_locked` guard-passing pattern.** Taking `&MutexGuard` as a proof-of-
+   lock token is a convention this repo did not previously have. Check it is not now a second
+   way to do the same thing, and that no other test in the tree sets an environment variable
+   outside the lock — R4 found one and did not sweep for others.
+
+Everything in rounds 1-3 was confirmed closed by mutation testing except where this doc says
+otherwise; R4's three fixes were each proved by mutation or by direct verification above.
 
 Two carried-over items, neither belonging to this task:
 

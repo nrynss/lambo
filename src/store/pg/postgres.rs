@@ -654,6 +654,22 @@ mod tests {
         );
     }
 
+    /// R4-1: the IAM opt-in `PgStore::new` reads and the name
+    /// [`crate::RESOLVE_ENV_VARS`] clears must be one string.
+    ///
+    /// The list is declared unconditionally and this const is not, so they
+    /// cannot be the same item; this is what keeps them the same *value*. A
+    /// harness that cleared a stale spelling would build its store with the
+    /// ambient login mode still in force.
+    #[test]
+    fn iam_opt_in_env_is_the_one_the_clean_slate_list_clears() {
+        assert_eq!(
+            super::super::LAMBO_POSTGRES_IAM_ENV,
+            crate::store::POSTGRES_IAM_ENV,
+            "PgStore::new's IAM opt-in and RESOLVE_ENV_VARS' name must agree"
+        );
+    }
+
     #[test]
     fn build_store_constructs_a_working_adapter() {
         let s = build_store(cfg_with_dim(Some(1536))).expect("build_store postgres");
