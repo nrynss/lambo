@@ -343,6 +343,9 @@ fn derive_after_validation(
     // the Derives edge (via insert_concept's structural edge; see module docs).
     let mut seen_contents: HashSet<&str> = HashSet::with_capacity(concepts.len());
     let mut call_nodes: Vec<NodeId> = Vec::with_capacity(concepts.len());
+    // C4: the concepts THIS call wrote, by canonical key — see
+    // `resolve_concept`'s Unmatched arm for why step 6 needs it.
+    let mut call_by_key: HashMap<String, NodeId> = HashMap::with_capacity(concepts.len());
     for &(content, concept_type) in concepts {
         if !seen_contents.insert(content) {
             continue;
@@ -357,6 +360,7 @@ fn derive_after_validation(
             &session_id,
             &mut written_this_call,
             &mut outcome,
+            &mut call_by_key,
         )?;
         // Two different contents can canonicalize to the same node (key
         // collision); dedup by node id so the CoOccurrence step never writes a
@@ -431,6 +435,7 @@ fn derive_after_validation(
             &session_id,
             &mut written_this_call,
             &mut outcome,
+            &mut call_by_key,
         )?;
         let child_node = resolve_concept(
             graph,
@@ -442,6 +447,7 @@ fn derive_after_validation(
             &session_id,
             &mut written_this_call,
             &mut outcome,
+            &mut call_by_key,
         )?;
         if parent_node == child_node {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -500,9 +506,27 @@ fn resolve_concept(
     session_id: &SessionId,
     written_this_call: &mut HashSet<NodeId>,
     outcome: &mut DeriveOutcome,
+    call_by_key: &mut HashMap<String, NodeId>,
 ) -> Result<NodeId, LamboError> {
     match canonicalize(content, graph)? {
         CanonicalizeResult::Unmatched { key } => {
+            // C4: `canonicalize` never matches an `Observation` (GRAPH-1 —
+            // agent-declared content must not attach to a *demoted*
+            // context-overflow record). That rule is about Observations the
+            // graph already held; it was never meant to hide one this same
+            // derive just declared. Without this lookup, a call carrying
+            // `concepts: [(X, Observation)]` and `parent_of: [(doc, X)]`
+            // creates X twice — once as the declared Observation, once as a
+            // bare `Entity` — splitting X's supporting interactions in two.
+            // Scoped to this call's own writes, so a pre-existing demoted
+            // Observation is still never matched and GRAPH-1 stands.
+            if let Some(&node) = call_by_key.get(&key) {
+                if written_this_call.contains(&node) {
+                    outcome.matched.push(node);
+                    return Ok(node);
+                }
+            }
+            let recorded_key = key.clone();
             let concept = Concept {
                 id: NodeId::new(),
                 session_id: session_id.clone(),
@@ -527,6 +551,7 @@ fn resolve_concept(
             graph.insert_concept(concept, interaction)?;
             written_this_call.insert(id);
             outcome.created.push(id);
+            call_by_key.entry(recorded_key).or_insert(id);
             Ok(id)
         }
         CanonicalizeResult::Matched { node, .. } => {
@@ -975,6 +1000,65 @@ mod tests {
         assert_eq!(derives_of(&g, pre_id).len(), 2);
         assert_eq!(out.reinforced, 0);
         g.assert_invariants().unwrap();
+    }
+
+    /// C4, `MatchStrategy::Canonical` twin of hybrid's
+    /// `parent_of_child_resolves_to_a_concept_declared_in_the_same_call`.
+    ///
+    /// The split is not strategy-specific: `canonicalize` is shared, so both
+    /// paths created the declared `Observation` and then a second bare
+    /// `Entity` for the same content. `reject_repeated_observation` already
+    /// refuses the *cross-call* version of this identity loss; this is the
+    /// same loss inside ONE call, arriving through `parent_of` rather than
+    /// through `concepts`, where that guard does not reach.
+    ///
+    /// Asserting the node COUNT is the point — a Hierarchical-edge assertion
+    /// passes on the duplicate.
+    #[test]
+    fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
+        for concept_type in [ConceptType::Observation, ConceptType::Entity] {
+            let (mut g, iid) = graph_with_interaction(1, 0);
+            let pairs = [("document:src.md", "shared content")];
+            derive(
+                &mut g,
+                iid,
+                &AgentId::from("agent-a"),
+                &[("shared content", concept_type)],
+                &ParentOf::from_pairs(&pairs),
+                10,
+            )
+            .unwrap();
+
+            let mine: Vec<_> = g
+                .concepts()
+                .filter(|c| c.content == "shared content")
+                .collect();
+            assert_eq!(
+                mine.len(),
+                1,
+                "{concept_type:?}: one content must be one node, got {:?}",
+                mine.iter().map(|c| c.concept_type).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                mine[0].concept_type, concept_type,
+                "the surviving node keeps its declared type"
+            );
+            let id = mine[0].id;
+            let parent = g
+                .concepts()
+                .find(|c| c.content == "document:src.md")
+                .expect("parent end created")
+                .id;
+            assert!(
+                g.edge_between(parent, id, EdgeType::Hierarchical).is_some(),
+                "{concept_type:?}: the Hierarchical edge lands on that same node"
+            );
+            assert!(
+                g.edge_between(iid, id, EdgeType::Derives).is_some(),
+                "{concept_type:?}: and it keeps its Derives edge"
+            );
+            g.assert_invariants().unwrap();
+        }
     }
 
     #[test]

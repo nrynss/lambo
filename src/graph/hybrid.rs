@@ -156,7 +156,7 @@
 //! leg permanently inert, a strictly larger product change than L82-4 asks for.
 //! The threshold, not the provenance of the vector, is the precision instrument.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -789,6 +789,25 @@ async fn derive_planned(
         let mut outcome = DeriveOutcome::default();
         let mut written: HashSet<NodeId> = HashSet::new();
         let mut call_nodes: Vec<NodeId> = Vec::with_capacity(items.len());
+        // C4: the concepts THIS call wrote, by canonical key, so step 6's
+        // `parent_of` resolution can find them.
+        //
+        // `canonicalize` deliberately never matches an `Observation`
+        // (GRAPH-1: agent-declared content must not attach to a *demoted*
+        // context-overflow record, spec section 7 demote semantics). That rule is
+        // about Observations the graph already held; it was never meant to
+        // hide a concept the same derive just declared. Without this index a
+        // call carrying `concepts: [(X, Observation)]` and
+        // `parent_of: [(doc, X)]` resolves the pair's child to Unmatched and
+        // creates X a SECOND time as a bare `Entity` -- unembedded, untyped,
+        // and splitting X's supporting interactions across two nodes. That is
+        // exactly what held Mooshik's bootstrap graph at ~50% embedding
+        // coverage across 170 contents.
+        //
+        // Keyed by canonical key rather than raw content so two spellings that
+        // normalize together ("UserSchema" / "user schema") resolve to one
+        // node, matching what the non-Observation path already does.
+        let mut call_by_key: HashMap<String, NodeId> = HashMap::with_capacity(items.len());
 
         for ((content, concept_type, _key, _matched), res) in items.iter().zip(resolutions.iter()) {
             // MAJOR-1 (P7 remediation): re-canonicalize `content` against the graph
@@ -809,6 +828,7 @@ async fn derive_planned(
                     if !call_nodes.contains(&node) {
                         call_nodes.push(node);
                     }
+                    call_by_key.entry(_key.clone()).or_insert(node);
                     continue;
                 }
             }
@@ -941,6 +961,9 @@ async fn derive_planned(
             if !call_nodes.contains(&this_node) {
                 call_nodes.push(this_node);
             }
+            // First writer of a key wins, mirroring `call_nodes`' dedup: a
+            // later item that collapsed onto it must not repoint the index.
+            call_by_key.entry(_key.clone()).or_insert(this_node);
         }
 
         // Step 5 — pairwise CoOccurrence (mirror derive: earlier-in-call -> later,
@@ -994,6 +1017,7 @@ async fn derive_planned(
                 &session_id,
                 &mut written,
                 &mut outcome,
+                &call_by_key,
             )?;
             let child_node = self::resolve_concept(
                 &mut g,
@@ -1005,6 +1029,7 @@ async fn derive_planned(
                 &session_id,
                 &mut written,
                 &mut outcome,
+                &call_by_key,
             )?;
             if parent_node == child_node {
                 return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -1077,9 +1102,23 @@ fn resolve_concept(
     session_id: &SessionId,
     written: &mut HashSet<NodeId>,
     outcome: &mut DeriveOutcome,
+    call_by_key: &HashMap<String, NodeId>,
 ) -> Result<NodeId, LamboError> {
     match canonicalize(content, graph)? {
         CanonicalizeResult::Unmatched { key } => {
+            // C4: `canonicalize` returns Unmatched for a key whose only holder
+            // is an `Observation` (GRAPH-1). When that holder is a concept
+            // THIS call just declared, creating a second node for the same
+            // content is a duplicate, not a fresh end -- so consult the
+            // call's own index before creating. Scoped to `call_by_key`, so a
+            // pre-existing *demoted* Observation from an earlier interaction
+            // is still never matched and GRAPH-1 stands.
+            if let Some(&node) = call_by_key.get(&key) {
+                if written.contains(&node) {
+                    outcome.matched.push(node);
+                    return Ok(node);
+                }
+            }
             let concept = new_concept(
                 session_id,
                 content,
@@ -1483,6 +1522,134 @@ mod tests {
             "losing vector space writes nothing"
         );
         g.assert_invariants().unwrap();
+    }
+
+    /// C4: one derive naming the same content in BOTH `concepts` and a
+    /// `parent_of` pair must produce ONE node, under the product's strategy.
+    ///
+    /// The regression this pins is an identity split, not a missing edge:
+    /// before the fix the call produced two nodes for one content — the
+    /// declared `Observation` (embedded, typed, carrying CoOccurrence /
+    /// Derives / Semantic) and a bare `Entity` (unembedded, carrying only
+    /// Derives / Hierarchical) — because `canonicalize` never matches an
+    /// `Observation` (GRAPH-1). On Mooshik's bootstrap graph that was 170
+    /// contents existing as such pairs, holding embedding coverage near 50%
+    /// and splitting each fact's supporting interactions across two nodes.
+    ///
+    /// **The count is the assertion.** A test that checked only "a
+    /// Hierarchical edge exists" passes on the duplicate — the split satisfies
+    /// the edge — which is precisely why this went unnoticed.
+    ///
+    /// `Observation` is the type that reproduces it, so it is the type under
+    /// test; `Entity` is carried alongside as the control that was already
+    /// correct, so a regression that breaks matching generally is
+    /// distinguishable from one that breaks only the Observation path.
+    #[tokio::test]
+    async fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
+        for concept_type in [ConceptType::Observation, ConceptType::Entity] {
+            let (graph, interaction) =
+                graph_with_interaction("hybrid-same-call", 1, 0, "ingest context");
+            let store = SpyStore::with_vector(Vec::new());
+            let embedder = FixtureEmbedder::new();
+            let pairs = [("document:src.md", "shared content")];
+            derive(
+                graph.clone(),
+                &store,
+                &embedder,
+                &contract("fixture", 1024),
+                interaction,
+                &agent(),
+                &[("shared content", concept_type)],
+                &ParentOf::from_pairs(&pairs),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
+            )
+            .await
+            .unwrap();
+
+            let g = graph.read();
+            let mine: Vec<_> = g
+                .concepts()
+                .filter(|c| c.content == "shared content")
+                .collect();
+            assert_eq!(
+                mine.len(),
+                1,
+                "{concept_type:?}: one content must be one node, got {:?}",
+                mine.iter()
+                    .map(|c| (c.concept_type, c.embedding.is_some()))
+                    .collect::<Vec<_>>()
+            );
+            let node = mine[0];
+            assert_eq!(
+                node.concept_type, concept_type,
+                "the surviving node must keep the declared type, not become the \
+                 parent_of default"
+            );
+            assert!(
+                node.embedding.is_some(),
+                "the surviving node must keep its embedding — losing it is what held \
+                 coverage near 50%"
+            );
+
+            let id = node.id;
+            let parent = g
+                .concepts()
+                .find(|c| c.content == "document:src.md")
+                .expect("the parent end is still created")
+                .id;
+            assert!(
+                g.edge_between(interaction, id, EdgeType::Derives).is_some(),
+                "{concept_type:?}: the concept keeps its Derives edge"
+            );
+            assert!(
+                g.edge_between(parent, id, EdgeType::Hierarchical).is_some(),
+                "{concept_type:?}: the pair's Hierarchical edge lands on that same node \
+                 — M9 samples targets of Hierarchical edges, so it is load-bearing"
+            );
+        }
+    }
+
+    /// C4 control: the fix is scoped to THIS call's own writes, so a
+    /// `parent_of` end the graph has never seen is still created fresh as
+    /// `PARENT_OF_CONCEPT_TYPE` (`Entity`). Without this, a fix that made
+    /// `canonicalize` match Observations generally would pass the test above
+    /// while quietly reattaching agent content to demoted context-overflow
+    /// records (GRAPH-1).
+    #[tokio::test]
+    async fn a_brand_new_parent_of_end_is_still_created_as_entity() {
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-fresh-end", 1, 0, "ingest context");
+        let store = SpyStore::with_vector(Vec::new());
+        let embedder = FixtureEmbedder::new();
+        let pairs = [("document:src.md", "never mentioned elsewhere")];
+        derive(
+            graph.clone(),
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[("an unrelated concept", ConceptType::Observation)],
+            &ParentOf::from_pairs(&pairs),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let g = graph.read();
+        let fresh: Vec<_> = g
+            .concepts()
+            .filter(|c| c.content == "never mentioned elsewhere")
+            .collect();
+        assert_eq!(fresh.len(), 1, "the fresh end is created exactly once");
+        assert_eq!(
+            fresh[0].concept_type, PARENT_OF_CONCEPT_TYPE,
+            "an end this call did not declare is still an Entity"
+        );
     }
 
     #[tokio::test]
