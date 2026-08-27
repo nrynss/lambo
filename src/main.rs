@@ -984,17 +984,12 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        for k in [
-            "LAMBO_STORE",
-            "LAMBO_EMBEDDER",
-            "LAMBO_CONFIG",
-            "LAMBO_COCKROACH_DSN",
-            "DATABASE_URL",
-            "LAMBO_SQLITE_PATH",
-            "LAMBO_EMBED_DIM",
-            "LAMBO_LLAMA_EMBED_URL",
-            "LAMBO_LLAMA_MODEL",
-        ] {
+        // Every variable the resolve reads, from the one list the library
+        // owns. `LAMBO_PROMOTION_POLICY` is on it not because a stray value
+        // would be *invalid* — an empty one is unset and a bogus one fails
+        // closed by design — but because a `LAMBO_PROMOTION_POLICY=Solo` left
+        // in the ambient shell would silently change what this test resolves.
+        for k in lambo::RESOLVE_ENV_VARS {
             std::env::remove_var(k);
         }
 

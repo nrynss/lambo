@@ -7,9 +7,13 @@ Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--con
 
 ## What lambo.toml contains
 
-The file has exactly two sections, `[store]` and `[embedder]`. It chooses which compiled backends this process runs, and nothing else.
+The file has `[store]`, `[embedder]` and `[daemon]` sections plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
 
 ```toml
+# Top-level keys must come BEFORE the first [table] header, or TOML scopes them
+# into that table and the unknown-key check refuses the file.
+promotion_policy = "Solo"   # optional; the default remains Swarm
+
 [store]
 kind = "sqlite"
 path = "./lambo.db"
@@ -24,7 +28,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. See [Library API](/api).
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Three settings are exceptions, and none of them is a threshold: `promotion_policy` below, and the two cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/api) for what each policy actually measures.
 
 ```
 $ lambo --config lambo.toml provision
@@ -32,8 +36,41 @@ lambo provision: failed to resolve store: config: lambo.toml: TOML parse error a
   |
 1 | default_top_k = 5
   | ^^^^^^^^^^^^^
-unknown field `default_top_k`, expected `store` or `embedder`
+unknown field `default_top_k`, expected one of `store`, `embedder`, `daemon`, `promotion_policy`
 ```
+
+## Promotion policy
+
+`promotion_policy` is an optional selector for how canonization promotes. Omit it to preserve the existing `Swarm` behavior. Set it to `Solo` for a single writer whose recurring evidence should be eligible for promotion.
+
+<Warning>
+It is a **top-level** key, so it has to appear before the first `[store]` or `[embedder]` header. Put it after one and TOML scopes it into *that* table, so the refusal names that table's keys and never mentions the placement. With the layout above, moving it below `[store]` gives:
+
+```
+unknown field `promotion_policy`, expected one of `kind`, `dsn`, `path`, `vector_dim`
+```
+
+A store error, about a key that was spelled correctly. Below `[embedder]` you get the same shape with the embedder's much longer key list instead. This is the mistake worth knowing about, because nothing in either message points at the line's position.
+</Warning>
+
+Accepted values are `Swarm` and `Solo`, matched after trimming and without regard to case, so `solo` and `Solo` are the same thing — the same leniency `store.kind` and `embedder.kind` already have. Anything else fails at startup and names both what you wrote and the valid set. There is no silent fallback to the default.
+
+There is no `lambo serve --promotion-policy` flag. Set it in the file or in `LAMBO_PROMOTION_POLICY`; no `serve` flag in Lambo duplicates a `lambo.toml` key, and every backend and policy selector is chosen the same way.
+
+`Solo` does not lower the Canonical bar — it uses a different one. Instead of the store-evidence stages, promotion is decided by a recurrence score over the concept's own supporting evidence, so `gc_survived`, blast radius, distinct interactions and coverage stop participating. Two practical consequences. Under `Solo` you do not need to lower [`[daemon] gc_interval`](#daemon-cadence): lowering it changes nothing about promotion. And on `lambo serve-web`'s inspect panel the four-gate breakdown is replaced by a line naming the policy, because those four numbers no longer explain the status — the re-promotion cooldown is still shown there, because it still applies under both policies and on the solo path it is the only store-side reason a concept that has cleared its band still waits. See [Library API](/api) for the score itself.
+
+<Warning>
+`lambo serve-web` resolves its **own** `lambo.toml` and its own environment, and nothing carries the writing process's policy to it. So what the panel describes is the *reader's* resolution: start `serve-web` where it reads the same config as the `lambo serve` writing that session, or the page will explain a policy that is not the one promoting. A `lambo serve` under a systemd unit with `Environment=LAMBO_PROMOTION_POLICY=Solo`, opened with a `serve-web` run by hand in a shell that does not export it, is the shape of the mistake. `/api/inspect` names the resolution it used in `promotion_policy` — on the response and again on the gate block — so the mismatch is visible rather than silent.
+</Warning>
+
+`lambo demo` is out of scope, but it is not unaffected. It runs a scripted *swarm* demonstration on its own compiled-in config, so it ignores the **value**: `promotion_policy = "Solo"` changes nothing about what the demo does. It still validates it, because the file is parsed before any command decides what to keep from it — which is also why an unparseable policy stops even the four commands that never resolve an embedder (`provision`, `saints`, `inspect`, `stats`), unlike a degenerate `[daemon]` cadence.
+
+```
+$ LAMBO_PROMOTION_POLICY=Bogus lambo --config lambo.toml demo
+lambo demo: failed to build backends: config: LAMBO_PROMOTION_POLICY: unknown promotion policy "Bogus" (expected Swarm | Solo)
+```
+
+[`[daemon]`](#daemon-cadence) is the same bargain with a narrower scope: the demo discards the cadence you set and still refuses a degenerate one, but only the commands that resolve an embedder refuse it at all.
 
 ## Store
 
@@ -70,6 +107,37 @@ A store that persists vectors declares its own width, and Lambo refuses to start
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
 </Warning>
 
+## Daemon cadence
+
+`[daemon]` is optional and sets cadence only — how often the background work runs, never what a concept must clear to be promoted. Omit the whole section for the defaults.
+
+| Key | Default | What it sets |
+|---|---|---|
+| `gc_interval` | `10000` | Mutations between GC sweeps. |
+| `canonization_eval_interval_secs` | `60` | Seconds between canonization evaluation passes. |
+
+A degenerate value is refused rather than quietly clamped — `gc_interval = 0` is a mutation counter and not a period, so it stops the process:
+
+```
+$ lambo --config lambo.toml demo
+lambo demo: failed to build backends: config: gc_interval must be >= 1 (a mutation counter), got 0
+```
+
+The check runs wherever the process resolves an embedder, because that is the resolution path the cadence is applied on. Four commands do not resolve one — `lambo provision`, `lambo saints`, `lambo inspect` and `lambo stats` open the store alone — so those four accept a degenerate cadence without complaint. Every other command refuses it.
+
+That boundary is not "commands that build a session". `lambo recall` builds none — it is a lease-free reader — and is refused anyway, because the refusal is about the file, not about a lease:
+
+```
+$ lambo --config lambo.toml recall --session s --query x
+lambo recall: failed to build backends: config: gc_interval must be >= 1 (a mutation counter), got 0
+$ lambo --config lambo.toml saints --session s
+0 canonical memories in session 's'
+```
+
+A bad `promotion_policy` has the wider scope of the two, and the difference is worth knowing: an unparseable policy is refused while the file is being read, so it stops every command, those four included. A degenerate cadence is refused later, when the backends are built. See [Promotion policy](#promotion-policy).
+
+Under the default `Swarm` policy `gc_interval` is the one worth understanding. Stage 1 requires `gc_survived >= 3`, so at the default a concept needs roughly 30000 mutations before it can be promoted at all, which an ordinary session of a few dozen concepts never reaches — this is why `lambo demo` sets it to 1 internally. Under `Solo` it does not participate at all; see [Promotion policy](#promotion-policy). `lambo.example.toml` carries the same notes inline.
+
 ## Environment variables
 
 Every variable below overrides the matching file key. An empty value counts as unset, so an empty placeholder in a `.env` file leaves the file value alone.
@@ -79,11 +147,14 @@ Every variable below overrides the matching file key. An empty value counts as u
 | `LAMBO_CONFIG` | The path to `lambo.toml`. |
 | `LAMBO_STORE` | `store.kind` |
 | `LAMBO_SQLITE_PATH` | `store.path` |
-| `LAMBO_COCKROACH_DSN` | `store.dsn`. Lambo falls back to `DATABASE_URL` when this is unset. |
+| `LAMBO_COCKROACH_DSN` | `store.dsn`, for `kind = "cockroach"`. |
+| `LAMBO_POSTGRES_DSN` | `store.dsn`, for `kind = "postgres"`. |
+| `DATABASE_URL` | `store.dsn` for either wire-Postgres kind, when that kind's own variable is unset. Never consulted for `memory` or `sqlite`. |
 | `LAMBO_EMBEDDER` | `embedder.kind` |
 | `LAMBO_EMBED_DIM` | `embedder.dim` |
 | `LAMBO_LLAMA_EMBED_URL` | `embedder.url` |
 | `LAMBO_LLAMA_MODEL` | `embedder.model` |
+| `LAMBO_PROMOTION_POLICY` | `promotion_policy` (`Swarm` or `Solo`, any case) |
 
 Keep connection strings in the environment rather than in `lambo.toml`.
 

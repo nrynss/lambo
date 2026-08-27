@@ -4,6 +4,30 @@
 
 ### Breaking
 
+- `lambo::canon::gate_progress` takes a `PromotionPolicy` argument (fourth
+  position, before `min_edge_age`). It decides whether the four store-evidence
+  gates are measured at all, so the caller cannot be trusted to check it: under
+  `Solo` none of `gc_survived`, blast radius, distinct interactions or coverage
+  participates in promotion, and shipping them anyway put "0 of 4 gates met"
+  beside a concept due to go Canonical on the next cycle.
+- `GateProgress`'s four gate fields moved into a new `SwarmGates` struct behind
+  `GateProgress::gates: Option<SwarmGates>`, absent under `Solo`. Rust field
+  access moves one level down, but the **move itself** changes no JSON: the
+  holder is `#[serde(flatten)]`ed, so under `Swarm` the four keys serialize in
+  the same place, with the same names, in the same order as before. The object
+  around them is not unchanged — it gained `policy`, and under `Solo` the four
+  keys are absent — so a client that only reads the four gates under `Swarm`
+  needs no change, while one that enumerates the object's keys does. The
+  cooldown fields stayed put deliberately: the re-promotion cooldown is
+  policy-independent, and this struct is its only carrier.
+- `GateProgress::met_count` returns `Option<usize>` rather than `usize`: `None`
+  when the live policy does not read the four gates, so a caller cannot render
+  "0 of 4" for a concept whose policy has no such count.
+- `LamboFile` gained a public `promotion_policy: Option<PromotionPolicy>`
+  field. The struct has all-public fields and no `#[non_exhaustive]`, so every
+  external struct-literal construction and exhaustive destructuring of it
+  breaks. `..Default::default()` does not.
+
 - `store.kind = "postgres"` and `"pg"` now select `StoreKind::Postgres`, not
   CockroachDB. `"cockroach"` and `"crdb"` remain Cockroach. A leftover
   `kind = "postgres"` pointed at a Cockroach cluster fails at provision
@@ -11,6 +35,55 @@
   silently ranking with Cockroach SQL.
 
 ### Added
+
+- `promotion_policy` as a top-level `lambo.toml` key with a
+  `LAMBO_PROMOTION_POLICY` environment override (non-empty env wins; an empty
+  value is unset, as everywhere else Lambo overlays the environment). It
+  threads onto the `Config` that `Memory::builder().config(..)` reads, so a
+  `lambo serve` process selects a canonization policy without a code change.
+  The default stays `Swarm`, and an unset key does not move existing
+  behaviour. Both surfaces parse through `PromotionPolicy::from_str` —
+  trimmed and case-insensitive, like `store.kind` and `embedder.kind` — and an
+  unrecognised value is a hard startup error naming both what was written and
+  the valid set, never a silent fallback to the default. There is no
+  `serve --promotion-policy` flag: no `serve` flag in Lambo duplicates a
+  `lambo.toml` key.
+- `PromotionPolicy::ALL`, `FromStr` and `Display`. Every refusal message
+  enumerates `ALL` and `from_str` searches it, so a variant missing from it
+  would be unselectable from both `lambo.toml` and `LAMBO_PROMOTION_POLICY`
+  while every refusal kept naming only the others. `ALL` and the enum are
+  therefore generated from one variant list, length included, which makes that
+  state unrepresentable rather than merely tested — a `PromotionPolicy` variant
+  cannot be declared anywhere else.
+- `promotion_policy` on the `lambo_stats` payload, its text summary, and the
+  `serve --ledger` heartbeat. The payload and the heartbeat come from one
+  shared builder (`stats_json`) and so cannot disagree; the text summary is a
+  separate `format!` over the same live `Config`, so all three report the same
+  value but only two of them are structurally prevented from drifting.
+  Read from the live `Config`, so it reports the value that won —
+  file, environment, or default. The cycle counters cannot answer the question:
+  `canonization_cycles` climbs identically under both policies, and
+  `canonical_count` staying at zero is both the normal reading for a young
+  `Swarm` session and the whole symptom of a `Solo` selection that did not
+  take.
+- `/api/inspect` names its own resolution in `promotion_policy` (always
+  present, including on a miss) and labels every absent gate block in
+  `gate_progress_omitted` (`already_canonical` or `unavailable`). `serve-web`
+  is a lease-free reader that resolves its own config, so a gate count with no
+  policy beside it was unattributable; the two omission causes used to be one
+  indistinguishable `null`. The page acts on the difference rather than merely
+  receiving it: `already_canonical` draws nothing, and `unavailable` says the
+  checks could not be read — a failed store query no longer renders identically
+  to a promoted fact.
+- `lambo::RESOLVE_ENV_VARS`: **every** environment variable a Level B resolve
+  reads, in one place, for tests and harnesses that need the config to be
+  exactly the `--config` file they wrote. Replaces five hand-maintained copies
+  of the same list, which had already fallen out of step — and completes it:
+  the five copies all named nine variables, omitting `LAMBO_POSTGRES_DSN` and
+  the five (`LAMBO_EMBED_DEVICE`, `LAMBO_GEMINI_*`) that `EmbedderConfig`
+  overlays regardless of `embedder.kind`. A harness that cleared the old list,
+  wrote `store.kind = "postgres"` with no `dsn`, and ran `lambo provision` took
+  its DSN from the ambient shell.
 
 - `StoreKind::Postgres` and Cargo feature `store-postgres` (same sqlx postgres
   driver as `store-cockroach`; no second driver). B2 lands templated-width

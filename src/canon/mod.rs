@@ -22,8 +22,16 @@ mod task;
 
 pub use eval::{eval_cycle, EvalError, EvalOutcome, EvalParams, Evaluator};
 pub use event_time::separated_session_count;
-pub use gate::{gate_progress, GateMetric, GateProgress};
+pub use gate::{gate_progress, GateMetric, GateProgress, SwarmGates};
 pub use policy::{PromotionPolicy, PromotionScorer, SoloScorer, SwarmScorer};
+// `deserialize_promotion_policy` is re-exported because `lambo.toml`'s
+// `promotion_policy` key must be parsed by `PromotionPolicy::from_str` and not
+// by serde's exact-`PascalCase` derive — one parser for the file and the
+// environment both (see the function's docs). `mod policy` is private, so
+// `config.rs` cannot name the function without a re-export; `pub(crate)` is the
+// narrowest one that works, and keeps serde plumbing off the library's semver
+// surface (there is nothing an external caller could do with it).
+pub(crate) use policy::deserialize_config_value as deserialize_promotion_policy;
 pub use stage1::stage1_candidates;
 pub use stage2::stage2_passes;
 pub use stage3::{last_demotion_time, stage3_passes};

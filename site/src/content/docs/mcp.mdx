@@ -304,6 +304,8 @@ Report session health: flush lag, write-behind log depth, background write queue
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
 
+**`promotion_policy`**, always present: which canonization policy this server is actually running, `Swarm` or `Solo`. It is read from the live config, so it reports the value that **won** — `lambo.toml`, `LAMBO_PROMOTION_POLICY`, or the default — and not any one of the three inputs. The counters beside it cannot answer that question: `canonization_cycles` climbs identically under both policies, and `canonical_count` staying at zero is both the normal reading for a young `Swarm` session and the entire symptom of a `Solo` selection that did not take. The same value appears on the tool's text summary and, with `serve --ledger`, on every heartbeat line, because one builder produces all three. See [Configuration](/lambo/config/).
+
 **Asking about one write.** Pass `receipt` and the payload gains a `receipt` object: an `id`, a `state`, and a `detail` sentence written for a model to read. On `applied` it also carries `created`, `matched`, `created_count`, `matched_count`, and the `semantic_merged` / `reinforced` / `edges` counts — everything the ack could not know. Add `wait_ms` and the call blocks until the write lands, which is how you get read-your-writes when you need it; the session figures in the same payload are read after that wait, so they never disagree with the receipt beside them.
 
 The `state` is one of nine, and none of them is "unknown":

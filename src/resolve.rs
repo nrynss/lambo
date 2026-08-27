@@ -10,6 +10,78 @@ use crate::store::{
 use crate::types::{EmbeddingContract, LamboError};
 use crate::LamboFile;
 
+/// Every environment variable a Level B resolve reads, in one place.
+///
+/// This exists to be *cleared*. `LamboFile::load_resolved` and
+/// [`resolve_backends`] overlay the environment on top of the file, so any test
+/// or harness that wants "the config is exactly the `--config` file I passed"
+/// has to remove all of them first — and five separate copies of that list had
+/// grown across the tree (`src/main.rs`, `src/cli/mod.rs`, and three
+/// integration tests), each of which had to be found and amended by hand
+/// whenever an override was added.
+///
+/// The `promotion_policy` selector is the case that proved the copies do not
+/// stay in step: it was added to one of them. A missed copy is not a compile
+/// error and not an immediate failure — an unset variable is unset and a bogus
+/// one fails closed by design — it is a test that quietly resolves something
+/// other than what it wrote to disk, which is the least useful way for a
+/// hermeticity list to be wrong.
+///
+/// Public because three of the five consumers are integration tests in
+/// `tests/`, which can only see the crate's public API.
+///
+/// **A new environment override belongs in this list.** Hermeticity means every
+/// variable the resolve reads, not just the ones that can error.
+///
+/// # Completeness, and the list this replaced (T3-P2-1)
+///
+/// The five hand-maintained copies all carried the same nine names, and all
+/// nine were the ones an operator is likeliest to set by hand. That is not the
+/// same as every variable the resolve reads, and consolidating the copies into
+/// one *public* const made the gap worse rather than better: five lists nobody
+/// trusted became one item whose doc told the next author it was exhaustive.
+/// Six names were missing.
+///
+/// * `LAMBO_POSTGRES_DSN` is read by `StoreConfig::dsn_from_env_for_kind` for
+///   `StoreKind::Postgres`, exactly as `LAMBO_COCKROACH_DSN` is for
+///   `StoreKind::Cockroach`. Leaving it out is the E2E-F2 hazard from the other
+///   side: a harness that clears this list, writes `kind = "postgres"` with no
+///   `dsn`, and runs `lambo provision` takes its DSN from the ambient shell and
+///   issues DDL against a cluster the config never names.
+/// * The five `LAMBO_EMBED_DEVICE` / `LAMBO_GEMINI_*` names are read
+///   **unconditionally** by `EmbedderConfig::overlay_env`, regardless of
+///   `embedder.kind` — a `kind = "fixture"` test still picks up an exported
+///   `LAMBO_GEMINI_PROJECT`.
+///
+/// `DATABASE_URL` is the one entry that is not a `LAMBO_*` name, and it stays —
+/// deliberately, not by inheritance. It is the DSN fallback both wire-Postgres
+/// kinds honour (`store::FALLBACK_DSN_ENV`), so it selects a database just as
+/// surely as the kind-specific names do, and its being a conventional name
+/// shared with unrelated tooling is an argument for clearing it in a hermetic
+/// harness, not against.
+///
+/// The DSN three are spelled by reference to `store`'s own consts rather than
+/// re-quoted, so the list cannot drift from the variables configuration
+/// actually reads.
+pub const RESOLVE_ENV_VARS: &[&str] = &[
+    "LAMBO_STORE",
+    "LAMBO_EMBEDDER",
+    "LAMBO_CONFIG",
+    crate::store::COCKROACH_DSN_ENV,
+    crate::store::POSTGRES_DSN_ENV,
+    crate::store::FALLBACK_DSN_ENV,
+    "LAMBO_SQLITE_PATH",
+    "LAMBO_EMBED_DIM",
+    "LAMBO_LLAMA_EMBED_URL",
+    "LAMBO_LLAMA_MODEL",
+    "LAMBO_EMBED_DEVICE",
+    "LAMBO_GEMINI_PROJECT",
+    "LAMBO_GEMINI_LOCATION",
+    "LAMBO_GEMINI_MODEL",
+    "LAMBO_GEMINI_CREDENTIALS",
+    "LAMBO_PROMOTION_POLICY",
+];
+
 /// Fully resolved Level B backends ready for `Memory` / CLI.
 ///
 /// `#[non_exhaustive]` is deliberate: adding a field is a breaking change for
@@ -98,11 +170,15 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let store_cfg = file.store;
     let embedder_cfg = file.embedder;
     let daemon_cfg = file.daemon;
+    let promotion_policy = file.promotion_policy;
     // Fail closed at the file boundary: every file-driven command rejects a
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may load a model, so we reject the file first).
     let mut config = crate::Config::default();
     daemon_cfg.apply_to(&mut config);
+    if let Some(policy) = promotion_policy {
+        config.promotion_policy = policy;
+    }
     config.validate()?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
     // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
@@ -285,6 +361,257 @@ pub fn describe_embedder(kind: EmbedderKind, dim: usize, model: Option<&str>) ->
 mod tests {
     use super::*;
     use async_trait::async_trait;
+
+    /// One override, and the `lambo.toml` plus observation that makes it
+    /// visible through a resolve.
+    ///
+    /// `resolved` renders whatever field the variable lands on as a `String` so
+    /// that one table can hold heterogeneous types, and takes the config path
+    /// rather than a `LamboFile` so that `LAMBO_CONFIG` — whose effect is
+    /// *which file is loaded*, before any field exists — fits the same shape as
+    /// the rest.
+    struct Override {
+        var: &'static str,
+        /// A **valid** value on purpose. An invalid one fails closed, which
+        /// would satisfy "the resolve changed" for the wrong reason.
+        value: &'static str,
+        /// The file this variable's effect is observable against. The DSN
+        /// variables are kind-aware since E2E-F2, so each needs its own
+        /// `store.kind`.
+        file: &'static str,
+        resolved: fn(&std::path::Path) -> String,
+    }
+
+    fn load(path: &std::path::Path) -> LamboFile {
+        LamboFile::load_resolved(Some(path)).expect("the table's values are all valid")
+    }
+
+    /// Every override in [`RESOLVE_ENV_VARS`], paired with the resolve
+    /// observation it moves.
+    fn override_table() -> Vec<Override> {
+        const MEMORY: &str = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n";
+        const COCKROACH: &str = "[store]\nkind = \"cockroach\"\n";
+        const POSTGRES: &str = "[store]\nkind = \"postgres\"\n";
+        vec![
+            Override {
+                var: "LAMBO_STORE",
+                value: "sqlite",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).store.kind),
+            },
+            Override {
+                var: "LAMBO_EMBEDDER",
+                value: "bge_m3",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.kind),
+            },
+            Override {
+                // The only entry whose effect precedes the file: it *chooses*
+                // the file. Observed at its read site, which `discover_path`
+                // reaches only when no `--config` was passed.
+                var: "LAMBO_CONFIG",
+                value: "/nonexistent/sentinel-lambo.toml",
+                file: MEMORY,
+                resolved: |_| format!("{:?}", LamboFile::discover_path(None)),
+            },
+            Override {
+                var: crate::store::COCKROACH_DSN_ENV,
+                value: "postgresql://crdb-host:26257/defaultdb",
+                file: COCKROACH,
+                resolved: |p| format!("{:?}", load(p).store.dsn),
+            },
+            Override {
+                var: crate::store::POSTGRES_DSN_ENV,
+                value: "postgresql://pg-host:5432/lambo",
+                file: POSTGRES,
+                resolved: |p| format!("{:?}", load(p).store.dsn),
+            },
+            Override {
+                // Not a `LAMBO_*` name, and read as the fallback for both
+                // wire-Postgres kinds — so a shell that exports it for some
+                // other program still picks the database this one opens.
+                var: crate::store::FALLBACK_DSN_ENV,
+                value: "postgresql://fallback-host:5432/lambo",
+                file: POSTGRES,
+                resolved: |p| format!("{:?}", load(p).store.dsn),
+            },
+            Override {
+                var: "LAMBO_SQLITE_PATH",
+                value: "/tmp/lambo-resolve-env-vars-sentinel.db",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).store.path),
+            },
+            Override {
+                var: "LAMBO_EMBED_DIM",
+                value: "768",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.dim),
+            },
+            Override {
+                var: "LAMBO_LLAMA_EMBED_URL",
+                value: "http://127.0.0.1:9999",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.llama_url),
+            },
+            Override {
+                var: "LAMBO_LLAMA_MODEL",
+                value: "sentinel-model",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.llama_model),
+            },
+            // The five below are read unconditionally by
+            // `EmbedderConfig::overlay_env`, whatever `embedder.kind` says, so
+            // a fixture-embedder test picks them up too. All five were missing
+            // from the pre-T3 list.
+            Override {
+                var: "LAMBO_EMBED_DEVICE",
+                value: "cpu",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.device),
+            },
+            Override {
+                var: "LAMBO_GEMINI_PROJECT",
+                value: "sentinel-project",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.gemini_project),
+            },
+            Override {
+                var: "LAMBO_GEMINI_LOCATION",
+                value: "us-central1",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.gemini_location),
+            },
+            Override {
+                var: "LAMBO_GEMINI_MODEL",
+                value: "sentinel-gemini-model",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.gemini_model),
+            },
+            Override {
+                var: "LAMBO_GEMINI_CREDENTIALS",
+                value: "/nonexistent/sentinel-sa.json",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).embedder.gemini_credentials),
+            },
+            Override {
+                var: "LAMBO_PROMOTION_POLICY",
+                value: "Solo",
+                file: MEMORY,
+                resolved: |p| format!("{:?}", load(p).promotion_policy),
+            },
+        ]
+    }
+
+    /// The table above and [`RESOLVE_ENV_VARS`] must name the same set.
+    ///
+    /// This is the half that catches a *shrinking* list. Without it, deleting a
+    /// name from `RESOLVE_ENV_VARS` would also stop the loop below exercising
+    /// it, and the suite would go green over the hermeticity hole — the vacuity
+    /// the previous version of this test had, which asserted one variable while
+    /// its docstring claimed every one.
+    #[test]
+    fn resolve_env_vars_and_the_test_table_name_the_same_set() {
+        let mut listed: Vec<&str> = RESOLVE_ENV_VARS.to_vec();
+        let mut tabled: Vec<&str> = override_table().iter().map(|o| o.var).collect();
+        listed.sort_unstable();
+        tabled.sort_unstable();
+        assert_eq!(
+            listed, tabled,
+            "a name in RESOLVE_ENV_VARS with no table entry is untested, and a \
+             table entry not in RESOLVE_ENV_VARS is a variable the resolve reads \
+             and the list fails to clear — add it to both"
+        );
+        let mut deduped = listed.clone();
+        deduped.dedup();
+        assert_eq!(deduped, listed, "RESOLVE_ENV_VARS must not repeat a name");
+    }
+
+    /// [`RESOLVE_ENV_VARS`] must actually neutralise **every** override it
+    /// names, and every name in it must be one the resolve really reads.
+    ///
+    /// P3-b/P3-5: `LAMBO_PROMOTION_POLICY` reached the tree as an override and
+    /// was added to one of the five hand-maintained copies of this list. The
+    /// four it missed were latent rather than broken — an unset variable is
+    /// unset and a bogus one fails closed — so nothing failed; they were just
+    /// tests that resolved something other than the file they had written.
+    ///
+    /// T3-P2-1: the first version of this test exercised `promotion_policy`
+    /// alone, which left the six names the consolidated list was *still*
+    /// missing (`LAMBO_POSTGRES_DSN` and the five unconditional embedder
+    /// variables) unpinned. So the property is now asserted per variable, in
+    /// three steps that make each other non-vacuous:
+    ///
+    /// 1. clear everything the *table* names — never via `RESOLVE_ENV_VARS`, or
+    ///    a missing name would leave the baseline polluted and matching;
+    /// 2. set the one variable and require the resolve to *move*, which proves
+    ///    the observation is sensitive to it and the name is not cruft;
+    /// 3. clear via `RESOLVE_ENV_VARS` only, and require the resolve back at
+    ///    the baseline. Step 2 is what makes step 3 mean something.
+    #[test]
+    fn resolve_env_vars_clears_every_override_it_names() {
+        let _g = crate::test_util::env_lock();
+        let table = override_table();
+        // Restore the ambient shell afterwards. Saved from the table, so a name
+        // the list omits is still put back.
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = table
+            .iter()
+            .map(|o| o.var)
+            .chain(RESOLVE_ENV_VARS.iter().copied())
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
+
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-resolve-env-vars-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("lambo.toml");
+
+        for o in &table {
+            std::fs::write(&path, o.file).expect("config");
+            // Step 1 — a clean slate established WITHOUT consulting the list.
+            for entry in &table {
+                std::env::remove_var(entry.var);
+            }
+            let baseline = (o.resolved)(&path);
+
+            // Step 2 — the resolve must actually read this variable.
+            std::env::set_var(o.var, o.value);
+            let overridden = (o.resolved)(&path);
+            assert_ne!(
+                baseline, overridden,
+                "{} is listed as an override the resolve reads, but setting it to \
+                 {:?} changed nothing — either the observation is wrong or the \
+                 name is cruft in RESOLVE_ENV_VARS",
+                o.var, o.value
+            );
+
+            // Step 3 — and clearing the list alone must undo it.
+            for k in RESOLVE_ENV_VARS {
+                std::env::remove_var(k);
+            }
+            assert_eq!(
+                baseline,
+                (o.resolved)(&path),
+                "clearing RESOLVE_ENV_VARS left {} in force: a variable missing \
+                 from the list resolves the ambient shell instead of the \
+                 --config file the harness wrote",
+                o.var
+            );
+        }
+
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
         check_vector_compatibility(None, 512).unwrap();
@@ -321,12 +648,18 @@ mod tests {
                 ..Default::default()
             },
             daemon: Default::default(),
+            promotion_policy: Some(crate::canon::PromotionPolicy::Solo),
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
         assert_eq!(r.store.vector_dimensions(), None);
         assert_eq!(r.embedding.dim, 1024);
         assert_eq!(r.embedding.kind, "fixture");
+        assert_eq!(
+            r.config.promotion_policy,
+            crate::canon::PromotionPolicy::Solo,
+            "the process-file selector must reach Memory's Config"
+        );
     }
 
     /// A-E2E-3 closure: the Gemini model-identity stamping is locked at the
@@ -365,6 +698,7 @@ mod tests {
                 ..Default::default()
             },
             daemon: Default::default(),
+            promotion_policy: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -407,6 +741,7 @@ mod tests {
                 ..Default::default()
             },
             daemon: Default::default(),
+            promotion_policy: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits

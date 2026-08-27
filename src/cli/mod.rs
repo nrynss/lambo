@@ -851,17 +851,13 @@ mod sqlite_tests {
     use crate::resolve::resolve_from_config_path;
     use crate::store::StoreKind;
 
-    const ENV_KEYS: &[&str] = &[
-        "LAMBO_STORE",
-        "LAMBO_EMBEDDER",
-        "LAMBO_CONFIG",
-        "LAMBO_COCKROACH_DSN",
-        "DATABASE_URL",
-        "LAMBO_SQLITE_PATH",
-        "LAMBO_EMBED_DIM",
-        "LAMBO_LLAMA_EMBED_URL",
-        "LAMBO_LLAMA_MODEL",
-    ];
+    /// One list, shared with `src/main.rs` and the three integration tests
+    /// that spawn the binary. Both users of this module — `resolve_clean` and
+    /// the T83 sqlite walk — go through `load_resolved` /
+    /// `resolve_from_config_path`, which overlay every one of these on top of
+    /// the `--config` file, so a variable missing from the list is a test that
+    /// resolves something other than what it wrote to disk.
+    const ENV_KEYS: &[&str] = crate::resolve::RESOLVE_ENV_VARS;
 
     fn scratch() -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
@@ -892,6 +888,67 @@ mod sqlite_tests {
             std::env::remove_var(k);
         }
         resolve_from_config_path(Some(cfg)).expect("resolve sqlite")
+    }
+
+    /// **P3-5.** `resolve_clean` must actually resolve clean.
+    ///
+    /// When the `promotion_policy` override landed it was added to
+    /// `src/main.rs`'s copy of the clean-slate list and not to this module's
+    /// byte-identical one. Nothing failed: no assertion on this path runs long
+    /// enough for `Solo` to promote anything, so an ambient
+    /// `LAMBO_PROMOTION_POLICY=Solo` silently changed what the T83 walk
+    /// resolved without changing what it observed. That is the least useful way
+    /// for a hermeticity list to be wrong, and a live trap for the next
+    /// canonization assertion added here. Both lists are now
+    /// `resolve::RESOLVE_ENV_VARS`.
+    ///
+    /// The second assertion is a control, not a second finding: it proves the
+    /// selector genuinely reaches `ResolvedBackends.config` on this path, so
+    /// the first assertion is about the environment being cleared and not about
+    /// the key being inert here.
+    #[tokio::test]
+    async fn resolve_clean_ignores_an_ambient_promotion_policy() {
+        let (dir, cfg) = scratch();
+        let old = {
+            let _g = crate::test_util::env_lock();
+            let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
+            std::env::set_var("LAMBO_PROMOTION_POLICY", "Solo");
+            old
+        };
+
+        assert_eq!(
+            resolve_clean(&cfg).config.promotion_policy,
+            crate::canon::PromotionPolicy::Swarm,
+            "a stray LAMBO_PROMOTION_POLICY in the ambient shell must not reach \
+             a resolve that claims to be clean"
+        );
+
+        // The same file, with the key set: proof that this path carries a
+        // file-set policy through, so the assertion above is about the
+        // environment and not about the selector being inert here.
+        let with_policy = dir.join("solo.toml");
+        std::fs::write(
+            &with_policy,
+            format!(
+                "promotion_policy = \"Solo\"\n{}",
+                std::fs::read_to_string(&cfg).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_clean(&with_policy).config.promotion_policy,
+            crate::canon::PromotionPolicy::Solo,
+            "the file's own selector must still reach the resolved Config"
+        );
+
+        {
+            let _g = crate::test_util::env_lock();
+            match old {
+                Some(v) => std::env::set_var("LAMBO_PROMOTION_POLICY", v),
+                None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
+            }
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]

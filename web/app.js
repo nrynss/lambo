@@ -52,6 +52,13 @@
     coverage: "Spread across the session"
   };
 
+  // What sits above the gate group. Two headings, because the group holds two
+  // different things: a checklist, or an explanation of why there is no
+  // checklist. The first is the wording the page has always used, and Swarm
+  // keeps reading it.
+  var GATES_HEADING_CHECKS = "Why nothing relies on this yet";
+  var GATES_HEADING_GENERIC = "Why this is not Canonical yet";
+
   // A node is either a Concept or an Interaction, so `nodes` is both together.
   // "Things remembered" hid that; these name what each number counts.
   var COUNT_LABEL = [
@@ -586,25 +593,59 @@
     renderGates(d);
   }
 
-  // The gates answer "why is this not Canonical yet", which is not a question
-  // about something that already is. They also measure against aged
-  // connections while the blast radius above counts live ones, so on a young
-  // session the two disagree and the pairing reads as a bug. The server has
-  // suppressed gate_progress for Canonical since H2, so this guard is
-  // defense-in-depth for older payloads; it must stay so the page renders a
-  // key-less Canonical payload identically.
+  // Three payload shapes reach here, and each gets a different page: the block
+  // present (draw it), the block absent because there is nothing left to
+  // explain (draw nothing), and the block absent because the read failed (say
+  // so).
+  //
+  // C2: an absent block says why, in `gate_progress_omitted`
+  // ("already_canonical" or "unavailable"), and T3-P3-7 makes the page act on
+  // the difference. It used to read the key not at all and hide the whole group
+  // either way, which is the very defect the label was added to end: a promoted
+  // fact and a store query that failed rendered identically, so an operator
+  // could not tell "there is nothing left to explain" from "this page could not
+  // find out". `already_canonical` still draws nothing — there really is
+  // nothing — but `unavailable` now says so.
   function renderGates(d) {
     var gp = d.gate_progress;
-    var applicable = gp && d.status !== "Canonical";
-    show($("details-gates-wrap"), !!applicable);
+    var wrap = $("details-gates");
+    var heading = $("details-gates-heading");
+
+    if (!gp) {
+      // `found: false` carries no reason key and needs none — the miss is
+      // already on the page — so an unavailable read is the only absence with
+      // something to say.
+      var unavailable = d.found && d.gate_progress_omitted === "unavailable";
+      show($("details-gates-wrap"), unavailable);
+      if (unavailable) {
+        heading.textContent = GATES_HEADING_GENERIC;
+        clear(wrap);
+        wrap.appendChild(el("div", "muted-small",
+          "The checks could not be read just now, so this page cannot say how close " +
+          "this is. That is a problem reading the store, not a verdict about this one."));
+        show($("details-cooldown"), false);
+      }
+      return;
+    }
+
+    // The gates answer "why is this not Canonical yet", which is not a question
+    // about something that already is. They also measure against aged
+    // connections while the blast radius above counts live ones, so on a young
+    // session the two disagree and the pairing reads as a bug. The server has
+    // suppressed gate_progress for Canonical since H2, so this guard is
+    // defense-in-depth for older payloads; it must stay so the page renders a
+    // key-less Canonical payload identically.
+    var applicable = d.status !== "Canonical";
+    show($("details-gates-wrap"), applicable);
     if (!applicable) return;
 
-    var wrap = $("details-gates");
     clear(wrap);
 
+    var rendered = 0;
     ["gc_survived", "blast_radius", "distinct_interactions", "coverage"].forEach(function (key) {
       var g = gp[key];
       if (!g) return;
+      rendered++;
       var isPct = key === "coverage";
       var row = el("div", "gate-row");
 
@@ -626,13 +667,71 @@
       wrap.appendChild(row);
     });
 
+    // The static heading in index.html describes a *checklist*, so it can only
+    // stand while there is one above it (T3-P3-4/nit). Under Swarm it is
+    // unchanged, deliberately: nothing about the existing page moves.
+    heading.textContent = rendered > 0 ? GATES_HEADING_CHECKS : GATES_HEADING_GENERIC;
+
+    if (rendered === 0) {
+      wrap.appendChild(el("div", "muted-small", gateAbsenceCopy(gp.policy || d.promotion_policy)));
+    }
+
     var cd = $("details-cooldown");
     show(cd, !!gp.in_cooldown);
     if (gp.in_cooldown) {
+      // T3-P3-3: keyed on `rendered`, the same thing the block above is keyed
+      // on — never on the policy name. Under Solo the page had just said "there
+      // is nothing to tick off" and this paragraph went on to talk about "the
+      // checks above: every one of them can be met", contradicting the line
+      // directly over it. Two paragraphs that describe the same block have to
+      // be decided by the same value, or one of them will be updated and the
+      // other will not.
       cd.textContent = "Recently downgraded, so it is in a cooling-off period before it can " +
-        "become Canonical again. This is separate from the checks above: every one of them " +
-        "can be met and promotion still waits.";
+        "become Canonical again. " + (rendered > 0
+          ? "This is separate from the checks above: every one of them can be met and " +
+            "promotion still waits."
+          : "This is separate from whatever else promotion needs: this one waits on the " +
+            "cooling-off period no matter how strong the rest of the case is.");
     }
+  }
+
+  // C2: the four gates are SWARM's gates. Under the Solo policy the server
+  // ships the block deliberately without them — promotion is a recurrence score
+  // over the concept's own evidence, so gc_survived, blast radius, distinct
+  // interactions and coverage decide nothing — while the cooldown stays live and
+  // is then the only store-side reason a concept that has cleared its band still
+  // waits. Drawing the heading over an empty checklist would read as "no checks
+  // left to pass", the opposite of what an absent group means, so name the
+  // policy instead.
+  //
+  // The policy here is the resolution of the server backing THIS page.
+  // serve-web is a lease-free reader that resolves its own config and nothing
+  // carries the writer's policy to it, so when the two processes are configured
+  // differently this line is what makes that visible rather than silently
+  // showing the reader's numbers.
+  //
+  // T3-P3-6: the non-Solo branch is not dead code, and it is no longer a
+  // transient-failure message either. Any policy this file has no copy for
+  // lands here — a server running a promotion policy added after this file was
+  // written ships `gate_progress` with a `policy` string this page does not
+  // know and no gate keys, and a pre-C2 server ships no `policy` at all.
+  // "Not available right now" was a lie in both cases: nothing is missing and
+  // nothing is being retried, the four checks simply do not apply. A genuinely
+  // failed read is a different payload entirely (`gate_progress` absent with
+  // `gate_progress_omitted: "unavailable"`) and is handled at the top of
+  // renderGates, which is what leaves this branch free to say the honest thing.
+  function gateAbsenceCopy(policy) {
+    if (policy === "Solo") {
+      return "Promotion here runs the Solo policy, which scores how often this keeps " +
+        "coming back rather than checking the four connection thresholds. There is " +
+        "nothing to tick off.";
+    }
+    if (policy) {
+      return "Promotion here runs the " + policy + " policy, which does not use the four " +
+        "connection thresholds. There is nothing to tick off.";
+    }
+    return "Promotion here does not use the four connection thresholds, so there is " +
+      "nothing to tick off.";
   }
 
   // ---- lookup ----------------------------------------------------------

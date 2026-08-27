@@ -6,6 +6,31 @@
 # - This file (or env) selects among compiled backends.
 # - Unknown or uncompiled `kind` => hard startup error.
 
+# Canonization's promotion selector. Omit for the established multi-writer
+# default (`Swarm`). A lone writer that needs recurrence-based promotion must
+# opt in explicitly. Values: `Swarm` | `Solo`, trimmed and case-insensitive
+# (like store.kind / embedder.kind below); anything else is a hard startup
+# error naming both what you wrote and the valid set — never a quiet fallback.
+# `LAMBO_PROMOTION_POLICY` overrides this file value; an empty one is unset.
+#
+# It is a TOP-LEVEL key and must stay above the first [table] header. Move it
+# below one and TOML scopes it into THAT table, so the refusal names that
+# table's own keys and never the placement. Below [store] it reads:
+#   unknown field `promotion_policy`, expected one of `kind`, `dsn`, `path`,
+#   `vector_dim`
+# — a store error about a key that was spelled correctly.
+#
+# There is no `lambo serve --promotion-policy` flag: this file or the env.
+#
+# `lambo demo` scripts its own config, so it ignores the VALUE — Solo does not
+# change what the demo shows. It still validates it: the file is parsed before
+# any command decides what to keep, so a bad value stops `demo` too — and stops
+# `provision`, `saints`, `inspect` and `stats`, which never resolve an embedder.
+# [daemon] below is the same bargain with a NARROWER scope: also discarded by
+# demo, also refused when degenerate, but only by the commands that do resolve
+# an embedder. Those four accept a degenerate cadence.
+# promotion_policy = "Solo"
+
 [store]
 # memory | cockroach | postgres | sqlite
 kind = "memory"
@@ -72,19 +97,28 @@ url = "http://127.0.0.1:8080"
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #
-# Cadence only, never a threshold. What a concept must clear to become Canonical
-# (blast radius, distinct interactions, coverage, the peer score cut) lives in
-# canon::stage{1,2,3} and is deliberately not settable from a file.
+# Cadence only, never a threshold. Under the default `Swarm` policy, what a
+# concept must clear to become Canonical (blast radius, distinct interactions,
+# coverage, the peer score cut) lives in canon::stage{1,2,3} and is deliberately
+# not settable from a file.
+#
+# WITH promotion_policy = "Solo" the paragraph above and the one below describe
+# a promotion path that is not running. Solo decides on a recurrence score over
+# the concept's own evidence: gc_survived, blast radius, distinct interactions
+# and coverage are all ignored, and the score's bands replace the store-evidence
+# stages. A lone writer reaches Canonical in a handful of mutations with zero GC
+# sweeps, so with Solo you do NOT need to lower gc_interval — lowering it
+# changes nothing about promotion.
 #
 # [daemon]
 #
 # Mutations between GC sweeps. Default 10000.
 #
-# Worth understanding before changing: Stage 1 requires gc_survived >= 3, so at
-# the default a concept needs roughly 30000 mutations before it can be promoted
-# at all. A session of a few dozen concepts never gets there, which is why
-# `lambo demo` sets this to 1 internally. Lower it if you want to watch the
-# canonization state machine work on a small session.
+# Worth understanding before changing, and SWARM-ONLY: swarm's Stage 1 requires
+# gc_survived >= 3, so at the default a concept needs roughly 30000 mutations
+# before it can be promoted at all. A session of a few dozen concepts never gets
+# there, which is why `lambo demo` sets this to 1 internally. Lower it if you
+# want to watch the canonization state machine work on a small swarm session.
 # gc_interval = 1
 #
 # Seconds between canonization evaluation passes. Default 60.

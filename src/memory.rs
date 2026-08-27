@@ -1081,6 +1081,14 @@ impl MemoryBuilder {
             agent = %agent,
             existing,
             match_strategy = ?config.match_strategy,
+            // Beside `match_strategy` for the same reason it is here: both are
+            // enum-valued `Config` knobs a process file or an environment
+            // variable can select, and an operator reading one line must be
+            // able to see which value actually won. `promotion_policy`
+            // especially — a `lambo.toml` saying `Solo` under a stale
+            // `LAMBO_PROMOTION_POLICY=Swarm` is a correct, silent override
+            // whose only other evidence is days of absent canonization events.
+            promotion_policy = %config.promotion_policy,
             embedder = %embedding.kind,
             dim = embedding.dim,
             "Memory session attached (daemon + flush + canonization running)"
@@ -3258,6 +3266,34 @@ mod tests {
         }
     }
 
+    /// Formatted log text with the capturing subscriber's ANSI escapes removed.
+    ///
+    /// `tracing_subscriber::fmt` styles the field NAME, so a raw capture reads
+    /// `\x1b[3mpromotion_policy\x1b[0m\x1b[2m=\x1b[0mSwarm` and a plain
+    /// `contains("promotion_policy=Swarm")` never matches even when the field is
+    /// there. Asserting on the stripped text keeps the assertion about the log
+    /// line rather than about the formatter's styling.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // CSI: ESC '[' … final byte in 0x40..=0x7e.
+            if chars.next() != Some('[') {
+                continue;
+            }
+            for b in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&b) {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     async fn memory_on(store: Arc<dyn GraphStore>, session: &str) -> Memory {
         Memory::builder()
             .session(session)
@@ -3271,6 +3307,59 @@ mod tests {
             .build()
             .await
             .expect("build")
+    }
+
+    /// **P2-b.** The attach line names the live promotion policy, beside
+    /// `match_strategy`.
+    ///
+    /// This is the operator's only in-process answer to "which policy is this
+    /// run using?", and it matters most when the configuration is *valid*: a
+    /// `lambo.toml` saying `Solo` under a stale exported
+    /// `LAMBO_PROMOTION_POLICY=Swarm` runs `Swarm`, correctly and silently.
+    /// Without this field the only remaining evidence is days of absent
+    /// canonization events — the exact diagnosis dead-end the selector exists
+    /// to end. Both policies are asserted, because a hardcoded literal would
+    /// pass a one-policy test.
+    #[tokio::test]
+    async fn the_attach_line_names_the_live_promotion_policy() {
+        for policy in crate::canon::PromotionPolicy::ALL {
+            let (logs, _guard) = capture_logs(tracing::Level::INFO);
+            let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+            let mem = Memory::builder()
+                .session(format!("attach-{}", policy.as_str().to_ascii_lowercase()))
+                .agent("agent-a")
+                .config(Config {
+                    promotion_policy: policy,
+                    ..Config::default()
+                })
+                .flush_interval(Duration::from_secs(3_600))
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(contract("fixture", 1024))
+                .build()
+                .await
+                .expect("build");
+
+            // The capturing subscriber writes ANSI, which lands *between* the
+            // field name and its `=`, so assert on the plain text.
+            let logged = strip_ansi(&logs.contents());
+            assert!(
+                logged.contains("Memory session attached"),
+                "the attach line must be captured: {logged}"
+            );
+            assert!(
+                logged.contains(&format!("promotion_policy={}", policy.as_str())),
+                "the attach line must name the live policy: {logged}"
+            );
+            // Its neighbour is the reason it belongs here: `match_strategy` is
+            // on this line so an operator can see which enum-valued knob won,
+            // and `promotion_policy` is the other one.
+            assert!(
+                logged.contains("match_strategy="),
+                "still beside match_strategy: {logged}"
+            );
+            mem.close().await.expect("close");
+        }
     }
 
     /// `GraphStore` that fails the first `fail_next` flushes (or every flush,

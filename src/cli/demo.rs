@@ -900,6 +900,14 @@ async fn run_scenario_with_override(
 /// The demo deliberately does not honour a user `[daemon]` — its own compressed
 /// cadence and scripted clock (see [`script_clock`]) are required for the
 /// state-machine demonstration (see `config.rs`).
+///
+/// The carve-out covers `promotion_policy` too: `run` destructures
+/// [`ResolvedBackends`] with `..`, so the whole resolved `Config` — cadence and
+/// policy alike — is dropped in favour of this function's. That is correct for a
+/// scripted demonstration whose whole point is showing the *swarm* ladder hop by
+/// hop, but it means `lambo demo` is the one verb a `promotion_policy = "Solo"`
+/// in `lambo.toml` does not reach. The docs say so where an operator would look
+/// (`docs/reference/config.mdx`, "Promotion policy") rather than only here.
 pub fn build_config() -> Config {
     Config {
         match_strategy: MatchStrategy::Canonical,

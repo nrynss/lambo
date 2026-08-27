@@ -1009,6 +1009,14 @@ impl LamboServer {
             "daemon_cycles": s.daemon_cycles,
             "canonization_cycles": s.canonization_cycles,
             "canonization_failures": s.canonization_failures,
+            // Which promotion policy the cycles above are actually running.
+            // The counters cannot answer it: `canonization_cycles` climbs
+            // identically under both policies and `canonical_count` staying 0
+            // is the normal reading for a young swarm session AND the whole
+            // symptom of a `Solo` selection that did not take. Read from the
+            // live `Config`, so it reports the value that WON — file, env, or
+            // default — rather than any one of the three inputs.
+            "promotion_policy": self.mem.config().promotion_policy.as_str(),
         });
         // I1: dropped lines are reported next to written ones so a gap in the
         // ledger is never mistaken for a gap in the traffic. Emitted ONLY when
@@ -2116,7 +2124,8 @@ impl LamboServer {
              nodes={} edges={} concepts={} canonical={}\n\
              embedded={}/{}\n\
              flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
-             epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}",
+             epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}\n\
+             promotion_policy={}",
             s.session.0,
             s.agent.0,
             s.node_count,
@@ -2134,6 +2143,10 @@ impl LamboServer {
             s.daemon_cycles,
             s.canonization_cycles,
             s.canonization_failures,
+            // The text half of the same answer, on its own line: an operator
+            // reading the tool output should not have to open the structured
+            // payload to learn which policy the cycle counts above belong to.
+            self.mem.config().promotion_policy.as_str(),
         );
         // One payload builder shared with the I2 heartbeat, so a heartbeat can
         // never report different numbers than the tool. With `--ledger` off
@@ -2244,15 +2257,22 @@ impl ServerHandler for LamboServer {
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 mod tests {
     use super::*;
+    use crate::canon::PromotionPolicy;
     use crate::embed::{Embedder, FixtureEmbedder};
     use crate::store::{GraphStore, MemoryStore};
     use crate::types::EmbeddingContract;
+    use crate::Config;
 
     async fn server(session: &str) -> LamboServer {
+        server_with_config(session, Config::default()).await
+    }
+
+    async fn server_with_config(session: &str, config: Config) -> LamboServer {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
         let mem = Memory::builder()
             .session(session)
             .agent("agent-a")
+            .config(config)
             // Keep the background flush loop out of the assertions.
             .flush_interval(Duration::from_secs(3_600))
             .store(store)
@@ -3215,6 +3235,160 @@ mod tests {
             );
         }
         s.mem.close().await.expect("close");
+    }
+
+    /// The process-selected policy must reach the live canonization task, not
+    /// merely the scorer unit tests. The same seven historical Constraint
+    /// derives are seven >=24h-separated sessions: Solo's 1.5 eviction
+    /// resistance makes the score 10.5, past `CANONICAL_BAR`, so it climbs
+    /// None → Candidate → Venerable → Canonical at one hop per cycle.
+    ///
+    /// Swarm refuses the identical corpus, and the operative reason is the
+    /// **peer-count floor**, not an absent P90 convergence: `stage1_candidates`
+    /// returns empty as soon as `peers.len() < canonization_min_peer_count`
+    /// (default 20) and never reaches the score distribution at all. Two other
+    /// swarm gates would each independently give the same answer here —
+    /// `gc_survived >= 3` cannot be met with `gc_interval` at its 10 000
+    /// default, and one concept has no peer distribution to cut at P90 — so the
+    /// arm is over-determined. That is fine for a negative control, but the
+    /// reason it fires must be stated correctly: this arm exercises the floor.
+    #[tokio::test]
+    async fn a_single_writer_historical_constraint_canonizes_only_under_solo() {
+        use crate::types::CanonizationStatus;
+
+        /// Cycles the arm is given **after the corpus is complete**, counted
+        /// from a baseline rather than from process start.
+        ///
+        /// Solo needs exactly three: one hop per cycle is structural
+        /// (`canon::eval`). The budget is not three, and it is not absolute.
+        /// An absolute `canonization_cycles >= 4` left one cycle of slack for
+        /// the whole run, and the 10 ms eval interval means cycles fire *while*
+        /// the seven derives are still being submitted — a cycle that sees one
+        /// recurrence (1.5, under `CANDIDATE_BAR`) or six (9.0, under
+        /// `CANONICAL_BAR`) is a real cycle that promotes nothing and spends
+        /// budget. Baselining makes those unspendable, so the pass condition is
+        /// "three hops happened" instead of "three hops happened inside four
+        /// ticks"; the headroom on top costs ~90 ms.
+        const CYCLE_BUDGET: u64 = 12;
+
+        async fn run(policy: PromotionPolicy, session: &str) -> CanonizationStatus {
+            let config = Config {
+                promotion_policy: policy,
+                canonization_eval_interval: Duration::from_millis(10),
+                ..Config::default()
+            };
+            config.validate().expect("selected policy validates");
+            let s = server_with_config(session, config).await;
+            let content = "single-writer recurring constraint";
+            for event_time in [
+                "2018-01-01T00:00:00Z",
+                "2018-01-03T00:00:00Z",
+                "2018-01-05T00:00:00Z",
+                "2018-01-07T00:00:00Z",
+                "2018-01-09T00:00:00Z",
+                "2018-01-11T00:00:00Z",
+                "2018-01-13T00:00:00Z",
+            ] {
+                // `call` (not `call_raw`) awaits the ack's receipt to a settled
+                // state, which is load-bearing here and not incidental: J3
+                // makes `lambo_derive` return once the write is *ordered*, so
+                // `is_error == Some(false)` alone would mean queued, not
+                // applied, and the loop below could open on a graph with no
+                // such concept in it.
+                let out = call(
+                    &s,
+                    "lambo_derive",
+                    json!({
+                        "agent_id": "agent-a",
+                        "concepts": [{"content": content, "concept_type": "constraint"}],
+                        "event_time": event_time,
+                    }),
+                )
+                .await;
+                assert_eq!(out.is_error, Some(false), "derive failed: {out:?}");
+            }
+
+            // Every one of the seven is applied by now, so from here on every
+            // cycle scores the complete corpus. Anything the eval spent while
+            // the corpus was partial is behind this line.
+            let baseline = s.mem.stats().canonization_cycles;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let status = s
+                    .mem
+                    .graph()
+                    .read()
+                    .concepts()
+                    .find(|concept| concept.content == content)
+                    .expect("the applied derives left a constraint in the graph")
+                    .canonization_status;
+                let spent = s.mem.stats().canonization_cycles.saturating_sub(baseline);
+                if status == CanonizationStatus::Canonical
+                    || spent >= CYCLE_BUDGET
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    // The Swarm arm is a LIVE negative control: it must have
+                    // burned its whole budget of real cycles on the finished
+                    // corpus and still promoted nothing. Without this the arm
+                    // could pass by never having evaluated anything.
+                    assert!(
+                        status == CanonizationStatus::Canonical || spent >= CYCLE_BUDGET,
+                        "{policy:?} neither promoted nor got its {CYCLE_BUDGET} cycles \
+                         (spent {spent}) — the arm timed out instead of deciding"
+                    );
+                    s.mem.close().await.expect("close");
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        assert_eq!(
+            run(PromotionPolicy::Solo, "mcp-solo-promotes").await,
+            CanonizationStatus::Canonical,
+            "seven historical recurrences must clear Solo's Canonical band"
+        );
+        assert_eq!(
+            run(PromotionPolicy::Swarm, "mcp-swarm-does-not-promote").await,
+            CanonizationStatus::None,
+            "the same lone-writer corpus must not silently change Swarm"
+        );
+    }
+
+    /// P2-b: `lambo_stats` names the live promotion policy, in both halves of
+    /// its answer.
+    ///
+    /// The failure this closes is not a bad config — it is a *correct* one an
+    /// operator cannot read back. `lambo.toml` saying `Solo` under a stale
+    /// exported `LAMBO_PROMOTION_POLICY=Swarm` runs Swarm, legitimately, and
+    /// before this key the only remaining evidence was days of absent
+    /// canonization events. Asserted on both arms, because a field hardcoded to
+    /// one policy would pass a single-arm test.
+    #[tokio::test]
+    async fn stats_reports_which_promotion_policy_is_live() {
+        for policy in PromotionPolicy::ALL {
+            let s = server_with_config(
+                &format!("stats-policy-{}", policy.as_str().to_ascii_lowercase()),
+                Config {
+                    promotion_policy: policy,
+                    ..Config::default()
+                },
+            )
+            .await;
+            let out = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+            let payload = out.structured_content.as_ref().expect("stats payload");
+            assert_eq!(
+                payload["promotion_policy"].as_str(),
+                Some(policy.as_str()),
+                "the structured payload must name the live policy: {payload}"
+            );
+            let text = format!("{:?}", out.content);
+            assert!(
+                text.contains(&format!("promotion_policy={}", policy.as_str())),
+                "the text summary must name the live policy too: {text}"
+            );
+            s.mem.close().await.expect("close");
+        }
     }
 
     /// A receipt with **no** `wait_ms` is a fetch, not a wait: it answers with
@@ -5921,6 +6095,10 @@ mod tests {
             "daemon_cycles",
             "canonization_cycles",
             "canonization_failures",
+            // P2-b: which policy the cycle counters belong to. A caller that
+            // has to infer it from a flat `canonical_count` is back to the
+            // dead end the selector exists to end.
+            "promotion_policy",
             "warnings",
         ] {
             assert!(

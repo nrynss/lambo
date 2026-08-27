@@ -74,17 +74,7 @@ impl Drop for Scratch {
 /// the only configuration is the `--config <toml>` we pass (Level B).
 fn lambo() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-    for k in [
-        "LAMBO_STORE",
-        "LAMBO_EMBEDDER",
-        "LAMBO_CONFIG",
-        "LAMBO_COCKROACH_DSN",
-        "DATABASE_URL",
-        "LAMBO_SQLITE_PATH",
-        "LAMBO_EMBED_DIM",
-        "LAMBO_LLAMA_EMBED_URL",
-        "LAMBO_LLAMA_MODEL",
-    ] {
+    for k in lambo::RESOLVE_ENV_VARS {
         cmd.env_remove(k);
     }
     cmd

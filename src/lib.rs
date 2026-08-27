@@ -120,7 +120,7 @@ pub use memory::{CanonicalMemory, DryRun, ImpactReport, Memory, MemoryBuilder, M
 
 pub use resolve::{
     assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,
-    resolve_from_config_path, resolve_store_only, ResolvedBackends,
+    resolve_from_config_path, resolve_store_only, ResolvedBackends, RESOLVE_ENV_VARS,
 };
 
 #[cfg(feature = "store-memory")]

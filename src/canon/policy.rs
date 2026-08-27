@@ -76,10 +76,11 @@
 //! wall clock.
 
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canon::event_time::separated_session_count;
 use crate::canon::stage1_candidates;
@@ -88,33 +89,113 @@ use crate::daemon::ScoreTable;
 use crate::graph::Graph;
 use crate::types::{CanonizationStatus, Concept, EdgeType, Node, NodeId};
 
-/// Which promotion policy a session canonizes under.
+/// Declares [`PromotionPolicy`] **and** [`PromotionPolicy::ALL`] from one list
+/// of variants, so that a variant the valid set does not name is not a thing
+/// this file can express.
 ///
-/// Serialized `PascalCase`, matching [`crate::types::MatchStrategy`] — the
-/// other enum-valued knob on [`crate::Config`].
+/// # Why the enum is not written out by hand (T3-P3-2)
 ///
-/// Unlike `MatchStrategy`, the `Default` here and
-/// `Config::default().promotion_policy` are the **same** value (`Swarm`).
-/// There is deliberately no second, differing product default to remember:
-/// swarm is what the pipeline has always done, and C1's entire contract is
-/// that it keeps doing it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-pub enum PromotionPolicy {
-    /// Spec §3.2 multi-agent convergence: peer-count session gate, P90 cut on
-    /// the non-Canonical peer score distribution. The default, and the only
-    /// policy a session can currently run under.
-    #[default]
-    Swarm,
-    /// Single-writer promotion (spec §3.2's solo score).
+/// `ALL` is what every refusal enumerates and what [`PromotionPolicy::from_str`]
+/// searches, so a variant missing from it is not cosmetic. It is unselectable
+/// from *both* operator surfaces — `lambo.toml`'s `promotion_policy` and
+/// `LAMBO_PROMOTION_POLICY` — while every refusal keeps naming only the values
+/// that are in the array, so the operator is told the value they need does not
+/// exist.
+///
+/// That property used to be "pinned by construction" with `ALL.len() == 2` plus
+/// a round-trip loop over `ALL`. Both are blind in the one direction that
+/// matters: the length only moves when a variant is added *to `ALL`*, and the
+/// loop iterates `ALL`, so a variant absent from `ALL` was reached by neither.
+/// A third variant, with the arms the compiler demands in `scorer`, `as_str`
+/// and `gate_progress`, compiled and passed the entire suite while being
+/// unreachable from either surface.
+///
+/// An exhaustive `match` does not close it either, and the reason is worth
+/// recording so the next author does not retry it: every match-based scheme
+/// needs a second, independent statement of *how many* variants exist to bound
+/// the arms against, and stable Rust cannot count an enum's variants. So the
+/// arm the compiler forces for the new variant can always be satisfied —
+/// pointing at an existing slot, or returning the same index as its neighbour —
+/// without `ALL` growing. Generating both from one list is what actually
+/// closes it: there is no way to add a variant except by adding it here, and
+/// adding it here adds it to `ALL`. What the compiler then still does, and does
+/// well, is point at every match that has to gain an arm.
+macro_rules! promotion_policy {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+        #[serde(rename_all = "PascalCase")]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant, )+
+        }
+
+        impl $name {
+            /// Every value an operator may write, in the spelling config
+            /// serializes.
+            ///
+            /// The valid set exists once so that no error message can drift
+            /// from what [`PromotionPolicy::from_str`] actually accepts: a
+            /// message naming `Swarm, Solo` from a hardcoded literal keeps
+            /// saying that after a third variant lands, and an operator then
+            /// reads a refusal that omits the very value they should have used.
+            ///
+            /// Generated from the same variant list as the enum itself (see the
+            /// `promotion_policy!` macro), including the length — so this is
+            /// exhaustive by construction rather than by assertion, and there
+            /// is no literal count for the two to disagree about.
+            pub const ALL: [$name; [$(stringify!($variant)),+].len()] =
+                [$($name::$variant),+];
+        }
+    };
+}
+
+promotion_policy! {
+    /// Which promotion policy a session canonizes under.
     ///
-    /// Implemented as of C2: [`SoloScorer`] computes the §3.2 formula over the
-    /// graph's own evidence. The default remains [`PromotionPolicy::Swarm`] —
-    /// nothing canonizes under solo unless a session opts in.
-    Solo,
+    /// Serialized `PascalCase`, matching [`crate::types::MatchStrategy`] — the
+    /// other enum-valued knob on [`crate::Config`].
+    ///
+    /// Unlike `MatchStrategy`, the `Default` here and
+    /// `Config::default().promotion_policy` are the **same** value (`Swarm`).
+    /// There is deliberately no second, differing product default to remember:
+    /// swarm is what the pipeline has always done, and C1's entire contract is
+    /// that it keeps doing it.
+    ///
+    /// Declared through the `promotion_policy!` macro so that this variant list
+    /// is also [`PromotionPolicy::ALL`]. **A new variant goes here**, and the
+    /// compiler will then name every `match` that needs an arm for it.
+    pub enum PromotionPolicy {
+        /// Spec §3.2 multi-agent convergence: peer-count session gate, P90 cut on
+        /// the non-Canonical peer score distribution. The default, and the only
+        /// policy a session can currently run under.
+        #[default]
+        Swarm,
+        /// Single-writer promotion (spec §3.2's solo score).
+        ///
+        /// Implemented as of C2: [`SoloScorer`] computes the §3.2 formula over the
+        /// graph's own evidence. The default remains [`PromotionPolicy::Swarm`] —
+        /// nothing canonizes under solo unless a session opts in.
+        Solo,
+    }
 }
 
 impl PromotionPolicy {
+    /// The accepted values as one `Swarm | Solo` phrase, built from
+    /// [`PromotionPolicy::ALL`] — the same shape `StoreKind` /
+    /// `EmbedderKind` put in their own refusals.
+    fn expected() -> String {
+        Self::ALL
+            .iter()
+            .map(|policy| policy.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
     /// The scorer this policy dispatches to.
     ///
     /// Both scorers are zero-sized, so this is a `&'static` with no
@@ -126,12 +207,87 @@ impl PromotionPolicy {
         }
     }
 
-    /// The value as it is written in config, for error messages.
+    /// The value as it is written in config — for error messages, for the
+    /// attach line, and for `lambo_stats`.
+    ///
+    /// The runtime report matters as much as the refusal. `lambo.toml` saying
+    /// `Solo` while a stale `LAMBO_PROMOTION_POLICY=Swarm` is exported in a
+    /// systemd unit is a *valid* configuration whose env half wins silently;
+    /// without this value on the attach line and in the stats payload the only
+    /// remaining evidence of which policy is live is days of absent
+    /// canonization events, which is exactly the diagnosis dead-end the
+    /// selector exists to end.
     pub fn as_str(self) -> &'static str {
         match self {
             PromotionPolicy::Swarm => "Swarm",
             PromotionPolicy::Solo => "Solo",
         }
+    }
+}
+
+/// Parse a config or environment spelling: trimmed, case-insensitive, and
+/// refusing anything else by name.
+///
+/// Deliberately as lenient as its two siblings, `StoreKind::from_str` and
+/// `EmbedderKind::from_str`, which both trim and lowercase. `lambo.toml`'s
+/// every other value is snake_case (`kind = "memory"`, `kind = "bge_m3"`), so
+/// `promotion_policy = "solo"` is the likeliest thing an operator types; a
+/// parser that refused it would be teaching a casing rule that exists nowhere
+/// else in the file. The refusal still names the rejected value *and* the valid
+/// set, because the fail-closed contract is about never silently falling back
+/// to `Swarm`, not about casing.
+///
+/// One parser serves both surfaces: the file goes through it via
+/// `LamboFile`'s `deserialize_with`, and the environment overlay calls it
+/// directly. An env-lenient/file-strict split would mean the same string
+/// works in `LAMBO_PROMOTION_POLICY` and fails in `lambo.toml`.
+impl FromStr for PromotionPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = s.trim();
+        if t.is_empty() {
+            return Err(format!(
+                "empty promotion policy (expected {})",
+                Self::expected()
+            ));
+        }
+        let lowered = t.to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|policy| policy.as_str().to_ascii_lowercase() == lowered)
+            .ok_or_else(|| {
+                format!(
+                    "unknown promotion policy {t:?} (expected {})",
+                    Self::expected()
+                )
+            })
+    }
+}
+
+impl std::fmt::Display for PromotionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `serde` entry point for `lambo.toml`'s optional `promotion_policy` key, so
+/// the file is parsed by [`PromotionPolicy::from_str`] rather than by the
+/// derive's exact-`PascalCase` match.
+///
+/// Only the *process file* is routed here. `Config`'s own field keeps the
+/// derive, because `Config` is a Rust struct an embedder builds in code and
+/// its JSON is a library wire format, not something an operator hand-types.
+pub(crate) fn deserialize_config_value<'de, D>(de: D) -> Result<Option<PromotionPolicy>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<String>::deserialize(de)? {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<PromotionPolicy>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -462,6 +618,74 @@ mod tests {
 
     fn ts() -> DateTime<Utc> {
         Utc.timestamp_opt(1_752_000_000, 0).unwrap()
+    }
+
+    /// `ALL` is what every refusal message enumerates, so a variant missing
+    /// from it is a refusal that hides the value the operator needed.
+    ///
+    /// The coverage half is not asserted here, and deliberately so: `ALL` and
+    /// the enum are generated from one variant list by `promotion_policy!`, so
+    /// a variant `ALL` does not name is unrepresentable rather than untested.
+    /// T3-P3-2: the assertion that *used* to stand in for coverage —
+    /// `ALL.len() == 2` — was vacuous in exactly the direction that mattered,
+    /// because the length moves only when a variant is added to `ALL` and the
+    /// loop below iterates `ALL`, so a variant absent from `ALL` was reached by
+    /// neither. Restoring any `ALL.len() == N` literal here would restore that,
+    /// and would also give the generated length something to disagree with.
+    ///
+    /// What is left to test is the part construction does *not* give: that every
+    /// value in the set survives the round trip an operator's config actually
+    /// takes — `as_str` out, `from_str` back — and that `expected()` names it.
+    #[test]
+    fn all_covers_every_variant_and_round_trips_through_from_str() {
+        for policy in PromotionPolicy::ALL {
+            assert_eq!(
+                policy.as_str().parse::<PromotionPolicy>(),
+                Ok(policy),
+                "{policy:?} must parse back from its own config spelling"
+            );
+            assert_eq!(policy.to_string(), policy.as_str());
+            assert!(PromotionPolicy::expected().contains(policy.as_str()));
+        }
+    }
+
+    /// Trimmed and case-insensitive, like `StoreKind::from_str` and
+    /// `EmbedderKind::from_str` — `lambo.toml`'s every other value is
+    /// snake_case, so `"solo"` is what an operator types. Still fail-closed:
+    /// nothing unrecognized silently becomes the default.
+    #[test]
+    fn from_str_is_lenient_about_shape_and_strict_about_membership() {
+        for (raw, want) in [
+            ("Swarm", PromotionPolicy::Swarm),
+            ("swarm", PromotionPolicy::Swarm),
+            ("SWARM", PromotionPolicy::Swarm),
+            ("  sWaRm\t", PromotionPolicy::Swarm),
+            ("Solo", PromotionPolicy::Solo),
+            ("solo", PromotionPolicy::Solo),
+            ("\n SOLO ", PromotionPolicy::Solo),
+        ] {
+            assert_eq!(raw.parse::<PromotionPolicy>(), Ok(want), "{raw:?}");
+        }
+        for raw in ["", "   ", "\t\n", "Solitary", "swarms", "sol o", "Both"] {
+            let err = raw
+                .parse::<PromotionPolicy>()
+                .expect_err(&format!("{raw:?} must be refused, never defaulted"));
+            for needle in ["Swarm", "Solo"] {
+                assert!(
+                    err.contains(needle),
+                    "the refusal for {raw:?} must name {needle}: {err}"
+                );
+            }
+        }
+        // The rejected value is quoted back, so an operator can see the typo
+        // (a bare valid-set list leaves them guessing which key was wrong).
+        assert!(
+            "Solitary"
+                .parse::<PromotionPolicy>()
+                .unwrap_err()
+                .contains("Solitary"),
+            "the refusal must quote what it rejected"
+        );
     }
 
     fn sid() -> SessionId {
@@ -1159,6 +1383,12 @@ mod tests {
             serde_json::from_str::<PromotionPolicy>("\"Solo\"").unwrap(),
             PromotionPolicy::Solo
         );
+        // The DERIVE stays exact — this is `Config`'s JSON, a library wire
+        // format nobody hand-types. The *config-file* surface is deliberately
+        // lenient and does not go through the derive: `LamboFile`'s
+        // `promotion_policy` uses `deserialize_config_value`, which routes to
+        // `from_str` so `lambo.toml` accepts what `LAMBO_PROMOTION_POLICY`
+        // accepts. The two are not in tension; they are two audiences.
         assert!(serde_json::from_str::<PromotionPolicy>("\"solo\"").is_err());
     }
     // -----------------------------------------------------------------------

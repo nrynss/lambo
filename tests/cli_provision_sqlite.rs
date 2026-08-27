@@ -17,17 +17,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-    for k in [
-        "LAMBO_STORE",
-        "LAMBO_EMBEDDER",
-        "LAMBO_CONFIG",
-        "LAMBO_COCKROACH_DSN",
-        "DATABASE_URL",
-        "LAMBO_SQLITE_PATH",
-        "LAMBO_EMBED_DIM",
-        "LAMBO_LLAMA_EMBED_URL",
-        "LAMBO_LLAMA_MODEL",
-    ] {
+    for k in lambo::RESOLVE_ENV_VARS {
         cmd.env_remove(k);
     }
     cmd

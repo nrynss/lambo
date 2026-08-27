@@ -129,10 +129,8 @@ pub struct Config {
     /// themselves still live in `canon::stage{1,2,3}` and are still not
     /// settable from a file (see [`DaemonConfig`]).
     ///
-    /// Only [`PromotionPolicy::Swarm`] is implemented; [`Config::validate`]
-    /// refuses `Solo`, which is waiting on C2 and its D2 (event-time)
-    /// dependency. Unlike [`MatchStrategy`], this field's `Default` and the
-    /// product default agree: both are `Swarm`.
+    /// Unlike [`MatchStrategy`], this field's `Default` and the product
+    /// default agree: both are `Swarm`.
     pub promotion_policy: PromotionPolicy,
 
     pub semantic_match_threshold: f64,
@@ -261,12 +259,24 @@ impl Config {
 /// score cut are the product's judgement and stay that way.
 ///
 /// This exists because the default cadence puts canonization out of reach of
-/// any ordinary session. GC runs every `gc_interval` *mutations* (default
-/// 10 000) and Stage 1 requires `gc_survived >= 3`, so a concept cannot be
-/// promoted until the session has taken 30 000 mutations. `lambo demo` only
-/// shows the state machine working because it sets `gc_interval` to 1
-/// internally. Without a way to say the same thing from a config file, a real
-/// deployment can run for weeks and never promote anything.
+/// any ordinary session **under the default `Swarm` policy**. GC runs every
+/// `gc_interval` *mutations* (default 10 000) and swarm's Stage 1 requires
+/// `gc_survived >= 3`, so a concept cannot be promoted until the session has
+/// taken 30 000 mutations. `lambo demo` only shows the state machine working
+/// because it sets `gc_interval` to 1 internally. Without a way to say the same
+/// thing from a config file, a real deployment can run for weeks and never
+/// promote anything.
+///
+/// # Both paragraphs above are policy-conditional (C2)
+///
+/// `promotion_policy = "Solo"` reads none of it. [`crate::canon::SoloScorer`]
+/// scores on recurrence — `gc_survived`, blast radius, distinct interactions
+/// and coverage are all ignored, and the score's own bands drive the ladder in
+/// place of the store-evidence stages — so a lone writer reaches Canonical in a
+/// handful of mutations with zero GC sweeps. **With `Solo` you do not need to
+/// lower `gc_interval`**; lowering it changes nothing about promotion. The
+/// "30 000 mutations" arithmetic and the "not settable from a file" framing
+/// both describe swarm, which remains the default.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -288,9 +298,10 @@ impl DaemonConfig {
     }
 }
 
-/// On-disk process config (`lambo.toml`). Product knobs stay on [`Config`];
-/// this file chooses which compiled adapters to run, and may override daemon
-/// *cadence* (see [`DaemonConfig`]) but never a canonization threshold.
+/// On-disk process config (`lambo.toml`). This file chooses which compiled
+/// adapters to run, may override daemon *cadence* (see [`DaemonConfig`]), and
+/// selects the canonization promotion policy, but never a canonization
+/// threshold.
 ///
 /// Unknown keys are rejected (`deny_unknown_fields`) so typos like `knd` / `[embeder]`
 /// fail closed instead of silently using defaults.
@@ -303,6 +314,21 @@ pub struct LamboFile {
     pub embedder: EmbedderConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// Canonization's Stage-1 promotion selector. `None` deliberately means
+    /// "leave the product default alone", rather than making the process file
+    /// carry a second default that could drift from [`Config::default`].
+    ///
+    /// Parsed by `PromotionPolicy::from_str` rather than serde's
+    /// exact-`PascalCase` derive, so the file accepts what
+    /// `LAMBO_PROMOTION_POLICY` accepts — trimmed and case-insensitive, like
+    /// `store.kind` and `embedder.kind`. A file that refused `"solo"` while the
+    /// environment took it would be a casing rule that exists nowhere else in
+    /// this file.
+    #[serde(
+        default,
+        deserialize_with = "crate::canon::deserialize_promotion_policy"
+    )]
+    pub promotion_policy: Option<PromotionPolicy>,
 }
 
 impl LamboFile {
@@ -353,6 +379,22 @@ impl LamboFile {
             .embedder
             .overlay_env()
             .map_err(|e: EmbedError| LamboError::Config(e.to_string()))?;
+        // Non-empty env wins; an empty value is UNSET and leaves the file
+        // value alone — the same rule `StoreConfig::overlay_env` and
+        // `EmbedderConfig::overlay_env` apply to all nine of their variables,
+        // and the rule the env table in `docs/reference/config.mdx` promises.
+        // `var_os` hands back `Some("")` for an exported-but-empty variable, so
+        // an empty `LAMBO_PROMOTION_POLICY=` placeholder in a `.env` (or in
+        // this repo's own test harness) would otherwise be a hard startup
+        // error rather than a no-op.
+        if let Some(raw) = std::env::var_os("LAMBO_PROMOTION_POLICY") {
+            let raw = raw.to_string_lossy();
+            if !raw.trim().is_empty() {
+                file.promotion_policy = Some(raw.parse::<PromotionPolicy>().map_err(|error| {
+                    LamboError::Config(format!("LAMBO_PROMOTION_POLICY: {error}"))
+                })?);
+            }
+        }
         Ok(file)
     }
 }
@@ -396,8 +438,9 @@ mod tests {
             Duration::from_secs(300)
         );
         // C1: swarm is the shipped default and the whole point of the seam is
-        // that it stays one. A default of `Solo` would also fail `validate`,
-        // but this is the assertion that says which policy runs.
+        // that it stays one. Since C2 nothing else defends that — `validate`
+        // accepts either policy — so this assertion is the only thing standing
+        // between an unset `promotion_policy` and moved behaviour.
         assert_eq!(c.promotion_policy, PromotionPolicy::Swarm);
 
         assert_eq!(
@@ -569,6 +612,7 @@ mod tests {
         assert_eq!(f.store.kind, StoreKind::Memory);
         assert_eq!(f.embedder.kind, EmbedderKind::BgeM3);
         assert_eq!(f.embedder.dim, 1024);
+        assert_eq!(f.promotion_policy, None);
         assert_eq!(
             f.embedder.llama_url.as_deref(),
             Some("http://127.0.0.1:8080")
@@ -643,6 +687,159 @@ mod tests {
         assert!(LamboFile::from_toml_str("extra = 1\n").is_err());
     }
 
+    /// The FILE surface goes through `PromotionPolicy::from_str`, not serde's
+    /// exact-`PascalCase` derive (P3-a). `store.kind` and `embedder.kind` are
+    /// both trimmed and case-insensitive with aliases, and every other value in
+    /// this file is snake_case — a `promotion_policy` that took `Solo` in the
+    /// environment and refused it in the file, or took `"Solo"` and refused
+    /// `"solo"`, would be a casing rule with no sibling.
+    #[test]
+    fn lambo_file_promotion_policy_is_case_insensitive_and_defaults_to_none() {
+        for spelling in ["Solo", "solo", "SOLO", "  Solo  ", "\tsOlO\n"] {
+            let f = LamboFile::from_toml_str(&format!("promotion_policy = {spelling:?}\n"))
+                .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e}"));
+            assert_eq!(
+                f.promotion_policy,
+                Some(PromotionPolicy::Solo),
+                "{spelling:?}"
+            );
+        }
+        for spelling in ["Swarm", "swarm", " SWARM "] {
+            let f = LamboFile::from_toml_str(&format!("promotion_policy = {spelling:?}\n"))
+                .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e}"));
+            assert_eq!(
+                f.promotion_policy,
+                Some(PromotionPolicy::Swarm),
+                "{spelling:?}"
+            );
+        }
+        // Absent stays absent: the file must not carry a second default that
+        // could drift from `Config::default`.
+        assert_eq!(LamboFile::default().promotion_policy, None);
+        assert_eq!(
+            LamboFile::from_toml_str("[store]\nkind = \"memory\"\n")
+                .unwrap()
+                .promotion_policy,
+            None
+        );
+        // Still fails closed, and still names both halves — the leniency is
+        // about casing, never about falling back to the default.
+        for bogus in ["", "  ", "Solitary", "swarmy"] {
+            let err = LamboFile::from_toml_str(&format!("promotion_policy = {bogus:?}\n"))
+                .unwrap_err()
+                .to_string();
+            for needle in ["Swarm", "Solo"] {
+                assert!(
+                    err.contains(needle),
+                    "{bogus:?} error must name {needle}: {err}"
+                );
+            }
+        }
+        assert!(
+            LamboFile::from_toml_str("promotion_policy = \"Solitary\"\n")
+                .unwrap_err()
+                .to_string()
+                .contains("Solitary"),
+            "the refusal must quote the rejected value"
+        );
+    }
+
+    /// P1-a: an exported-but-empty `LAMBO_PROMOTION_POLICY=` is **unset**.
+    ///
+    /// `var_os` returns `Some("")` for it, so parsing unconditionally turned an
+    /// empty `.env` placeholder — and any harness that exports the variable
+    /// blank — into a hard startup error, contradicting both the documented env
+    /// rule and all nine sibling overrides.
+    #[test]
+    fn promotion_policy_empty_env_is_unset_and_leaves_the_file_value() {
+        let _env = crate::test_util::env_lock();
+        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
+        let dir = scratch_config_dir("empty-env");
+        let path = dir.join("lambo.toml");
+        std::fs::write(&path, "promotion_policy = \"Solo\"\n").expect("config");
+
+        for blank in ["", "   ", "\t"] {
+            std::env::set_var("LAMBO_PROMOTION_POLICY", blank);
+            let resolved = LamboFile::load_resolved(Some(&path))
+                .unwrap_or_else(|e| panic!("blank {blank:?} must be unset, not an error: {e}"));
+            assert_eq!(
+                resolved.promotion_policy,
+                Some(PromotionPolicy::Solo),
+                "a blank override must leave the file value intact"
+            );
+        }
+
+        // And with no file value at all, blank leaves the product default —
+        // `None` here, which `resolve_backends` reads as "do not touch
+        // `Config::default().promotion_policy`".
+        std::fs::write(&path, "[store]\nkind = \"memory\"\n").expect("config");
+        std::env::set_var("LAMBO_PROMOTION_POLICY", "");
+        assert_eq!(
+            LamboFile::load_resolved(Some(&path))
+                .expect("blank env is unset")
+                .promotion_policy,
+            None
+        );
+
+        match old {
+            Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
+            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A scratch directory for the env-override tests, unique per process and
+    /// per call so two of them can never share a `lambo.toml`.
+    fn scratch_config_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lambo-promotion-policy-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn promotion_policy_env_beats_file_and_unknown_value_fails_closed() {
+        let _env = crate::test_util::env_lock();
+        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
+        std::env::set_var("LAMBO_PROMOTION_POLICY", "Swarm");
+        let dir = scratch_config_dir("env-wins");
+        let path = dir.join("lambo.toml");
+        std::fs::write(&path, "promotion_policy = \"Solo\"\n").expect("config");
+
+        let resolved = LamboFile::load_resolved(Some(&path)).expect("env override");
+        assert_eq!(resolved.promotion_policy, Some(PromotionPolicy::Swarm));
+
+        // The env surface is the file surface's parser, so it is lenient in
+        // exactly the same way and no more.
+        std::env::set_var("LAMBO_PROMOTION_POLICY", " swarm ");
+        assert_eq!(
+            LamboFile::load_resolved(Some(&path))
+                .expect("trimmed lowercase env override")
+                .promotion_policy,
+            Some(PromotionPolicy::Swarm)
+        );
+
+        std::env::set_var("LAMBO_PROMOTION_POLICY", "Everywhere");
+        let err = LamboFile::load_resolved(Some(&path))
+            .expect_err("unknown env value must fail at startup")
+            .to_string();
+        for needle in ["LAMBO_PROMOTION_POLICY", "Everywhere", "Swarm", "Solo"] {
+            assert!(err.contains(needle), "error must name {needle}: {err}");
+        }
+
+        match old {
+            Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
+            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn lambo_file_store_aliases() {
         let f = LamboFile::from_toml_str(
@@ -682,6 +879,7 @@ kind = "fake"
                 ..Default::default()
             },
             daemon: Default::default(),
+            promotion_policy: Some(PromotionPolicy::Solo),
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();
