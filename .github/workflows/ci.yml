@@ -345,6 +345,24 @@ jobs:
             2>&1 | tee postgres-b3.log
           grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
           grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
+      # B0-R4-1: the Stage-2 `coverage` decode. Only a live PostgreSQL >= 14
+      # can exercise it -- that is where `extract(epoch ...)` began returning
+      # `numeric`, and SQLite's type affinity hides the mismatch entirely, so
+      # an offline row is green either way. Before the cast this step is the
+      # only thing in CI that goes red. Its own step, with the same
+      # grep-the-ok-line guard as its neighbours, so a rename or an accidental
+      # skip is a named red row rather than a silent pass.
+      - name: Live Postgres coverage decode + Stage-2 hop
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms \
+            store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres \
+            2>&1 | tee postgres-coverage.log
+          grep -q 'test store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms ... ok' postgres-coverage.log
+          grep -q 'test store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres ... ok' postgres-coverage.log
+
       - name: Live Postgres H3 recall parity
         run: |
           set -o pipefail
