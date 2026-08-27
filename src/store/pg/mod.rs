@@ -486,16 +486,30 @@ extent AS (
 )
 SELECT
     (SELECT count(*) FROM span) AS distinct_count,
-    CASE
-        WHEN (SELECT count(*) FROM span) = 0 THEN 0.0
-        WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
-            THEN least(1.0, greatest(0.0,
-                 extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
-                 / extract(epoch FROM (extent.hi - extent.lo))))
-        -- F1: non-empty span over a single-point session extent covers the
-        -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
-        ELSE 1.0
-    END AS coverage
+    -- B0-R4-1: the outer cast is load-bearing, not cosmetic. PostgreSQL 14
+    -- changed `extract` to return `numeric` rather than `double precision`,
+    -- and a bare `0.0` / `1.0` literal is `numeric` too -- so WITHOUT this
+    -- cast every arm of the CASE is numeric, `try_get::<f64>("coverage")`
+    -- fails unconditionally with "Rust type `f64` (as SQL type `FLOAT8`) is
+    -- not compatible with SQL type `NUMERIC`", and the whole canonization
+    -- cycle aborts at the Stage-2 gate that reads it. Stage 1's transitions
+    -- commit first, so the visible symptom is a graph that reaches Candidate
+    -- and never moves again -- not an obvious type error. SQLite's affinity
+    -- accepts the same value as a float, so only a Postgres-backed test sees
+    -- this. `InteractionSpan::coverage` is an f64 ratio, not money: the
+    -- contract belongs here at the boundary, not in a Decimal conversion.
+    CAST(
+        CASE
+            WHEN (SELECT count(*) FROM span) = 0 THEN 0.0
+            WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
+                THEN least(1.0, greatest(0.0,
+                     extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
+                     / extract(epoch FROM (extent.hi - extent.lo))))
+            -- F1: non-empty span over a single-point session extent covers the
+            -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
+            ELSE 1.0
+        END
+    AS double precision) AS coverage
 FROM extent
 "#;
 

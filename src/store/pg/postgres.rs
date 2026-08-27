@@ -1489,6 +1489,372 @@ mod tests {
     /// Preservation: fencing StaleWrite and idempotent upserts still hold
     /// on the Postgres dialect. Shared PgStore code, proven on this dialect
     /// so B3 does not silently drop them.
+    /// B0-R4-1, integration half: a **canonization cycle** over Postgres makes
+    /// the `Candidate -> Venerable` hop and reports no failure.
+    ///
+    /// The span test above pins the decode at the boundary; this pins the
+    /// consequence, which is the thing that was actually observed in the wild:
+    /// 531 concepts, 31 Candidate, 0 Venerable, 0 Canonical, and one
+    /// `CanonizationCycleFailed` per cycle forever. Stage 2 is the only stage
+    /// that reads `coverage`, so before the cast `eval_cycle` returned
+    /// `Err(EvalError)` here after Stage 1's transitions had already committed
+    /// — which is why the symptom was a stalled ladder rather than a loud
+    /// type error.
+    ///
+    /// Asserting `Ok` is the zero-`CanonizationCycleFailed` assertion at the
+    /// source: `CanonizationTask::cycle` logs that warning on exactly this
+    /// `Err`, so a cycle that returns `Ok` cannot have emitted it.
+    ///
+    /// Fixture is the Postgres twin of `canon::eval`'s
+    /// `one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate`: four
+    /// interactions spanning 80s, twenty non-Canonical peers so the session
+    /// gate is open, and a hub carrying three distinct-origin dependents that
+    /// cover 40/80 = 0.5 of the extent. The hub is seeded already `Candidate`
+    /// so the cycle under test is the Stage-2 one.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn canonization_cycle_makes_the_stage2_hop_on_postgres() {
+        use crate::canon::{eval_cycle, EvalParams, Evaluator};
+        use crate::graph::Graph;
+        use crate::types::{CanonizationStatus, Edge, EdgeType};
+        use parking_lot::RwLock;
+
+        let Some(store) =
+            unique_live_store("canonization_cycle_makes_the_stage2_hop_on_postgres", 8).await
+        else {
+            return;
+        };
+        let sid = SessionId::from("b0-r4-cycle");
+        let agent = AgentId::from("b0-r4");
+        let at = Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0).unwrap();
+        let secs = |n: i64| at + chrono::Duration::seconds(n);
+
+        let mk_interaction = |id: NodeId, prev: Option<NodeId>, when| Interaction {
+            id,
+            session_id: sid.clone(),
+            agent_id: agent.clone(),
+            prompt_text: Some("p".into()),
+            previous_id: prev,
+            created_at: when,
+            event_time: None,
+        };
+        let mk_concept = |id: NodeId, origin: NodeId, gc: i32, status| Concept {
+            id,
+            session_id: sid.clone(),
+            content: format!("c{id}"),
+            canonical_key: format!("c{id}"),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: agent.clone(),
+            created_at: at,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: gc,
+            canonization_status: status,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+
+        // Four interactions, 0/20/40/80s: the session extent is 80s, and the
+        // hub's three dependents span 40s of it -> coverage 0.5, the division
+        // arm of the CASE.
+        let iids: Vec<NodeId> = (0..4).map(|_| NodeId::new()).collect();
+        let mut graph = Graph::new(sid.clone());
+        for (n, when) in [secs(0), secs(20), secs(40), secs(80)].iter().enumerate() {
+            let prev = if n == 0 { None } else { Some(iids[n - 1]) };
+            graph
+                .insert_interaction(mk_interaction(iids[n], prev, *when))
+                .expect("seed interaction");
+        }
+
+        // Twenty non-Canonical peers so Stage 1's session gate is open. The
+        // hub is the twentieth, seeded Candidate: Stage 2 is the stage under
+        // test, and a node that became Candidate this tick is not re-checked
+        // for Venerable in the same one.
+        let hub = NodeId::new();
+        for _ in 1..20u64 {
+            let peer = NodeId::new();
+            graph
+                .insert_concept(
+                    mk_concept(peer, iids[0], 5, CanonizationStatus::None),
+                    iids[0],
+                )
+                .expect("seed peer");
+        }
+        graph
+            .insert_concept(
+                mk_concept(hub, iids[0], 5, CanonizationStatus::Candidate),
+                iids[0],
+            )
+            .expect("seed hub");
+
+        // Three dependents with DISTINCT origin interactions: the span CTE
+        // counts distinct origins, so three dependents off one interaction
+        // would cover nothing and Stage 2 would decline for a reason that has
+        // nothing to do with the decode.
+        for (n, origin) in [iids[0], iids[1], iids[2]].iter().enumerate() {
+            let dep = NodeId::new();
+            graph
+                .insert_concept(
+                    mk_concept(dep, *origin, 0, CanonizationStatus::None),
+                    *origin,
+                )
+                .expect("seed dependent");
+            graph
+                .upsert_edge(Edge {
+                    id: NodeId::new(),
+                    session_id: sid.clone(),
+                    source: dep,
+                    target: hub,
+                    edge_type: EdgeType::Dependency,
+                    weight: 1.0,
+                    reinforcements: 1,
+                    created_at: secs(20 * n as i64),
+                    last_reinforced: secs(20 * n as i64),
+                    event_time: None,
+                })
+                .expect("seed edge");
+        }
+
+        // Seed the live store through the production write path, so the rows
+        // Stage 2 reads are the rows a real writer would have left.
+        let snap = graph.snapshot();
+        let mut mutations = Vec::new();
+        for i in snap.interactions {
+            mutations.push(Mutation::UpsertNode {
+                node: Node::Interaction(i),
+            });
+        }
+        for c in snap.concepts {
+            mutations.push(Mutation::UpsertNode {
+                node: Node::Concept(c),
+            });
+        }
+        for e in snap.edges {
+            mutations.push(Mutation::UpsertEdge { edge: e });
+        }
+        store
+            .flush(&MutationBatch { mutations }, None)
+            .await
+            .expect("seed flush");
+
+        let graph = RwLock::new(graph);
+        let (tx, _rx) = crate::daemon::events::event_channel();
+        let scores = crate::daemon::ScoreTable {
+            epoch: 0,
+            ranked: vec![crate::types::Scored::new(hub, 1.0)],
+        };
+        let params = EvalParams {
+            min_age: std::time::Duration::ZERO,
+            min_edge_age: std::time::Duration::ZERO,
+            ..EvalParams::default()
+        };
+        let mut ev = Evaluator::new();
+
+        // Before the cast this is Err(EvalError) carrying the numeric/f64
+        // decode failure, and `CanonizationTask::cycle` turns exactly this
+        // into the `CanonizationCycleFailed` warning seen once a minute.
+        let outcome = eval_cycle(&mut ev, &graph, &store, &scores, &tx, &params, secs(120))
+            .await
+            .expect("a Postgres cycle must not fail at the Stage-2 coverage read");
+
+        let status = match graph.read().node(hub) {
+            Some(crate::types::Node::Concept(c)) => c.canonization_status,
+            other => panic!("hub must still be a concept, got {other:?}"),
+        };
+        assert_eq!(
+            status,
+            CanonizationStatus::Venerable,
+            "evidence clearing the Stage-2 gate must promote Candidate -> Venerable \
+             on Postgres, not stall at Candidate"
+        );
+        assert!(
+            outcome.transitions().any(|e| e.node_id == hub
+                && e.from_status == CanonizationStatus::Candidate
+                && e.to_status == CanonizationStatus::Venerable),
+            "the hop must be audited, not merely reflected in the graph"
+        );
+    }
+
+    /// B0-R4-1, offline half: the cast is load-bearing, so its absence is a
+    /// defect the `store-postgres` CI row can catch without a cluster.
+    ///
+    /// This is a text pin because the real failure is a *type* the SQL returns,
+    /// and only a live server can report that. It cannot prove the decode
+    /// works; it can only refuse a silent revert of the token that makes the
+    /// decode possible. `interaction_span_coverage_decodes_on_both_arms` is
+    /// the half that actually proves it.
+    #[test]
+    fn span_coverage_is_cast_to_double_precision() {
+        let sql = super::super::INTERACTION_SPAN_SQL;
+        assert!(
+            sql.contains("AS double precision) AS coverage"),
+            "coverage must be cast to double precision: PostgreSQL >= 14 returns \
+             `numeric` from extract(epoch ...), and the bare 0.0/1.0 CASE arms are \
+             numeric too, so an uncast column fails `try_get::<f64>` on EVERY row \
+             and aborts the canonization cycle at the Stage-2 gate"
+        );
+        assert!(
+            sql.contains("extract(epoch FROM"),
+            "the cast above is only meaningful while the expression it wraps still \
+             computes coverage from extract(epoch ...)"
+        );
+    }
+
+    /// B0-R4-1, live half: the coverage **decode**, on the adapter that breaks.
+    ///
+    /// Stage 2 (`Candidate -> Venerable`) reads this column. Before the cast,
+    /// every canonization cycle against Postgres died here with "Rust type
+    /// `f64` (as SQL type `FLOAT8`) is not compatible with SQL type `NUMERIC`"
+    /// after Stage 1 had already committed its transitions — so the graph
+    /// reached Candidate and never moved again, once a minute, forever.
+    ///
+    /// Both `CASE` arms are exercised because both return numeric today: a
+    /// multi-point session extent takes the division arm, a single-point
+    /// extent takes `ELSE 1.0`. A test that covered only one would leave the
+    /// other free to regress.
+    ///
+    /// This cannot be a SQLite or MemoryStore test: SQLite's type affinity
+    /// accepts the same value as a float, so the offline ladder promotes all
+    /// the way to Canonical while Postgres silently caps at Candidate.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn interaction_span_coverage_decodes_on_both_arms() {
+        let Some(store) =
+            unique_live_store("interaction_span_coverage_decodes_on_both_arms", 8).await
+        else {
+            return;
+        };
+        let agent = AgentId::from("b0-r4");
+        let now = Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0).unwrap();
+
+        // Two sessions differing ONLY in the shape of their temporal extent,
+        // so the arm each one takes is the thing under test.
+        //
+        //   multi-point: two interactions two hours apart -> hi > lo, so
+        //                `extract(epoch ...) > 0` and coverage divides.
+        //   single-point: one interaction -> hi == lo, so the guard is false
+        //                and coverage is the bare `ELSE 1.0` literal.
+        for (session, offsets) in [
+            ("b0-r4-multi-point", vec![0i64, 7_200]),
+            ("b0-r4-single-point", vec![0i64]),
+        ] {
+            let sid = SessionId::from(session);
+            let concept_id = NodeId::new();
+            let origin = NodeId::new();
+            let mut mutations = Vec::new();
+
+            // The concept's own origin interaction. Every later interaction
+            // reaches it through a structural edge, which is what the span
+            // CTE counts.
+            for (n, secs) in offsets.iter().enumerate() {
+                let iid = if n == 0 { origin } else { NodeId::new() };
+                mutations.push(Mutation::UpsertNode {
+                    node: Node::Interaction(Interaction {
+                        id: iid,
+                        session_id: sid.clone(),
+                        agent_id: agent.clone(),
+                        prompt_text: Some(format!("p{n}")),
+                        previous_id: None,
+                        created_at: now - chrono::Duration::seconds(*secs),
+                        event_time: None,
+                    }),
+                });
+            }
+            mutations.push(Mutation::UpsertNode {
+                node: Node::Concept(Concept {
+                    id: concept_id,
+                    session_id: sid.clone(),
+                    content: "coverage probe".into(),
+                    canonical_key: "coverage probe".into(),
+                    concept_type: ConceptType::Constraint,
+                    origin_interaction: origin,
+                    origin_agent: agent.clone(),
+                    created_at: now - chrono::Duration::seconds(7_200),
+                    access_count: 0,
+                    last_accessed: None,
+                    gc_survived: 0,
+                    canonization_status: crate::types::CanonizationStatus::None,
+                    blast_radius: None,
+                    last_demotion_time: None,
+                    embedding: None,
+                    human_confirmed: 0,
+                    chunk_group_id: None,
+                }),
+            });
+            // A structural inbound edge from a concept whose origin is the
+            // session's interaction: the span CTE joins edge -> source concept
+            // -> origin interaction, so a bare edge between interactions would
+            // count nothing and the query would answer 0 on both arms without
+            // ever reaching the numeric division.
+            let peer = NodeId::new();
+            mutations.push(Mutation::UpsertNode {
+                node: Node::Concept(Concept {
+                    id: peer,
+                    session_id: sid.clone(),
+                    content: "peer".into(),
+                    canonical_key: "peer".into(),
+                    concept_type: ConceptType::Entity,
+                    origin_interaction: origin,
+                    origin_agent: agent.clone(),
+                    created_at: now - chrono::Duration::seconds(7_200),
+                    access_count: 0,
+                    last_accessed: None,
+                    gc_survived: 0,
+                    canonization_status: crate::types::CanonizationStatus::None,
+                    blast_radius: None,
+                    last_demotion_time: None,
+                    embedding: None,
+                    human_confirmed: 0,
+                    chunk_group_id: None,
+                }),
+            });
+            mutations.push(Mutation::UpsertEdge {
+                edge: crate::types::Edge {
+                    id: NodeId::new(),
+                    session_id: sid.clone(),
+                    source: peer,
+                    target: concept_id,
+                    edge_type: crate::types::EdgeType::Dependency,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: now - chrono::Duration::seconds(7_200),
+                    last_reinforced: now - chrono::Duration::seconds(7_200),
+                    event_time: None,
+                },
+            });
+
+            store
+                .flush(&MutationBatch { mutations }, None)
+                .await
+                .unwrap_or_else(|e| panic!("{session}: seed flush: {e}"));
+
+            // The assertion is that this RETURNS AT ALL. Before the cast it is
+            // an Err(Backend) naming the numeric/f64 mismatch, on both arms.
+            let span = store
+                .interaction_span(&sid, concept_id, std::time::Duration::ZERO, now)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("{session}: coverage must decode as f64, not fail the cycle: {e}")
+                });
+
+            assert!(
+                span.coverage.is_finite() && (0.0..=1.0).contains(&span.coverage),
+                "{session}: coverage must be a clamped ratio, got {}",
+                span.coverage
+            );
+            assert!(
+                span.distinct >= 1,
+                "{session}: the seed must produce a non-empty span, else the count = 0 \
+                 arm answers 0.0 and neither arm under test is reached (distinct = {})",
+                span.distinct
+            );
+        }
+    }
+
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn fencing_refuses_stale_write_and_upserts_replay() {
