@@ -2,14 +2,15 @@
 
 ```text
 ╔══════════════════════════════════════════════════════════════════════╗
-║  STATUS: IN PROGRESS — round 4 run and remediated                    ║
-║  Verdict: NOT YET CLEAN. Rounds 1-4 closed. R4 produced 3 findings   ║
-║    (2×P2, 1×P3), so the change still has not been through a round     ║
-║    that returned empty; round 5 is the next step.                     ║
+║  STATUS: CLOSED — ACCEPTED after round 4, on a judgement call         ║
+║  Verdict: ACCEPTED WITHOUT AN EMPTY ROUND. Rounds 1-4 closed. R4      ║
+║    found 3 (2×P2, 1×P3), none of them in shipped behaviour, so the    ║
+║    "review until a round returns empty" rule was retired rather       ║
+║    than satisfied — see "Why this closed at four rounds".              ║
 ║  Both R4 open questions were answered: the macro is justified and     ║
 ║    costs nothing measurable; the fallback string was NOT made         ║
 ║    reachable, and is now labelled for what it is.                     ║
-║  Gates after R4: see "State after round 4".                           ║
+║  Gates after R4: see "State after round 4". All green.                ║
 ║  Findings: R1 13 (+1 self) · R2 11 · R3 6 (+4 nits, +3 self) · R4 3   ║
 ║  P0/P1 open: none. Last P1 closed in R2. No P0 after R0.              ║
 ║  Live services: none used, none needed.                               ║
@@ -334,27 +335,50 @@ rather than adding count.
 - [ ] **No `serve --promotion-policy` flag** — deliberately not implemented; the spec called it
       optional and repo convention says no `serve` flag should duplicate a file key.
 
-## Resuming
+## Why this closed at four rounds
 
-The work is on `task/promotion-policy-serve`, not merged. Next step is a **round 5** from a
-clean start. Round 4's two open questions are closed and should not be re-opened: both were
-settled with evidence (a compile-failure mutation and a built rustdoc page for the macro; a
-payload-shape trace for the fallback string), and both answers are recorded above.
+Merged into `lambo-for-mooshik` at `ad32954` (fast-forward from `71334f0`) after round 4,
+**without** the empty round the earlier status banner demanded. That rule was retired
+deliberately, and the reasoning belongs here rather than in a commit message.
 
-Round 5 should weight itself at:
+The findings decayed in *kind*, not merely in severity:
 
-1. **Whether R4-1's remediation repeated R4-1's own mistake.** The finding was an
-   exhaustiveness claim wider than the pin behind it. The fix adds three names and two
-   feature-gated observations — so ask what a resolve reads that is *still* absent, from the
-   read sites rather than from the list, and check whether `resolved: None` rows have quietly
-   become the place omissions hide.
-2. **The `resolve_clean_locked` guard-passing pattern.** Taking `&MutexGuard` as a proof-of-
-   lock token is a convention this repo did not previously have. Check it is not now a second
-   way to do the same thing, and that no other test in the tree sets an environment variable
-   outside the lock — R4 found one and did not sweep for others.
+| Round | Findings | Where they landed |
+|---|---|---|
+| R1 | 2×P1, 5×P2, 6×P3 | shipped behaviour — a startup error, an unparseable sample, a payload that lied under `Solo` |
+| R2 | 3×P2, 8×P3 | payload and doc correctness |
+| R3 | 1×P2, 5×P3 | vacuous safety, mostly tests and docs |
+| R4 | 2×P2, 1×P3 | **entirely test infrastructure and one comment** |
 
-Everything in rounds 1-3 was confirmed closed by mutation testing except where this doc says
-otherwise; R4's three fixes were each proved by mutation or by direct verification above.
+Nothing R4 found touched what the binary does. The product surface has not moved since R2.
+"Review until a round returns empty" is a stopping rule that can regress without limit on a
+2900-line diff, because a motivated reviewer will always find a P3; convergence on
+nothing-that-matters is the better signal, and that is what rounds 3 and 4 show.
+
+Two residuals were checked before closing rather than assumed:
+
+- **`RESOLVE_ENV_VARS` is `pub`, and R4's own remediation added three names to it** —
+  including `GOOGLE_APPLICATION_CREDENTIALS`. A downstream harness that iterates the const to
+  clear it would start clearing its own Vertex credentials. Checked against the actual
+  consumer: Mooshik does not reference `RESOLVE_ENV_VARS` anywhere. Its credential use is a
+  live-gated test in `src/memory/ops.rs` that skips when the variables are unset, plus
+  `ingester/deploy/entrypoint.sh`, which *exports* them. No breakage.
+- **Whether the addition is a semver break.** It is not: `RESOLVE_ENV_VARS` is itself new in
+  the same Unreleased 0.3.0 section, so it ships with all nineteen names on its first
+  release and no prior list exists to depend on. The CHANGELOG's "Added" placement is
+  correct.
+
+## If this code is revisited
+
+Not a review backlog — nothing here blocks anything. These are the two places a future
+author should look first, because they are the newest and least settled:
+
+- **`resolved: None` rows in `resolve.rs`'s override table.** They are honest today (a read
+  site that is not compiled cannot be watched), but they are also exactly where an omission
+  would next hide. Derive the list from read sites, never from the table.
+- **The `&MutexGuard` proof-of-lock token** on `resolve_clean_locked`. A convention this repo
+  did not previously have. If a second one appears, make it the pattern or drop it; and note
+  that R4 fixed the one env-lock leak it found without sweeping the tree for others.
 
 Two carried-over items, neither belonging to this task:
 
