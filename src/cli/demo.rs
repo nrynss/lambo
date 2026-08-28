@@ -1184,7 +1184,28 @@ async fn await_progression(mem: &Memory, n: &mut Narrator) -> Result<Vec<Transit
     for want in target {
         let graph = mem.graph().clone();
         wait_until(&format!("user schema → {want:?}"), move || {
-            status_of(&graph, USER_SCHEMA) == Some(want)
+            // T84-FLAKE: **at least** `want`, never `== want`.
+            //
+            // The ladder advances one hop per canonization cycle
+            // (`DEMO_EVAL_INTERVAL`, 25ms) while `wait_until` polls every
+            // `POLL_INTERVAL` (2ms). An equality test is therefore a race on a
+            // transient: if this loop is starved past a rung's ~25ms lifetime
+            // — which a loaded machine does routinely — the concept moves
+            // Candidate → Venerable BETWEEN two polls, the equality never
+            // holds, and the wait burns the whole 60s `STEP_DEADLINE` waiting
+            // for a state that has already been and gone. Measured at 5
+            // failures in 12 runs under 24 spinners on a 12-core box, always
+            // as `timed out after 60s waiting for user schema → Candidate`,
+            // even though the demo itself completes in ~0.9s unloaded.
+            //
+            // Raising the deadline would not have fixed it: the wait is not
+            // slow, it is watching for an edge it already missed. The rungs
+            // are monotonic (a demotion lands on `None`, which no rung here
+            // targets), so "has reached at least this rung" is the property
+            // the demo actually means, and it cannot be missed. The per-hop
+            // audit rows the narration and `assert_spec_13` read come from
+            // `transitions`, which records every hop whatever the poll saw.
+            status_of(&graph, USER_SCHEMA).is_some_and(|seen| rung(seen) >= rung(want))
         })
         .await?;
         let cycles = mem.stats().canonization_cycles;
@@ -1391,6 +1412,22 @@ fn concept_id(graph: &Graph, content: &str) -> Option<NodeId> {
         .concepts()
         .find(|c| c.content == content)
         .map(|c| c.id)
+}
+
+/// How far up the canonization ladder a status sits.
+///
+/// `CanonizationStatus` deliberately derives no `Ord` — the ordering of a
+/// *demotion* target is not obvious enough to put on the public type — so the
+/// demo keeps its own rung numbering, local to the one place that needs to ask
+/// "has it got at least this far?". See the `await_progression` wait for why
+/// asking that, rather than for equality, is what makes the demo robust.
+fn rung(status: CanonizationStatus) -> u8 {
+    match status {
+        CanonizationStatus::None => 0,
+        CanonizationStatus::Candidate => 1,
+        CanonizationStatus::Venerable => 2,
+        CanonizationStatus::Canonical => 3,
+    }
 }
 
 fn status_of(graph: &Arc<RwLock<Graph>>, content: &str) -> Option<CanonizationStatus> {

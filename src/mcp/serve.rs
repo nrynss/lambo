@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rmcp::service::ServerInitializeError;
 use rmcp::transport::io::stdio;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -1723,7 +1724,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // `wind_down` — used to pass the entire suite (JE2E-R2-2). It is now pinned
     // by `serve_feeds_the_fence_into_the_transports_shutdown`, which drives
     // `run_transport_until_shutdown` the way this call site does.
-    let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early);
+    // Cloned, not moved: the same signal record is read twice on this path —
+    // by `wind_down` for the shutdown itself, and by `close_bounded` for the
+    // "was that a SECOND Ctrl-C?" escape hatch. Both readers must see one
+    // count, which is exactly why `EarlyShutdown` is `Clone` over shared state.
+    let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone());
     tokio::pin!(shutdown);
 
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
@@ -1850,7 +1855,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
     };
 
-    let outcome = run_and_close(mem.clone(), transport, event_pump).await;
+    let outcome = run_and_close(mem.clone(), transport, event_pump, &early).await;
 
     // After `close()`, deliberately: the tail's durability is the load-bearing
     // guarantee and the ledger is not allowed to be in front of it. The
@@ -1908,9 +1913,10 @@ async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
+    early: &EarlyShutdown,
 ) -> Result<(), LamboError> {
     let outcome = transport.await;
-    let closed = close_bounded(&mem).await;
+    let closed = close_bounded(&mem, early).await;
     event_pump.abort();
 
     match (outcome, closed) {
@@ -1953,8 +1959,8 @@ async fn run_and_close(
 /// under [`LEASE_RELEASE_GRACE`] before returning. It cannot rescue the tail and
 /// does not pretend to: the returned error is unchanged, and a release that
 /// itself times out leaves the row to lapse at TTL, which is where this started.
-async fn close_bounded(mem: &Memory) -> Result<(), LamboError> {
-    close_bounded_until(mem, shutdown_signal()).await
+async fn close_bounded(mem: &Memory, early: &EarlyShutdown) -> Result<(), LamboError> {
+    close_bounded_until(mem, early.second_signal()).await
 }
 
 /// [`close_bounded`] with the re-armed signal passed in.
@@ -2072,6 +2078,37 @@ async fn setup_or_shutdown<T>(
         v = setup => Some(v),
         () = shutdown => None,
     }
+}
+
+/// Did this failed handshake just mean "the client hung up"?
+///
+/// [`ServerInitializeError::ConnectionClosed`] is the one variant rmcp raises
+/// when the transport stream *ended* while it was waiting for a handshake frame
+/// — `expect_next_message` seeing `None`, which is its only construction site
+/// in the crate. On stdio that is EOF on stdin: the client went away between
+/// launching this process and sending `initialize`. That is a disconnect,
+/// indistinguishable in kind from the post-handshake EOF [`serve_stdio`]
+/// already logs as `client disconnected` and exits 0 on.
+///
+/// One honest caveat, because the variant is very slightly broader than "clean
+/// EOF": rmcp's `AsyncRwTransport::receive` also returns `None` when the
+/// underlying read *fails*, not only when it hits end-of-stream. So a genuine
+/// I/O fault on stdin arrives here wearing the same variant, and is treated as
+/// a hangup. That is accepted deliberately rather than overlooked — rmcp logs
+/// the fault itself at ERROR (`Error reading from stream`) so it is never
+/// silent, and a process whose stdin is unreadable cannot serve a stdio client
+/// by any route: there is no configuration an operator could fix in response,
+/// which is what `LamboError::Config` would have been claiming. The variants
+/// that *do* describe a fixable fault stay fatal, below.
+///
+/// Every other variant stays fatal on purpose, because each one is a live peer
+/// saying something wrong rather than a peer leaving: `ExpectedInitializeRequest`
+/// is a client that opened with the wrong frame, `InitializeFailed` /
+/// `UnexpectedInitializeResponse` are protocol violations, and `TransportError`
+/// is an I/O fault worth an operator's attention. Folding those into a clean
+/// exit would hide real breakage behind a zero exit status.
+fn is_pre_handshake_disconnect(e: &ServerInitializeError) -> bool {
+    matches!(e, ServerInitializeError::ConnectionClosed(_))
 }
 
 /// Drain the daemon's event stream into the log.
@@ -2215,7 +2252,44 @@ async fn serve_stdio(
     // reborrows, so the same registration is still live for the transport race
     // below if the handshake wins.
     let service = match setup_or_shutdown(server.serve(stdio()), shutdown.as_mut()).await {
-        Some(r) => r.map_err(|e| LamboError::Config(format!("mcp stdio: {e}")))?,
+        Some(Ok(service)) => service,
+        // A client that hangs up *before* it finishes `initialize` has
+        // disconnected; it has not misconfigured anything. Reporting that as
+        // `LamboError::Config` made `serve` exit non-zero on a completely
+        // ordinary lifecycle event, and it split the contract across the
+        // handshake boundary: an EOF one frame later lands in
+        // `Exit::Finished(Ok(reason))` below and exits 0 with an INFO line.
+        //
+        // This is the defect CI run 33085161710 collected on, and it is worth
+        // spelling out why it presents as a *flaky* test rather than a
+        // deterministic one. `Child::wait()` closes the child's stdin before it
+        // waits, so the pre-handshake durability test's holder gets two
+        // shutdown stimuli in a rush: the `SIGTERM` it sends explicitly, and
+        // the stdin EOF that `wait()` causes an instant later. Whichever the
+        // holder observes first decides the exit status, because
+        // `setup_or_shutdown` is `biased` toward the setup future — so on an
+        // unloaded box the signal usually wins and the process exits 0 down the
+        // `None` arm, while on a loaded runner the holder is descheduled long
+        // enough for the EOF to be sitting there ready when it next polls, the
+        // biased arm takes it, and the same run exits 1. Nothing about the test
+        // was timing-dependent except which of two correct-to-handle events got
+        // there first; only one of them was actually handled.
+        //
+        // So the fix is here rather than in the test: both orderings are a
+        // client going away pre-handshake, and both must close the session and
+        // exit 0. `ConnectionClosed` is rmcp's "the transport ended while I was
+        // waiting for a frame" — a peer hangup and never a config fault — so it
+        // is the only variant folded in; a malformed or rejected `initialize`
+        // still fails loudly.
+        Some(Err(e)) if is_pre_handshake_disconnect(&e) => {
+            tracing::info!(
+                reason = %e,
+                "mcp stdio: client disconnected before the handshake completed — \
+                 closing the session without serving"
+            );
+            return Ok(());
+        }
+        Some(Err(e)) => return Err(LamboError::Config(format!("mcp stdio: {e}"))),
         None => {
             tracing::info!(
                 "mcp stdio: shutdown signal during handshake — closing the session without serving"
@@ -2587,10 +2661,14 @@ async fn wind_down(
 /// existed, and `close_bounded` builds a fresh one.
 #[derive(Clone)]
 pub(crate) struct EarlyShutdown {
-    fired: tokio::sync::watch::Receiver<bool>,
+    /// How many shutdown signals this process has been sent, not merely
+    /// *whether* it has been sent one. The count is what makes
+    /// [`EarlyShutdown::second_signal`] correct — see it for the CI failure
+    /// that a boolean could not tell apart.
+    signals: tokio::sync::watch::Receiver<u64>,
     /// The sender, kept beside the receiver so [`EarlyShutdown::arm`] can be a
     /// `&self` method on the same handle the builder carries.
-    tx: Arc<tokio::sync::watch::Sender<bool>>,
+    tx: Arc<tokio::sync::watch::Sender<u64>>,
     /// Latches on the first [`EarlyShutdown::arm`] so a second call cannot
     /// install a second registration. `build_attach` calls it exactly once per
     /// acquire and `MemoryBuilder` is `Clone`, so this is belt-and-braces
@@ -2607,9 +2685,9 @@ impl EarlyShutdown {
     /// [`serve`] hand it into the builder *before* the election runs while
     /// still arming only on the winning branch.
     pub(crate) fn unarmed() -> Self {
-        let (tx, fired) = tokio::sync::watch::channel(false);
+        let (tx, signals) = tokio::sync::watch::channel(0u64);
         Self {
-            fired,
+            signals,
             tx: Arc::new(tx),
             armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -2634,14 +2712,13 @@ impl EarlyShutdown {
         // `async move` below would re-open the very window this type closes,
         // with every gate green — the same trap `shutdown_signal`'s own
         // docstring records for `wind_down`.
-        let signal = shutdown_signal();
+        //
+        // It counts rather than latches, and keeps counting after the first:
+        // the close-phase escape hatch reads this record to tell an operator's
+        // *second* Ctrl-C from the first, and it cannot do that from a boolean.
+        let counter = shutdown_signal_counter();
         let tx = Arc::clone(&self.tx);
-        tokio::spawn(async move {
-            signal.await;
-            // A receiver is always alive (this handle holds one), and a failed
-            // send would mean the shutdown path is already gone.
-            let _ = tx.send(true);
-        });
+        tokio::spawn(counter(tx));
     }
 
     /// Whether [`EarlyShutdown::arm`] has run on this handle.
@@ -2673,7 +2750,7 @@ impl EarlyShutdown {
     // and CI's RUSTFLAGS `-D warnings` turns that into a build failure.
     #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn simulate_signal(&self) {
-        let _ = self.tx.send(true);
+        self.tx.send_modify(|n| *n += 1);
     }
 
     /// Resolve once a signal has been recorded — **immediately** if one already
@@ -2683,11 +2760,77 @@ impl EarlyShutdown {
     /// whole point: the interesting case is a signal that landed while the
     /// session was still attaching, long before anything asked.
     pub(crate) async fn fired(&self) {
-        let mut rx = self.fired.clone();
+        self.at_least(1).await;
+    }
+
+    /// Resolve once a **second** shutdown signal has been recorded.
+    ///
+    /// This is [`close_bounded`]'s escape hatch — the operator who watches a
+    /// close stall and presses Ctrl-C again — and it is expressed as "the
+    /// count reached two" rather than as a fresh `signal()` registration
+    /// because the fresh registration got it wrong, and lost data doing so.
+    ///
+    /// The old spelling reasoned that a registration created after a signal was
+    /// *delivered* does not replay it, so anything it caught had to be a second
+    /// signal. Delivery is not the event that matters, though: tokio's unix
+    /// handler only sets a flag and writes a byte to its self-pipe, and the
+    /// watch that wakes registrations is not sent until the signal driver task
+    /// gets scheduled to drain that pipe. Under CPU contention those are
+    /// milliseconds apart, and any registration created in the gap sees the
+    /// *first* signal and calls it the second.
+    ///
+    /// That is exactly what the pre-handshake durability test hit once the
+    /// stdio hangup above was classified correctly: the holder closed on the
+    /// stdin EOF that `Child::wait()` causes, `close_bounded` armed a fresh
+    /// registration, and the single `SIGTERM` the test had already sent then
+    /// landed on it — so the close was abandoned, `final flush failed — tail
+    /// lost on exit` was logged, and the holder exited 1 with the session row
+    /// gone. One signal, read as two. And it is not a test-only shape: closing
+    /// stdin and then sending `SIGTERM` is the shutdown sequence the MCP spec
+    /// prescribes for clients, so a real client shutting a holder down could
+    /// lose the tail the same way.
+    ///
+    /// A count cannot be fooled by when the record is written: one `kill` is
+    /// one increment whenever the driver gets round to it. Two signals close
+    /// enough together to coalesce inside one `watch` value would count as one,
+    /// which errs toward finishing the close — the safe direction, and not the
+    /// shape of the impatient-operator case this serves anyway.
+    ///
+    /// Why an absolute two rather than "one more than the count when the close
+    /// began": reading a baseline at the top of the close would reintroduce the
+    /// very race this fixes, because the whole problem is that the first
+    /// signal's increment may not have been written *yet* when the close
+    /// starts. A baseline of zero read in that window makes the first signal
+    /// look like the increment, and the close is abandoned again. Two is
+    /// immune precisely because it does not depend on reading anything at a
+    /// particular moment.
+    ///
+    /// The one behaviour this trades away, stated plainly: on a close reached
+    /// *without* any signal — a client hangup, the `ConnectionClosed` path
+    /// above — an operator's first Ctrl-C no longer abandons the close; it
+    /// takes two. That is a deliberate trade and a small one, because the
+    /// close is already bounded by [`CLOSE_GRACE`], so the cost is a bounded
+    /// wait rather than a hang, and the thing bought with it is that a tail is
+    /// never thrown away on a signal the operator only sent once.
+    pub(crate) async fn second_signal(&self) {
+        self.at_least(2).await;
+    }
+
+    /// Resolve once at least `n` shutdown signals have been recorded —
+    /// **immediately** if that many already were.
+    ///
+    /// Parks forever on an unarmed handle: nothing is counting, so no claim
+    /// about signals can honestly be made. On the serve path that cannot
+    /// happen for anything that closes a session — [`EarlyShutdown::arm`] runs
+    /// in the acquire, and only a process that acquired has a `Memory` to
+    /// close — and on the library path ([`build_memory`]) an unarmed handle is
+    /// the whole point.
+    async fn at_least(&self, n: u64) {
+        let mut rx = self.signals.clone();
         // `Err` means every sender is gone, which cannot happen while `self`
         // holds one; treat it as "no signal" and park rather than reporting a
         // shutdown nobody asked for.
-        if rx.wait_for(|fired| *fired).await.is_err() {
+        if rx.wait_for(|seen| *seen >= n).await.is_err() {
             std::future::pending::<()>().await;
         }
     }
@@ -2781,6 +2924,99 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     {
         async {
             let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// [`shutdown_signal`], but it never stops listening — it counts.
+///
+/// Returns a *builder* of the counting future rather than the future itself so
+/// the registration keeps [`shutdown_signal`]'s eager contract: the `signal()`
+/// calls run when this function is called, inside [`EarlyShutdown::arm`], not
+/// when the spawned task is first polled. A signal arriving one instruction
+/// after `arm` returns is therefore already buffered by a live registration
+/// rather than hitting the default disposition, which is the property R2-a and
+/// J6 both turn on.
+///
+/// One registration, polled in a loop, is deliberate and is the part that makes
+/// the count trustworthy. Creating a *new* registration per signal — the
+/// obvious alternative — leaves a window between one signal being recorded and
+/// the next registration existing, and a signal in that window is not counted
+/// at all. That is the same class of mistake as the one
+/// [`EarlyShutdown::second_signal`] documents, only in the other direction: it
+/// would make the operator's second Ctrl-C occasionally do nothing.
+fn shutdown_signal_counter(
+) -> impl FnOnce(Arc<tokio::sync::watch::Sender<u64>>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // Register both handlers NOW, exactly as `shutdown_signal` does and for
+        // exactly the same reason. Errors (exotic platforms, exhausted signal
+        // slots) degrade to the lazy ctrl_c path rather than failing.
+        let int = signal(SignalKind::interrupt());
+        let term = signal(SignalKind::terminate());
+        move |tx| {
+            Box::pin(async move {
+                match (int, term) {
+                    (Ok(mut int), Ok(mut term)) => loop {
+                        // The `Option` is load-bearing and must not be dropped
+                        // on the floor. `recv()` yields `None` when the
+                        // registration behind it is gone, and `None` is
+                        // *immediately* ready forever after — so a loop that
+                        // treated it as an arrival would spin a core at full
+                        // tilt and, far worse, drive this counter up until it
+                        // tripped `second_signal` and abandoned a close that
+                        // nobody had asked to abandon. That is the tail-loss
+                        // failure this whole type exists to prevent, delivered
+                        // by the fix for it. Tokio's global signal registry
+                        // never drops its sender, so this is a guard rather
+                        // than an expected path — which is exactly why it has
+                        // to be written down rather than assumed.
+                        let arrived = tokio::select! {
+                            v = int.recv() => v.is_some(),
+                            v = term.recv() => v.is_some(),
+                        };
+                        if !arrived {
+                            return;
+                        }
+                        // A receiver is always alive (the `EarlyShutdown` this
+                        // was spawned from holds one), and a failed send would
+                        // mean the shutdown path is already gone.
+                        tx.send_modify(|n| *n += 1);
+                    },
+                    (Ok(mut int), Err(_)) => loop {
+                        if int.recv().await.is_none() {
+                            return;
+                        }
+                        tx.send_modify(|n| *n += 1);
+                    },
+                    (Err(_), Ok(mut term)) => loop {
+                        if term.recv().await.is_none() {
+                            return;
+                        }
+                        tx.send_modify(|n| *n += 1);
+                    },
+                    // No registration at all: `ctrl_c()` resolves once, so this
+                    // records the first signal and nothing after it. Degraded,
+                    // and honest about being degraded — the escape hatch simply
+                    // never trips, which loses no data.
+                    (Err(_), Err(_)) => {
+                        if tokio::signal::ctrl_c().await.is_ok() {
+                            tx.send_modify(|n| *n += 1);
+                        }
+                    }
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        move |tx: Arc<tokio::sync::watch::Sender<u64>>| {
+            Box::pin(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tx.send_modify(|n| *n += 1);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
         }
     }
 }
@@ -3335,6 +3571,48 @@ mod tests {
         assert!(
             CLOSE_FLUSH_GRACE > LEASE_RELEASE_GRACE,
             "the flush keeps the bulk of the close budget; the release is one statement"
+        );
+    }
+
+    /// A peer that leaves mid-handshake is a disconnect; a peer that says
+    /// something wrong is not.
+    ///
+    /// This is the classification CI run 33085161710 turned red on. The
+    /// pre-handshake durability test reaps its holder with `Child::wait()`,
+    /// which closes stdin first, so the holder saw a stdin EOF racing the
+    /// `SIGTERM` it had just been sent. The EOF arrived as
+    /// `ConnectionClosed("initialize request")`, was reported as
+    /// `LamboError::Config`, and exited the process 1 — on a loaded runner,
+    /// where the EOF won the race, and only there. Both stimuli mean the client
+    /// is gone, so both must close the session and exit 0.
+    ///
+    /// The negative half of the test is the load-bearing half: widening this to
+    /// "any handshake failure exits 0" would green the same CI run while hiding
+    /// a client that opened with the wrong frame, a rejected `initialize`, or a
+    /// genuine transport fault behind a successful exit status.
+    #[test]
+    fn only_a_mid_handshake_hangup_counts_as_a_disconnect() {
+        assert!(
+            is_pre_handshake_disconnect(&ServerInitializeError::ConnectionClosed(
+                "initialize request".to_string()
+            )),
+            "a stdin EOF while waiting for `initialize` is the client leaving"
+        );
+        assert!(
+            !is_pre_handshake_disconnect(&ServerInitializeError::ExpectedInitializeRequest(None)),
+            "a client that opens with the wrong frame is still talking — that is a real fault \
+             and must not be laundered into a clean exit"
+        );
+        assert!(
+            !is_pre_handshake_disconnect(&ServerInitializeError::InitializeFailed(
+                rmcp::model::ErrorData::invalid_request("nope", None)
+            )),
+            "a rejected `initialize` is a protocol failure, not a hangup"
+        );
+        assert!(
+            !is_pre_handshake_disconnect(&ServerInitializeError::Cancelled),
+            "cancellation is not a client hangup; `serve_stdio` handles the shutdown signal \
+             through `setup_or_shutdown`, not through this classifier"
         );
     }
 
@@ -4148,11 +4426,111 @@ mod tests {
             );
         }
 
+        /// **The first signal must never abandon a close; the second must.**
+        ///
+        /// `close_bounded`'s escape hatch is the operator who watches a close
+        /// stall and presses Ctrl-C again. It used to detect that by arming a
+        /// *fresh* `signal()` registration at the top of the close and treating
+        /// whatever that caught as the second signal, on the reasoning that a
+        /// registration created after a signal was delivered will not replay
+        /// it.
+        ///
+        /// Delivery is not when the record is written. Tokio's unix handler
+        /// sets a flag and writes one byte to a self-pipe; the watch that wakes
+        /// registrations is not sent until the signal driver task is scheduled
+        /// to drain it. On a loaded machine those are milliseconds apart, so a
+        /// registration created in the gap catches the FIRST signal and reads
+        /// it as a second — abandoning a close nobody asked to abandon and
+        /// losing the tail with it.
+        ///
+        /// The pre-handshake durability test hit exactly this under CPU
+        /// contention, and it is not a test-only shape: closing stdin and then
+        /// sending `SIGTERM` is the shutdown sequence the MCP spec prescribes
+        /// for clients, so a real client could lose a holder's tail the same
+        /// way. Counting arrivals instead of dating them is what fixes it — one
+        /// `kill` is one increment no matter when the driver records it.
+        ///
+        /// `simulate_signal` bumps the record directly, so this drives the
+        /// observer side without installing process-wide handlers on the whole
+        /// test binary or sending a real signal to it.
+        #[tokio::test]
+        async fn one_signal_does_not_abandon_the_close_but_two_do() {
+            // One signal: the close must complete and the tail must be durable.
+            let one = EarlyShutdown::unarmed();
+            one.simulate_signal();
+            let m = mem("serve-close-one-signal").await;
+            let out = close_bounded_until(&m, one.second_signal()).await;
+            assert!(
+                out.is_ok(),
+                "a single shutdown signal is the one that STARTED the shutdown — it must never \
+                 be mistaken for the operator's give-up second press, whenever it happens to be \
+                 recorded: {out:?}"
+            );
+            assert_closed(&m, "one-signal path");
+
+            // Two signals: the escape hatch is still there, and still says so.
+            let two = EarlyShutdown::unarmed();
+            two.simulate_signal();
+            two.simulate_signal();
+            let m2 = mem("serve-close-two-signals").await;
+            let out2 = close_bounded_until(&m2, two.second_signal()).await;
+            let err = out2.expect_err(
+                "a genuine second signal must still abandon the close — removing the escape \
+                 hatch would turn a stalled flush into an unkillable process",
+            );
+            assert!(
+                err.to_string().contains("second shutdown signal"),
+                "the abandon must be reported as what it is: {err}"
+            );
+        }
+
+        /// The record `close_bounded` reads is a **count**, and an unarmed one
+        /// never claims anything.
+        ///
+        /// Kept separate from the close above so a regression in the counting
+        /// itself is named as such rather than surfacing as a mysterious close
+        /// result. `now_or_never`-style polling is spelled with a zero timeout
+        /// so a future that is genuinely pending is not silently treated as
+        /// ready.
+        #[tokio::test]
+        async fn the_signal_record_counts_arrivals_rather_than_latching() {
+            let e = EarlyShutdown::unarmed();
+            async fn ready(f: impl Future<Output = ()>) -> bool {
+                tokio::time::timeout(Duration::from_millis(50), f)
+                    .await
+                    .is_ok()
+            }
+
+            assert!(
+                !ready(e.fired()).await,
+                "an unarmed record has seen nothing and must park"
+            );
+            assert!(
+                !ready(e.second_signal()).await,
+                "an unarmed record certainly has not seen two"
+            );
+
+            e.simulate_signal();
+            assert!(
+                ready(e.fired()).await,
+                "one arrival is a shutdown — this is J6's pre-arm and must still fire"
+            );
+            assert!(
+                !ready(e.second_signal()).await,
+                "one arrival is NOT two: this is the assertion the old boolean record could \
+                 not make, and the whole of the fix"
+            );
+
+            e.simulate_signal();
+            assert!(ready(e.second_signal()).await, "two arrivals are two");
+        }
+
         #[tokio::test]
         async fn close_runs_when_the_transport_returns_ok() {
             let m = mem("serve-close-ok").await;
             let pump = tokio::spawn(std::future::pending::<()>());
-            let out = run_and_close(m.clone(), async { Ok(()) }, pump).await;
+            let out =
+                run_and_close(m.clone(), async { Ok(()) }, pump, &EarlyShutdown::unarmed()).await;
             assert!(out.is_ok(), "clean transport exit closes cleanly: {out:?}");
             assert_closed(&m, "ok path");
         }
@@ -4165,6 +4543,7 @@ mod tests {
                 m.clone(),
                 async { Err(LamboError::Config("transport blew up".into())) },
                 pump,
+                &EarlyShutdown::unarmed(),
             )
             .await;
             assert!(out.is_err(), "the transport error is surfaced: {out:?}");
@@ -4199,7 +4578,13 @@ mod tests {
             );
 
             let pump = tokio::spawn(std::future::pending::<()>());
-            let out = run_and_close(first.clone(), async { Ok(()) }, pump).await;
+            let out = run_and_close(
+                first.clone(),
+                async { Ok(()) },
+                pump,
+                &EarlyShutdown::unarmed(),
+            )
+            .await;
             assert!(out.is_ok(), "clean close: {out:?}");
             assert_closed(&first, "release path");
 
@@ -4423,7 +4808,8 @@ mod tests {
             // identity-licensed unlink — runs on this path exactly as it does
             // on the clean one.
             let pump = tokio::spawn(std::future::pending::<()>());
-            let out = run_and_close(m.clone(), async { Ok(()) }, pump).await;
+            let out =
+                run_and_close(m.clone(), async { Ok(()) }, pump, &EarlyShutdown::unarmed()).await;
             assert!(
                 out.is_err(),
                 "a fenced close must not claim success: {out:?}"

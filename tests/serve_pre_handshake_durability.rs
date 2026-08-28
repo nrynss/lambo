@@ -462,3 +462,171 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The exit-status contract the flake in CI run 33085161710 was really about.
+///
+/// The proxy case above sends a `SIGTERM` and then reaps the holder with
+/// `Child::wait()` — and `wait()` **closes the child's stdin before it waits**
+/// (std documents this; it is how it avoids deadlocking on a full pipe). So the
+/// holder is handed two shutdown stimuli within microseconds of each other: the
+/// signal, and a stdin EOF while it is still parked waiting for `initialize`.
+/// Only the signal was handled. The EOF fell through
+/// `ServerInitializeError::ConnectionClosed` into `LamboError::Config`, and the
+/// holder exited 1 with `config: mcp stdio: connection closed: initialize
+/// request` *after* logging a clean `Memory session closed (tail flushed)`.
+///
+/// Which stimulus the holder saw first was pure scheduling luck — the signal on
+/// an idle box, the EOF on a loaded runner — which is why that test read as a
+/// timing flake when the defect underneath it was not timing-dependent at all.
+///
+/// This test pins the property directly and deterministically: **no signal at
+/// all**, just a client that launches `lambo serve` and hangs up before sending
+/// `initialize`, which is what every MCP client that dies during startup does.
+/// That must be a clean close — exit 0, session row durable — exactly as a
+/// hangup one frame later already was. It reproduced 30/30 before the fix and
+/// needs no contention to do it, so it is the fast, deterministic guard on a
+/// contract the process-level proxy test could only ever probe by accident.
+#[test]
+fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
+    const HANGUP_SESSION: &str = "t8.2-pre-handshake-hangup";
+
+    let dir = std::env::temp_dir().join(format!(
+        "lambo-pre-handshake-hangup-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let db_str = dir
+        .join("durability.sqlite")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let cfg_path = dir.join("lambo.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{db_str}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n"
+        ),
+    )
+    .expect("write config");
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("connect for provision");
+        store.init_schema().await.expect("init_schema");
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .args([
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "serve",
+            "--session",
+            HANGUP_SESSION,
+            "--agent",
+            "agent-a",
+            "--transport",
+            "stdio",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lambo serve");
+    let pid = child.id();
+
+    let stderr = child.stderr.take().expect("child stderr");
+    let (etx, erx) = mpsc::channel::<String>();
+    let ereader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Some(Ok(line)) = lines.next() {
+            eprintln!("[serve stderr] {line}");
+            if etx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let stdout = child.stdout.take().expect("child stdout");
+    let out_reader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(Ok(_line)) = lines.next() {}
+    });
+
+    // Event-driven, not timed: block until the session is provably attached.
+    // The deadline is a backstop that turns a hang into a readable failure, and
+    // nothing about how fast this test runs depends on it — on a machine under
+    // any load the `recv` returns the moment the line is written.
+    //
+    // Anchored on the SERVE-level line on purpose, unlike the loose matcher the
+    // two cases above need. Those are racing a signal into the window that
+    // opens at lease acquisition, so they must fire on the earlier memory-level
+    // line. This one is racing nothing: it wants the process fully parked in
+    // the pre-handshake wait so the hangup is unambiguously pre-handshake, and
+    // the serve-level line is the one that says so.
+    let mut attached = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match erx.recv_timeout(Duration::from_secs(30)) {
+            Ok(line) if line.contains("lambo serve: session attached") => {
+                attached = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    if !attached {
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("never saw 'lambo serve: session attached' — cannot hang up pre-handshake");
+    }
+
+    // The hangup, and the whole stimulus: close stdin, send no `initialize`,
+    // send no signal. Dropping `ChildStdin` closes the write end of the pipe,
+    // so the child reads EOF while it is still waiting for the handshake frame.
+    drop(child.stdin.take().expect("child stdin"));
+
+    let (wait_tx, wait_rx) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = wait_tx.send(child.wait());
+    });
+    match wait_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(status) => {
+            let status = status.expect("wait on child");
+            assert!(
+                status.success(),
+                "a client that hangs up before `initialize` is a disconnect, not a \
+                 misconfiguration: lambo serve must exit 0 the way it already does for a \
+                 hangup after `initialize`, got {status:?}"
+            );
+        }
+        Err(_) => {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            let _ = waiter.join();
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("lambo serve did not exit within 30s of a pre-handshake client hangup");
+        }
+    }
+    let _ = waiter.join();
+    let _ = ereader.join();
+    let _ = out_reader.join();
+
+    // Clean exit is half the contract; the other half is that the clean exit
+    // was earned. `close()` must have run and flushed the session-attach
+    // mutation, so the row is readable from a fresh connection.
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("reconnect");
+        store
+            .load_session(&SessionId::from(HANGUP_SESSION))
+            .await
+            .expect(
+                "the session row must be durable after a pre-handshake hangup — an exit that \
+             skipped close() would leave nothing here",
+            );
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
