@@ -28,6 +28,17 @@
   external struct-literal construction and exhaustive destructuring of it
   breaks. `..Default::default()` does not.
 
+- `lambo serve` exits **0**, not 1, when a client disconnects before completing
+  the MCP `initialize` handshake. That is `rmcp`'s stream-ended case — on stdio,
+  EOF on stdin — and reporting it as a config error called an ordinary
+  lifecycle event a misconfiguration: the session had already closed and
+  flushed cleanly, and the failing status was appended to a successful
+  shutdown. It also split the contract across the handshake boundary, since an
+  EOF one frame *later* already exited 0. Anything scripting `lambo serve` that
+  treated a pre-handshake hangup as a failure will now see success. Every other
+  handshake error stays fatal: a client opening with the wrong frame, a
+  protocol violation, or a transport fault is still a non-zero exit.
+
 - `store.kind = "postgres"` and `"pg"` now select `StoreKind::Postgres`, not
   CockroachDB. `"cockroach"` and `"crdb"` remain Cockroach. A leftover
   `kind = "postgres"` pointed at a Cockroach cluster fails at provision
@@ -141,6 +152,24 @@
   instance's authorized networks, idempotently, preserving entries it did not add.
 - Released binaries (`ship`) now carry `store-postgres` and `embed-gemini`, so a
   `lambo.toml` naming `postgres` or `gemini` runs on a prebuilt binary.
+
+### Fixed
+
+- A bounded close could abandon its own flush. `close_bounded` registered a
+  *fresh* shutdown listener, so the SIGTERM that started the shutdown could be
+  the one that listener recorded — and the close then read it as the operator's
+  give-up second press and stopped flushing. `EarlyShutdown` now counts signal
+  arrivals rather than latching a flag, so the wind-down and the bounded close
+  read one shared record and "a second press" means exactly that. The escape
+  hatch is deliberately kept: without it a stalled flush is an unkillable
+  process.
+- `lambo demo` no longer waits on an exact canonization status. It polled for
+  equality every 2ms against a ladder advancing one rung per 25ms cycle, so a
+  loaded machine could step Candidate → Venerable *between two polls*, after
+  which the wait could never match and burned its full 60s deadline on a state
+  that had already passed. It now waits for the concept to have reached **at
+  least** the rung in question, which is what the demo means and cannot be
+  missed.
 
 ### Notes
 
