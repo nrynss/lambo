@@ -1022,6 +1022,110 @@ impl Graph {
         Ok(())
     }
 
+    /// Fill in vectors for concepts that have **none**, without touching the
+    /// session contract or any vector already stored.
+    ///
+    /// This is the backfill twin of [`Graph::reembed_all`], and the two are
+    /// mutually exclusive by design: `reembed_all` migrates *between* spaces
+    /// and therefore refuses to run when the live contract is already the
+    /// stored one, which is exactly the state a backfill runs in. Without this
+    /// method a session that accumulated NULL vectors inside its own current
+    /// space had no repair path at all — the 2026-09-01 dogfood finding, where
+    /// `lambo re-embed` correctly refused with "already carries exactly this
+    /// contract" and left 555 unembedded concepts in place.
+    ///
+    /// * The contract must already be stamped and identical to `contract`. A
+    ///   session with no contract is refused rather than stamped here: a
+    ///   backfill is repair, and stamping a space from a repair path is how a
+    ///   session acquires a contract nobody chose.
+    /// * Every id must name a concept whose `embedding` is `None`. Overwriting
+    ///   an existing vector is refused — that is a migration, and migrations go
+    ///   through `reembed_all` so the contract moves with them.
+    /// * Width and finiteness are checked exactly as in `reembed_all`.
+    /// * Partial coverage is fine and expected: this is the one vector
+    ///   operation that does not require every concept, because the concepts it
+    ///   skips are already correct.
+    ///
+    /// Returns how many concepts were given a vector. Callers MUST flush the
+    /// drained batch; until then the RAM graph is ahead of the durable state.
+    pub fn embed_missing(
+        &mut self,
+        updates: Vec<(NodeId, Vec<f32>)>,
+        contract: &crate::types::EmbeddingContract,
+    ) -> Result<usize, LamboError> {
+        match &self.embedding {
+            None => {
+                return Err(invariant(
+                    "cannot backfill embeddings in a session with no embedding contract; \
+                     a contract is stamped by the first real write, never by a repair",
+                ))
+            }
+            Some(existing) if existing != contract => {
+                return Err(invariant(format!(
+                    "cannot backfill embeddings from a different space: session carries \
+                     kind={} dim={} but the live embedder is kind={} dim={}; that is a \
+                     migration, which is `re-embed`, not a backfill",
+                    existing.kind, existing.dim, contract.kind, contract.dim
+                )))
+            }
+            Some(_) => {}
+        }
+
+        let mut covered: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        for (id, vector) in &updates {
+            if !covered.insert(*id) {
+                return Err(invariant(format!(
+                    "backfill updates list concept {id} twice; each concept appears at most once"
+                )));
+            }
+            match self.nodes.get(id) {
+                Some(Node::Concept(c)) => {
+                    if c.embedding.is_some() {
+                        return Err(invariant(format!(
+                            "backfill targets {id}, which already carries a vector; \
+                             replacing a vector is a migration (`re-embed`), not a backfill"
+                        )));
+                    }
+                }
+                Some(Node::Interaction(_)) => {
+                    return Err(invariant(format!(
+                        "backfill targets {id}, which is an interaction, not a concept"
+                    )))
+                }
+                None => {
+                    return Err(invariant(format!(
+                        "backfill targets {id}, which is not a node"
+                    )))
+                }
+            }
+            if vector.len() != contract.dim || vector.iter().any(|x| !x.is_finite()) {
+                return Err(invariant(format!(
+                    "backfill vector for {id} is non-finite or has width {} != contract {}",
+                    vector.len(),
+                    contract.dim
+                )));
+            }
+        }
+
+        // No `SetEmbedding` tail here: the contract is unchanged, so emitting
+        // one would append a mutation that says nothing and make the batch look
+        // like a migration to anything reading the log.
+        let filled = updates.len();
+        for (id, vector) in updates {
+            let node = match self.nodes.get_mut(&id) {
+                Some(Node::Concept(c)) => {
+                    c.embedding = Some(vector);
+                    Node::Concept(c.clone())
+                }
+                // Unreachable: validated above, and `self` is not shared across
+                // the two loops.
+                _ => unreachable!("backfill target validated as a concept above"),
+            };
+            self.append_mutation(Mutation::UpsertNode { node });
+        }
+        Ok(filled)
+    }
+
     /// Advisory soft lock (spec §11). Same-agent re-reservation extends; cross-agent
     /// denial is T2.7's policy — this stores what it is given.
     pub fn set_reservation(&mut self, r: Reservation) {
@@ -3045,6 +3149,75 @@ mod tests {
                 }
             ] if c == &target
         ));
+    }
+
+    /// The backfill twin. `re-embed` refuses when the live contract is already
+    /// the stored one — correct for a migration, and the reason the 2026-09-01
+    /// dogfood session had no way to repair 555 concepts that were missing
+    /// vectors inside their own current space.
+    #[test]
+    fn embed_missing_fills_null_vectors_without_touching_the_contract() {
+        let (mut g, c1, c2) = two_concept_graph();
+        let live = embed_contract("bge_m3", "old.gguf", 1024);
+
+        // Both concepts start with no vector; back-fill only c2, so the
+        // assertion below distinguishes "filled" from "filled everything".
+        let filled = g
+            .embed_missing(vec![(c2, vec![0.75_f32; 1024])], &live)
+            .unwrap();
+        assert_eq!(filled, 1);
+
+        let embedded = |g: &Graph, id: NodeId| match g.node(id) {
+            Some(crate::types::Node::Concept(c)) => c.embedding.clone(),
+            other => panic!("expected concept {id}, got {other:?}"),
+        };
+        assert_eq!(embedded(&g, c2), Some(vec![0.75_f32; 1024]));
+        assert_eq!(embedded(&g, c1), None, "untargeted concepts are untouched");
+        assert_eq!(g.embedding(), Some(&live), "the contract did not move");
+
+        // No trailing SetEmbedding: the contract is unchanged, so emitting one
+        // would make a repair look like a migration to anything reading the log.
+        assert!(matches!(
+            g.drain_log().mutations.as_slice(),
+            [Mutation::UpsertNode { .. }]
+        ));
+    }
+
+    #[test]
+    fn embed_missing_refuses_to_overwrite_or_cross_spaces() {
+        let (mut g, c1, c2) = two_concept_graph();
+        let live = embed_contract("bge_m3", "old.gguf", 1024);
+        g.embed_missing(vec![(c1, vec![0.25_f32; 1024])], &live)
+            .unwrap();
+        let before = g.snapshot();
+
+        // Overwriting an existing vector is a migration, not a backfill.
+        let err = g
+            .embed_missing(vec![(c1, vec![0.9_f32; 1024])], &live)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already carries a vector"),
+            "{err}"
+        );
+
+        // A different space is a migration too.
+        let other = embed_contract("candle", "BAAI/bge-m3@main sha256:abcd1234", 1024);
+        let err = g
+            .embed_missing(vec![(c2, vec![0.9_f32; 1024])], &other)
+            .unwrap_err();
+        assert!(err.to_string().contains("that is a migration"), "{err}");
+
+        // Wrong width is refused like everywhere else.
+        let err = g
+            .embed_missing(vec![(c2, vec![0.9_f32; 8])], &live)
+            .unwrap_err();
+        assert!(err.to_string().contains("non-finite or has width"), "{err}");
+
+        assert_eq!(
+            g.snapshot(),
+            before,
+            "every refusal left the graph untouched"
+        );
     }
 
     #[test]

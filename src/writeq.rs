@@ -142,7 +142,9 @@ use tokio::task::JoinHandle;
 
 use crate::cli::caps::{MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::embed::Embedder;
-use crate::graph::action::{record_action as graph_record_action, Action};
+use crate::graph::action::{
+    record_action_with_embeddings as graph_record_action_embedded, Action, ActionEmbeddings,
+};
 use crate::graph::derive::{derive as graph_derive, ParentOf};
 use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
@@ -1849,19 +1851,42 @@ impl WriteCtx {
                 let p: Vec<&str> = produces.iter().map(String::as_str).collect();
                 let m: Vec<&str> = modifies.iter().map(String::as_str).collect();
                 let d: Vec<&str> = depends_on.iter().map(String::as_str).collect();
+                let act = Action {
+                    event_time: None,
+                    action: action.as_str(),
+                    produces: &p,
+                    modifies: &m,
+                    depends_on: &d,
+                };
+                // Embed BEFORE the write lock: these are model calls, and the
+                // commit below is sync. A failure here fails the job with
+                // nothing written, exactly as an embed failure fails a derive.
+                //
+                // Gated on the strategy for the same reason `derive` is: under
+                // `Canonical` there is no vector leg at all, and embedding here
+                // would stamp a contract on a session that asked for none.
+                let embeddings = match self.match_strategy {
+                    MatchStrategy::Hybrid => {
+                        crate::graph::action::embed_action_contents(self.embedder.as_ref(), &act)
+                            .await?
+                    }
+                    MatchStrategy::Canonical => ActionEmbeddings::new(),
+                };
                 let outcome = {
                     let mut g = self.graph.write();
-                    let outcome = graph_record_action(
+                    // Stamp the space this call's vectors live in, or verify the
+                    // stamp already there. Same rule as `hybrid::derive`'s
+                    // commit phase: a vector must never land in a session with
+                    // no declared contract.
+                    if !embeddings.is_empty() {
+                        g.stamp_embedding(self.embedding.clone())?;
+                    }
+                    let outcome = graph_record_action_embedded(
                         &mut g,
                         job.interaction,
                         &job.agent,
-                        &Action {
-                            event_time: None,
-                            action: action.as_str(),
-                            produces: &p,
-                            modifies: &m,
-                            depends_on: &d,
-                        },
+                        &act,
+                        &embeddings,
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
                     if let Some(stamp) = consume {

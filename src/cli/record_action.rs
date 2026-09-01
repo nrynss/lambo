@@ -52,11 +52,15 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         modifies: &modifies,
         depends_on: &depends_on,
     };
-    let out = match mem.record_action(&action) {
+    // The embedding variant, not the sync one: a CLI-recorded action that
+    // stored no vector was findable by keyword only, exactly like the MCP path
+    // before 2026-09-01.
+    let out = match mem.record_action_embedded_as(mem.agent(), &action).await {
         Ok(outcome) => Ok(format!(
-            "recorded action '{}': {} concept(s) created, {} edge(s) added",
+            "recorded action '{}': {} concept(s) created ({} embedded), {} edge(s) added",
             args.action,
             outcome.created.len(),
+            outcome.embedded,
             outcome.edges
         )),
         Err(e) => Err(CliError::from(e)),

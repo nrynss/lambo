@@ -92,6 +92,14 @@ pub struct ActionOutcome {
     /// edges whose natural key did not already exist. Re-recorded edges
     /// reinforce instead (see [`Graph::upsert_edge`]) and are not counted.
     pub edges: usize,
+    /// How many of `created` were written **with** a vector. Always `0` from
+    /// the keyword-only [`record_action`]; from
+    /// [`record_action_with_embeddings`] it is `created.len()` unless a content
+    /// string was missing from the map. Reported rather than inferred so a
+    /// caller can tell "embedded nothing because it created nothing" from
+    /// "created concepts and left them unembedded", which is the exact
+    /// distinction whose absence hid this defect for two weeks.
+    pub embedded: usize,
 }
 
 /// Record an agent action (spec §7).
@@ -116,11 +124,127 @@ pub struct ActionOutcome {
 /// Validate-then-mutate is the contract: every failure path leaves the graph
 /// byte-identical — `snapshot()` unchanged, no log entries appended, `epoch`
 /// and `log_len` untouched.
+///
+/// Concepts created here carry **no vector**: this is the keyword-only entry
+/// point. Callers that hold an embedder use
+/// [`record_action_with_embeddings`] instead — see its doc for why the
+/// distinction is not cosmetic.
 pub fn record_action(
     graph: &mut Graph,
     interaction: NodeId,
     agent: &AgentId,
     action: &Action,
+) -> Result<ActionOutcome, LamboError> {
+    record_action_with_embeddings(graph, interaction, agent, action, &ActionEmbeddings::new())
+}
+
+/// Vectors for the content strings a [`record_action`] call may create, keyed
+/// by the **exact** content string the caller passed (never the canonical
+/// key): the planned concept stores that string verbatim, and matching on it
+/// keeps this map independent of how canonicalization folds case or spacing.
+///
+/// A content string absent from the map creates a concept with `embedding:
+/// None`, which is the pre-2026-09-01 behaviour for every action.
+pub type ActionEmbeddings = HashMap<String, Vec<f32>>;
+
+/// Embed every distinct content string an [`Action`] may turn into a concept:
+/// the action itself, and each `produces` / `modifies` / `depends_on` entry.
+///
+/// Runs **outside** the graph write lock, like `hybrid::derive`'s embed phase,
+/// because these are real model calls. Distinct strings only, so an action
+/// that lists the same path under both `produces` and `depends_on` costs one
+/// embed, not two.
+///
+/// An embedder failure fails the call and no vector is returned for anything
+/// (J3-R3-1's rule, applied here for the same reason it was applied to
+/// `derive`: a per-input embedder surprise that silently degrades to
+/// `embedding: NULL` is invisible in the write's own ack, and invisibility is
+/// what let the dogfood store reach 555 unembedded concepts unnoticed).
+///
+/// Note the asymmetry with the content strings the graph will actually keep:
+/// this embeds every candidate, including ones that turn out to match an
+/// existing concept and are therefore never written. Embedding before
+/// canonicalization is what keeps the model call off the write lock; the
+/// wasted vectors are discarded by
+/// [`record_action_with_embeddings`], which reads the map only for concepts it
+/// creates.
+pub async fn embed_action_contents(
+    embedder: &dyn crate::embed::Embedder,
+    action: &Action<'_>,
+) -> Result<ActionEmbeddings, LamboError> {
+    // One deadline for the whole call, not per string, matching
+    // `hybrid::derive`: an action listing twenty resources must not be able to
+    // hold the write path for twenty times the budget.
+    let io_deadline = tokio::time::Instant::now() + crate::graph::hybrid::HYBRID_IO_TIMEOUT;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = ActionEmbeddings::new();
+    let candidates = std::iter::once(action.action)
+        .chain(action.produces.iter().copied())
+        .chain(action.modifies.iter().copied())
+        .chain(action.depends_on.iter().copied());
+    for content in candidates {
+        if !seen.insert(content) {
+            continue;
+        }
+        // The transient/permanent split is the same one `hybrid::derive` makes
+        // and for the same downstream reason: the durable-intent replay's
+        // consume-or-keep decision turns on whether anything was learned about
+        // this input. A timeout learned nothing, so it is `EmbedUnavailable`.
+        match tokio::time::timeout_at(io_deadline, embedder.embed(content)).await {
+            Err(_) => {
+                return Err(LamboError::EmbedUnavailable(format!(
+                    "record_action embed timed out after {:?}; nothing was written — the write \
+                     is refused rather than applied without its vectors (a concept stored with \
+                     no embedding is unfindable by semantic recall)",
+                    crate::graph::hybrid::HYBRID_IO_TIMEOUT
+                )))
+            }
+            Ok(Err(e)) if e.is_transient() => {
+                return Err(LamboError::EmbedUnavailable(format!(
+                    "the embedder could not be reached ({e}); nothing was written — the write \
+                     is refused rather than applied without its vectors (a concept stored with \
+                     no embedding is unfindable by semantic recall)"
+                )))
+            }
+            Ok(Err(e)) => {
+                return Err(LamboError::Embed(format!(
+                    "the embedder refused this content ({e}); nothing was written — the write \
+                     is refused rather than applied without its vectors (a concept stored with \
+                     no embedding is unfindable by semantic recall)"
+                )))
+            }
+            Ok(Ok(vector)) => {
+                out.insert(content.to_string(), vector);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// [`record_action`] with vectors for the concepts it creates.
+///
+/// Why this exists (found dogfooding 2026-09-01): `record_action` had no
+/// embedder hop of its own, so every concept it created stored
+/// `embedding: NULL` while `derive`'s concepts were embedded. On the dogfood
+/// session that was 555 of 946 concepts, all of them `Resource` and `Entity`,
+/// reachable only by keyword match and graph traversal and never by vector
+/// similarity. The effect is an inversion: everything an agent *concluded* was
+/// semantically searchable, everything it *did* was not.
+///
+/// Only concepts this call actually creates take a vector. A content string
+/// that canonicalizes onto an existing concept is left exactly as it is — its
+/// vector, present or absent, belongs to the write that created it.
+///
+/// The caller owns the embedder hop because embedding is I/O and this function
+/// runs under the graph write lock. It also owns the contract: stamp it
+/// ([`Graph::stamp_embedding`]) before calling, exactly as `hybrid::derive`
+/// does, or a vector lands in a session with no declared space.
+pub fn record_action_with_embeddings(
+    graph: &mut Graph,
+    interaction: NodeId,
+    agent: &AgentId,
+    action: &Action,
+    embeddings: &ActionEmbeddings,
 ) -> Result<ActionOutcome, LamboError> {
     // Step 1 — the interaction must exist (a concept id is equally rejected:
     // `record_action` attaches the action to a specific interaction).
@@ -144,7 +268,12 @@ pub fn record_action(
     // are emitted by insert_concept), then the planned edges, so the mutation
     // log never references an endpoint that was not upserted earlier.
     let mut created: Vec<NodeId> = Vec::with_capacity(planned.len());
+    let mut embedded = 0usize;
     for c in &planned {
+        let vector = embeddings.get(&c.content).cloned();
+        if vector.is_some() {
+            embedded += 1;
+        }
         let concept = Concept {
             id: c.id,
             session_id: session_id.clone(),
@@ -160,7 +289,7 @@ pub fn record_action(
             canonization_status: CanonizationStatus::None,
             blast_radius: None,
             last_demotion_time: None,
-            embedding: None,
+            embedding: vector,
             human_confirmed: 0,
             chunk_group_id: None,
         };
@@ -198,6 +327,7 @@ pub fn record_action(
         action_node,
         created,
         edges,
+        embedded,
     })
 }
 
@@ -508,6 +638,114 @@ mod tests {
             modifies,
             depends_on,
         }
+    }
+
+    /// A 4-wide test space. `record_action_with_embeddings` deliberately does
+    /// NOT stamp one itself: the graph refuses a vector in a session with no
+    /// contract, and stamping from inside the write would let a repair or a
+    /// side path silently choose a session's embedding space. Its production
+    /// callers stamp first, exactly as `hybrid::derive` does.
+    fn stamp_test_space(g: &mut Graph) {
+        g.stamp_embedding(crate::types::EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("test".into()),
+            dim: 4,
+        })
+        .unwrap();
+    }
+
+    /// The 2026-09-01 defect: every concept `record_action` created stored
+    /// `embedding: NULL`, so an action was findable by keyword and by graph
+    /// traversal but never by vector similarity. This pins the fixed shape —
+    /// a vector on each created concept — and its counted report.
+    #[test]
+    fn record_action_with_embeddings_stores_a_vector_on_every_concept_it_creates() {
+        let (mut g, iid) = graph_with_interaction();
+        let act = action(
+            "created migrations/003.sql",
+            &["migrations/003.sql"],
+            &["auth middleware"],
+            &["user schema"],
+        );
+        stamp_test_space(&mut g);
+        let mut embeddings = ActionEmbeddings::new();
+        for content in [
+            "created migrations/003.sql",
+            "migrations/003.sql",
+            "auth middleware",
+            "user schema",
+        ] {
+            embeddings.insert(content.to_string(), vec![0.5, 0.5, 0.5, 0.5]);
+        }
+
+        let out = record_action_with_embeddings(&mut g, iid, &agent(), &act, &embeddings).unwrap();
+
+        assert_eq!(out.created.len(), 4);
+        assert_eq!(out.embedded, 4, "every created concept took a vector");
+        for id in &out.created {
+            match g.node(*id).unwrap() {
+                Node::Concept(c) => assert_eq!(
+                    c.embedding.as_deref(),
+                    Some(&[0.5, 0.5, 0.5, 0.5][..]),
+                    "concept {id} ({}) stored no vector",
+                    c.content
+                ),
+                _ => panic!("created node is not a concept"),
+            }
+        }
+    }
+
+    /// The keyword-only entry point keeps its old behaviour exactly: this is
+    /// what every caller without an embedder still gets, and `embedded: 0`
+    /// says so out loud rather than leaving it to be inferred.
+    #[test]
+    fn plain_record_action_stays_keyword_only_and_reports_zero_embedded() {
+        let (mut g, iid) = graph_with_interaction();
+        let act = action("shipped the thing", &["artifact.tar"], &[], &[]);
+        let out = record_action(&mut g, iid, &agent(), &act).unwrap();
+
+        assert_eq!(out.created.len(), 2);
+        assert_eq!(out.embedded, 0);
+        for id in &out.created {
+            match g.node(*id).unwrap() {
+                Node::Concept(c) => assert!(c.embedding.is_none()),
+                _ => panic!("created node is not a concept"),
+            }
+        }
+    }
+
+    /// A content string that resolves onto an existing concept is NOT written,
+    /// so its vector must not be counted — and the pre-existing concept keeps
+    /// whatever vector state it already had. Guards against a future "embed
+    /// everything in the map" simplification silently overwriting vectors.
+    #[test]
+    fn record_action_embeddings_only_count_concepts_actually_created() {
+        let (mut g, iid) = graph_with_interaction();
+        // First call creates "user schema" with no vector at all.
+        let first = action("wrote the schema", &[], &[], &["user schema"]);
+        let before = record_action(&mut g, iid, &agent(), &first).unwrap();
+        assert_eq!(before.embedded, 0);
+
+        // Second call names the same dependency and offers a vector for it.
+        let second = action("queried the schema", &[], &[], &["user schema"]);
+        stamp_test_space(&mut g);
+        let mut embeddings = ActionEmbeddings::new();
+        embeddings.insert("queried the schema".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+        embeddings.insert("user schema".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+        let out =
+            record_action_with_embeddings(&mut g, iid, &agent(), &second, &embeddings).unwrap();
+
+        // Only the new action concept was created, so only it was embedded.
+        assert_eq!(out.created.len(), 1);
+        assert_eq!(out.embedded, 1);
+        let dep = g
+            .concepts()
+            .find(|c| c.content == "user schema")
+            .expect("the earlier dependency concept is still there");
+        assert!(
+            dep.embedding.is_none(),
+            "a matched concept must keep its own vector state, not take the caller's"
+        );
     }
 
     #[test]

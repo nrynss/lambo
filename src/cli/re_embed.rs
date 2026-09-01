@@ -36,6 +36,16 @@ pub struct Args {
     /// Accepted on the wire only so the clap shape mirrors the other writers;
     /// always refused. Re-embed IS the mismatch migration.
     pub allow_embedding_mismatch: bool,
+    /// Backfill mode: embed only the concepts that currently have NO vector,
+    /// leaving every existing vector and the session contract untouched.
+    ///
+    /// The default (full migration) refuses to run when the live contract is
+    /// already the stored one, which is correct for a migration and useless for
+    /// a repair: a session that accumulated NULL vectors inside its own current
+    /// space then has no path back to full coverage. That is the state the
+    /// dogfood session was found in on 2026-09-01, with 555 of 946 concepts
+    /// unembedded and `re-embed` refusing by design.
+    pub missing_only: bool,
 }
 
 /// Run the K2 re-embed migration for one session.
@@ -44,6 +54,14 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     check_size_cli("session", &args.session)?;
     require_nonempty("agent", &args.agent)?;
     check_size_cli("agent", &args.agent)?;
+    if args.allow_embedding_mismatch && args.missing_only {
+        return Err(CliError::Usage(
+            "--missing-only and --allow-embedding-mismatch are contradictory: the backfill \
+             writes vectors into the space the session already declares, so there is no \
+             mismatch for the override to permit."
+                .to_string(),
+        ));
+    }
     if args.allow_embedding_mismatch {
         return Err(CliError::Usage(
             "--allow-embedding-mismatch is refused by re-embed: re-embed IS the embedding \
@@ -82,8 +100,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // are real model inference and must never run under any lock.
     let concepts: Vec<(NodeId, String)> = {
         let g = mem.graph().read();
-        let mut snapshot: Vec<(NodeId, String)> =
-            g.concepts().map(|c| (c.id, c.content.clone())).collect();
+        let mut snapshot: Vec<(NodeId, String)> = g
+            .concepts()
+            .filter(|c| !args.missing_only || c.embedding.is_none())
+            .map(|c| (c.id, c.content.clone()))
+            .collect();
         snapshot.sort_by_key(|(id, _)| id.0);
         snapshot
     };
@@ -92,10 +113,27 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // close_writer at the end of this function (K2-R1-6): a failed migration
     // must release the writer lease immediately, not hold it to TTL.
     let out = if concepts.is_empty() {
-        Ok(format!(
-            "session '{}' has no concepts; nothing to re-embed",
-            args.session
-        ))
+        Ok(if args.missing_only {
+            format!(
+                "session '{}': every concept already carries a vector; nothing to backfill",
+                args.session
+            )
+        } else {
+            format!(
+                "session '{}' has no concepts; nothing to re-embed",
+                args.session
+            )
+        })
+    } else if args.missing_only {
+        backfill_missing(
+            &mem,
+            &args.session,
+            &args.agent,
+            &embedder,
+            &live_contract,
+            &concepts,
+        )
+        .await
     } else {
         rewrite_all(
             &mem,
@@ -108,6 +146,57 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .await
     };
     close_writer(mem, out).await
+}
+
+/// The backfill body: embed only the concepts handed in (already filtered to
+/// those with no vector) and append them through [`Graph::embed_missing`],
+/// which leaves the session contract exactly as it found it.
+///
+/// Same all-or-nothing discipline as [`rewrite_all`]: every embed happens
+/// before any mutation, so an embedder failure part-way leaves the graph
+/// untouched rather than half-backfilled, and `close_writer` still releases
+/// the lease on that path (K2-R1-6).
+async fn backfill_missing(
+    mem: &Memory,
+    session: &str,
+    agent: &str,
+    embedder: &Arc<dyn Embedder>,
+    live_contract: &EmbeddingContract,
+    missing: &[(NodeId, String)],
+) -> Result<String, CliError> {
+    let mut updates: Vec<(NodeId, Vec<f32>)> = Vec::with_capacity(missing.len());
+    for (id, content) in missing {
+        let vector = embedder.embed(content).await.map_err(|e| {
+            CliError::Runtime(format!(
+                "backfill aborted BEFORE mutating the graph: embedding concept {id} \
+                 ({content:?}) failed: {e}"
+            ))
+        })?;
+        updates.push((*id, vector));
+    }
+
+    debug_assert_eq!(mem.session().as_str(), session);
+    let (filled, total, after) = {
+        let mut g = mem.graph().write();
+        let total = g.concepts().count();
+        let filled = g
+            .embed_missing(updates, live_contract)
+            .map_err(CliError::from)?;
+        let after = g.concepts().filter(|c| c.embedding.is_some()).count();
+        (filled, total, after)
+    };
+
+    Ok(format!(
+        "backfilled session '{session}' as agent '{agent}': {filled} concept(s) that had no \
+         vector embedded into the session's existing space\n\
+         coverage: embedded {}/{total} -> {after}/{total}\n\
+         contract unchanged: kind={} model={} dim={}\n\
+         existing vectors were not touched; this is a repair, not a migration",
+        after - filled,
+        live_contract.kind,
+        live_contract.model.as_deref().unwrap_or("<unset>"),
+        live_contract.dim,
+    ))
 }
 
 /// The all-or-nothing rewrite body: embed EVERY concept BEFORE mutating the
@@ -419,6 +508,7 @@ mod tests {
                 session: SESSION.into(),
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
+                missing_only: false,
             },
         )
         .await
@@ -439,6 +529,7 @@ mod tests {
                 session: SESSION.into(),
                 agent: AGENT.into(),
                 allow_embedding_mismatch: true,
+                missing_only: false,
             },
         )
         .await
@@ -459,6 +550,7 @@ mod tests {
                 session: SESSION.into(),
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
+                missing_only: false,
             },
         )
         .await
@@ -488,6 +580,7 @@ mod tests {
                 session: SESSION.into(),
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
+                missing_only: false,
             },
         )
         .await
@@ -524,6 +617,7 @@ mod tests {
                 session: SESSION.into(),
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
+                missing_only: false,
             },
         )
         .await

@@ -332,6 +332,9 @@ enum Commands {
         /// REFUSED: re-embed is itself the migration; pairing it with the relabel override is contradictory and the flag exists only so the clap shape mirrors the other writers.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// Backfill only: embed the concepts that have NO vector, leave every existing vector and the session contract untouched. This is the repair path for a session that accumulated NULL vectors inside its own current space, which the default migration refuses to touch.
+        #[arg(long)]
+        missing_only: bool,
     },
 }
 
@@ -751,6 +754,7 @@ fn main() -> ExitCode {
                 session,
                 agent,
                 allow_embedding_mismatch: _,
+                missing_only,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -764,6 +768,7 @@ fn main() -> ExitCode {
                     // The verb refuses it outright; the resolve-level flip
                     // below still lands on ResolvedBackends and is ignored.
                     allow_embedding_mismatch,
+                    missing_only,
                 },
             ),
         ),

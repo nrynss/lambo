@@ -1657,6 +1657,63 @@ impl Memory {
         Ok(outcome)
     }
 
+    /// [`Memory::record_action`] with an embedder hop, so the concepts it
+    /// creates are findable by semantic recall and not only by keyword.
+    ///
+    /// **Async because embedding is I/O**, which is precisely why
+    /// [`Memory::record_action`] never did it: that entry point is
+    /// synchronous, and a sync signature has nowhere to put a model call. The
+    /// cost of the omission was measured on the dogfood session 2026-09-01 —
+    /// 555 of 946 concepts with no vector, every one of them from an action —
+    /// so the sync path is now the deliberate keyword-only choice rather than
+    /// the default one. Callers holding a runtime should prefer this.
+    ///
+    /// Under [`MatchStrategy::Canonical`] this is exactly
+    /// [`Memory::record_action_as`]: that strategy has no vector leg, and
+    /// embedding here would stamp a contract on a session that asked for none.
+    ///
+    /// An embedder failure fails the call with **nothing written** (J3-R3-1's
+    /// rule, see [`crate::graph::action::embed_action_contents`]).
+    pub async fn record_action_embedded_as(
+        &self,
+        agent: &AgentId,
+        action: &Action<'_>,
+    ) -> Result<ActionOutcome, LamboError> {
+        if self.config.match_strategy == MatchStrategy::Canonical {
+            return self.record_action_as(agent, action);
+        }
+        // Held across the embed await below, so a concurrent `close()` either
+        // waits for this whole call or refuses it (T81-1), matching `derive`.
+        let _writing = self.begin_write().await?;
+        {
+            let g = self.graph.read();
+            crate::graph::action::validate(&g, action)?;
+        }
+        // Off-lock: real model calls.
+        let embeddings =
+            crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?;
+        let interaction =
+            self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
+        let outcome = {
+            let mut g = self.graph.write();
+            if !embeddings.is_empty() {
+                g.stamp_embedding(self.embedding.clone())?;
+            }
+            crate::graph::action::record_action_with_embeddings(
+                &mut g,
+                interaction,
+                agent,
+                action,
+                &embeddings,
+            )?
+        };
+        let mut touched = outcome.created.clone();
+        touched.push(outcome.action_node);
+        self.mirror_concepts(&touched);
+        self.daemon.wake();
+        Ok(outcome)
+    }
+
     /// The J3 write pipeline and its receipt store.
     ///
     /// The MCP server needs it for the two delivery surfaces the pipeline
