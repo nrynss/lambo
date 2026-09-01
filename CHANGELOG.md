@@ -45,6 +45,14 @@
   (`CREATE EXTENSION vector`) or first vector query (`<=>`) rather than
   silently ranking with Cockroach SQL.
 
+- `ActionOutcome` gained a public `embedded: usize` field — how many of
+  `created` were written with a vector. The struct has all-public fields and no
+  `#[non_exhaustive]`, so external struct-literal construction and exhaustive
+  destructuring of it break; field access and `..` patterns do not. It is
+  reported rather than inferred so that "embedded nothing because it created
+  nothing" is distinguishable from "created concepts and left them unembedded",
+  which is the exact distinction whose absence hid the defect below.
+
 ### Added
 
 - `promotion_policy` as a top-level `lambo.toml` key with a
@@ -154,6 +162,43 @@
   `lambo.toml` naming `postgres` or `gemini` runs on a prebuilt binary.
 
 ### Fixed
+
+- `lambo_record_action` embeds the concepts it creates. It had no embedder hop
+  at all, so every concept it wrote stored `embedding: NULL` while `derive`'s
+  concepts were embedded — an inversion in which everything an agent
+  **concluded** was findable by semantic recall and everything it **did** was
+  reachable by keyword and graph traversal only. Found by dogfooding on
+  2026-09-01: 555 of 946 concepts on the live session carried no vector, and
+  the split was categorical rather than partial (Observation 68/68, Logic
+  109/109, Constraint 130/130 embedded, all of them `derive`'s; Resource
+  394/454 and Entity 161/185 NULL, the action string plus every
+  `produces`/`modifies`/`depends_on` entry). It accrued daily rather than
+  draining, so it was not a backlog any re-embed could clear.
+
+  Embedding happens off-lock through `embed_action_contents`, with
+  `hybrid::derive`'s deadline and its transient/permanent error split, because
+  the durable-intent replay's consume-or-keep decision turns on that
+  difference. An embedder failure **fails the write** rather than degrading it
+  (J3-R3-1): degrading silently to `NULL` is what let this go unnoticed. Both
+  the write-queue path (every MCP client) and the new async
+  `Memory::record_action_embedded_as` (the CLI's `lambo record-action`) stamp
+  the contract first and are gated on `MatchStrategy::Hybrid` — under
+  `Canonical` there is no vector leg, and embedding there would stamp a
+  contract on a session that asked for none. The synchronous
+  `Memory::record_action` keeps its old keyword-only behaviour: a sync
+  signature has nowhere to put a model call, so it is now the deliberate
+  choice rather than the only one.
+
+- `lambo re-embed --missing-only` backfills concepts that have no vector,
+  leaving every existing vector and the session contract untouched. Without it
+  a session that accumulated `NULL` vectors inside its own current space had no
+  repair path: the full migration refuses to run when the live contract is
+  already the stored one ("already carries exactly this contract"), which is
+  correct for a migration and is exactly the state a repair runs in. The
+  backing `Graph::embed_missing` refuses to overwrite an existing vector (that
+  is a migration, and migrations move the contract with them) and appends no
+  trailing `SetEmbedding`, so a repair never reads as a migration in the
+  mutation log.
 
 - A bounded close could abandon its own flush. `close_bounded` registered a
   *fresh* shutdown listener, so the SIGTERM that started the shutdown could be
