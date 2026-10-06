@@ -537,7 +537,11 @@ mod tests {
         // c5: 0.6×0.25 + 0.2×0.75 = 0.30
         // c6: 0.6×0.25 + 0.0×0.75 = 0.15
         let want_order = vec![uid(1), uid(2), uid(5), uid(6), uid(4), uid(3)];
-        assert_eq!(ids_of(&result), want_order, "score desc, ties by id asc");
+        // Score desc; the six planted finals are all distinct, so the tie
+        // arms below the score (canonical-first, then canonical key, then id)
+        // do not fire in this test — the chain itself is pinned by
+        // `final_score_ties_break_by_canonical_key_ahead_of_node_id`.
+        assert_eq!(ids_of(&result), want_order);
         let score = |id: NodeId| {
             result
                 .hits

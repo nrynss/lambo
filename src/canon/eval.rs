@@ -12,12 +12,14 @@
 //!    became Candidate is not re-checked for Venerable in the same tick).
 //! 3. Stage 3: `Venerable → Canonical` for a **round-robin** window of
 //!    at most [`EvalParams::batch_size`] Venerable nodes, **score-
-//!    descending** (NodeId ascending tie-break) within the window.
+//!    descending** (canonical key ascending, then NodeId ascending —
+//!    [`tie_break_by_key`], issue #2) within the window.
 //!    The cursor lives on [`Evaluator`] so the next cycle continues
 //!    around the ring.
 //! 4. Budget: if Canonical count exceeds `max_canonical_nodes`, demote
 //!    `Canonical → None` lowest [`GraphStore::blast_radius`] first
-//!    (NodeId ascending tie-break) until the count is within budget.
+//!    (canonical key ascending, then NodeId ascending —
+//!    [`tie_break_by_key`], issue #2) until the count is within budget.
 //!
 //! One hop per cycle is **structural**, not bookkeeping: all three stage
 //! windows are read from the same pre-cycle graph state, where the `None` /

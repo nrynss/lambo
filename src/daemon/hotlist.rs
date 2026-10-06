@@ -221,7 +221,16 @@ impl fmt::Debug for HotListEntry {
     }
 }
 
-/// Priority comparator: severity desc, recency desc, node id asc.
+/// Priority comparator: severity desc, recency desc.
+///
+/// `seq` is assigned fresh on every insert and strictly monotonic
+/// (`next_seq`), and entries are only replaced in place or pushed, so no two
+/// live entries share a seq — the seq arm alone is already a total order. The
+/// trailing node-id arm is kept so the comparator stays total if that
+/// uniqueness invariant ever fails; it never decides today (an unreachable
+/// formality, remediation round 2 — the old comment presented it as a live
+/// tie-break).
+///
 /// `entries` stays sorted so `entries[0]` is the highest-priority entry and
 /// `pop()` (eviction) removes the lowest.
 fn higher_priority(a: &HotListEntry, b: &HotListEntry) -> Ordering {

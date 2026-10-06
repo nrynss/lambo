@@ -110,15 +110,23 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         .concepts()
         .filter(|c| !c.content.is_empty() && lower_q.contains(&c.content.to_lowercase()))
         .collect();
-    let rank = |c: &&crate::types::Concept| {
-        let ty_prio = match c.concept_type {
-            crate::types::ConceptType::Entity | crate::types::ConceptType::Resource => 0,
-            _ => 1,
-        };
-        // Shortest content first, then Entity/Resource, then id.
-        (ty_prio, c.content.len(), c.id.0)
+    let ty_prio = |c: &crate::types::Concept| match c.concept_type {
+        crate::types::ConceptType::Entity | crate::types::ConceptType::Resource => 0,
+        _ => 1,
     };
-    substring_matches.sort_by_key(rank);
+    // Shortest content first, then Entity/Resource; equal (type, length)
+    // matches compare full content, then the stable issue-2 chain (canonical
+    // key ascending, NodeId ascending — ids are minted per run) as the final
+    // fallback (remediation round 2; the bare id used to decide).
+    substring_matches.sort_by(|a, b| {
+        ty_prio(a)
+            .cmp(&ty_prio(b))
+            .then_with(|| a.content.len().cmp(&b.content.len()))
+            .then_with(|| a.content.cmp(&b.content))
+            .then_with(|| {
+                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+            })
+    });
     if let Some(c) = substring_matches.first() {
         tracing::trace!(
             target: "lambo::recall",
@@ -132,7 +140,7 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     if !lower_q.contains("security group") {
         return None;
     }
-    let mut sg: Vec<NodeId> = graph
+    let sg: Vec<NodeId> = graph
         .concepts()
         .filter(|c| {
             let upper = c.content.to_uppercase();
@@ -142,13 +150,26 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         .collect();
     // Each `dependents(graph, *id)` is a full inbound_sources pass, run twice
     // per recall (brief read + final lock), so this branch is O(SG x E) —
-    // bounded and fine at recall-graph sizes, but precompute per-SG dependent
-    // counts if it ever matters.
-    // Tie-break among equal-dependent SGs is not an explicit key: it falls
-    // back to concept-store iteration order, deterministic for an ordered
-    // store and for the exhibit, but an assumption worth naming.
-    sg.sort_by_key(|id| std::cmp::Reverse(dependents(graph, *id).len()));
-    if let Some(id) = sg.first() {
+    // bounded and fine at recall-graph sizes; counts are precomputed so the
+    // sort calls it once per SG instead of once per comparison.
+    // Most structural dependents wins; equal-dependent SGs fall to the stable
+    // issue-2 chain (canonical key ascending, NodeId ascending) because
+    // concept-store iteration order is HashMap order and never run-stable
+    // (remediation round 2; the count-only sort silently leaned on it).
+    let mut sg: Vec<(usize, NodeId)> = sg
+        .into_iter()
+        .map(|id| (dependents(graph, id).len(), id))
+        .collect();
+    sg.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            let key = |n: NodeId| match graph.node(n) {
+                Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
+                _ => None,
+            };
+            tie_break_by_key(key(a.1), &a.1, key(b.1), &b.1)
+        })
+    });
+    if let Some((_, id)) = sg.first() {
         tracing::trace!(
             target: "lambo::recall",
             anchor = %id,
@@ -614,6 +635,81 @@ mod tests {
             try_structural(&g, "what depends on nothing-imaginary", 5, 500),
             None
         );
+    }
+
+    /// Remediation round 2: among same-type, equal-length substring matches
+    /// the anchor must not fall to the run-minted id. `alpha`/`gamma` are both
+    /// five bytes and compare OPPOSITE to their ids, so the old
+    /// `(type, length, id)` rank picked `gamma`; the extended chain compares
+    /// content first.
+    #[test]
+    fn anchor_substring_ties_break_on_content_ahead_of_id() {
+        let mut g = Graph::new(sid());
+        let i1 = Interaction {
+            event_time: None,
+            id: NodeId(uuid::Uuid::from_u64_pair(1, 1)),
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("q".into()),
+            previous_id: None,
+            created_at: ts(0),
+        };
+        let i1_id = i1.id;
+        g.insert_interaction(i1.clone()).unwrap();
+        // `alpha` rides the LARGER id; `gamma` the smaller one.
+        let alpha = concept(9, "alpha", ConceptType::Entity);
+        let alpha_id = alpha.id;
+        let gamma = concept(8, "gamma", ConceptType::Entity);
+        g.insert_concept(alpha, i1_id).unwrap();
+        g.insert_concept(gamma, i1_id).unwrap();
+
+        assert_eq!(
+            resolve_anchor(&g, "zz alpha yy gamma zz"),
+            Some(alpha_id),
+            "equal (type, length) matches compare content before the run-minted id"
+        );
+    }
+
+    /// Remediation round 2: equal-dependent SG anchors must not lean on
+    /// concept-store iteration order (`Graph::concepts` is a HashMap view, so
+    /// the old count-only stable sort was not run-stable). Both SGs here have
+    /// zero dependents and keys ordered opposite to ids; the pick must be the
+    /// smaller canonical key whichever way the concepts went into the graph.
+    #[test]
+    fn sg_prose_anchor_ties_break_on_canonical_key_ahead_of_id() {
+        let build = |alpha_first: bool| -> Graph {
+            let mut g = Graph::new(sid());
+            let i1 = Interaction {
+                event_time: None,
+                id: NodeId(uuid::Uuid::from_u64_pair(1, 1)),
+                session_id: sid(),
+                agent_id: AgentId::from("agent-a"),
+                prompt_text: Some("q".into()),
+                previous_id: None,
+                created_at: ts(0),
+            };
+            let i1_id = i1.id;
+            g.insert_interaction(i1.clone()).unwrap();
+            // `SG-Alpha` rides the LARGER id; `SG-Beta` the smaller one.
+            let alpha = concept(9, "SG-Alpha", ConceptType::Entity);
+            let beta = concept(8, "SG-Beta", ConceptType::Entity);
+            let (first, second) = if alpha_first {
+                (alpha, beta)
+            } else {
+                (beta, alpha)
+            };
+            g.insert_concept(first, i1_id).unwrap();
+            g.insert_concept(second, i1_id).unwrap();
+            g
+        };
+        let expected = NodeId(uuid::Uuid::from_u64_pair(2, 9)); // key "sg-alpha"
+        for alpha_first in [true, false] {
+            assert_eq!(
+                resolve_anchor(&build(alpha_first), "which security group is most shared"),
+                Some(expected),
+                "equal-dependent SGs follow canonical key, not store iteration order"
+            );
+        }
     }
 
     #[test]

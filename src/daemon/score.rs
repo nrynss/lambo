@@ -301,8 +301,7 @@ pub fn rescore(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
         .collect();
     ranked.sort_by(|a, b| {
         b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.score)
             .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
     ranked

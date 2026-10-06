@@ -83,7 +83,7 @@ use crate::daemon::conflict::ConflictHit;
 use crate::daemon::drift::{DriftHit, DRIFT_HOPS_NO_PATH_EVENT};
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
 use crate::graph::Graph;
-use crate::types::{CanonizationEvent, CanonizationStatus, DaemonEvent, NodeId};
+use crate::types::{tie_break_by_key, CanonizationEvent, CanonizationStatus, DaemonEvent, NodeId};
 use tokio::sync::broadcast;
 
 /// Broadcast capacity. Consumers slower than the daemon's peak emission rate
@@ -284,11 +284,18 @@ fn chrono_window(window: Duration) -> ChronoDuration {
 /// `O(nodes × degree)`: an edge write counts as activity for both endpoints, so
 /// folding the edge set once is equivalent to per-node `last_activity` folds and
 /// strictly cheaper. Future-dated writes (mocked clocks) are ignored, matching
-/// every other detector. The anchor breaks ties by smallest id, so the result is
-/// deterministic.
+/// every other detector. Same-instant ties are routine (one interaction or edge
+/// write stamps every concept it touches with one instant), and the anchor
+/// breaks them on the stable issue-2 chain — canonical key ascending, then
+/// NodeId ascending ([`tie_break_by_key`]) — so the result is deterministic
+/// across runs, not just within one (remediation round 2; was smallest id).
 ///
 /// `None` for a session with no concept whose activity is at or before `now`.
 fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, DateTime<Utc>)> {
+    let key = |n: NodeId| match graph.node(n) {
+        Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
+        _ => None,
+    };
     let mut best: Option<(NodeId, DateTime<Utc>)> = None;
     let mut consider = |node: NodeId, at: DateTime<Utc>| {
         if at > now {
@@ -296,7 +303,12 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
         }
         let better = match &best {
             None => true,
-            Some((id, t)) => at > *t || (at == *t && node.0 < id.0),
+            Some((id, t)) => {
+                at > *t
+                    || (at == *t
+                        && tie_break_by_key(key(node), &node, key(*id), id)
+                            == std::cmp::Ordering::Less)
+            }
         };
         if better {
             best = Some((node, at));
@@ -831,8 +843,9 @@ mod tests {
 
         // Two hours after that last write the whole session is stale: exactly
         // one hit, anchored on the newest activity — the `c2 -> c3` edge at
-        // 7100 refreshes both endpoints, so the tie-break (smallest id) picks
-        // c2 over c3.
+        // 7100 refreshes both endpoints with one instant, a routine tie the
+        // stable chain resolves on canonical key: "edge-refreshed one" sorts
+        // ahead of "fresh one" (round 2; the old smallest-id pick chose c2).
         let much_later = ts(7100 + 7200);
         let hits = detect_stale(&g, STALE_WINDOW, much_later);
         assert_eq!(
@@ -840,8 +853,59 @@ mod tests {
             1,
             "one hit per session, not per concept: {hits:?}"
         );
-        assert_eq!(hits[0].node, c2_id, "anchor = newest activity, ties by id");
+        assert_eq!(
+            hits[0].node, c3_id,
+            "anchor = newest activity, same-instant ties by canonical key"
+        );
         assert_eq!(hits[0].seconds_inactive, 7200);
+    }
+
+    /// Remediation round 2: the StaleSession anchor must not depend on
+    /// run-minted ids when two concepts tie at the most recent instant. The
+    /// keys here order OPPOSITE to the ids, so the old smallest-id anchor
+    /// picks `late id small key`; the stable chain picks `late id big key`.
+    #[test]
+    fn stale_anchor_ties_break_on_canonical_key_ahead_of_id() {
+        // Two hours past the shared touch instant: beyond STALE_WINDOW, so
+        // the session actually goes stale.
+        let now = ts(7000 + 7200);
+        let (mut g, i1_id, _) = base_graph();
+        // Both concepts last touched at the same instant ts(7000): id (1,40)
+        // carries key "alpha fresh" (smaller key, LARGER id); id (1,39)
+        // carries key "beta fresh" (larger key, smaller id).
+        let big_id_small_key = concept(
+            40,
+            i1_id,
+            "agent-a",
+            "alpha fresh",
+            7000,
+            CanonizationStatus::None,
+            None,
+        );
+        let big_id = big_id_small_key.id;
+        g.insert_concept(big_id_small_key, i1_id).unwrap();
+        let small_id_big_key = concept(
+            39,
+            i1_id,
+            "agent-a",
+            "beta fresh",
+            7000,
+            CanonizationStatus::None,
+            None,
+        );
+        let small_id = small_id_big_key.id;
+        g.insert_concept(small_id_big_key, i1_id).unwrap();
+
+        let hits = detect_stale(&g, STALE_WINDOW, now);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].node, big_id,
+            "same-instant ties must follow canonical key, not the UUID"
+        );
+        assert_ne!(
+            hits[0].node, small_id,
+            "the smaller key wins even though it rides the larger id"
+        );
     }
 
     #[test]
