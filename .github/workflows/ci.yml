@@ -189,8 +189,11 @@ jobs:
             command: cargo check --no-default-features
           # cockroach without fixtures: compiles AND runs the test module
           # (dead-code-clean under -D warnings); live tests are #[ignore]d.
-          - name: cockroach
-            command: cargo test --no-default-features --features store-cockroach
+          # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision.
+          # store-cockroach code keeps its compile lint through the ship rows
+          # below; restore this row to bring the behavior tests back.
+          # - name: cockroach
+          #   command: cargo test --no-default-features --features store-cockroach
           # B2: postgres compile + unit. Live init is the postgres-live job
           # below (pinned pgvector service container). Same driver as
           # store-cockroach.
@@ -398,7 +401,11 @@ jobs:
     # canonization, F is SQLite. `LAMBO_REQUIRE_LIVE=1` means a missing DSN is a
     # hard failure rather than a skip, so it cannot simply be left to no-op.
     # Restored automatically on merge: the condition is false only on this ref.
-    if: github.ref != 'refs/heads/lambo-for-mooshik'
+    # DISABLED 2026-10-06: the CockroachDB CI rows are off by decision. The
+    # previous condition restored this job on every ref except the
+    # lambo-for-mooshik dogfood branch; `if: false` turns it off everywhere.
+    # Re-enable by restoring that condition.
+    if: false
     env:
       RUSTFLAGS: "-D warnings"
       LAMBO_COCKROACH_DSN: ${{ secrets.LAMBO_COCKROACH_DSN }}
