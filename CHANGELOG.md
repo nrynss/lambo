@@ -163,6 +163,49 @@
 
 ### Fixed
 
+- Every score-ordered list now breaks an exact tie on the concept's
+  `canonical_key` before falling back to its node id (issue #2). Node ids
+  are minted per run (`Uuid::new_v4`), so an id-settled tie was
+  deterministic inside a run and arbitrary across them: the same session
+  recalled in a different order, and which synonym duplicate surfaced
+  first was seeded by process start, not by the data. The chain is
+  **score first, then `canonical_key` ascending, then `NodeId`
+  ascending**, stated once in `types::tie_break_by_key` and used by
+  recall rank and assemble, the inverted index, daemon rescore and the
+  stale-session anchor, canonization window and budget demotion, saints,
+  inspect focus, the hybrid merge pick, and the store adapters (sqlite
+  and the pg family order in SQL, where sqlite's `BINARY` collation
+  makes byte order equal to Rust `str` order; `canonical_key` is
+  `NOT NULL` in all three schemas, so the SQL `ASC` can never reach the
+  comparator's keyless-sorts-last arm).
+
+  Key *presence* is part of the order — a keyless node sorts after every
+  keyed one — because the obvious comparator (compare keys when both are
+  present, fall through to the id otherwise) is intransitive on mixed
+  input: a keyed node could sort both behind and ahead of the same
+  keyless one depending on the third element, so sort results depended
+  on input order. The id fallback stays because the key is not a total
+  separator — synonym duplicates share one, and interactions carry none
+  — but it is final only inside each presence class.
+
+  Three fixes rode along where the chain exposed adjacent defects: the
+  inverted index's `remove` now drops the tie-break key entry along with
+  the postings, so the map's lifecycle mirrors the postings' it was
+  pinned to; the hybrid merge pick moved from the async gather phase
+  (which holds no graph, and had been picking by raw id) to the commit
+  phase, which validates every tier member as a Concept and picks by
+  canonical key; and the web event feed orders same-instant events by
+  the moved concept's key, which eval makes routine by stamping every
+  event in a cycle with the same `now`.
+
+  Deliberately left id-primary, each named at its site: the
+  recent-interactions leg (interactions carry no canonical key),
+  presentation orderings with no score to tie (drift hits, conflict and
+  high-risk output lists), the hotlist (its `seq` is already a total
+  order), and rows a `LIMIT` cut before any tie-break could see them —
+  `has_boundary_tie` still forces the exact session query, which is
+  authoritative, not unconditionally deterministic.
+
 - `lambo_record_action` embeds the concepts it creates. It had no embedder hop
   at all, so every concept it wrote stored `embedding: NULL` while `derive`'s
   concepts were embedded — an inversion in which everything an agent
