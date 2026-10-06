@@ -163,6 +163,15 @@
 
 ### Fixed
 
+- The H3 cross-store parity suite no longer requires zero rank displacement
+  from the `postgres-exact` lane. Issue #2's tie-break change invalidated the
+  old contract silently: the midpoint probe of "user schema" and "create
+  user" ties exactly in the f64 lane (now settled by canonical key, "creat
+  user" first) while pgvector's f32 round-trip sees a strict order the other
+  way. Both adapters are faithful to their own scores, so a rank swap whose
+  score gap sits inside the f32 round-trip bound (`H3_SCORE_SKEW_EPSILON`)
+  in both outputs is now accepted, and any swap across a real gap above the
+  bound still fails the suite.
 - Every score-ordered list now breaks an exact tie on the concept's
   `canonical_key` before falling back to its node id (issue #2). Node ids
   are minted per run (`Uuid::new_v4`), so an id-settled tie was

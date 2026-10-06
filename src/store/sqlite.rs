@@ -5771,6 +5771,35 @@ mod tests {
                 .fold(0.0_f64, f64::max)
         }
 
+        /// True when every rank displacement sits inside the f32 round-trip
+        /// bound: for each displaced id, the score gap to the id occupying its
+        /// other rank is within [`H3_SCORE_SKEW_EPSILON`] in BOTH lanes. A
+        /// transposition therefore passes only when the swapped pair is
+        /// effectively tied in each lane's own score view; a swap across a
+        /// real gap above the bound returns false and the caller asserts.
+        fn displacement_within_noise(
+            a: &[Scored<NodeId>],
+            b: &[Scored<NodeId>],
+            disp: &[IdDisplacement],
+        ) -> bool {
+            let score_a: HashMap<String, f64> =
+                a.iter().map(|s| (s.item.0.to_string(), s.score)).collect();
+            let score_b: HashMap<String, f64> =
+                b.iter().map(|s| (s.item.0.to_string(), s.score)).collect();
+            disp.iter().all(|d| {
+                let within = |x: &f64, y: &f64| (x - y).abs() <= H3_SCORE_SKEW_EPSILON;
+                match (
+                    score_a.get(&d.id),
+                    a.get(d.rank_b).map(|s| &s.score),
+                    score_b.get(&d.id),
+                    b.get(d.rank_a).map(|s| &s.score),
+                ) {
+                    (Some(xa), Some(ya), Some(xb), Some(yb)) => within(xa, ya) && within(xb, yb),
+                    _ => false,
+                }
+            })
+        }
+
         // ---- Probe/limit grid (same shape as the F matrix above) -----------
 
         /// Same probe shapes as `vector_candidates_agree_with_an_exact_cosine_
@@ -6045,11 +6074,27 @@ mod tests {
                                 let postgres_exact =
                                     *a_name == "postgres-exact" || *b_name == "postgres-exact";
                                 if postgres_exact {
-                                    // Same ids and order as the other exact
-                                    // adapter; scores may differ by f32
-                                    // round-trip through pgvector. A copied
-                                    // Cockroach formula shows up as ~0.375
-                                    // skew at cosine=0.5, well above the bound.
+                                    // Same ids as the other exact adapter;
+                                    // scores may differ by f32 round-trip
+                                    // through pgvector. A copied Cockroach
+                                    // formula shows up as ~0.375 skew at
+                                    // cosine=0.5, well above the bound.
+                                    //
+                                    // Order must agree too, EXCEPT inside a
+                                    // pair whose scores sit within the
+                                    // round-trip bound in both lanes. Since
+                                    // issue #2 an exact f64 tie breaks on the
+                                    // canonical key, while pgvector's f32
+                                    // distance can see a strict order at
+                                    // ~1e-9 and keep score order: the H3
+                                    // midpoint probe of "user schema" and
+                                    // "create user" ties in f64 (key order
+                                    // puts "creat user" first) but is strict
+                                    // in f32 the other way. Both lanes are
+                                    // faithful to their own scores, so such
+                                    // a swap is round-trip noise, not skew;
+                                    // a swap across a real score gap above
+                                    // the bound still fails below.
                                     assert_eq!(
                                         got_a.len(),
                                         got_b.len(),
@@ -6066,20 +6111,24 @@ mod tests {
                                         pair.displacement,
                                     );
                                     assert!(
-                                        pair.displacement.is_empty(),
-                                        "H3: postgres-exact rank displacement on \
-                                         fixture {fixture_label:?} probe {probe_label:?} \
-                                         limit {limit}: {:?}",
+                                        displacement_within_noise(&got_a, &got_b, &pair.displacement),
+                                        "H3: postgres-exact rank displacement above the \
+                                         round-trip bound on fixture {fixture_label:?} \
+                                         probe {probe_label:?} limit {limit}: {:?}",
                                         pair.displacement,
                                     );
+                                    // Every displaced id breaks exactly its own
+                                    // rank in each lane, so the matching prefix
+                                    // is the undisplaced remainder.
                                     assert_eq!(
                                         pair.rank_prefix_match,
-                                        got_a.len(),
-                                        "H3: postgres-exact rank prefix {} != {} on \
+                                        got_a.len() - pair.displacement.len(),
+                                        "H3: postgres-exact rank prefix {} != {} - {} on \
                                          fixture {fixture_label:?} probe {probe_label:?} \
                                          limit {limit}",
                                         pair.rank_prefix_match,
                                         got_a.len(),
+                                        pair.displacement.len(),
                                     );
                                     assert!(
                                         pair.max_score_diff <= H3_SCORE_SKEW_EPSILON,
