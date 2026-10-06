@@ -137,9 +137,10 @@
 //!    overlaps real paraphrases and related-but-distinct pairs, so lowering the
 //!    score-only bar would add measured false positives; 0.85 remains the
 //!    deliberate precision bias. See `evidence/mooshik-g-recall-calibration/`.
-//!    Selection still applies `best_candidate`'s finite/`[0,1]`/deterministic
-//!    tie-break validation and the commit-time "target really is a Concept"
-//!    check. Persisting a vector lowers nothing.
+//!    Selection still applies `top_tier`'s finite/`[0,1]`/at-or-above-threshold
+//!    validation, and the commit phase both validates every tied candidate as a
+//!    real Concept and picks the merge target stably (canonical key, then id).
+//!    Persisting a vector lowers nothing.
 //! 3. **A vector minted in this call can never drive a merge in this call.**
 //!    Candidates come from the store, which cannot see this call's staged,
 //!    not-yet-flushed writes; `*target != id` is the defence in depth.
@@ -147,7 +148,7 @@
 //! ## What is deliberately *not* claimed
 //!
 //! Once flushed, a fresh vector **is** a legal merge *target* for a later derive
-//! (`Resolution::HybridMerge { target }`). That is unavoidable here:
+//! (`Resolution::HybridMerge { targets }`). That is unavoidable here:
 //! the checked candidate read targets `embedding IS NOT NULL` and cannot
 //! tell the merge leg from the recall leg apart. A strict target-exclusion would
 //! need durable per-vector provenance (a new `concepts` column plus a migration
@@ -171,8 +172,8 @@ use crate::graph::derive::{
 use crate::graph::Graph;
 use crate::store::{Capabilities, GraphStore};
 use crate::types::{
-    AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
-    LamboError, Node, NodeId, SessionId, StoreError,
+    tie_break_by_key, AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
+    EmbeddingContract, LamboError, Node, NodeId, SessionId, StoreError,
 };
 
 /// Default merge threshold (spec §7.1 step 6). Configurable per call
@@ -204,20 +205,40 @@ fn semantic_weight(score: f64) -> f64 {
     score.clamp(0.0, crate::graph::MAX_EDGE_WEIGHT)
 }
 
-fn best_candidate(
+/// The candidates tied at the highest valid score: finite, inside `[0,1]`, and
+/// at/above the configured threshold. Usually exactly one element; the whole
+/// tied tier is carried back rather than one pick because the raw UUID must
+/// not decide an exact tie (ids are run-minted) and this async gather phase
+/// holds no graph to read canonical keys from. The commit phase owns the
+/// stable pick: smallest canonical key, then smallest id (issue #2,
+/// remediation round 1). Works on unsorted input.
+fn top_tier(
     hits: &[crate::types::Scored<NodeId>],
     threshold: f64,
-) -> Option<&crate::types::Scored<NodeId>> {
-    hits.iter()
+) -> Vec<&crate::types::Scored<NodeId>> {
+    let mut tier: Vec<&crate::types::Scored<NodeId>> = Vec::new();
+    let mut best: Option<&crate::types::Scored<NodeId>> = None;
+    for c in hits
+        .iter()
         .filter(|c| c.score.is_finite() && (0.0..=1.0).contains(&c.score) && c.score >= threshold)
-        // Prefer higher similarity, then the lexicographically smaller UUID.
-        // Reversing the UUID comparison is required because `max_by` selects
-        // Ordering::Greater.
-        .max_by(|a, b| {
-            a.score
-                .total_cmp(&b.score)
-                .then_with(|| b.item.0.cmp(&a.item.0))
-        })
+    {
+        match best {
+            None => {
+                best = Some(c);
+                tier.push(c);
+            }
+            Some(b) => match c.score.total_cmp(&b.score) {
+                std::cmp::Ordering::Greater => {
+                    best = Some(c);
+                    tier.clear();
+                    tier.push(c);
+                }
+                std::cmp::Ordering::Equal => tier.push(c),
+                std::cmp::Ordering::Less => {}
+            },
+        }
+    }
+    tier
 }
 
 /// A caller-supplied action to run **inside the commit critical section**,
@@ -247,10 +268,13 @@ enum Resolution {
         embedding: Option<Vec<f32>>,
     },
     /// `Unmatched` with a vector hit at/above threshold: create the concept and
-    /// a decaying `Semantic` edge to the matched concept.
+    /// a decaying `Semantic` edge to the matched concept. `targets` is the
+    /// whole tier tied at the top score ([`top_tier`], usually length 1): the
+    /// gather phase holds no graph, so the stable pick — smallest canonical
+    /// key, then id (issue #2) — is made here at commit, where the graph is.
     HybridMerge {
         key: String,
-        target: NodeId,
+        targets: Vec<NodeId>,
         score: f64,
         embedding: Vec<f32>,
     },
@@ -696,17 +720,14 @@ async fn derive_planned(
                                     .into())
                                 }
                                 Ok(Ok(hits)) => {
-                                    // Highest-scoring candidate at/above threshold (store
-                                    // results are not guaranteed sorted). The candidate is
-                                    // validated to be a real distinct concept at commit.
-                                    let best = best_candidate(&hits, semantic_match_threshold);
-                                    match best {
-                                        Some(c) => Resolution::HybridMerge {
-                                            key: key.clone(),
-                                            target: c.item,
-                                            score: c.score,
-                                            embedding: emb,
-                                        },
+                                    // The tier tied at the highest score
+                                    // at/above threshold (store results are not
+                                    // guaranteed sorted). Every member is
+                                    // validated as a real distinct concept at
+                                    // commit, which also makes the stable
+                                    // canonical-key pick.
+                                    let tier = top_tier(&hits, semantic_match_threshold);
+                                    if tier.is_empty() {
                                         // Below threshold: fresh concept, NO
                                         // `Semantic` edge — the merge is refused.
                                         // L82-4 (product decision 2026-08-14):
@@ -723,10 +744,17 @@ async fn derive_planned(
                                         // is still `>= semantic_match_threshold`.
                                         // See the module doc, "Vector persistence
                                         // for fresh concepts".
-                                        None => Resolution::Fresh {
+                                        Resolution::Fresh {
                                             key: key.clone(),
                                             embedding: Some(emb),
-                                        },
+                                        }
+                                    } else {
+                                        Resolution::HybridMerge {
+                                            key: key.clone(),
+                                            targets: tier.iter().map(|c| c.item).collect(),
+                                            score: tier[0].score,
+                                            embedding: emb,
+                                        }
                                     }
                                 }
                                 Ok(Err(StoreError::Capability(_))) => {
@@ -886,22 +914,24 @@ async fn derive_planned(
                 }
                 Resolution::HybridMerge {
                     key,
-                    target,
+                    targets,
                     score,
                     embedding,
                 } => {
                     // MINOR-2 (P7 remediation): the concept keeps its vector ONLY if
                     // the merge Semantic edge is actually written. Both endpoints
-                    // must be concepts (GRAPH-2); validate the target up front and,
-                    // when the store handed us a bogus non-Concept candidate, refuse
-                    // the merge and degrade to a TRUE keyword-only concept
-                    // (embedding: None). L82-4 did NOT relax this arm: a store that
-                    // answers `vector_candidates` with an id that is not a concept
-                    // has an untrustworthy vector view for this call, so we decline
-                    // to add another row to it. (The below-threshold arm, where the
+                    // must be concepts (GRAPH-2); validate EVERY carried candidate
+                    // up front and, when the store handed us a bogus non-Concept
+                    // candidate, refuse the merge and degrade to a TRUE keyword-only
+                    // concept (embedding: None) — regardless of which tier member a
+                    // run-minted tie-break would have picked, an untrustworthy
+                    // vector view for this call means no new row in it. L82-4 did
+                    // NOT relax this arm. (The below-threshold arm, where the
                     // store behaved correctly and simply had no near neighbour, does
                     // persist its vector — see the module doc.)
-                    let can_merge = matches!(g.node(*target), Some(Node::Concept(_)));
+                    let can_merge = targets
+                        .iter()
+                        .all(|t| matches!(g.node(*t), Some(Node::Concept(_))));
                     let embedding = if can_merge {
                         Some(embedding.clone())
                     } else {
@@ -927,33 +957,51 @@ async fn derive_planned(
                         // receipt's applied-vs-embedded distinction (J3-R3-1).
                         outcome.embedded += 1;
                     }
-                    if can_merge && *target != id {
+                    if can_merge {
+                        // The stable merge-target pick (issue #2, remediation
+                        // round 1): the tier's members are tied at one score, so
+                        // the run-minted UUID must not decide; smallest canonical
+                        // key wins, smallest id behind it (`tie_break_by_key`).
+                        // `can_merge` proved every target is a Concept, so the
+                        // key arm is always `Some` here — the `None` arm keeps
+                        // the closure total, it never fires.
+                        let key_of = |t: NodeId| match g.node(t) {
+                            Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
+                            _ => None,
+                        };
+                        let target = targets
+                            .iter()
+                            .copied()
+                            .min_by(|a, b| tie_break_by_key(key_of(*a), a, key_of(*b), b))
+                            .expect("can_merge proved the validated tier is non-empty");
                         // Decaying Semantic edge to the matched concept (deterministic
                         // direction: order endpoints by NodeId's inner UUID, since
-                        // NodeId itself is not Ord). `*target != id` is defense-in-depth:
+                        // NodeId itself is not Ord). `target != id` is defense-in-depth:
                         // a store-returned target can never equal this fresh id.
-                        let (s, t) = if target.0 < id.0 {
-                            (*target, id)
-                        } else {
-                            (id, *target)
-                        };
-                        g.upsert_edge(Edge {
-                            event_time: interaction_event_time,
-                            id: NodeId::new(),
-                            session_id: session_id.clone(),
-                            source: s,
-                            target: t,
-                            edge_type: EdgeType::Semantic,
-                            weight: semantic_weight(*score),
-                            reinforcements: 1,
-                            created_at: interaction_created_at,
-                            last_reinforced: interaction_created_at,
-                        })?;
-                        // Recorded separately from `matched`: a merge does not
-                        // re-upsert the target nor Derives-reinforce it, so the
-                        // outcome must not over-count `matched` as "re-derived"
-                        // (DeriveOutcome contract, MINOR-3).
-                        outcome.semantic_merged.push(*target);
+                        if target != id {
+                            let (s, t) = if target.0 < id.0 {
+                                (target, id)
+                            } else {
+                                (id, target)
+                            };
+                            g.upsert_edge(Edge {
+                                event_time: interaction_event_time,
+                                id: NodeId::new(),
+                                session_id: session_id.clone(),
+                                source: s,
+                                target: t,
+                                edge_type: EdgeType::Semantic,
+                                weight: semantic_weight(*score),
+                                reinforcements: 1,
+                                created_at: interaction_created_at,
+                                last_reinforced: interaction_created_at,
+                            })?;
+                            // Recorded separately from `matched`: a merge does not
+                            // re-upsert the target nor Derives-reinforce it, so the
+                            // outcome must not over-count `matched` as "re-derived"
+                            // (DeriveOutcome contract, MINOR-3).
+                            outcome.semantic_merged.push(target);
+                        }
                     }
                     this_node = id;
                 }
@@ -1466,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_validation_and_ties_are_deterministic() {
+    fn candidate_validation_and_ties_form_one_tier() {
         let lower = NodeId(Uuid::from_u64_pair(0, 1));
         let higher = NodeId(Uuid::from_u64_pair(0, 2));
         let invalid = NodeId(Uuid::from_u64_pair(0, 3));
@@ -1478,9 +1526,24 @@ mod tests {
         ];
         let mut b = a.clone();
         b.reverse();
-        assert_eq!(best_candidate(&a, 0.85).unwrap().item, lower);
-        assert_eq!(best_candidate(&b, 0.85).unwrap().item, lower);
-        assert!(best_candidate(&[hit(invalid, f64::INFINITY)], 0.85).is_none());
+        // The 0.9 pair is the whole valid top tier — both members, in either
+        // input order (the gather phase picks none of them: no graph here).
+        let tier_ids = |tier: Vec<&Scored<NodeId>>| tier.iter().map(|c| c.item).collect::<Vec<_>>();
+        let mut ta = tier_ids(top_tier(&a, 0.85));
+        let mut tb = tier_ids(top_tier(&b, 0.85));
+        // NodeId is deliberately not Ord (issue #2: the UUID must not be the
+        // semantic order) — sort by the raw bytes only to compare sets.
+        ta.sort_by_key(|id| id.0);
+        tb.sort_by_key(|id| id.0);
+        assert_eq!(ta, vec![lower, higher]);
+        assert_eq!(tb, vec![lower, higher]);
+        // Invalid candidates are filtered, not merely outranked.
+        assert!(top_tier(&[hit(invalid, f64::INFINITY)], 0.85).is_empty());
+        // A strictly best candidate is a tier of one.
+        assert_eq!(
+            tier_ids(top_tier(&[hit(higher, 0.9), hit(lower, 0.86)], 0.85)),
+            vec![higher]
+        );
     }
 
     #[tokio::test]
@@ -2710,7 +2773,7 @@ mod tests {
         graph.write().insert_interaction(second).unwrap();
 
         // Both colliding contents embed, and the store returns C1 at 0.9 for
-        // each — so both resolve HybridMerge { target: c1 }.
+        // each — so both resolve HybridMerge { targets: vec![c1] }.
         let out = derive(
             graph.clone(),
             &SpyStore::with_vector(vec![hit(c1, 0.9)]),
@@ -2794,6 +2857,81 @@ mod tests {
         assert!(g.edge_between(iid, c, EdgeType::Semantic).is_none());
         assert!(g.edge_between(c, iid, EdgeType::Semantic).is_none());
         assert!(g.edge_between(iid, c, EdgeType::Derives).is_some());
+        g.assert_invariants().unwrap();
+    }
+
+    /// A concept with a FIXED id and key, inserted straight into the graph so a
+    /// test can pit id order against key order for the merge pick.
+    fn preseeded_concept(sess: &str, id: Uuid, key: &str, owner: NodeId) -> Concept {
+        Concept {
+            id: NodeId(id),
+            session_id: sid(sess),
+            content: key.to_string(),
+            canonical_key: key.to_string(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: owner,
+            origin_agent: agent(),
+            created_at: ts(0),
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        }
+    }
+
+    /// Issue-2 remediation round 1: candidates tied at the top score must
+    /// resolve the merge target stably — smallest canonical key, then id — not
+    /// by the run-minted UUID the gather phase's pick used to fall back to.
+    /// The ids here order OPPOSITE to the keys, so the old reversed-UUID pick
+    /// merges into `beta`; the stable pick must land on `alpha`.
+    #[tokio::test]
+    async fn tied_merge_candidates_pick_smallest_canonical_key() {
+        let sess = "hybrid-tie-key";
+        let (graph, iid) = graph_with_interaction(sess, 1, 0, "billing questions");
+        let alpha = preseeded_concept(sess, Uuid::from_u64_pair(9, 2), "alpha api", iid);
+        let beta = preseeded_concept(sess, Uuid::from_u64_pair(9, 1), "beta api", iid);
+        let (alpha_id, beta_id) = (alpha.id, beta.id);
+        {
+            let mut g = graph.write();
+            g.insert_concept(alpha, iid).unwrap();
+            g.insert_concept(beta, iid).unwrap();
+        }
+
+        let out = derive(
+            graph.clone(),
+            // Both candidates tied at 0.9, in non-key order — the tier, not
+            // the store's ordering, decides.
+            &SpyStore::with_vector(vec![hit(beta_id, 0.9), hit(alpha_id, 0.9)]),
+            &RecordingEmbedder::new(),
+            &contract("fixture", 1024),
+            iid,
+            &agent(),
+            &[("gamma queries", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.created.len(), 1);
+        assert_eq!(
+            out.semantic_merged,
+            vec![alpha_id],
+            "an exact score tie must resolve on the canonical key, not the UUID"
+        );
+        let g = graph.read();
+        let n1 = out.created[0];
+        assert!(
+            g.edge_between(alpha_id, n1, EdgeType::Semantic).is_some()
+                || g.edge_between(n1, alpha_id, EdgeType::Semantic).is_some()
+        );
         g.assert_invariants().unwrap();
     }
 }

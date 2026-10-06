@@ -74,8 +74,8 @@ impl InvertedIndex {
         self.doc_tokens.insert(c.id, tokens);
     }
 
-    /// Drop a concept from the index (its postings, its length contribution).
-    /// No-op if `id` is not indexed.
+    /// Drop a concept from the index (its postings, its length contribution,
+    /// its tie-break key). No-op if `id` is not indexed.
     pub fn remove(&mut self, id: NodeId) {
         let Some(tokens) = self.doc_tokens.remove(&id) else {
             return;
@@ -94,6 +94,10 @@ impl InvertedIndex {
         }
         self.total_tokens -= tokens.len();
         self.total_docs -= 1;
+        // The tie-break key rides the same lifecycle as the postings: a
+        // removed concept leaves nothing behind (remediation round 1 — the
+        // entry used to linger, a leak re-added ids can mask with a stale key).
+        self.doc_keys.remove(&id);
     }
 
     /// Index every concept in a snapshot (bulk-load; incremental `add` underneath).
@@ -289,6 +293,35 @@ mod tests {
         assert_eq!(idx.total_docs, 0);
         assert!(idx.search("rate", 10).is_empty());
         assert!(idx.postings.is_empty());
+    }
+
+    #[test]
+    fn remove_drops_the_tie_break_key() {
+        // Remediation round 1: `remove` used to leave the concept's canonical
+        // key in `doc_keys` forever. A re-added id overwrote it, so the leak
+        // never surfaced in `search` (no postings -> never consulted), but the
+        // map must mirror the postings' lifecycle, not grow past it.
+        let mut idx = InvertedIndex::new();
+        let a = concept(1, "rate limiter");
+        idx.add(&a);
+        assert_eq!(
+            idx.doc_keys.get(&a.id).map(String::as_str),
+            Some("rate limiter")
+        );
+
+        idx.remove(a.id);
+        assert!(
+            idx.doc_keys.is_empty(),
+            "a removed concept leaves no key behind"
+        );
+
+        // Re-adding the id inserts its key fresh.
+        let rekeyed = concept(1, "create user");
+        idx.add(&rekeyed);
+        assert_eq!(
+            idx.doc_keys.get(&a.id).map(String::as_str),
+            Some("create user")
+        );
     }
 
     #[test]

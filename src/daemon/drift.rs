@@ -54,18 +54,19 @@
 //! * **Cycle safety (G6).** Multi-hop `Hierarchical` cycles are writable
 //!   across calls, so the BFS keeps a visited set — the traversal can never
 //!   loop, and no `assert_invariants` guarantee is assumed.
-//! * **Determinism.** Goal seeds are sorted by id, per-node neighbor lists
+//! * **Determinism.** Goal seeds are sorted by canonical key then id
+//!   (issue #2 — the ids alone are minted per run), per-node neighbor lists
 //!   are id-ascending (Graph's typed-neighbor methods sort), and the output is
 //!   sorted by node id. `DriftHit::goal` is the goal that *first* reaches the
 //!   node in BFS order (shortest distance; ties resolved by seed order →
-//!   smallest-id goal in practice).
+//!   smallest canonical key, then smallest id).
 
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::daemon::hotlist::{Condition, HotList, HotListEntry, HotListPayload};
 use crate::graph::Graph;
-use crate::types::{EdgeType, NodeId};
+use crate::types::{tie_break_by_key, EdgeType, NodeId};
 
 /// Spec §9 `drift_threshold` — warn strictly beyond this many hops.
 pub const DRIFT_THRESHOLD: usize = 5;
@@ -109,8 +110,8 @@ pub struct DriftHit {
     /// The drifted concept.
     pub node: NodeId,
     /// The root goal it was measured against (the one reached first in BFS
-    /// order — shortest distance, ties → smallest-id goal in practice), or
-    /// `None` when there is **no path** to any goal (ALGO-5).
+    /// order — shortest distance, ties → smallest canonical key, then smallest
+    /// id), or `None` when there is **no path** to any goal (ALGO-5).
     pub goal: Option<NodeId>,
     /// Shortest-path hop count over `Causal`/`Dependency`/`Hierarchical`, or
     /// `None` for the no-path case — the maximally drifted concept, which has no
@@ -123,23 +124,27 @@ pub struct DriftHit {
 
 /// The session's root goal concept nodes: concepts whose `content` or
 /// `canonical_key` equals the `root_goal` string. Empty when the goal is
-/// unset, non-string, or matches no concept. Deterministic (id-ascending).
+/// unset, non-string, or matches no concept. Deterministic, canonical key
+/// ascending then id ascending ([`tie_break_by_key`]): this is the seed order
+/// `detect`'s BFS attributes nearest-goal ties with, and the ids alone are
+/// minted per run (issue #2, remediation round 1 — was id-ascending).
 pub fn root_goal_nodes(graph: &Graph) -> Vec<NodeId> {
     let texts = graph.root_goal_texts();
     if texts.is_empty() {
         return Vec::new();
     }
-    let mut goals: Vec<NodeId> = graph
+    let mut goals: Vec<&crate::types::Concept> = graph
         .concepts()
         .filter(|c| {
             texts
                 .iter()
                 .any(|t| c.content == *t || c.canonical_key == *t)
         })
-        .map(|c| c.id)
         .collect();
-    goals.sort_by_key(|id| id.0);
-    goals
+    goals.sort_by(|a, b| {
+        tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+    });
+    goals.into_iter().map(|c| c.id).collect()
 }
 
 /// Detect drifted concepts: every concept within the goal's traversable
@@ -204,7 +209,9 @@ pub fn detect(graph: &Graph, threshold: usize) -> Vec<DriftHit> {
 /// Distance is symmetric (the traversable edge set is treated as undirected),
 /// so the hop count this finds is the same one [`detect`] finds from the goal
 /// side, and the tie-break matches: among goals at the shortest distance the
-/// smallest id wins.
+/// smallest canonical key wins, then the smallest id
+/// ([`tie_break_by_key`], issue #2) — the same chain [`detect`]'s seed order
+/// applies.
 pub fn drift_at(graph: &Graph, node: NodeId, threshold: usize) -> Option<DriftHit> {
     let goals: HashSet<NodeId> = root_goal_nodes(graph).into_iter().collect();
     if goals.is_empty() {
@@ -214,11 +221,19 @@ pub fn drift_at(graph: &Graph, node: NodeId, threshold: usize) -> Option<DriftHi
     let mut frontier: Vec<NodeId> = vec![node];
     let mut hops = 0usize;
     while !frontier.is_empty() {
-        // Any goal on this level is at the shortest distance; smallest id wins.
+        // Any goal on this level is at the shortest distance; the stable
+        // issue-2 chain decides among them: smallest canonical key, then
+        // smallest id (remediation round 1 — the bare id is run-minted).
         if let Some(goal) = frontier
             .iter()
             .filter(|n| goals.contains(n))
-            .min_by_key(|n| n.0)
+            .min_by(|a, b| {
+                let key = |n: &NodeId| match graph.node(*n) {
+                    Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
+                    _ => None,
+                };
+                tie_break_by_key(key(a), a, key(b), b)
+            })
         {
             return drift_hit(node, Some(*goal), Some(hops), threshold);
         }
@@ -442,6 +457,49 @@ mod tests {
         g2.insert_concept(c, iid).unwrap();
         g2.set_root_goal(Some(serde_json::json!("launch product")));
         assert_eq!(root_goal_nodes(&g2), vec![cid]);
+    }
+
+    /// Issue-2 remediation round 1: when two goals are equidistant from a
+    /// node, the attributed goal follows the stable chain — smallest canonical
+    /// key, then id — not the run-minted id the seeds used to sort by. The
+    /// keys here order OPPOSITE to the ids, so the old id order would
+    /// attribute `beta goal` where the stable pick is `alpha goal`.
+    #[test]
+    fn nearest_goal_ties_break_on_canonical_key_ahead_of_id() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        // `alpha goal` rides the LARGER id; `beta goal` the smaller one.
+        let alpha = concept(41, iid, "alpha goal");
+        let alpha_id = alpha.id;
+        let beta = concept(40, iid, "beta goal");
+        let beta_id = beta.id;
+        g.insert_concept(alpha, iid).unwrap();
+        g.insert_concept(beta, iid).unwrap();
+        let probe = concept(60, iid, "probe node");
+        let probe_id = probe.id;
+        g.insert_concept(probe, iid).unwrap();
+        g.upsert_edge(edge(910, beta_id, probe_id, EdgeType::Dependency))
+            .unwrap();
+        g.upsert_edge(edge(911, alpha_id, probe_id, EdgeType::Dependency))
+            .unwrap();
+        g.set_root_goal(Some(serde_json::json!(["beta goal", "alpha goal"])));
+
+        // The seed order is key-ascending, not id-ascending.
+        assert_eq!(root_goal_nodes(&g), vec![alpha_id, beta_id]);
+
+        // `detect` attributes the tie to the smallest canonical key…
+        let hit = detect(&g, 0)
+            .into_iter()
+            .find(|h| h.node == probe_id)
+            .expect("the probe is 1 hop from two goals");
+        assert_eq!(hit.hops, Some(1));
+        assert_eq!(hit.goal, Some(alpha_id));
+
+        // …and the per-node primitive picks the same goal.
+        let at = drift_at(&g, probe_id, 0).expect("1 hop is beyond threshold 0");
+        assert_eq!(at.goal, Some(alpha_id));
     }
 
     #[test]

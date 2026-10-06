@@ -887,14 +887,19 @@ impl<T> Scored<T> {
 }
 
 /// The stable tie-break for score-ordered candidate lists (issue #2): on an
-/// exact score tie, order by **canonical key ascending** where both concepts
-/// are in scope, and fall back to **node id ascending** only when a key is
-/// missing on either side. Node ids are minted per run (`Uuid::new_v4`), so an
-/// id-first tie-break is deterministic within a run but arbitrary across runs;
-/// the canonical key is persisted and stable for the same logical concept. The
-/// key is not a total separator (non-canonical synonym duplicates share one,
-/// and interactions carry none), which is why the id fallback stays: it keeps
-/// the order total, it no longer decides exact-key ties arbitrarily.
+/// exact score tie, order by **canonical key ascending**, with a keyless node
+/// sorting after every keyed node (SQL's `NULLS LAST` on an ascending order),
+/// and **node id ascending** as the final fallback inside each class. Node ids
+/// are minted per run (`Uuid::new_v4`), so an id-first tie-break is
+/// deterministic within a run but arbitrary across runs; the canonical key is
+/// persisted and stable for the same logical concept. The key is not a total
+/// separator (non-canonical synonym duplicates share one, and interactions
+/// carry none), which is why the id fallback stays — but key *presence* is
+/// itself compared. Ignoring a present key whenever the other side lacked one
+/// made the order intransitive on mixed input (a keyed node could sort both
+/// behind and ahead of a keyless one depending on the third element), so the
+/// result of a sort depended on input order; remediation round 1 made the
+/// comparator total: the same pair now always orders the same way.
 pub fn tie_break_by_key(
     a_key: Option<&str>,
     a: &NodeId,
@@ -903,7 +908,9 @@ pub fn tie_break_by_key(
 ) -> std::cmp::Ordering {
     match (a_key, b_key) {
         (Some(a_key), Some(b_key)) => a_key.cmp(b_key),
-        _ => std::cmp::Ordering::Equal,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
     .then_with(|| a.0.cmp(&b.0))
 }
@@ -1177,5 +1184,65 @@ mod tests {
             let back: EdgeType = serde_json::from_str(&s).unwrap();
             assert_eq!(et, back);
         }
+    }
+
+    /// Issue-2 remediation round 1: the old comparator compared keys only when
+    /// BOTH were `Some` and fell through to the id otherwise, so a keyed node
+    /// ordered ahead of a keyless one on one pairing and behind it on another
+    /// (a < b < c with a > c) and sort output depended on input order. The
+    /// total order sorts the same permutation every way.
+    #[test]
+    fn tie_break_is_transitive_on_mixed_key_presence() {
+        // (key, id): the keyed nodes' ids order them OPPOSITE to their keys, so
+        // only the key can decide a keyed pair, and the keyless node's id sits
+        // between them — the exact shape that used to break transitivity.
+        let a = (Some("b"), NodeId(uuid::Uuid::from_u64_pair(0, 1)));
+        let b = (None, NodeId(uuid::Uuid::from_u64_pair(0, 2)));
+        let c = (Some("a"), NodeId(uuid::Uuid::from_u64_pair(0, 3)));
+        let cmp = |x: (Option<&str>, NodeId), y: (Option<&str>, NodeId)| {
+            tie_break_by_key(x.0, &x.1, y.0, &y.1)
+        };
+        // Totality: antisymmetric, and the sorted result is one fixed sequence.
+        assert_eq!(cmp(a, b), cmp(b, a).reverse());
+        assert_eq!(cmp(b, c), cmp(c, b).reverse());
+        assert_eq!(cmp(a, c), cmp(c, a).reverse());
+        // Keyed nodes sort by key ahead of the keyless one, ids never deciding
+        // across the presence partition.
+        assert_eq!(cmp(c, a), std::cmp::Ordering::Less);
+        assert_eq!(cmp(c, b), std::cmp::Ordering::Less);
+        assert_eq!(cmp(a, b), std::cmp::Ordering::Less);
+        let expected = [c, a, b];
+        for input in [
+            [a, b, c],
+            [a, c, b],
+            [b, a, c],
+            [b, c, a],
+            [c, a, b],
+            [c, b, a],
+        ] {
+            let mut items = input;
+            items.sort_by(|x, y| cmp(*x, *y));
+            assert_eq!(items, expected, "input order {input:?} must not leak");
+        }
+    }
+
+    #[test]
+    fn tie_break_key_then_id_with_keyless_last() {
+        let id = |n: u64| NodeId(uuid::Uuid::from_u64_pair(7, n));
+        // Equal keys: id decides.
+        assert_eq!(
+            tie_break_by_key(Some("k"), &id(1), Some("k"), &id(2)),
+            std::cmp::Ordering::Less
+        );
+        // Keys decide ahead of ids.
+        assert_eq!(
+            tie_break_by_key(Some("z"), &id(1), Some("a"), &id(2)),
+            std::cmp::Ordering::Greater
+        );
+        // Two keyless nodes: id decides.
+        assert_eq!(
+            tie_break_by_key(None, &id(2), None, &id(1)),
+            std::cmp::Ordering::Greater
+        );
     }
 }

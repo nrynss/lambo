@@ -958,8 +958,14 @@ fn filter_session_rows<D: Dialect>(
 
 /// True when the global fetch's kth and lookahead distances tie. The canonical
 /// key tie-break can only order rows the fetch actually returned, so a tie
-/// group cut by SQL's LIMIT still has an arbitrary subset: the exact session
-/// query remains the only deterministic answer (unchanged by issue #2).
+/// group cut by SQL's LIMIT has an arbitrary subset — this still forces the
+/// exact session query, which re-fetches the session's own rows and re-orders
+/// them with the same comparator (the forcing rule is unchanged by issue #2).
+/// That makes the re-fetch authoritative, not unconditionally deterministic
+/// (remediation round 1 doc alignment): a tie group outgrowing the exact
+/// query's own LIMIT is still cut by its SQL `id` order, and rows sharing one
+/// canonical key fall through to that run-minted id — the residual per-run
+/// arbitrariness no in-process tie-break can remove.
 fn has_boundary_tie(rows: &[(NodeId, f64, String, String)], k: usize) -> bool {
     k > 0
         && rows.len() > k
