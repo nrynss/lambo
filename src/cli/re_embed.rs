@@ -465,6 +465,7 @@ mod tests {
             }),
         };
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 interaction,
                 set_contract,

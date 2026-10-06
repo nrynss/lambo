@@ -381,6 +381,7 @@ mod tests {
         // S5): drop the RAM-local metadata to get the store-faithful oracle.
         expected.synonyms.clear();
         expected.reservations.clear();
+        let epoch_at_drain = g.epoch();
         let batch = g.drain_log();
         assert!(!batch.is_empty());
 
@@ -393,7 +394,10 @@ mod tests {
         // chain order, concepts, edges, canonization trail, metadata fields).
         assert_eq!(loaded.graph.snapshot(), expected);
         assert_eq!(loaded.graph.log_len(), 0, "load must not seed mutations");
-        assert_eq!(loaded.graph.epoch(), 0);
+        // Issue #17: the load resumes the durable mutation accounting — the
+        // epoch the drained batch stamped is what comes back — while the log
+        // itself stays empty (a loaded session's history is already durable).
+        assert_eq!(loaded.graph.epoch(), epoch_at_drain);
         loaded.graph.assert_invariants().unwrap();
 
         // RAM-local metadata is NOT in the write-behind materialization — the
@@ -423,6 +427,76 @@ mod tests {
             .collect();
         assert_eq!(drift_ids.len(), 2, "both observations indexed");
         assert!(loaded.index.search("zzzz-nothing", 10).is_empty());
+    }
+
+    /// Issue #17, end to end through a store: the mutation accounting a
+    /// flushed batch stamps is what `load_session` hands back, so a writer
+    /// restart resumes the counter instead of resetting it. Two contracts ride
+    /// on that: GC's `gc_interval` measures deployment-lifetime mutations (the
+    /// sweep — and through `gc_survived` every Swarm Stage 1 promotion — is
+    /// reachable in a low-write deployment), and the epoch the recall cache
+    /// keys on ([`crate::recall::cache::CacheKey::mutation_epoch`]) stays
+    /// strictly increasing across a restart, so a pre-restart key can never
+    /// collide with post-restart content.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn restart_resumes_the_mutation_accounting_across_the_store() {
+        // Writer 1: a session with a handful of mutations.
+        let (mut g1, _, _) = build_session();
+        g1.assert_invariants().unwrap();
+        let epoch_1 = g1.epoch();
+        assert!(epoch_1 > 0, "test premise: writer 1 has taken mutations");
+        let batch1 = g1.drain_log();
+        assert_eq!(
+            batch1.mutation_epoch, epoch_1,
+            "drain stamps the absolute watermark"
+        );
+
+        let store = MemoryStore::new();
+        store.flush(&batch1, None).await.unwrap();
+
+        // Writer 2 attaches: the counter resumes where writer 1 left it —
+        // not 0.
+        let loaded = load_session(&store, &SessionId::from("roundtrip")).unwrap();
+        assert_eq!(
+            loaded.graph.epoch(),
+            epoch_1,
+            "restart must resume the durable counter, not reset it"
+        );
+        assert_eq!(loaded.graph.log_len(), 0);
+
+        // ...and the resumed counter keeps rising, strictly above the
+        // pre-restart value (the cache-key monotonicity).
+        let mut g2 = loaded.graph;
+        let user_schema = g2
+            .concepts()
+            .find(|c| c.content == "user schema")
+            .expect("loaded from writer 1")
+            .id;
+        g2.apply_canonization_transition(CanonizationEvent {
+            id: NodeId(Uuid::from_u64_pair(9, 9)),
+            session_id: g2.session_id().clone(),
+            node_id: user_schema,
+            from_status: CanonizationStatus::Candidate,
+            to_status: CanonizationStatus::Venerable,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: ts(20),
+        })
+        .unwrap();
+        let epoch_2 = g2.epoch();
+        assert!(
+            epoch_2 > epoch_1,
+            "the epoch must strictly increase across the restart"
+        );
+
+        let batch2 = g2.drain_log();
+        store.flush(&batch2, None).await.unwrap();
+
+        // Writer 3: the accounting is cumulative over both writers, never
+        // rewound.
+        let loaded3 = load_session(&store, &SessionId::from("roundtrip")).unwrap();
+        assert_eq!(loaded3.graph.epoch(), epoch_2);
     }
 
     /// Full-snapshot round-trip: seed (the full `GraphSnapshot` save path, S5)

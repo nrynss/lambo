@@ -69,6 +69,15 @@ pub struct Graph {
     /// `MutationEpoch` — bumps once per appended mutation. Recall-cache invalidation
     /// key (spec §8); GC's step 7 is redundant but harmless (any mutation already
     /// bumps the epoch).
+    ///
+    /// The counter is **deployment-lifetime, not process-lifetime** (issue #17):
+    /// [`Graph::from_snapshot`] resumes it from [`GraphSnapshot::mutation_epoch`]
+    /// and [`Graph::drain_log`] stamps it back onto every flushed batch, so a
+    /// writer restart neither resets GC's `gc_interval` measure nor rewinds the
+    /// epoch scale the recall cache keys on. RAM-local bumps (reservations,
+    /// synonyms) are counted while they last; they are not durable state, so a
+    /// crash can shed their contribution — the durable watermark is always
+    /// exactly the count of durable mutations.
     epoch: u64,
 }
 
@@ -108,6 +117,13 @@ impl Graph {
     /// silently merged via reinforcement (GRAPH-7 — the loaded graph must equal
     /// the stored snapshot; reinforcement is a write-path semantic, not a load
     /// one).
+    ///
+    /// The mutation epoch **resumes** from [`GraphSnapshot::mutation_epoch`]
+    /// (issue #17): the counter is durable accounting, not process state.
+    /// Restarting it at 0 on every writer start is what kept GC's
+    /// `gc_interval` sweep — and through `gc_survived` every Swarm Stage 1
+    /// promotion — permanently out of reach in a low-write deployment. The
+    /// log stays empty either way: loading counts nothing new.
     pub fn from_snapshot(snap: GraphSnapshot) -> Result<Self, LamboError> {
         let sid = snap.session_id.clone();
         let mut g = Self::new(sid.clone());
@@ -241,6 +257,11 @@ impl Graph {
         }
 
         g.assert_invariants()?;
+        // Issue #17: resume the durable mutation accounting AFTER the
+        // invariant pass so `epoch` is the last thing a caller could observe
+        // mid-construction. `Graph::new` started it at 0; the snapshot's value
+        // is the deployment's count through its last durable mutation.
+        g.epoch = snap.mutation_epoch;
         Ok(g)
     }
 
@@ -300,6 +321,11 @@ impl Graph {
             // `load_session` materializes them. A RAM snapshot therefore has
             // none to offer — the store is their single home.
             write_intents: Vec::new(),
+            // The mutation accounting is graph state (issue #17): a seeded or
+            // otherwise re-materialized session must resume the epoch, not
+            // restart it, or GC's `gc_interval` would measure per-process
+            // mutations again.
+            mutation_epoch: self.epoch,
         }
     }
 
@@ -1360,9 +1386,15 @@ impl Graph {
     /// The batch is in **chronological** write order. §2.4's phase grouping
     /// (nodes -> edges -> deletions -> transitions) holds within a single logical
     /// write, not across the batch. Replay in order — never re-sort.
+    ///
+    /// The batch is stamped with [`Graph::epoch`] at drain time
+    /// ([`MutationBatch::mutation_epoch`]): an absolute watermark the store
+    /// persists in the same transaction as the batch, so the durable counter
+    /// can never run ahead of durable content or behind it (issue #17).
     pub fn drain_log(&mut self) -> MutationBatch {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
+            mutation_epoch: self.epoch,
         }
     }
 
@@ -3519,6 +3551,44 @@ mod tests {
         assert!(g.epoch() > e_before);
     }
 
+    /// Issue #17: the mutation epoch is durable accounting, not process state.
+    /// `from_snapshot` resumes it, so a writer restart neither resets GC's
+    /// `gc_interval` measure (which gates every Swarm Stage 1 promotion
+    /// through `gc_survived`) nor rewinds the epoch scale the recall cache
+    /// keys on. Pre-fix, a restarted writer's epoch began at 0 and a
+    /// low-write deployment never crossed the interval in any single process.
+    #[test]
+    fn from_snapshot_resumes_the_mutation_epoch() {
+        let (mut g, iid, _cid) = small_graph();
+        let c2 = concept(2, iid, "auth middleware");
+        g.insert_concept(c2, iid).unwrap();
+        let epoch_1 = g.epoch();
+        assert!(epoch_1 > 0, "test premise: the session has taken mutations");
+
+        // "Restart": re-materialize from the snapshot the way a store load
+        // does. The counter resumes exactly where writer 1 left it.
+        let mut writer2 = Graph::from_snapshot(g.snapshot()).unwrap();
+        assert_eq!(writer2.epoch(), epoch_1, "restart must resume, not reset");
+        assert_eq!(writer2.log_len(), 0, "resuming counts nothing new");
+        assert_eq!(
+            writer2.snapshot().mutation_epoch,
+            epoch_1,
+            "the snapshot carries the accounting forward"
+        );
+
+        // The drained batch stamps the absolute watermark the store persists.
+        let batch = writer2.drain_log();
+        assert!(batch.is_empty());
+        assert_eq!(batch.mutation_epoch, epoch_1);
+
+        // The resumed counter keeps rising, strictly above the pre-restart
+        // value — so an epoch-keyed cache entry from before the restart can
+        // never collide with post-restart content.
+        let c3 = concept(3, iid, "caching layer");
+        writer2.insert_concept(c3, iid).unwrap();
+        assert!(writer2.epoch() > epoch_1);
+    }
+
     #[test]
     fn drain_log_clears_and_orders_writes() {
         let (mut g, iid, cid) = small_graph();
@@ -3826,6 +3896,7 @@ mod tests {
             reservations: vec![],
             canonization_events: vec![],
             embedding: None,
+            mutation_epoch: 0,
         };
         // Every concept derives from the interaction (assert_invariants
         // requires it) plus a single Causal chain c0 -> c1 -> ... -> c(N-1).

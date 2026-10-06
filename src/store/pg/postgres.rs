@@ -1637,7 +1637,13 @@ mod tests {
             mutations.push(Mutation::UpsertEdge { edge: e });
         }
         store
-            .flush(&MutationBatch { mutations }, None)
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 0,
+                    mutations,
+                },
+                None,
+            )
             .await
             .expect("seed flush");
 
@@ -1828,7 +1834,13 @@ mod tests {
             });
 
             store
-                .flush(&MutationBatch { mutations }, None)
+                .flush(
+                    &MutationBatch {
+                        mutation_epoch: 0,
+                        mutations,
+                    },
+                    None,
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{session}: seed flush: {e}"));
 
@@ -1884,6 +1896,7 @@ mod tests {
         let concept_id = NodeId::new();
         let ts = Utc.with_ymd_and_hms(2026, 8, 23, 12, 0, 0).unwrap();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 Mutation::UpsertNode {
                     node: Node::Interaction(Interaction {
@@ -1948,6 +1961,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(contract.clone()),

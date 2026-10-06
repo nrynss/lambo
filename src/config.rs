@@ -267,6 +267,18 @@ impl Config {
 /// thing from a config file, a real deployment can run for weeks and never
 /// promote anything.
 ///
+/// # The 30 000 count is deployment-lifetime (issue #17)
+///
+/// "The session has taken 30 000 mutations" is measured over the
+/// **deployment's** lifetime, not the writer process's: the mutation epoch
+/// persists with the session (`sessions.mutation_epoch`; the flush stamps it,
+/// the startup load resumes it), so writer restarts no longer reset the
+/// counter toward zero. Before that, a low-write single-writer deployment
+/// could never cross even one sweep in any single process — GC never ran,
+/// `gc_survived` never left 0, and Stage 1 was closed by construction. The
+/// cadence itself is unchanged: every threshold (peer count, `gc_survived >=
+/// 3`, the P90 cut) stays exactly as designed.
+///
 /// # Both paragraphs above are policy-conditional (C2)
 ///
 /// `promotion_policy = "Solo"` reads none of it. [`crate::canon::SoloScorer`]

@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     closed_at       TIMESTAMPTZ,
     embedding_kind  STRING,
     embedding_model STRING,
-    embedding_dim   INT
+    embedding_dim   INT,
+    mutation_epoch  INT NOT NULL DEFAULT 0
 );
 
 -- P3 review round 1 (schema persistence): sessions now carries the embedding
@@ -20,6 +21,13 @@ CREATE TABLE IF NOT EXISTS sessions (
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS embedding_kind STRING;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS embedding_model STRING;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS embedding_dim INT;
+
+-- Issue #17: the durable mutation counter. flush upserts it monotonically
+-- (GREATEST) in the batch's own transaction; load_session returns it so the
+-- graph resumes the epoch across a writer restart instead of resetting it.
+-- Existing clusters predate the column; the ALTER backfills 0 and the
+-- accounting accumulates forward.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mutation_epoch INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS interactions (
     id              UUID PRIMARY KEY,

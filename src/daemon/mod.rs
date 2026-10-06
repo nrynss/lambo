@@ -744,8 +744,15 @@ fn condition_set(
 ///    consumer draining a burst in order sees the most actionable event
 ///    first. Ring-eviction protection is re-arm's job, not ordering's.
 /// 3. Run GC once the mutation counter crosses `gc_interval` (spec §9). The
-///    counter spans the graph's whole lifetime; GC resets it to its own
-///    `epoch_after` so the next interval measures session mutations only.
+///    counter spans the deployment's whole lifetime — the epoch resumes from
+///    the durable snapshot on a writer restart (issue #17), so a low-write
+///    deployment crosses the interval cumulatively instead of never — and GC
+///    resets it to its own `epoch_after` so the next interval measures session
+///    mutations only. The watermark starts at 0, the deployment's baseline:
+///    a writer attaching to a session whose lifetime counter has already
+///    crossed the interval sweeps once immediately (the sweep that no process
+///    before it observed), then resumes the normal cadence; NEW-2's fixed
+///    point bounds that catch-up to one sweep per restart.
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
 ///
@@ -834,7 +841,10 @@ struct CycleState {
     /// GC watermark: the epoch the next `gc_interval` is measured from. Set to
     /// `GcOutcome::epoch_after` when a sweep runs, then advanced by every
     /// deferred-bump drain so GC's own mutations are never credited as session
-    /// mutations (NEW-2 — see `run_loop`'s step 3).
+    /// mutations (NEW-2 — see `run_loop`'s step 3). It starts at 0 — the
+    /// deployment's baseline, not this writer's: the epoch itself resumes from
+    /// the durable snapshot (issue #17), so the first interval of a fresh
+    /// writer counts the mutations of every writer before it.
     last_gc_epoch: u64,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
     /// `(condition, node)` maps to the channel's publication index at its last
@@ -1639,6 +1649,98 @@ mod tests {
         let handle = daemon.spawn();
 
         wait_until(|| graph.read().node(cid).is_none()).await;
+        handle.abort();
+    }
+
+    /// Issue #17: the GC interval measures deployment-lifetime mutations. The
+    /// epoch a writer resumes from the durable snapshot counts every writer
+    /// before it, so a restart does not reset the sweep clock: once the
+    /// cumulative counter crosses `gc_interval` the sweep fires — and with it
+    /// `gc_survived` starts moving, Stage 1's input. Pre-fix this sweep never
+    /// fired: the restarted epoch began at 0 and the restarted writer's three
+    /// mutations could not cross the interval alone.
+    #[tokio::test(start_paused = true)]
+    async fn restart_resumes_gc_accounting_and_the_sweep_fires_cumulatively() {
+        // "Process 1": a session with several mutations (both concepts keep
+        // their Derives edges — a loaded graph must satisfy §5.7, so the
+        // orphaning happens after the restart).
+        let (graph, _cid) = locked_graph_with_one_concept();
+        let iid = match graph.read().node(_cid).unwrap() {
+            crate::types::Node::Concept(c) => c.origin_interaction,
+            _ => unreachable!(),
+        };
+        let second = concept(2, iid, "second concept");
+        let second_id = second.id;
+        graph.write().insert_concept(second, iid).unwrap();
+        let lifetime = graph.read().epoch();
+
+        // "Restart": a writer attaches to the durable session. The interval
+        // sits TWO mutations past the lifetime counter, so only a resumed
+        // counter can cross it: the restarted writer's edge removal stays one
+        // short, and the concept insert that follows (node + Derives, two
+        // mutations) crosses it.
+        let resumed = Graph::from_snapshot(graph.read().snapshot()).unwrap();
+        assert_eq!(
+            resumed.epoch(),
+            lifetime,
+            "the restart must resume the counter, not reset it"
+        );
+        let graph2 = Arc::new(RwLock::new(resumed));
+        let params = CycleParams {
+            gc_interval: lifetime + 2,
+            ..Default::default()
+        };
+        let daemon = Daemon::with_params(
+            graph2.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        );
+        let handle = daemon.spawn();
+
+        // Warm-up cycle: the resumed counter is still two below the interval.
+        wait_until(|| daemon.scores().epoch == graph2.read().epoch()).await;
+        assert!(
+            daemon.last_gc().is_none(),
+            "no sweep before the interval is crossed"
+        );
+
+        // First mutation of the restarted writer: orphan `second`
+        // (deterministic GC-able work). Still one short of the interval.
+        let derives = {
+            let g = graph2.read();
+            g.edge_between(iid, second_id, EdgeType::Derives)
+                .unwrap()
+                .id
+        };
+        graph2.write().remove_edge(derives).unwrap();
+        daemon.wake();
+        wait_until(|| daemon.scores().epoch == graph2.read().epoch()).await;
+        assert!(
+            daemon.last_gc().is_none(),
+            "one mutation short of the interval must not sweep"
+        );
+
+        // The insert crosses the interval CUMULATIVELY — process 1's mutations
+        // count — and the sweep fires.
+        let post = concept(3, iid, "post-restart concept");
+        graph2.write().insert_concept(post, iid).unwrap();
+        daemon.wake();
+        wait_until(|| daemon.last_gc().is_some()).await;
+        let outcome = daemon.last_gc().unwrap();
+        assert!(
+            outcome.concepts_collected.contains(&second_id),
+            "the orphaned concept is collected: {outcome:?}"
+        );
+        // Every surviving concept takes its step-5 bump — Stage 1's input.
+        let g = graph2.read();
+        for id in &outcome.survivors {
+            let c = match g.node(*id).unwrap() {
+                crate::types::Node::Concept(c) => c,
+                _ => unreachable!(),
+            };
+            assert_eq!(c.gc_survived, 1, "survivor bumped exactly once");
+        }
         handle.abort();
     }
 

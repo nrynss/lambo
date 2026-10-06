@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     closed_at       TEXT,
     embedding_kind  TEXT,   -- session embedding contract (S5; written by seed, read by load_session)
     embedding_model TEXT,
-    embedding_dim   INTEGER
+    embedding_dim   INTEGER,
+    mutation_epoch  INTEGER NOT NULL DEFAULT 0  -- durable mutation counter (issue #17; written by flush, resumed by load_session)
 );
 
 CREATE TABLE IF NOT EXISTS interactions (

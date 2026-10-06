@@ -231,13 +231,20 @@ const VECTOR_FETCH_CAP: usize = 2048;
 // SQL statements (each adapter owns its SQL — spec §3.2)
 // ---------------------------------------------------------------------------
 
-/// Session row exists primarily to satisfy `interactions.session_id` / `concepts.session_id`
-/// `REFERENCES sessions(session_id)` — `flush` upserts a bare row per new session
-/// (created_at defaults to `now()`), mirroring `MemoryStore::ensure_session`.
+/// Session row anchor + durable mutation-counter stamp (issue #17): `flush`
+/// upserts a bare row per new session (created_at defaults to `now()`),
+/// mirroring `MemoryStore::ensure_session`, and stamps the batch's absolute
+/// `mutation_epoch` in the same statement — monotonic via `GREATEST`, so a
+/// replayed batch converges to the same final state (the flush-replay
+/// contract) and the counter commits atomically with the content it counts.
+/// A batch of pure deletions resolves no session here; its epoch contribution
+/// lands with the next batch that names one (the stamp is absolute, so the
+/// counter only ever lags, never rewinds).
 const UPSERT_SESSION_ROW_SQL: &str = r#"
-INSERT INTO sessions (session_id)
-VALUES ($1)
-ON CONFLICT (session_id) DO NOTHING
+INSERT INTO sessions (session_id, mutation_epoch)
+VALUES ($1, $2)
+ON CONFLICT (session_id) DO UPDATE SET
+    mutation_epoch = GREATEST(sessions.mutation_epoch, EXCLUDED.mutation_epoch)
 "#;
 
 /// Upserts are issued as **multi-row** statements (L82-1), so each is built as
@@ -596,15 +603,16 @@ LIMIT $3
                 r#"
 INSERT INTO sessions (
     session_id, root_goal, created_at, closed_at,
-    embedding_kind, embedding_model, embedding_dim
-) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5{s}, $6{s}, $7::INT)
+    embedding_kind, embedding_model, embedding_dim, mutation_epoch
+) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5{s}, $6{s}, $7::INT, $8::INT)
 ON CONFLICT (session_id) DO UPDATE SET
     root_goal = EXCLUDED.root_goal,
     created_at = EXCLUDED.created_at,
     closed_at = EXCLUDED.closed_at,
     embedding_kind = EXCLUDED.embedding_kind,
     embedding_model = EXCLUDED.embedding_model,
-    embedding_dim = EXCLUDED.embedding_dim
+    embedding_dim = EXCLUDED.embedding_dim,
+    mutation_epoch = EXCLUDED.mutation_epoch
 "#
             ),
             set_embedding: format!(
@@ -619,7 +627,7 @@ WHERE session_id = $1
             select_session: format!(
                 r#"
 SELECT root_goal{s} AS root_goal, created_at, closed_at,
-       embedding_kind, embedding_model, embedding_dim
+       embedding_kind, embedding_model, embedding_dim, mutation_epoch
 FROM sessions
 WHERE session_id = $1
 "#
@@ -1561,6 +1569,8 @@ impl<D: Dialect> PgStore<D> {
         // Copy handles for the same FnMut-reborrow reason as root_goal.
         let embedding_kind = embedding.map(|c| c.kind.as_str());
         let embedding_model = embedding.and_then(|c| c.model.as_deref());
+        // Issue #17: the seeded snapshot carries the mutation accounting.
+        let mutation_epoch = i64::try_from(snapshot.mutation_epoch).unwrap_or(i64::MAX);
         tx_retry(|| async move {
             let mut tx = pool
                 .begin()
@@ -1574,6 +1584,7 @@ impl<D: Dialect> PgStore<D> {
                 .bind(embedding_kind)
                 .bind(embedding_model)
                 .bind(embedding_dim)
+                .bind(mutation_epoch)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -2676,9 +2687,12 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             // Ensure a sessions row for every session the batch writes into — the DDL
             // enforces `REFERENCES sessions(session_id)` on interactions/concepts, and the
             // graph tier creates sessions implicitly (MemoryStore::ensure_session parity).
+            // Issue #17: the same statement stamps the batch's absolute mutation-epoch
+            // watermark, monotonically, in this transaction.
             for sid in batch_session_ids(&batch.mutations) {
                 sqlx::query(UPSERT_SESSION_ROW_SQL)
                     .bind(sid)
+                    .bind(i64::try_from(batch.mutation_epoch).unwrap_or(i64::MAX))
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -2771,6 +2785,10 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 embedding_dim,
                 sid.0.as_str(),
             )?;
+            // Issue #17: the durable mutation counter, stamped by flush and
+            // seeded by `seed`; the loading writer resumes it so GC's
+            // `gc_interval` measures deployment-lifetime mutations.
+            let mutation_epoch: i64 = session_row.try_get("mutation_epoch").map_err(backend)?;
 
             let interactions = sqlx::query(&self.sql.select_interactions)
                 .bind(sid.0.as_str())
@@ -2842,6 +2860,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 canonization_events,
                 embedding,
                 write_intents,
+                mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
             })
         })
         .await

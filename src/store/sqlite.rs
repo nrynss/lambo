@@ -220,6 +220,16 @@
 //! write-behind persists first-use stamps through `Mutation::SetEmbedding`, in
 //! the same transaction as vector-bearing concepts; flush/load and incompatible
 //! restart regressions cover this path.
+//!
+//! ## Mutation epoch (issue #17)
+//!
+//! `sessions.mutation_epoch` (`NOT NULL DEFAULT 0`, converged the same guarded
+//! way) is the session's durable mutation counter. Every flush stamps the
+//! batch's absolute watermark onto the touched sessions' rows
+//! (`ensure_sessions`, monotonic `max`) in the batch's own transaction, and
+//! `load_session` returns it in `GraphSnapshot.mutation_epoch` so
+//! `Graph::from_snapshot` resumes the accounting instead of a restart
+//! resetting it — GC's `gc_interval` measures deployment-lifetime mutations.
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -466,19 +476,31 @@ impl SqliteStore {
     }
 
     /// Ensure every session touched by the batch has a `sessions` row (FK
-    /// anchor; `created_at` DB-default, metadata columns inert — see module
-    /// doc). Idempotent, so once per unique session per batch is enough.
+    /// anchor; `created_at` DB-default) and stamp the batch's absolute
+    /// `mutation_epoch` watermark onto it (issue #17). Idempotent, so once per
+    /// unique session per batch is enough. The upsert is monotonic
+    /// (`max(existing, stamped)`), so a replayed batch converges to the same
+    /// final state instead of regressing the counter — the flush-replay
+    /// contract — and the stamp commits in the batch's own transaction, so a
+    /// crash can never leave durable content ahead of its durable count. A
+    /// batch of pure `DeleteNode`/`DeleteEdge` mutations resolves no session
+    /// here; its epoch contribution lands with the next batch that names one
+    /// (the stamp is absolute, so the counter only ever lags, never rewinds).
     async fn ensure_sessions(
         &self,
         tx: &mut sqlx::SqliteConnection,
         sessions: &HashSet<String>,
+        mutation_epoch: u64,
     ) -> Result<(), StoreError> {
+        let epoch = i64::try_from(mutation_epoch).unwrap_or(i64::MAX);
         for sid in sessions {
             sqlx::query(
-                "INSERT INTO sessions (session_id) VALUES (?) \
-                 ON CONFLICT (session_id) DO NOTHING",
+                "INSERT INTO sessions (session_id, mutation_epoch) VALUES (?, ?) \
+                 ON CONFLICT (session_id) DO UPDATE SET \
+                     mutation_epoch = MAX(mutation_epoch, excluded.mutation_epoch)",
             )
             .bind(sid)
+            .bind(epoch)
             .execute(&mut *tx)
             .await
             .map_err(|e| map_write_err(e, |m| format!("ensure session row: {m}")))?;
@@ -533,15 +555,16 @@ impl SqliteStore {
         sqlx::query(
             "INSERT INTO sessions (\
                  session_id, root_goal, created_at, closed_at, \
-                 embedding_kind, embedding_model, embedding_dim) \
-             VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?, ?, ?, ?) \
+                 embedding_kind, embedding_model, embedding_dim, mutation_epoch) \
+             VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?, ?, ?, ?, ?) \
              ON CONFLICT (session_id) DO UPDATE SET \
                  root_goal = excluded.root_goal, \
                  created_at = excluded.created_at, \
                  closed_at = excluded.closed_at, \
                  embedding_kind = excluded.embedding_kind, \
                  embedding_model = excluded.embedding_model, \
-                 embedding_dim = excluded.embedding_dim",
+                 embedding_dim = excluded.embedding_dim, \
+                 mutation_epoch = excluded.mutation_epoch",
         )
         .bind(&snapshot.session_id.0)
         .bind(root_goal.as_deref())
@@ -550,6 +573,7 @@ impl SqliteStore {
         .bind(embedding_kind)
         .bind(embedding_model)
         .bind(embedding_dim)
+        .bind(i64::try_from(snapshot.mutation_epoch).unwrap_or(i64::MAX))
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -731,6 +755,16 @@ impl GraphStore for SqliteStore {
             "session_leases",
             "endpoint",
             "ALTER TABLE session_leases ADD COLUMN endpoint TEXT",
+        )
+        .await?;
+        // Issue #17: the durable mutation counter. NOT NULL DEFAULT 0, so the
+        // ALTER backfills existing rows and the accounting accumulates forward
+        // from a session's first post-upgrade flush.
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "mutation_epoch",
+            "ALTER TABLE sessions ADD COLUMN mutation_epoch INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
         Ok(())
@@ -1005,7 +1039,8 @@ impl GraphStore for SqliteStore {
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }
         }
-        self.ensure_sessions(&mut *tx, &sessions).await?;
+        self.ensure_sessions(&mut *tx, &sessions, batch.mutation_epoch)
+            .await?;
 
         // Fencing-token gate (#1): reject a stale/missing token for every
         // session the batch touches, INSIDE the same transaction as the writes
@@ -1062,9 +1097,11 @@ impl GraphStore for SqliteStore {
 
         // The existence probe doubles as the embedding-contract read. Both
         // snapshot seed and `SetEmbedding` flush write these columns; root_goal
-        // likewise has its ordered mutation path (XP-8).
+        // likewise has its ordered mutation path (XP-8). `mutation_epoch` is
+        // the durable mutation counter (issue #17): flush stamps it, and this
+        // read is what a writer restart resumes it from.
         let row = sqlx::query(
-            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal \
+            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch \
              FROM sessions WHERE session_id = ?",
         )
         .bind(&session.0)
@@ -1088,6 +1125,7 @@ impl GraphStore for SqliteStore {
             .map(serde_json::from_str::<serde_json::Value>)
             .transpose()
             .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
+        let mutation_epoch: i64 = row.try_get(4).map_err(|e| db_err("lookup session", e))?;
         let embedding = session_embedding_from_parts(
             embedding_kind,
             embedding_model,
@@ -1122,6 +1160,7 @@ impl GraphStore for SqliteStore {
             canonization_events,
             embedding,
             write_intents,
+            mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
         })
     }
 
@@ -3229,7 +3268,13 @@ mod tests {
             ));
         }
         store
-            .flush(&MutationBatch { mutations }, None)
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 0,
+                    mutations,
+                },
+                None,
+            )
             .await
             .unwrap();
     }
@@ -3330,6 +3375,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![plant_concept(
                         &sid,
                         bare,
@@ -3631,6 +3677,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         plant_concept(
@@ -3743,6 +3790,7 @@ mod tests {
         // The reviewer's batch, verbatim in shape: interaction, SetEmbedding{dim:4},
         // a 4-wide concept, then a 3-wide one.
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, origin, None, ts),
                 Mutation::SetEmbedding {
@@ -3807,6 +3855,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&fresh, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -3839,6 +3888,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&pre, origin2, None, ts),
                         plant_concept_with_vector(
@@ -3905,6 +3955,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -3959,6 +4010,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -3994,6 +4046,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid.clone(),
@@ -4110,6 +4163,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(renamed.clone()),
@@ -4145,6 +4199,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(rekinded.clone()),
@@ -4232,6 +4287,7 @@ mod tests {
         let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
         let goal = serde_json::json!(["launch the product", "ship the API"]);
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, NodeId::new(), None, ts),
                 Mutation::SetRootGoal {
@@ -4250,6 +4306,7 @@ mod tests {
 
         // Last write wins, and a clear is durable (not "no change").
         let replace = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![Mutation::SetRootGoal {
                 session_id: sid.clone(),
                 goal: Some(serde_json::json!("only this one")),
@@ -4261,6 +4318,7 @@ mod tests {
             Some(serde_json::json!("only this one"))
         );
         let clear = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![Mutation::SetRootGoal {
                 session_id: sid.clone(),
                 goal: None,
@@ -4295,6 +4353,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(
                             &sid,
@@ -4342,6 +4401,7 @@ mod tests {
             memory
                 .flush(
                     &MutationBatch {
+                        mutation_epoch: 0,
                         mutations: vec![Mutation::SetEmbedding {
                             session_id: sid.clone(),
                             embedding: Some(contract.clone()),
@@ -4373,6 +4433,7 @@ mod tests {
         let ts = Utc.timestamp_opt(1_752_000_000, 0).unwrap();
         let emb = vec![0.25, -0.5, 1.0, 0.0];
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 Mutation::UpsertNode {
@@ -4447,6 +4508,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, interaction, None, ts),
                         concept_mutation,
@@ -4482,6 +4544,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(EmbeddingContract {
@@ -4593,6 +4656,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![plant_interaction(
                         &sid,
                         NodeId::new(),
@@ -4745,6 +4809,7 @@ mod tests {
         let mut expected = g.snapshot();
         expected.synonyms.clear();
         expected.reservations.clear();
+        let epoch_at_drain = g.epoch();
         let batch = g.drain_log();
         assert!(!batch.is_empty());
 
@@ -4753,7 +4818,10 @@ mod tests {
 
         assert_eq!(loaded.graph.snapshot(), expected);
         assert_eq!(loaded.graph.log_len(), 0, "load must not seed mutations");
-        assert_eq!(loaded.graph.epoch(), 0);
+        // Issue #17: the batch's stamp is durable, so the load resumes the
+        // mutation accounting instead of restarting it (the log stays empty —
+        // a loaded session's history is already durable).
+        assert_eq!(loaded.graph.epoch(), epoch_at_drain);
         loaded.graph.assert_invariants().unwrap();
         assert_eq!(loaded.graph.synonyms().count(), 0);
         assert_eq!(loaded.graph.reservations().len(), 0);
@@ -4786,6 +4854,46 @@ mod tests {
             .map(|s| s.item)
             .collect();
         assert_eq!(drift.len(), 2, "both observations indexed");
+    }
+
+    /// Issue #17: the `sessions` row carries the durable mutation counter.
+    /// flush stamps the batch's absolute watermark, `load_session` reads it
+    /// back (that is what a writer restart resumes from), and a stale stamp —
+    /// a replayed or retained-then-retried older batch — must never rewind the
+    /// counter (the flush-replay contract, applied to the stamp).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_stamps_and_load_resumes_the_mutation_epoch() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("mutation-epoch");
+        let i1 = NodeId::new();
+        let c1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
+        let batch = MutationBatch {
+            mutation_epoch: 42,
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                plant_concept(&sid, c1, i1, "user schema", ConceptType::Entity, ts),
+            ],
+        };
+        store.flush(&batch, None).await.unwrap();
+
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.mutation_epoch, 42, "the stamp must be durable");
+
+        // An older batch (a replay, or a retained batch retried after a newer
+        // flush) carries a lower watermark: monotonic max keeps the counter.
+        let older = MutationBatch {
+            mutation_epoch: 7,
+            mutations: vec![plant_interaction(&sid, NodeId::new(), Some(i1), ts)],
+        };
+        store.flush(&older, None).await.unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(
+            snap.mutation_epoch, 42,
+            "a stale stamp must not rewind the durable counter"
+        );
     }
 
     /// Migration path for pre-existing databases (P3 wave 2): a database built
@@ -4873,6 +4981,7 @@ mod tests {
         let o1 = NodeId::new();
         let ts = Utc::now();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 Mutation::UpsertNode {
@@ -5010,6 +5119,7 @@ mod tests {
         let c1 = NodeId::new();
         let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 Mutation::UpsertNode {
                     node: NodeKind::Interaction(Interaction {
@@ -5107,6 +5217,7 @@ mod tests {
         let c3 = NodeId::new();
         let ts = Utc::now();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, c1, i1, "user schema design", ConceptType::Entity, ts),
@@ -5364,7 +5475,13 @@ mod tests {
                 });
             }
             store
-                .flush(&MutationBatch { mutations }, None)
+                .flush(
+                    &MutationBatch {
+                        mutation_epoch: 0,
+                        mutations,
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
 
@@ -6215,7 +6332,10 @@ mod tests {
                         node: NodeKind::Concept(concept),
                     });
                 }
-                let batch = MutationBatch { mutations };
+                let batch = MutationBatch {
+                    mutation_epoch: 0,
+                    mutations,
+                };
 
                 run_fixture_grid(
                     FixtureGrid {
@@ -6320,7 +6440,10 @@ mod tests {
             for e in &snap.edges {
                 mutations.push(Mutation::UpsertEdge { edge: e.clone() });
             }
-            let batch = MutationBatch { mutations };
+            let batch = MutationBatch {
+                mutation_epoch: 0,
+                mutations,
+            };
 
             run_fixture_grid(
                 FixtureGrid {
@@ -7001,6 +7124,7 @@ mod tests {
         let orphan = NodeId::new();
         let alone = NodeId::new();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
@@ -7066,6 +7190,7 @@ mod tests {
         let foreign = NodeId::new();
 
         let local = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&here, i1, None, ts),
                 plant_concept(&here, hub, i1, "hub", ConceptType::Entity, ts),
@@ -7078,6 +7203,7 @@ mod tests {
             ],
         };
         let elsewhere = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&there, i2, None, ts),
                 plant_concept(&there, foreign, i2, "foreign", ConceptType::Entity, ts),
@@ -7151,6 +7277,7 @@ mod tests {
         // probe_src -> probe_victim (aged edge, FRESH origin i3: the i-gate
         // probe). `other`'s origin is DISTINCT i2 — the fresh edge's source.
         let base = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, old_ts),
                 plant_interaction(&sid, i2, None, old_ts),
@@ -7183,6 +7310,7 @@ mod tests {
         memory.flush(&base, None).await.unwrap();
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
         store.flush(&fresh, None).await.unwrap();
@@ -7349,7 +7477,10 @@ mod tests {
             ));
             mutations.push(plant_edge(&here, id, target, EdgeType::Dependency, t(0)));
         }
-        let batch = MutationBatch { mutations };
+        let batch = MutationBatch {
+            mutation_epoch: 0,
+            mutations,
+        };
         store.flush(&batch, None).await.unwrap();
         let memory = MemoryStore::new();
         memory.flush(&batch, None).await.unwrap();
@@ -7392,6 +7523,7 @@ mod tests {
         let pillar = NodeId::new();
         let orphan = NodeId::new();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
@@ -7458,6 +7590,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
@@ -7481,6 +7614,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
                 },
                 None,
@@ -7537,6 +7671,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
                 },
                 None,
@@ -7568,6 +7703,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
@@ -7676,6 +7812,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
                 },
                 None,
@@ -7698,6 +7835,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         with_stale_canonization(plant, CanonizationStatus::None, None, None),
                         Mutation::CanonizationTransition { event: hop },
@@ -7765,6 +7903,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         born,
@@ -7827,6 +7966,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_interaction(&sid, i1, None, ts),
@@ -7852,6 +7992,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_interaction(&sid, i2, Some(i1), ts),
@@ -7930,7 +8071,13 @@ mod tests {
         );
 
         store
-            .flush(&MutationBatch { mutations }, None)
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 0,
+                    mutations,
+                },
+                None,
+            )
             .await
             .unwrap();
 
@@ -7964,6 +8111,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
                 },
                 None,
@@ -8004,6 +8152,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         with_stale_canonization(
                             plant,
@@ -8046,6 +8195,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, NodeId::new(), None, t1),
                         plant_interaction(&sid, NodeId::new(), None, t2),
@@ -8110,6 +8260,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(
@@ -8144,6 +8295,7 @@ mod tests {
         let err = store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![plant_concept(
                         &sid,
                         e2,
@@ -8183,6 +8335,7 @@ mod tests {
                 let ts = Utc::now();
                 s.flush(
                     &MutationBatch {
+                        mutation_epoch: 0,
                         mutations: vec![
                             plant_interaction(&sid, i1, None, ts),
                             plant_concept(&sid, c1, i1, &format!("n{n}"), ConceptType::Entity, ts),
@@ -8229,6 +8382,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "registry concept", ConceptType::Entity, ts),
@@ -8285,6 +8439,7 @@ mod tests {
             store
                 .flush(
                     &MutationBatch {
+                        mutation_epoch: 0,
                         mutations: vec![
                             plant_interaction(&sid, i1, None, ts),
                             plant_concept(
@@ -9082,6 +9237,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         interaction(i_stamped, None, Some(about)),
                         interaction(i_plain, Some(i_stamped), None),
@@ -9157,6 +9313,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: NodeKind::Interaction(Interaction {

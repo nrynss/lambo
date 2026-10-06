@@ -3819,6 +3819,7 @@ mod tests {
         store
             .flush(
                 &crate::types::MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![crate::types::Mutation::SetEmbedding {
                         session_id: SessionId::new("h1-web-mismatch"),
                         embedding: Some(changed),
@@ -3882,6 +3883,7 @@ mod tests {
         store
             .flush(
                 &crate::types::MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![crate::types::Mutation::SetEmbedding {
                         session_id: SessionId::new("h1-web-mismatch"),
                         embedding: Some(stored),
@@ -3985,6 +3987,7 @@ mod tests {
         store
             .flush(
                 &crate::types::MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![crate::types::Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(EmbeddingContract {

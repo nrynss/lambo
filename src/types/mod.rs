@@ -666,6 +666,18 @@ pub struct WriteIntentOutcome {
 pub struct MutationBatch {
     /// The mutations, in the order they were appended.
     pub mutations: Vec<Mutation>,
+    /// The graph's [`crate::graph::Graph::epoch`] at drain time — an absolute
+    /// watermark, not a delta: every mutation this batch carries is counted
+    /// **through** this value. `Graph::drain_log` stamps it; adapters persist
+    /// it monotonically (`GREATEST`-style upsert) **inside the flush
+    /// transaction**, so a replayed batch converges (the idempotency contract)
+    /// and a crash between content and counter is impossible by construction.
+    /// Issue #17: this is the value `Graph::from_snapshot` resumes, so GC's
+    /// `gc_interval` measures deployment-lifetime mutations instead of
+    /// per-process ones. Hand-built batches (test doubles) default to 0, a
+    /// no-op against any stored value.
+    #[serde(default)]
+    pub mutation_epoch: u64,
 }
 
 impl MutationBatch {
@@ -722,6 +734,15 @@ pub struct GraphSnapshot {
     /// `applied_after_restart` lookups. Expired consumed rows are not loaded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_intents: Vec<WriteIntent>,
+    /// The graph's mutation epoch when this snapshot was taken.
+    /// [`crate::graph::Graph::from_snapshot`] resumes it, so the epoch is a
+    /// deployment-lifetime counter rather than a per-process one (issue #17):
+    /// GC's `gc_interval` and the recall cache's epoch key keep their meaning
+    /// across a writer restart. `0` on snapshots written before this field
+    /// existed (serde default) — those sessions resume the accounting from
+    /// zero and accumulate forward.
+    #[serde(default)]
+    pub mutation_epoch: u64,
 }
 
 /// Identity of the dense embedding space used in a session.
@@ -1156,6 +1177,7 @@ mod tests {
     #[test]
     fn mutation_batch_json_roundtrip() {
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
         };
         let s = serde_json::to_string(&batch).unwrap();

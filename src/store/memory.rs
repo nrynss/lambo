@@ -629,8 +629,14 @@ impl GraphStore for MemoryStore {
             Self::apply_mutation(data, m)?;
         }
 
-        // Commit: swap the working copies in on full success.
-        for (sid, data) in work {
+        // Commit: swap the working copies in on full success. Issue #17: the
+        // batch's absolute `mutation_epoch` watermark is committed WITH the
+        // content it counts — monotonic max, so a replayed batch converges —
+        // and `load_session` hands it back for `Graph::from_snapshot` to
+        // resume. GC's `gc_interval` therefore measures deployment-lifetime
+        // mutations, not per-process ones.
+        for (sid, mut data) in work {
+            data.snapshot.mutation_epoch = data.snapshot.mutation_epoch.max(batch.mutation_epoch);
             map.insert(sid, data);
         }
         Ok(())
@@ -1101,6 +1107,7 @@ mod tests {
         let (sid, i1, c1, _) = sample_session();
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 Mutation::UpsertNode {
                     node: Node::Interaction(Interaction {
@@ -1138,6 +1145,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1185,6 +1193,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::CanonizationTransition {
                         event: hop1.clone(),
                     }],
@@ -1252,6 +1261,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1290,6 +1300,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         with_stale_canonization(plant, CanonizationStatus::None, None, None),
                         Mutation::CanonizationTransition { event: hop },
@@ -1327,6 +1338,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1377,6 +1389,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         with_stale_canonization(
                             plant,
@@ -1429,6 +1442,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1480,6 +1494,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1514,6 +1529,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1784,6 +1800,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: Node::Interaction(Interaction {
@@ -1818,6 +1835,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::DeleteNode { id: c2 }],
                 },
                 None,
@@ -1841,6 +1859,7 @@ mod tests {
                 let ts = Utc::now();
                 s.flush(
                     &MutationBatch {
+                        mutation_epoch: 0,
                         mutations: vec![
                             Mutation::UpsertNode {
                                 node: Node::Interaction(Interaction {
@@ -1884,6 +1903,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::UpsertNode {
                         node: Node::Interaction(Interaction {
                             event_time: None,
@@ -1905,6 +1925,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
                 },
                 None,
@@ -1928,6 +1949,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::UpsertNode {
                         node: Node::Interaction(Interaction {
                             event_time: None,
@@ -1949,6 +1971,7 @@ mod tests {
         // Batch: a valid concept upsert (prefix) FOLLOWED by a canonization
         // transition on a missing concept — the mid-batch failure.
         let bad = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![
                 plant_concept(&sid, c1, i1, "ghost", ts),
                 Mutation::CanonizationTransition {
@@ -1989,6 +2012,7 @@ mod tests {
         store
             .flush(
                 &MutationBatch {
+                    mutation_epoch: 0,
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(embedding.clone()),
@@ -2020,6 +2044,7 @@ mod tests {
         let ts = Utc::now();
 
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
         };
         let err = store.flush(&batch, Some(0)).await.unwrap_err();
@@ -2062,6 +2087,7 @@ mod tests {
 
         // The holder writes with its own token.
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
         };
         store.flush(&batch, Some(ra.token)).await.unwrap();
@@ -2109,6 +2135,7 @@ mod tests {
             "a same-holder refresh must preserve, not bump, the fencing token"
         );
         let batch = MutationBatch {
+            mutation_epoch: 0,
             mutations: vec![plant_concept(&sid, c1, i1, "fenced", ts)],
         };
         store.flush(&batch, Some(r2.token)).await.unwrap();

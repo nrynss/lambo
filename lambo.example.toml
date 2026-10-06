@@ -116,9 +116,12 @@ url = "http://127.0.0.1:8080"
 #
 # Worth understanding before changing, and SWARM-ONLY: swarm's Stage 1 requires
 # gc_survived >= 3, so at the default a concept needs roughly 30000 mutations
-# before it can be promoted at all. A session of a few dozen concepts never gets
-# there, which is why `lambo demo` sets this to 1 internally. Lower it if you
-# want to watch the canonization state machine work on a small swarm session.
+# before it can be promoted at all. The count is the deployment's lifetime, not
+# one writer process's: the mutation epoch is persisted with the session and
+# resumed on restart, so the sweeps arrive even in a low-write single-writer
+# deployment. A session of a few dozen concepts still never gets there, which
+# is why `lambo demo` sets this to 1 internally. Lower it if you want to watch
+# the canonization state machine work on a small swarm session.
 # gc_interval = 1
 #
 # Seconds between canonization evaluation passes. Default 60.
