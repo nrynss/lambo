@@ -163,6 +163,59 @@
 
 ### Fixed
 
+- `lambo_inspect` no longer refuses the focus approximations a model actually
+  types, and recall's rendered text now carries the handle it talks about
+  (issue #9). On the dogfood rig inspect failed 28.2% of the time (22 of 78
+  calls), every one the bare `no concept matching` refusal, because a caller
+  working from recall's rendered block had no way to reach the durable node id:
+  the id lived only in `structuredContent`, the text a model actually read
+  carried none, and at p90 a concept is 548 B a model will not retype. Four
+  changes close the gap, and the 2,000-concept fuzzy-scan cap survives all of
+  them with its value, its keying on concept count and the O(total-content)
+  lowercase pass it refuses all intact:
+
+  - Recall's rendered block is now
+    `<content> [Type] (score N.NN, id <short8>, blast radius N)`, the short
+    form being the first 8 hex chars of the node id's simple form. The renderer
+    and the resolver share one constant (`format::SHORT_ID_CHARS`), and a
+    pure-hex focus of 8..=32 chars now resolves through a short-form id leg in
+    `resolve_focus` (unique prefix resolves; several refuse with named
+    candidates; none falls through to the content legs), so the token a caller
+    reads is itself a valid, durable focus by construction. The floor of 8 is
+    the deliberate tradeoff: shorter hex prefixes collide with concept ids
+    often enough that hex-looking words like "def" would hijack substring
+    foci. The portal's structured hit payload gained an additive `node_id`
+    field because its byte-for-byte parity check re-renders the context from
+    the payload; the MCP `structuredContent` shapes did not move.
+  - A focus that matches nothing now offers near-matches the way the Ambiguous
+    arm does: the closest concepts by focus-token overlap, recency breaking
+    ties, listed with their node ids under an explicit "suggestions (not
+    matches)" header, never a silent match. The ranking is bounded by
+    construction (it runs only under the scan cap and keeps at most
+    `MAX_INSPECT_CANDIDATES` candidates), a focus sharing no token stays a
+    bare refusal, and past the cap the suggestions come from the bounded
+    subset only, named as such.
+  - Past 2,000 concepts the fuzzy leg no longer refuses outright: it scans a
+    bounded subset, the 256 most recently created concepts plus the 256
+    highest live blast-radius concepts, deterministic and comparison-only to
+    build, and every outcome announces the bound (the fuzzy note, the
+    ambiguous message and the refusal all name the subset and the cap). A
+    match inside the subset resolves; a match outside it fails honestly as
+    Oversized rather than pretending nothing exists. Refusing, not trimming,
+    remains the rule for the full pass: it is the fallback that is bounded and
+    loud, not the search that is silent.
+  - Every failed inspect now records its failure mode and its focus in the
+    ledger facts before the error returns (`failure` carrying `missing`,
+    `ambiguous` or `oversized`, alongside a focus truncated to 200 characters
+    with the explicit marker), so the rig's telemetry can classify Missing,
+    Ambiguous and Oversized without reproducing the call. The ledger's
+    `error_kind` on these lines deliberately stays `unclassified`: the
+    classification rides the new fact, and no new error_kind vocabulary was
+    minted.
+
+  Acceptance 4 of the issue, the post-change error rate on the rig, is
+  post-deploy measurement and has not been taken; nothing here deploys.
+
 - Every score-ordered list now breaks an exact tie on the concept's
   `canonical_key` before falling back to its node id (issue #2). Node ids
   are minted per run (`Uuid::new_v4`), so an id-settled tie was
