@@ -1,5 +1,5 @@
 {
-  "note": "H3 structured recall payloads, pinned byte-for-byte by src/recall/assemble.rs h3_blended_payload_matches_golden (blended: Canonical load-bearing hit, Candidate, conflict, non-conflict hot condition, reservation, annotation-free hit) and src/recall/dispatch.rs h3_structural_payload_matches_golden (dispatched dependency question: canonical dependent + plain dependent + one traversal response annotation). Wire shape: hits[] with content/concept_type/status (absent only for None)/score/blast_radius (when present)/included_in_context/annotations[{kind,text}], plus response_annotations[{kind,text}].",
+  "note": "H3 structured recall payloads, pinned byte-for-byte by src/recall/assemble.rs h3_blended_payload_matches_golden (blended: Canonical load-bearing hit, Candidate, conflict, non-conflict hot condition, reservation, annotation-free hit) and src/recall/dispatch.rs h3_structural_payload_matches_golden (dispatched dependency question: canonical dependent + plain dependent + one traversal response annotation). Wire shape: hits[] with content/concept_type/status (absent only for None)/score/blast_radius (when present)/included_in_context/annotations[{kind,text}], plus response_annotations[{kind,text}]. 2026-10-06 (issue #9): each hit also carries node_id (additive; the rendered context now carries the short-form id and the portal parity check re-renders from this payload).",
   "blended": {
     "hits": [
       {
@@ -13,6 +13,7 @@
         "concept_type": "Entity",
         "content": "user schema",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000001",
         "score": 0.5,
         "status": "Canonical"
       },
@@ -21,6 +22,7 @@
         "concept_type": "Entity",
         "content": "auth middleware",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000002",
         "score": 0.45,
         "status": "Candidate"
       },
@@ -34,6 +36,7 @@
         "concept_type": "Entity",
         "content": "rate limiter",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000003",
         "score": 0.4
       },
       {
@@ -46,6 +49,7 @@
         "concept_type": "Entity",
         "content": "caching layer",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000004",
         "score": 0.35
       },
       {
@@ -58,6 +62,7 @@
         "concept_type": "Entity",
         "content": "logging config",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000005",
         "score": 0.3
       },
       {
@@ -65,6 +70,7 @@
         "concept_type": "Entity",
         "content": "ping endpoint",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000006",
         "score": 0.25
       }
     ],
@@ -83,6 +89,7 @@
         "concept_type": "Entity",
         "content": "users handler",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000002",
         "score": 5.0,
         "status": "Canonical"
       },
@@ -91,6 +98,7 @@
         "concept_type": "Entity",
         "content": "payments handler",
         "included_in_context": true,
+        "node_id": "00000000-0000-0002-0000-000000000003",
         "score": 3.0
       }
     ],

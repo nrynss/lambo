@@ -1059,7 +1059,7 @@ async fn api_inspect(
             },
             // Ambiguous / missing / oversized all read as a miss (200, not
             // an error): there is no single canonical concept to describe.
-            Focus::Ambiguous(_) | Focus::Missing | Focus::Oversized { .. } => None,
+            Focus::Ambiguous { .. } | Focus::Missing { .. } | Focus::Oversized { .. } => None,
         }
     };
     let resp = match found {

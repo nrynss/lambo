@@ -508,6 +508,12 @@ complete rendered blocks appear in `context`; hits after the token-budget cut
 remain in `hits` with `false`. Derive annotation kinds from typed producers,
 never text patterns.
 
+Reconciliation note (2026-10-06, issue #9): each hit now also carries
+`node_id`, an additive field beside the ones above. The rendered `context`
+blocks carry the short-form node id, and the portal's byte-for-byte parity
+check deserializes this payload and re-renders it, so the id has to ride the
+serialized shape. The MCP `structuredContent` fields are unchanged.
+
 Hit-owned kinds are:
 
 - `load_bearing` - the Canonical blast warning;

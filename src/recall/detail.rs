@@ -12,7 +12,8 @@
 //!
 //! The wire contract (pinned in the H3 spec section of
 //! `dev-diary/notes/hardening-tasks.md`) is exactly this module's `Serialize`
-//! shape: every hit carries `content`, `concept_type`, `status` (absent only
+//! shape: every hit carries `node_id` (added 2026-10-06, issue #9, beside the
+//! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
 //! `included_in_context`, and `annotations` as zero or more `{kind, text}`
 //! pairs; `response_annotations` carries the response-global explanations.
@@ -28,7 +29,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{CanonizationStatus, ConceptType, RecallHit, RecallResult};
+use crate::types::{CanonizationStatus, ConceptType, NodeId, RecallHit, RecallResult};
 
 /// The pinned H3 annotation kinds. Wire values are stable (`snake_case`);
 /// clients treat kinds differently instead of pattern-matching on text.
@@ -68,6 +69,12 @@ impl Annotation {
 /// One ranked hit in the presentation model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DetailedHit {
+    /// The hit's node id (issue #9, an additive field beside the pinned H3
+    /// shape): the rendered context block now carries the short-form id, so
+    /// the portal's byte-for-byte parity check, which deserializes this
+    /// payload and re-renders it, needs the id here; portal cards get the
+    /// same durable handle the text surface has.
+    pub(crate) node_id: NodeId,
     pub(crate) content: String,
     pub(crate) concept_type: Option<ConceptType>,
     /// The concept's full status from the SAME graph snapshot the hit was
@@ -92,6 +99,7 @@ impl DetailedHit {
     /// status the public [`RecallHit::is_canonical`] collapses to a bool.
     pub(crate) fn new(hit: &RecallHit, status: Option<CanonizationStatus>) -> Self {
         Self {
+            node_id: hit.node_id,
             content: hit.content.clone(),
             concept_type: hit.concept_type,
             status,

@@ -44,7 +44,9 @@ use crate::cli::caps::{
     MAX_INSPECT_CANDIDATES, MAX_INSPECT_DEPTH, MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K,
     MAX_TRAVERSAL_DEPTH,
 };
-use crate::cli::inspect::{render_neighbourhood, resolve_focus, Focus};
+use crate::cli::inspect::{
+    render_neighbourhood, resolve_focus, Focus, MAX_INSPECT_BOUNDED_SCAN, MAX_INSPECT_SCAN_CONCEPTS,
+};
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::ledger::Ledger;
@@ -524,6 +526,20 @@ const _: () = if LEDGER_QUERY_PREFIX <= LEDGER_CONTENT_PREFIX {
 /// explicit marker so a consumer never mistakes a cut for the whole text.
 fn truncate_for_ledger(content: &str) -> String {
     truncate_to(content, LEDGER_CONTENT_PREFIX)
+}
+
+/// Longest inspect-focus prefix a ledger line carries.
+///
+/// The focus is the other client string an inspect line carries (issue #9):
+/// recorded on the failure paths so a failed inspect is classifiable from the
+/// ledger alone. 200 characters identifies the miss without carrying a 16 KiB
+/// paste.
+const LEDGER_FOCUS_PREFIX: usize = 200;
+
+/// `focus` truncated to [`LEDGER_FOCUS_PREFIX`] **characters**, with an
+/// explicit marker so a consumer never mistakes a cut for the whole focus.
+fn focus_for_ledger(focus: &str) -> String {
+    truncate_to(focus, LEDGER_FOCUS_PREFIX)
 }
 
 /// `text` truncated to `max` **characters**, with an explicit marker so a
@@ -1938,30 +1954,64 @@ impl LamboServer {
             let g = self.mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
                 Focus::Exact(id) => Ok((None, render_neighbourhood(&g, id, depth))),
-                Focus::Fuzzy { id, content } => Ok((
-                    Some(format!(
-                        "resolved '{}' → '{}' (substring match, single candidate)",
-                        p.focus.trim(),
-                        content
-                    )),
-                    render_neighbourhood(&g, id, depth),
-                )),
+                Focus::Fuzzy {
+                    id,
+                    content,
+                    bounded,
+                } => {
+                    // A fuzzy resolution is stated in the *text*, not only in a
+                    // warning: "focus: <something the caller did not ask for>"
+                    // is exactly the line a model reads straight past. A
+                    // bounded one also names the bound (issue #9), so the
+                    // caller knows what was not scanned.
+                    let note = match bounded {
+                        None => format!(
+                            "resolved '{}' → '{}' (substring match, single candidate)",
+                            p.focus.trim(),
+                            content
+                        ),
+                        Some(b) => format!(
+                            "resolved '{}' → '{}' (substring match within the bounded scan \
+                             of {} concepts; this graph is past the {}-concept full-scan cap, \
+                             so concepts outside the subset were not scanned)",
+                            p.focus.trim(),
+                            content,
+                            b.scanned,
+                            MAX_INSPECT_SCAN_CONCEPTS
+                        ),
+                    };
+                    Ok((Some(note), render_neighbourhood(&g, id, depth)))
+                }
                 other => Err(other),
             }
         };
 
         let (note, (text, structured)) = match resolved {
             Ok(v) => v,
-            Err(Focus::Ambiguous(candidates)) => {
+            Err(Focus::Ambiguous {
+                candidates,
+                bounded,
+            }) => {
                 // Refuse rather than pick (R1/T82-7): an arbitrary pick fed a
                 // node_id the caller never named into `lambo_reserve` and into
                 // edits, and the pick changed between calls.
-                let mut msg = format!(
-                    "lambo_inspect: '{}' matches {} concepts — name one exactly, or pass its \
-                     node_id:",
-                    p.focus.trim(),
-                    candidates.len()
-                );
+                let mut msg = match bounded {
+                    None => format!(
+                        "lambo_inspect: '{}' matches {} concepts — name one exactly, or pass \
+                         its node_id:",
+                        p.focus.trim(),
+                        candidates.len()
+                    ),
+                    Some(b) => format!(
+                        "lambo_inspect: '{}' matches {} concepts within the bounded scan of {} \
+                         concepts (this graph is past the {}-concept full-scan cap); name one \
+                         exactly, or pass its node_id:",
+                        p.focus.trim(),
+                        candidates.len(),
+                        b.scanned,
+                        MAX_INSPECT_SCAN_CONCEPTS
+                    ),
+                };
                 for c in candidates.iter().take(MAX_INSPECT_CANDIDATES) {
                     msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
                 }
@@ -1971,26 +2021,68 @@ impl LamboServer {
                         candidates.len() - MAX_INSPECT_CANDIDATES
                     ));
                 }
+                // Issue #9: every inspect failure names its mode and its focus
+                // in the ledger facts BEFORE the error returns, so telemetry
+                // can classify the refusal without reprobing.
+                note_facts(|| {
+                    json!({
+                        "failure": "ambiguous",
+                        "focus": focus_for_ledger(&p.focus),
+                    })
+                });
                 return CallToolResult::error(vec![ContentBlock::text(msg)]);
             }
             Err(Focus::Oversized { cap }) => {
-                // T8.7 residual #3 graph-size guard: the session's graph is too
-                // large to pay the fuzzy leg's O(total-content) lowercase pass,
-                // so refuse rather than let an unattended graph amplify one call
-                // into unbounded per-request work. Exact / node-id focus still
+                // T8.7 residual #3 graph-size guard, relaxed by issue #9: the
+                // O(total-content) pass is still refused, but the bounded
+                // subset was scanned and matched nothing. The refusal says so
+                // and names the bound, because the concept the caller meant
+                // may exist outside the subset; exact / node-id focus still
                 // works.
+                note_facts(|| {
+                    json!({
+                        "failure": "oversized",
+                        "focus": focus_for_ledger(&p.focus),
+                    })
+                });
                 return CallToolResult::error(vec![ContentBlock::text(format!(
-                    "lambo_inspect: this session's graph has more than {cap} concepts, so the \
-                     substring (fuzzy) focus is disabled; pass a node_id or an exact concept \
-                     instead"
+                    "lambo_inspect: this session's graph has more than {cap} concepts; the \
+                     fuzzy pass scanned only the bounded subset (the \
+                     {MAX_INSPECT_BOUNDED_SCAN} most recently created plus the \
+                     {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
+                     nothing; pass a node_id or an exact concept instead"
                 ))]);
             }
-            Err(_) => {
-                return CallToolResult::error(vec![ContentBlock::text(format!(
+            Err(Focus::Missing { near }) => {
+                // Issue #9: the bare "no concept matching" refusal is how 22
+                // of 78 dogfood-rig inspects failed. Do what Ambiguous does:
+                // refuse, explain, and offer the closest concepts with their
+                // node ids, announced as suggestions.
+                let mut msg = format!(
                     "lambo_inspect: no concept matching '{}' in session '{}'",
                     p.focus,
                     self.mem.session().0
-                ))]);
+                );
+                if !near.is_empty() {
+                    msg.push_str(
+                        "\nsuggestions (not matches; pass a node_id or name one exactly):",
+                    );
+                    for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
+                        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+                    }
+                }
+                note_facts(|| {
+                    json!({
+                        "failure": "missing",
+                        "focus": focus_for_ledger(&p.focus),
+                    })
+                });
+                return CallToolResult::error(vec![ContentBlock::text(msg)]);
+            }
+            // Unreachable: Exact and Fuzzy are resolved in the read section
+            // above, and `Focus` has no further variants.
+            Err(Focus::Exact(_) | Focus::Fuzzy { .. }) => {
+                unreachable!("Exact and Fuzzy resolve in the read section")
             }
         };
 
@@ -5178,6 +5270,275 @@ mod tests {
                 "focus resolution must not depend on HashMap iteration order"
             );
         }
+        s.mem.close().await.expect("close");
+    }
+
+    /// Issue #9: a Missing focus does what Ambiguous does: refuse, explain,
+    /// and offer the closest concepts WITH their node ids, announced as
+    /// suggestions, never a silent match.
+    #[tokio::test]
+    async fn inspect_missing_suggests_near_matches_with_their_node_ids() {
+        let s = server("mcp-inspect-near-matches").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "vector storage codec", "concept_type": "entity"},
+                    {"content": "vector clock ordering", "concept_type": "entity"}
+                ]
+            }),
+        )
+        .await;
+        let codec_id = {
+            let g = s.mem.graph().read();
+            let found = g
+                .concepts()
+                .find(|c| c.content == "vector storage codec")
+                .map(|c| c.id.0.to_string())
+                .expect("the derived concept");
+            found
+        };
+
+        let out = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "vector codec"}),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        let text = text_of(&out);
+        assert!(
+            text.contains("no concept matching 'vector codec'"),
+            "the refusal must still say no: {text}"
+        );
+        assert!(
+            text.contains("suggestions"),
+            "the suggestions must announce themselves as suggestions: {text}"
+        );
+        assert!(
+            text.contains("vector storage codec"),
+            "the closest concept by token overlap must be offered: {text}"
+        );
+        assert!(
+            text.contains(&codec_id),
+            "the suggestion must carry its node id ({codec_id}): {text}"
+        );
+
+        // A focus sharing no token with any concept offers nothing: the
+        // refusal stays bare rather than inventing a suggestion.
+        let bare = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "qqq zzz"}),
+        )
+        .await;
+        assert_eq!(bare.is_error, Some(true), "{bare:?}");
+        assert!(
+            !text_of(&bare).contains("suggestions"),
+            "{}",
+            text_of(&bare)
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// Pad the graph past [`MAX_INSPECT_SCAN_CONCEPTS`] with staggered
+    /// creation times: the recency side of the bounded subset is then exactly
+    /// the last concepts created. `pad concept {k}` foci are unique per k, so
+    /// a fuzzy focus names exactly one pad.
+    async fn pad_graph_past_inspect_cap(s: &LamboServer, count: usize) {
+        use crate::types::{Concept, Interaction};
+        let mut g = s.mem.graph().write();
+        let origin = NodeId::new();
+        g.insert_interaction(Interaction {
+            event_time: None,
+            id: origin,
+            session_id: s.mem.session().clone(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: None,
+            previous_id: None,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        let base = chrono::TimeZone::timestamp_opt(&chrono::Utc, 1_752_000_000, 0).unwrap();
+        for k in 0..count {
+            let c = Concept {
+                id: NodeId::new(),
+                session_id: s.mem.session().clone(),
+                content: format!("pad concept {k}"),
+                canonical_key: format!("pad concept {k}"),
+                concept_type: ConceptType::Entity,
+                origin_interaction: origin,
+                origin_agent: AgentId::from("agent-a"),
+                created_at: base + chrono::Duration::minutes(k as i64),
+                access_count: 0,
+                last_accessed: None,
+                gc_survived: 0,
+                canonization_status: crate::types::CanonizationStatus::None,
+                blast_radius: None,
+                last_demotion_time: None,
+                embedding: None,
+                human_confirmed: 0,
+                chunk_group_id: None,
+            };
+            g.insert_concept(c, origin).unwrap();
+        }
+    }
+
+    /// Issue #9: past the scan cap the fuzzy leg scans the bounded subset and
+    /// SAYS so in the text: a match inside the subset announces the bound; a
+    /// match outside it fails honestly instead of pretending no concept
+    /// exists. The graph is 2,001 concepts: the cap the dogfood rig crosses.
+    #[tokio::test]
+    async fn past_the_cap_inspect_says_what_the_bounded_scan_scanned() {
+        let s = server("mcp-inspect-bounded").await;
+        pad_graph_past_inspect_cap(&s, MAX_INSPECT_SCAN_CONCEPTS + 1).await;
+
+        // Inside the recency side of the subset: resolves fuzzily and
+        // announces the bounded scan.
+        let inside = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "ad concept 2000"}),
+        )
+        .await;
+        assert_eq!(inside.is_error, Some(false), "{inside:?}");
+        let text = text_of(&inside);
+        assert!(
+            text.contains("bounded scan of"),
+            "a bounded resolution must say so: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "past the {MAX_INSPECT_SCAN_CONCEPTS}-concept full-scan cap"
+            )),
+            "the bounded note must name the cap: {text}"
+        );
+        assert!(
+            text.contains("pad concept 2000"),
+            "the matched concept must render: {text}"
+        );
+
+        // Outside both sides (old, no blast radius): an honest failure that
+        // still names the bound. "ad concept 5" substring-matches exactly one
+        // pad, so a full scan would have resolved it.
+        let outside = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "ad concept 5"}),
+        )
+        .await;
+        assert_eq!(outside.is_error, Some(true), "{outside:?}");
+        let text = text_of(&outside);
+        assert!(
+            text.contains("bounded subset"),
+            "the refusal must say the scan was bounded: {text}"
+        );
+        assert!(
+            text.contains(&format!("{MAX_INSPECT_BOUNDED_SCAN} most recently created")),
+            "the refusal must name the subset composition: {text}"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// Issue #9: every inspect failure records its failure mode and its focus
+    /// in the ledger facts before the error returns, so the rig's telemetry
+    /// can classify Missing / Ambiguous / Oversized without reprobing. The
+    /// focus is truncated with an explicit marker. Past the cap a no-match
+    /// focus is Oversized by design (the bounded scan ran and found nothing),
+    /// so the Oversized case runs on its own padded graph.
+    #[tokio::test]
+    async fn failed_inspects_record_their_failure_mode_and_focus_in_the_ledger() {
+        // Within the cap: Missing and Ambiguous are reachable.
+        let dir = ledger_dir("inspect-failures");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-inspect-failures", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "auth middleware", "concept_type": "entity"},
+                    {"content": "auth middleware rewrite", "concept_type": "entity"}
+                ]
+            }),
+        )
+        .await;
+
+        // Missing: shares no token with any concept.
+        call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "qqq zzz"}),
+        )
+        .await;
+        // Ambiguous: "middleware" substring-matches both concepts exactly.
+        call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "middleware"}),
+        )
+        .await;
+        // The focus is truncated to LEDGER_FOCUS_PREFIX characters with an
+        // explicit marker: 250 chars in, 200 + marker out.
+        call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "x".repeat(250)}),
+        )
+        .await;
+
+        // Four lines: the derive that seeded the concepts, then the three
+        // failed inspects.
+        let lines = read_ledger(&ledger, 4);
+        let by_focus = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l["tool"] == json!("lambo_inspect") && l["focus"] == json!(needle))
+                .unwrap_or_else(|| panic!("no ledger line with focus {needle}: {lines:?}"))
+        };
+        let missing = by_focus("qqq zzz");
+        assert_eq!(missing["outcome"], json!("error"));
+        assert_eq!(missing["failure"], json!("missing"));
+
+        let ambiguous = by_focus("middleware");
+        assert_eq!(ambiguous["failure"], json!("ambiguous"));
+
+        let truncated = lines
+            .iter()
+            .find(|l| {
+                l["tool"] == json!("lambo_inspect")
+                    && l["focus"]
+                        .as_str()
+                        .is_some_and(|f| f.ends_with("[truncated]"))
+            })
+            .and_then(|l| l["focus"].as_str())
+            .expect("the 250-char focus must be truncated with the explicit marker");
+        assert!(
+            truncated.starts_with(&"x".repeat(LEDGER_FOCUS_PREFIX)),
+            "the cut keeps the first {LEDGER_FOCUS_PREFIX} chars: {truncated}"
+        );
+        s.mem.close().await.expect("close");
+
+        // Past the cap: the no-match focus books as Oversized, because the
+        // bounded subset scan is what ran and found nothing.
+        let dir = ledger_dir("inspect-failures-oversized");
+        let path = dir.join("calls.jsonl");
+        let s = server_with_ledger("i1-inspect-failures-oversized", &path).await;
+        let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+        pad_graph_past_inspect_cap(&s, MAX_INSPECT_SCAN_CONCEPTS + 1).await;
+        call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "ad concept 5"}),
+        )
+        .await;
+        let lines = read_ledger(&ledger, 1);
+        assert_eq!(lines[0]["failure"], json!("oversized"));
+        assert_eq!(lines[0]["focus"], json!("ad concept 5"));
         s.mem.close().await.expect("close");
     }
 

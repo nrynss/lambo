@@ -1488,10 +1488,11 @@ pub fn normalize_volatile(text: &str) -> String {
 
 /// Replace every UUID-shaped token with `<node>`.
 ///
-/// Node ids are `Uuid::new_v4()` — random by construction, and one reaches the
-/// rendered surface: the high-risk warning names the node it fired on. The
-/// warning's text, condition and the fact that it fired on the pillar are all
-/// still compared; only the identifier is masked.
+/// Node ids are `Uuid::new_v4()`, random by construction, and two reach the
+/// rendered surface: the high-risk warning names the node it fired on, and
+/// (issue #9) every recall block carries the node's short-form id after its
+/// score. The warning's text, condition and the fact that it fired on the
+/// pillar are all still compared; only the identifier is masked.
 pub fn normalize_node_ids(text: &str) -> String {
     const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
     let bytes = text.as_bytes();
@@ -1501,6 +1502,9 @@ pub fn normalize_node_ids(text: &str) -> String {
         if is_uuid_at(bytes, i) {
             out.push_str("<node>");
             i += GROUPS.iter().sum::<usize>() + 4;
+        } else if is_short_id_at(bytes, i) {
+            out.push_str("id <node>");
+            i += 3 + crate::recall::format::SHORT_ID_CHARS;
         } else {
             // Advance one char, not one byte: the context block is UTF-8 and
             // carries `⚑`.
@@ -1510,6 +1514,35 @@ pub fn normalize_node_ids(text: &str) -> String {
         }
     }
     out
+}
+
+/// Whether the recall block's `id <short>` short-form token starts at byte
+/// `i`. The token must open at a word boundary and the hex digits must end
+/// at a non-hex boundary, so a longer hex run (a full UUID, masked by
+/// [`is_uuid_at`]) is never half-masked and prose like "paid" never opens one.
+fn is_short_id_at(bytes: &[u8], i: usize) -> bool {
+    if bytes.get(i) != Some(&b'i')
+        || bytes.get(i + 1) != Some(&b'd')
+        || bytes.get(i + 2) != Some(&b' ')
+    {
+        return false;
+    }
+    if let Some(prev) = i.checked_sub(1).and_then(|p| bytes.get(p)) {
+        if prev.is_ascii_alphanumeric() {
+            return false;
+        }
+    }
+    let hex_at = i + 3;
+    for k in 0..crate::recall::format::SHORT_ID_CHARS {
+        match bytes.get(hex_at + k) {
+            Some(b) if b.is_ascii_hexdigit() => {}
+            _ => return false,
+        }
+    }
+    match bytes.get(hex_at + crate::recall::format::SHORT_ID_CHARS) {
+        None => true,
+        Some(b) => !b.is_ascii_hexdigit(),
+    }
 }
 
 /// Whether a canonical 8-4-4-4-12 hex UUID starts at byte `i`.
@@ -1705,6 +1738,27 @@ mod tests {
         assert_eq!(got, normalize_node_ids(&got));
         // Not a UUID: too short, and a hex-looking word.
         assert_eq!(normalize_node_ids("deadbeef-1234"), "deadbeef-1234");
+
+        // Issue #9: the recall block's short-form id is minted per run like a
+        // full UUID, so it is masked too, keeping the ×2 determinism bar
+        // meaningful. A longer hex run is never half-masked.
+        let hit = "user schema [Entity, canonical] (score 0.72, id 445370df, blast radius 9)";
+        let got = normalize_node_ids(hit);
+        assert_eq!(
+            got,
+            "user schema [Entity, canonical] (score 0.72, id <node>, blast radius 9)"
+        );
+        assert_eq!(got, normalize_node_ids(&got));
+        assert_eq!(
+            normalize_node_ids("id 445370df12"),
+            "id 445370df12",
+            "a 10-char hex run is not a short form"
+        );
+        assert_eq!(
+            normalize_node_ids("paid 445370df"),
+            "paid 445370df",
+            "only the literal token `id` opens a short form"
+        );
     }
 
     #[test]

@@ -4,11 +4,19 @@
 //! One hit renders as a block of lines, in this order:
 //!
 //! ```text
-//! <content> [<ConceptType>{, canonical}] (score <final>, blast radius <n>)
+//! <content> [<ConceptType>{, canonical}] (score <final>, id <short>, blast radius <n>)
 //! <⚑ load-bearing-pillar line>        (only when the concept is Canonical)
 //! <hot-list condition line(s)>        (only for re-validated hot nodes)
 //! <reservation line>                  (only while an active reservation holds)
 //! ```
+//!
+//! The `id <short>` token (issue #9) is an additive extension of the spec §8
+//! block shape: the rendered text is the only surface some callers read, and
+//! without a node id in it their only inspect focus was retyping a
+//! paragraph-length concept string. It renders [`short_id`] right after the
+//! score, and [`short_id`] is a valid `inspect` focus by construction (the
+//! short-form id leg in `resolve_focus` resolves it), so a caller working only
+//! from this text can reach the durable node-id path.
 //!
 //! Blocks are joined with a blank line ([`render_context`]); a block is never
 //! split by the token budget (the truncation rule lives in `assemble`).
@@ -144,6 +152,23 @@ pub fn concept_label(hit: &RecallHit) -> String {
     format!("{} [{ty}{marker}]", hit.content)
 }
 
+/// Length of the rendered short-form node id, in hex chars (issue #9).
+///
+/// The rendered token must stay typeable, and `inspect`'s short-form id leg
+/// only fires at this length or longer: 8 hex chars is 32 bits, so on a
+/// 2,000-concept graph the chance a *content* focus of this shape also
+/// uniquely names an id prefix is negligible, while shorter prefixes collide
+/// with real ids often enough to hijack substring foci. The renderer and the
+/// resolver share this one constant so the two cannot drift.
+pub const SHORT_ID_CHARS: usize = 8;
+
+/// The short-form node id rendered in a hit block: the first
+/// [`SHORT_ID_CHARS`] hex chars of the UUID's simple form. Resolvable as an
+/// `inspect` focus by the short-form id leg of `resolve_focus`.
+pub fn short_id(id: NodeId) -> String {
+    id.0.simple().to_string()[..SHORT_ID_CHARS].to_string()
+}
+
 /// The spec §13 load-bearing-pillar warning, verbatim except for the count.
 pub fn blast_radius_warning(count: u64) -> String {
     format!("⚑ Load-bearing pillar — {count} nodes depend on this. Modify with caution.")
@@ -203,13 +228,17 @@ pub fn reservation_warning(r: &Reservation) -> String {
     )
 }
 
-/// One hit's full block: the label line (content, type marker, score, blast
-/// radius) followed by its warning lines. Warnings are passed in already
-/// ordered: ⚑ line, hot-list lines, reservation line.
+/// One hit's full block: the label line (content, type marker, score, node
+/// id, blast radius) followed by its warning lines. Warnings are passed in
+/// already ordered: ⚑ line, hot-list lines, reservation line.
 pub fn render_block(hit: &RecallHit, warnings: &[String]) -> String {
     let meta = match hit.blast_radius {
-        Some(radius) => format!("(score {:.2}, blast radius {radius})", hit.score),
-        None => format!("(score {:.2})", hit.score),
+        Some(radius) => format!(
+            "(score {:.2}, id {}, blast radius {radius})",
+            hit.score,
+            short_id(hit.node_id)
+        ),
+        None => format!("(score {:.2}, id {})", hit.score, short_id(hit.node_id)),
     };
     let mut lines = vec![format!("{} {meta}", concept_label(hit))];
     lines.extend(warnings.iter().cloned());
@@ -217,14 +246,15 @@ pub fn render_block(hit: &RecallHit, warnings: &[String]) -> String {
 }
 
 /// One hit's full block from the H3 presentation model: the label line
-/// (content, type marker, score, blast radius) followed by its annotation
-/// warning lines. Reuses [`concept_label`] / [`render_block`] by projecting
-/// the presentation hit onto a [`RecallHit`], so the CLI-rendered blocks and
-/// the pipeline's own blocks cannot drift (node_id is unused by the
-/// renderers; a nil id is a placeholder, never emitted).
+/// (content, type marker, score, node id, blast radius) followed by its
+/// annotation warning lines. Reuses [`concept_label`] / [`render_block`] by
+/// projecting the presentation hit onto a [`RecallHit`], so the CLI-rendered
+/// blocks and the pipeline's own blocks cannot drift. The presentation hit
+/// carries the real node id (issue #9 made the rendered id load-bearing, so
+/// the old nil-id placeholder is gone).
 pub(crate) fn render_detailed_block(h: &crate::recall::detail::DetailedHit) -> String {
     let hit = RecallHit {
-        node_id: NodeId(uuid::Uuid::nil()),
+        node_id: h.node_id,
         content: h.content.clone(),
         concept_type: h.concept_type,
         score: h.score,
@@ -516,13 +546,30 @@ mod tests {
         let block = render_block(&hit, &warnings);
         assert_eq!(
             block,
-            "user schema [Entity, canonical] (score 0.72, blast radius 8)\n\
+            "user schema [Entity, canonical] (score 0.72, id 00000000, blast radius 8)\n\
              ⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.\n\
              Agent A wrote to it 11 seconds ago"
         );
-        assert_eq!(render_context(&[block]), "user schema [Entity, canonical] (score 0.72, blast radius 8)\n⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.\nAgent A wrote to it 11 seconds ago");
+        assert_eq!(render_context(std::slice::from_ref(&block)), "user schema [Entity, canonical] (score 0.72, id 00000000, blast radius 8)\n⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.\nAgent A wrote to it 11 seconds ago");
         assert_eq!(render_context(&[]), "");
         assert_eq!(render_context(&["a".into(), "b".into()]), "a\n\nb");
+
+        // Issue #9: the rendered text carries the node id per hit, right
+        // after the score, so a caller working only from this surface has a
+        // durable inspect focus. The token is exactly `short_id`'s output so
+        // the renderer and the resolver cannot drift.
+        assert!(
+            block.contains(&format!("id {}", short_id(uid(1)))),
+            "block must carry the node id after the score: {block}"
+        );
+        assert_eq!(short_id(uid(1)).len(), SHORT_ID_CHARS);
+    }
+
+    #[test]
+    fn short_id_is_the_first_hex_chars_of_the_simple_form() {
+        let id = NodeId("f0000000-0000-4000-8000-000000001001".parse().unwrap());
+        assert_eq!(short_id(id), "f0000000");
+        assert_eq!(short_id(NodeId(uuid::Uuid::nil())), "00000000");
     }
 
     #[test]
