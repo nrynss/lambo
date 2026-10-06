@@ -301,7 +301,9 @@ lambo_record_action admitted, receipt
                     (J3/J4: created is on the completion, same reason, same
                     join; edges remain receipt-only.)
 lambo_reserve       op ("reserve"|"release"), granted, ttl_seconds (grants only)
-lambo_inspect       depth, fuzzy
+lambo_inspect       depth, fuzzy; errored calls add failure
+                    ("missing"|"ambiguous"|"oversized") and focus
+                    (the caller's focus string, truncated to 200 chars)
 lambo_saints        canonical_count
 lambo_stats         (no extra facts — the numbers are in the heartbeat)
 

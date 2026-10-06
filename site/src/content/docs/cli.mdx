@@ -99,11 +99,11 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 
 ```bash
 $ lambo recall --session demo --query "update user schema" --top-k 5
-user schema [Entity] (score 1.44)
+user schema [Entity] (score 1.44, id 3f9c2a10)
 
-auth middleware [Entity] (score 0.25)
+auth middleware [Entity] (score 0.25, id 71b0e4c2)
 
-migrations/003.sql [Resource] (score 0.25)
+migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
 ```
 
 ### lambo saints
@@ -125,7 +125,7 @@ Shows the neighbourhood around a concept: its type, its blast radius, and the ty
 | `--focus <FOCUS>` | Yes | |
 | `--depth <DEPTH>` | No | `2`, and at most `5`. |
 
-`--focus` takes concept text or a node UUID. Lambo resolves text exactly first, then as a single substring match.
+`--focus` takes concept text, a node UUID, or the short id a recall block renders. Lambo resolves text exactly first, then the short id, then as a single substring match. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset and says so; a miss offers the closest concepts as suggestions with their node ids.
 
 ```bash
 $ lambo inspect --session demo --focus "user schema" --depth 2

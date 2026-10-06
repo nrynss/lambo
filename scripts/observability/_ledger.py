@@ -38,7 +38,9 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
     + record_action  admitted, receipt
                 (J3/J4: created is on the completion, same reason, same join.)
     + reserve   op ("reserve"|"release"), granted, ttl_seconds (grants only)
-    + inspect   depth, fuzzy
+    + inspect   depth, fuzzy; errored calls add failure
+                (("missing"|"ambiguous"|"oversized"), issue 9) and focus
+                (the caller's focus string, truncated to 200 chars)
     + saints    canonical_count
     stats       uptime_secs, version, git_sha, stats{...the lambo_stats payload,
                 including ledger_written_lines / ledger_dropped_lines /

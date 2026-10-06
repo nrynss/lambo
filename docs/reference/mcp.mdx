@@ -168,8 +168,8 @@ Recall still works without a vector leg. You get matches on the words you use ra
 ```
 
 ```json
-{"content": [{"type": "text", "text": "stdio wire check [Entity] (score 0.86)"}],
- "structuredContent": {"context": "stdio wire check [Entity] (score 0.86)",
+{"content": [{"type": "text", "text": "stdio wire check [Entity] (score 0.86, id ddbc8bc8)"}],
+ "structuredContent": {"context": "stdio wire check [Entity] (score 0.86, id ddbc8bc8)",
    "hits": [{"node_id": "ddbc8bc8-52ed-465b-9a2a-b0066bda51ad", "content": "stdio wire check",
              "concept_type": "Entity", "score": 0.8565231086776713,
              "is_canonical": false, "blast_radius": null}],
@@ -280,7 +280,7 @@ Look at the neighbourhood around a concept, including its type, whether it is ca
 | `focus` | string | Yes | Concept text or a node UUID. Up to 16 KB. |
 | `depth` | integer | No | `0` to `5`. Defaults to `2`. |
 
-Lambo resolves `focus` exactly first, then as a single substring match, and says in the result text when it resolved a substring. If the focus matches several concepts it refuses rather than guessing, and lists up to ten candidates with their node ids. The rendered neighbourhood stops after 200 neighbours and says so.
+Lambo resolves `focus` exactly first, then as the short id a recall block renders, then as a single substring match, and says in the result text when it resolved a substring. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset instead of refusing, and says it did. If the focus matches several concepts it refuses rather than guessing, and lists up to ten candidates with their node ids; a focus matching nothing gets the same treatment with the closest concepts as suggestions. The rendered neighbourhood stops after 200 neighbours and says so.
 
 ```json
 {"name": "lambo_inspect", "arguments": {"agent_id": "agent-a", "focus": "user schema", "depth": 2}}
