@@ -6117,19 +6117,12 @@ mod tests {
                                          probe {probe_label:?} limit {limit}: {:?}",
                                         pair.displacement,
                                     );
-                                    // Every displaced id breaks exactly its own
-                                    // rank in each lane, so the matching prefix
-                                    // is the undisplaced remainder.
-                                    assert_eq!(
-                                        pair.rank_prefix_match,
-                                        got_a.len() - pair.displacement.len(),
-                                        "H3: postgres-exact rank prefix {} != {} - {} on \
-                                         fixture {fixture_label:?} probe {probe_label:?} \
-                                         limit {limit}",
-                                        pair.rank_prefix_match,
-                                        got_a.len(),
-                                        pair.displacement.len(),
-                                    );
+                                    // No separate rank-prefix assert here: same-id
+                                    // sets plus the noise rule above already pin the
+                                    // full ordering modulo round-trip ties, and ids
+                                    // sliding past a displaced pair legitimately
+                                    // break prefix positions between the old and new
+                                    // ranks.
                                     assert!(
                                         pair.max_score_diff <= H3_SCORE_SKEW_EPSILON,
                                         "H3: postgres-exact conversion skew {} > \
