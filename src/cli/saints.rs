@@ -186,8 +186,8 @@ mod parity {
             .expect("memory");
 
         // Three concepts with DISTINCT blast radii, plus a tie, so the saints
-        // ordering (blast_radius desc, then created_at, then id) is genuinely
-        // exercised. "user schema" parents two children (blast_radius 2);
+        // ordering (blast_radius desc, then created_at, then canonical key,
+        // then id) is genuinely exercised. "user schema" parents two children (blast_radius 2);
         // "auth middleware" and "config loader" parent one each (blast_radius 1,
         // a tie broken by created_at / id). The children stay non-canonical, so
         // only the three parents appear in saints. Hierarchical edges are the

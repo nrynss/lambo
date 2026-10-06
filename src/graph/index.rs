@@ -427,7 +427,8 @@ mod tests {
                 .map(|v| serde_json::from_value(v.clone()).expect("parse NodeId"))
                 .collect();
             let got = ids(idx.search(query, top_k));
-            // Exact set AND order (score-desc, tie by id) — not float comparisons.
+            // Exact set AND order (score-desc, ties by canonical key then id,
+            // per `search`'s issue-2 chain) — not float comparisons.
             assert_eq!(got, expected, "phase-1 candidates for query {query:?}");
         }
     }

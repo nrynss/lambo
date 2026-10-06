@@ -111,8 +111,8 @@ use crate::resolve::{
 };
 use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreKind};
 use crate::types::{
-    CanonizationStatus, ConceptType, EdgeType, EmbeddingContract, GraphSnapshot, Node, NodeId,
-    SessionId, StoreError,
+    tie_break_by_key, CanonizationStatus, ConceptType, EdgeType, EmbeddingContract, GraphSnapshot,
+    Node, NodeId, SessionId, StoreError,
 };
 
 // ---------------------------------------------------------------------------
@@ -717,21 +717,42 @@ fn status_str(s: CanonizationStatus) -> &'static str {
     }
 }
 
-/// Canonization events at or after `since`, in a total order that does not
-/// depend on which adapter produced them.
+/// Canonization events at or after `since`, in a total order that depends
+/// neither on which adapter produced them nor on which ids a run minted:
+/// same-instant events are routine (one eval cycle stamps the cycle's `now`
+/// on every event it emits — a Stage-3 batch or a multi-demotion cycle), and
+/// they order by the moved concept's canonical key, then the event id
+/// (issue #2, remediation round 3 — the bare event id was run-minted, which
+/// made `seq` and the cursor built on it per-run arbitrary). The id residual
+/// remains only for events whose node is absent from this snapshot.
 fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
     let content: HashMap<NodeId, &str> = snap
         .concepts
         .iter()
         .map(|c| (c.id, c.content.as_str()))
         .collect();
+    let key_of: HashMap<NodeId, &str> = snap
+        .concepts
+        .iter()
+        .map(|c| (c.id, c.canonical_key.as_str()))
+        .collect();
 
     let mut ordered: Vec<&crate::types::CanonizationEvent> =
         snap.canonization_events.iter().collect();
     // SQLite orders by (occurred_at, id) on load and MemoryStore by insertion;
     // sorting here makes `seq` mean the same thing on every backend, which is
-    // what lets the page use it as a cursor.
-    ordered.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at).then(a.id.0.cmp(&b.id.0)));
+    // what lets the page use it as a cursor. The lookup only runs on exact
+    // occurred_at ties.
+    ordered.sort_by(|a, b| {
+        a.occurred_at.cmp(&b.occurred_at).then_with(|| {
+            tie_break_by_key(
+                key_of.get(&a.node_id).copied(),
+                &a.node_id,
+                key_of.get(&b.node_id).copied(),
+                &b.node_id,
+            )
+        })
+    });
 
     let total = ordered.len();
     let start = since.min(total);
@@ -1998,6 +2019,64 @@ mod tests {
             human_confirmed: 0,
             chunk_group_id: None,
         }
+    }
+
+    /// Remediation round 3: same-instant canonization events are routine (one
+    /// eval cycle stamps the cycle's `now` on every event it emits), and the
+    /// feed's `seq` — which the page uses as a cursor — must not depend on
+    /// run-minted event ids. The two events here share one `occurred_at` and
+    /// their nodes' keys order OPPOSITE to the event ids, so the old
+    /// `(occurred_at, event id)` order emitted `beta` first; the stable chain
+    /// emits `alpha` first.
+    #[test]
+    fn canon_event_feed_ties_break_on_node_canonical_key_ahead_of_id() {
+        let sid = SessionId::from("web-events");
+        let node_alpha = NodeId(uuid::Uuid::from_u64_pair(5, 2)); // key "alpha api"
+        let node_beta = NodeId(uuid::Uuid::from_u64_pair(5, 1)); // key "beta api"
+                                                                 // One shared instant: the cycle's `now` that every event in the batch
+                                                                 // carries. The actual value is irrelevant; only its equality is.
+        let at = Utc::now();
+        let snap = GraphSnapshot {
+            session_id: sid.clone(),
+            concepts: vec![
+                concept(sid.clone(), node_alpha, NodeId::nil(), "alpha api", at),
+                concept(sid.clone(), node_beta, NodeId::nil(), "beta api", at),
+            ],
+            canonization_events: vec![
+                // Smaller event id on the LARGER-key node.
+                CanonizationEvent {
+                    id: NodeId(uuid::Uuid::from_u64_pair(9, 1)),
+                    session_id: sid.clone(),
+                    node_id: node_beta,
+                    from_status: CanonizationStatus::Venerable,
+                    to_status: CanonizationStatus::Canonical,
+                    blast_radius: None,
+                    occurred_at: at,
+                    last_demotion_time: None,
+                },
+                // Larger event id on the SMALLER-key node.
+                CanonizationEvent {
+                    id: NodeId(uuid::Uuid::from_u64_pair(9, 2)),
+                    session_id: sid.clone(),
+                    node_id: node_alpha,
+                    from_status: CanonizationStatus::Candidate,
+                    to_status: CanonizationStatus::Venerable,
+                    blast_radius: None,
+                    occurred_at: at,
+                    last_demotion_time: None,
+                },
+            ],
+            ..GraphSnapshot::default()
+        };
+
+        let feed = events_from(&snap, 0);
+        assert_eq!(feed.total, 2);
+        assert_eq!(
+            feed.events[0].node_id,
+            node_alpha.0.to_string(),
+            "same-instant events follow the moved concept's canonical key, not the event id"
+        );
+        assert_eq!(feed.events[1].node_id, node_beta.0.to_string());
     }
 
     fn edge(

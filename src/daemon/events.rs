@@ -1048,7 +1048,10 @@ mod tests {
         }
 
         // Two hours on, the session is stale: exactly one entry, anchored on
-        // the newest activity (c2 and cw tie at 7190; smallest id wins).
+        // the newest activity (c2 and cw tie at 7190; canonical key
+        // "canonical" < "writer" decides — keys and ids happen to agree in
+        // this fixture, so either chain passes it; the discriminating tie
+        // test is `stale_anchor_ties_break_on_canonical_key_ahead_of_id`).
         let stale_now = ts(7190 + 7200);
         assert_eq!(insert_stale(&mut hot, &g, STALE_WINDOW, stale_now).len(), 1);
         let stale_entry = hot
