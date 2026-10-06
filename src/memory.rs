@@ -106,9 +106,9 @@ use crate::store::lease::{LeaseHolder, LeaseOutcome, LEASE_HEARTBEAT_INTERVAL, L
 use crate::store::load::load_session_async;
 use crate::store::{Capabilities, GraphStore};
 use crate::types::{
-    AgentId, CanonizationStatus, Concept, ConceptType, DaemonEvent, EmbeddingContract, Interaction,
-    LamboError, MatchStrategy, MutationBatch, Node, NodeId, RecallQuery, RecallResult, Reservation,
-    SessionId, StoreError,
+    tie_break_by_key, AgentId, CanonizationStatus, Concept, ConceptType, DaemonEvent,
+    EmbeddingContract, Interaction, LamboError, MatchStrategy, MutationBatch, Node, NodeId,
+    RecallQuery, RecallResult, Reservation, SessionId, StoreError,
 };
 use crate::writeq::{Submitted, WriteCtx, WritePipeline};
 
@@ -193,6 +193,9 @@ pub struct ImpactReport {
 pub struct CanonicalMemory {
     /// The concept's node id.
     pub node_id: NodeId,
+    /// The concept's canonical key: the stable tie order for equal blast
+    /// radius and age, ahead of the per-run node id (issue #2).
+    pub canonical_key: String,
     /// Its text.
     pub content: String,
     /// How it is classified.
@@ -2167,8 +2170,10 @@ impl Memory {
     /// no store query for it exists or is needed. The graph is the primary tier
     /// (spec §2.1), so it is also the freshest answer.
     ///
-    /// Ordered blast-radius descending, then oldest first, then by id — total
-    /// and deterministic, so `lambo saints` output is stable across runs.
+    /// Ordered blast-radius descending, then oldest first, then the issue-2
+    /// tie-break (canonical key ascending, node id ascending behind it):
+    /// total and deterministic, and stable across runs because the tie is
+    /// decided by the persisted key, not the per-run id.
     pub fn canonical_memories(&self) -> Vec<CanonicalMemory> {
         let g = self.graph.read();
         let radii = format::blast_radii(&g);
@@ -2177,6 +2182,7 @@ impl Memory {
             .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
             .map(|c| CanonicalMemory {
                 node_id: c.id,
+                canonical_key: c.canonical_key.clone(),
                 content: c.content.clone(),
                 concept_type: c.concept_type,
                 blast_radius: radii.get(&c.id).copied().unwrap_or(0),
@@ -2189,7 +2195,12 @@ impl Memory {
             b.blast_radius
                 .cmp(&a.blast_radius)
                 .then(a.created_at.cmp(&b.created_at))
-                .then(a.node_id.0.cmp(&b.node_id.0))
+                .then(tie_break_by_key(
+                    Some(&a.canonical_key),
+                    &a.node_id,
+                    Some(&b.canonical_key),
+                    &b.node_id,
+                ))
         });
         out
     }
@@ -3308,8 +3319,8 @@ mod tests {
     use crate::store::MemoryStore;
     use crate::test_util::capture_logs;
     use crate::types::{
-        CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Scored,
-        StoreError,
+        tie_break_by_key, CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation,
+        MutationBatch, Scored, StoreError,
     };
     use async_trait::async_trait;
     use std::collections::HashSet;
@@ -4254,24 +4265,26 @@ mod tests {
                     )));
                 }
             }
-            let mut scored: Vec<Scored<NodeId>> = snapshot
+            // Same ordering contract as the real adapters: best first, ties
+            // broken by canonical key asc then the smaller UUID (issue #2) so
+            // the answer is deterministic within and across runs.
+            let mut scored: Vec<(Scored<NodeId>, &str)> = snapshot
                 .concepts
                 .iter()
                 .filter_map(|c| {
                     let vector = c.embedding.as_ref()?;
-                    Some(Scored::new(
-                        c.id,
-                        f64::from(crate::embed::cosine(embedding, vector)),
+                    Some((
+                        Scored::new(c.id, f64::from(crate::embed::cosine(embedding, vector))),
+                        c.canonical_key.as_str(),
                     ))
                 })
                 .collect();
-            // Same ordering contract as the real adapter: best first, ties
-            // broken by the smaller UUID so the answer is deterministic.
-            scored.sort_by(|a, b| {
+            scored.sort_by(|(a, a_key), (b, b_key)| {
                 b.score
                     .total_cmp(&a.score)
-                    .then_with(|| a.item.0.cmp(&b.item.0))
+                    .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
             });
+            let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
             scored.truncate(limit);
             self.answers.lock().push(scored.clone());
             Ok(scored)

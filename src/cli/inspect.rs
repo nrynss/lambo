@@ -15,7 +15,7 @@ use super::load_reader_graph;
 use crate::graph::Graph;
 use crate::recall::format;
 use crate::store::GraphStore;
-use crate::types::{CanonizationStatus, EdgeType, Node, NodeId};
+use crate::types::{tie_break_by_key, CanonizationStatus, EdgeType, Node, NodeId};
 
 /// Upper bound on the number of concepts `inspect`'s fuzzy (substring) leg
 /// will scan (T8.7 residual #3 graph-size guard).
@@ -35,6 +35,9 @@ pub(crate) const MAX_INSPECT_SCAN_CONCEPTS: usize = 2_000;
 #[derive(Clone, Debug)]
 pub(crate) struct FocusCandidate {
     pub id: NodeId,
+    /// The concept's canonical key: the stable tie order ahead of the per-run
+    /// node id (issue #2).
+    pub canonical_key: String,
     pub content: String,
 }
 
@@ -74,13 +77,19 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
         .filter(|c| c.content.eq_ignore_ascii_case(focus))
         .map(|c| FocusCandidate {
             id: c.id,
+            canonical_key: c.canonical_key.clone(),
             content: c.content.clone(),
         })
         .collect();
     if !exact.is_empty() {
         // Case-insensitive duplicates are the same concept to the caller, so
-        // there is nothing to disambiguate — just pick one *stably*.
-        exact.sort_by(|a, b| a.content.cmp(&b.content).then(a.id.0.cmp(&b.id.0)));
+        // there is nothing to disambiguate, just pick one *stably*. Canonical
+        // key ahead of the id (issue #2): the id is minted per run.
+        exact.sort_by(|a, b| {
+            a.content.cmp(&b.content).then_with(|| {
+                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+            })
+        });
         return Focus::Exact(exact[0].id);
     }
 
@@ -103,6 +112,7 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
         .filter(|c| c.content.to_lowercase().contains(&needle))
         .map(|c| FocusCandidate {
             id: c.id,
+            canonical_key: c.canonical_key.clone(),
             content: c.content.clone(),
         })
         .collect();
@@ -110,13 +120,16 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
         return Focus::Missing;
     }
     // Shortest content first: the least-padded match is the closest to what was
-    // asked for. Content then id break ties, so the order is total.
+    // asked for. Content, then canonical key, then id break ties (issue #2),
+    // so the order is total and stable across runs.
     fuzzy.sort_by(|a, b| {
         a.content
             .len()
             .cmp(&b.content.len())
             .then_with(|| a.content.cmp(&b.content))
-            .then_with(|| a.id.0.cmp(&b.id.0))
+            .then_with(|| {
+                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+            })
     });
     if fuzzy.len() == 1 {
         let c = fuzzy.remove(0);

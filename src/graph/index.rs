@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use crate::graph::canonical::normalize_tokens;
-use crate::types::{Concept, GraphSnapshot, NodeId, Scored};
+use crate::types::{tie_break_by_key, Concept, GraphSnapshot, NodeId, Scored};
 
 /// BM25 term-frequency saturation (spec-pinned constant).
 const BM25_K1: f64 = 1.2;
@@ -35,6 +35,10 @@ pub struct InvertedIndex {
     postings: HashMap<String, HashMap<NodeId, usize>>,
     /// concept id -> its token vector (enables cheap remove / re-add).
     doc_tokens: HashMap<NodeId, Vec<String>>,
+    /// concept id -> its canonical key, so `search` can break exact score ties
+    /// on something stable across runs (issue #2). Mirrors `doc_tokens`'s
+    /// lifecycle; no postings are touched for it.
+    doc_keys: HashMap<NodeId, String>,
     /// number of indexed concepts (`N` in BM25).
     total_docs: usize,
     /// total tokens across all indexed concepts (feeds BM25 `avgdl`).
@@ -66,6 +70,7 @@ impl InvertedIndex {
         }
         self.total_tokens += tokens.len();
         self.total_docs += 1;
+        self.doc_keys.insert(c.id, c.canonical_key.clone());
         self.doc_tokens.insert(c.id, tokens);
     }
 
@@ -105,8 +110,9 @@ impl InvertedIndex {
     /// The query is tokenized with the **same** tokenizer as documents. Concepts
     /// matching at least one query term are scored (OR semantics, scores summed
     /// across matching terms); the result is score-descending with ties broken by
-    /// concept id ascending, truncated to `limit`. Only concepts with a strictly
-    /// positive score are returned — there is no zero-score padding.
+    /// canonical key ascending, then concept id ascending (`tie_break_by_key`),
+    /// truncated to `limit`. Only concepts with a strictly positive score are
+    /// returned; there is no zero-score padding.
     ///
     /// Duplicate query tokens count ONCE (query-term frequency is 1 for scoring,
     /// grok G1) — `search("user user")` scores identically to `search("user")`;
@@ -152,10 +158,19 @@ impl InvertedIndex {
             .filter(|(_, s)| *s > 0.0)
             .map(|(item, score)| Scored { item, score })
             .collect();
+        // Exact score ties break on canonical key asc, then id asc (issue #2):
+        // the id alone is minted per run. The key map lives on the index (the
+        // cheapest source that needs no restructuring), and the lookup only
+        // runs inside the tie arm.
         results.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.item.0.cmp(&b.item.0))
+            b.score.total_cmp(&a.score).then_with(|| {
+                tie_break_by_key(
+                    self.doc_keys.get(&a.item).map(String::as_str),
+                    &a.item,
+                    self.doc_keys.get(&b.item).map(String::as_str),
+                    &b.item,
+                )
+            })
         });
         results.truncate(limit);
         results
@@ -317,12 +332,17 @@ mod tests {
     }
 
     #[test]
-    fn search_orders_by_score_then_id_and_truncates() {
+    fn search_orders_by_score_then_key_then_id_and_truncates() {
         let mut idx = InvertedIndex::new();
-        // id1 "alpha" (dl=1) scores highest; id2/id3 (dl=2, same tf) tie -> id order.
+        // id1 "alpha" (dl=1) scores highest; id2/id3 (dl=2, same tf) tie. The
+        // tie-break is canonical key asc, id asc behind that (issue #2): the
+        // keys are chosen to contradict the id order, so the old id-first
+        // chain would have returned [id2, id3] on the tie.
         let a = concept(1, "alpha");
-        let b = concept(2, "alpha beta");
-        let c = concept(3, "alpha gamma");
+        let mut b = concept(2, "alpha beta");
+        b.canonical_key = "zeta".into();
+        let mut c = concept(3, "alpha gamma");
+        c.canonical_key = "alpha".into();
         idx.add(&a);
         idx.add(&b);
         idx.add(&c);
@@ -331,10 +351,14 @@ mod tests {
         assert_eq!(limited, vec![a.id]);
 
         let limited2 = ids(idx.search("alpha", 2));
-        assert_eq!(limited2, vec![a.id, b.id]);
+        assert_eq!(
+            limited2,
+            vec![a.id, c.id],
+            "key order beats id order on the tie"
+        );
 
         let all = ids(idx.search("alpha", 10));
-        assert_eq!(all, vec![a.id, b.id, c.id]);
+        assert_eq!(all, vec![a.id, c.id, b.id]);
         assert!(idx.search("alpha", 0).is_empty());
     }
 

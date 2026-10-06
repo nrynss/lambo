@@ -43,7 +43,7 @@ use chrono::{DateTime, Utc};
 
 use crate::config::ScoringWeights;
 use crate::graph::Graph;
-use crate::types::{Concept, ConceptType, EdgeType, NodeId, Scored};
+use crate::types::{tie_break_by_key, Concept, ConceptType, EdgeType, NodeId, Scored};
 
 /// Frequency saturates at this many accesses (documented interpretation).
 pub const FREQUENCY_NORMALIZER: f64 = 10.0;
@@ -282,13 +282,19 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
     }
 }
 
-/// Rescore every concept in the session, returning a score-descending,
-/// id-ascending ranked list (the daemon's score table).
+/// Rescore every concept in the session, returning a score-descending ranked
+/// list (the daemon's score table), ties broken by canonical key ascending
+/// then `NodeId` ascending ([`tie_break_by_key`]).
 ///
-/// Deterministic for a given graph: ties break by `NodeId` ascending, and no
-/// wall-clock value enters the formula.
+/// Deterministic for a given graph AND across runs: the canonical key is
+/// persisted, so equal-score concepts keep one order no matter which ids a run
+/// minted (issue #2), and no wall-clock value enters the formula.
 pub fn rescore(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
     let ctx = SessionContext::compute(graph);
+    let key = |id: NodeId| match graph.node(id) {
+        Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
+        _ => None,
+    };
     let mut ranked: Vec<Scored<NodeId>> = graph
         .concepts()
         .map(|c| Scored::new(c.id, score(score_concept(graph, c, &ctx), weights)))
@@ -297,7 +303,7 @@ pub fn rescore(graph: &Graph, weights: &ScoringWeights) -> Vec<Scored<NodeId>> {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.item.0.cmp(&b.item.0))
+            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
     ranked
 }
@@ -832,5 +838,41 @@ mod tests {
         );
         // Sanity: it must also strictly beat the runner-up.
         assert!(ranked[0].score > ranked[1].score);
+    }
+
+    // ------------------------------------------------------------------
+    // Issue-2 tie-break: equal scores order by canonical key, id behind
+    // ------------------------------------------------------------------
+
+    /// Equal scores must order by canonical key ascending with the id only
+    /// behind that. The ids are minted so the id order contradicts the key
+    /// order ("beta" carries the smaller id), so the old id-first chain fails
+    /// this test: ids are per-run random and must not decide ties.
+    #[test]
+    fn rescore_ties_order_by_canonical_key_ahead_of_node_id() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let i2 = interaction(2, Some(1), 10);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+        // Same created_at, type, access_count, and no edges, so the two scores
+        // tie exactly; key "alpha" rides the LARGER id.
+        let alpha = concept(2, iid, "alpha", 5);
+        let beta = concept(1, iid, "beta", 5);
+        let (alpha_id, beta_id) = (alpha.id, beta.id);
+        g.insert_concept(beta, iid).unwrap();
+        g.insert_concept(alpha, iid).unwrap();
+
+        let ranked = rescore(&g, &ScoringWeights::default());
+        assert_eq!(
+            ranked[0].score, ranked[1].score,
+            "precondition: the two concepts tie exactly"
+        );
+        assert_eq!(
+            ranked[0].item, alpha_id,
+            "canonical key order (alpha < beta) must beat id order"
+        );
+        assert_eq!(ranked[1].item, beta_id);
     }
 }

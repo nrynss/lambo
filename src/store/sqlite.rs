@@ -250,8 +250,9 @@ use super::{
     SessionFlushStats,
 };
 use crate::types::{
-    CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot, Interaction,
-    InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
+    tie_break_by_key, CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot,
+    Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId,
+    StoreError,
 };
 
 /// Structural edge types counted by both structural queries (spec §4.1 errata:
@@ -1144,7 +1145,10 @@ impl GraphStore for SqliteStore {
 
         // Exact substring semantics (memory's `contains`) via instr() on
         // lowercased content/key — no LIKE wildcard interpretation. Score =
-        // number of tokens hitting content OR canonical_key; ties by id.
+        // number of tokens hitting content OR canonical_key. Ties: canonical
+        // key asc, then id (issue #2; SQLite's default BINARY collation
+        // compares the same UTF-8 bytes Rust's `str` ordering does, so this
+        // matches MemoryStore's Rust-side tie-break).
         let mut sql = String::from("SELECT id, ");
         for (i, _) in tokens_l.iter().enumerate() {
             if i > 0 {
@@ -1159,7 +1163,7 @@ impl GraphStore for SqliteStore {
             }
             sql.push_str("(instr(lower(content), ?) > 0 OR instr(lower(canonical_key), ?) > 0)");
         }
-        sql.push_str(") ORDER BY score DESC, id ASC LIMIT ?");
+        sql.push_str(") ORDER BY score DESC, canonical_key ASC, id ASC LIMIT ?");
 
         let mut q = sqlx::query(&sql);
         for tok in &tokens_l {
@@ -1524,8 +1528,9 @@ fn session_embedding_from_parts(
     }
 }
 
-/// One decoded stored vector, before scoring.
-type VectorCandidate = (NodeId, Vec<f32>);
+/// One decoded stored vector, before scoring, with the concept's canonical key
+/// riding along (the issue-2 tie-break consumes it on exact score ties).
+type VectorCandidate = (NodeId, Vec<f32>, String);
 
 /// **Candidate selection** — the swappable half of the vector query path (F1).
 ///
@@ -1550,7 +1555,7 @@ async fn select_session_vectors(
     dim: usize,
 ) -> Result<Vec<VectorCandidate>, StoreError> {
     let rows = sqlx::query(
-        "SELECT id, embedding FROM concepts \
+        "SELECT id, canonical_key, embedding FROM concepts \
          WHERE session_id = ? AND embedding IS NOT NULL ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -1563,8 +1568,11 @@ async fn select_session_vectors(
         let id: String = row
             .try_get(0)
             .map_err(|e| db_err("vector_candidates: concept id", e))?;
-        let blob: Vec<u8> = row
+        let key: String = row
             .try_get(1)
+            .map_err(|e| db_err("vector_candidates: concept canonical key", e))?;
+        let blob: Vec<u8> = row
+            .try_get(2)
             .map_err(|e| db_err("vector_candidates: concept embedding", e))?;
         let text = std::str::from_utf8(&blob).map_err(|e| {
             StoreError::Backend(format!(
@@ -1580,29 +1588,37 @@ async fn select_session_vectors(
                 session.0
             )));
         }
-        out.push((node_id(&id, "concept id")?, vector));
+        out.push((node_id(&id, "concept id")?, vector, key));
     }
     Ok(out)
 }
 
-/// **Candidate scoring** — the fixed half. Exact cosine, best first, ties broken by the
-/// smaller node id so the answer is deterministic (MemoryStore / Cockroach parity).
-/// Stays exact whatever [`select_session_vectors`] becomes: an approximate index would
+/// **Candidate scoring**, the fixed half. Exact cosine, best first; ties
+/// broken by canonical key ascending, then the smaller node id
+/// ([`tie_break_by_key`], issue #2), so the answer is deterministic across
+/// runs as well as within one (MemoryStore / Cockroach parity). Stays exact
+/// whatever [`select_session_vectors`] becomes: an approximate index would
 /// prune the pool, never the ranking.
 fn rank_by_cosine(
     probe: &[f32],
     candidates: Vec<VectorCandidate>,
     limit: usize,
 ) -> Vec<Scored<NodeId>> {
-    let mut scored: Vec<Scored<NodeId>> = candidates
+    let mut scored: Vec<(Scored<NodeId>, String)> = candidates
         .into_iter()
-        .map(|(id, vector)| Scored::new(id, f64::from(crate::embed::cosine(probe, &vector))))
+        .map(|(id, vector, key)| {
+            (
+                Scored::new(id, f64::from(crate::embed::cosine(probe, &vector))),
+                key,
+            )
+        })
         .collect();
-    scored.sort_by(|a, b| {
+    scored.sort_by(|(a, a_key), (b, b_key)| {
         b.score
             .total_cmp(&a.score)
-            .then_with(|| a.item.0.cmp(&b.item.0))
+            .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
     });
+    let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
     scored.truncate(limit);
     scored
 }
@@ -3266,8 +3282,9 @@ mod tests {
         ));
     }
 
-    /// F1: the scan scores exact cosine over the flushed BLOBs, best first, ties by
-    /// the smaller node id — the ordering contract MemoryStore and Cockroach share.
+    /// F1: the scan scores exact cosine over the flushed BLOBs, best first; ties
+    /// by canonical key asc, then the smaller node id (issue #2): the ordering
+    /// contract MemoryStore and Cockroach share.
     #[tokio::test]
     async fn vector_candidates_score_exact_cosine_in_rank_order() {
         let store = vec_test_store(4);
@@ -3332,8 +3349,11 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 3, "the vector-less concept must not appear");
 
-        // Ties break by the smaller id, deterministically, whichever order the two
-        // identical vectors were written in.
+        // Ties break by canonical key asc, then id (issue #2), deterministically,
+        // whichever order the two identical vectors were written in. The ids are
+        // named so the id order contradicts the key order: `hi` carries
+        // "written first" (smaller key) and `lo` carries "written second", so
+        // the old id-first chain would have returned [lo, hi].
         let (lo, hi) = {
             let a = NodeId::new();
             let b = NodeId::new();
@@ -3360,7 +3380,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             hits.iter().map(|s| s.item).collect::<Vec<_>>(),
-            vec![lo, hi]
+            vec![hi, lo],
+            "canonical key order (written first < written second) must beat id order"
         );
 
         // The frozen unchecked surface answers with the session's own contract.
@@ -5219,7 +5240,8 @@ mod tests {
 
     /// An **exact-cosine oracle** with the ordering contract of `MemoryStore`'s
     /// `VectorSearchStore` and of `rank_by_cosine`: best score first by `total_cmp`
-    /// descending, ties broken by the smaller `NodeId`, then truncated to `limit`.
+    /// descending, ties broken by canonical key ascending then the smaller
+    /// `NodeId` (issue #2), then truncated to `limit`.
     ///
     /// Reimplemented here rather than reused because `VectorSearchStore` is private to
     /// `memory.rs`'s test module. That is not a weakness of the comparison: the oracle
@@ -5229,18 +5251,24 @@ mod tests {
     #[cfg(feature = "fixtures")]
     fn cosine_oracle(
         probe: &[f32],
-        pool: &[(NodeId, Vec<f32>)],
+        pool: &[(NodeId, Vec<f32>, String)],
         limit: usize,
     ) -> Vec<Scored<NodeId>> {
-        let mut scored: Vec<Scored<NodeId>> = pool
+        let mut scored: Vec<(Scored<NodeId>, &str)> = pool
             .iter()
-            .map(|(id, v)| Scored::new(*id, f64::from(crate::embed::cosine(probe, v))))
+            .map(|(id, v, key)| {
+                (
+                    Scored::new(*id, f64::from(crate::embed::cosine(probe, v))),
+                    key.as_str(),
+                )
+            })
             .collect();
-        scored.sort_by(|a, b| {
+        scored.sort_by(|(a, a_key), (b, b_key)| {
             b.score
                 .total_cmp(&a.score)
-                .then_with(|| a.item.0.cmp(&b.item.0))
+                .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
         });
+        let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
         scored.truncate(limit);
         scored
     }
@@ -5309,11 +5337,11 @@ mod tests {
                  this test supplies them"
             );
 
-            let pool: Vec<(NodeId, Vec<f32>)> = snap
+            let pool: Vec<(NodeId, Vec<f32>, String)> = snap
                 .concepts
                 .iter()
                 .enumerate()
-                .map(|(i, c)| (c.id, synthetic_unit_vector(i, DIM)))
+                .map(|(i, c)| (c.id, synthetic_unit_vector(i, DIM), c.canonical_key.clone()))
                 .collect();
 
             let store = vec_test_store(DIM);
@@ -5611,8 +5639,9 @@ mod tests {
                 panic!("MemoryOracleStore: unchecked vector lookup is unused by the H1 harness")
             }
             /// Same ordering contract as SQLite's `rank_by_cosine` and F's
-            /// `cosine_oracle`: best first by `total_cmp`, ties broken by the
-            /// smaller `NodeId`, truncated to `limit`.
+            /// `cosine_oracle`: best first by `total_cmp`, ties broken by
+            /// canonical key asc then the smaller `NodeId` (issue #2),
+            /// truncated to `limit`.
             async fn vector_candidates_checked(
                 &self,
                 session: &SessionId,
@@ -5643,22 +5672,23 @@ mod tests {
                         )));
                     }
                 }
-                let mut scored: Vec<Scored<NodeId>> = snapshot
+                let mut scored: Vec<(Scored<NodeId>, &str)> = snapshot
                     .concepts
                     .iter()
                     .filter_map(|c| {
                         let vector = c.embedding.as_ref()?;
-                        Some(Scored::new(
-                            c.id,
-                            f64::from(crate::embed::cosine(embedding, vector)),
+                        Some((
+                            Scored::new(c.id, f64::from(crate::embed::cosine(embedding, vector))),
+                            c.canonical_key.as_str(),
                         ))
                     })
                     .collect();
-                scored.sort_by(|a, b| {
+                scored.sort_by(|(a, a_key), (b, b_key)| {
                     b.score
                         .total_cmp(&a.score)
-                        .then_with(|| a.item.0.cmp(&b.item.0))
+                        .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
                 });
+                let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
                 scored.truncate(limit);
                 Ok(scored)
             }

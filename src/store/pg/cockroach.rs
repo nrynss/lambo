@@ -538,11 +538,11 @@ mod tests {
         let mine = sid.0.clone();
         // dist asc: a(0.0), fx(0.5), b(1.0), fy(1.5), c(2.0)
         let rows = vec![
-            (a, 0.0, mine.clone()),
-            (fx, 0.5, foreign.clone()),
-            (b, 1.0, mine.clone()),
-            (fy, 1.5, foreign.clone()),
-            (c, 2.0, mine.clone()),
+            (a, 0.0, mine.clone(), "a".to_string()),
+            (fx, 0.5, foreign.clone(), "fx".to_string()),
+            (b, 1.0, mine.clone(), "b".to_string()),
+            (fy, 1.5, foreign.clone(), "fy".to_string()),
+            (c, 2.0, mine.clone(), "c".to_string()),
         ];
         let got = filter_session_rows::<CockroachDialect>(&sid, &rows);
         let items: Vec<_> = got.iter().map(|s| s.item).collect();
@@ -557,30 +557,35 @@ mod tests {
         assert!((got[2].score - (-1.0)).abs() < 1e-12);
     }
 
+    /// Issue #2: at an exact distance tie the pg-family order is canonical key
+    /// ascending, node id ascending only behind that. The keys here contradict
+    /// the id order on purpose, so the old id-first chain fails this test.
     #[test]
-    fn vector_ties_are_ordered_by_uuid_or_trigger_exact_fallback() {
+    fn vector_ties_are_ordered_by_canonical_key_or_trigger_exact_fallback() {
         let sid = SessionId::from("ties");
         let low = NodeId(Uuid::from_u64_pair(0, 1));
         let mid = NodeId(Uuid::from_u64_pair(0, 2));
         let high = NodeId(Uuid::from_u64_pair(0, 3));
         let rows_a = vec![
-            (high, 0.25, sid.0.clone()),
-            (low, 0.25, sid.0.clone()),
-            (mid, 0.25, sid.0.clone()),
+            (high, 0.25, sid.0.clone(), "alpha".to_string()),
+            (low, 0.25, sid.0.clone(), "gamma".to_string()),
+            (mid, 0.25, sid.0.clone(), "beta".to_string()),
         ];
         let mut rows_b = rows_a.clone();
         rows_b.reverse();
-        let ids = |rows: &[(NodeId, f64, String)]| {
+        let ids = |rows: &[(NodeId, f64, String, String)]| {
             filter_session_rows::<CockroachDialect>(&sid, rows)
                 .into_iter()
                 .map(|s| s.item)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(&rows_a), vec![low, mid, high]);
-        assert_eq!(ids(&rows_b), vec![low, mid, high]);
+        // "alpha" (high) < "beta" (mid) < "gamma" (low): key order, not id order.
+        assert_eq!(ids(&rows_a), vec![high, mid, low]);
+        assert_eq!(ids(&rows_b), vec![high, mid, low]);
 
         // More equal-distance rows than the fetch window: k+1 exposes that the
-        // kth subset is arbitrary, so the caller must use exact fallback.
+        // kth subset is arbitrary (the key tie-break cannot recover rows SQL
+        // never returned), so the caller must use exact fallback.
         assert!(has_boundary_tie(&rows_a, 2));
         assert!(has_boundary_tie(&rows_b, 2));
         assert!(crdb_sql()
@@ -588,9 +593,9 @@ mod tests {
             .contains("ORDER BY dist ASC, id ASC"));
         assert!(!has_boundary_tie(
             &[
-                (low, 0.1, sid.0.clone()),
-                (mid, 0.2, sid.0.clone()),
-                (high, 0.3, sid.0.clone()),
+                (low, 0.1, sid.0.clone(), "alpha".to_string()),
+                (mid, 0.2, sid.0.clone(), "beta".to_string()),
+                (high, 0.3, sid.0.clone(), "gamma".to_string()),
             ],
             2
         ));
@@ -624,10 +629,17 @@ mod tests {
         // caller's nearest concept at global rank 2,049. The capped fast path
         // must not silently return empty; it switches to the exact session query.
         let caller = SessionId::from("caller");
-        let mut globally_ranked: Vec<(NodeId, f64, String)> = (0..VECTOR_FETCH_CAP)
-            .map(|rank| (NodeId::new(), rank as f64 / 10_000.0, "foreign".to_string()))
+        let mut globally_ranked: Vec<(NodeId, f64, String, String)> = (0..VECTOR_FETCH_CAP)
+            .map(|rank| {
+                (
+                    NodeId::new(),
+                    rank as f64 / 10_000.0,
+                    "foreign".to_string(),
+                    format!("foreign-{rank}"),
+                )
+            })
             .collect();
-        globally_ranked.push((NodeId::new(), 0.3, caller.0.clone()));
+        globally_ranked.push((NodeId::new(), 0.3, caller.0.clone(), "local".to_string()));
         let capped_page = &globally_ranked[..VECTOR_FETCH_CAP];
         let local = filter_session_rows::<CockroachDialect>(&caller, capped_page);
         assert!(local.is_empty(), "local row is exactly global rank 2,049");
@@ -757,10 +769,16 @@ mod tests {
     /// not transcribed by hand. A single whitespace change in any composed
     /// statement, or a change to `STRING_CAST`, `VECTOR_CAST`, or
     /// `DISTANCE_OP`, must fail here.
+    ///
+    /// Deliberate exception (issue #2, re-pinned by hand): the two vector
+    /// candidate SELECTs now also fetch `canonical_key`, so the Rust side can
+    /// order exact score ties stably across runs. Their `PRE_*` bodies carry
+    /// that one added column; everything else stays parser-faithful.
     #[test]
     fn b0_composed_sql_is_byte_identical_to_the_pre_carve_constants() {
         const PRE_VECTOR_CANDIDATES_SQL: &str = r#"
 SELECT id::STRING AS id, session_id::STRING AS session_id,
+       canonical_key::STRING AS canonical_key,
        embedding <-> $1::VECTOR AS dist
 FROM concepts
 WHERE embedding IS NOT NULL
@@ -769,7 +787,8 @@ LIMIT $2
 "#;
 
         const PRE_SESSION_VECTOR_CANDIDATES_SQL: &str = r#"
-SELECT id::STRING AS id, embedding <-> $1::VECTOR AS dist
+SELECT id::STRING AS id, canonical_key::STRING AS canonical_key,
+       embedding <-> $1::VECTOR AS dist
 FROM concepts
 WHERE session_id = $2 AND embedding IS NOT NULL
 ORDER BY dist ASC, id ASC
@@ -3493,22 +3512,26 @@ mod h2_cockroach_parity {
                     )));
                 }
             }
-            let mut scored: Vec<Scored<NodeId>> = snapshot
+            // Same ordering contract as the real pg-family candidate read:
+            // best first by `total_cmp`, ties broken by canonical key asc then
+            // the smaller `NodeId` (issue #2), then truncated to `limit`.
+            let mut scored: Vec<(Scored<NodeId>, &str)> = snapshot
                 .concepts
                 .iter()
                 .filter_map(|c| {
                     let vector = c.embedding.as_ref()?;
-                    Some(Scored::new(
-                        c.id,
-                        f64::from(crate::embed::cosine(embedding, vector)),
+                    Some((
+                        Scored::new(c.id, f64::from(crate::embed::cosine(embedding, vector))),
+                        c.canonical_key.as_str(),
                     ))
                 })
                 .collect();
-            scored.sort_by(|a, b| {
+            scored.sort_by(|(a, a_key), (b, b_key)| {
                 b.score
                     .total_cmp(&a.score)
-                    .then_with(|| a.item.0.cmp(&b.item.0))
+                    .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
             });
+            let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
             scored.truncate(limit);
             Ok(scored)
         }

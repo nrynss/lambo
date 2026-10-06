@@ -91,9 +91,9 @@ use crate::store::{
     SessionFlushStats, StoreConfig,
 };
 use crate::types::{
-    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
-    GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId,
-    Reservation, Scored, SessionId, StoreError, Synonym,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
+    EmbeddingContract, GraphSnapshot, Interaction, InteractionSpan, Mutation, MutationBatch, Node,
+    NodeId, Reservation, Scored, SessionId, StoreError, Synonym,
 };
 
 /// Pool size is deliberately small: Lambo is single-writer per session (spec §2.4) and
@@ -573,6 +573,7 @@ impl DialectSql {
             vector_candidates: format!(
                 r#"
 SELECT id{s} AS id, session_id{s} AS session_id,
+       canonical_key{s} AS canonical_key,
        embedding {op} $1{v} AS dist
 FROM concepts
 WHERE embedding IS NOT NULL
@@ -582,7 +583,8 @@ LIMIT $2
             ),
             session_vector_candidates: format!(
                 r#"
-SELECT id{s} AS id, embedding {op} $1{v} AS dist
+SELECT id{s} AS id, canonical_key{s} AS canonical_key,
+       embedding {op} $1{v} AS dist
 FROM concepts
 WHERE session_id = $2 AND embedding IS NOT NULL
 ORDER BY dist ASC, id ASC
@@ -924,28 +926,41 @@ fn dsn_for_rustls(dsn: &str) -> String {
     out
 }
 
+/// The pg-family candidate order: score descending, then canonical key
+/// ascending, then node id ascending ([`tie_break_by_key`], issue #2). One
+/// implementation for the global-fetch filter and the exact session query, so
+/// the two paths can never order equal-score rows differently.
+fn order_candidates(mut scored: Vec<(Scored<NodeId>, String)>) -> Vec<Scored<NodeId>> {
+    scored.sort_by(|(a, a_key), (b, b_key)| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
+    });
+    scored.into_iter().map(|(s, _)| s).collect()
+}
+
 /// Keep only rows belonging to the caller's session from one global top-k fetch.
 /// Input rows arrive in L2-distance-ascending order (SQL `ORDER BY dist ASC`), so
-/// the survivors keep that order — the trait's score-descending ordering contract.
+/// the survivors keep that order: the trait's score-descending ordering contract,
+/// with the issue-2 tie-break ([`order_candidates`]) deciding equal scores.
 /// Pure & deterministic: unit-tested without a cluster.
 fn filter_session_rows<D: Dialect>(
     session: &SessionId,
-    rows: &[(NodeId, f64, String)],
+    rows: &[(NodeId, f64, String, String)],
 ) -> Vec<Scored<NodeId>> {
-    let mut scored: Vec<_> = rows
-        .iter()
-        .filter(|(_, dist, sid)| sid == &session.0 && dist.is_finite())
-        .map(|(id, dist, _)| Scored::new(*id, D::distance_to_score(*dist)))
-        .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.item.0.cmp(&b.item.0))
-    });
-    scored
+    order_candidates(
+        rows.iter()
+            .filter(|(_, dist, sid, _)| sid == &session.0 && dist.is_finite())
+            .map(|(id, dist, _, key)| (Scored::new(*id, D::distance_to_score(*dist)), key.clone()))
+            .collect(),
+    )
 }
 
-fn has_boundary_tie(rows: &[(NodeId, f64, String)], k: usize) -> bool {
+/// True when the global fetch's kth and lookahead distances tie. The canonical
+/// key tie-break can only order rows the fetch actually returned, so a tie
+/// group cut by SQL's LIMIT still has an arbitrary subset: the exact session
+/// query remains the only deterministic answer (unchanged by issue #2).
+fn has_boundary_tie(rows: &[(NodeId, f64, String, String)], k: usize) -> bool {
     k > 0
         && rows.len() > k
         && rows[k - 1].1.is_finite()
@@ -2847,24 +2862,20 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         }
         let rows = q.fetch_all(pool).await.map_err(backend)?;
 
-        let mut scored: Vec<Scored<NodeId>> = rows
+        let scored: Vec<(Scored<NodeId>, String)> = rows
             .iter()
             .map(|r| {
                 let id: String = r.try_get("id").map_err(backend)?;
                 let content: String = r.try_get("content").map_err(backend)?;
                 let key: String = r.try_get("canonical_key").map_err(backend)?;
                 let hits = score_keyword_hits(&content, &key, &tokens);
-                Ok(Scored::new(parse_node_id(&id)?, hits as f64))
+                Ok((Scored::new(parse_node_id(&id)?, hits as f64), key))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
 
-        // MemoryStore parity: score desc, id asc tie-break.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.item.0.cmp(&b.item.0))
-        });
+        // MemoryStore parity: score desc, then canonical key asc, then id asc
+        // (the issue-2 tie-break; the key rides along from the row).
+        let mut scored = order_candidates(scored);
         scored.truncate(limit);
         Ok(scored)
     }
@@ -2966,14 +2977,17 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                     .await
                     .map_err(backend)?;
 
-                // (id, dist, session_id) — session_id selected so foreign rows can be dropped.
+                // (id, dist, session_id, canonical_key): session_id selected so
+                // foreign rows can be dropped, canonical_key so equal distances
+                // order stably across runs (issue #2).
                 let parsed = rows
                     .iter()
                     .map(|r| {
                         let id: String = r.try_get("id").map_err(backend)?;
                         let dist: f64 = r.try_get("dist").map_err(backend)?;
                         let sid: String = r.try_get("session_id").map_err(backend)?;
-                        Ok((parse_node_id(&id)?, dist, sid))
+                        let key: String = r.try_get("canonical_key").map_err(backend)?;
+                        Ok((parse_node_id(&id)?, dist, sid, key))
                     })
                     .collect::<Result<Vec<_>, StoreError>>()?;
 
@@ -2995,20 +3009,23 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                         .fetch_all(&mut *tx)
                         .await
                         .map_err(backend)?;
-                    let hits = fallback_rows
-                        .iter()
-                        .map(|row| {
-                            let id: String = row.try_get("id").map_err(backend)?;
-                            let dist: f64 = row.try_get("dist").map_err(backend)?;
-                            let score = D::distance_to_score(dist);
-                            if !score.is_finite() {
-                                return Err(StoreError::Backend(format!(
-                                    "non-finite vector distance for concept {id}"
-                                )));
-                            }
-                            Ok(Scored::new(parse_node_id(&id)?, score))
-                        })
-                        .collect::<Result<Vec<_>, StoreError>>()?;
+                    let hits = order_candidates(
+                        fallback_rows
+                            .iter()
+                            .map(|row| {
+                                let id: String = row.try_get("id").map_err(backend)?;
+                                let dist: f64 = row.try_get("dist").map_err(backend)?;
+                                let key: String = row.try_get("canonical_key").map_err(backend)?;
+                                let score = D::distance_to_score(dist);
+                                if !score.is_finite() {
+                                    return Err(StoreError::Backend(format!(
+                                        "non-finite vector distance for concept {id}"
+                                    )));
+                                }
+                                Ok((Scored::new(parse_node_id(&id)?, score), key))
+                            })
+                            .collect::<Result<Vec<_>, StoreError>>()?,
+                    );
                     tx.commit().await.map_err(backend)?;
                     return Ok(hits);
                 }

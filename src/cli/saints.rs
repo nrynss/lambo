@@ -1,14 +1,15 @@
 //! `lambo saints` — lease-free list of Canonical memories.
 //!
 //! Scans the loaded graph exactly like [`crate::memory::Memory::canonical_memories`]: Canonical
-//! only; order blast-radius desc, then created_at, then id. Not a store query.
+//! only; order blast-radius desc, then created_at, then canonical key, then id (issue #2). Not
+//! a store query.
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::load_reader_graph;
 use crate::memory::CanonicalMemory;
 use crate::recall::format;
 use crate::store::GraphStore;
-use crate::types::CanonizationStatus;
+use crate::types::{tie_break_by_key, CanonizationStatus};
 
 /// List the session's canonical memories.
 pub async fn run(store: &dyn GraphStore, session: &str) -> Result<String, CliError> {
@@ -45,6 +46,7 @@ pub(crate) fn canonical_memories_from_graph(g: &crate::graph::Graph) -> Vec<Cano
         .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
         .map(|c| CanonicalMemory {
             node_id: c.id,
+            canonical_key: c.canonical_key.clone(),
             content: c.content.clone(),
             concept_type: c.concept_type,
             blast_radius: radii.get(&c.id).copied().unwrap_or(0),
@@ -56,7 +58,12 @@ pub(crate) fn canonical_memories_from_graph(g: &crate::graph::Graph) -> Vec<Cano
         b.blast_radius
             .cmp(&a.blast_radius)
             .then(a.created_at.cmp(&b.created_at))
-            .then(a.node_id.0.cmp(&b.node_id.0))
+            .then(tie_break_by_key(
+                Some(&a.canonical_key),
+                &a.node_id,
+                Some(&b.canonical_key),
+                &b.node_id,
+            ))
     });
     out
 }

@@ -5,9 +5,11 @@
 //!    golden-exact (`fixtures/recall-goldens.json` `phase1_candidates`).
 //! 2. **Recent interactions** — concepts whose `origin_interaction` is one of
 //!    the N = [`RECENT_INTERACTIONS`] most recent interactions by `created_at`
-//!    (ties broken by node id ascending). The temporal chain order is NOT
-//!    consulted: the contract is "3 most recent by `created_at`" (handoff
-//!    T5.1), and a chain ordered by insertion may carry arbitrary timestamps.
+//!    (ties broken by node id ascending; interactions carry no canonical key,
+//!    so the id is the only stable separator at that step). The temporal chain
+//!    order is NOT consulted: the contract is "3 most recent by `created_at`"
+//!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
+//!    timestamps.
 //! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
 //!    advertises [`Capabilities::VECTOR_SEARCH`]. The call is async I/O, so it
 //!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
@@ -25,9 +27,13 @@
 //! BM25 score; recent-interaction members score a flat [`RECENT_SCORE`] (a
 //! secondary signal below a genuine BM25 or similarity hit); vector members
 //! keep the store-provided similarity score. The merged list is sorted
-//! score-descending with ties broken by node id ascending, then truncated to
-//! `limit`. Sorting is a total order (f64 `total_cmp`, then UUID), so the
-//! output is deterministic regardless of leg iteration or store result order.
+//! score-descending, ties broken by canonical key ascending then node id
+//! ascending ([`crate::types::tie_break_by_key`]), then truncated to `limit`.
+//! Sorting is a total order (f64 `total_cmp`, then canonical key, then UUID),
+//! so the output is deterministic regardless of leg iteration or store result
+//! order, and stable across runs: node ids are minted per run, so the old
+//! id-first tie-break could reorder equal-score members from one run to the
+//! next (issue #2).
 //!
 //! The caller supplies the [`InvertedIndex`]: the graph itself owns no index
 //! (P3 contract — the session owner mirrors every concept write into a separate
@@ -51,7 +57,9 @@ use std::collections::{HashMap, HashSet};
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::store::{validate_vector_candidate_limit, Capabilities, GraphStore};
-use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
+use crate::types::{
+    tie_break_by_key, EmbeddingContract, Node, NodeId, Scored, SessionId, StoreError,
+};
 
 /// Number of most-recent interactions whose concepts join phase 1 (spec §8).
 pub const RECENT_INTERACTIONS: usize = 3;
@@ -218,7 +226,7 @@ pub fn candidates_with_legs(
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
-    let out = rank(&legs);
+    let out = rank(&legs, graph);
     // T9 instrumentation: which phase-1 leg(s) produced each candidate, so a
     // trace-enabled run can say whether the lexical (keyword), recent, or
     // vector arm produced an identifier-shaped hit. Unchanged output; it now
@@ -256,11 +264,19 @@ fn arm_names(legs: LegScores) -> Vec<&'static str> {
     .collect()
 }
 
-/// Max-merge and sort: score descending, ties by node id ascending.
+/// Max-merge and sort: score descending, ties by canonical key ascending then
+/// node id ascending ([`tie_break_by_key`]).
 ///
-/// A total order (f64 `total_cmp`, then UUID), so the output is deterministic
-/// regardless of leg iteration or store result order.
-fn rank(legs: &LegProvenance) -> Vec<Scored<NodeId>> {
+/// A total order (f64 `total_cmp`, then canonical key, then UUID), so the
+/// output is deterministic regardless of leg iteration or store result order,
+/// and stable across runs (issue #2). The key is resolved from `graph` inside
+/// the comparator, so the lookup only runs on exact score ties and the hot
+/// path is untouched.
+fn rank(legs: &LegProvenance, graph: &Graph) -> Vec<Scored<NodeId>> {
+    let key = |id: NodeId| match graph.node(id) {
+        Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
+        _ => None,
+    };
     let mut out: Vec<Scored<NodeId>> = legs
         .iter()
         .map(|(item, legs)| Scored::new(*item, legs.merged()))
@@ -268,7 +284,7 @@ fn rank(legs: &LegProvenance) -> Vec<Scored<NodeId>> {
     out.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
-            .then_with(|| a.item.0.cmp(&b.item.0))
+            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
     out
 }
@@ -295,7 +311,7 @@ pub fn candidates_without_keyword_with_legs(
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
     }
-    let out = rank(&legs);
+    let out = rank(&legs, graph);
     (out, legs)
 }
 
@@ -319,7 +335,10 @@ fn merge_max(slot: &mut Option<f64>, score: f64) {
 }
 
 /// Ids of the concepts owned by the [`RECENT_INTERACTIONS`] most recent
-/// interactions (by `created_at`; ties broken by node id ascending).
+/// interactions (by `created_at`; ties broken by node id ascending). The tie
+/// stays on the bare id, deliberately: interactions carry no canonical key, so
+/// at this step the id fallback is the only stable order available (the
+/// residual named in [`tie_break_by_key`]).
 fn recent_concepts(graph: &Graph) -> Vec<NodeId> {
     let mut recent: Vec<&crate::types::Interaction> = graph.interactions().collect();
     recent.sort_by(|a, b| {
@@ -611,7 +630,8 @@ mod tests {
         // recent leg (c1/c2/c3 at RECENT_SCORE) must not lower it.
         let out = candidates(&graph, &index, input, "beta", 10);
         // Union: c2 (keyword + vector) first, then the recent-leg members c1/c3
-        // at the flat recent score, ties by id asc.
+        // at the flat recent score, canonical key asc ("alpha" < "gamma"; the
+        // ids minted in that same order agree).
         assert_eq!(ids(out.clone()), vec![c2, c1, c3]);
         let s = out[0].score;
         assert!(s > 0.8, "max-merge keeps the higher BM25 score, got {s}");
@@ -754,8 +774,9 @@ mod tests {
 
         // i4 (120) is strictly most recent; i1/i2/i3 tie at 60. Recent =
         // i4 + {i1, i2} (tie broken by id asc) -> concepts c4, c1, c2; final
-        // output is score-desc (all RECENT_SCORE) then id asc -> c1, c2, c4. A
-        // chain-order or id-desc selection would yield {c4, c3, c2}.
+        // output is score-desc (all RECENT_SCORE), then canonical key asc
+        // ("alpha" < "beta" < "delta", matching the id order here) -> c1, c2,
+        // c4. A chain-order or id-desc selection would yield {c4, c3, c2}.
         let out = ids(candidates(&g, &index, Phase1Input::default(), "zzz", 10));
         let expected = vec![
             NodeId(Uuid::from_u64_pair(2, 1)),
@@ -771,6 +792,37 @@ mod tests {
         let index = InvertedIndex::new();
         assert!(candidates(&g, &index, Phase1Input::default(), "user", 10).is_empty());
         assert!(candidates(&g, &index, Phase1Input::default(), "zzz", 0).is_empty());
+    }
+
+    /// Issue #2: equal scores order by canonical key ascending, node id only
+    /// behind that. Both concepts share one recent interaction (same flat
+    /// [`RECENT_SCORE`]) and the ids are minted so the id order contradicts
+    /// the key order ("beta" carries the smaller id), so the old id-first
+    /// chain fails this test.
+    #[test]
+    fn equal_scores_tie_break_by_canonical_key_ahead_of_node_id() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        g.insert_interaction(i1.clone()).unwrap();
+        g.insert_concept(concept(1, i1.id, "beta"), i1.id).unwrap();
+        g.insert_concept(concept(2, i1.id, "alpha"), i1.id).unwrap();
+        let index = InvertedIndex::from_snapshot(&g.snapshot());
+
+        let out = ids(candidates(
+            &g,
+            &index,
+            Phase1Input::default(),
+            "zzzznomatch",
+            10,
+        ));
+        assert_eq!(
+            out,
+            vec![
+                NodeId(Uuid::from_u64_pair(2, 2)), // "alpha": key order wins
+                NodeId(Uuid::from_u64_pair(2, 1)), // "beta"
+            ],
+            "equal-score members must tie on canonical key, not the per-run id"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -850,8 +902,10 @@ mod tests {
         );
         assert_eq!(
             ids(out.clone()),
-            vec![c8, c5, c9, c10, c11, c12],
-            "keyword first, then vector 0.8, then recent leg, ties by id"
+            vec![c8, c5, c9, c12, c10, c11],
+            "keyword first, then vector 0.8, then recent leg: the flat-scored \
+             members tie, so canonical key asc decides (api doc < api layer < \
+             cach layer < load test), id asc behind that"
         );
         let score8 = out.iter().find(|s| s.item == c8).unwrap().score;
         assert!(score8 > 0.9, "max-merge keeps the BM25 score, got {score8}");
@@ -936,14 +990,22 @@ mod tests {
                 "keyword leg must be golden-exact for query {query:?}"
             );
             // 3. The recent members are exactly the rest (no vector leg: the
-            //    fixture carries no embeddings).
+            //    fixture carries no embeddings), in the tie order the union
+            //    ranks them: canonical key ascending, then node id.
             let recent_members: Vec<NodeId> = union_ids
                 .iter()
                 .copied()
                 .filter(|id| recent_concept_ids.contains(id))
                 .collect();
+            let key_of: HashMap<NodeId, &str> = snap
+                .concepts
+                .iter()
+                .map(|c| (c.id, c.canonical_key.as_str()))
+                .collect();
             let mut recent_expected: Vec<NodeId> = recent_concept_ids.iter().copied().collect();
-            recent_expected.sort_by_key(|a| a.0);
+            recent_expected.sort_by(|a, b| {
+                tie_break_by_key(key_of.get(a).copied(), a, key_of.get(b).copied(), b)
+            });
             assert_eq!(
                 recent_members, recent_expected,
                 "recent-leg members for query {query:?}"

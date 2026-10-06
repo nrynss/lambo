@@ -886,6 +886,28 @@ impl<T> Scored<T> {
     }
 }
 
+/// The stable tie-break for score-ordered candidate lists (issue #2): on an
+/// exact score tie, order by **canonical key ascending** where both concepts
+/// are in scope, and fall back to **node id ascending** only when a key is
+/// missing on either side. Node ids are minted per run (`Uuid::new_v4`), so an
+/// id-first tie-break is deterministic within a run but arbitrary across runs;
+/// the canonical key is persisted and stable for the same logical concept. The
+/// key is not a total separator (non-canonical synonym duplicates share one,
+/// and interactions carry none), which is why the id fallback stays: it keeps
+/// the order total, it no longer decides exact-key ties arbitrarily.
+pub fn tie_break_by_key(
+    a_key: Option<&str>,
+    a: &NodeId,
+    b_key: Option<&str>,
+    b: &NodeId,
+) -> std::cmp::Ordering {
+    match (a_key, b_key) {
+        (Some(a_key), Some(b_key)) => a_key.cmp(b_key),
+        _ => std::cmp::Ordering::Equal,
+    }
+    .then_with(|| a.0.cmp(&b.0))
+}
+
 /// Stage 2 structural evidence (spec §4.1 / §10).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSpan {

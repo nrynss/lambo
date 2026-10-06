@@ -15,8 +15,8 @@ use std::time::Duration;
 use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
-    CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation, MutationBatch, Node,
-    NodeId, Scored, SessionId, StoreError,
+    tie_break_by_key, CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation,
+    MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
 };
 
 /// One session's lease row (T8.6). In-process analogue of the sqlite/cockroach
@@ -664,7 +664,9 @@ impl GraphStore for MemoryStore {
             .get(&session.0)
             .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
 
-        let mut scored: Vec<Scored<NodeId>> = data
+        // Keys ride along so the tie arm can order by canonical key asc before
+        // the id fallback (issue #2); the id alone is minted per run.
+        let mut scored: Vec<(Scored<NodeId>, &str)> = data
             .snapshot
             .concepts
             .iter()
@@ -678,15 +680,16 @@ impl GraphStore for MemoryStore {
                 if hits == 0 {
                     return None;
                 }
-                Some(Scored::new(c.id, hits as f64))
+                Some((Scored::new(c.id, hits as f64), c.canonical_key.as_str()))
             })
             .collect();
-        scored.sort_by(|a, b| {
+        scored.sort_by(|(a, a_key), (b, b_key)| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.item.0.cmp(&b.item.0))
+                .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
         });
+        let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
         scored.truncate(limit);
         Ok(scored)
     }

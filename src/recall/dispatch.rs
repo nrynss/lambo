@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
-use crate::types::{CanonizationStatus, NodeId, RecallHit, Scored};
+use crate::types::{tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, Scored};
 
 /// What kind of question a recall query is, for routing (T9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,9 +192,10 @@ pub fn fits_structural(graph: &Graph, query: &str) -> bool {
 /// excluded by construction (`inbound_sources` tracks concepts only).
 ///
 /// Score is the strongest structural edge weight binding `dst` to `anchor`.
-/// Ordering applies spec §10 canonical-first promotion, then strength, then id
-/// ascending (T9-R1-6) — the same partition `assemble` applies, so the
-/// traversal answer orders identically to the blend.
+/// Ordering applies spec §10 canonical-first promotion, then strength, then the
+/// issue-2 tie-break (canonical key ascending, node id ascending behind it):
+/// the same partition and tie order `assemble` applies, so the traversal
+/// answer orders identically to the blend.
 pub fn dependents(graph: &Graph, anchor: NodeId) -> Vec<Scored<NodeId>> {
     let sources = format::inbound_sources(graph);
     let mut strength: HashMap<NodeId, f64> = HashMap::new();
@@ -215,11 +216,15 @@ pub fn dependents(graph: &Graph, anchor: NodeId) -> Vec<Scored<NodeId>> {
                 if c.canonization_status == CanonizationStatus::Canonical
         )
     };
+    let key = |id: NodeId| match graph.node(id) {
+        Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
+        _ => None,
+    };
     out.sort_by(|a, b| {
         is_canonical(b.item)
             .cmp(&is_canonical(a.item))
             .then_with(|| b.score.total_cmp(&a.score))
-            .then_with(|| a.item.0.cmp(&b.item.0))
+            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
     for s in &out {
         tracing::trace!(

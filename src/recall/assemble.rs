@@ -28,9 +28,9 @@
 //!   (ALGO-10): a non-finite or negative weight becomes `0.0`, so the final
 //!   score is finite for every input.
 //!
-//! Hits are sorted by `final_score` descending, ties broken by node id
-//! ascending (the same total order phase 1 uses) — **after** the canonical
-//! partition below.
+//! Hits are sorted by `final_score` descending, ties broken by canonical key
+//! ascending then node id ascending (the same total order phase 1 uses),
+//! **after** the canonical partition below.
 //!
 //! ## Canonical-first ordering (spec §10)
 //!
@@ -42,9 +42,13 @@
 //! the read the whole tier exists to produce. Canonization decides what is
 //! load-bearing; recall is where that decision is supposed to show up.
 //!
-//! So the sort key is `(is_canonical desc, final_score desc, node id asc)`:
-//! every Canonical member of the expanded set is ranked ahead of every
-//! non-Canonical one, and score order applies within each group.
+//! So the sort key is `(is_canonical desc, final_score desc, canonical key
+//! asc, node id asc)`: every Canonical member of the expanded set is ranked
+//! ahead of every non-Canonical one, and score order applies within each
+//! group. The key tie-break keeps equal-score members in one order across
+//! runs (issue #2); the id stays as the final fallback because non-canonical
+//! synonym duplicates share a key and interaction-adjacent members may lack
+//! the concept context entirely.
 //!
 //! **Why ordering rather than a rank boost.** A boost is a magic constant
 //! added to a formula spec §8 states exactly (`daemon_score × w_daemon +
@@ -104,7 +108,9 @@ use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
-use crate::types::{CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, Scored};
+use crate::types::{
+    tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, Scored,
+};
 
 /// The built-in token estimator (see [`crate::recall::format`]).
 pub use crate::recall::format::default_token_count;
@@ -191,18 +197,27 @@ where
     }
     // Spec §10 "always promoted first": Canonical members are partitioned
     // ahead of the rest, score order applies inside each group. See the
-    // module docs for why this is a partition and not a score boost.
+    // module docs for why this is a partition and not a score boost. Ties
+    // fall to canonical key asc, then node id asc: the id alone is minted per
+    // run, so it must not decide equal-score order (issue #2). Like
+    // `is_canonical`, the key lookup runs inside the comparator; members that
+    // are not graph concepts (stale durable-vector ids) have no key and fall
+    // straight to the id.
     let is_canonical = |id: NodeId| {
         matches!(
             graph.node(id),
             Some(Node::Concept(c)) if c.canonization_status == CanonizationStatus::Canonical
         )
     };
+    let key = |id: NodeId| match graph.node(id) {
+        Some(Node::Concept(c)) => Some(c.canonical_key.as_str()),
+        _ => None,
+    };
     members.sort_by(|a, b| {
         is_canonical(b.item)
             .cmp(&is_canonical(a.item))
             .then_with(|| b.score.total_cmp(&a.score))
-            .then_with(|| a.item.0.cmp(&b.item.0))
+            .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
 
     // Force-include: re-validate every hot expanded member at `now`, capture
@@ -707,8 +722,16 @@ mod tests {
     }
 
     #[test]
-    fn final_score_ties_break_by_node_id_ascending() {
-        let g = graph_with(2);
+    fn final_score_ties_break_by_canonical_key_ahead_of_node_id() {
+        // Issue #2: equal finals order by canonical key asc, id asc only
+        // behind that. The graph's keys are chosen so the key order
+        // contradicts the id order ("alpha" rides the LARGER id, c2), so the
+        // old id-first chain fails this test.
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1);
+        g.insert_interaction(i1.clone()).unwrap();
+        g.insert_concept(concept(1, i1.id, "beta"), i1.id).unwrap();
+        g.insert_concept(concept(2, i1.id, "alpha"), i1.id).unwrap();
         let expanded = ExpandedSet {
             required: vec![Scored::new(uid(2), 0.0), Scored::new(uid(1), 0.0)],
             siblings: Vec::new(),
@@ -731,7 +754,11 @@ mod tests {
             ts(0),
             default_token_count,
         );
-        assert_eq!(ids_of(&result), vec![uid(1), uid(2)], "ties by id asc");
+        assert_eq!(
+            ids_of(&result),
+            vec![uid(2), uid(1)],
+            "equal finals tie on canonical key (alpha < beta), not the per-run id"
+        );
     }
 
     #[test]

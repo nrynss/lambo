@@ -103,7 +103,8 @@ use crate::daemon::ScoreTable;
 use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::{
-    CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, SessionId, StoreError,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, SessionId,
+    StoreError,
 };
 
 /// Round-robin cursors plus the one-cycle write path.
@@ -250,11 +251,12 @@ struct CyclePlan {
     /// window — the budget cut happens in `apply`, on the nodes that passed
     /// (R2-2).
     stage3: Vec<Stage3Probe>,
-    /// Budget: Canonical ids to rank for demotion. Empty unless the session
-    /// is **already** over budget — Stage 3 is capped at the remaining
-    /// budget, so a cycle can never create the overflow it then demotes
-    /// (the phase-R2 P2 / original P1-1 property).
-    demotion: Vec<NodeId>,
+    /// Budget: Canonical ids to rank for demotion, with each concept's
+    /// canonical key (the issue-2 tie-break in `verdicts`, which holds no
+    /// graph). Empty unless the session is **already** over budget: Stage 3
+    /// is capped at the remaining budget, so a cycle can never create the
+    /// overflow it then demotes (the phase-R2 P2 / original P1-1 property).
+    demotion: Vec<(NodeId, String)>,
 }
 
 /// One Stage-3 window member plus the cooldown input read from its concept.
@@ -273,9 +275,11 @@ struct Verdicts {
     /// The measurement is the one that admitted the node — it is what the
     /// audit row is stamped with (F9), never a second query.
     stage3_pass: Vec<(NodeId, u64)>,
-    /// `(blast, node)` for the budget ranking, blast-ascending then
-    /// NodeId-ascending (spec §10: lowest blast radius demoted first).
-    demotion_ranked: Vec<(u64, NodeId)>,
+    /// `(blast, node, key)` for the budget ranking, blast-ascending, then
+    /// canonical key ascending, then NodeId-ascending (spec §10: lowest blast
+    /// radius demoted first; the issue-2 tie-break keeps equal-blast order
+    /// stable across runs).
+    demotion_ranked: Vec<(u64, NodeId, String)>,
 }
 
 impl Evaluator {
@@ -464,15 +468,20 @@ impl Evaluator {
         if let Some(&last) = window.last() {
             self.stage3_cursor = Some(last);
         }
-        // Score-descending within the window (spec §10), NodeId ascending
-        // tie-break — the evaluation order, and therefore the order `apply`
-        // spends the budget in. The cursor is anchored in RING order, taken
-        // above.
+        // Score-descending within the window (spec §10), then the issue-2
+        // tie-break (canonical key asc, NodeId asc): the evaluation order,
+        // and therefore the order `apply` spends the budget in. Equal-score
+        // Venerables must hold one order across runs, so the id alone cannot
+        // decide. The cursor is anchored in RING order, taken above.
+        let key = |id: NodeId| match graph.node(id) {
+            Some(crate::types::Node::Concept(c)) => Some(c.canonical_key.as_str()),
+            _ => None,
+        };
         let score_of = score_map(scores);
         window.sort_by(|a, b| {
             score_lookup(&score_of, *b)
                 .total_cmp(&score_lookup(&score_of, *a))
-                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| tie_break_by_key(key(*a), a, key(*b), b))
         });
         let stage3: Vec<Stage3Probe> = window
             .into_iter()
@@ -483,9 +492,21 @@ impl Evaluator {
             .collect();
 
         // Budget — probe only when the session is already over the ceiling.
+        // Keys ride along because `verdicts` (which ranks the demotion) holds
+        // no graph; the ids alone would order equal-blast ties per-run
+        // arbitrarily (issue #2).
         let canonicals = ids_with_status(graph, CanonizationStatus::Canonical);
         let demotion = if canonicals.len() > params.max_canonical_nodes {
             canonicals
+                .into_iter()
+                .map(|id| {
+                    let key = match graph.node(id) {
+                        Some(crate::types::Node::Concept(c)) => c.canonical_key.clone(),
+                        _ => String::new(),
+                    };
+                    (id, key)
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -555,14 +576,16 @@ async fn verdicts(
             out.stage3_pass.push((probe.node, blast));
         }
     }
-    for &id in &plan.demotion {
+    for (id, key) in &plan.demotion {
         let blast = store
-            .blast_radius(&plan.session, id, params.min_edge_age, now)
+            .blast_radius(&plan.session, *id, params.min_edge_age, now)
             .await?;
-        out.demotion_ranked.push((blast, id));
+        out.demotion_ranked.push((blast, *id, key.clone()));
     }
-    out.demotion_ranked
-        .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    out.demotion_ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| tie_break_by_key(Some(&a.2), &a.1, Some(&b.2), &b.1))
+    });
     Ok(out)
 }
 
@@ -693,9 +716,10 @@ fn apply(
             .push(commit_transition(graph, events, event)?);
         remaining -= 1;
     }
-    // --- Budget: lowest store.blast_radius first, NodeId asc tie-break ---
+    // --- Budget: lowest store.blast_radius first, canonical key asc, NodeId
+    // asc behind that (issue #2) ---
     let overflow = canonical_count(graph).saturating_sub(params.max_canonical_nodes);
-    for &(_, id) in verdicts.demotion_ranked.iter().take(overflow) {
+    for &(_, id, _) in verdicts.demotion_ranked.iter().take(overflow) {
         if concept_status(graph, id) != Some(CanonizationStatus::Canonical) {
             continue;
         }
@@ -2104,20 +2128,29 @@ mod tests {
             assert_eq!(status_of(&g.read(), nid(3)), CanonizationStatus::Venerable);
         }
 
-        /// F19: demotion ties. Two Canonicals with the **same** blast radius
-        /// over a budget of 1 — spec §10 demotes the lowest blast radius
-        /// first, and the documented tie-break is NodeId ascending. Without
-        /// it the victim would depend on `HashMap` walk order.
+        /// F19 + issue #2: demotion ties. Two Canonicals with the **same**
+        /// blast radius over a budget of 1; spec §10 demotes the lowest blast
+        /// radius first, and the tie-break is canonical key ascending with
+        /// NodeId ascending only behind that. Without a stable order the
+        /// victim would depend on `HashMap` walk order; with the old
+        /// id-first chain it would depend on the per-run ids.
         #[tokio::test]
-        async fn demotion_blast_radius_tie_breaks_on_node_id() {
+        async fn demotion_blast_radius_tie_breaks_on_canonical_key_ahead_of_node_id() {
             let mut g = Graph::new(sid());
             g.insert_interaction(interaction(1, None, ts())).unwrap();
-            for id in [20u64, 21] {
-                let mut c = concept(id, 1, 5, CanonizationStatus::Canonical);
-                c.blast_radius = Some(3);
-                g.insert_concept(c, iid(1)).unwrap();
-            }
             // Equal blast radii (3 each) — the tie-break is the only signal.
+            // The keys contradict the id order ("zeta" rides the SMALLER id),
+            // so the old NodeId-first chain fails this test.
+            let mut zeta = concept(20, 1, 5, CanonizationStatus::Canonical);
+            zeta.canonical_key = "zeta".into();
+            zeta.content = "zeta".into();
+            zeta.blast_radius = Some(3);
+            g.insert_concept(zeta, iid(1)).unwrap();
+            let mut alpha = concept(21, 1, 5, CanonizationStatus::Canonical);
+            alpha.canonical_key = "alpha".into();
+            alpha.content = "alpha".into();
+            alpha.blast_radius = Some(3);
+            g.insert_concept(alpha, iid(1)).unwrap();
             attach_blast(&mut g, 20, 3, 100);
             attach_blast(&mut g, 21, 3, 200);
 
@@ -2144,10 +2177,10 @@ mod tests {
             assert_eq!(outcome.demotions.len(), 1);
             assert_eq!(
                 outcome.demotions[0].node_id,
-                nid(20),
-                "a blast tie demotes the lower NodeId, deterministically"
+                nid(21),
+                "a blast tie demotes the smaller canonical key (alpha), not the smaller id"
             );
-            assert_eq!(status_of(&g.read(), nid(21)), CanonizationStatus::Canonical);
+            assert_eq!(status_of(&g.read(), nid(20)), CanonizationStatus::Canonical);
         }
 
         /// F7 at the eval seam: `EvalParams::min_edge_age` must reach the
