@@ -1297,23 +1297,39 @@ mod tests {
             ],
             siblings: Vec::new(),
         };
-        // token_fn = byte length; block for concept "concept 1" (len ~ "concept 1 [Entity]
-        // (score 1.00)" ~ 30) each block ~ >; use a budget that fits block 1 plus the
-        // separator but not block 2's separator+block? Instead: pick budget so block1
-        // fits alone and block1+sep+block2 does not -> only block1 rendered (ranked-prefix:
-        // block2, though it might fit alone, must NOT appear after block1).
+        // token_fn = byte length. The discriminating budget is derived from
+        // blocks the same shape renders (the custom_token_fn pattern), so the
+        // test self-adjusts when the render changes: block1+block2 fits with
+        // one byte to spare only while the join separator is free, and stops
+        // fitting once the "\n\n" join is charged. Under a separator-free
+        // accumulator the pre-P1-4 bug rendered two blocks here; the fixed
+        // code must stop at block1 (ranked-prefix: block2, though it might
+        // fit alone, must NOT appear after block1).
+        let hit1 = RecallHit {
+            node_id: uid(1),
+            content: "concept 1".into(),
+            concept_type: Some(ConceptType::Entity),
+            score: 1.0 * 0.5,
+            is_canonical: false,
+            blast_radius: None,
+        };
+        let hit2 = RecallHit {
+            node_id: uid(2),
+            content: "concept 2".into(),
+            concept_type: Some(ConceptType::Entity),
+            score: 0.5 * 0.5,
+            is_canonical: false,
+            blast_radius: None,
+        };
+        let block1 = crate::recall::format::render_block(&hit1, &[]);
+        let block2 = crate::recall::format::render_block(&hit2, &[]);
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
             &mut HotList::new(),
-            // Discriminating budget: block1+block2 (no separators) == 62 <= 63
-            // (old buggy code accepted 2 blocks), but block1+sep+block2 == 64
-            // > 63, so the fixed code stops at block1. Proves in-context
-            // separator charging (the same budget, under a separator-free
-            // accumulator, would render two blocks).
-            &query(3, 63),
+            &query(3, block1.len() + block2.len() + 1),
             RecallWeights::default(),
             ts(60),
             byte_len,

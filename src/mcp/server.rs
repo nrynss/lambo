@@ -235,7 +235,8 @@ pub struct InspectParams {
     /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
-    /// Concept content (or a node UUID) to centre the neighbourhood on.
+    /// Concept content, a node UUID, or the short-form id rendered in recall
+    /// blocks, to centre the neighbourhood on.
     #[schemars(length(max = 16_384))]
     pub focus: String,
     /// Hops out from the focus (default 2, max 5).
@@ -2032,26 +2033,37 @@ impl LamboServer {
                 });
                 return CallToolResult::error(vec![ContentBlock::text(msg)]);
             }
-            Err(Focus::Oversized { cap }) => {
+            Err(Focus::Oversized { cap, near }) => {
                 // T8.7 residual #3 graph-size guard, relaxed by issue #9: the
                 // O(total-content) pass is still refused, but the bounded
                 // subset was scanned and matched nothing. The refusal says so
                 // and names the bound, because the concept the caller meant
                 // may exist outside the subset; exact / node-id focus still
-                // works.
+                // works. The near-match remediation survives past the cap,
+                // ranked within the subset only and announced as such.
                 note_facts(|| {
                     json!({
                         "failure": "oversized",
                         "focus": focus_for_ledger(&p.focus),
                     })
                 });
-                return CallToolResult::error(vec![ContentBlock::text(format!(
+                let mut msg = format!(
                     "lambo_inspect: this session's graph has more than {cap} concepts; the \
                      fuzzy pass scanned only the bounded subset (the \
                      {MAX_INSPECT_BOUNDED_SCAN} most recently created plus the \
                      {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
                      nothing; pass a node_id or an exact concept instead"
-                ))]);
+                );
+                if !near.is_empty() {
+                    msg.push_str(
+                        "\nnearest within the bounded subset (suggestions, not matches; \
+                         pass a node_id or name one exactly):",
+                    );
+                    for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
+                        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+                    }
+                }
+                return CallToolResult::error(vec![ContentBlock::text(msg)]);
             }
             Err(Focus::Missing { near }) => {
                 // Issue #9: the bare "no concept matching" refusal is how 22
@@ -5422,7 +5434,8 @@ mod tests {
 
         // Outside both sides (old, no blast radius): an honest failure that
         // still names the bound. "ad concept 5" substring-matches exactly one
-        // pad, so a full scan would have resolved it.
+        // pad, so a full scan would have resolved it. The miss still carries
+        // the near-match remediation, subset-scoped and announced.
         let outside = call(
             &s,
             "lambo_inspect",
@@ -5438,6 +5451,14 @@ mod tests {
         assert!(
             text.contains(&format!("{MAX_INSPECT_BOUNDED_SCAN} most recently created")),
             "the refusal must name the subset composition: {text}"
+        );
+        assert!(
+            text.contains("nearest within the bounded subset"),
+            "a past-cap miss must offer subset-scoped suggestions: {text}"
+        );
+        assert!(
+            text.contains("pad concept 2000 ["),
+            "the newest subset concept must be suggested with its node id: {text}"
         );
         s.mem.close().await.expect("close");
     }

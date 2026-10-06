@@ -572,6 +572,63 @@ mod tests {
         assert_eq!(short_id(NodeId(uuid::Uuid::nil())), "00000000");
     }
 
+    /// The rendered id is per-hit: a multi-hit context carries as many
+    /// distinct short ids as hits, and no block carries another hit's id. A
+    /// regression emitting one constant id (or the nil placeholder) in every
+    /// block would pass the fixture goldens, whose ids share a prefix, so
+    /// this is the unit-level guard.
+    #[test]
+    fn a_multi_hit_context_carries_each_hits_own_short_id() {
+        let ids = [
+            NodeId("f0000000-0000-4000-8000-000000000001".parse().unwrap()),
+            NodeId("e1000000-0000-4000-8000-000000000002".parse().unwrap()),
+            NodeId("d2000000-0000-4000-8000-000000000003".parse().unwrap()),
+        ];
+        let blocks: Vec<String> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                render_block(
+                    &RecallHit {
+                        node_id: *id,
+                        content: format!("hit {i}"),
+                        concept_type: Some(ConceptType::Entity),
+                        score: 0.5,
+                        is_canonical: false,
+                        blast_radius: None,
+                    },
+                    &[],
+                )
+            })
+            .collect();
+        let context = render_context(&blocks);
+
+        let shorts: Vec<String> = ids.iter().map(|id| short_id(*id)).collect();
+        assert_eq!(
+            shorts.iter().collect::<HashSet<_>>().len(),
+            ids.len(),
+            "the fixture ids must differ in their short form for this guard to bite"
+        );
+        for (i, block) in blocks.iter().enumerate() {
+            assert!(
+                block.contains(&format!("id {}", shorts[i])),
+                "block {i} must carry its own id: {block}"
+            );
+            for (j, other) in shorts.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        !block.contains(other),
+                        "block {i} must not carry hit {j}'s id: {block}"
+                    );
+                }
+            }
+        }
+        // The nil uuid is the old placeholder's short form; it must not
+        // resurface as a rendered id.
+        let nil_short = short_id(NodeId(uuid::Uuid::nil()));
+        assert!(!context.contains(&format!("id {nil_short}")));
+    }
+
     #[test]
     fn default_token_count_is_ceil_bytes_over_3_5() {
         assert_eq!(default_token_count(""), 0);

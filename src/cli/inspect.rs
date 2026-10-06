@@ -41,9 +41,10 @@ pub(crate) const MAX_INSPECT_SCAN_CONCEPTS: usize = 2_000;
 /// The scan cap's rationale is untouched: the O(total-content) lowercase pass
 /// stays refused. But refusing outright also refused *every* fuzzy focus the
 /// moment a normally growing session crossed 2,000 concepts, and the refusal
-/// was silent about what would and would not be searched. The subset is
-/// comparison-only to build (no content allocation) and the lowercase pass
-/// then runs over at most `2 × MAX_INSPECT_BOUNDED_SCAN` concepts, so the
+/// was silent about what would and would not be searched. Building the subset
+/// allocates no concept content (reference sorts plus the fixed-size
+/// blast-radius map) and the lowercase pass then runs over at most
+/// `2 × MAX_INSPECT_BOUNDED_SCAN` concepts, so the
 /// per-call cost stays bounded as the cap intends.
 pub(crate) const MAX_INSPECT_BOUNDED_SCAN: usize = 256;
 
@@ -96,8 +97,15 @@ pub(crate) enum Focus {
     /// The graph exceeded [`MAX_INSPECT_SCAN_CONCEPTS`], the bounded subset
     /// ([`MAX_INSPECT_BOUNDED_SCAN`]) was scanned and matched nothing: an
     /// honest failure that still says the scan was bounded, since the concept
-    /// the caller meant may exist outside the subset (issue #9).
-    Oversized { cap: usize },
+    /// the caller meant may exist outside the subset (issue #9). `near` lists
+    /// the closest concepts within that bounded subset by focus-token overlap
+    /// (recency breaking ties) as *suggestions* with their node ids; the
+    /// full-graph ranking is the pass the cap refuses, so every renderer must
+    /// present them as subset-scoped suggestions, never a silent match.
+    Oversized {
+        cap: usize,
+        near: Vec<FocusCandidate>,
+    },
 }
 
 /// Resolve inspect's focus **deterministically**.
@@ -145,9 +153,9 @@ pub(crate) fn resolve_focus(g: &Graph, focus: &str) -> Focus {
     // O(total-content) lowercase pass iterates, so per-second work cannot grow
     // with an unattended graph. A graph past the cap falls back to the bounded
     // subset scan (issue #9) instead of paying the full pass; the count itself
-    // is an allocation-free linear scan, and the subset build below is
-    // comparison-only, so the lowercase+alloc pass over every concept never
-    // runs on an oversized graph.
+    // is allocation-free, and the subset build allocates no concept content
+    // (reference sorts plus the fixed-size blast-radius map), so the
+    // lowercase pass over every concept never runs on an oversized graph.
     if g.concepts().count() > MAX_INSPECT_SCAN_CONCEPTS {
         return bounded_fuzzy_pass(g, focus);
     }
@@ -217,12 +225,16 @@ fn fuzzy_candidates<'a>(
         .collect()
 }
 
-/// The focus's lowercase alphanumeric tokens, deduplicated. A focus with no
-/// tokens offers no suggestions.
+/// The focus's lowercase alphanumeric tokens, deduplicated, each at least two
+/// characters. The split is Unicode-aware, so a non-ASCII focus keeps its
+/// tokens whole instead of shedding them as separators, and single-character
+/// tokens are dropped: one stray character is contained in nearly every
+/// content and would make almost every concept a candidate. A focus with no
+/// surviving tokens offers no suggestions.
 fn focus_tokens(needle: &str) -> Vec<&str> {
     let mut tokens: Vec<&str> = Vec::new();
-    for t in needle.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if !t.is_empty() && !tokens.contains(&t) {
+    for t in needle.split(|c: char| !c.is_alphanumeric()) {
+        if t.chars().count() >= 2 && !tokens.contains(&t) {
             tokens.push(t);
         }
     }
@@ -233,14 +245,24 @@ fn focus_tokens(needle: &str) -> Vec<&str> {
 /// count how many focus tokens its content contains (the lowercase pass is
 /// the same cost the fuzzy leg pays), rank by overlap then recency
 /// (`created_at`, newest first), then the issue #2 total order, and keep at
-/// most [`MAX_INSPECT_CANDIDATES`] suggestions. Bounded by construction: it
-/// only runs under the scan cap, and only the kept suggestions clone content.
+/// most [`MAX_INSPECT_CANDIDATES`] suggestions. Under the scan cap it ranks
+/// the whole graph; past the cap the bounded subset is ranked instead, so
+/// the per-call cost stays the cost the cap already accepts.
 fn near_matches(g: &Graph, tokens: &[&str]) -> Vec<FocusCandidate> {
+    near_matches_over(g.concepts(), tokens)
+}
+
+/// The ranking core of [`near_matches`] over any concept source, so the
+/// past-cap path can rank its bounded subset without a second full-graph
+/// pass. Only the kept suggestions clone content.
+fn near_matches_over<'a>(
+    concepts: impl Iterator<Item = &'a crate::types::Concept>,
+    tokens: &[&str],
+) -> Vec<FocusCandidate> {
     if tokens.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(u32, &crate::types::Concept)> = g
-        .concepts()
+    let mut scored: Vec<(u32, &crate::types::Concept)> = concepts
         .filter_map(|c| {
             let lower = c.content.to_lowercase();
             let overlap = tokens.iter().filter(|t| lower.contains(*t)).count() as u32;
@@ -319,15 +341,23 @@ fn id_has_hex_prefix(id: uuid::Uuid, prefix: &str) -> bool {
 /// [`bounded_subset`], then resolve exactly as the full pass would, carrying
 /// [`BoundedScan`] so every renderer can say the scan was bounded. Nothing
 /// matched is still [`Focus::Oversized`], an honest refusal naming the
-/// bound, never a silent full-scan claim.
+/// bound, never a silent full-scan claim; it carries the near-match
+/// suggestions ranked within the subset, so the remediation a below-cap miss
+/// gets survives past the cap too.
 fn bounded_fuzzy_pass(g: &Graph, focus: &str) -> Focus {
     let subset = bounded_subset(g);
     let scanned = subset.len();
     let needle = focus.to_lowercase();
-    let mut fuzzy = fuzzy_candidates(subset.into_iter(), &needle);
+    let mut fuzzy = fuzzy_candidates(subset.iter().copied(), &needle);
     if fuzzy.is_empty() {
+        // The suggestions are ranked within the bounded subset ONLY: the
+        // full-graph ranking is the same O(total-content) lowercase pass the
+        // cap refuses, and a concept outside the subset was never scanned, so
+        // suggesting it would claim knowledge the scan does not have.
+        let near = near_matches_over(subset.iter().copied(), &focus_tokens(&needle));
         return Focus::Oversized {
             cap: MAX_INSPECT_SCAN_CONCEPTS,
+            near,
         };
     }
     finish_fuzzy(&mut fuzzy, Some(BoundedScan { scanned }))
@@ -336,9 +366,10 @@ fn bounded_fuzzy_pass(g: &Graph, focus: &str) -> Focus {
 /// The bounded subset a past-cap graph's fuzzy leg scans: the
 /// [`MAX_INSPECT_BOUNDED_SCAN`] most recently created concepts plus the
 /// [`MAX_INSPECT_BOUNDED_SCAN`] highest blast-radius concepts (live radii, the
-/// same authority the rendered blast warnings use), deduplicated. Both
-/// selections sort references (comparison-only, no content allocation) and
-/// tie-break deterministically so the subset is a function of the graph.
+/// same authority the rendered blast warnings use), deduplicated. Building it
+/// allocates the fixed-size blast-radius map (an O(edges) HashMap, no concept
+/// content); both selections then sort references and tie-break
+/// deterministically so the subset is a function of the graph.
 fn bounded_subset(g: &Graph) -> Vec<&crate::types::Concept> {
     use std::collections::HashSet;
 
@@ -567,12 +598,26 @@ pub async fn run(
             }
             Err(CliError::Usage(msg))
         }
-        Focus::Oversized { cap } => Err(CliError::Runtime(format!(
-            "this session's graph has more than {cap} concepts; the fuzzy pass scanned only \
-             the bounded subset (the {MAX_INSPECT_BOUNDED_SCAN} most recently created plus \
-             the {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
-             nothing; pass a node_id or an exact concept instead"
-        ))),
+        Focus::Oversized { cap, near } => {
+            let mut msg = format!(
+                "this session's graph has more than {cap} concepts; the fuzzy pass scanned only \
+                 the bounded subset (the {MAX_INSPECT_BOUNDED_SCAN} most recently created plus \
+                 the {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
+                 nothing; pass a node_id or an exact concept instead"
+            );
+            if !near.is_empty() {
+                // Subset-scoped suggestions (issue #9): the ranking never left
+                // the bounded subset, so the renderer must say so.
+                msg.push_str(
+                    "\nnearest within the bounded subset (suggestions, not matches; \
+                     pass a node_id or name one exactly):",
+                );
+                for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
+                    msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+                }
+            }
+            Err(CliError::Runtime(msg))
+        }
         Focus::Missing { near } => {
             let mut msg = format!("no concept matching '{}' in session '{}'", focus, session);
             if !near.is_empty() {
@@ -701,7 +746,7 @@ mod tests {
         // A non-matching substring focus is refused before the O(total-content)
         // pass, not silently scanned.
         match resolve_focus(&g, "no-such-substring") {
-            Focus::Oversized { cap } => assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS),
+            Focus::Oversized { cap, .. } => assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS),
             other => panic!("a graph past the cap must refuse the fuzzy leg, got {other:?}"),
         }
     }
@@ -912,12 +957,102 @@ mod tests {
         }
         // A matching concept outside both sides: honest failure, not silence.
         // "oncept-42" substring-matches concept-42 and concept-420..429, all
-        // old and unconnected, so a full scan would have found them.
+        // old and unconnected, so a full scan would have found them. The miss
+        // still carries subset-scoped suggestions: every subset concept
+        // shares the "oncept" token, and the list stays at the cap.
         match resolve_focus(&g, "oncept-42") {
-            Focus::Oversized { cap } => assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS),
+            Focus::Oversized { cap, near } => {
+                assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS);
+                assert!(
+                    !near.is_empty() && near.len() <= MAX_INSPECT_CANDIDATES,
+                    "a past-cap miss must suggest within the bounded subset: {near:?}"
+                );
+            }
             other => panic!(
                 "a concept outside the bounded subset must fail honestly as Oversized, got {other:?}"
             ),
+        }
+    }
+
+    /// Issue #9 round 1: a past-cap miss keeps the near-match remediation,
+    /// but ranked within the bounded subset only. "widget mount" is the
+    /// newest concept, so it sits in the subset and is suggested;
+    /// "widget frame" is old and unconnected, so the subset never scanned it.
+    /// A full-graph ranking would suggest both (equal token overlap, recency
+    /// decides), so exactly one suggestion proves the ranking stayed inside
+    /// the subset the cap accepts.
+    #[test]
+    fn a_past_cap_miss_suggests_only_within_the_bounded_subset() {
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        for k in 1..=(MAX_INSPECT_SCAN_CONCEPTS as u64 + 1) {
+            let mut c = concept(k, iid, &format!("concept-{k}"));
+            c.created_at = ts() + chrono::Duration::minutes(k as i64);
+            g.insert_concept(c, iid).unwrap();
+        }
+        let mount = NodeId(Uuid::from_u64_pair(2, 9_001));
+        let mut newest = concept(9_001, iid, "widget mount");
+        newest.id = mount;
+        newest.created_at = ts() + chrono::Duration::minutes(9_001);
+        g.insert_concept(newest, iid).unwrap();
+        let mut oldest = concept(9_002, iid, "widget frame");
+        oldest.created_at = ts();
+        g.insert_concept(oldest, iid).unwrap();
+
+        match resolve_focus(&g, "widget bracket") {
+            Focus::Oversized { cap, near } => {
+                assert_eq!(cap, MAX_INSPECT_SCAN_CONCEPTS);
+                assert_eq!(
+                    near.len(),
+                    1,
+                    "only the in-subset concept may be suggested: {near:?}"
+                );
+                assert_eq!(near[0].id, mount);
+                assert_eq!(near[0].content, "widget mount");
+            }
+            other => panic!(
+                "a past-cap miss must still suggest within the bounded subset, got {other:?}"
+            ),
+        }
+    }
+
+    /// Round 1: the tokenizer drops single-character tokens and keeps
+    /// non-ASCII characters inside their tokens, so one stray character
+    /// cannot make every concept a candidate while a non-ASCII focus still
+    /// suggests by its whole tokens.
+    #[test]
+    fn focus_tokens_drop_single_characters_and_keep_non_ascii_whole() {
+        // The contract, at the tokenizer itself.
+        assert_eq!(focus_tokens("café order"), vec!["café", "order"]);
+        assert_eq!(focus_tokens("a b hi"), vec!["hi"]);
+        assert!(focus_tokens("x y").is_empty());
+
+        // Behaviorally: the single-char token "a" is inside both contents, so
+        // the old tokenizer suggested everything; dropped, the refusal is
+        // bare.
+        let mut g = Graph::new(sid());
+        let i = interaction(1);
+        let iid = i.id;
+        g.insert_interaction(i).unwrap();
+        g.insert_concept(concept(1, iid, "alpha pad"), iid).unwrap();
+        g.insert_concept(concept(2, iid, "beta pad"), iid).unwrap();
+
+        match resolve_focus(&g, "a x") {
+            Focus::Missing { near } => assert!(near.is_empty(), "{near:?}"),
+            other => panic!("single-character tokens must not suggest, got {other:?}"),
+        }
+
+        // A whole non-ASCII token still matches its content.
+        g.insert_concept(concept(3, iid, "café specials"), iid)
+            .unwrap();
+        match resolve_focus(&g, "café menu") {
+            Focus::Missing { near } => {
+                assert_eq!(near.len(), 1, "{near:?}");
+                assert_eq!(near[0].content, "café specials");
+            }
+            other => panic!("a non-ASCII token must still suggest, got {other:?}"),
         }
     }
 }
