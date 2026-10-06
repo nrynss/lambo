@@ -58,12 +58,14 @@ for ln in text.split('\n'):
     # The site-only mcp.mdx block, delimited by explicit markers so a benign
     # rename of the site-only section's headings does not break the strip
     # (J5 round-1 P3). The site copy wraps its site-only content in
-    # <!-- lambo-site-only:start --> ... <!-- lambo-site-only:end -->; the
-    # reference copy carries no such block.
-    if ln.strip() == '<!-- lambo-site-only:start -->':
+    # {/* lambo-site-only:start */} ... {/* lambo-site-only:end */}; the
+    # site-only block must use MDX comment syntax: an HTML comment parses as
+    # JSX text there and the astro build dies on the `!` (docs.yml red,
+    # 2026-10-06). The reference copy carries no such block.
+    if ln.strip() == '{/* lambo-site-only:start */}':
         site_only = True
         continue
-    if site_only and ln.strip() == '<!-- lambo-site-only:end -->':
+    if site_only and ln.strip() == '{/* lambo-site-only:end */}':
         site_only = False
         continue
     if site_only:
