@@ -367,7 +367,12 @@ struct FlushLoop {
     token: Option<u64>,
     /// Mutations not yet durable. Retained batches stay at the front; newly
     /// drained mutations are appended in chronological order — never re-sorted
-    /// (mod.rs contract).
+    /// (mod.rs contract). The batch's `mutation_epoch` is a carried watermark:
+    /// the max stamp of everything drained this task's lifetime, never reset
+    /// when the mutations are consumed, so a flush can never present a stamp
+    /// lower than one already presented (a repeated value — e.g. a retained
+    /// batch re-sent on retry — is idempotent against the adapters'
+    /// MAX/GREATEST upsert).
     pending: MutationBatch,
     /// Earliest time (tokio clock) the next flush attempt may run after a
     /// retained batch exhausted its retries (F3, `RETAINED_BACKOFF`). `None`
@@ -475,6 +480,21 @@ impl FlushLoop {
             // WRITE lock only for the drain; the guard dies before any I/O.
             let mut graph = self.graph.write();
             let drained = graph.drain_log();
+            // Carry the epoch watermark forward (issue #17): `drain_log` stamps
+            // the batch with the graph's absolute epoch, and this max is the
+            // only path that stamp has into a flushed batch — `pending` starts
+            // as `MutationBatch::default()` (epoch 0) and is consumed by
+            // clearing `mutations` only, so without the carry every routine
+            // flush would present epoch 0 and the adapters' MAX/GREATEST upsert
+            // would leave the durable watermark untouched forever. The watermark
+            // never moves backwards: the graph's epoch is monotonic within the
+            // process, so drained stamps never regress, and keeping the stamp
+            // across consumption means a later flush presents at least what
+            // earlier flushes did. Re-sending a repeated value is safe by the
+            // store contract: adapters upsert `sessions.mutation_epoch` with a
+            // MAX/GREATEST, so a retained batch retried with the same stamp (or
+            // the same watermark arriving twice) is idempotent at the store.
+            self.pending.mutation_epoch = self.pending.mutation_epoch.max(drained.mutation_epoch);
             self.pending.mutations.extend(drained.mutations);
         }
 
@@ -2112,5 +2132,151 @@ mod tests {
             "transient failure is not a dead letter"
         );
         assert!(!task.degraded());
+    }
+
+    /// Issue #17: the flush LOOP — not a hand-stamped batch — must carry
+    /// `drain_log`'s `mutation_epoch` stamp into the batches it flushes, so
+    /// the store's durable watermark advances with routine write-behind
+    /// flushes and a restarted writer resumes it. Fails on a loop that drops
+    /// the stamp in `cycle`: every flushed batch then carries epoch 0 and the
+    /// adapters' MAX/GREATEST upsert leaves the store watermark untouched
+    /// forever — the exactly-steady-state graceful close this workstream
+    /// targets. The watermark claim is the honest one from the `Graph::epoch`
+    /// docs: never behind the count of durable mutations (RAM-local bumps may
+    /// run it ahead; none occur in this test).
+    #[tokio::test(start_paused = true)]
+    async fn flush_loop_carries_the_epoch_stamp_and_a_restart_resumes_it() {
+        // FlakyStore with no failures armed is a pass-through that counts
+        // flush calls, so the idle-cycle assertion below can observe them.
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        // First interaction (1 mutation) + concept (2) = 3 mutations, drained
+        // at graph epoch 3 (no RAM-local bumps).
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        let stamped = graph.read().epoch();
+        assert_eq!(stamped, 3);
+
+        // Interval tick: the loop drains and flushes; the store watermark
+        // advances to the drain stamp instead of staying at 0.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async { store.load_session(&sid()).await.is_ok() }).await;
+        let after_first = store.load_session(&sid()).await.unwrap().mutation_epoch;
+        assert_eq!(
+            after_first, stamped,
+            "the loop flush must carry the drain stamp"
+        );
+
+        // Second flush after the first pending batch was consumed: the
+        // watermark advances again, never moving backwards.
+        let _iid2 = add_interaction(&graph, 2, Some(iid)); // 2 more mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async {
+            matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == 2)
+        })
+        .await;
+        let after_second = store.load_session(&sid()).await.unwrap().mutation_epoch;
+        assert!(
+            after_second > after_first,
+            "the watermark advances across pending consumption"
+        );
+
+        // Idle cycles (empty drain, pending consumed) flush nothing, so they
+        // can neither re-send nor lower the watermark.
+        let calls = store.flush_calls();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            store.flush_calls(),
+            calls,
+            "an empty-drain cycle with a consumed pending flushes nothing"
+        );
+        assert_eq!(
+            store.load_session(&sid()).await.unwrap().mutation_epoch,
+            after_second,
+            "the watermark cannot regress"
+        );
+
+        // Restart: a fresh writer's pre-load epoch is 0. Resuming from the
+        // loaded snapshot must land strictly above that pre-restart 0, at
+        // exactly the watermark the loop flushed.
+        let snapshot = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snapshot.mutation_epoch, after_second);
+        let restarted = Graph::from_snapshot(snapshot).unwrap();
+        assert!(
+            restarted.epoch() > 0,
+            "the restart must not reset the epoch to the pre-restart 0"
+        );
+        assert_eq!(restarted.epoch(), after_second);
+    }
+
+    /// Issue #17: the epoch stamp must survive the pending-consumption path —
+    /// a batch retained by failed flushes, carried across cycles whose drains
+    /// are empty, then flushed by the post-retry hold re-entry (F3). The
+    /// second flush of this test happens after only empty drains, and the
+    /// watermark it lands equals the stamp of the ORIGINAL drain — not 0, not
+    /// lowered. Fails on a loop that drops the stamp.
+    #[tokio::test(start_paused = true)]
+    async fn flush_loop_keeps_the_epoch_stamp_across_retained_pending_and_empty_drains() {
+        // Reaches the shared BackendFlushFailed warn; keep its callsite from
+        // registering `never` (see `test_util::quiet_logs`).
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_next(2); // attempts 1 and 2 fail -> batch retained
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations, drain stamp = epoch 3
+        let stamped = graph.read().epoch();
+        assert_eq!(stamped, 3);
+
+        // Tick: attempt 1 fails; the backoff retry fails too -> retained (the
+        // stamp rides in pending; the store is still untouched).
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        assert_eq!(task.stats().depth, 3, "batch retained");
+        assert!(
+            store.load_session(&sid()).await.is_err(),
+            "nothing durable yet"
+        );
+
+        // Empty-drain cycles while the post-retry hold (F3) elapses: no new
+        // writes, the loop keeps cycling, no flush attempts fire.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(store.flush_calls(), 2, "no attempts during the hold");
+
+        // Hold elapsed: the next tick re-enters the sequence and lands the
+        // retained batch — a flush whose preceding drains were all empty.
+        tokio::time::advance(Duration::from_secs(9)).await;
+        wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(store.flush_calls(), 3);
+
+        // The flush-after-empty-drains carried the ORIGINAL drain stamp: the
+        // store watermark equals it (unchanged by the retention journey),
+        // never 0, never lowered.
+        let snap = store.load_session(&sid()).await.unwrap();
+        assert_eq!(
+            snap.mutation_epoch, stamped,
+            "the stamp survived retention and the empty-drain cycles"
+        );
+        assert!(snap.mutation_epoch > 0);
     }
 }

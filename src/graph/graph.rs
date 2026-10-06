@@ -75,9 +75,10 @@ pub struct Graph {
     /// and [`Graph::drain_log`] stamps it back onto every flushed batch, so a
     /// writer restart neither resets GC's `gc_interval` measure nor rewinds the
     /// epoch scale the recall cache keys on. RAM-local bumps (reservations,
-    /// synonyms) are counted while they last; they are not durable state, so a
-    /// crash can shed their contribution — the durable watermark is always
-    /// exactly the count of durable mutations.
+    /// synonyms) are counted while they last and ride along with the next
+    /// flushed stamp — a crash before that flush sheds their contribution, one
+    /// after it does not. The durable watermark is therefore never behind the
+    /// count of durable mutations; it may run ahead of it by RAM-local bumps.
     epoch: u64,
 }
 
@@ -1389,8 +1390,11 @@ impl Graph {
     ///
     /// The batch is stamped with [`Graph::epoch`] at drain time
     /// ([`MutationBatch::mutation_epoch`]): an absolute watermark the store
-    /// persists in the same transaction as the batch, so the durable counter
-    /// can never run ahead of durable content or behind it (issue #17).
+    /// persists in the same transaction as the batch, so the counter and the
+    /// content it counts land atomically — the durable watermark is never
+    /// behind the count of durable mutations, though it may run ahead of it by
+    /// the RAM-local epoch bumps (reservations, synonyms) the stamp carries
+    /// (issue #17).
     pub fn drain_log(&mut self) -> MutationBatch {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
