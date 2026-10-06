@@ -6119,12 +6119,13 @@ mod tests {
                                         pair.candidate_jaccard,
                                         pair.displacement,
                                     );
+                                    let noise_ok = displacement_within_noise(
+                                        &pair.got_a,
+                                        &pair.got_b,
+                                        &pair.displacement,
+                                    );
                                     assert!(
-                                        displacement_within_noise(
-                                            &got_a,
-                                            &got_b,
-                                            &pair.displacement
-                                        ),
+                                        noise_ok,
                                         "H3: postgres-exact rank displacement above the \
                                          round-trip bound on fixture {fixture_label:?} \
                                          probe {probe_label:?} limit {limit}: {:?}",
