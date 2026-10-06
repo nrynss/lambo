@@ -5577,6 +5577,13 @@ mod tests {
             /// strongest of the three measures, and the one `ExactMustMatch`
             /// pairs are asserted against.
             exact_match: bool,
+            /// The two answers the aggregates were computed from. Not
+            /// serialized: the post-hoc exact-lane assertions re-read them to
+            /// apply the round-trip-noise rule to `displacement`.
+            #[serde(skip)]
+            got_a: Vec<Scored<NodeId>>,
+            #[serde(skip)]
+            got_b: Vec<Scored<NodeId>>,
         }
 
         // ---- The "memory oracle" adapter -----------------------------------
@@ -6069,6 +6076,8 @@ mod tests {
                                 displacement: displacements(&got_a, &got_b),
                                 max_score_diff: max_score_diff(&got_a, &got_b),
                                 exact_match: got_a == got_b,
+                                got_a: got_a.clone(),
+                                got_b: got_b.clone(),
                             };
                             if attribution == Attribution::ExactMustMatch {
                                 let postgres_exact =
@@ -6111,7 +6120,11 @@ mod tests {
                                         pair.displacement,
                                     );
                                     assert!(
-                                        displacement_within_noise(&got_a, &got_b, &pair.displacement),
+                                        displacement_within_noise(
+                                            &got_a,
+                                            &got_b,
+                                            &pair.displacement
+                                        ),
                                         "H3: postgres-exact rank displacement above the \
                                          round-trip bound on fixture {fixture_label:?} \
                                          probe {probe_label:?} limit {limit}: {:?}",
@@ -6560,8 +6573,9 @@ mod tests {
                     "H3 forced-exact adapter skew: {p:?}"
                 );
                 assert!(
-                    p.displacement.is_empty(),
-                    "H3 forced-exact rank displacement: {p:?}"
+                    displacement_within_noise(&p.got_a, &p.got_b, &p.displacement),
+                    "H3 forced-exact rank displacement above the round-trip \
+                     bound: {p:?}"
                 );
                 assert!(
                     p.max_score_diff <= H3_SCORE_SKEW_EPSILON,
@@ -6851,6 +6865,8 @@ mod tests {
                         displacement: displacements(&got_hnsw, &got_exact),
                         max_score_diff: max_score_diff(&got_hnsw, &got_exact),
                         exact_match: got_hnsw == got_exact,
+                        got_a: got_hnsw.clone(),
+                        got_b: got_exact.clone(),
                     });
                 }
             }
