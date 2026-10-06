@@ -56,10 +56,16 @@
 //!   loop, and no `assert_invariants` guarantee is assumed.
 //! * **Determinism.** Goal seeds are sorted by canonical key then id
 //!   (issue #2 — the ids alone are minted per run), per-node neighbor lists
-//!   are id-ascending (Graph's typed-neighbor methods sort), and the output is
-//!   sorted by node id. `DriftHit::goal` is the goal that *first* reaches the
-//!   node in BFS order (shortest distance; ties resolved by seed order →
-//!   smallest canonical key, then smallest id).
+//!   are id-ascending (Graph's typed-neighbor methods sort), and the output
+//!   list is ordered by node id — a documented presentation contract, not a
+//!   tie-break (hits carry no score), per-run arbitrary across fresh runs of
+//!   the same logical scenario like every id-primary enumeration on this
+//!   branch. `DriftHit::goal` is the goal that *first* reaches the node in
+//!   BFS order (shortest distance; ties resolved by seed order → smallest
+//!   canonical key, then smallest id — and this attribution is stable across
+//!   id mintings: the FIFO queue keeps each seed's BFS family contiguous at
+//!   every level, so a same-level race between two goals' discoverers is
+//!   always won by the smaller-key goal's family, never by id order).
 
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -197,6 +203,13 @@ pub fn detect(graph: &Graph, threshold: usize) -> Vec<DriftHit> {
             .filter(|c| !dist.contains_key(&c.id))
             .filter_map(|c| drift_hit(c.id, None, None, threshold)),
     );
+    // The output list is ordered by node id, deliberately not a key chain:
+    // hits carry no score, so there is no tie here to break — this is a
+    // presentation contract for daemon emission and CLI output, named as an
+    // accepted residual like `recall::candidates::recent_concepts`. The id
+    // order is per-run arbitrary across fresh runs of the same logical
+    // scenario (remediation round 4: the round-1 sweep left this site
+    // undocumented, which read as a miss rather than a decision).
     hits.sort_by_key(|h| h.node.0);
     hits
 }
@@ -717,13 +730,16 @@ mod tests {
     }
 
     #[test]
-    fn hits_are_deterministic_and_id_sorted() {
+    fn hits_are_deterministic_in_the_documented_id_order() {
         let (g, _, _) = chain_graph(8);
         // Distances 6, 7, 8 along id-ascending chain nodes → three hits.
         let a = detect(&g, DRIFT_THRESHOLD);
         let b = detect(&g, DRIFT_THRESHOLD);
         assert_eq!(a, b, "detect must be deterministic");
         assert_eq!(a.len(), 3);
+        // The id order is a presentation contract (see the sort site), not an
+        // issue-2 guarantee: ids are minted per run, so this pins the
+        // documented within-run order, not cross-run stability.
         for w in a.windows(2) {
             assert!(w[0].node.0 < w[1].node.0, "hits sorted by node id");
         }
@@ -731,6 +747,95 @@ mod tests {
             a.iter().map(|h| h.hops).collect::<Vec<_>>(),
             vec![Some(6), Some(7), Some(8)]
         );
+    }
+
+    /// Build the >1-hop attribution corner: `deep` sits 2 hops from BOTH goals
+    /// through one shared discoverer (`mid`, adjacent to each goal), and
+    /// `deep2` sits 2 hops from both through two same-level discoverers from
+    /// DIFFERENT goal families (`aprod` off alpha, `bprod` off beta). With
+    /// `swap` the same logical graph is built under the opposite id minting —
+    /// every node's id number flips relative order, goals included.
+    /// Returns `(graph, [goal_a, goal_b, mid, deep, aprod, bprod, deep2])`.
+    fn goal_attribution_graph(swap: bool) -> (Graph, [NodeId; 7]) {
+        // logical: 0=goal A "alpha goal", 1=goal B "beta goal", 2=mid, 3=deep,
+        // 4=aprod, 5=bprod, 6=deep2.
+        let minted = [
+            [50u64, 10, 99, 98, 97, 96, 95],
+            [10, 50, 96, 97, 99, 98, 95],
+        ];
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let contents = [
+            "alpha goal",
+            "beta goal",
+            "midpoint",
+            "deep node",
+            "a prod",
+            "b prod",
+            "deep two",
+        ];
+        let mut nodes = Vec::new();
+        for (l, content) in contents.iter().enumerate() {
+            let c = concept(minted[swap as usize][l], iid, content);
+            let cid = c.id;
+            g.insert_concept(c, iid).unwrap();
+            nodes.push(cid);
+        }
+        let [a, b, mid, deep, aprod, bprod, deep2] = [
+            nodes[0], nodes[1], nodes[2], nodes[3], nodes[4], nodes[5], nodes[6],
+        ];
+        // mid is the shared 1-hop discoverer of deep (2 hops from each goal);
+        // aprod/bprod are the same-level, different-family 1-hop discoverers
+        // of deep2. Traversal is undirected, so direction is irrelevant.
+        for (eid, src, dst) in [
+            (900u64, a, mid),
+            (901, b, mid),
+            (902, mid, deep),
+            (903, a, aprod),
+            (904, b, bprod),
+            (905, aprod, deep2),
+            (906, bprod, deep2),
+        ] {
+            g.upsert_edge(edge(eid, src, dst, EdgeType::Dependency))
+                .unwrap();
+        }
+        g.set_root_goal(Some(serde_json::json!(["alpha goal", "beta goal"])));
+        (g, [a, b, mid, deep, aprod, bprod, deep2])
+    }
+
+    /// The final-review corner, executed: both id mintings of the same logical
+    /// graph must attribute every equidistant node to the SMALLER-KEY goal.
+    /// The FIFO BFS keeps each seed's family contiguous at every level (seed
+    /// order is the stable key order), so the minted ids only reorder nodes
+    /// INSIDE one family — all of whom share that family's src — and can never
+    /// hand a same-level race to the larger-key goal's family. If a flip were
+    /// possible, one of the two mintings would report `beta goal` for deep or
+    /// deep2.
+    #[test]
+    fn goal_attribution_is_stable_across_id_mintings() {
+        for swap in [false, true] {
+            let (g, nodes) = goal_attribution_graph(swap);
+            let [a, b, mid, deep, aprod, bprod, deep2] = nodes;
+            let hits = detect(&g, 0);
+            let goal_of = |node: NodeId| {
+                hits.iter()
+                    .find(|h| h.node == node)
+                    .unwrap_or_else(|| panic!("node {node} must be a hit"))
+                    .goal
+            };
+            // Goals sit at dist 0 and are not hits at threshold 0; their
+            // seeding shows up in their 1-hop neighbors' attribution instead.
+            // mid touches both goals at 1 hop: alpha's family claims it.
+            assert_eq!(goal_of(mid), Some(a));
+            // The two >1-hop equidistant nodes — the corner the review flagged.
+            assert_eq!(goal_of(deep), Some(a), "swap={swap}");
+            assert_eq!(goal_of(deep2), Some(a), "swap={swap}");
+            // Single-family 1-hop nodes attribute to their own goal.
+            assert_eq!(goal_of(aprod), Some(a));
+            assert_eq!(goal_of(bprod), Some(b));
+        }
     }
 
     // ------------------------------------------------------------------
