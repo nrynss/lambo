@@ -853,6 +853,13 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("create {db}: {e}"));
             let dsn = dsn_for_database(&admin_dsn, &db);
+            // Dropped at the end of the iteration, after the store and pool
+            // below (reverse declaration order), on a panic too.
+            let _cleanup = LiveDb {
+                admin_dsn: admin_dsn.clone(),
+                db: db.clone(),
+                dsn: dsn.clone(),
+            };
             let store = PostgresStore::new(StoreConfig {
                 kind: StoreKind::Postgres,
                 dsn: Some(dsn.clone()),
@@ -947,7 +954,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn live_schema_width_refuses_a_config_that_disagrees() {
-        let Some(store768) =
+        let Some((_db768, store768)) =
             unique_live_store("live_schema_width_refuses_a_config_that_disagrees", 768).await
         else {
             return;
@@ -1421,12 +1428,13 @@ mod tests {
         }
     }
 
-    async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
+    /// A store on a fresh [`LiveDb`]. Callers bind `Some((_db, store))`, the
+    /// guard first: bindings drop in reverse order, so the store (and its pool)
+    /// goes before the database does.
+    async fn unique_live_store(test: &str, dim: usize) -> Option<(LiveDb, PostgresStore)> {
         let db = unique_live_db(test).await?;
-        let dsn = db.dsn.clone();
-        // Not yet cleaned up: the tests that use this helper predate the guard.
-        std::mem::forget(db);
-        Some(live_store_at(test, &dsn, dim).await)
+        let store = live_store_at(test, &db.dsn, dim).await;
+        Some((db, store))
     }
 
     /// A fresh database on the live server — for a test that needs a second
@@ -1539,7 +1547,7 @@ mod tests {
     async fn explain_recall_uses_hnsw() {
         const DIM: usize = 8;
         let rows = corpus::PLANNER_CROSSOVER_ROWS * 4;
-        let Some(store) = unique_live_store("explain_recall_uses_hnsw", DIM).await else {
+        let Some((_db, store)) = unique_live_store("explain_recall_uses_hnsw", DIM).await else {
             return;
         };
         let contract = crate::types::EmbeddingContract {
@@ -1656,7 +1664,7 @@ mod tests {
         use crate::types::{CanonizationStatus, Edge, EdgeType};
         use parking_lot::RwLock;
 
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("canonization_cycle_makes_the_stage2_hop_on_postgres", 8).await
         else {
             return;
@@ -1867,7 +1875,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn interaction_span_coverage_decodes_on_both_arms() {
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("interaction_span_coverage_decodes_on_both_arms", 8).await
         else {
             return;
@@ -2009,7 +2017,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn fencing_refuses_stale_write_and_upserts_replay() {
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("fencing_refuses_stale_write_and_upserts_replay", 8).await
         else {
             return;
