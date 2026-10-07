@@ -127,7 +127,8 @@ impl AccessLedger {
                 // but a closed session still being read is worth one line.
                 // The running total is [`AccessLedger::dropped_after_close`].
                 tracing::debug!(
-                    "access ledger closed: dropping reads that finish after close                      (counts only; later drops are not logged)"
+                    "access ledger closed: dropping reads that finish after close \
+                     (counts only; later drops are not logged)"
                 );
             }
             return false;

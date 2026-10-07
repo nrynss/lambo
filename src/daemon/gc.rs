@@ -2390,7 +2390,9 @@ mod tests {
     /// Entity and an isolated Resource that agents keep recalling are not
     /// collected by the 365-day cut, while the same concepts untouched are.
     /// The access goes through the real write path (`Graph::record_accesses`),
-    /// not a patched field.
+    /// not a patched field. A second comparison holds the access count fixed
+    /// (one read, long ago versus recently) so the frequency term cannot be
+    /// what saves the concept: only the recency anchor separates them.
     #[test]
     fn a_recalled_old_entity_and_isolated_resource_survive_the_365_day_cut() {
         let params = aged_params();
@@ -2441,6 +2443,39 @@ mod tests {
             assert!(
                 out.concepts_collected.contains(&nid(22)),
                 "{ty:?}: the unread twin still ages out"
+            );
+
+            // Recency alone: the same single read, once long ago (at creation)
+            // and once recently. The frequency term is identical, so only the
+            // `last_accessed` recency anchor can separate them.
+            let created = match untouched.node(nid(20)) {
+                Some(crate::types::Node::Concept(c)) => c.created_at,
+                _ => panic!("concept 20"),
+            };
+            let mut stale_read = untouched.clone();
+            assert_eq!(stale_read.record_accesses(&[(nid(20), 1, created)]), 1);
+            let stale = score_of(&stale_read, 20);
+            assert!(
+                read > stale,
+                "{ty:?}: a recent read must outscore an old read of the same count"
+            );
+            let recency_bar = GcParams {
+                min_concept_score: (stale + read) / 2.0 * ty.eviction_resistance(),
+                ..params
+            };
+            let mut recent = untouched.clone();
+            assert_eq!(recent.record_accesses(&[(nid(20), 1, at)]), 1);
+            assert!(
+                run(&mut stale_read, recency_bar)
+                    .concepts_collected
+                    .contains(&nid(20)),
+                "{ty:?}: a leaf last read long ago ages out"
+            );
+            assert!(
+                !run(&mut recent, recency_bar)
+                    .concepts_collected
+                    .contains(&nid(20)),
+                "{ty:?}: the same leaf read recently survives on recency alone"
             );
         }
     }

@@ -23,12 +23,14 @@
   watermark 0 and no sweep time: the first writer to attach starts the
   `gc_max_interval` clock rather than sweeping, so the first timed sweep comes
   a day (and at least 100 mutations) after the upgrade.
+
 - `lambo::Mutation` gained a `RecordAccess` variant (issue #30: the narrow,
   monotonic access-column update), so an exhaustive `match` on it no longer
   compiles; `lambo::store::batch::FlushStep` gained `Accesses` and
   `BulkLimits` gained an `accesses` field for the same reason. Not a wire or
   persisted format: mutations are applied in-process, and the only serialized
   form (the fixtures' JSON loader) gains an additive `record_access` tag.
+
 - `lambo::canon::gate_progress` takes a `PromotionPolicy` argument (fourth
   position, before `min_edge_age`). It decides whether the four store-evidence
   gates are measured at all, so the caller cannot be trusted to check it: under
