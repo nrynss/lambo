@@ -2650,13 +2650,17 @@ impl Memory {
 
         // 3 — final drain. Short critical section, guard dies with the block.
         // Accesses noted since the daemon's last cycle (it is stopped now) are
-        // applied in the same section so a clean close loses none (issue #30).
-        // The ledger is taken before the graph lock: it stays a leaf.
+        // applied in the same section, and every access the flush had not yet
+        // taken from the graph's dirty set rides the tail after the log, so a
+        // clean close loses none (issue #30). The ledger is taken before the
+        // graph lock: it stays a leaf.
         let accesses = self.accesses.take();
         let batch = {
             let mut g = self.graph.write();
             g.record_accesses(&accesses);
-            g.drain_log()
+            let mut batch = g.drain_log();
+            batch.mutations.extend(g.drain_accesses(usize::MAX));
+            batch
         };
         // Custody of the drained tail passes to `TailCustody` immediately:
         // from here until it is durable those mutations exist nowhere else,

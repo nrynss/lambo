@@ -89,6 +89,12 @@ pub struct Graph {
     /// bumps `epoch` and never enters the log (it rides the next batch's
     /// stamp, the way `epoch` does).
     gc_mark: GcMark,
+    /// Concepts whose access columns changed since they were last handed to
+    /// the flush ([`Graph::record_accesses`] / [`Graph::drain_accesses`],
+    /// issue #30). A set, not a log: however many reads land while the store
+    /// is unreachable, it holds at most one entry per concept, and the values
+    /// are read from the node when drained. RAM-only, like the log.
+    access_dirty: HashSet<NodeId>,
 }
 
 impl Graph {
@@ -111,6 +117,7 @@ impl Graph {
             mutation_log: Vec::new(),
             epoch: 0,
             gc_mark: GcMark::default(),
+            access_dirty: HashSet::new(),
         }
     }
 
@@ -626,6 +633,9 @@ impl Graph {
             self.remove_edge(eid)?;
         }
         self.nodes.remove(&id);
+        // Issue #30: nothing left to count against; keep the dirty set bounded
+        // by the live concepts even while the flush is not draining it.
+        self.access_dirty.remove(&id);
         self.temporal_chain.retain(|&x| x != id);
         self.reservations.retain(|r| r.node_id != id);
         self.append_mutation(Mutation::DeleteNode { id });
@@ -764,10 +774,16 @@ impl Graph {
     /// `last_accessed = max(last_accessed, at)`. Returns how many concepts were
     /// updated.
     ///
-    /// Each updated concept is emitted as one [`Mutation::RecordAccess`]
-    /// carrying its new absolute values, which the adapters apply as a narrow,
-    /// monotonic update of the two access columns (no full-row rewrite, no
-    /// embedding, no vector-index touch) — and **the epoch is not bumped**.
+    /// The update is in RAM at once (GC and scoring see it); durability is
+    /// **deferred**: the concept is marked access-dirty, and the write-behind
+    /// flush turns the dirty set into one [`Mutation::RecordAccess`] per
+    /// concept, with its absolute values at that moment, via
+    /// [`Self::drain_accesses`] — a narrow, monotonic update of the two access
+    /// columns (no full-row rewrite, no embedding, no vector-index touch).
+    /// Nothing is appended to the mutation log here, so reads can never grow
+    /// the log: during a store outage the flush stops draining accesses while
+    /// it holds unflushed ones, and the dirty set stays bounded by the concept
+    /// count. **The epoch is not bumped** either.
     /// An access is bookkeeping about a read, not a change to what the graph
     /// says: no node, edge, key or status that recall, canonicalization or a
     /// hybrid plan reads changes. Bumping would (a) count reads toward GC's
@@ -777,13 +793,14 @@ impl Graph {
     /// concurrent hybrid commit to replan against a graph nothing changed. The
     /// same reasoning already keeps [`Self::record_write_intent`] off the epoch.
     ///
-    /// The durable mutation watermark is unaffected: the next drain stamps the
-    /// unchanged epoch, and the adapters persist `MAX` of it.
+    /// The durable mutation watermark is unaffected: accesses are never
+    /// counted, and the adapters persist `MAX` of whatever stamp a flush
+    /// carries.
     ///
     /// Ids that are missing, or that are not concepts (an interaction hit), are
     /// skipped: a concept collected or retracted between the read and this
     /// apply has nothing left to count against. `count == 0` is a no-op for
-    /// that id. Applied in id order so the emitted log is deterministic.
+    /// that id.
     pub fn record_accesses(
         &mut self,
         accesses: &[(NodeId, u32, chrono::DateTime<chrono::Utc>)],
@@ -799,16 +816,58 @@ impl Graph {
             let delta = i32::try_from(count).unwrap_or(i32::MAX);
             c.access_count = c.access_count.saturating_add(delta);
             c.last_accessed = Some(c.last_accessed.map_or(at, |prev| prev.max(at)));
-            // Deliberately NOT `append_mutation`: see the doc comment.
-            self.mutation_log.push(Mutation::RecordAccess {
-                session_id: c.session_id.clone(),
-                id,
-                access_count: c.access_count,
-                last_accessed: c.last_accessed.unwrap_or(at),
-            });
+            // Deliberately NOT the log (nor `append_mutation`): see the doc
+            // comment. The flush asks for it through `drain_accesses`.
+            self.access_dirty.insert(id);
             updated += 1;
         }
         updated
+    }
+
+    /// Hand at most `limit` access-dirty concepts to the flush as
+    /// [`Mutation::RecordAccess`] (issue #30), each with its **current**
+    /// absolute values, in id order (deterministic), and clear them from the
+    /// dirty set. Ids that are no longer concepts are dropped from the set
+    /// without a mutation. The rest stay dirty for a later call.
+    ///
+    /// Not part of [`Self::drain_log`] on purpose: the log is replayed in
+    /// order and grows with every drain the flush retains, while access
+    /// bookkeeping is a per-concept *state* that only needs its latest value
+    /// to be durable. The flush loop decides when to take it (never while it
+    /// already holds undelivered accesses — see `store::flush`), and
+    /// `Memory::close` takes all of it after its final `drain_log`. Values only
+    /// ever rise, so a `RecordAccess` taken after a concept upsert in the log
+    /// carries values at least as high — the ordering `store::batch` relies on.
+    pub fn drain_accesses(&mut self, limit: usize) -> Vec<Mutation> {
+        if limit == 0 || self.access_dirty.is_empty() {
+            return Vec::new();
+        }
+        let mut ids: Vec<NodeId> = self.access_dirty.iter().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        let mut out = Vec::with_capacity(limit.min(ids.len()));
+        for id in ids {
+            if out.len() == limit {
+                break;
+            }
+            self.access_dirty.remove(&id);
+            if let Some(Node::Concept(c)) = self.nodes.get(&id) {
+                if let Some(last_accessed) = c.last_accessed {
+                    out.push(Mutation::RecordAccess {
+                        session_id: c.session_id.clone(),
+                        id,
+                        access_count: c.access_count,
+                        last_accessed,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Concepts whose applied accesses have not yet been handed to the flush
+    /// ([`Self::drain_accesses`]). At most the session's concept count.
+    pub fn pending_accesses(&self) -> usize {
+        self.access_dirty.len()
     }
 
     // -----------------------------------------------------------------------
@@ -4295,13 +4354,14 @@ mod tests {
             "an access must not advance the mutation epoch"
         );
 
-        // The update is durable state: one narrow RecordAccess per updated
-        // concept carrying its absolute values (not a full-row UpsertNode), and
-        // the drained batch carries the UNCHANGED epoch as its watermark.
-        let batch = g.drain_log();
-        assert_eq!(batch.mutation_epoch, epoch);
+        // Nothing reaches the log; the concept is access-dirty, and the drain
+        // the flush calls yields one narrow RecordAccess carrying its absolute
+        // values (not a full-row UpsertNode).
+        assert_eq!(g.log_len(), 0, "a read never appends to the log");
+        assert_eq!(g.drain_log().mutation_epoch, epoch);
+        assert_eq!(g.pending_accesses(), 1);
         assert_eq!(
-            batch.mutations,
+            g.drain_accesses(usize::MAX),
             [Mutation::RecordAccess {
                 session_id: g.session_id().clone(),
                 id: cid,
@@ -4309,6 +4369,55 @@ mod tests {
                 last_accessed: ts(10),
             }]
         );
+    }
+
+    /// The dirty set is per concept, not per read: any number of applies
+    /// before a drain yield one update per concept with the latest values; a
+    /// limited drain takes the lowest ids and leaves the rest dirty; a removed
+    /// concept leaves the set.
+    #[test]
+    fn drain_accesses_is_one_update_per_concept_and_honours_the_limit() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, 0);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        let ids: Vec<NodeId> = (1..=3)
+            .map(|k| {
+                let c = concept(k, iid, &format!("c{k}"));
+                let id = c.id;
+                g.insert_concept(c, iid).unwrap();
+                id
+            })
+            .collect();
+        g.drain_log();
+        for round in 0..100 {
+            g.record_accesses(&[
+                (ids[0], 1, ts(round)),
+                (ids[1], 1, ts(round)),
+                (ids[2], 1, ts(round)),
+            ]);
+        }
+        assert_eq!(g.pending_accesses(), 3, "bounded by concepts, not reads");
+        assert_eq!(g.log_len(), 0);
+
+        let mut sorted = ids.clone();
+        sorted.sort_unstable_by_key(|id| id.0);
+        let first = g.drain_accesses(2);
+        let drained: Vec<(NodeId, i32)> = first
+            .iter()
+            .map(|m| match m {
+                Mutation::RecordAccess {
+                    id, access_count, ..
+                } => (*id, *access_count),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(drained, [(sorted[0], 100), (sorted[1], 100)]);
+        assert_eq!(g.pending_accesses(), 1);
+
+        g.remove_node(sorted[2]).unwrap();
+        assert_eq!(g.pending_accesses(), 0, "a removed concept leaves the set");
+        assert!(g.drain_accesses(usize::MAX).is_empty());
     }
 
     #[test]

@@ -1799,8 +1799,10 @@ mod tests {
             daemon.last_gc().is_none(),
             "100 accesses must not fund a sweep that needs one mutation"
         );
-        // Five applies → five durable upserts in the write-behind log.
-        assert_eq!(graph.read().log_len(), 3 + 5);
+        // Five applies → nothing in the write-behind log, one access-dirty
+        // concept for the flush to take (issue #30: reads never grow the log).
+        assert_eq!(graph.read().log_len(), 3);
+        assert_eq!(graph.read().pending_accesses(), 1);
 
         // One real mutation crosses the interval: the trigger is intact.
         let mut i2 = interaction(2);

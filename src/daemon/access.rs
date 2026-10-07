@@ -8,10 +8,12 @@
 //! a few hash inserts and never while any other lock is acquired. The
 //! session's daemon cycle (one tick, default 1s) then takes the whole map and
 //! applies it in ONE write-guard section through [`Graph::record_accesses`],
-//! which emits one narrow `RecordAccess` per touched concept into the
-//! write-behind log.
-//! Recall pays a hash insert per hit; the graph pays one brief write section
-//! per tick, however many recalls ran in it.
+//! which updates the concepts in RAM and marks them access-dirty. The
+//! write-behind flush takes the dirty set ([`Graph::drain_accesses`]) as one
+//! narrow, monotonic `RecordAccess` update per concept, only while it holds no
+//! undelivered accesses already. Recall pays a hash insert per hit; the graph
+//! pays one brief write section per tick, however many recalls ran in it; the
+//! store pays one access row per touched concept per flush.
 //!
 //! ## What is an access
 //!
@@ -30,17 +32,29 @@
 //!
 //! See [`Graph::record_accesses`]: GC's `gc_interval` trigger, the recall
 //! cache key and hybrid replanning all key on the epoch, and none of them is
-//! about reads. The access updates still ride the normal flush, so they are
-//! durable without a separate dirty set or a schema change.
+//! about reads. The access updates still ride the normal flush and its
+//! transaction (fencing, watermark), so they are durable without a schema
+//! change.
+//!
+//! ## Why a dirty set rather than the mutation log
+//!
+//! The log is replayed in order and everything drained into it is retained
+//! until the store takes it. Appending one entry per touched concept per tick
+//! meant a store outage turned steady read traffic into backlog, toward
+//! `backend_log_max` and a terminal `durability="none"` from reads alone. The
+//! dirty set holds at most one entry per concept however long the outage
+//! lasts; the flush holds at most one drain of it at a time, capped at half of
+//! `backend_log_max` (`store::flush`).
 //!
 //! ## Loss bound
 //!
 //! Notes live in RAM until the next daemon cycle applies them (≤ one tick),
-//! then in the mutation log until the next flush (≤ `backend_flush_interval`),
-//! the same bound every write-behind mutation has. `Memory::close` applies
-//! what is left before its final drain, so a clean shutdown loses nothing; a
-//! crash loses at most the last tick-plus-flush window of counts, which is a
-//! frequency signal, not an acknowledged write.
+//! then in the graph's dirty set until the flush takes them and makes them
+//! durable (≤ about two `backend_flush_interval`s while the store is healthy;
+//! for as long as an outage lasts otherwise, like the retained batch). A
+//! crash loses what had not reached the store, which is a frequency signal,
+//! not an acknowledged write. `Memory::close` applies what is left and takes
+//! the whole dirty set into its final flush, so a clean shutdown loses nothing.
 
 use std::collections::HashMap;
 
@@ -198,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn many_reads_coalesce_into_one_upsert_per_concept() {
+    fn many_reads_coalesce_into_one_update_per_concept() {
         let ledger = AccessLedger::new();
         for k in 0..50 {
             ledger.record([nid(2, 1), nid(2, 2)], ts(k));
@@ -213,10 +227,16 @@ mod tests {
         assert_eq!(count(&g, nid(2, 1)), (50, Some(ts(49))));
         assert_eq!(count(&g, nid(2, 2)), (50, Some(ts(49))));
         assert_eq!(count(&g, nid(2, 3)), (1, Some(ts(7))));
-        // 101 reads, 3 log entries: the write volume is per touched concept per
-        // apply, not per read or per hit.
-        assert_eq!(g.log_len(), 3);
+        // 101 reads, 3 dirty concepts and nothing in the log: the write volume
+        // is one access update per touched concept per flush, not per read or
+        // per hit.
+        assert_eq!(g.log_len(), 0, "reads never append to the mutation log");
+        assert_eq!(g.pending_accesses(), 3);
         assert_eq!(g.epoch(), epoch, "accesses never advance the epoch");
+        drop(g);
+        let updates = graph.write().drain_accesses(usize::MAX);
+        assert_eq!(updates.len(), 3);
+        assert_eq!(graph.read().pending_accesses(), 0);
     }
 
     #[test]
