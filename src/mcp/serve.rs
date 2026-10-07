@@ -1064,9 +1064,21 @@ fn correct_the_refresh_claim(message: &str, outcome: &str) -> String {
 /// client's entire startup gate to arrive at the same refusal is how a
 /// recoverable wait turns into "this server has no tools" — measured live at
 /// 31.96 s on one real client.
+///
+/// # It takes the builder by value, so a proxy holds no model (issue #13 review)
+///
+/// The builder carries the resolved backends, embedder included: with candle
+/// on Metal that is ~1.1 GB of weight buffers plus the coalescer's threads.
+/// `serve` used to lend it here by reference and keep it alive across the
+/// whole `Role::Proxy` arm, so every proxying serve held a full model it never
+/// embeds with, for as long as its client stayed attached. Moving the builder
+/// in means it is dropped when this returns: a holder's embedder lives on in
+/// its `Memory`, a proxy's is released before `HubProxy::run` starts, and
+/// `serve` cannot reintroduce the retention because it no longer owns the
+/// value. `a_proxy_does_not_retain_the_embedder` pins the proxy half.
 async fn resolve_role(
     opts: &ServeOptions,
-    builder: &crate::memory::MemoryBuilder,
+    builder: crate::memory::MemoryBuilder,
     endpoint: Option<&SessionEndpoint>,
     ledger: &Option<Arc<Ledger>>,
 ) -> Result<Role, LamboError> {
@@ -1551,7 +1563,8 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         ledger.clone(),
         early.clone(),
     );
-    let role = resolve_role(&opts, &builder, endpoint.as_ref(), &ledger).await;
+    // Moved, not lent: see `resolve_role` — a proxy must not keep the model.
+    let role = resolve_role(&opts, builder, endpoint.as_ref(), &ledger).await;
     let mem: Arc<Memory> = match role {
         // The startup election refused (or otherwise failed): this process's
         // pre-lease ledger was opened and the loser recorded its `startup` and
@@ -4394,6 +4407,170 @@ mod tests {
                 );
                 mem.close().await.expect("close");
             }
+        }
+    }
+
+    /// **Issue #13 review (pre-existing defect).** A serve that loses the
+    /// election and becomes a proxy must not keep the embedder it resolved.
+    ///
+    /// The real shape, in-process: a holder `Memory` takes the lease on a
+    /// file-backed SQLite store, publishing an endpoint it then binds, so
+    /// [`resolve_role`] for a second agent sees a reachable holder and returns
+    /// [`Role::Proxy`]. The second builder's embedder carries a drop flag. With
+    /// the proxy still alive, the flag must already be set: nothing on the
+    /// proxy path (the role, the store handle it re-reads the lease from, the
+    /// builder `serve` used to keep across the arm) may hold the model. With
+    /// candle on Metal that was ~1.1 GB of weights per proxying client.
+    #[cfg(all(unix, feature = "store-sqlite", feature = "embed-fixture"))]
+    mod proxy_releases_the_model {
+        use super::*;
+        use crate::embed::{EmbedError, Embedder, FixtureEmbedder};
+        use crate::store::{GraphStore, SqliteStore, StoreConfig, StoreKind};
+        use crate::types::EmbeddingContract;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// A private scratch directory, removed on drop. Under `/tmp` rather
+        /// than `std::env::temp_dir()`: the endpoint path inside it must fit a
+        /// unix socket address, and macOS's per-user temp dir is too deep.
+        struct ScratchDir(PathBuf);
+
+        impl ScratchDir {
+            fn new() -> Self {
+                use std::os::unix::fs::DirBuilderExt;
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos();
+                let path = PathBuf::from(format!("/tmp/lb13p-{}-{nanos}", std::process::id()));
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&path)
+                    .expect("create scratch dir");
+                Self(path)
+            }
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for ScratchDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// The fixture embedder, plus a flag set when the last owner drops it.
+        struct DropFlagged {
+            inner: FixtureEmbedder,
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for DropFlagged {
+            fn drop(&mut self) {
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Embedder for DropFlagged {
+            fn dimensions(&self) -> usize {
+                self.inner.dimensions()
+            }
+            async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+                self.inner.embed(text).await
+            }
+        }
+
+        fn backends(db: &Path, embedder: Box<dyn Embedder>) -> ResolvedBackends {
+            let path = db.to_str().expect("utf-8 temp path").to_string();
+            ResolvedBackends {
+                store: Box::new(SqliteStore::connect(&path).expect("sqlite connect")),
+                embedder,
+                store_cfg: StoreConfig {
+                    kind: StoreKind::Sqlite,
+                    dsn: None,
+                    path: Some(path),
+                    vector_dim: None,
+                },
+                embedder_cfg: Default::default(),
+                embedding: EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                },
+                allow_embedding_mismatch: false,
+                config: crate::Config::default(),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_proxy_does_not_retain_the_embedder() {
+            let dir = ScratchDir::new();
+            let db = dir.path().join("store.db");
+            SqliteStore::connect(db.to_str().unwrap())
+                .unwrap()
+                .init_schema()
+                .await
+                .expect("provision the scratch store");
+            // A private (0700, ours) endpoint directory, as `dial_dir` demands,
+            // inside the per-test tempdir: never the operator's runtime dir.
+            let ep_dir = dir.path().join("run");
+            let session = "issue13-proxy-drop";
+            let probe_backends = backends(&db, Box::new(FixtureEmbedder::new()));
+            let endpoint = SessionEndpoint::resolve_in(&ep_dir, session, &probe_backends.store_cfg)
+                .expect("endpoint fits");
+            drop(probe_backends);
+
+            // The holder: takes the lease, publishes the endpoint, binds it.
+            let holder_opts = ServeOptions::new(session, "agent-holder");
+            let holder = serve_builder(
+                &holder_opts,
+                backends(&db, Box::new(FixtureEmbedder::new())),
+                Some(&endpoint),
+                None,
+                EarlyShutdown::unarmed(),
+            )
+            .build()
+            .await
+            .expect("the holder attaches");
+            let _listener = endpoint.bind().expect("bind the holder endpoint");
+
+            // The would-be second writer, with a model whose drop we can see.
+            let dropped = Arc::new(AtomicBool::new(false));
+            let proxy_opts = ServeOptions::new(session, "agent-proxy");
+            let builder = serve_builder(
+                &proxy_opts,
+                backends(
+                    &db,
+                    Box::new(DropFlagged {
+                        inner: FixtureEmbedder::new(),
+                        dropped: Arc::clone(&dropped),
+                    }),
+                ),
+                Some(&endpoint),
+                None,
+                EarlyShutdown::unarmed(),
+            );
+            assert!(
+                !dropped.load(Ordering::SeqCst),
+                "control: the builder owns it"
+            );
+
+            let role = resolve_role(&proxy_opts, builder, Some(&endpoint), &None)
+                .await
+                .expect("the election resolves");
+            let proxy = match role {
+                Role::Proxy(proxy) => proxy,
+                Role::Holder(_) => panic!("the second agent must lose the lease and proxy"),
+            };
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "a proxying serve must not keep its resolved embedder alive (with candle on \
+                 Metal that is ~1.1 GB of weights it never embeds with)"
+            );
+
+            drop(proxy);
+            holder.close().await.expect("holder close");
         }
     }
 
