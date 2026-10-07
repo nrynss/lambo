@@ -53,7 +53,7 @@ impl Serve {
     /// inside the test's directory instead of the operator's.
     fn spawn(cfg: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> Self {
         let mut child = ServeChild::new(
-            Command::new(env!("CARGO_BIN_EXE_lambo"))
+            common::lambo_command()
                 .env(RUNTIME_DIR_VAR, runtime.path())
                 .args([
                     "--config",
@@ -985,7 +985,7 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
     );
 
     let mut child = ServeChild::new(
-        Command::new(env!("CARGO_BIN_EXE_lambo"))
+        common::lambo_command()
             .args([
                 "--config",
                 cfg.to_str().unwrap(),
@@ -1207,7 +1207,7 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
     }
 
     let started = std::time::Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+    let out = common::lambo_command()
         .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
@@ -1300,7 +1300,7 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
         });
     }
 
-    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+    let out = common::lambo_command()
         .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",

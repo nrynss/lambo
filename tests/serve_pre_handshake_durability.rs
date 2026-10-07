@@ -130,7 +130,7 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     // point) is a tracing line on stderr, and we must not send the signal until
     // the session is genuinely attached.
     let mut child = ServeChild::new(
-        Command::new(env!("CARGO_BIN_EXE_lambo"))
+        common::lambo_command()
             .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",
@@ -300,7 +300,7 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
 
     let spawn = |agent: &str| {
         ServeChild::new(
-            Command::new(env!("CARGO_BIN_EXE_lambo"))
+            common::lambo_command()
                 .env(RUNTIME_DIR_VAR, runtime.path())
                 .args([
                     "--config",
@@ -505,7 +505,7 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
     });
 
     let mut child = ServeChild::new(
-        Command::new(env!("CARGO_BIN_EXE_lambo"))
+        common::lambo_command()
             .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",

@@ -44,11 +44,7 @@ fn write_frame(stdin: &mut impl Write, frame: &str) {
 }
 
 fn lambo() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-    for k in lambo::RESOLVE_ENV_VARS {
-        cmd.env_remove(k);
-    }
-    cmd
+    common::lambo_command()
 }
 
 /// A stdio serve whose endpoint directory is the test's own (#15).

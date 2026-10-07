@@ -37,6 +37,29 @@ use std::time::{Duration, Instant};
 /// The variable `endpoint_dir()` consults first.
 pub const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
 
+/// A `lambo` command with every configuration variable the binary reads from
+/// the ambient environment removed (#15).
+///
+/// A spawned binary resolves its backends from `LAMBO_*` and a few well-known
+/// names (`DATABASE_URL`, the Google credential variables) as well as from
+/// `--config`, so a developer shell that exports any of them silently changes
+/// what a test serve does. This removes the crate's [`lambo::RESOLVE_ENV_VARS`]
+/// and, so a variable added later is covered without editing a list, every
+/// `LAMBO_`-prefixed variable present in this process. A test that means to set
+/// one does so on the returned command, after this clears it.
+pub fn lambo_command() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
+    for k in lambo::RESOLVE_ENV_VARS {
+        cmd.env_remove(k);
+    }
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("LAMBO_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd
+}
+
 /// A private (0700), self-owned, per-test runtime directory, removed on drop.
 pub struct RuntimeDir {
     path: PathBuf,

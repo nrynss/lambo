@@ -80,7 +80,7 @@ fn serve_cmd_on(
     transport: &str,
     runtime: &RuntimeDir,
 ) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
+    let mut cmd = common::lambo_command();
     runtime.isolate(&mut cmd);
     cmd.args([
         "--config",

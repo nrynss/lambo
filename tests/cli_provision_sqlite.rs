@@ -16,11 +16,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn bin() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-    for k in lambo::RESOLVE_ENV_VARS {
-        cmd.env_remove(k);
-    }
-    cmd
+    common::lambo_command()
 }
 
 mod common;

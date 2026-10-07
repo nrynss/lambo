@@ -92,7 +92,7 @@ fn a_sigterm_flushes_the_recorded_action_to_the_durable_store() {
     // endpoint directory inside the test's own runtime dir (#15).
     let runtime = RuntimeDir::new();
     let mut child = ServeChild::new(
-        Command::new(env!("CARGO_BIN_EXE_lambo"))
+        common::lambo_command()
             .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",

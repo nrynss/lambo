@@ -77,7 +77,7 @@ fn spawn_serve(
     ledger: &std::path::Path,
     runtime: &RuntimeDir,
 ) -> ServeChild {
-    let child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+    let child = common::lambo_command()
         .env(common::RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",

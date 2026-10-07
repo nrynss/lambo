@@ -82,11 +82,7 @@ impl Drop for Scratch {
 /// A `lambo` command with any ambient store/embedder/config env removed, so
 /// the only configuration is the `--config <toml>` we pass (Level B).
 fn lambo() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-    for k in lambo::RESOLVE_ENV_VARS {
-        cmd.env_remove(k);
-    }
-    cmd
+    common::lambo_command()
 }
 
 struct Output {

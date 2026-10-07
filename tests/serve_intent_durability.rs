@@ -97,7 +97,7 @@ impl Serve {
     /// below leaves a socket nothing unlinks, and it must land there.
     fn launch(cfg: &std::path::Path, runtime: &RuntimeDir, session: &str) -> Self {
         let mut child = ServeChild::new(
-            Command::new(env!("CARGO_BIN_EXE_lambo"))
+            common::lambo_command()
                 .env(RUNTIME_DIR_VAR, runtime.path())
                 .args([
                     "--config",
@@ -600,7 +600,7 @@ fn an_unmigrated_store_refuses_the_attach_naming_lambo_provision() {
             .expect("drop write_intents");
     });
 
-    let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+    let out = common::lambo_command()
         .env(RUNTIME_DIR_VAR, rig.runtime.path())
         .args([
             "--config",
