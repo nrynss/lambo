@@ -211,6 +211,24 @@
   mutation, ledger line or recall-cache entry), is not part of the embedding
   contract, and first fires one interval after startup, so the handshake gains
   no work. Proxies and one-shot CLI commands never run it.
+- A Metal release asset, `lambo-<version>-macos-arm64-metal` (with its
+  `.sha256`): the `ship` adapter set plus `embed-candle-metal`, so an Apple
+  silicon machine can run the in-process candle embedder (`[embedder]
+  kind = "candle"`, `device = "metal"`) from a published binary instead of a
+  hand build. It links only macOS system frameworks and `/usr/lib` libraries,
+  which the release workflow asserts. The stock `ship` assets are unchanged and
+  still carry no candle.
+- `install.sh` takes `LAMBO_FLAVOR=metal` to install that asset, with the same
+  SHA-256 verification. It is refused with an error on anything but macOS arm64;
+  unset, the script installs the stock build as before. `LAMBO_DRY_RUN=1`
+  prints the asset and URLs it would fetch, then exits without downloading.
+- The release workflow can be run by hand (`workflow_dispatch`, `dry_run`
+  default true) to build, parity-test and checksum every asset as workflow
+  artifacts without tagging. A dispatch never publishes a GitHub release or a
+  crate: those jobs run only on a `v*` tag push, and a dispatch with
+  `dry_run=false` is refused. Release binaries are now built with
+  `LAMBO_GIT_SHA`, so the `serve --ledger` heartbeat names the release commit
+  instead of `unknown`.
 
 ### Fixed
 
