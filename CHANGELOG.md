@@ -233,10 +233,14 @@
     `[daemon] gc_idle_floor` (default 100) mutations since. Idle sessions never
     sweep on time; a writer down for N days sweeps once. The 10 000-mutation
     trigger and every promotion threshold are unchanged.
-  - **Step 2 protects reasoning.** Logic and Constraint are exempt from the
-    score cut (orphans and disconnected components are still collected). GC's
-    eviction recency is now time since last touch over a fixed 90-day window
-    instead of position in the session span; recall ranking and canonization
+  - **Step 2 protects reasoning.** Logic, Constraint and Observation are
+    exempt from the score cut (orphans and disconnected components are still
+    collected; the exemption is `ConceptType::exempt_from_gc_score_cut`, an
+    exhaustive table), so the cut removes only Entities and isolated
+    Resources. GC's eviction recency is now time since last touch over a fixed
+    365-day window (Lambo is long-term memory; what the cut can still reach is
+    mostly long-tail pointers, about 4% of the rig's store) instead of
+    position in the session span; recall ranking and canonization
     still use the span-relative score. Collections per sweep are capped at
     `max(32, 5%)` of unprotected concepts; a sweep that hits the cap logs a
     warning and reports `GcOutcome::collections_deferred`.
@@ -245,7 +249,7 @@
     `Causal` or `Hierarchical` edge into (what `record_action` writes into the
     things an action depends on, produces or modifies), nor one whose blast
     radius is non-zero (the action node that is the only structural source of
-    something). Isolated, untouched Resources still age out over the 90-day
+    something). Isolated, untouched Resources still age out over the 365-day
     window. Reported as `GcOutcome::resources_spared_by_dependents`.
   - **An access can only help in GC's cut.** GC no longer switches the whole
     session to the full composite once any concept has been read (ALGO-1's
