@@ -1,6 +1,7 @@
 # Issue #29 — GC time bound, durable sweep mark, step-2 protections
 
-Status: implemented on `fix/29-gc-time-bound` (from `main` c83b933). Companion to
+Status: implemented on `fix/29-gc-time-bound` (from `main` c83b933, rebased on
+f65f610), review round 1 remediated (see "Remediation" below). Companion to
 issue #29's dry-run comment and to #17
 (`dev-diary/adversarial-review/adve-review-issue-17-canonization-reachability.md`).
 
@@ -132,16 +133,94 @@ resets its own clock.
 
 Rows rewritten by one sweep: 3,211 survivor upserts (of 3,703 mutations).
 
+The tables above were measured before the review-round-1 remediation. The
+1,468-concept convergence in particular no longer holds: the Resource
+dependents rule keeps most of its 995 Resources (next section).
+
+## Remediation (review round 1)
+
+Changes, each its own commit: Resources with dependents are spared the score
+cut (operator decision); GC's composite is the live-dimension score plus the
+concept's own frequency term, so an access can only raise the accessed
+concept's score (replaces ALGO-1's session-wide switch in GC's cut only);
+`exempt_from_gc_measure` clamps to the epoch and its #30 advice is corrected;
+a sweep time more than 5 min in the future is re-anchored and the regression
+persists through a flagged store merge; the cap takes orphans, then
+disconnected components, then the score cut; held-back candidates take no
+survivor bump; the survivor drain order rotates per sweep; `lambo_stats` has a
+`gc` block; a floor at or above `gc_interval` warns; restart/attach wording.
+
+**Dependents rule, precisely.** A Resource is spared when another concept has a
+`Dependency`, `Causal` or `Hierarchical` edge into it (record_action's
+direction: action → depends_on / produces / modifies), or when its blast
+radius is non-zero (it is the only structural source of some concept). The
+second sense covers the action nodes themselves: incoming-only would collect
+an action node, its targets would lose their only incoming edge, and the next
+sweep would take them.
+
+### Dry run (fresh copy of the same snapshot, `work29r.db`; aggregates only)
+
+Same store, `now = 2026-10-07T06:30Z`, default weights, copy provisioned with
+this branch's binary, mark unset.
+
+Dependents census: 1,307 of 1,464 Resources have dependents — 940 by an
+incoming edge, 373 by blast radius, 6 by both, so **367 are protected only by
+the blast-radius sense** (an incoming-only rule would leave them to the cut).
+
+| clock | capped first sweep | uncapped | Resources spared by the rule |
+|---|---|---|---|
+| +0 d | 159 (Observation) | 159 (Observation) | 0 |
+| +7 d | 169, cap bound (78 deferred) | 247 (Observation) | 0 |
+| +14 d | 169, cap bound (164 deferred) | 333 (Observation 331, Resource 2) | 0 |
+| +30 d | 169, cap bound (304 deferred) | 473 (Observation 458, Resource 15) — was 588 | 115 |
+| +60 d | 169, cap bound (390 deferred) | 559 (Observation 467, Resource 89, Entity 3) — was 1,211 | 652 |
+
+Successive capped sweeps, no writes: same clock 159, 4, 0… (163, all
+Observation); +1 day each 159, 15, 20, 27, 13, 12, 3, 0, 7, 20, 23, 18 (317,
+all Observation) — unchanged, because nothing in the first 12 days reaches a
+Resource with dependents.
+
+**Untouched end state** (uncapped sweeps at +365 d until nothing more goes):
+**602 collected — Observation 467, Resource 122, Entity 13** (was 1,468:
+Observation 467, Resource 995, Entity 6). 884 Resources sit under their bar
+and are kept only by the dependents rule; 1,309 Resources with dependents
+remain. Logic and Constraint: 0 collected.
+
+**Blast radius:** total over all concepts 1,165 before, 1,184 after the end
+state (removing a second source can leave a concept with a single one, which
+then counts); concepts above Stage 3's bar (blast radius > 5): **41 before, 41
+after**.
+
+**Synthetic access** (uncapped first sweep at +0 d; end state at +365 d;
+"newly" = collected with access but not without):
+
+| scenario | accessed | first sweep | newly | end state | newly |
+|---|---|---|---|---|---|
+| no access | 0 | 159 | — | 602 | — |
+| one access on the hub Entity, at its creation time | 1 | 159 | **0** | 602 | **0** |
+| one access on the hub Entity, at `now` | 1 | 159 | **0** | 602 | **0** |
+| replay k=1 (#30 review method) | 2,115 | 68 | **0** | 543 | **0** |
+| replay k=2 | 2,671 | 42 | **0** | 470 | **0** |
+| replay k=4 | 3,065 | 19 | **0** | 324 | **0** |
+
+Before the remediation one access on one Entity took the first sweep from 159
+to 412 and the end state from 1,468 to 2,034. Now an access never adds a
+collection anywhere; reads only save concepts (91 / 117 / 140 saved from the
+first sweep for k = 1 / 2 / 4). Replay is the #30 review harness's method: at
+each interaction, recall k queries built from the previous interaction's
+derived concepts, every hit an access at that interaction's time.
+
 ## Risks a reviewer should weigh
 
-- **Resources age out.** Without #30, 995 of 1,464 Resources (mostly
-  `record_action` artifacts of degree 2–4) are below their bar once older than
-  the window. Losing them shrinks the dependency graph that blast radius reads.
-  Whether Resource deserves the same exemption as Logic/Constraint, or the bar
-  needs recalibrating, is a separate decision. This change keeps
-  `MIN_CONCEPT_SCORE` and every promotion threshold as they were.
+- **Resources age out — now only isolated ones.** Before the operator's
+  dependents rule, 995 of 1,464 Resources were below their bar once older than
+  the window. With it, 122 go in the untouched end state; 884 under-bar
+  Resources are kept because something depends on them, and the count of
+  concepts above Stage 3's blast-radius bar is unchanged (41). `MIN_CONCEPT_SCORE`
+  and every promotion threshold are as they were.
 - **The cap binds once a backlog exists.** After a long pause (+30 d) the first
-  sweep has 588 candidates and takes 169 a day; the warning names it.
+  sweep has 473 candidates and takes 169 a day; the warning names it, and
+  `lambo_stats`' `gc` block shows `deferred` and `cap_bound`.
 - **Lost deferred bumps.** Pending survivor bumps live in the daemon, not the
   store. A restart mid-drain loses the rest of that sweep's bumps (as before
   #29); the watermark already counts the drained part, so nothing double-counts.
@@ -164,7 +243,9 @@ Rows rewritten by one sweep: 3,211 survivor upserts (of 3,703 mutations).
   appended, under the same write guard (GC's own survivor drains). It now
   clamps the watermark to the epoch and debug-asserts an overshoot.
 - GC's eviction recency reads `last_accessed`; #30's writes protect recalled
-  concepts directly. When `access_count` becomes live, ALGO-1 switches GC to
-  the full composite (weighted part × 0.8 for unaccessed concepts). The
-  Logic/Constraint exemption does not depend on it; re-run the harness with
-  access data to see the Observation/Resource effect.
+  concepts directly. GC no longer switches to the full composite when
+  `access_count` becomes live: each concept scores the live-dimension score
+  plus its own frequency term (`score::score_live_plus_frequency`), so an
+  unread concept's GC score is the same however much else is read. Recall
+  ranking, the daemon's score table and canonization still use `score()`;
+  any cliff there is #30's.

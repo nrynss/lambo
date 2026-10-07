@@ -265,7 +265,10 @@
     Observations and nothing else (was 537, including 42 Logic); collection no
     longer grows with session span alone (span +60 days with the clock fixed:
     159, was 1,049). Untouched sparse concepts still age out once older than
-    the window. Details in `dev-diary/notes/gc-time-bound-29.md`.
+    the window: an untouched store converges on 602 collections (Observation
+    467, Resource 122, Entity 13), with 884 under-bar Resources kept by the
+    dependents rule and no change in the concepts above Stage 3's blast-radius
+    bar. Details in `dev-diary/notes/gc-time-bound-29.md`.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero
