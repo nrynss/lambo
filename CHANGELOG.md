@@ -163,6 +163,27 @@
 
 ### Fixed
 
+- Canonization now fires in long-running low-write deployments: the mutation
+  epoch the GC interval measures persists with the session instead of resetting
+  on every writer start (issue #17). Thirteen days of dogfooding produced zero
+  consolidations because the chain was closed by construction — Stage 1 needs
+  `gc_survived >= 3`, survivor bumps come only from GC sweeps, GC ran only
+  every 10,000 **in-process** mutations, and the epoch restarted at 0 each
+  start, so a single supervised writer never crossed even one sweep. The fix
+  is the accounting, not the predicates: `Graph::drain_log` stamps each flushed
+  batch with the absolute epoch, every store upserts
+  `sessions.mutation_epoch = MAX/GREATEST(existing, stamped)` inside the flush
+  transaction (replays converge; a crash cannot separate the counter from the
+  content it counts), `load_session` returns it, and `Graph::from_snapshot`
+  resumes it. The daemon is unchanged; a writer attaching to a session whose
+  resumed epoch already exceeds the interval sweeps once immediately (a
+  catch-up, not new collection criteria), then the normal cadence holds.
+  Operator-visible: the schema gains `sessions.mutation_epoch` on all three
+  dialects, so an already-provisioned store refuses to attach until
+  re-provisioned (`lambo provision`); existing rows backfill to 0 and
+  accumulate forward — past mutations are not backdated. The recall cache's
+  `mutation_epoch` key component now keeps one comparable scale across
+  restarts instead of restarting at 0 with each process.
 - `lambo_inspect` no longer refuses the focus approximations a model actually
   types, and recall's rendered text now carries the handle it talks about
   (issue #9). On the dogfood rig inspect failed 28.2% of the time (22 of 78
