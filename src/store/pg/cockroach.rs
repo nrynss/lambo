@@ -955,8 +955,14 @@ WHERE session_id = $1
         );
         // STORE-1: the full-snapshot upsert now carries the embedding contract
         // (kind/model/dim) alongside root_goal/created_at/closed_at.
+        // Issue #17 added mutation_epoch ($8) without updating this count, so
+        // the assertion was red on this (CI-disabled) row from 5709a72 on;
+        // issue #29 adds last_gc_epoch ($9) and last_gc_at ($10).
         let upsert_session = crdb_sql().upsert_session;
-        assert_eq!(placeholder_max(&upsert_session), 7);
+        assert_eq!(placeholder_max(&upsert_session), 10);
+        assert!(upsert_session.contains("mutation_epoch = EXCLUDED.mutation_epoch"));
+        assert!(upsert_session.contains("last_gc_epoch = EXCLUDED.last_gc_epoch"));
+        assert!(upsert_session.contains("last_gc_at = EXCLUDED.last_gc_at"));
         assert!(upsert_session.contains("embedding_kind = EXCLUDED.embedding_kind"));
         assert!(upsert_session.contains("embedding_dim = EXCLUDED.embedding_dim"));
         assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 8);
