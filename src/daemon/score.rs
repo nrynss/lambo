@@ -536,9 +536,6 @@ mod tests {
         assert!(ScoringWeights::default().is_valid());
     }
 
-    /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes
-    /// over the surviving weights, so it stays on the same `[0,1]`+bonus scale
-    /// and lifts every concept whose only missing dimension is the dead one.
     /// Issue #29: GC's composite is the live score plus the concept's own
     /// frequency term — identical to the live score at frequency 0, strictly
     /// above it once the concept earns frequency, monotone in frequency,
@@ -598,6 +595,9 @@ mod tests {
         );
     }
 
+    /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes
+    /// over the surviving weights, so it stays on the same `[0,1]`+bonus scale
+    /// and lifts every concept whose only missing dimension is the dead one.
     #[test]
     fn live_dimension_score_renormalizes_over_surviving_weights() {
         let w = ScoringWeights::default();

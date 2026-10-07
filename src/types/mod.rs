@@ -1300,9 +1300,6 @@ mod tests {
         assert_eq!(back.id(), id);
     }
 
-    /// Issue #29: the GC mark merges field-wise (each field only moves
-    /// forward), the unset mark is the identity, and old JSON without the
-    /// field still parses (batches and snapshots written before #29).
     /// Issue #29: a re-anchored mark is the one way `last_gc_at` moves back.
     /// In the flush carry (older `merge` newer) the newer reset stamp supplies
     /// the time and the flag sticks, so later stamps of the same writer keep
@@ -1379,6 +1376,9 @@ mod tests {
         assert_eq!(back, reset);
     }
 
+    /// Issue #29: the GC mark merges field-wise (each field only moves
+    /// forward), the unset mark is the identity, and old JSON without the
+    /// field still parses (batches and snapshots written before #29).
     #[test]
     fn gc_mark_merge_is_fieldwise_max_and_serde_defaults() {
         use chrono::TimeZone;
