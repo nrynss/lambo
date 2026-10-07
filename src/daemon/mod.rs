@@ -1813,6 +1813,86 @@ mod tests {
         handle.abort();
     }
 
+    /// Issue #30 x #29: accesses are not mutations for the timed trigger
+    /// either. A previously swept session past `gc_max_interval` with exactly
+    /// `gc_idle_floor` accesses applied since the sweep stays unswept (the
+    /// watermark never moves, so "mutations since the last sweep" stays 0);
+    /// the same session with real mutations at the floor sweeps on time.
+    #[tokio::test(start_paused = true)]
+    async fn applied_accesses_do_not_satisfy_the_idle_floor_of_the_timed_trigger() {
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let floor = 100u64;
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: floor,
+            ..Default::default()
+        };
+        let (graph, cid) = locked_graph_with_one_concept();
+        let epoch0 = graph.read().epoch();
+        // As loaded: swept two days ago, nothing since.
+        graph
+            .write()
+            .record_gc_sweep(epoch0, t0 - chrono::Duration::days(2));
+        let ledger = Arc::new(access::AccessLedger::new());
+        let (_cell, clock) = settable_clock(t0);
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock)
+        .with_access_ledger(ledger.clone());
+        let handle = daemon.spawn();
+        wait_until(|| daemon.cycles() >= 1).await;
+
+        for round in 0..5 {
+            for _ in 0..(floor / 5) {
+                ledger.record([cid], ts(round));
+            }
+            wake_and_settle(&daemon).await;
+            assert_eq!(ledger.pending(), 0, "the cycle applied the ledger");
+        }
+        let applied = match graph.read().node(cid) {
+            Some(crate::types::Node::Concept(c)) => c.access_count,
+            _ => unreachable!(),
+        };
+        assert_eq!(u64::try_from(applied).unwrap(), floor, "all applied");
+        assert_eq!(graph.read().epoch(), epoch0, "the epoch did not move");
+        assert_eq!(graph.read().gc_mark().last_gc_epoch, epoch0);
+        assert!(
+            daemon.last_gc().is_none(),
+            "{floor} accesses must not satisfy gc_idle_floor for the timed trigger"
+        );
+        handle.abort();
+
+        // Control: the same floor met by real mutations does sweep on time.
+        let (graph, _) = locked_graph_with_one_concept();
+        let epoch = graph.read().epoch();
+        graph
+            .write()
+            .record_gc_sweep(epoch - 3, t0 - chrono::Duration::days(2));
+        let (_cell, clock) = settable_clock(t0);
+        let control = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            CycleParams {
+                gc_idle_floor: 3,
+                ..params
+            },
+        )
+        .with_clock(clock);
+        let handle = control.spawn();
+        wake_and_settle(&control).await;
+        assert_eq!(
+            control.last_gc().expect("real mutations sweep").trigger,
+            Some(gc::GcTrigger::Elapsed)
+        );
+        handle.abort();
+    }
+
     /// Issue #17: the GC interval measures deployment-lifetime mutations. The
     /// epoch a writer resumes from the durable snapshot counts every writer
     /// before it, so a restart does not reset the sweep clock: once the

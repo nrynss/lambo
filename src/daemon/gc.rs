@@ -2386,6 +2386,65 @@ mod tests {
         }
     }
 
+    /// Issue #30 x #29: `last_accessed` is GC's recency anchor, so an old
+    /// Entity and an isolated Resource that agents keep recalling are not
+    /// collected by the 365-day cut, while the same concepts untouched are.
+    /// The access goes through the real write path (`Graph::record_accesses`),
+    /// not a patched field.
+    #[test]
+    fn a_recalled_old_entity_and_isolated_resource_survive_the_365_day_cut() {
+        let params = aged_params();
+        let at = params.now - ChronoDuration::days(1);
+        for ty in [ConceptType::Resource, ConceptType::Entity] {
+            // 20 is recalled, 22 is not; both are old, isolated leaves.
+            let leaves = [(20u64, ty), (22, ty)];
+            let untouched = hub_session(&leaves);
+            let mut recalled = untouched.clone();
+            assert_eq!(recalled.record_accesses(&[(nid(20), 1, at)]), 1);
+
+            let score_of = |g: &Graph, id: u64| {
+                let ctx = crate::daemon::score::SessionContext::compute(g);
+                let c = match g.node(nid(id)) {
+                    Some(crate::types::Node::Concept(c)) => c.clone(),
+                    _ => panic!("concept {id}"),
+                };
+                eviction_score(g, &c, &ctx, params)
+            };
+            let old = score_of(&untouched, 20);
+            let read = score_of(&recalled, 20);
+            assert!(read > old, "{ty:?}: a recent read lifts the score");
+            assert_eq!(
+                score_of(&recalled, 22).to_bits(),
+                score_of(&untouched, 22).to_bits(),
+                "{ty:?}: the unread twin is unchanged"
+            );
+
+            // A bar between the two scores (the bar is `min / resistance`).
+            let bar_params = GcParams {
+                min_concept_score: (old + read) / 2.0 * ty.eviction_resistance(),
+                ..params
+            };
+            let mut baseline = untouched.clone();
+            let base = run(&mut baseline, bar_params);
+            assert!(
+                base.concepts_collected.contains(&nid(20))
+                    && base.concepts_collected.contains(&nid(22)),
+                "{ty:?} setup: untouched old leaves age out, got {:?}",
+                base.concepts_collected
+            );
+            let out = run(&mut recalled, bar_params);
+            assert!(
+                !out.concepts_collected.contains(&nid(20)),
+                "{ty:?}: the recalled leaf must survive the recency cut"
+            );
+            assert!(recalled.node(nid(20)).is_some());
+            assert!(
+                out.concepts_collected.contains(&nid(22)),
+                "{ty:?}: the unread twin still ages out"
+            );
+        }
+    }
+
     /// The exemption is from the score cut only: a Logic concept with no edge
     /// at all is still an orphan, and an unreachable one is still a
     /// disconnected component.
