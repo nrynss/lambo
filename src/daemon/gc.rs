@@ -68,7 +68,8 @@
 //!    owner MUST call `sync_index(&outcome, &mut index)` after `run` (each
 //!    collected id → `InvertedIndex::remove`). Survivor bumps never change
 //!    content, so no re-`add` is ever needed.
-//! 5. **`gc_survived += 1` on all survivors** — via
+//! 5. **`gc_survived += 1` on all survivors** — except candidates the cap held
+//!    back, which this sweep judged collectable (issue #29) — via
 //!    [`Graph::bump_gc_survived`] (saturating `i32`), which emits `UpsertNode`
 //!    mutations so the durable store mirrors the counter. Stage 1's input —
 //!    the reason GC cannot be cut. **Chunked** (CONC-6/XP-10): one call applies
@@ -363,8 +364,9 @@ pub struct GcOutcome {
     pub edges_removed: Vec<NodeId>,
     /// Steps 2+3: concept ids collected, together with their incident edges.
     pub concepts_collected: Vec<NodeId>,
-    /// Step 5: every concept id that survived this run (held-back candidates
-    /// included). Id-ascending.
+    /// Step 5: every concept id that survived this run **and takes its
+    /// `gc_survived += 1`** — every remaining concept except
+    /// [`deferred`](GcOutcome::deferred). Id-ascending.
     pub survivors: Vec<NodeId>,
     /// Step 5: the part of [`survivors`](GcOutcome::survivors) whose
     /// `gc_survived += 1` this run **deferred** — the owner must drain it with
@@ -372,8 +374,8 @@ pub struct GcOutcome {
     /// survivor set fit in one chunk.
     pub survivors_pending: Vec<NodeId>,
     /// Steps 2+3: the candidates the cap held back (issue #29), id-ascending.
-    /// They stay in the graph and are re-evaluated next sweep.
-    /// `deferred.len() == collections_deferred`.
+    /// They stay in the graph, are re-evaluated next sweep, and do **not** take
+    /// this sweep's survivor bump. `deferred.len() == collections_deferred`.
     pub deferred: Vec<NodeId>,
     /// Step 6: number of Canonical concepts after cleanup.
     pub canonical_count: usize,
@@ -551,11 +553,18 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         ));
     }
 
-    // Step 5 — survivors: every remaining concept gets gc_survived += 1. At
-    // most `max_survivor_bumps` land here; the tail is
+    // Step 5 — survivors: every remaining concept gets gc_survived += 1,
+    // except the candidates the cap held back (issue #29: this sweep judged
+    // them collectable, so it must not credit them with surviving it — Stage 1
+    // reads the counter). At most `max_survivor_bumps` land here; the tail is
     // deferred to later cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for
     // the convergence argument).
-    let mut survivors: Vec<NodeId> = graph.concepts().map(|c| c.id).collect();
+    let held: HashSet<NodeId> = held_back.iter().copied().collect();
+    let mut survivors: Vec<NodeId> = graph
+        .concepts()
+        .map(|c| c.id)
+        .filter(|id| !held.contains(id))
+        .collect();
     survivors.sort_by_key(|id| id.0);
     let split = survivors.len().min(params.max_survivor_bumps);
     graph.bump_gc_survived(&survivors[..split]);
@@ -2455,7 +2464,9 @@ mod tests {
 
     /// Issue #29 item 4: when the cap binds with orphans present, the orphans
     /// are taken first and the score cut gets only what is left — weakest
-    /// first.
+    /// first. Item 5: the candidate held back keeps its `gc_survived` (it is
+    /// not credited with surviving a sweep that judged it collectable), while
+    /// every real survivor takes its bump.
     #[test]
     fn the_cap_takes_orphans_before_score_cut_candidates() {
         let mut g = hub_session(&[(20, ConceptType::Observation), (21, ConceptType::Resource)]);
@@ -2489,7 +2500,22 @@ mod tests {
         assert_eq!(outcome.collections_deferred, outcome.deferred.len());
         assert_eq!(outcome.deferred.len(), 5, "13, 14, 15, 16, 21");
         for id in &outcome.deferred {
-            assert!(g.node(*id).is_some(), "held back, not collected");
+            let c = match g.node(*id) {
+                Some(Node::Concept(c)) => c,
+                _ => panic!("held back, not collected"),
+            };
+            assert_eq!(
+                c.gc_survived, 0,
+                "a held-back candidate takes no survivor bump"
+            );
+            assert!(!outcome.survivors.contains(id));
+        }
+        for id in &outcome.survivors {
+            let c = match g.node(*id) {
+                Some(Node::Concept(c)) => c,
+                _ => unreachable!(),
+            };
+            assert_eq!(c.gc_survived, 1, "a real survivor is bumped");
         }
     }
 

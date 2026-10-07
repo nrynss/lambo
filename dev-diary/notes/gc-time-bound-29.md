@@ -50,8 +50,9 @@ issue #29's dry-run comment and to #17
    (both by id, measured on the post-step-1 graph), then score-cut candidates
    by ascending `score / bar`; concepts that the score cut's collections cut
    off from the chain (step 3's cascade) are collected in the same sweep with
-   the budget left. Held-back candidates survive the sweep (and take its
-   `gc_survived` bump), are listed in `GcOutcome::deferred` and counted once in
+   the budget left. Held-back candidates survive the sweep but do **not** take
+   its `gc_survived` bump (the sweep judged them collectable; Stage 1 reads the
+   counter), are listed in `GcOutcome::deferred` and counted once in
    `collections_deferred` (an orphan is also a disconnected component), and are
    re-evaluated next sweep. A
    bound cap is a `tracing::warn` via `GcOutcome::warnings`. 5% per day bounds a
