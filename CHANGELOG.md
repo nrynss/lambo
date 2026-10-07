@@ -227,7 +227,11 @@
     `gc_idle_floor` mutations and was down past `gc_max_interval` sweeps once
     on its first cycle back, which is intended. A never-swept session anchors
     its clock on first attach instead of time-sweeping, and keeps #17's single
-    catch-up sweep on the mutation count.
+    catch-up sweep on the mutation count. The anchor only delays the timed
+    trigger: a never-swept session counts its whole lifetime toward
+    `gc_idle_floor`, so one with at least that many mutations sweeps once,
+    `gc_max_interval_secs` after the anchor, even if idle since (a deliberate
+    catch-up; afterwards the mark is set and idle sessions never sweep).
   - **Timed sweeps.** A session also sweeps once `[daemon] gc_max_interval_secs`
     (default 86 400) has passed since its last sweep, if it took at least
     `[daemon] gc_idle_floor` (default 100) mutations since. Idle sessions never

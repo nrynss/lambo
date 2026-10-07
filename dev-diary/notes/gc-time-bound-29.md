@@ -46,6 +46,13 @@ issue #29's dry-run comment and to #17
    epoch ≥ `gc_interval`) is unchanged for a never-swept session. If the anchor is
    not yet flushed when the writer restarts it re-anchors, which is harmless: the
    floor cannot be met without writes, and a write flushes the anchor.
+   The anchor delays the timed trigger, it does not exempt the session: a
+   never-swept session has `last_gc_epoch` 0, so the floor counts its whole
+   lifetime, and one with at least `gc_idle_floor` mutations sweeps **once**,
+   `gc_max_interval` after the anchor, even if it has been idle since. That is a
+   deliberate catch-up for a store that grew before sweeps ran on time (pinned by
+   `never_swept_session_over_the_floor_catches_up_once_after_the_anchor`); the
+   sweep sets the mark, so it does not repeat.
    This is about **never-swept** sessions. A previously swept session is not
    swept *because* a writer attached, but if a sweep is already due by its
    stored mark (it took at least `gc_idle_floor` mutations since the last

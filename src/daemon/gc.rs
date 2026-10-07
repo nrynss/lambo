@@ -353,7 +353,12 @@ impl GcTrigger {
 /// session never sweeps on time alone, and it measures from one stored
 /// instant, so a writer that was down for N intervals sweeps **once** (no
 /// backlog). A never-anchored mark (`last_gc_at == None`) cannot time-trigger;
-/// the daemon anchors it on first observation ([`Graph::anchor_gc_clock`]). A
+/// the daemon anchors it on first observation ([`Graph::anchor_gc_clock`]).
+/// A never-*swept* session has `last_gc_epoch == 0`, so `since` is its whole
+/// lifetime mutation count: one with at least `gc_idle_floor` of them sweeps
+/// once, `gc_max_interval` after the anchor, **even if idle since** — a
+/// deliberate catch-up for a store that grew before sweeps ran on time, not
+/// an accident of the floor (`never_swept_session_over_the_floor_catches_up_once_after_the_anchor`). A
 /// clock that went backwards past the mark reads as "not elapsed" — the time
 /// trigger waits, the mutation trigger is unaffected. A mark more than
 /// [`GC_CLOCK_SKEW_TOLERANCE`] in the future is the daemon's to re-anchor
@@ -2865,6 +2870,66 @@ mod tests {
     }
 
     const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+    /// A never-swept, anchored session (mark epoch 0) measures the floor
+    /// against its whole lifetime: with at least `gc_idle_floor` mutations it
+    /// time-sweeps once a full interval after the anchor with no write in
+    /// between; below the floor it never does. The sweep then moves the mark,
+    /// so it is once, not daily.
+    #[test]
+    fn never_swept_session_over_the_floor_catches_up_once_after_the_anchor() {
+        let anchor = ts(0);
+        let lifetime = 500u64;
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::hours(23),
+                10_000,
+                DAY,
+                100
+            ),
+            None,
+            "not before the interval"
+        );
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::hours(24),
+                10_000,
+                DAY,
+                100
+            ),
+            Some(GcTrigger::Elapsed),
+            "an idle never-swept session over the floor sweeps one interval after the anchor"
+        );
+        assert_eq!(
+            sweep_due(
+                99,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::days(30),
+                10_000,
+                DAY,
+                100
+            ),
+            None,
+            "below the floor it never time-sweeps"
+        );
+        // After that sweep the mark is (epoch, now): idle again, nothing due.
+        let after = anchor + ChronoDuration::hours(24);
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(lifetime, Some(after)),
+                after + ChronoDuration::days(30),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+    }
 
     #[test]
     fn sweep_due_mutation_trigger_is_unchanged_and_ungated() {
