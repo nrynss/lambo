@@ -49,8 +49,12 @@ issue #29's dry-run comment and to #17
    therefore never causes an immediate timed sweep; the first one comes a day and
    100 mutations later. The mutation trigger's #17 catch-up (watermark 0, lifetime
    epoch ≥ `gc_interval`) is unchanged for a never-swept session. If the anchor is
-   not yet flushed when the writer restarts it re-anchors, which is harmless: the
-   floor cannot be met without writes, and a write flushes the anchor.
+   not yet flushed when the writer restarts it re-anchors: a mark-only batch
+   cannot persist, because sessions are resolved from mutations. For a
+   never-swept session already over the idle floor this postpones the timed
+   catch-up below until one write lands or the writer stays up for
+   `gc_max_interval`; an idle store restarted more often than that never reaches
+   it. The count-based #17 catch-up at `gc_interval` still fires.
    The anchor delays the timed trigger, it does not exempt the session: a
    never-swept session has `last_gc_epoch` 0, so the floor counts its whole
    lifetime, and one with at least `gc_idle_floor` mutations sweeps **once**,

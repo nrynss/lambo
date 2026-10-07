@@ -13,7 +13,7 @@
   `DaemonConfig::{gc_max_interval_secs, gc_idle_floor}`,
   `CycleParams::{gc_max_interval, gc_idle_floor}`,
   `GcParams::{recency_window, max_collect_fraction, min_collect_cap}` and
-  `GcOutcome::{collection_cap, collections_deferred, trigger}`.
+  `GcOutcome::{collection_cap, collections_deferred, deferred, resources_spared_by_dependents, trigger}`.
   **Operator action:** the schema gains `sessions.last_gc_epoch` and
   `sessions.last_gc_at` on all three dialects, so an already-provisioned
   store (SQLite included: the attach preflight reads the DDL) refuses to

@@ -171,8 +171,8 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// mid-session concept survives with margin while the clause still bites where
 /// it should: a concept whose recency **and** density have both decayed to ~0
 /// scores at most its type modifier (Entity +0.05, Resource 0.0), which is
-/// below both bars that still apply (Entity 0.10, Resource 0.12). Orphans and disconnected components are
-/// collected by their own clauses regardless of score, so the score cut is
+/// below both bars that still apply (Entity 0.10, Resource 0.12). Orphans and
+/// disconnected components are collected by their own clauses regardless of score, so the score cut is
 /// deliberately the conservative one. Reading a concept only adds headroom:
 /// its frequency term is added on top of this scale, never traded for it
 /// (issue #29).
@@ -358,7 +358,8 @@ impl GcTrigger {
 /// lifetime mutation count: one with at least `gc_idle_floor` of them sweeps
 /// once, `gc_max_interval` after the anchor, **even if idle since** — a
 /// deliberate catch-up for a store that grew before sweeps ran on time, not
-/// an accident of the floor (`never_swept_session_over_the_floor_catches_up_once_after_the_anchor`). A
+/// an accident of the floor
+/// (`never_swept_session_over_the_floor_catches_up_once_after_the_anchor`). A
 /// clock that went backwards past the mark reads as "not elapsed" — the time
 /// trigger waits, the mutation trigger is unaffected. A mark more than
 /// [`GC_CLOCK_SKEW_TOLERANCE`] in the future is the daemon's to re-anchor

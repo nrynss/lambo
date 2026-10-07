@@ -1028,8 +1028,11 @@ fn run_cycle(
     if mark.last_gc_at.is_none() {
         // Issue #29: a session that has never swept starts its time bound
         // when a writer first sees it — never "overdue" on attach. Rides the
-        // next flushed batch; a restart before any write re-anchors, which is
-        // harmless because the floor cannot be met without writes.
+        // next flushed batch. A mark-only batch cannot persist (sessions are
+        // resolved from mutations), so a restart before any write re-anchors.
+        // For a never-swept session already over the idle floor this postpones
+        // the timed catch-up: it needs one write or `gc_max_interval` of uptime.
+        // The count-based catch-up at `gc_interval` (#17) is unaffected.
         let mut g = graph.write();
         g.anchor_gc_clock(now);
         mark = g.gc_mark();
