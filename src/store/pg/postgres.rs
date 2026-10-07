@@ -434,6 +434,50 @@ mod tests {
         }
     }
 
+    /// Issue #30 (no live server: SQL text is the contract). Recall and
+    /// inspect now write `access_count` / `last_accessed` through an ordinary
+    /// concept `UpsertNode`, so both must be bound on insert, carried by the
+    /// conflict update (an existing row is the normal case), and read back on
+    /// load — the shared statement path both pg dialects run.
+    #[test]
+    fn access_columns_ride_the_concept_upsert_and_the_load() {
+        let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let c = Concept {
+            id: NodeId::new(),
+            session_id: SessionId::from("issue-30"),
+            content: "read often".into(),
+            canonical_key: "read often".into(),
+            concept_type: ConceptType::Logic,
+            origin_interaction: NodeId::new(),
+            origin_agent: AgentId::from("a"),
+            created_at: at,
+            access_count: 9,
+            last_accessed: Some(at),
+            gc_survived: 0,
+            canonization_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+        let rows = [crate::store::batch::ConceptRow::new(&c)];
+        let sql =
+            crate::store::pg::concept_upsert_query(&rows, &[None], PostgresDialect::VECTOR_CAST)
+                .sql()
+                .to_string();
+        let (insert, on_conflict) = sql.split_once("ON CONFLICT").expect("an upsert");
+        assert!(insert.contains("access_count, last_accessed"), "{sql}");
+        for column in ["access_count", "last_accessed"] {
+            assert!(
+                on_conflict.contains(&format!("{column} = EXCLUDED.{column}")),
+                "the conflict update must carry {column}: {sql}"
+            );
+        }
+        let select = crate::store::pg::DialectSql::for_dialect::<PostgresDialect>().select_concepts;
+        assert!(select.contains("access_count, last_accessed"), "{select}");
+    }
+
     #[test]
     fn dialect_tokens_are_not_cockroach_sql() {
         assert_ne!(
