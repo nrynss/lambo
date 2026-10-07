@@ -35,6 +35,7 @@
 //!
 //! [`Daemon::spawn`] returns the `JoinHandle`; aborting it stops the loop (a
 //! graceful stop is a P8 concern per the COH-6 note).
+pub mod access;
 pub mod conflict;
 pub mod drift;
 pub mod events;
@@ -121,6 +122,9 @@ pub struct Daemon {
     index: Option<Arc<RwLock<InvertedIndex>>>,
     /// The most recent [`gc::GcOutcome`], for [`Daemon::last_gc`] (XP-5).
     last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
+    /// The owner's read-access ledger (issue #30), when it gave the daemon
+    /// one: each cycle applies what the read paths noted since the last.
+    accesses: Option<Arc<access::AccessLedger>>,
     /// Completed cycles, for [`Daemon::cycles`] (XP-6).
     cycles: Arc<AtomicU64>,
     params: CycleParams,
@@ -224,6 +228,7 @@ impl Daemon {
             events: sender,
             index: None,
             last_gc: Arc::new(RwLock::new(None)),
+            accesses: None,
             cycles: Arc::new(AtomicU64::new(0)),
             params,
             clock: Arc::new(Utc::now),
@@ -263,6 +268,20 @@ impl Daemon {
         self
     }
 
+    /// Give the daemon the owner's [`access::AccessLedger`] (issue #30): every
+    /// cycle applies the accesses the owner's read paths noted since the last
+    /// one, in a single graph write section, **before** GC runs, so a sweep
+    /// scores against counts no older than one tick.
+    ///
+    /// The daemon applies; it never records. What counts as an access is the
+    /// owner's decision (`Memory`'s recall and inspect surfaces), which is why
+    /// a reader that builds a `Daemon` only to run one recall — `lambo recall`,
+    /// `serve-web` — passes no ledger and counts nothing.
+    pub fn with_access_ledger(mut self, ledger: Arc<access::AccessLedger>) -> Self {
+        self.accesses = Some(ledger);
+        self
+    }
+
     /// Spawn the daemon loop and return its handle (abort = stop).
     ///
     /// Call `spawn` **exactly once** per `Daemon` — a second call panics
@@ -291,6 +310,7 @@ impl Daemon {
             clock,
             index: self.index.clone(),
             last_gc: self.last_gc.clone(),
+            accesses: self.accesses.clone(),
             cycles: self.cycles.clone(),
         };
         tokio::spawn(async move {
@@ -670,6 +690,7 @@ struct LoopState {
     clock: Clock,
     index: Option<Arc<RwLock<InvertedIndex>>>,
     last_gc: Arc<RwLock<Option<gc::GcOutcome>>>,
+    accesses: Option<Arc<access::AccessLedger>>,
     cycles: Arc<AtomicU64>,
 }
 
@@ -894,9 +915,20 @@ fn run_cycle(
         clock,
         index,
         last_gc,
+        accesses,
         cycles,
         ..
     } = state;
+
+    // 0. Apply the read accesses noted since the last cycle (issue #30) — one
+    //    brief write section, ledger taken first (it is a leaf lock). First,
+    //    so GC below scores against counts at most one tick old. Accesses do
+    //    not advance the epoch, so this neither triggers a rescore nor counts
+    //    toward `gc_interval` (see `Graph::record_accesses`).
+    if let Some(ledger) = accesses.as_ref() {
+        ledger.apply(graph);
+    }
+
     // Brief lock: read epoch, release.
     let epoch = graph.read().epoch();
     let now = clock();
@@ -1716,6 +1748,66 @@ mod tests {
         let handle = daemon.spawn();
 
         wait_until(|| graph.read().node(cid).is_none()).await;
+        handle.abort();
+    }
+
+    /// Issue #30: the cycle applies noted read accesses, and they do not
+    /// advance the GC mutation trigger. With `gc_interval` one mutation past
+    /// the warm-up epoch, any number of applied accesses leaves GC unswept and
+    /// the epoch (hence the score table and the recall-cache key) untouched;
+    /// the next real write then fires the sweep exactly as before.
+    #[tokio::test(start_paused = true)]
+    async fn applied_accesses_do_not_advance_the_gc_trigger() {
+        let (graph, cid) = locked_graph_with_one_concept();
+        let epoch0 = graph.read().epoch();
+        assert_eq!(epoch0, 3);
+        let params = CycleParams {
+            gc_interval: epoch0 + 1,
+            ..Default::default()
+        };
+        let ledger = Arc::new(access::AccessLedger::new());
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_access_ledger(ledger.clone());
+        let handle = daemon.spawn();
+        wait_until(|| daemon.cycles() >= 1).await;
+
+        for round in 0..5 {
+            for _ in 0..20 {
+                ledger.record([cid], ts(round));
+            }
+            wake_and_settle(&daemon).await;
+            assert_eq!(ledger.pending(), 0, "the cycle applied the ledger");
+        }
+        let (count, last) = match graph.read().node(cid) {
+            Some(crate::types::Node::Concept(c)) => (c.access_count, c.last_accessed),
+            _ => unreachable!(),
+        };
+        assert_eq!(count, 100);
+        assert_eq!(last, Some(ts(4)));
+        assert_eq!(
+            graph.read().epoch(),
+            epoch0,
+            "accesses never bump the epoch"
+        );
+        assert_eq!(daemon.scores().epoch, epoch0);
+        assert!(
+            daemon.last_gc().is_none(),
+            "100 accesses must not fund a sweep that needs one mutation"
+        );
+        // Five applies → five durable upserts in the write-behind log.
+        assert_eq!(graph.read().log_len(), 3 + 5);
+
+        // One real mutation crosses the interval: the trigger is intact.
+        let mut i2 = interaction(2);
+        i2.previous_id = Some(interaction(1).id);
+        graph.write().insert_interaction(i2).unwrap();
+        wake_and_settle(&daemon).await;
+        assert!(daemon.last_gc().is_some(), "a real write still sweeps");
         handle.abort();
     }
 
