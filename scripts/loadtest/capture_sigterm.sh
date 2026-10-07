@@ -124,7 +124,20 @@ export LAMBO_AUTH_TOKEN="$TOKEN"
 export RUST_LOG="${RUST_LOG:-lambo=info,lambo::daemon::gc=debug}"
 
 echo "== C2 capture: run=$RUN session=$SESSION workers=$WORKERS"
-echo "== machine: $(uname -srm) | $(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs) | $(nproc) threads"
+# Machine facts, portably: lscpu/nproc are Linux-only, sysctl is the macOS
+# equivalent, and getconf answers on both.
+cpu_model() {
+    lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs ||
+        true
+    sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+}
+CPU_MODEL="$(cpu_model | sed "/^[[:space:]]*$/d" | head -n 1)"
+CPU_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+case "$(uname -s)" in
+    Linux) MACHINE_NOTE="Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md" ;;
+    *) MACHINE_NOTE="$(uname -s) host — see concurrency-capture.md for which machine the P8 criterion names" ;;
+esac
+echo "== machine: $(uname -srm) | $CPU_MODEL | $CPU_THREADS threads"
 
 "$BIN" provision --config "$CFG" >/dev/null
 
@@ -209,9 +222,9 @@ cat > "$OUT/run-$RUN.json" <<EOF
   "machine": {
     "host": "$(hostname)",
     "os": "$(uname -srm)",
-    "cpu": "$(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs)",
-    "threads": "$(nproc)",
-    "note": "Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md"
+    "cpu": "$CPU_MODEL",
+    "threads": "$CPU_THREADS",
+    "note": "$MACHINE_NOTE"
   },
   "server": {
     "binary": "$BIN",
