@@ -625,6 +625,9 @@ mod tests {
         assert_eq!(f.embedder.kind, EmbedderKind::BgeM3);
         assert_eq!(f.embedder.dim, 1024);
         assert_eq!(f.promotion_policy, None);
+        // Issue #13: the example documents keep_warm_secs commented out, so
+        // the shipped example resolves keep-warm to auto.
+        assert_eq!(f.embedder.keep_warm_secs, None);
         assert_eq!(
             f.embedder.llama_url.as_deref(),
             Some("http://127.0.0.1:8080")

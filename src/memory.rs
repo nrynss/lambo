@@ -1428,6 +1428,13 @@ impl Memory {
         &self.store
     }
 
+    /// The resolved embedder (single construction site — do not build
+    /// another). `lambo serve`'s keep-warm task (issue #13) touches the very
+    /// instance this session embeds with.
+    pub(crate) fn embedder(&self) -> &Arc<dyn Embedder> {
+        &self.embedder
+    }
+
     // -----------------------------------------------------------------------
     // Session metadata
     // -----------------------------------------------------------------------

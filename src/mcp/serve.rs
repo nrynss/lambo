@@ -1533,6 +1533,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(ledger) = &ledger {
         ledger.append(&serve_startup_line(&opts, &endpoint));
     }
+    // Issue #13 — read before `serve_builder` consumes the backends. Pure (a
+    // config lookup and a type downcast), no I/O, so it belongs in this
+    // create-nothing pre-lease group; the task it configures is spawned on the
+    // holder path only, below the arming.
+    let keep_warm = backends.keep_warm_interval();
     // J6 — the pre-arm. Constructing it installs NOTHING; it is armed from
     // inside `build_attach`, in the `LeaseOutcome::Acquired` arm, so the
     // election below stays killable and a serve that loses never arms at all.
@@ -1631,9 +1636,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // the first statement after the lease-taking attach returns (`resolve_role`,
     // which builds through the same `serve_builder` `MemoryBuilder`), and
     // before ANY of the startup work below it: `LamboServer::new` and its
-    // `#[tool_router]` JSON-schema build, the heartbeat spawn, the J4
-    // refusal-recorder spawn, the J2 session-endpoint bind and its accept loop,
-    // the event pump, and the serve-level attach log. Registration is eager (see
+    // `#[tool_router]` JSON-schema build, the heartbeat spawn, the issue-13
+    // embedder keep-warm spawn, the J4 refusal-recorder spawn, the J2
+    // session-endpoint bind and its accept loop, the event pump, and the
+    // serve-level attach log. Registration is eager (see
     // `shutdown_signal`), so every one of those runs guarded (R2-a): a SIGTERM
     // arriving during them is taken by this future, `Memory::close` runs, the
     // tail reaches the store, and the single-writer lease is released.
@@ -1764,6 +1770,21 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
         _ => None,
     };
+    // Issue #13 — embedder keep-warm. Spawned here, below the arming and
+    // beside the heartbeat, for the same reasons: spawning awaits nothing, so
+    // the pre-handshake window is not widened, and the loop's first touch is
+    // one full interval out, so startup gains no forward. Holder path only: a
+    // proxy has no embedder. Aborted at close like the heartbeat.
+    let keep_warm_task = keep_warm.map(|every| {
+        tracing::info!(
+            interval_secs = every.as_secs(),
+            "lambo serve: embedder keep-warm armed"
+        );
+        tokio::spawn(crate::embed::keep_warm::keep_warm_loop(
+            Arc::clone(mem.embedder()),
+            every,
+        ))
+    });
     // J4 — the holder side of a refused takeover: record the incumbent's
     // line when the store reports a refusal this process turned away. Spawned
     // only when a ledger is attached, and only on the holder path (the proxy
@@ -1864,6 +1885,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // filesystem is abandoned, never allowed to hold process exit.
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
+    }
+    // Issue #13. Nothing to drain: a touch writes nothing.
+    if let Some(task) = keep_warm_task {
+        task.abort();
     }
     // J4. The refusal-recorder task is stopped before the ledger drains, so it
     // cannot enqueue a line into a closing ledger.

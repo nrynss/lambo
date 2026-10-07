@@ -94,6 +94,20 @@ url = "http://127.0.0.1:8080"
 # Or point at a local weights dir (config.json + tokenizer.json + weight file);
 # bypasses hf-hub entirely:
 # weights_dir = "/srv/lambo/bge-m3-f16"
+#
+# Keep-warm (issue #13), any kind, `lambo serve` only. While serve idles, the
+# OS can compress or swap model weights nothing is touching, and the next
+# call pays to bring them back. Keep-warm embeds one short fixed probe every N
+# seconds and discards the vector; it writes nothing. Not part of the
+# embedding contract. LAMBO_EMBED_KEEP_WARM_SECS overrides this value.
+#   omitted = auto: every 30 s when the weights sit in unified memory that the
+#             pager can compress (candle on Metal); off for everything else
+#             (CUDA weights live in VRAM, the fixture has no weights, and
+#             bge_m3/gemini hold their weights in another process)
+#   0       = off
+#   N       = every N seconds, for any kind (e.g. a bge_m3 llama-server on
+#             the same Mac; each touch is then one HTTP embed request)
+# keep_warm_secs = 30
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #

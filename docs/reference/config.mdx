@@ -98,10 +98,13 @@ The kind you choose must be compiled into your binary. If it is not, Lambo fails
 | `dim` | integer | `1024` | The width you expect the embedder to emit. |
 | `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
 | `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
+| `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 30 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. |
 
 `kind` also accepts `bge` and `bge-m3` for `bge_m3`, `titan` for `bedrock`, and `fake` for `fixture`.
 
 A store that persists vectors declares its own width, and Lambo refuses to start if `dim` disagrees with it.
+
+While `lambo serve` sits idle, the operating system can compress or swap out model weights that nothing is touching, and the next call pays to bring them back. On Apple silicon the candle embedder's weights live in unified memory, so this is where it shows. Keep-warm embeds one short fixed probe on an interval and discards the vector. It writes nothing to the store, the graph or the call ledger, and it is not part of the embedding contract, so you can change it without re-embedding. The first touch comes one interval after startup, never during it.
 
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
@@ -154,6 +157,7 @@ Every variable below overrides the matching file key. An empty value counts as u
 | `LAMBO_EMBED_DIM` | `embedder.dim` |
 | `LAMBO_LLAMA_EMBED_URL` | `embedder.url` |
 | `LAMBO_LLAMA_MODEL` | `embedder.model` |
+| `LAMBO_EMBED_KEEP_WARM_SECS` | `embedder.keep_warm_secs` |
 | `LAMBO_PROMOTION_POLICY` | `promotion_policy` (`Swarm` or `Solo`, any case) |
 
 Keep connection strings in the environment rather than in `lambo.toml`.
