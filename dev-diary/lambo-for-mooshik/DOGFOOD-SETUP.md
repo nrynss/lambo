@@ -114,7 +114,10 @@ races a live serve:
 # 1. stop the supervised writer (graceful: the lease is released, no 45s TTL wait)
 launchctl bootout gui/$(id -u)/dev.lambo.dogfood
 
-# 2. bring the store's schema up to the new binary (idempotent; v0.3.0 needs it for
+# 2. back up the store first: provisioning adds columns, and an older binary may
+#    refuse the new schema, so this copy is what makes a rollback possible
+sqlite3 ~/lambo-dogfood/lambo-dev.db ".backup '$HOME/lambo-dogfood/backup-pre-$V.db'"
+#    then bring the schema up to the new binary (idempotent; v0.3.0 needs it for
 #    #17's mutation_epoch and #29's sessions.last_gc_epoch / last_gc_at)
 ~/lambo-dogfood/bin/lambo-$V provision --config ~/lambo-dogfood/lambo.toml
 #    run any repair verbs the release notes call for here, while still stopped
@@ -130,13 +133,16 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
 
 # 5. verify. bootstrap returns as soon as launchd has the job, before serve has
 #    loaded the embedder, taken the lease and bound :7700, so a lease check run at
-#    once can read an empty table. Wait (up to 60 s) for the port to answer first:
-for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7700/mcp)
+#    once can read an empty table. Wait (up to 60 s in total) for the port to
+#    answer first. Each probe is capped at 2 s, so a connection that is accepted
+#    but never answered cannot stall the loop past its deadline:
+deadline=$((SECONDS + 60)); code=000
+while [ "$SECONDS" -lt "$deadline" ]; do
+  code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:7700/mcp)
   [ "$code" != "000" ] && break
   sleep 1
 done
-echo "mcp port answered HTTP $code after ${i}s"   # 000 = never came up: read the unit's log
+echo "mcp port answered HTTP $code"   # 000 = never came up within 60 s: read the unit's log
 sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"   # http-shared-writer
 ```
 
@@ -166,10 +172,24 @@ are the release's real Metal runtime check. Check, in order:
   warning; that warning is the failure signal;
 - the first ledger heartbeat (above) names `$V` and the release commit.
 
-If any of these fails, roll back (step 3 with the old name) before debugging.
+If any of these fails, roll back before debugging. Editing the plist alone is not
+enough: launchd keeps the job definition it loaded, so the job must be booted out and
+bootstrapped again around the edit. With `OLD` set to the previous binary's suffix:
 
-Keep the previous `lambo-<old>` in `bin/` until the new one has served for a while:
-rolling back is step 3 with the old name.
+```sh
+OLD=e11fb06   # the binary that served before this upgrade
+launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$OLD<#" \
+  ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+# only if the old binary refuses the provisioned schema: restore the step-2 backup.
+# This discards anything written since the upgrade.
+#   cp ~/lambo-dogfood/backup-pre-$V.db ~/lambo-dogfood/lambo-dev.db
+#   rm -f ~/lambo-dogfood/lambo-dev.db-wal ~/lambo-dogfood/lambo-dev.db-shm
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+```
+
+Then run the step-5 wait and checks again. Keep the previous `lambo-<old>` in `bin/`,
+and the `backup-pre-$V.db`, until the new one has served for a while.
 
 ### 2b. Build from source (CUDA rig; any unreleased commit)
 
