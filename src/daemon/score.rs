@@ -138,9 +138,12 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// remaining weights, so the result occupies the same `[0,1]`-plus-bonus range
 /// as [`score`].
 ///
-/// GC's step-2 cut uses this while `access_count` is dead session-wide
-/// (ALGO-1). The spec formula reserves 20% of the composite for a dimension no
-/// write path feeds until P5 recall lands, so an **absolute** threshold against
+/// GC's step-2 cut builds on this: [`score_live_plus_frequency`] adds each
+/// concept's own frequency term on top. Issue #29 replaced ALGO-1's
+/// session-wide switch to [`score`] (measured in the NEW-6 note below) with
+/// that per-concept addition. The spec formula reserves 20% of the composite
+/// for a dimension no write path feeds until P5 recall lands, so an
+/// **absolute** threshold against
 /// the full composite measures every concept against a fifth of a score it
 /// cannot yet earn. Recall *ranking* is unaffected by the dead term (a
 /// constant-zero dimension cannot reorder anything), which is why [`score`]
@@ -157,8 +160,10 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// type modifier are untouched). Only a concept whose frequency has actually
 /// started earning comes out ahead.
 ///
-/// Measured on the shipped `session-rest-api` fixture (all 22 concepts, at the
-/// moment the first access lands and GC's cut flips): **every** concept's
+/// GC's cut no longer flips (issue #29, [`score_live_plus_frequency`]); this
+/// note records why it must not. Measured on the shipped `session-rest-api`
+/// fixture (all 22 concepts, at the moment the first access lands and the old
+/// cut flipped): **every** concept's
 /// eviction score falls, by a factor of 0.83–0.89, and the smallest margin to its
 /// type's bar goes from **1.49× to 1.33×**. Nothing crosses the bar, so the
 /// switch does not by itself make GC collect anything — but the headroom
@@ -176,6 +181,33 @@ pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> 
         0.0
     };
     finite_or_zero(weighted + bonus_and_modifier(dims))
+}
+
+/// GC's step-2 eviction composite (issue #29): the live-dimension score
+/// ([`score_over_live_dimensions`]) **plus** the frequency term at its spec
+/// weight, `w.frequency × clamp(frequency)`, under the same `[0, 1 +
+/// MAX_BONUS]` bound every composite here has.
+///
+/// GC's cut used to switch the whole session from the live-dimension score to
+/// the full composite the moment any concept recorded an access (ALGO-1).
+/// Under #29's time-anchored recency that switch made every unread concept
+/// ~20% easier to collect at once: on the Metal rig snapshot one access on one
+/// Entity took the first sweep from 159 to 412 candidates, and the untouched
+/// end state from 1,468 to 2,034. The additive form has no session-wide state:
+///
+/// * a concept with `frequency == 0` scores exactly its live-dimension score,
+///   the scale `crate::daemon::gc::MIN_CONCEPT_SCORE` and the 90-day window
+///   were calibrated on, however many other concepts have been read;
+/// * reading a concept can only raise its own score (frequency is
+///   non-negative, and its `last_accessed` only raises GC's recency).
+///
+/// It is not the spec composite (the weighted part can exceed 1 before the
+/// clamp), so it is **only** for GC's threshold comparison. Recall ranking,
+/// the daemon's score table and canonization keep [`score`].
+pub fn score_live_plus_frequency(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
+    let w = weights.sanitized();
+    let live = score_over_live_dimensions(dims, &w);
+    finite_or_zero(live + clamp_dim(dims.frequency) * w.frequency)
 }
 
 /// The two additive terms, each clamped to its defined range.
@@ -507,6 +539,65 @@ mod tests {
     /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes
     /// over the surviving weights, so it stays on the same `[0,1]`+bonus scale
     /// and lifts every concept whose only missing dimension is the dead one.
+    /// Issue #29: GC's composite is the live score plus the concept's own
+    /// frequency term — identical to the live score at frequency 0, strictly
+    /// above it once the concept earns frequency, monotone in frequency,
+    /// bounded like every composite, and finite for poisoned input.
+    #[test]
+    fn live_plus_frequency_adds_only_the_concepts_own_frequency() {
+        let w = ScoringWeights::default();
+        let dims = ScoreDims {
+            recency: 0.3,
+            frequency: 0.0,
+            session_activity: 0.1,
+            density: 0.2,
+            edge_type_bonus: 0.02,
+            concept_type_modifier: -0.1,
+        };
+        let live = score_over_live_dimensions(dims, &w);
+        assert_eq!(
+            score_live_plus_frequency(dims, &w).to_bits(),
+            live.to_bits()
+        );
+        let mut prev = live;
+        for f in [0.1, 0.5, 1.0, 7.0] {
+            let s = score_live_plus_frequency(
+                ScoreDims {
+                    frequency: f,
+                    ..dims
+                },
+                &w,
+            );
+            assert!(s > prev || (f > 1.0 && s == prev), "f={f}: {s} vs {prev}");
+            prev = s;
+        }
+        let one = score_live_plus_frequency(
+            ScoreDims {
+                frequency: 1.0,
+                ..dims
+            },
+            &w,
+        );
+        assert!((one - (live + w.frequency)).abs() < 1e-12);
+        let maxed = ScoreDims {
+            recency: 1.0,
+            frequency: 1.0,
+            session_activity: 1.0,
+            density: 1.0,
+            edge_type_bonus: MAX_EDGE_BONUS,
+            concept_type_modifier: MAX_CONCEPT_MODIFIER,
+        };
+        assert_eq!(score_live_plus_frequency(maxed, &w), 1.0 + MAX_BONUS);
+        let poisoned = ScoreDims {
+            frequency: f64::NAN,
+            ..dims
+        };
+        assert_eq!(
+            score_live_plus_frequency(poisoned, &w).to_bits(),
+            live.to_bits()
+        );
+    }
+
     #[test]
     fn live_dimension_score_renormalizes_over_surviving_weights() {
         let w = ScoringWeights::default();

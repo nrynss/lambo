@@ -1380,25 +1380,23 @@ async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) -> Result<(), 
 ///
 /// `min_concept_score` (0.12) is not a [`Config`] key — the daemon passes
 /// `GcParams::default()` for it — so this is measured against the same
-/// constant GC uses, and mirrors GC's own two adjustments: the live-dimension
-/// score while `access_count` is dead session-wide (ALGO-1) and the per-type
-/// bar (ALGO-11).
+/// constant GC uses, and mirrors GC's composite (the live-dimension score
+/// plus each concept's own frequency term, issue #29) and its per-type bar
+/// (ALGO-11). Recency is the span-relative one, not GC's 90-day time-anchored
+/// one: for a session younger than the window, read near its last write (the
+/// demo), span-relative recency is never above GC's, so the headroom printed
+/// here is a lower bound on GC's.
 pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
     use crate::daemon::gc::MIN_CONCEPT_SCORE;
-    use crate::daemon::score::{score, score_concept, score_over_live_dimensions, SessionContext};
+    use crate::daemon::score::{score_concept, score_live_plus_frequency, SessionContext};
 
     let ctx = SessionContext::compute(graph);
     let weights = Config::default().scoring;
-    let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
     let mut out: Vec<(String, f64)> = graph
         .concepts()
         .map(|c| {
             let dims = score_concept(graph, c, &ctx);
-            let value = if frequency_is_live {
-                score(dims, &weights)
-            } else {
-                score_over_live_dimensions(dims, &weights)
-            };
+            let value = score_live_plus_frequency(dims, &weights);
             let bar = MIN_CONCEPT_SCORE / c.concept_type.eviction_resistance();
             (c.content.clone(), value / bar)
         })

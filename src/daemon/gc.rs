@@ -21,8 +21,10 @@
 //!    sub-threshold concepts are collected, **excluding** Venerable,
 //!    Canonical, and root-goal concepts. The cut takes the **session's**
 //!    [`ScoringWeights`] (ALGO-4 — GC must not rank eviction with weights
-//!    nothing else uses), scores over the live dimensions while `access_count`
-//!    is dead session-wide (ALGO-1), and compares against a per-type bar
+//!    nothing else uses), scores each concept over the live dimensions plus
+//!    its own frequency term
+//!    ([`crate::daemon::score::score_live_plus_frequency`], issue #29 — an
+//!    access can only raise a score, never another concept's), and compares against a per-type bar
 //!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
 //!
@@ -126,8 +128,10 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// v0.6.0's value is not in-repo — v0.1 decision, **recalibrated** (ALGO-1).
 ///
 /// The threshold is not applied flat: the concept's eviction score is
-/// [`crate::daemon::score::score_over_live_dimensions`] (frequency excluded
-/// while `access_count` is dead session-wide) and the comparison is against
+/// [`crate::daemon::score::score_over_live_dimensions`] plus the concept's own
+/// frequency term ([`crate::daemon::score::score_live_plus_frequency`], issue
+/// #29; an unread concept scores exactly the live-dimension score this bar was
+/// calibrated against, whatever else has been read) and the comparison is against
 /// `MIN_CONCEPT_SCORE / ConceptType::eviction_resistance()` — the spec §5
 /// resistances (Constraint 1.5 … Observation 0.7) scale the bar per type
 /// instead of every type facing the identical cut (ALGO-11). Dividing the
@@ -154,7 +158,9 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// scores at most its type modifier (Entity +0.05, Observation −0.10 → 0.0),
 /// which is below every type's bar. Orphans and disconnected components are
 /// collected by their own clauses regardless of score, so the score cut is
-/// deliberately the conservative one while a fifth of the composite is dead.
+/// deliberately the conservative one. Reading a concept only adds headroom:
+/// its frequency term is added on top of this scale, never traded for it
+/// (issue #29).
 pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
@@ -397,7 +403,6 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // concept type (ALGO-11). Logic and Constraint are exempt from the score
     // cut, not from the orphan clause (issue #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
-    let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
     // Issue #29 operator decision: a Resource with dependents is spared the
     // score cut (see `resources_with_dependents`). Computed once, post-step-1.
     let depended_on = resources_with_dependents(graph);
@@ -414,7 +419,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         if exempt_from_score_cut(c.concept_type) {
             continue;
         }
-        let score = eviction_score(graph, c, &ctx, params, frequency_is_live);
+        let score = eviction_score(graph, c, &ctx, params);
         let bar = eviction_threshold(params.min_concept_score, c.concept_type);
         if score < bar {
             if depended_on.contains(&c.id) {
@@ -712,38 +717,32 @@ fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
 
 /// One concept's step-2 eviction score.
 ///
-/// `frequency_is_live` is computed once per run over the whole session: while
-/// **no** concept has been accessed, the frequency dimension is structurally
-/// dead and is renormalized out of the cut (ALGO-1,
-/// [`crate::daemon::score::score_over_live_dimensions`]). The moment any
-/// access lands the full spec §9 composite is used again — so the session
-/// switches scoring functions exactly once.
+/// The live-dimension score plus this concept's own frequency term
+/// ([`crate::daemon::score::score_live_plus_frequency`]), with GC's
+/// time-anchored recency in place of the span-relative one.
 ///
-/// That switch **lowers** every score whose frequency is still 0 (NEW-6): the
-/// live composite renormalizes over the surviving weights, so going back to the
-/// full one re-applies the live weight total — `0.8 ×` the weighted part at the
-/// default weights. On the shipped `session-rest-api` fixture all 22 concepts
-/// drop (factor 0.83–0.89) and the smallest margin to a type bar falls from
-/// **1.49× to 1.33×**; nothing crosses, so no concept is collected *because of*
-/// the switch. The direction matters for calibration — see
-/// [`crate::daemon::score::score_over_live_dimensions`] for the measurements —
-/// and it is the opposite of what this block claimed before.
+/// Issue #29 replaced ALGO-1's **session-wide** switch here. That switch moved
+/// every concept from the live-dimension score to the full composite as soon
+/// as *any* concept had an access, which lowers every unread concept's score
+/// (the full composite is `0.8 ×` the live one on the weighted part at
+/// frequency 0, NEW-6). Under the 90-day recency that was a cliff: on the
+/// Metal rig snapshot one access on one Entity took the first sweep from 159
+/// to 412 candidates. Per concept and additive, an access can only raise the
+/// accessed concept's score and never touches anyone else's, and an unread
+/// concept keeps exactly the scale [`MIN_CONCEPT_SCORE`] and
+/// [`GC_RECENCY_WINDOW`] were calibrated on. Recall ranking, the daemon's score
+/// table and canonization are unchanged.
 fn eviction_score(
     graph: &Graph,
     c: &Concept,
     ctx: &crate::daemon::score::SessionContext,
     params: GcParams,
-    frequency_is_live: bool,
 ) -> f64 {
     let mut dims = crate::daemon::score::score_concept(graph, c, ctx);
     // Issue #29: GC's cut measures recency from the last touch, not from the
     // concept's position in the session span (see `eviction_recency`).
     dims.recency = eviction_recency(c, params.now, params.recency_window);
-    if frequency_is_live {
-        crate::daemon::score::score(dims, &params.weights)
-    } else {
-        crate::daemon::score::score_over_live_dimensions(dims, &params.weights)
-    }
+    crate::daemon::score::score_live_plus_frequency(dims, &params.weights)
 }
 
 /// A concept is protected when it is Venerable or Canonical, or it is one of
@@ -1087,7 +1086,7 @@ mod tests {
             Node::Concept(c) => c,
             _ => unreachable!(),
         };
-        let low_score = eviction_score(&g, low, &ctx, params, false);
+        let low_score = eviction_score(&g, low, &ctx, params);
         let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Observation);
         assert!(
             low_score < low_bar,
@@ -1222,7 +1221,7 @@ mod tests {
                 Node::Concept(c) => c.clone(),
                 _ => unreachable!(),
             };
-            eviction_score(g, &c, ctx, base, false)
+            eviction_score(g, &c, ctx, base)
         };
         let entity_score = score_of(&g, nid(11), &ctx);
         let resource_score = score_of(&g, nid(12), &ctx);
@@ -1908,6 +1907,15 @@ mod tests {
     /// leaf's density is 1/4, plus the given low-value leaves, each with only
     /// its `Derives` edge. Leaves are created at `ts(0)`.
     fn hub_session(leaves: &[(u64, ConceptType)]) -> Graph {
+        hub_session_patched(leaves, |c| c)
+    }
+
+    /// [`hub_session`] with every concept passed through `patch` before it is
+    /// inserted (access counts, timestamps).
+    fn hub_session_patched(
+        leaves: &[(u64, ConceptType)],
+        patch: impl Fn(Concept) -> Concept,
+    ) -> Graph {
         let mut g = Graph::new(sid());
         let i1 = interaction(1, None);
         let i2 = Interaction {
@@ -1919,7 +1927,7 @@ mod tests {
         g.insert_interaction(i2).unwrap();
         for id in [13u64, 14, 15, 16] {
             g.insert_concept(
-                concept(id, 1, &format!("anchor {id}"), ConceptType::Entity),
+                patch(concept(id, 1, &format!("anchor {id}"), ConceptType::Entity)),
                 iid,
             )
             .unwrap();
@@ -1929,7 +1937,7 @@ mod tests {
                 .unwrap();
         }
         for (id, ty) in leaves {
-            g.insert_concept(concept(*id, 1, &format!("leaf {id}"), *ty), iid)
+            g.insert_concept(patch(concept(*id, 1, &format!("leaf {id}"), *ty)), iid)
                 .unwrap();
         }
         g
@@ -2054,6 +2062,123 @@ mod tests {
         assert_eq!(outcome.resources_spared_by_dependents, 0);
     }
 
+    /// Issue #29 item 1: an access on one concept never lowers any other
+    /// concept's GC score. Pre-fix, the first access anywhere switched the
+    /// whole session to the full composite (ALGO-1), which is `0.8 ×` the
+    /// live one on the weighted part for every unread concept — on the Metal
+    /// rig snapshot one access on one Entity took the first sweep from 159
+    /// candidates to 412. Here the hub (13) is read heavily; every other
+    /// concept's score must be bit-identical, and the collection set at a bar
+    /// just above the unread leaves' scores must not grow.
+    #[test]
+    fn an_access_on_another_concept_never_lowers_an_unread_concepts_gc_score() {
+        let leaves = [
+            (20, ConceptType::Observation),
+            (21, ConceptType::Resource),
+            (22, ConceptType::Entity),
+        ];
+        let unread = hub_session(&leaves);
+        let params = aged_params();
+        let read_at = params.now - ChronoDuration::days(1);
+        let read = hub_session_patched(&leaves, |c| {
+            if c.id == nid(13) {
+                Concept {
+                    access_count: 40,
+                    last_accessed: Some(read_at),
+                    ..c
+                }
+            } else {
+                c
+            }
+        });
+        let score_in = |g: &Graph, id: u64| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            let c = match g.node(nid(id)) {
+                Some(crate::types::Node::Concept(c)) => c.clone(),
+                _ => panic!("concept {id}"),
+            };
+            eviction_score(g, &c, &ctx, params)
+        };
+        for id in [14u64, 15, 16, 20, 21, 22] {
+            assert_eq!(
+                score_in(&read, id).to_bits(),
+                score_in(&unread, id).to_bits(),
+                "concept {id}: another concept's access changed its GC score"
+            );
+        }
+        assert!(score_in(&read, 13) > score_in(&unread, 13));
+
+        // End to end: a bar between the leaves' (unread) scores and the
+        // full-composite version of them. The old session-wide switch put the
+        // leaves under it the moment the hub was read; now nothing changes.
+        let observation_bar_scale =
+            |id: u64| score_in(&unread, id) * ConceptType::Observation.eviction_resistance();
+        let params_bar = GcParams {
+            min_concept_score: observation_bar_scale(20) * 0.95,
+            ..params
+        };
+        let mut a = unread.clone();
+        let mut b = read.clone();
+        let before = run(&mut a, params_bar);
+        let after = run(&mut b, params_bar);
+        assert_eq!(before.concepts_collected, after.concepts_collected);
+        assert!(!after.concepts_collected.contains(&nid(20)));
+    }
+
+    /// Issue #29 item 1: reading a concept can only raise its own GC score —
+    /// for any access count and any access time (none, before creation,
+    /// mid-window, now), its score is at least its never-read score.
+    #[test]
+    fn an_accessed_concepts_gc_score_is_at_least_its_no_access_score() {
+        let params = aged_params();
+        let created = ts(0);
+        for ty in [
+            ConceptType::Observation,
+            ConceptType::Resource,
+            ConceptType::Entity,
+        ] {
+            let leaves = [(20u64, ty)];
+            let base_graph = hub_session(&leaves);
+            let ctx = crate::daemon::score::SessionContext::compute(&base_graph);
+            let base_c = match base_graph.node(nid(20)) {
+                Some(crate::types::Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            let base = eviction_score(&base_graph, &base_c, &ctx, params);
+            for count in [1, 3, 25, 1_000, i32::MAX] {
+                for at in [
+                    None,
+                    Some(created - ChronoDuration::days(5)),
+                    Some(created + ChronoDuration::days(45)),
+                    Some(params.now),
+                ] {
+                    let g = hub_session_patched(&leaves, |c| {
+                        if c.id == nid(20) {
+                            Concept {
+                                access_count: count,
+                                last_accessed: at,
+                                ..c
+                            }
+                        } else {
+                            c
+                        }
+                    });
+                    let ctx = crate::daemon::score::SessionContext::compute(&g);
+                    let c = match g.node(nid(20)) {
+                        Some(crate::types::Node::Concept(c)) => c.clone(),
+                        _ => unreachable!(),
+                    };
+                    let s = eviction_score(&g, &c, &ctx, params);
+                    assert!(
+                        s >= base,
+                        "{ty:?} count {count} at {at:?}: {s} < no-access {base}"
+                    );
+                    assert!(s.is_finite() && s <= 1.0 + crate::daemon::score::MAX_BONUS);
+                }
+            }
+        }
+    }
+
     /// The exemption is from the score cut only: a Logic concept with no edge
     /// at all is still an orphan, and an unreachable one is still a
     /// disconnected component.
@@ -2122,7 +2247,7 @@ mod tests {
 
         let gc_score = |g: &Graph| {
             let ctx = crate::daemon::score::SessionContext::compute(g);
-            eviction_score(g, &leaf(g), &ctx, params, false)
+            eviction_score(g, &leaf(g), &ctx, params)
         };
         let (a, b) = (gc_score(&short), gc_score(&long));
         // The extra interaction does not change the leaf's degree or the hub,

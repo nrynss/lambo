@@ -235,6 +235,13 @@
     radius is non-zero (the action node that is the only structural source of
     something). Isolated, untouched Resources still age out over the 90-day
     window. Reported as `GcOutcome::resources_spared_by_dependents`.
+  - **An access can only help in GC's cut.** GC no longer switches the whole
+    session to the full composite once any concept has been read (ALGO-1's
+    switch, which made every unread concept ~20% easier to collect: one access
+    on one concept took the rig's first sweep from 159 to 412). Each concept
+    scores the live-dimension score plus its own frequency term
+    (`score::score_live_plus_frequency`). Recall ranking, the daemon's score
+    table and canonization are unchanged.
   - On a copy of the Metal rig store the first sweep now collects 159
     Observations and nothing else (was 537, including 42 Logic); collection no
     longer grows with session span alone (span +60 days with the clock fixed:
