@@ -15,25 +15,27 @@ dependency rather than distributed as an executable.
 
 ## Features included
 
-This release ships with the full adapter feature set compiled into one binary.
-You pick the store and embedder at runtime in `lambo.toml`, not by downloading a
-different binary.
+Every binary in this release carries the full `ship` adapter set. You pick the
+store and embedder at runtime in `lambo.toml`; switching among the adapters
+below never needs a different download.
 
-- Stores: `memory`, `sqlite`, `cockroach`
-- Embedders: `fixture`, `bge_m3`
+- Stores: `memory`, `sqlite`, `cockroach`, `postgres` (PostgreSQL + pgvector)
+- Embedders: `fixture`, `bge_m3`, `gemini` (Vertex `gemini-embedding-001`)
 - Not included: `bedrock` (Amazon Bedrock is gated on account authorization and
   lands in a later release)
 
 Apple silicon also gets a Metal build, `lambo-__LAMBO_VERSION__-macos-arm64-metal`:
 the same adapter set plus the in-process `candle` embedder on the GPU
 (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not
-carry candle. It links only macOS system frameworks, so it needs nothing
+carry candle, so the in-process GPU embedder is the one case where you choose
+a different download. It links only macOS system frameworks, so it needs nothing
 installed beyond macOS itself. Set `LAMBO_FLAVOR=metal` for the install script
 to pick it; the script refuses that flavor on any other platform.
 
 The one caveat: the adapter code is compiled in, but its backing service must be
 reachable at runtime. BGE embeddings need a local `llama-server`. CockroachDB
-needs a reachable cluster.
+needs a reachable cluster. Postgres needs a reachable server with pgvector.
+Gemini needs Vertex AI credentials.
 
 `cargo install lambo` is a leaner channel: it builds the crate's default
 features (the `memory` store, `fixture` + `bge_m3` embedders) rather than the
@@ -43,7 +45,9 @@ or build from source with `--features ship`, for the complete adapter set.
 ## Binary checksums
 
 Each platform release has a binary and a `.sha256` file, for example
-`lambo-__LAMBO_VERSION__-linux-x86_64.sha256`. Use `sha256sum` to verify a download.
+`lambo-__LAMBO_VERSION__-linux-x86_64.sha256`. Verify a download from the
+directory holding both files: `sha256sum -c <asset>.sha256` on Linux,
+`shasum -a 256 -c <asset>.sha256` on macOS (which ships no `sha256sum`).
 
 | Platform | Asset |
 |---|---|
@@ -61,10 +65,18 @@ Install the latest release with the install script:
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
 ```
 
-Or pin a version and add the install directory:
+Or pin this version. The variables go on `sh`, the command that reads them;
+add `LAMBO_INSTALL_DIR=/some/dir` there too to install somewhere other than
+`~/.local/bin`:
 
 ```bash
-LAMBO_VERSION=__LAMBO_VERSION__ curl -fsSL https://github.com/nrynss/lambo/releases/download/v__LAMBO_VERSION__/install.sh | sh
+curl -fsSL https://github.com/nrynss/lambo/releases/download/v__LAMBO_VERSION__/install.sh | LAMBO_VERSION=__LAMBO_VERSION__ sh
+```
+
+The Metal build on Apple silicon, pinned:
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/download/v__LAMBO_VERSION__/install.sh | LAMBO_VERSION=__LAMBO_VERSION__ LAMBO_FLAVOR=metal sh
 ```
 
 ## Known limits
@@ -85,7 +97,10 @@ cargo build --release --features ship,embed-candle-metal
 ```
 
 The full-feature build is the `ship` profile. For a leaner binary, pick the
-adapters you need from the table in `docs/reference/installation.mdx`.
+adapters you need from the Cargo features table in the installation guide
+(`docs/reference/installation.mdx`), which lists every store and embedder
+feature, including `store-postgres`, `embed-gemini` and the `embed-candle`
+accelerator features.
 
 ## Verify
 
