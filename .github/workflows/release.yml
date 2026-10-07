@@ -24,16 +24,20 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The full ship profile (T8.9): every compiled adapter in one binary.
-  # `[store] kind` / `[embedder] kind` pick the adapter at runtime. The one
-  # caveat: the adapter code is compiled in, but its backing service must be
-  # reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach).
-  FEATURES: ship
 
 jobs:
   build:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+
+    # Cargo features are per matrix entry. An entry without `features` gets the
+    # full ship profile (T8.9): every compiled adapter in one binary, with
+    # `[store] kind` / `[embedder] kind` picking the adapter at runtime. The one
+    # caveat: the adapter code is compiled in, but its backing service must be
+    # reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach).
+    # Only the Metal flavour sets `features`; the stock assets are unchanged.
+    env:
+      FEATURES: ${{ matrix.features || 'ship' }}
 
     # Every `run:` step here is bash. windows-latest defaults to PowerShell, which
     # parses `VERSION=$(...)` as a module name and fails the job before it builds.
@@ -65,6 +69,18 @@ jobs:
             target: aarch64-apple-darwin
             name: macos-arm64
             ext: ""
+          # The Metal flavour: ship plus the in-process candle embedder with its
+          # Metal backend (`[embedder] kind = "candle"`, `device = "metal"`).
+          # The stock ship assets carry no candle at all, so without this asset
+          # a Metal rig can only run a hand-built binary. Same runner class as
+          # CI's candle-metal job. Metal is a system framework, so the binary
+          # still links nothing outside /System/Library and /usr/lib; the
+          # "Assert system-only dylibs" step below enforces that.
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-arm64-metal
+            features: ship,embed-candle-metal
+            ext: ""
           # x86_64-apple-darwin is deliberately not built. The macos-13 (Intel)
           # runner class never picked up this job across four tagged runs — it
           # sat queued for over an hour with nothing else of ours competing,
@@ -91,11 +107,22 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # macos-arm64 and macos-arm64-metal share an OS and a target triple, so
+          # the default key would make them fight over one cache with different
+          # feature sets. Key by asset name instead.
+          key: ${{ matrix.name }}
 
-      - name: Derive version from Cargo.toml
+      - name: Derive version and git sha
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # LAMBO_GIT_SHA is an option_env! read at compile time (src/ledger.rs):
+          # without it the `serve --ledger` heartbeat reports git_sha
+          # "unknown", and a rig that installs this asset cannot tell one
+          # release binary from another in its ledger. Set it for both the
+          # build and the parity test so the parity relink keeps the same value.
+          echo "LAMBO_GIT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --features "$FEATURES" --target ${{ matrix.target }}
@@ -103,7 +130,7 @@ jobs:
       - name: Binary + TOML parity test (release artifact)
         run: |
           set -euo pipefail
-          # Drive the exact shipped binary (the `--features ship --target <triple>`
+          # Drive the exact shipped binary (the `--features $FEATURES --target <triple>`
           # release artifact built above) with a real lambo.toml via
           # tests/binary_parity.rs. unix targets only: KillOnDrop/SIGTERM is unix.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -114,14 +141,15 @@ jobs:
           # the build step, so env!("CARGO_BIN_EXE_lambo") resolves to
           # target/<triple>/release/lambo -- the exact artifact the Stage step
           # below copies and publishes -- not a fresh NESTED rebuild.
-          # `--features ship` is a superset of the parity test's cfg gate
-          # (store-sqlite + embed-fixture are both in ship), so this step
-          # compiles the full ship profile, never a store-sqlite,embed-fixture
-          # subset. Cargo still relinks `lambo` into that same path with full
-          # ship features (identical feature set, same release profile), so the
-          # staged artifact stays feature-complete and is never clobbered by a
-          # subset binary. Because the parity run builds the whole ship profile,
-          # a ship-only regression now fails this build job.
+          # Every entry's $FEATURES contains ship, a superset of the parity
+          # test's cfg gate (store-sqlite + embed-fixture are both in ship), so
+          # this step compiles the entry's full feature set, never a
+          # store-sqlite,embed-fixture subset. Cargo still relinks `lambo` into
+          # that same path with the SAME features as the build step (same
+          # release profile), so the staged artifact stays feature-complete and
+          # is never clobbered by a subset binary. Because the parity run builds
+          # the whole feature set, a ship-only (or Metal-only) regression fails
+          # this build job.
           cargo test --release --features "$FEATURES" \
             --test binary_parity --target ${{ matrix.target }}
 
@@ -157,6 +185,24 @@ jobs:
           req=$(printf '2.39\n%s' "${max_glibc#GLIBC_}" | sort -V | tail -1)
           if [[ "$req" != "2.39" ]]; then
             echo "::error::$BIN requires $max_glibc (> 2.39); the shipped glibc floor must not exceed the Ubuntu 24.04 build host" >&2
+            exit 1
+          fi
+
+      - name: Assert system-only dylibs (Metal asset)
+        if: matrix.name == 'macos-arm64-metal'
+        run: |
+          set -euo pipefail
+          BIN="dist/lambo-${VERSION}-${{ matrix.name }}"
+          otool -L "$BIN"
+          # Metal, Foundation and friends are system frameworks, so a clean
+          # macOS needs nothing installed. A dependency that starts linking a
+          # Homebrew or bundled dylib (/opt/homebrew, @rpath, ...) would ship a
+          # binary that fails to launch on a machine without it; fail here.
+          bad=$(otool -L "$BIN" | tail -n +2 | awk '{print $1}' \
+            | grep -v -e '^/System/Library/' -e '^/usr/lib/' || true)
+          if [[ -n "$bad" ]]; then
+            echo "::error::$BIN links libraries outside /System/Library and /usr/lib:" >&2
+            echo "$bad" >&2
             exit 1
           fi
 
@@ -202,7 +248,7 @@ jobs:
           # sequence may appear in this script; the placeholder is
           # deliberately brace-free.
           sed "s/__LAMBO_VERSION__/$VERSION/g" \
-            .github/release/release-notes-template.md > /tmp/notes-$VERSION.md
+            .github/release/release-notes-template.md > "/tmp/notes-$VERSION.md"
 
       - name: Publish release
         env:
@@ -216,7 +262,7 @@ jobs:
           cp scripts/install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" \
             --title "Lambo v$VERSION" \
-            --notes-file /tmp/notes-$VERSION.md \
+            --notes-file "/tmp/notes-$VERSION.md" \
             --verify-tag \
             dist/lambo-* dist/install.sh
 
