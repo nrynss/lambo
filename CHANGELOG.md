@@ -298,6 +298,29 @@
     Resources kept by the dependents rule and no change in the concepts above
     Stage 3's blast-radius bar (41 before and after). One access never adds a
     collection. Details in `dev-diary/notes/gc-time-bound-29.md`.
+- `access_count` and `last_accessed` are now written (issue #30). No path ever
+  wrote them, so the spec §9 `frequency` dimension was dead: GC's step 2 ran on
+  the renormalized three-dimension score (ALGO-1) and could not see what agents
+  actually recall (all 3,370 concepts on the Metal rig read 0). Every concept
+  hit a writer's recall returns now counts once per recall — cache-served or
+  not, inside the token budget or not — and a resolved `lambo_inspect` counts
+  its focus concept (not the neighbourhood; a refusal counts nothing). Reads
+  note hits in a leaf-locked ledger; the daemon applies the batch once per tick
+  through the graph's write path, and `close` applies the remainder, so the
+  counts persist through the existing columns (no schema change, no
+  re-provision) and survive a writer restart. Accesses do **not** advance the
+  mutation epoch, so GC's `gc_interval` trigger, the recall cache and hybrid
+  replanning are unaffected and a read-heavy session does not sweep on reads.
+  Reader processes (`lambo recall`, `serve-web`) count nothing; a proxied call
+  counts once, in the holder. Operator-visible effects: GC's score cut adds
+  each concept's own frequency term on top of the live-dimension score (#29's
+  additive rule), so an access can only raise that concept's score and never
+  makes another concept easier to collect; a read counts as a touch for recency
+  and the session-staleness detector (the later of `created_at` and
+  `last_accessed`), which also postpones GC's 365-day recency cut for a
+  recalled concept; accesses never advance the epoch, so they cannot reach
+  `gc_interval` or `gc_idle_floor`; `lambo_saints` reports non-zero
+  `access_count`. See `dev-diary/notes/issue-30-access-count.md`.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero

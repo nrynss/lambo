@@ -157,7 +157,7 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// ### Why 0.12
 ///
 /// The original 0.3 was calibrated against nothing: with `access_count`
-/// identically 0 (no write path feeds it until P5 recall) and `density`
+/// identically 0 (no write path fed it until issue #30) and `density`
 /// max-normalized against the session hub, an ordinary well-connected concept
 /// in the shipped `session-rest-api` fixture scores 0.13–0.34 — so 0.3
 /// collected **15 of its 22 concepts on the first sweep**, including `auth

@@ -170,6 +170,16 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// switch does not by itself make GC collect anything — but the headroom
 /// [`crate::daemon::gc::MIN_CONCEPT_SCORE`] was calibrated against is ~11%
 /// smaller after it, which is the number to anchor on when tuning the threshold.
+///
+/// On a real store the switch **does** collect (issue #30 dry run, Metal rig
+/// snapshot, 3,370 concepts): one access anywhere — nothing else changed — takes
+/// a first sweep from 537 to 677 collections (+108 Observation, +23 Resource,
+/// +6 Entity, +3 Logic), because every concept that has not been read loses the
+/// 1.25× renormalization at once. A synthetic replay of two recalls per
+/// interaction more than pays that back (398 collected; 162 of the baseline's
+/// 537 saved, 23 newly collected). The switch is session-wide by design and is
+/// left as is: changing the cut is #29's step-2 work, which must account for
+/// this cliff. Evidence and method: `dev-diary/notes/issue-30-access-count.md`.
 pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
     let w = weights.sanitized();
     let live_total = w.recency + w.session_activity + w.density;
