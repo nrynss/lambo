@@ -642,7 +642,7 @@ impl Daemon {
     /// not a delivery guarantee for a late subscriber.
     ///
     /// P8 must therefore call `events()` **before** `spawn()`. Pinned by
-    /// `daemon::tests::late_subscriber_misses_the_warm_up_condition_set`.
+    /// `daemon::tests::conditions::late_subscriber_misses_the_warm_up_condition_set`.
     pub fn events(&self) -> broadcast::Receiver<DaemonEvent> {
         self.events.subscribe()
     }

@@ -43,7 +43,7 @@ fn assert_closed(m: &Memory, ctx: &str) {
 /// keep-warm's abort handle), so a task handed to it must come back
 /// cancelled even though nobody else aborts it. The ordering against
 /// the close needs a close that takes time and is pinned in
-/// `memory::tests::the_keep_warm_is_stopped_before_the_close_starts`;
+/// `memory::tests::shutdown::the_keep_warm_is_stopped_before_the_close_starts`;
 /// this one pins the abort itself.
 #[tokio::test]
 async fn run_and_close_stops_the_tasks_it_is_handed() {
