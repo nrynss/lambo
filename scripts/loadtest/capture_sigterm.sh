@@ -121,6 +121,8 @@ export LAMBO_AUTH_TOKEN="$TOKEN"
 # durability comparison against concept counts needs it, so the default run
 # enables the daemon GC target's debug logs on stderr. Override with
 # RUST_LOG=... if a quieter transcript is wanted.
+GC_LOGGED_FLAG=()
+if [[ -z "${RUST_LOG:-}" ]]; then GC_LOGGED_FLAG=(--gc-logged); fi
 export RUST_LOG="${RUST_LOG:-lambo=info,lambo::daemon::gc=debug}"
 
 echo "== C2 capture: run=$RUN session=$SESSION workers=$WORKERS"
@@ -210,7 +212,7 @@ wait "$DRIVER_PID" || { echo "driver failed" >&2; exit 1; }
 # C3 — prove the tail is durable.
 python3 "$HERE/check_durability.py" \
     --ledger "$LEDGER" --db "$DB" --session "$SESSION" \
-    --stderr "$STDERR" \
+    --stderr "$STDERR" ${GC_LOGGED_FLAG[@]+"${GC_LOGGED_FLAG[@]}"} \
     > "$OUT/durability-$RUN.txt" || true   # exit 2 is the honest SHORTFALL signal
 
 cat > "$OUT/run-$RUN.json" <<EOF

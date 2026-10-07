@@ -21,7 +21,7 @@ is scripting its calls.
 |---|---|
 | `mcp_load.py` | The load driver (C1). K worker threads, each an independent streamable-HTTP MCP session, issuing a deterministic seeded mix: valid `lambo_derive` / `lambo_record_action` / `lambo_recall`, plus adversarial calls (record_action over `MAX_ACTION_TARGETS`, content with NUL and U+202E, content over `MAX_CONTENT_BYTES`, an unknown tool, malformed params). Every response — success, tool refusal, 429, 503, transport error — is recorded to a JSONL ledger. |
 | `capture_sigterm.sh` | The run harness (C2). Provisions a scratch SQLite store, starts `lambo serve` with a scratch bearer token, runs the driver, sends SIGTERM inside the burst phase, measures signal→exit wall time and exit code, captures full server stderr, then runs the durability check. |
-| `check_durability.py` | The C3 check: compares the ledger's successful-call accounting (interactions 1:1 per write call; concept/edge counts parsed from the server's own response text) against a post-exit readback of the SQLite store. Used by both families. |
+| `check_durability.py` | The C3 check: compares the ledger's accounting against a post-exit readback of the SQLite store. Interactions are 1:1 per acknowledged write call; concept/edge counts come from the write receipts the ledger saw settle as applied (J3 acks a write before applying it), and receipts never seen settled are reported as their own row. Exits 2 on a shortfall and 3 when the ledger's write responses are in a format it does not recognise. Used by both families. |
 
 ### Model-driven harnesses (C5)
 
