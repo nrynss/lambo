@@ -1,7 +1,9 @@
 # Issue #29 — GC time bound, durable sweep mark, step-2 protections
 
 Status: implemented on `fix/29-gc-time-bound` (from `main` c83b933, rebased on
-f65f610), review round 1 remediated (see "Remediation" below). Companion to
+f65f610), review round 1 remediated (see "Remediation" below); round 2 applies
+two operator decisions (Observation exempt from the score cut, 365-day window)
+and the round-1 review findings (see "Remediation, round 2"). Companion to
 issue #29's dry-run comment and to #17
 (`dev-diary/adversarial-review/adve-review-issue-17-canonization-reachability.md`).
 
@@ -12,27 +14,30 @@ issue #29's dry-run comment and to #17
 | `GcMark { last_gc_epoch, last_gc_at }` is graph state, stamped on every `MutationBatch` by `drain_log`, carried by the flush loop, persisted as `sessions.last_gc_epoch` / `sessions.last_gc_at` with a field-wise monotonic max inside the flush transaction, returned by `load_session`, resumed by `Graph::from_snapshot` | `src/types/mod.rs`, `src/graph/graph.rs`, `src/store/{flush,memory,sqlite}.rs`, `src/store/pg/{mod,cockroach}.rs`, `migrations/*/001_init.sql` |
 | The daemon reads and writes the watermark on the graph (no more `CycleState::last_gc_epoch`); drains advance it through `Graph::exempt_from_gc_measure` under the drain's own guard; a sweep records `(epoch_after, now)` under the sweep's guard | `src/daemon/mod.rs` |
 | Trigger: `gc::sweep_due` — `gc_interval` mutations since the mark, or `gc_max_interval` elapsed since `last_gc_at` with at least `gc_idle_floor` mutations since the mark | `src/daemon/gc.rs`, `src/config.rs` |
-| Step 2: Logic/Constraint exempt from the score cut; GC's eviction recency is time since last touch over a 90-day window; collections capped at `max(32, 5%)` of unprotected concepts per sweep, reported in `GcOutcome` | `src/daemon/gc.rs` |
+| Step 2: Logic/Constraint/Observation exempt from the score cut (`ConceptType::exempt_from_gc_score_cut`); GC's eviction recency is time since last touch over a 365-day window; collections capped at `max(32, 5%)` of unprotected concepts per sweep, reported in `GcOutcome` | `src/daemon/gc.rs` |
 | Config: `[daemon] gc_max_interval_secs` (86 400) and `gc_idle_floor` (100); zero refused by `validate()`; unknown keys still hard errors; no env overlay (none of the `[daemon]` keys has one) | `src/config.rs`, `lambo.example.toml`, `docs/reference/{config,api}.mdx` + site copies |
 
 ## Decisions and why
 
 1. **Step-2 protection: option (a), exempt Logic and Constraint from the score
-   cut.** Option (b), "below the bar on two consecutive sweeps", does not protect
+   cut; Observation joined them in round 2 (operator decision, 2026-10-07).** Option (b), "below the bar on two consecutive sweeps", does not protect
    anything on an idle store: a concept's score does not change between sweeps
    without writes, so the second verdict is the first one a day later, and it
    needs a persisted per-concept counter to do even that. The exemption is a
    hard guarantee, independent of whether #30's frequency dimension is live.
    Orphan and disconnected-component cleanup still apply to both types; they are
    structural, not age-based.
-2. **Eviction recency = `1 − age / 90 days`, clamped, age = now − max(created_at,
+2. **Eviction recency = `1 − age / 365 days`, clamped, age = now − max(created_at,
    last_accessed). GC's cut only.** `score::rescore` (daemon ranking, recall,
    Stage 1's P90) keeps span-relative recency: changing it would move recall
    ranking and canonization, which #29 does not set out to change, and nothing
    showed the two must share one definition. The window is a const
    (`GC_RECENCY_WINDOW`), not a `[daemon]` key: it is a scoring constant, and
-   `config.rs` keeps scoring bars out of the file. 90 days was chosen from the
-   sensitivity table below.
+   `config.rs` keeps scoring bars out of the file. The window was 90 days
+   (chosen from the sensitivity table below) and became 365 by operator
+   decision in round 2: Lambo is long-term memory, the at-risk set is mostly
+   long-tail pointers (paths, PRs, commits, verdicts), and at ~4% of the store
+   the space a short window saves is negligible next to what losing one costs.
 3. **The mark is a batch stamp, not a `Mutation` variant.** Same mechanism and
    same argument as #17's `mutation_epoch`: a mutation would bump the epoch it
    is measuring, needs adapter match arms, and is not graph content. The two
@@ -89,7 +94,11 @@ issue #29's dry-run comment and to #17
    rewrites ~3.2k concept rows in 500-row chunks (CONC-6/XP-10), at most once a
    day at human pace.
 
-## Dry run (Metal rig snapshot copy; aggregates only)
+## Dry run (Metal rig snapshot copy; aggregates only) — historical, 90-day window, Observation under the cut
+
+The tables from here to "Remediation (review round 1)" are the **90-day,
+Observation-in-the-cut** measurements and are kept as the record of how the
+design got here; the current numbers are in "Remediation, round 2".
 
 Store: 3,370 concepts (Constraint 323, Entity 557, Logic 559, Observation 467,
 Resource 1,464), 8,121 edges, 1,147 interactions, spanning 2026-08-19 to
@@ -120,7 +129,8 @@ uncapped (the before column advanced the clock with the span).
 Collection no longer grows with span alone. It does grow with time since last
 touch, by design: that is the eviction criterion now.
 
-Window sensitivity (uncapped first sweep at clock offset):
+Window sensitivity (uncapped first sweep at clock offset; 90-day-era
+measurement, before the Observation exemption and the dependents rule):
 
 | window | +0 d | +30 d | +60 d | +90 d | +120 d |
 |---|---|---|---|---|---|
@@ -145,6 +155,9 @@ The tables above were measured before the review-round-1 remediation. The
 dependents rule keeps most of its 995 Resources (next section).
 
 ## Remediation (review round 1)
+
+The numbers in this section are the round-1 state: 90-day window, Observation
+still under the cut. Round 2's are below.
 
 Changes, each its own commit: Resources with dependents are spared the score
 cut (operator decision); GC's composite is the live-dimension score plus the
@@ -217,17 +230,94 @@ first sweep for k = 1 / 2 / 4). Replay is the #30 review harness's method: at
 each interaction, recall k queries built from the previous interaction's
 derived concepts, every hit an access at that interaction's time.
 
+## Remediation, round 2
+
+Operator decisions, each its own labelled commit:
+
+* **Observation is exempt from the score cut** (`feat(gc)!`). The exemption is
+  `ConceptType::exempt_from_gc_score_cut`, an exhaustive `match`, replacing the
+  hard-coded `matches!` in `gc.rs`: a new type has to pick a side. Observations
+  still go as orphans and disconnected components. The score cut now removes
+  only Entities and isolated Resources. The "most evictable kind" wording in the
+  `lambo_derive` `concept_type` schema description and in the type docs is gone
+  (`docs(wire)`; no golden carries the text). Every gc.rs test that used an
+  Observation as its score-cut victim now uses an Entity or an isolated Resource,
+  and the cap-ordering tests put the Entity at the lower id so an id-ordered
+  cap would pick the wrong one (before, the weakest victim was also the lowest
+  id, so those tests could not tell ratio order from id order).
+* **The recency window is 365 days** (`feat(gc)!`). `gc_headroom`'s
+  lower-bound claim still holds (span-relative `1 − x/span` stays at or below
+  GC's `1 − x/window` whenever the session is no older than the window; a wider
+  window only widens it), and it is conservative because it still measures the
+  exempt types.
+
+Review findings, each its own commit: a second clock re-anchor in one process
+is now persisted (a newer mark carrying the reset flag supplies `last_gc_at`
+whether or not the older one is flagged; `last_gc_epoch` stays a strict max);
+the writer-side reset flag is stripped in `Graph::snapshot` and
+`Graph::from_snapshot`; the mangled test doc comments are back on their own
+tests; `resources_spared_by_dependents` counts after the disconnected filter;
+the never-swept catch-up is documented and pinned (decision 4); `lambo_stats`
+reads GC stats once; and `SessionContext` precomputes each concept's derivation
+count so a sweep is no longer O(concepts × interactions).
+
+### Dry run, round 2 (`work29s.db`, fresh copy of the same snapshot; aggregates only)
+
+Same store and `now = 2026-10-07T06:30Z`, default weights, copy provisioned with
+this branch's binary, mark unset. 1,307 of 1,464 Resources have dependents (as
+in round 1).
+
+| clock | first sweep (capped = uncapped) | by type | Resources spared by the rule |
+|---|---|---|---|
+| +0, +7, +14, +30, +60, +180 d | 0 | — | 0 |
+| +365 d | 126 | Resource 120, Entity 6 | 875 |
+| +400 d | 126 | Resource 120, Entity 6 | 875 |
+
+The cap (169) never binds. Successive capped sweeps, no writes, same clock or
++1 day each: 0 for all 12.
+
+**Untouched end state** (uncapped sweeps at +365 d until nothing more goes):
+**130 collected, 3.9% of the store — Resource 121, Entity 9; Observation, Logic,
+Constraint 0.** 884 under-bar Resources are kept only by the dependents rule;
+1,309 Resources with dependents remain. Blast radius total 1,165 → 1,184;
+**concepts above Stage 3's blast-radius bar (> 5): 41 before, 41 after.**
+
+**Synthetic access** ("newly" = collected with access but not without):
+
+| scenario | accessed | first sweep | newly | end state | newly |
+|---|---|---|---|---|---|
+| no access | 0 | 0 | — | 130 | — |
+| one access on the hub Entity, at its creation time | 1 | 0 | **0** | 130 | **0** |
+| one access on the hub Entity, at `now` | 1 | 0 | **0** | 130 | **0** |
+| replay k=1 | 2,115 | 0 | **0** | 69 | **0** |
+| replay k=2 | 2,671 | 0 | **0** | 38 | **0** |
+| replay k=4 | 3,065 | 0 | **0** | 11 | **0** |
+
+**Sweep time** (`gc::run`, first sweep, median of 7, release build, the 3,370
+concept snapshot): **67.5 ms before the `SessionContext` precompute, 9.0 ms
+after** (min 65.6 → 8.5). Scoring every concept alone: 95.1 ms → 1.7 ms, with
+an identical checksum, and every collection count above is identical before and
+after (the per-concept scan is kept as a test oracle). What remains is the
+`O(edges)` passes and the per-concept degree sort. The sweep runs under the
+write lock; a 2.7k-concept store was the worst case measured here.
+
 ## Risks a reviewer should weigh
 
-- **Resources age out — now only isolated ones.** Before the operator's
-  dependents rule, 995 of 1,464 Resources were below their bar once older than
-  the window. With it, 122 go in the untouched end state; 884 under-bar
-  Resources are kept because something depends on them, and the count of
-  concepts above Stage 3's blast-radius bar is unchanged (41). `MIN_CONCEPT_SCORE`
-  and every promotion threshold are as they were.
-- **The cap binds once a backlog exists.** After a long pause (+30 d) the first
-  sweep has 473 candidates and takes 169 a day; the warning names it, and
-  `lambo_stats`' `gc` block shows `deferred` and `cap_bound`.
+- **Observations are never collected by the score cut.** With the exemption an
+  Observation leaves the store only as an orphan or a disconnected component, so
+  a store of well-connected Observations grows until something else prunes it.
+  By operator decision, and the rig's whole at-risk set is 3.9% of the store.
+
+- **Resources and Entities age out — now only isolated ones.** Before the
+  operator's dependents rule, 995 of 1,464 Resources were below their bar once
+  older than the window. With it, and with Observation exempt, the untouched end
+  state at a 365-day window loses 130 concepts (Resource 121, Entity 9); 884
+  under-bar Resources are kept because something depends on them, and the count
+  of concepts above Stage 3's blast-radius bar is unchanged (41).
+  `MIN_CONCEPT_SCORE` and every promotion threshold are as they were.
+- **The cap rarely binds now.** The rig's first sweep at +365 d takes 126
+  against a cap of 169; the warning and `lambo_stats`' `gc` block (`deferred`,
+  `cap_bound`) are for a backlog that a long pause or a scoring change builds.
 - **Lost deferred bumps.** Pending survivor bumps live in the daemon, not the
   store. A restart mid-drain loses the rest of that sweep's bumps (as before
   #29); the watermark already counts the drained part, so nothing double-counts.

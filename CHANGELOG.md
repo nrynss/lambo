@@ -269,14 +269,24 @@
     `now`; the regression persists through a flagged path in the session-row
     upsert (`GcMark::last_gc_at_reset`, never stored). `last_gc_epoch` stays
     strictly monotonic.
-  - On a copy of the Metal rig store the first sweep now collects 159
-    Observations and nothing else (was 537, including 42 Logic); collection no
-    longer grows with session span alone (span +60 days with the clock fixed:
-    159, was 1,049). Untouched sparse concepts still age out once older than
-    the window: an untouched store converges on 602 collections (Observation
-    467, Resource 122, Entity 13), with 884 under-bar Resources kept by the
-    dependents rule and no change in the concepts above Stage 3's blast-radius
-    bar. Details in `dev-diary/notes/gc-time-bound-29.md`.
+  - **Repeated clock jumps persist.** A second forward jump and correction in
+    one process now re-anchors in the store too; the writer-side reset flag is
+    never carried in snapshots.
+  - **Sweeps are cheap.** Scoring no longer scans every interaction per
+    concept, so a sweep is linear in the store instead of concepts times
+    interactions: on the rig copy the first sweep went from 67.5 ms to 9.0 ms
+    under the write lock, with identical results.
+  - `lambo_stats` reads GC stats once per answer, and
+    `resources_spared_by_dependents` no longer counts a Resource that step 3
+    collected as disconnected.
+  - On a copy of the Metal rig store the first sweep now collects nothing
+    (was 537, including 42 Logic and 324 Observations), and collection no
+    longer grows with session span alone. Untouched sparse concepts still age
+    out once older than the window: an untouched store converges on 130
+    collections (Resource 121, Entity 9; 3.9% of the store), with 884 under-bar
+    Resources kept by the dependents rule and no change in the concepts above
+    Stage 3's blast-radius bar (41 before and after). One access never adds a
+    collection. Details in `dev-diary/notes/gc-time-bound-29.md`.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero
